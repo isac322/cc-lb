@@ -1,10 +1,11 @@
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
+use cc_lb_core::clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_core::{AuditPayload, MetadataHookHandle, MetadataHookRequest};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
@@ -64,6 +65,7 @@ pub struct LazyRefresher {
     claim_guard: Arc<dyn LazyRefreshClaimGuard>,
     contention: LazyRefreshContentionConfig,
     apalis_handle: SchedulerBackend,
+    clock: ClockHandle,
 }
 
 #[derive(Clone, Copy)]
@@ -249,27 +251,15 @@ fn lazy_refresh_task_state_from_row(
 }
 
 impl LazyRefresher {
-    pub fn new(
-        stores: Arc<Stores>,
-        aead: Arc<AeadService>,
-        oauth_cfg: Arc<AnthropicOAuthConfig>,
-        replica_id: Uuid,
-        metadata_hook: Option<MetadataHookHandle>,
-        cancel: CancellationToken,
-        apalis_handle: SchedulerBackend,
-    ) -> Self {
-        let claim_guard = lazy_refresh_claim_guard_from_scheduler(&apalis_handle);
+    pub fn new(params: LazyRefresherParams) -> Self {
+        let claim_guard = lazy_refresh_claim_guard_from_scheduler(&params.apalis_handle);
         Self::new_with_claim_guard(
-            LazyRefresherDeps {
-                stores,
-                aead,
-                oauth_cfg,
-            },
-            replica_id,
-            metadata_hook,
-            cancel,
+            params.deps,
+            params.replica_id,
+            params.metadata_hook,
+            params.cancel,
             claim_guard,
-            apalis_handle,
+            params.apalis_handle,
         )
     }
 
@@ -334,6 +324,7 @@ impl LazyRefresher {
             claim_guard,
             contention,
             apalis_handle,
+            clock: deps.clock,
         }
     }
 
@@ -412,6 +403,15 @@ pub struct LazyRefresherDeps {
     pub stores: Arc<Stores>,
     pub aead: Arc<AeadService>,
     pub oauth_cfg: Arc<AnthropicOAuthConfig>,
+    pub clock: ClockHandle,
+}
+
+pub struct LazyRefresherParams {
+    pub deps: LazyRefresherDeps,
+    pub replica_id: Uuid,
+    pub metadata_hook: Option<MetadataHookHandle>,
+    pub cancel: CancellationToken,
+    pub apalis_handle: SchedulerBackend,
 }
 
 impl LazyRefresher {
@@ -434,6 +434,7 @@ impl LazyRefresher {
             &self.http,
             &self.cancel,
             upstream,
+            &*self.clock,
         )
         .await;
         match result {
@@ -473,7 +474,12 @@ impl LazyRefreshHandle for LazyRefresher {
         let expires_at_unix_secs = oauth_expires_at(&upstream, &self.aead)?;
         let claim = self
             .claim_guard
-            .begin_refresh(upstream_id, &holder, expires_at_unix_secs, now_unix_secs())
+            .begin_refresh(
+                upstream_id,
+                &holder,
+                expires_at_unix_secs,
+                now_unix_secs(&*self.clock),
+            )
             .await
             .map_err(lazy_error)?;
         if let LazyRefreshClaim::Enqueued { idempotency_key } = claim {
@@ -506,6 +512,7 @@ impl LazyRefreshHandle for LazyRefresher {
             &self.http,
             &self.cancel,
             upstream,
+            &*self.clock,
         )
         .await;
         match result {
@@ -569,7 +576,12 @@ impl LazyRefreshHandle for LazyRefresher {
         let expires_at_unix_secs = oauth_expires_at(&upstream, &self.aead)?;
         let claim = self
             .claim_guard
-            .begin_refresh(upstream_id, &holder, expires_at_unix_secs, now_unix_secs())
+            .begin_refresh(
+                upstream_id,
+                &holder,
+                expires_at_unix_secs,
+                now_unix_secs(&*self.clock),
+            )
             .await
             .map_err(lazy_error)?;
         if let LazyRefreshClaim::Acquired = claim
@@ -626,6 +638,7 @@ async fn refresh_flow(
     http: &TokenHttpClient,
     cancel: &CancellationToken,
     upstream: UpstreamRecord,
+    clock: &dyn Clock,
 ) -> Result<u64, RefreshError> {
     let previous = upstream
         .oauth_credentials
@@ -636,7 +649,7 @@ async fn refresh_flow(
     let token = request_refresh(http, oauth_cfg, cancel, &previous.refresh_token).await;
     match token {
         Ok(response) => {
-            let now = now_unix_secs();
+            let now = now_unix_secs(clock);
             let scopes = response
                 .scope
                 .as_deref()
@@ -668,6 +681,7 @@ async fn refresh_flow(
                 },
                 &upstream,
                 200,
+                clock,
             )
             .await;
             Ok(updated.oauth_token_generation)
@@ -689,6 +703,7 @@ async fn refresh_flow(
                 },
                 &upstream,
                 500,
+                clock,
             )
             .await;
             status_result?;
@@ -773,11 +788,12 @@ async fn emit_audit(
     payload: AuditPayload,
     upstream: &UpstreamRecord,
     status: u16,
+    clock: &dyn Clock,
 ) {
     let Some(audit) = audit else {
         return;
     };
-    let now = now_unix_secs();
+    let now = now_unix_secs(clock);
     let entry = AuditEntry {
         ts: now,
         request_id: format!("oauth-refresh-{}-{now}", upstream.id),
@@ -864,11 +880,8 @@ fn scheduler_claim_error(error: cc_lb_scheduler::error::SchedulerError) -> Stora
     }
 }
 
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+fn now_unix_secs(clock: &dyn Clock) -> u64 {
+    unix_secs(clock.now())
 }
 
 #[cfg(test)]
@@ -882,6 +895,7 @@ mod tests {
     use axum::{Json, Router};
     use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
     use cc_lb_config::AnthropicOAuthConfig;
+    use cc_lb_core::clock::{ClockHandle, TestClock};
     use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
     use cc_lb_storage_api::upstream::UpstreamKind;
     use cc_lb_storage_api::{BackendKind, MetaStore, StorageResult, UpstreamCreate, UpstreamStore};
@@ -945,6 +959,7 @@ mod tests {
         oauth_cfg: Arc<AnthropicOAuthConfig>,
         refresh_calls: Arc<AtomicUsize>,
         scheduler_backend: SchedulerBackend,
+        clock: ClockHandle,
     }
 
     impl LazyRefreshFixture {
@@ -958,9 +973,12 @@ mod tests {
                 dir.path().join("lazy-refresh.sqlite").display()
             );
             let storage = Arc::new(
-                cc_lb_storage_sqlite::open_sqlite(&database_url)
-                    .await
-                    .expect("storage opens"),
+                cc_lb_storage_sqlite::open_sqlite(
+                    &database_url,
+                    Arc::new(cc_lb_core::SystemClock),
+                )
+                .await
+                .expect("storage opens"),
             );
             storage
                 .initialize(BackendKind::Sqlite)
@@ -988,6 +1006,7 @@ mod tests {
                         &scheduler_pool,
                         cc_lb_scheduler::worker::ADAPTIVE_QUEUE,
                     ),
+                    clock: Arc::new(cc_lb_core::SystemClock),
                 });
             let stores = Arc::new(crate::dynamic_view_builder::Stores {
                 upstreams: storage.clone(),
@@ -1008,6 +1027,7 @@ mod tests {
                 redirect_uri: Url::parse("http://127.0.0.1/callback").expect("redirect url"),
                 scopes: vec!["messages".to_owned()],
             });
+            let clock = Arc::new(TestClock::new_at_secs(1_700_000_000)) as ClockHandle;
             Self {
                 _dir: dir,
                 storage,
@@ -1016,6 +1036,7 @@ mod tests {
                 oauth_cfg,
                 refresh_calls,
                 scheduler_backend,
+                clock,
             }
         }
 
@@ -1061,6 +1082,7 @@ mod tests {
                     stores: self.stores.clone(),
                     aead: self.aead.clone(),
                     oauth_cfg: self.oauth_cfg.clone(),
+                    clock: self.clock.clone(),
                 },
                 Uuid::new_v4(),
                 None,

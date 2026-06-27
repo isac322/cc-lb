@@ -33,7 +33,7 @@
 //!   dispatcher captures `host_str() == "target.invalid"` → assertion passes.
 
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::body::Bytes;
@@ -73,7 +73,10 @@ async fn extism_shape_plugin_receives_resolved_upstream_base_url_via_envelope() 
         "sqlite://{}",
         dir.path().join("extism-shape-base-url.sqlite").display()
     );
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
+    let storage = cc_lb_storage_sqlite::open_sqlite(
+        &database_url,
+        Arc::new(cc_lb_core::SystemClock),
+    )
         .await
         .expect("storage opens");
     storage
@@ -148,6 +151,7 @@ async fn extism_shape_plugin_receives_resolved_upstream_base_url_via_envelope() 
         Arc::new(SubscriptionQuotaCache::new()),
         1800,
         &config,
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await
     .expect("dynamic view builds");
@@ -169,9 +173,11 @@ async fn extism_shape_plugin_receives_resolved_upstream_base_url_via_envelope() 
                 upstream_kind: NoneModeUpstreamKind::AnthropicKey,
             }),
             None,
+            Arc::new(cc_lb_core::SystemClock),
         )),
         holder,
         LifecycleConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
     );
 
     let response = lifecycle
@@ -384,7 +390,7 @@ fn message_request() -> Request<Bytes> {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now()
+    cc_lb_core::Clock::now(&cc_lb_core::SystemClock)
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()

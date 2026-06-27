@@ -66,6 +66,7 @@ impl Fixture {
             admin_token: Some("test-token".to_owned()),
             start_time: std::time::Instant::now(),
             event_bus: None,
+            clock: Arc::new(cc_lb_core::SystemClock),
         };
 
         Self {
@@ -198,10 +199,7 @@ impl Fixture {
 }
 
 fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_secs()
+    cc_lb_core::clock::unix_secs(cc_lb_core::Clock::now(&cc_lb_core::SystemClock))
 }
 
 #[tokio::test]

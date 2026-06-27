@@ -175,7 +175,10 @@ async fn run_list_abandoned_chain_entries() -> Result<(), DoctorError> {
     }
 
     let database_url = format!("sqlite://{}", path.display());
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
+    let storage = cc_lb_storage_sqlite::open_sqlite(
+        &database_url,
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    )
         .await
         .map_err(DoctorError::StorageOpen)?;
     storage

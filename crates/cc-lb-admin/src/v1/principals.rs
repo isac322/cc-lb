@@ -5,7 +5,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_core::{AuditEntry, AuditPayload};
+use cc_lb_core::{AuditEntry, AuditPayload, Clock};
 use cc_lb_plugin_api::TerminalStrategy;
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::{
@@ -137,7 +137,7 @@ async fn create_principal(
         default_limits: body.default_limits,
     };
 
-    match PrincipalStore::create(storage, input, unix_now_secs()).await {
+    match PrincipalStore::create(storage, input, unix_now_secs(&*state.clock)).await {
         Ok(record) => {
             emit_audit(
                 &state,
@@ -269,8 +269,14 @@ async fn set_enabled(
         return error_response(StatusCode::BAD_REQUEST, "invalid_principal_id");
     };
 
-    match PrincipalStore::set_enabled(storage, id, expected_revision, enabled, unix_now_secs())
-        .await
+    match PrincipalStore::set_enabled(
+        storage,
+        id,
+        expected_revision,
+        enabled,
+        unix_now_secs(&*state.clock),
+    )
+    .await
     {
         Ok(Some(record)) => {
             emit_audit(
@@ -304,7 +310,9 @@ async fn delete_principal(
         return error_response(StatusCode::BAD_REQUEST, "invalid_principal_id");
     };
 
-    match PrincipalStore::soft_delete(storage, id, expected_revision, unix_now_secs()).await {
+    match PrincipalStore::soft_delete(storage, id, expected_revision, unix_now_secs(&*state.clock))
+        .await
+    {
         Ok(Some(record)) => {
             emit_audit(
                 &state,
@@ -416,7 +424,7 @@ async fn update_router_terminal(
             router_terminal_strategy: Some(strategy),
             ..PrincipalUpdate::default()
         },
-        unix_now_secs(),
+        unix_now_secs(&*state.clock),
     )
     .await
     {
@@ -451,7 +459,15 @@ async fn update_principal_record(
         return error_response(StatusCode::BAD_REQUEST, "invalid_principal_id");
     };
 
-    match PrincipalStore::update(storage, id, expected_revision, update, unix_now_secs()).await {
+    match PrincipalStore::update(
+        storage,
+        id,
+        expected_revision,
+        update,
+        unix_now_secs(&*state.clock),
+    )
+    .await
+    {
         Ok(Some(record)) => {
             emit_audit(
                 &state,
@@ -639,7 +655,7 @@ fn emit_audit(state: &AdminState, payload: AuditPayload) {
     };
     let principal_id = principal_id_for_audit(&payload);
     let action = payload.to_string();
-    let ts = unix_now_secs();
+    let ts = unix_now_secs(&*state.clock);
     let mut entry: AuditEntry = payload.into();
     entry.ts = ts;
     entry.request_id = format!("admin-v1-principal-{principal_id}-{ts}");
@@ -668,9 +684,6 @@ fn principal_kind_name(kind: PrincipalKind) -> &'static str {
     }
 }
 
-fn unix_now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+fn unix_now_secs(clock: &dyn Clock) -> u64 {
+    cc_lb_core::clock::unix_secs(clock.now())
 }

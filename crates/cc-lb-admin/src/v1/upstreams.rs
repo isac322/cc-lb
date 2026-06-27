@@ -20,7 +20,7 @@ use cc_lb_core::warmup_attempts::{
     WarmupAttemptExecution, WarmupAttemptExecutionResult, execute_warmup_attempt,
 };
 use cc_lb_core::{
-    AuditEntry, AuditPayload, UnifiedQuotaObservation, make_metadata_http_client,
+    AuditEntry, AuditPayload, Clock, UnifiedQuotaObservation, make_metadata_http_client,
     observe_subscription_quota_headers, parse_anthropic_unified_headers, run_metadata_refresh,
 };
 use cc_lb_scheduler::error::SchedulerError;
@@ -59,9 +59,13 @@ const WARMUP_ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 
 type WarmupHttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
 
-async fn write_warmup_status_after_success(storage: &dyn Storage, upstream_id: Uuid) {
+async fn write_warmup_status_after_success(
+    storage: &dyn Storage,
+    upstream_id: Uuid,
+    clock: &dyn Clock,
+) {
     let status = UpstreamStatusUpdate {
-        last_warmup_at_unix_secs: Some(Some(unix_now_secs())),
+        last_warmup_at_unix_secs: Some(Some(unix_now_secs(clock))),
         ..UpstreamStatusUpdate::default()
     };
     if let Err(error) = UpstreamStore::set_status(storage, upstream_id, status).await {
@@ -417,6 +421,7 @@ async fn refresh_upstream_subscription_metadata(
             &access_token,
             &user_agent,
             &cancel,
+            &*state.clock,
         ),
     )
     .await
@@ -448,7 +453,7 @@ async fn fire_now_upstream_warmup(
         )
             .into_response());
     }
-    let now_unix_secs = unix_now_secs_i64()?;
+    let now_unix_secs = unix_now_secs_i64(&*state.clock)?;
     if !upstream.warmup_enabled {
         record_fire_now_skip(
             storage.as_ref(),
@@ -626,7 +631,7 @@ async fn fire_now_upstream_warmup(
         lease_holder: Some(holder.as_str()),
         expected_cycle_key: Some(candidate_cycle_key),
         attempted_at_unix_secs: now_unix_secs,
-        completed_at_unix_secs: Some(unix_now_secs_i64()?),
+        completed_at_unix_secs: Some(unix_now_secs_i64(&*state.clock)?),
         result: execution_result_from_fire_now_attempt(&dispatch_attempt),
     })
     .await;
@@ -646,7 +651,7 @@ async fn fire_now_upstream_warmup(
         WarmupAttemptOutcome::SuccessFresh | WarmupAttemptOutcome::SuccessRedundant => {
             let response_cycle_key = record.cycle_key.unwrap_or(candidate_cycle_key);
             tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, cycle_key = %candidate_cycle_key, response_cycle_key = %response_cycle_key, action = "dispatch_succeeded");
-            write_warmup_status_after_success(storage.as_ref(), upstream_id).await;
+            write_warmup_status_after_success(storage.as_ref(), upstream_id, &*state.clock).await;
             Ok(Json(json!({ "fired": true, "cycle_key": response_cycle_key })).into_response())
         }
         WarmupAttemptOutcome::PermanentFailure => {
@@ -766,7 +771,7 @@ async fn record_fire_now_subscription_quota_observations(
     if headers.is_empty() {
         return Ok(());
     }
-    let observed_at_unix_millis = unix_now_millis()?;
+    let observed_at_unix_millis = unix_now_millis(&*state.clock)?;
     if let Some(lifecycle) = &state.lifecycle {
         let observed_at = UNIX_EPOCH
             .checked_add(Duration::from_millis(observed_at_unix_millis))
@@ -1034,7 +1039,7 @@ async fn seed_warmup_if_toggled(
     let Some(scheduler) = state.scheduler.as_ref() else {
         return Ok(());
     };
-    let seed_secs = unix_now_secs();
+    let seed_secs = unix_now_secs(&*state.clock);
     match scheduler
         .push_adaptive_task(warmup_bootstrap_task(after.id, seed_secs))
         .await
@@ -1259,7 +1264,7 @@ async fn fresh_enough_access_token(
     upstream: &UpstreamRecord,
     bundle: OAuthTokenBundle,
 ) -> Result<String, UpstreamError> {
-    let now = unix_now_secs();
+    let now = unix_now_secs(&*state.clock);
     if bundle.expires_at_unix_secs > now.saturating_add(METADATA_REFRESH_LOOKAHEAD_SECS) {
         return Ok(bundle.access_token);
     }
@@ -1517,7 +1522,7 @@ fn enqueue_upstream_audit(state: &AdminState, upstream: &UpstreamRecord, payload
     let Some(audit_sink) = &state.audit_sink else {
         return;
     };
-    let ts = unix_now_secs();
+    let ts = unix_now_secs(&*state.clock);
     let action = payload.to_string();
     let mut entry: AuditEntry = payload.into();
     entry.ts = ts;
@@ -1532,16 +1537,17 @@ fn enqueue_upstream_audit(state: &AdminState, upstream: &UpstreamRecord, payload
     let _ = audit_sink.try_enqueue(entry);
 }
 
-fn unix_now_secs() -> u64 {
-    u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default()
+fn unix_now_secs(clock: &dyn Clock) -> u64 {
+    cc_lb_core::clock::unix_secs(clock.now())
 }
 
-fn unix_now_secs_i64() -> Result<i64, UpstreamError> {
-    i64::try_from(unix_now_secs()).map_err(|_| invalid_warmup_state("current timestamp overflow"))
+fn unix_now_secs_i64(clock: &dyn Clock) -> Result<i64, UpstreamError> {
+    i64::try_from(unix_now_secs(clock))
+        .map_err(|_| invalid_warmup_state("current timestamp overflow"))
 }
 
-fn unix_now_millis() -> Result<u64, UpstreamError> {
-    unix_now_secs()
+fn unix_now_millis(clock: &dyn Clock) -> Result<u64, UpstreamError> {
+    unix_now_secs(clock)
         .checked_mul(1_000)
         .ok_or_else(|| invalid_warmup_state("current timestamp millis overflow"))
 }
@@ -1808,9 +1814,10 @@ mod tests {
     async fn test_context() -> TestContext {
         let dir = tempfile::tempdir().expect("storage dir");
         let database_url = format!("sqlite://{}", dir.path().join("upstreams.sqlite").display());
-        let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
-            .await
-            .expect("storage opens");
+        let storage =
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+                .await
+                .expect("storage opens");
         storage
             .initialize(BackendKind::Sqlite)
             .await
@@ -1821,7 +1828,10 @@ mod tests {
             storage: Some(storage.clone()),
             key_store: None,
             aead: aead.clone(),
-            limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
+            limit_engine: LimitEngine::new(
+                Arc::new(KeyConcurrencyManager::new()),
+                Arc::new(cc_lb_core::SystemClock),
+            ),
             lifecycle: None,
             subscription_metadata_hook: None,
             lazy_refresher: None,
@@ -1835,6 +1845,7 @@ mod tests {
             admin_token: None,
             start_time: std::time::Instant::now(),
             event_bus: None,
+            clock: Arc::new(cc_lb_core::SystemClock),
         };
         TestContext {
             _dir: dir,

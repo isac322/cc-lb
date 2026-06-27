@@ -4,6 +4,7 @@ use cc_lb_plugin_api::sign_request;
 
 #[tokio::test]
 async fn sign_loads_from_storage() {
+    let clock = common::test_clock();
     let test_storage = common::storage();
     test_storage
         .put_oauth(
@@ -12,7 +13,7 @@ async fn sign_loads_from_storage() {
             &common::creds(
                 "sk-ant-oat01-storage-token",
                 "refresh-token",
-                common::now_epoch_secs() + 600,
+                common::now_epoch_secs(clock.as_ref()) + 600,
             ),
         )
         .await
@@ -22,6 +23,7 @@ async fn sign_loads_from_storage() {
         test_storage.storage.clone(),
         test_storage.aead.clone(),
         http.clone(),
+        clock,
     );
 
     let signed = sign_request(&signer, common::shaped_request())

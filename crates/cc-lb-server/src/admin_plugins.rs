@@ -546,8 +546,13 @@ mod tests {
         registry_repo: Arc<MemoryRegistryRepo>,
         blob_repo: Arc<MemoryBlobRepo>,
     ) -> PluginRegistry {
-        PluginRegistry::new(registry_repo, blob_repo, build_offer(&BTreeSet::new()))
-            .expect("registry builds")
+        PluginRegistry::new(
+            registry_repo,
+            blob_repo,
+            build_offer(&BTreeSet::new()),
+            Arc::new(cc_lb_core::SystemClock),
+        )
+        .expect("registry builds")
     }
 
     #[derive(Default)]

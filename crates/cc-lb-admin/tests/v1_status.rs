@@ -33,12 +33,14 @@ async fn status_reflects_in_memory_dynamic_view_generation_and_replica_id() {
             DownstreamAuthMode::ApiKey,
             None,
             state.key_store.clone(),
+            Arc::new(cc_lb_core::SystemClock),
         )),
         state.dynamic_view.clone(),
         LifecycleConfig {
             replica_identity: Some(replica.clone()),
             ..LifecycleConfig::default()
         },
+        Arc::new(cc_lb_core::SystemClock),
     );
     state.lifecycle = Some(Arc::new(lifecycle));
     bump_dynamic_generation(&state, UpstreamStatusSnapshot::default());

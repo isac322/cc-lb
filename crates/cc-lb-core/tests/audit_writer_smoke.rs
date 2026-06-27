@@ -74,7 +74,11 @@ async fn new_storage() -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dy
         "sqlite://{}",
         dir.path().join("audit-writer.sqlite").display()
     );
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url).await?;
+    let storage = cc_lb_storage_sqlite::open_sqlite(
+        &database_url,
+        Arc::new(cc_lb_core::SystemClock),
+    )
+    .await?;
     storage.initialize(BackendKind::Sqlite).await?;
     Ok((dir, Arc::new(storage)))
 }

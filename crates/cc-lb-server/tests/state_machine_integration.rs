@@ -316,7 +316,7 @@ async fn build_test_app() -> TestResult<TestApp> {
     let key = [0_u8; 32];
     let storage_path = dir.path().join("state-machine.sqlite");
     let database_url = format!("sqlite://{}", storage_path.display());
-    let storage_arc = open_sqlite(&database_url).await?;
+    let storage_arc = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock)).await?;
     cc_lb_storage_api::MetaStore::initialize(&storage_arc, BackendKind::Sqlite).await?;
     let storage_arc = Arc::new(storage_arc);
     seed_storage(storage_arc.as_ref()).await?;

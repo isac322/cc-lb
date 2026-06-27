@@ -1,6 +1,5 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use cc_lb_core::anthropic_compat::{CompatibilityKey, run_compat_fetcher};
+use cc_lb_core::clock::{Clock, unix_secs};
 use cc_lb_storage_api::AnthropicCompatibilityKvStore;
 use tokio_util::sync::CancellationToken;
 
@@ -17,12 +16,13 @@ pub async fn handle_anthropic_compat_refresh_job_with_core_fetcher<E, K>(
     etags: &E,
     compatibility_kv: &K,
     cancel: &CancellationToken,
+    clock: &dyn Clock,
 ) -> Result<JobOutcome>
 where
     E: CompatEtagRepository + Sync,
     K: AnthropicCompatibilityKvStore + ?Sized,
 {
-    let now_unix_secs = current_unix_secs()?;
+    let now_unix_secs = current_unix_secs(clock)?;
     handle_anthropic_compat_refresh_job(
         job,
         etags,
@@ -48,9 +48,6 @@ pub async fn fetch_compat_key(
     })
 }
 
-pub fn current_unix_secs() -> Result<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .map_err(|error| SchedulerError::Job(error.to_string()))
+pub fn current_unix_secs(clock: &dyn Clock) -> Result<u64> {
+    Ok(unix_secs(clock.now()))
 }

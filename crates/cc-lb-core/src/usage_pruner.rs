@@ -1,7 +1,9 @@
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use cc_lb_storage_api::Storage;
+
+use crate::clock::{Clock, ClockHandle, unix_millis};
 
 const DAY_MS: u64 = 86_400_000;
 const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
@@ -11,6 +13,7 @@ const PRUNE_BATCH_SLEEP: Duration = Duration::from_millis(50);
 pub struct UsagePruner {
     storage: Arc<dyn Storage>,
     retention_days: u64,
+    clock: ClockHandle,
 }
 
 pub trait IntoUsagePrunerStorage {
@@ -33,10 +36,15 @@ where
 }
 
 impl UsagePruner {
-    pub fn new(storage: impl IntoUsagePrunerStorage, retention_days: u64) -> Self {
+    pub fn new(
+        storage: impl IntoUsagePrunerStorage,
+        retention_days: u64,
+        clock: ClockHandle,
+    ) -> Self {
         Self {
             storage: storage.into_usage_pruner_storage(),
             retention_days,
+            clock,
         }
     }
 
@@ -45,7 +53,7 @@ impl UsagePruner {
             return PruneResult::default();
         }
 
-        let now_ms = now_unix_ms();
+        let now_ms = now_unix_ms(&*self.clock);
         let retention_ms = self.retention_days.saturating_mul(DAY_MS);
         let cutoff_ms = now_ms.saturating_sub(retention_ms);
         let cutoff_secs = cutoff_ms / 1_000;
@@ -132,9 +140,6 @@ pub struct PruneResult {
     pub audit_log_removed: u64,
 }
 
-fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_millis() as u64
+fn now_unix_ms(clock: &dyn Clock) -> u64 {
+    unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
 }

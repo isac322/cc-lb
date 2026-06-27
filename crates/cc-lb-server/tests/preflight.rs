@@ -141,7 +141,9 @@ impl Fixture {
             "sqlite://{}",
             db_dir.path().join("preflight.sqlite").display()
         );
-        let storage = open_sqlite(&database_url).await.unwrap();
+        let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+            .await
+            .unwrap();
         storage.initialize(BackendKind::Sqlite).await.unwrap();
         let storage = Arc::new(storage);
         let upstreams: Arc<dyn UpstreamStore> = storage.clone();

@@ -1,12 +1,9 @@
 #![cfg(feature = "postgres")]
 
-use std::{
-    str::FromStr,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
+use cc_lb_core::{ClockHandle, SystemClock};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_conformance::scenarios::managed_keys::{
     ManagedKeyBackend, managed_keys_concurrent_issue_no_index_collision,
@@ -54,7 +51,7 @@ impl ManagedKeyBackend for PostgresManagedKeyBackend {
                 PgConnectOptions::from_str(&self.url)?.options([("search_path", schema.as_str())]),
             )
             .await?;
-        PostgresStorage::new(pool.clone())
+        PostgresStorage::new(pool.clone(), system_clock())
             .initialize(BackendKind::Postgres)
             .await?;
 
@@ -69,6 +66,7 @@ impl ManagedKeyBackend for PostgresManagedKeyBackend {
         Ok(PostgresManagedKeyStore::new(
             fixture.pool.clone(),
             Arc::new(retry::RetryPolicy::default()),
+            system_clock(),
         ))
     }
 
@@ -135,11 +133,7 @@ where
 }
 
 fn schema_name() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!("managed_keys_{nanos}_{}", std::process::id())
+    format!("managed_keys_{}", uuid::Uuid::new_v4().simple())
 }
 
 fn quote_ident(identifier: &str) -> String {
@@ -152,4 +146,8 @@ fn quote_ident(identifier: &str) -> String {
         "unsafe postgres identifier: {identifier}"
     );
     format!("\"{identifier}\"")
+}
+
+fn system_clock() -> ClockHandle {
+    Arc::new(SystemClock)
 }

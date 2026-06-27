@@ -4,6 +4,7 @@ use cc_lb_plugin_api::sign_request;
 
 #[tokio::test]
 async fn proactive_refreshes_before_signing() {
+    let clock = common::test_clock();
     let test_storage = common::storage();
     test_storage
         .put_oauth(
@@ -12,7 +13,7 @@ async fn proactive_refreshes_before_signing() {
             &common::creds(
                 "sk-ant-oat01-old",
                 "refresh-old",
-                common::now_epoch_secs() + 30,
+                common::now_epoch_secs(clock.as_ref()) + 30,
             ),
         )
         .await
@@ -26,6 +27,7 @@ async fn proactive_refreshes_before_signing() {
         test_storage.storage.clone(),
         test_storage.aead.clone(),
         http.clone(),
+        clock,
     );
 
     let signed = sign_request(&signer, common::shaped_request())

@@ -71,6 +71,7 @@ impl TestAuthn {
                     upstream_kind: NoneModeUpstreamKind::AnthropicKey,
                 }),
                 None,
+                Arc::new(cc_lb_core::SystemClock),
             )),
             principal_view: view,
             state,
@@ -297,6 +298,7 @@ pub fn lifecycle_with_parts(
         authn.authn.clone(),
         Arc::new(DynamicViewHolder::new(view)),
         config,
+        Arc::new(cc_lb_core::SystemClock),
     )
 }
 

@@ -1,5 +1,6 @@
 use std::{str::FromStr, time::Duration};
 
+use cc_lb_core::{Clock, ClockHandle};
 use cc_lb_storage_api::{StorageError, StorageResult};
 use sqlx::{
     Sqlite, SqlitePool, Transaction,
@@ -8,14 +9,15 @@ use sqlx::{
 
 pub mod adapter;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SqliteStorage {
     pool: SqlitePool,
+    clock: ClockHandle,
 }
 
 impl SqliteStorage {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(pool: SqlitePool, clock: ClockHandle) -> Self {
+        Self { pool, clock }
     }
 
     pub fn pool(&self) -> &SqlitePool {
@@ -25,6 +27,10 @@ impl SqliteStorage {
     pub async fn begin_immediate(&self) -> StorageResult<Transaction<'static, Sqlite>> {
         begin_immediate(&self.pool).await
     }
+
+    pub(crate) fn clock(&self) -> &dyn Clock {
+        &*self.clock
+    }
 }
 
 pub async fn begin_immediate(pool: &SqlitePool) -> StorageResult<Transaction<'static, Sqlite>> {
@@ -33,7 +39,7 @@ pub async fn begin_immediate(pool: &SqlitePool) -> StorageResult<Transaction<'st
         .map_err(map_sqlx_error)
 }
 
-pub async fn open_sqlite(database_url: &str) -> StorageResult<SqliteStorage> {
+pub async fn open_sqlite(database_url: &str, clock: ClockHandle) -> StorageResult<SqliteStorage> {
     let options = SqliteConnectOptions::from_str(database_url)
         .map_err(map_sqlx_error)?
         .create_if_missing(true)
@@ -47,7 +53,7 @@ pub async fn open_sqlite(database_url: &str) -> StorageResult<SqliteStorage> {
         .await
         .map_err(map_sqlx_error)?;
 
-    Ok(SqliteStorage::new(pool))
+    Ok(SqliteStorage::new(pool, clock))
 }
 
 fn map_sqlx_error(error: sqlx::Error) -> StorageError {

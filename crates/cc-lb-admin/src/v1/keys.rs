@@ -5,9 +5,9 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_core::AuditEntry;
 use cc_lb_core::api_keys::key_store::CreateParams;
 use cc_lb_core::api_keys::secret;
+use cc_lb_core::{AuditEntry, Clock};
 use cc_lb_storage_api::types::{KeyStatus, PrincipalKindLite, UpstreamKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -144,10 +144,8 @@ async fn list_keys(
             let last_used_map: std::collections::HashMap<String, u64> = if let Some(storage) =
                 state.storage.as_ref()
             {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
+                let now_ms = cc_lb_core::clock::unix_millis(state.clock.now())
+                    .min(u128::from(u64::MAX)) as u64;
                 let since_ms = now_ms.saturating_sub(30 * 24 * 60 * 60 * 1000);
                 match storage
                     .query_request_events(since_ms / 1000, now_ms / 1000, 5000)
@@ -236,10 +234,7 @@ async fn revoke_key(
 
     match key_store.revoke(&id, &key_id).await {
         Ok(_) => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time is always after UNIX_EPOCH")
-                .as_secs();
+            let now = cc_lb_core::clock::unix_secs(state.clock.now());
             emit_key_audit(&state, &id, &key_id, "principal_key_revoke", 200);
             let response = RevokeKeyResponse {
                 key_id,
@@ -264,7 +259,7 @@ fn emit_key_audit(state: &AdminState, principal_id: &str, key_id: &str, action: 
     let Some(audit_sink) = &state.audit_sink else {
         return;
     };
-    let ts = unix_now_secs();
+    let ts = unix_now_secs(&*state.clock);
     let _ = audit_sink.try_enqueue(AuditEntry {
         ts,
         request_id: format!("admin-v1-key-{key_id}-{ts}"),
@@ -284,9 +279,6 @@ fn emit_key_audit(state: &AdminState, principal_id: &str, key_id: &str, action: 
     });
 }
 
-fn unix_now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+fn unix_now_secs(clock: &dyn Clock) -> u64 {
+    cc_lb_core::clock::unix_secs(clock.now())
 }

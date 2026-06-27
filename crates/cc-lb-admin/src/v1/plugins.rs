@@ -7,7 +7,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_core::{AuditEntry, AuditPayload};
+use cc_lb_core::{AuditEntry, AuditPayload, Clock};
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainConflictReason,
     PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginMetadata, PluginSlot,
@@ -1116,7 +1116,7 @@ fn emit_audit(state: &AdminState, payload: AuditPayload) {
         return;
     };
     let action = payload.to_string();
-    let ts = unix_now_secs();
+    let ts = unix_now_secs(&*state.clock);
     let mut entry: AuditEntry = payload.into();
     entry.ts = ts;
     entry.request_id = format!("admin-v1-plugin-{ts}");
@@ -1132,9 +1132,6 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
     sha256.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn unix_now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+fn unix_now_secs(clock: &dyn Clock) -> u64 {
+    cc_lb_core::clock::unix_secs(clock.now())
 }

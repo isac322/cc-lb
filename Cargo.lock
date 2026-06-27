@@ -832,6 +832,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-lb-clock"
+version = "0.1.0"
+
+[[package]]
 name = "cc-lb-config"
 version = "0.1.0"
 dependencies = [
@@ -864,6 +868,7 @@ dependencies = [
  "bincode",
  "bytes",
  "cc-lb-aead",
+ "cc-lb-clock",
  "cc-lb-config",
  "cc-lb-observability",
  "cc-lb-plugin-api",
@@ -980,6 +985,7 @@ dependencies = [
  "anyhow",
  "base64",
  "bytes",
+ "cc-lb-clock",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "cc-lb-runtime-protocol",
@@ -1020,6 +1026,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "bytes",
+ "cc-lb-clock",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
  "futures-lite",
@@ -1063,6 +1070,7 @@ dependencies = [
  "async-trait",
  "base64",
  "bytes",
+ "cc-lb-core",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "cc-lb-runtime-protocol",
@@ -1093,6 +1101,7 @@ dependencies = [
  "async-trait",
  "base64",
  "bytes",
+ "cc-lb-core",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "extism",
@@ -1258,6 +1267,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cc-lb-aead",
+ "cc-lb-core",
  "cc-lb-plugin-api",
  "cc-lb-storage-api",
  "chrono",
@@ -1287,6 +1297,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cc-lb-aead",
+ "cc-lb-core",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "cc-lb-storage-sqlite",
@@ -1332,6 +1343,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cc-lb-aead",
+ "cc-lb-core",
  "cc-lb-pricing",
  "cc-lb-storage-api",
  "cc-lb-storage-conformance",
@@ -1355,6 +1367,7 @@ dependencies = [
  "async-trait",
  "cc-lb-aead",
  "cc-lb-config",
+ "cc-lb-core",
  "cc-lb-plugin-api",
  "cc-lb-storage-api",
  "chrono",

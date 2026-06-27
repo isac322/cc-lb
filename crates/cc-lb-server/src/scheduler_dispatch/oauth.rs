@@ -31,7 +31,7 @@ impl SchedulerDispatch {
         OAuthRefreshJobHandler::new(StorageHandle::new(self.storage.clone()), replica_id)
             .handle(
                 job,
-                now_unix_secs(),
+                now_unix_secs(&*self.clock),
                 |upstream| self.refresh_upstream(upstream),
                 |metadata_job| self.enqueue_metadata_refresh(metadata_job),
                 |upstream_id, expires_at_unix_secs| {
@@ -61,7 +61,7 @@ impl SchedulerDispatch {
         let updated = OAuthTokenBundle {
             access_token: response.access_token,
             refresh_token: response.refresh_token.unwrap_or(bundle.refresh_token),
-            expires_at_unix_secs: now_unix_secs().saturating_add(response.expires_in),
+            expires_at_unix_secs: now_unix_secs(&*self.clock).saturating_add(response.expires_in),
             scopes,
         };
         let encrypted_tokens =
@@ -115,7 +115,7 @@ impl SchedulerDispatch {
             return Ok(OAuthUsagePollObservation::Skip);
         }
         self.ensure_fresh_usage_token(&mut upstream).await?;
-        let observed_at_unix_secs = now_unix_secs();
+        let observed_at_unix_secs = now_unix_secs(&*self.clock);
         let first_response = match self.fetch_usage_with_current_token(&upstream).await {
             FetchOutcome::Response(response) => response,
             FetchOutcome::Network => {
@@ -154,7 +154,7 @@ impl SchedulerDispatch {
                 status: response.status.as_u16(),
             });
         }
-        let observed_at_unix_millis = now_unix_millis();
+        let observed_at_unix_millis = now_unix_millis(&*self.clock);
         observe_usage_body(
             upstream.id,
             &response.body,
@@ -201,7 +201,7 @@ impl SchedulerDispatch {
         if bundle
             .expires_at_unix_secs
             .saturating_sub(TOKEN_REFRESH_LOOKAHEAD_SECS)
-            > now_unix_secs()
+            > now_unix_secs(&*self.clock)
         {
             return Ok(());
         }

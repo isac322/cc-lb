@@ -55,7 +55,10 @@ async fn storage_fixture() -> (tempfile::TempDir, Arc<Storage>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!("sqlite://{}", dir.path().join("test.sqlite").display());
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&database_url)
+        cc_lb_storage_sqlite::open_sqlite(
+            &database_url,
+            Arc::new(cc_lb_core::SystemClock),
+        )
             .await
             .expect("storage"),
     );
@@ -150,6 +153,7 @@ async fn initial_holder(
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await
     .expect("initial dynamic view");
@@ -175,6 +179,7 @@ fn reconciler(
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         Arc::new(cc_lb_config::Config::default()),
+        Arc::new(cc_lb_core::SystemClock),
     ))
 }
 

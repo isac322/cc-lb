@@ -7,7 +7,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_core::{AuditEntry, AuditPayload};
+use cc_lb_core::{AuditEntry, AuditPayload, Clock};
 use cc_lb_storage_api::{Storage, StorageError};
 use http_body_util::BodyExt;
 use serde::Deserialize;
@@ -368,7 +368,7 @@ async fn put_config_draft(
         Err(error) => return settings_error_response(error, true),
     };
     let draft_value = request.draft.clone();
-    match crate::settings::put_draft(storage, request, unix_now_secs()).await {
+    match crate::settings::put_draft(storage, request, unix_now_secs(&*state.clock)).await {
         Ok(response) => {
             emit_admin_action(&state, "config_draft_put", "admin_config_draft", None, 200);
             if let Ok(config) = serde_json::from_value::<cc_lb_config::Config>(draft_value) {
@@ -424,7 +424,7 @@ async fn get_config_draft(State(state): State<AdminState>) -> axum::response::Re
         Ok(storage) => storage,
         Err(error) => return settings_error_response(error, false),
     };
-    match crate::settings::get_draft(storage).await {
+    match crate::settings::get_draft(storage, &*state.clock).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => settings_error_response(error, false),
     }
@@ -583,11 +583,8 @@ fn dashboard_error(status: StatusCode, error: &str) -> axum::response::Response 
     (status, Json(json!({ "error": error }))).into_response()
 }
 
-fn unix_now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+fn unix_now_secs(clock: &dyn Clock) -> u64 {
+    cc_lb_core::clock::unix_secs(clock.now())
 }
 
 async fn reload_config(State(_state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
@@ -613,7 +610,7 @@ fn emit_admin_action(
     let Some(audit_sink) = &state.audit_sink else {
         return;
     };
-    let ts = unix_now_secs();
+    let ts = unix_now_secs(&*state.clock);
     let _ = audit_sink.try_enqueue(AuditEntry {
         ts,
         request_id: format!("{route}-{ts}"),

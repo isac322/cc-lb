@@ -1,6 +1,5 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use async_trait::async_trait;
+use cc_lb_core::{Clock, unix_secs};
 use cc_lb_storage_api::{
     ManagedKeyStore, StorageError, StorageResult,
     types::{
@@ -30,7 +29,7 @@ impl ManagedKeyStore for SqliteStorage {
 
         let record = StoredApiKeyRecord {
             label: params.label,
-            issued_at_unix_secs: now_unix_secs(),
+            issued_at_unix_secs: now_unix_secs(self.clock()),
             revoked_at_unix_secs: None,
             key_hash_b64: base64_url_no_pad(&params.verify_hash),
             verify_hash: params.verify_hash,
@@ -117,7 +116,7 @@ impl ManagedKeyStore for SqliteStorage {
             return Ok(());
         };
 
-        apply_mutation(&mut record, mutation);
+        apply_mutation(&mut record, mutation, self.clock());
         update_record(self, principal_id, key_id, &record).await
     }
 
@@ -131,7 +130,7 @@ impl ManagedKeyStore for SqliteStorage {
 
         record.status = KeyStatus::Revoked;
         if record.revoked_at_unix_secs.is_none() {
-            record.revoked_at_unix_secs = Some(now_unix_secs());
+            record.revoked_at_unix_secs = Some(now_unix_secs(self.clock()));
         }
         record.index_hash = [0; 32];
         record.verify_hash = [0; 32];
@@ -164,7 +163,7 @@ async fn insert_record(
     let limit_overrides = serde_json::to_string(&record.limit_overrides)?;
     let issued_at = u64_to_i64(record.issued_at_unix_secs, "issued_at_unix_secs")?;
     let expires_at = option_u64_to_i64(record.expires_at_unix_secs, "expires_at_unix_secs")?;
-    let now = now_i64()?;
+    let now = now_i64(storage.clock())?;
 
     sqlx::query(
         "INSERT INTO managed_keys_v1 \
@@ -236,7 +235,7 @@ async fn update_record(
     .bind(&record.description)
     .bind(principal_kind_as_str(record.principal_kind))
     .bind(record.index_hash.as_slice())
-    .bind(now_i64()?)
+    .bind(now_i64(storage.clock())?)
     .bind(principal_id)
     .bind(key_id)
     .execute(storage.pool())
@@ -307,7 +306,7 @@ fn row_to_record(row: SqliteRow) -> StorageResult<StoredApiKeyRecord> {
     })
 }
 
-fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation) {
+fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation, clock: &dyn Clock) {
     if let Some(label) = mutation.label {
         record.label = label;
     }
@@ -322,7 +321,7 @@ fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation) {
     }
     if let Some(status) = mutation.status {
         if status == KeyStatus::Revoked && record.revoked_at_unix_secs.is_none() {
-            record.revoked_at_unix_secs = Some(now_unix_secs());
+            record.revoked_at_unix_secs = Some(now_unix_secs(clock));
         }
         record.status = status;
     }
@@ -428,15 +427,12 @@ fn base64_url_no_pad(value: &[u8]) -> String {
     out
 }
 
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default()
+fn now_unix_secs(clock: &dyn Clock) -> u64 {
+    unix_secs(clock.now())
 }
 
-fn now_i64() -> StorageResult<i64> {
-    u64_to_i64(now_unix_secs(), "now_unix_secs")
+fn now_i64(clock: &dyn Clock) -> StorageResult<i64> {
+    u64_to_i64(now_unix_secs(clock), "now_unix_secs")
 }
 
 fn map_managed_sqlx_error(error: sqlx::Error) -> StorageError {

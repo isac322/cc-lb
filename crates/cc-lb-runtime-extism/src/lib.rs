@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use cc_lb_core::clock::{ClockHandle, SystemClock};
 #[allow(deprecated)]
 use cc_lb_plugin_api::RouterPlugin;
 use cc_lb_plugin_api::{
@@ -138,6 +139,7 @@ pub struct ExtismRuntime {
     manifests: RwLock<HashMap<SlotKey, PluginEntry>>,
     instances: RwLock<HashMap<SlotKey, Arc<PluginSlot>>>,
     host_state: Arc<HostState>,
+    clock: ClockHandle,
 }
 
 impl ExtismRuntime {
@@ -151,6 +153,7 @@ impl ExtismRuntime {
             manifests: RwLock::new(HashMap::new()),
             instances: RwLock::new(HashMap::new()),
             host_state: Arc::new(HostState::new()),
+            clock: Arc::new(SystemClock),
         }
     }
 
@@ -179,7 +182,7 @@ impl ExtismRuntime {
         manifest: &PluginManifest,
     ) -> Result<Arc<PluginSlot>, RuntimeError> {
         let entry = PluginEntry::from_manifest(manifest, &self.config)?;
-        let cell = build_plugin_cell(&entry, self.host_state.clone())?;
+        let cell = build_plugin_cell(&entry, self.host_state.clone(), self.clock.clone())?;
 
         if let Some(slot) = self
             .instances
@@ -220,7 +223,7 @@ impl ExtismRuntime {
                 reason: format!("unknown plugin manifest: {manifest_ref}"),
             })?;
         let refreshed = PluginEntry::from_manifest(&entry.original, &self.config)?;
-        let cell = build_plugin_cell(&refreshed, self.host_state.clone())?;
+        let cell = build_plugin_cell(&refreshed, self.host_state.clone(), self.clock.clone())?;
         let slot = self
             .instances
             .read()
@@ -266,7 +269,7 @@ impl ExtismRuntime {
     ) -> Result<(Arc<PluginSlot>, StagedSlot), RuntimeError> {
         let key = SlotKey::new(principal_id, plugin_name);
         let entry = PluginEntry::from_manifest(manifest, &self.config)?;
-        let cell = build_plugin_cell(&entry, self.host_state.clone())?;
+        let cell = build_plugin_cell(&entry, self.host_state.clone(), self.clock.clone())?;
         let slot = Arc::new(PluginSlot::new(entry.clone(), cell));
         if !slot.function_exists(hook)? {
             return Err(RuntimeError::InstantiateFailed {
@@ -612,11 +615,13 @@ pub(crate) struct PluginCell {
 fn build_plugin_cell(
     entry: &PluginEntry,
     host_state: Arc<HostState>,
+    clock: ClockHandle,
 ) -> Result<PluginCell, RuntimeError> {
     let context = HostFunctionContext::new(
         entry.name.clone(),
         entry.limits.storage_quota_bytes,
         host_state,
+        clock,
     );
     let mut builder = PluginBuilder::new(&entry.extism_manifest)
         .with_functions(host_functions::functions(context))

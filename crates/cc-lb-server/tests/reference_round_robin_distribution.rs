@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::body::{Body, Bytes};
@@ -83,7 +83,11 @@ impl Harness {
         let key = [26; 32];
         let storage_path = dir.path().join("round-robin.sqlite");
         let database_url = format!("sqlite://{}", storage_path.display());
-        let storage = cc_lb_storage_sqlite::open_sqlite(&database_url).await?;
+        let storage = cc_lb_storage_sqlite::open_sqlite(
+            &database_url,
+            Arc::new(cc_lb_core::SystemClock),
+        )
+        .await?;
         storage.initialize(BackendKind::Sqlite).await?;
         let storage = Arc::new(storage);
         let aead = Arc::new(AeadService::from_master_key(key));
@@ -131,8 +135,12 @@ impl Harness {
             DownstreamAuthMode::ApiKey,
             None,
             Some(key_store.clone()),
+            Arc::new(cc_lb_core::SystemClock),
         ));
-        let limit_engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()));
+        let limit_engine = LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_core::SystemClock),
+        );
         let storage_trait: Arc<dyn StorageTrait> = storage.clone();
         let (rate_limit_sink, rate_limit_receiver) = UpstreamRateLimitSink::new();
         let rate_limit_writer =
@@ -142,6 +150,7 @@ impl Harness {
                 authn.clone(),
                 dynamic_view.clone(),
                 LifecycleConfig::default(),
+                Arc::new(cc_lb_core::SystemClock),
             )
             .with_limit_engine(limit_engine.clone(), authn)
             .with_upstream_rate_limit_sink(rate_limit_sink),
@@ -181,6 +190,7 @@ impl Harness {
             subscription_metadata_hook: None,
             event_bus: None,
             start_time: Instant::now(),
+            clock: Arc::new(cc_lb_core::SystemClock),
         });
         std::mem::forget(dir);
 
@@ -514,6 +524,7 @@ async fn rebuild_test_view(
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await?;
     Ok(DynamicViewBuilder::from_view(&view)
@@ -680,7 +691,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now()
+    cc_lb_core::Clock::now(&cc_lb_core::SystemClock)
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()

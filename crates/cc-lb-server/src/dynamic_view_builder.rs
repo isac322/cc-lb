@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
@@ -16,7 +16,7 @@ use cc_lb_core::api_keys::principal_view::{
 };
 use cc_lb_core::builtin_filters::cache_affinity::CacheAffinityFilter;
 use cc_lb_core::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_core::clock::SystemClock;
+use cc_lb_core::clock::{Clock, SystemClock, unix_secs};
 use cc_lb_core::{
     ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
     UpstreamStatusEntry, UpstreamStatusSnapshot, make_default_dispatcher,
@@ -176,6 +176,7 @@ pub async fn build_dynamic_view(
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
     subscription_quota_routing_max_staleness_secs: u64,
     config: &cc_lb_config::Config,
+    clock: cc_lb_core::ClockHandle,
 ) -> Result<Arc<DynamicView>, RebindError> {
     let upstreams = list_upstreams(stores).await?;
     let all_upstream_ids = upstreams
@@ -239,14 +240,14 @@ pub async fn build_dynamic_view(
         .await?;
     let upstream_rate_limit_cache = Arc::new(RwLock::new(UpstreamRateLimitCache {
         snapshots: group_rate_limit_observations(upstream_rate_limit_records),
-        updated_at_unix_secs: unix_now_secs(),
+        updated_at_unix_secs: unix_now_secs(&*clock),
     }));
     let principals = list_principals(stores).await?;
     let mut staged = Vec::new();
     let principal_chains =
         build_principal_chains(stores, runtime, data_dir, &principals, &mut staged).await?;
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
-    let now = unix_now_secs();
+    let now = unix_now_secs(&*clock);
     let statuses = apply_upstreams(stores, &upstreams, oauth_anthropic, now).await?;
     let revision_hash = collect_revision_hash(stores).await?;
     let global_router = Arc::new(FirstCandidateRouter);
@@ -255,11 +256,12 @@ pub async fn build_dynamic_view(
         stores.upstreams.clone(),
         aead,
         lazy_refresher,
+        clock.clone(),
     ));
     let dispatcher = make_default_dispatcher(50);
     let snapshot = Arc::new(UpstreamStatusSnapshot {
         entries: statuses,
-        applied_at_unix_secs: unix_now_secs(),
+        applied_at_unix_secs: unix_now_secs(&*clock),
         revision_hash,
     });
 
@@ -798,6 +800,7 @@ struct DbCompositeSignerFactory {
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     downstream_api_key: Option<String>,
     router_chosen_upstream_name: Option<String>,
+    clock: cc_lb_core::ClockHandle,
 }
 
 impl DbCompositeSignerFactory {
@@ -806,6 +809,7 @@ impl DbCompositeSignerFactory {
         upstream_store: Arc<dyn UpstreamStore>,
         aead: Arc<AeadService>,
         lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
+        clock: cc_lb_core::ClockHandle,
     ) -> Self {
         Self {
             upstreams,
@@ -814,6 +818,7 @@ impl DbCompositeSignerFactory {
             lazy_refresher,
             downstream_api_key: None,
             router_chosen_upstream_name: None,
+            clock,
         }
     }
 
@@ -829,6 +834,7 @@ impl DbCompositeSignerFactory {
             lazy_refresher: self.lazy_refresher.clone(),
             downstream_api_key: Some(api_key),
             router_chosen_upstream_name: Some(router_chosen_upstream_name),
+            clock: self.clock.clone(),
         }
     }
 }
@@ -870,6 +876,7 @@ impl SignerFactory for DbCompositeSignerFactory {
                         self.upstream_store.clone(),
                         self.aead.clone(),
                         record.name.clone(),
+                        self.clock.clone(),
                     );
                 if let Some(handle) = &self.lazy_refresher {
                     cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactoryWithLazyRefresh::new(
@@ -909,11 +916,8 @@ fn upstream_matches(record: &UpstreamRecord, upstream: &Upstream) -> bool {
     )
 }
 
-fn unix_now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+fn unix_now_secs(clock: &dyn Clock) -> u64 {
+    unix_secs(clock.now())
 }
 
 fn hex_sha256(sha256: [u8; 32]) -> String {
@@ -929,6 +933,7 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
 mod tests {
     use std::collections::BTreeSet;
 
+    use cc_lb_core::clock::TestClock;
     use cc_lb_plugin_api::types::TtlClass as PluginTtlClass;
     use cc_lb_storage_api::{
         BackendKind, MetaStore, PromptCacheObservationRecord, TtlClass as StorageTtlClass,
@@ -1012,9 +1017,10 @@ mod tests {
                 .join(format!("dynamic-view-builder-{seed}.sqlite"))
                 .display()
         );
-        let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
-            .await
-            .expect("storage");
+        let storage =
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+                .await
+                .expect("storage");
         storage.initialize(BackendKind::Sqlite).await.unwrap();
         let storage = Arc::new(storage);
         (dir, storage)
@@ -1070,6 +1076,7 @@ mod tests {
         data_dir: &Path,
         config: cc_lb_config::Config,
     ) -> Arc<DynamicView> {
+        let clock: cc_lb_core::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         build_dynamic_view(
             stores,
             &AnthropicOAuthConfig::default(),
@@ -1081,6 +1088,7 @@ mod tests {
             Arc::new(SubscriptionQuotaCache::new()),
             1800,
             &config,
+            clock,
         )
         .await
         .expect("dynamic view builds")
@@ -1115,6 +1123,7 @@ mod tests {
         let runtime = ExtismRuntime::new();
 
         let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
+        let clock = TestClock::new_at_secs(1_700_000_000);
 
         let snapshot = dynamic_view
             .prompt_cache_observation_cache_opt()
@@ -1127,7 +1136,7 @@ mod tests {
                     ("hash-b".to_owned(), PluginTtlClass::Ephemeral5m),
                     ("hash-c".to_owned(), PluginTtlClass::Ephemeral5m),
                 ],
-                unix_now_secs(),
+                unix_now_secs(&clock),
             );
         let prefix_hashes = snapshot
             .into_iter()
@@ -1154,7 +1163,6 @@ mod tests {
         let runtime = ExtismRuntime::new();
 
         let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
-
         let sink = dynamic_view
             .prompt_cache_observation_sink_opt()
             .expect("sink wired when prompt_cache_shadow enabled")
@@ -1200,6 +1208,7 @@ mod tests {
         let started = tokio::time::Instant::now();
 
         let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
+        let clock = TestClock::new_at_secs(1_700_000_000);
 
         assert!(started.elapsed() <= Duration::from_secs(6));
         let snapshot = dynamic_view
@@ -1209,7 +1218,7 @@ mod tests {
                 upstream.id,
                 MODEL,
                 &[("hash-a".to_owned(), PluginTtlClass::Ephemeral5m)],
-                unix_now_secs(),
+                unix_now_secs(&clock),
             );
         assert!(snapshot.is_empty());
     }

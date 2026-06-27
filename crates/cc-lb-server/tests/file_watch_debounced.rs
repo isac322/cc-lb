@@ -17,6 +17,7 @@ async fn file_watch_debounced() {
         &config_path,
         reload_common::load_config(&config_path),
         Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
+        Arc::new(cc_lb_core::SystemClock),
     ));
     let task = watcher.spawn_file_watcher();
     tokio::time::sleep(Duration::from_millis(300)).await;

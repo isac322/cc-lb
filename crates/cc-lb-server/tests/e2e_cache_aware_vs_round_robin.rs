@@ -41,7 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use cc_lb_core::clock::{ClockHandle, TestClock};
+use cc_lb_core::clock::{ClockHandle, TestClock, unix_secs};
 use cc_lb_core::parse_request_cache_breakpoints;
 use cc_lb_plugin_api::types::{CacheBreakpoint, CacheScore, TtlClass, WarmCacheEntry};
 use cc_lb_plugin_api::{
@@ -193,7 +193,7 @@ async fn run_phase(
 
     let mut hits = 0_usize;
     for _ in 0..REQUEST_COUNT {
-        let now = clock.now_unix_secs();
+        let now = unix_secs(clock.now());
         let candidates: Vec<UpstreamCandidate> = upstreams
             .iter()
             .map(|upstream| {

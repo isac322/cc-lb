@@ -91,6 +91,7 @@ fn test_state(
         admin_token: Some(TEST_TOKEN.to_owned()),
         start_time: std::time::Instant::now(),
         event_bus: None,
+        clock: Arc::new(cc_lb_core::SystemClock),
     }
 }
 
@@ -100,7 +101,10 @@ async fn seed_attempts(
     upstream_spec_revision: u64,
     dialect_plugin: &UpstreamWarmupDialectPlugin,
 ) -> Vec<WarmupAttemptRecord> {
-    let now = chrono::Utc::now().timestamp();
+    let now = i64::try_from(cc_lb_core::clock::unix_secs(cc_lb_core::Clock::now(
+        &cc_lb_core::SystemClock,
+    )))
+    .unwrap_or(i64::MAX);
     let plugin_snapshot = serde_json::to_value(dialect_plugin).expect("plugin serializes");
     let attempts = (0..30)
         .map(|index| {

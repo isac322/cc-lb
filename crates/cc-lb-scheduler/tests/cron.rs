@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use apalis_cron::Schedule;
+use cc_lb_core::clock::{Clock, SystemClock};
 use cc_lb_scheduler::cron::{LeaderRunFuture, LeaderRunner, WorkerBuilder};
 use chrono::{DateTime, Duration, Utc};
 
@@ -72,7 +73,7 @@ fn conformance_job() -> CronConformanceJob {
 }
 
 fn next_tick() -> DateTime<Utc> {
-    Utc::now() + Duration::milliseconds(50)
+    DateTime::<Utc>::from(SystemClock.now()) + Duration::milliseconds(50)
 }
 
 #[cfg(feature = "sqlite")]

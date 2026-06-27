@@ -140,7 +140,7 @@ async fn proxy_fallbacks_return_anthropic_json_errors() -> TestResult<()> {
 
 async fn sqlite_storage(path: &std::path::Path) -> TestResult<Arc<SqliteStorage>> {
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url).await?;
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock)).await?;
     storage.initialize(BackendKind::Sqlite).await?;
     Ok(Arc::new(storage))
 }

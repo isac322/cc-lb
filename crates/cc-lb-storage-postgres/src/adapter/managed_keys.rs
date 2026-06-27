@@ -1,7 +1,7 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use cc_lb_core::{Clock, ClockHandle, unix_secs};
 use cc_lb_storage_api::{
     ManagedKeyStore, StorageError, StorageResult,
     types::{
@@ -22,11 +22,16 @@ use crate::{
 pub struct PostgresManagedKeyStore {
     pool: PgPool,
     retry_policy: Arc<retry::RetryPolicy>,
+    clock: ClockHandle,
 }
 
 impl PostgresManagedKeyStore {
-    pub fn new(pool: PgPool, retry_policy: Arc<retry::RetryPolicy>) -> Self {
-        Self { pool, retry_policy }
+    pub fn new(pool: PgPool, retry_policy: Arc<retry::RetryPolicy>, clock: ClockHandle) -> Self {
+        Self {
+            pool,
+            retry_policy,
+            clock,
+        }
     }
 }
 
@@ -47,7 +52,7 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
 
         let record = StoredApiKeyRecord {
             label: params.label,
-            issued_at_unix_secs: now_unix_secs(),
+            issued_at_unix_secs: now_unix_secs(&*self.clock),
             revoked_at_unix_secs: None,
             key_hash_b64: base64_url_no_pad(&params.verify_hash),
             verify_hash: params.verify_hash,
@@ -191,9 +196,11 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
         validate_identifier("principal_id", principal_id)?;
         validate_identifier("key_id", key_id)?;
 
+        let clock = Arc::clone(&self.clock);
         retry::with_retry(&self.retry_policy, || {
             let pool = self.pool.clone();
             let mutation = mutation.clone();
+            let clock = Arc::clone(&clock);
             async move {
                 let mut tx = pool.begin().await?;
                 let Some(row) = sqlx::query(SELECT_BY_KEY_FOR_UPDATE_SQL)
@@ -207,7 +214,7 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
                 };
                 let mut record = row_to_record_sqlx(row)?;
 
-                apply_mutation(&mut record, mutation);
+                apply_mutation(&mut record, mutation, &*clock);
                 update_record(principal_id, key_id, &record, &mut tx).await?;
                 tx.commit().await?;
                 Ok(())
@@ -221,8 +228,10 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
         validate_identifier("principal_id", principal_id)?;
         validate_identifier("key_id", key_id)?;
 
+        let clock = Arc::clone(&self.clock);
         retry::with_retry(&self.retry_policy, || {
             let pool = self.pool.clone();
+            let clock = Arc::clone(&clock);
             async move {
                 let mut tx = pool.begin().await?;
                 let Some(row) = sqlx::query(SELECT_BY_KEY_FOR_UPDATE_SQL)
@@ -238,7 +247,7 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
                 let captured_index_hash = record.index_hash;
                 record.status = KeyStatus::Revoked;
                 if record.revoked_at_unix_secs.is_none() {
-                    record.revoked_at_unix_secs = Some(now_unix_secs());
+                    record.revoked_at_unix_secs = Some(now_unix_secs(&*clock));
                 }
                 record.index_hash = [0; 32];
                 record.verify_hash = [0; 32];
@@ -406,7 +415,7 @@ fn row_to_record_inner(row: PgRow) -> Result<StoredApiKeyRecord, sqlx::Error> {
     })
 }
 
-fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation) {
+fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation, clock: &dyn Clock) {
     if let Some(label) = mutation.label {
         record.label = label;
     }
@@ -421,7 +430,7 @@ fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation) {
     }
     if let Some(status) = mutation.status {
         if status == KeyStatus::Revoked && record.revoked_at_unix_secs.is_none() {
-            record.revoked_at_unix_secs = Some(now_unix_secs());
+            record.revoked_at_unix_secs = Some(now_unix_secs(clock));
         }
         record.status = status;
     }
@@ -528,11 +537,8 @@ fn base64_url_no_pad(value: &[u8]) -> String {
     out
 }
 
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default()
+fn now_unix_secs(clock: &dyn Clock) -> u64 {
+    unix_secs(clock.now())
 }
 
 #[cfg(test)]
@@ -712,7 +718,11 @@ mod tests {
         }
 
         fn store(&self) -> PostgresManagedKeyStore {
-            PostgresManagedKeyStore::new(self.pool.clone(), Arc::new(retry::RetryPolicy::default()))
+            PostgresManagedKeyStore::new(
+                self.pool.clone(),
+                Arc::new(retry::RetryPolicy::default()),
+                Arc::new(cc_lb_core::SystemClock),
+            )
         }
 
         async fn drop_schema(self) -> TestResult<()> {

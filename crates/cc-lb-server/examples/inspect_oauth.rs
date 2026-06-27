@@ -137,7 +137,14 @@ async fn main() {
 
     let aead = Arc::new(AeadService::try_from_key(&key_bytes).expect("valid key"));
 
-    let storage = match storage_factory::open_storage(&config, aead.clone(), key_bytes).await {
+    let storage = match storage_factory::open_storage(
+        &config,
+        aead.clone(),
+        key_bytes,
+        Arc::new(cc_lb_core::SystemClock),
+    )
+    .await
+    {
         Ok(s) => s,
         Err(err) => {
             eprintln!("Error: Failed to open storage: {}", err);

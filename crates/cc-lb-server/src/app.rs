@@ -23,13 +23,15 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DownstreamAuthMode, TlsConfig};
 use cc_lb_core::{
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
-    CircuitBreakerDispatch, DynamicView, DynamicViewBuilder, DynamicViewHolder, HopByHopStripLayer,
-    Lifecycle, LifecycleConfig, SubscriptionQuotaSink, SubscriptionQuotaWriterConfig,
-    UpstreamDispatch, UpstreamRateLimitSink, anthropic_error_response,
+    CircuitBreakerDispatch, ClockHandle, DynamicView, DynamicViewBuilder, DynamicViewHolder,
+    HopByHopStripLayer, Lifecycle, LifecycleConfig, SubscriptionQuotaSink,
+    SubscriptionQuotaWriterConfig, SystemClock, UpstreamDispatch, UpstreamRateLimitSink,
+    anthropic_error_response,
     api_keys::{
         builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
         limit_engine::LimitEngine, principal_view::PrincipalView,
     },
+    clock::unix_secs,
     make_default_dispatcher, spawn_audit_writer, start_subscription_quota_writer,
     start_upstream_rate_limit_writer,
 };
@@ -362,7 +364,9 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
     let key = [0u8; 32];
     let aead = Arc::new(AeadService::from_master_key(key));
     let database_url = format!("sqlite://{}", path.display());
-    let storage_arc = Arc::new(cc_lb_storage_sqlite::open_sqlite(&database_url).await?);
+    let clock: ClockHandle = Arc::new(SystemClock);
+    let storage_arc =
+        Arc::new(cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone()).await?);
     storage_arc.initialize(BackendKind::Sqlite).await?;
     let managed_store: Arc<dyn ManagedKeyStore> = storage_arc.clone();
     let storage: Arc<dyn Storage> = storage_arc.clone();
@@ -376,9 +380,12 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
     std::mem::forget(dir);
     let plugin_registry_repo = storage_arc.clone() as Arc<dyn PluginRegistryRepo>;
     let plugin_blob_repo = storage_arc.clone() as Arc<dyn PluginBlobRepo>;
-    let opened_scheduler =
-        crate::scheduler_factory::open_scheduler_storage(&config.storage, &config.scheduler)
-            .await?;
+    let opened_scheduler = crate::scheduler_factory::open_scheduler_storage(
+        &config.storage,
+        &config.scheduler,
+        clock,
+    )
+    .await?;
     build_app_with_storage_inner(
         config,
         None,
@@ -449,15 +456,17 @@ pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, B
             message: e.to_string(),
         })?;
 
-    let init_storage: Arc<dyn StorageTrait> =
-        Arc::new(cc_lb_storage_postgres::PostgresStorage::new(pool.clone()));
+    let clock: ClockHandle = Arc::new(SystemClock);
+    let init_storage: Arc<dyn StorageTrait> = Arc::new(
+        cc_lb_storage_postgres::PostgresStorage::new(pool.clone(), clock.clone()),
+    );
     init_storage
         .initialize(BackendKind::Postgres)
         .await
         .map_err(|e| BuildError::StorageConnect {
             message: e.to_string(),
         })?;
-    seed_app_testing_storage(init_storage.as_ref(), None).await?;
+    seed_app_testing_storage(init_storage.as_ref(), None, &*clock).await?;
 
     sqlx::query("TRUNCATE managed_api_key_index_v1, managed_api_keys_v1")
         .execute(&pool)
@@ -470,6 +479,7 @@ pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, B
         Arc::new(cc_lb_storage_postgres::PostgresManagedKeyStore::new(
             pool,
             Arc::new(cc_lb_storage_postgres::adapter::retry::RetryPolicy::default()),
+            clock.clone(),
         ));
     let key = [0u8; 32];
     let aead = Arc::new(AeadService::from_master_key(key));
@@ -481,12 +491,13 @@ pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, B
 pub async fn seed_app_testing_storage(
     storage: &dyn Storage,
     upstream_base_url: Option<url::Url>,
+    clock: &dyn cc_lb_core::Clock,
 ) -> Result<(), BuildError> {
     use cc_lb_storage_api::principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind};
     use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
     use cc_lb_storage_api::{PrincipalStore, StorageError, UpstreamStore};
 
-    let now = unix_now_secs();
+    let now = unix_secs(clock.now());
     // NOTE [Priority-3 footgun]: postgres-conformance's managed_key_multi_instance
     // spawns two cc-lb instances against the same database; both call this seed
     // helper, race on get_by_name, and one then loses the create with a Conflict
@@ -571,6 +582,7 @@ async fn build_app_with_path_inner(
     startup_handshake_opts: StartupHandshakeOpts,
 ) -> Result<App, BuildError> {
     config.validate()?;
+    let clock: ClockHandle = Arc::new(SystemClock);
     let (
         managed_store,
         storage,
@@ -579,7 +591,7 @@ async fn build_app_with_path_inner(
         plugin_blob_repo,
         lazy_refresh_claim_guard,
         opened_scheduler,
-    ) = open_storage(&config).await?;
+    ) = open_storage(&config, clock).await?;
     build_app_with_storage_inner(
         config,
         config_path,
@@ -630,9 +642,13 @@ pub async fn build_app_with_storage(
     storage: Arc<dyn Storage>,
     aead: Arc<AeadService>,
 ) -> Result<App, BuildError> {
-    let opened_scheduler =
-        crate::scheduler_factory::open_scheduler_storage(&config.storage, &config.scheduler)
-            .await?;
+    let clock: ClockHandle = Arc::new(SystemClock);
+    let opened_scheduler = crate::scheduler_factory::open_scheduler_storage(
+        &config.storage,
+        &config.scheduler,
+        clock,
+    )
+    .await?;
     build_app_with_storage_inner(
         config,
         config_path,
@@ -661,13 +677,19 @@ async fn build_app_with_storage_inner(
     opened_scheduler: crate::scheduler_factory::OpenedScheduler,
     lazy_refresh_claim_guard: Option<Arc<dyn LazyRefreshClaimGuard>>,
 ) -> Result<App, BuildError> {
+    let clock: ClockHandle = Arc::new(SystemClock);
     opened_scheduler.probe_leader().await?;
     let scheduler_lazy_handle = opened_scheduler.lazy_handle();
     let server_state = Arc::new(ServerStateHandle::new_starting());
     let key_store = Arc::new(KeyStore::new(managed_store));
     let price_catalog = cc_lb_pricing::global_catalog().clone();
     let (price_catalog_install_cancel, price_catalog_install_task) =
-        spawn_price_catalog_local_installer(&config, storage.clone(), price_catalog.clone());
+        spawn_price_catalog_local_installer(
+            &config,
+            storage.clone(),
+            price_catalog.clone(),
+            clock.clone(),
+        );
     let (sink, audit_writer_task) = spawn_audit_writer(storage.clone(), 1024);
     let audit_sink = Some(Arc::new(sink));
     let (upstream_rate_limit_sink, upstream_rate_limit_receiver) = UpstreamRateLimitSink::new();
@@ -689,11 +711,12 @@ async fn build_app_with_storage_inner(
         },
         subscription_quota_writer_cancel.clone(),
     );
-    let subscription_metadata_hook = Some(cc_lb_core::start_subscription_metadata_hook(Arc::new(
-        ServerMetadataRefreshEnqueue {
+    let subscription_metadata_hook = Some(cc_lb_core::start_subscription_metadata_hook(
+        Arc::new(ServerMetadataRefreshEnqueue {
             scheduler_backend: scheduler_lazy_handle.clone(),
-        },
-    )));
+        }),
+        clock.clone(),
+    ));
     let runtime = Arc::new(ExtismRuntime::new());
     let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
     let storage_for_dynamic = storage.clone();
@@ -705,17 +728,19 @@ async fn build_app_with_storage_inner(
         storage.as_ref(),
         env_token,
         &data_dir,
+        &*clock,
     )
     .await?;
     ensure_wasm_cache_dirs(&data_dir)?;
 
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
-    let limit_engine = LimitEngine::new(concurrent_mgr);
+    let limit_engine = LimitEngine::new(concurrent_mgr, clock.clone());
     limit_engine.startup_replay(storage.clone()).await;
     let builtin_authn = Arc::new(BuiltinAuthn::new(
         config.downstream_auth.mode.clone(),
         config.downstream_auth.none_mode.clone(),
         Some(key_store.clone()),
+        clock.clone(),
     ));
 
     let (_dispatcher, _breaker_registry) = dispatcher(&config);
@@ -723,10 +748,7 @@ async fn build_app_with_storage_inner(
     let replica_identity = {
         match replica::load_or_create_replica_id(&data_dir) {
             Ok(id) => {
-                let started_at_unix_secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
+                let started_at_unix_secs = unix_secs(clock.now());
                 Some(cc_lb_core::ReplicaIdentity {
                     id,
                     started_at_unix_secs,
@@ -784,6 +806,7 @@ async fn build_app_with_storage_inner(
         plugin_registry_repo.clone(),
         plugin_blob_repo.clone(),
         cc_lb_runtime_extism::handshake::build_offer(&BTreeSet::new()),
+        clock.clone(),
     )
     .map_err(|error| BuildError::StartupHandshake(error.to_string()))?;
     let startup_report = run_startup_handshake_with_slot_store(
@@ -792,6 +815,7 @@ async fn build_app_with_storage_inner(
         storage.clone(),
         startup_handshake_opts,
         startup_shutdown,
+        &*clock,
     )
     .await;
     startup_shutdown_task.abort();
@@ -826,6 +850,7 @@ async fn build_app_with_storage_inner(
                     stores: stores.clone(),
                     aead: aead.clone(),
                     oauth_cfg: oauth_cfg.clone(),
+                    clock: clock.clone(),
                 },
                 identity.id,
                 subscription_metadata_hook.clone(),
@@ -833,15 +858,18 @@ async fn build_app_with_storage_inner(
                 claim_guard,
                 scheduler_lazy_handle.clone(),
             )),
-            None => Arc::new(LazyRefresher::new(
-                stores.clone(),
-                aead.clone(),
-                oauth_cfg.clone(),
-                identity.id,
-                subscription_metadata_hook.clone(),
-                refresh_cancel.clone(),
-                scheduler_lazy_handle.clone(),
-            )),
+            None => Arc::new(LazyRefresher::new(crate::refresh::LazyRefresherParams {
+                deps: crate::refresh::LazyRefresherDeps {
+                    stores: stores.clone(),
+                    aead: aead.clone(),
+                    oauth_cfg: oauth_cfg.clone(),
+                    clock: clock.clone(),
+                },
+                replica_id: identity.id,
+                metadata_hook: subscription_metadata_hook.clone(),
+                cancel: refresh_cancel.clone(),
+                apalis_handle: scheduler_lazy_handle.clone(),
+            })),
         });
     let lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>> =
         lazy_refresher_concrete.as_ref().map(|refresher| {
@@ -858,6 +886,7 @@ async fn build_app_with_storage_inner(
         subscription_quota_cache.clone(),
         config.subscription_quota.routing_max_staleness_secs,
         &config,
+        clock.clone(),
     )
     .await?;
     let dynamic_view_holder = Arc::new(DynamicViewHolder::new(initial_view));
@@ -887,6 +916,7 @@ async fn build_app_with_storage_inner(
             .subscription_quota
             .routing_max_staleness_secs,
         config: Arc::new(config.clone()),
+        clock: clock.clone(),
     }));
     let notify_listener_task = Some(tokio::spawn(async move {
         notify_listener.run().await;
@@ -896,6 +926,7 @@ async fn build_app_with_storage_inner(
         builtin_authn.clone(),
         dynamic_view_holder.clone(),
         lifecycle_config,
+        clock.clone(),
     );
     if let Some(audit_sink) = audit_sink.clone() {
         lifecycle = lifecycle.with_audit_sink(audit_sink);
@@ -931,6 +962,7 @@ async fn build_app_with_storage_inner(
             .subscription_quota
             .routing_max_staleness_secs,
         config: Arc::new(config.clone()),
+        clock: clock.clone(),
     });
     let config_watcher = config_path.map(|path| {
         let watcher = Arc::new(ConfigWatcher::new_with_principal_view(
@@ -938,6 +970,7 @@ async fn build_app_with_storage_inner(
             config.clone(),
             Arc::clone(&runtime),
             Some(dynamic_view.clone()),
+            clock.clone(),
         ));
         watcher.set_dynamic_view_rebinder(admin_rebinder.clone());
         watcher
@@ -975,6 +1008,7 @@ async fn build_app_with_storage_inner(
             replica_id: scheduler_replica_id,
             price_catalog: price_catalog.clone(),
             dynamic_view: dynamic_view_holder.clone(),
+            clock: clock.clone(),
         },
     );
     let scheduler_tasks = opened_scheduler
@@ -998,6 +1032,7 @@ async fn build_app_with_storage_inner(
             .subscription_quota
             .routing_max_staleness_secs,
         config: Arc::new(config.clone()),
+        clock: clock.clone(),
     });
     spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
     let state = ProxyState {
@@ -1011,6 +1046,7 @@ async fn build_app_with_storage_inner(
         dynamic_view: dynamic_view.clone(),
         key_store: Some(key_store.clone()),
         builtin_authn: Some(builtin_authn.clone()),
+        clock: clock.clone(),
     };
 
     let admin_config: Arc<dyn CurrentConfig> = match &config_watcher {
@@ -1036,6 +1072,7 @@ async fn build_app_with_storage_inner(
                 stores: stores.clone(),
                 aead: aead.clone(),
                 lazy_refresher,
+                clock: clock.clone(),
             }) as Arc<dyn WarmupDialectDispatcher>
         }),
         audit_sink: audit_sink.clone(),
@@ -1052,6 +1089,7 @@ async fn build_app_with_storage_inner(
             .or_else(|| std::env::var(&config.admin.token_env).ok()),
         start_time,
         event_bus: Some(event_bus.clone()),
+        clock: clock.clone(),
     };
     let reload_task = config_watcher.clone().map(spawn_reload_watcher);
 
@@ -1084,6 +1122,7 @@ struct ServerWarmupDialectDispatcher {
     stores: Arc<DynamicStores>,
     aead: Arc<AeadService>,
     lazy_refresher: Arc<LazyRefresher>,
+    clock: ClockHandle,
 }
 
 struct ServerMetadataRefreshEnqueue {
@@ -1126,13 +1165,16 @@ impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
     ) -> Result<WarmupDialectDispatchOutcome, WarmupDialectDispatchError> {
         let http = warmup_dialect_http_client();
         let outcome = crate::warmup::dialect::dispatch_warmup_with_dialect(
-            runtime,
-            self.stores.as_ref(),
-            data_dir,
-            self.aead.clone(),
-            self.lazy_refresher.clone(),
-            upstream,
-            &http,
+            crate::warmup::dialect::WarmupDialectDispatchParams {
+                runtime,
+                stores: self.stores.as_ref(),
+                data_dir,
+                aead: self.aead.clone(),
+                lazy_refresher: self.lazy_refresher.clone(),
+                upstream,
+                http: &http,
+                clock: self.clock.clone(),
+            },
         )
         .await
         .map_err(map_warmup_dialect_error)?;
@@ -1188,6 +1230,7 @@ struct ServerDynamicViewRebinder {
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
     subscription_quota_routing_max_staleness_secs: u64,
     config: Arc<cc_lb_config::Config>,
+    clock: ClockHandle,
 }
 
 #[async_trait]
@@ -1207,6 +1250,7 @@ impl DynamicViewRebinder for ServerDynamicViewRebinder {
             self.subscription_quota_cache.clone(),
             self.subscription_quota_routing_max_staleness_secs,
             &self.config,
+            self.clock.clone(),
         )
         .await?)
     }
@@ -1496,6 +1540,7 @@ struct ReconcilerParams {
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
     subscription_quota_routing_max_staleness_secs: u64,
     config: Arc<cc_lb_config::Config>,
+    clock: ClockHandle,
 }
 
 fn spawn_reconciler(params: ReconcilerParams) {
@@ -1511,6 +1556,7 @@ fn spawn_reconciler(params: ReconcilerParams) {
         params.subscription_quota_cache,
         params.subscription_quota_routing_max_staleness_secs,
         params.config,
+        params.clock,
     ));
     tokio::spawn(reconciler.run());
 }
@@ -1524,14 +1570,6 @@ fn spawn_reconcile_shutdown(shutdown: watch::Receiver<bool>, cancel: Cancellatio
 
 fn cap_to_usize(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
-}
-
-#[cfg(feature = "postgres")]
-fn unix_now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 fn build_tls_state(config: &Config) -> Result<Option<Arc<TlsState>>, BuildError> {
@@ -1671,14 +1709,16 @@ struct ProxyState {
     #[allow(dead_code)]
     key_store: Option<Arc<KeyStore>>,
     builtin_authn: Option<Arc<BuiltinAuthn>>,
+    clock: ClockHandle,
 }
 
 fn spawn_price_catalog_local_installer(
     config: &Config,
     storage: Arc<dyn Storage>,
     price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
+    clock: ClockHandle,
 ) -> (CancellationToken, JoinHandle<()>) {
-    install_default_fallback_if_uninitialized(&price_catalog);
+    install_default_fallback_if_uninitialized(&price_catalog, &*clock);
 
     let cfg = &config.api_keys.price_catalog;
     let storage_cache: Arc<dyn cc_lb_storage_api::PriceCatalogCache> = storage;
@@ -1688,6 +1728,7 @@ fn spawn_price_catalog_local_installer(
         cfg.url.clone(),
         cfg.refresh_interval,
         cfg.cache_path.clone(),
+        clock.clone(),
     );
     tracing::info!(
         local_install_interval_secs = PRICE_CATALOG_LOCAL_INSTALL_INTERVAL.as_secs(),
@@ -1719,16 +1760,18 @@ async fn run_price_catalog_local_install(loader: &cc_lb_pricing::LiteLlmLoader) 
     }
 }
 
-fn install_default_fallback_if_uninitialized(price_catalog: &cc_lb_pricing::PriceCatalog) {
+fn install_default_fallback_if_uninitialized(
+    price_catalog: &cc_lb_pricing::PriceCatalog,
+    clock: &dyn cc_lb_core::Clock,
+) {
     if !matches!(price_catalog.status(), cc_lb_pricing::CatalogStatus::Ok) {
-        price_catalog.install_snapshot(claude_default_snapshot());
+        price_catalog.install_snapshot(claude_default_snapshot(clock));
     }
 }
 
-fn claude_default_snapshot() -> cc_lb_pricing::CatalogSnapshot {
+fn claude_default_snapshot(clock: &dyn cc_lb_core::Clock) -> cc_lb_pricing::CatalogSnapshot {
     use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion};
     use std::collections::HashMap;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     // Per-million USD in micros (1 USD = 1_000_000 micros).
     // Sources: anthropic.com/pricing (Nov 2026 snapshot).
@@ -1793,10 +1836,9 @@ fn claude_default_snapshot() -> cc_lb_pricing::CatalogSnapshot {
     }
 
     CatalogSnapshot {
-        fetched_at_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
+        fetched_at_ms: cc_lb_core::clock::unix_millis(clock.now())
+            .try_into()
+            .unwrap_or(u64::MAX),
         models,
         raw_json: Vec::new(),
         cache_creation_per_million_usd: cache_creation,
@@ -2068,6 +2110,7 @@ async fn oauth_usage_handler(
     match cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
         state.storage.as_ref(),
         &state.dynamic_view,
+        &*state.clock,
     )
     .await
     {
@@ -2176,17 +2219,24 @@ type OpenStorageParts = (
     crate::scheduler_factory::OpenedScheduler,
 );
 
-pub async fn open_storage(config: &Config) -> Result<OpenStorageParts, BuildError> {
+pub async fn open_storage(
+    config: &Config,
+    clock: ClockHandle,
+) -> Result<OpenStorageParts, BuildError> {
     let key_hex =
         std::env::var(&config.aead.key_env).map_err(|_| BuildError::StorageKeyMissing {
             env: config.aead.key_env.clone(),
         })?;
     let key = decode_hex_key(&key_hex)?;
     let aead = Arc::new(AeadService::from_master_key(key));
-    let opened = storage_factory::open_storage(&config.storage, aead.clone(), key).await?;
-    let opened_scheduler =
-        crate::scheduler_factory::open_scheduler_storage(&config.storage, &config.scheduler)
-            .await?;
+    let opened =
+        storage_factory::open_storage(&config.storage, aead.clone(), key, clock.clone()).await?;
+    let opened_scheduler = crate::scheduler_factory::open_scheduler_storage(
+        &config.storage,
+        &config.scheduler,
+        clock,
+    )
+    .await?;
     let lazy_refresh_claim_guard =
         crate::refresh::lazy_refresh_claim_guard_from_scheduler(&opened_scheduler.backend);
     Ok((
@@ -2322,7 +2372,7 @@ mod tests {
             cc_lb_pricing::CatalogStatus::CostDisabled
         ));
 
-        install_default_fallback_if_uninitialized(&catalog);
+        install_default_fallback_if_uninitialized(&catalog, &cc_lb_core::SystemClock);
 
         assert!(matches!(catalog.status(), cc_lb_pricing::CatalogStatus::Ok));
         assert!(catalog.lookup("claude-opus-4-5", None).is_some());
@@ -2351,7 +2401,7 @@ mod tests {
             status: cc_lb_pricing::CatalogStatus::Ok,
         });
 
-        install_default_fallback_if_uninitialized(&catalog);
+        install_default_fallback_if_uninitialized(&catalog, &cc_lb_core::SystemClock);
 
         assert!(catalog.lookup("operator-model-a", None).is_some());
         assert!(catalog.lookup("claude-opus-4-5", None).is_none());

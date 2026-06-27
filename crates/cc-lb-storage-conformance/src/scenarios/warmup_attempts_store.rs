@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
+use cc_lb_core::ClockHandle;
 use cc_lb_storage_api::{
     UpstreamStore, UpstreamWarmupAttemptStore, WarmupAttemptListFilters, WarmupAttemptOutcome,
     WarmupAttemptReason, WarmupAttemptSummary,
@@ -15,7 +16,7 @@ use crate::{
 
 const SEVEN_DAYS_SECS: i64 = 7 * 86_400;
 
-pub async fn run_all<B>(backend: Arc<B>) -> Result<()>
+pub async fn run_all<B>(backend: Arc<B>, clock: ClockHandle) -> Result<()>
 where
     B: ConformanceBackend,
     B::Storage: UpstreamStore + UpstreamWarmupAttemptStore,
@@ -23,7 +24,7 @@ where
     insert_and_read_back(Arc::clone(&backend)).await?;
     cursor_pagination(Arc::clone(&backend)).await?;
     outcome_filter(Arc::clone(&backend)).await?;
-    summary_7d(Arc::clone(&backend)).await?;
+    summary_7d(Arc::clone(&backend), Arc::clone(&clock)).await?;
     fk_cascade_on_upstream_delete(Arc::clone(&backend)).await?;
     latest_for_upstream_when_empty(backend).await?;
     Ok(())
@@ -140,52 +141,59 @@ scenario!(outcome_filter, |storage| async move {
     Ok(())
 });
 
-scenario!(summary_7d, |storage| async move {
-    let upstream = create_upstream(storage.as_ref(), "warmup-summary-7d").await?;
-    let now = chrono::Utc::now().timestamp();
-    let mut records = outcomes(
-        upstream.id,
-        &[
-            WarmupAttemptOutcome::SuccessFresh,
-            WarmupAttemptOutcome::SuccessFresh,
-            WarmupAttemptOutcome::SuccessRedundant,
-            WarmupAttemptOutcome::TransientFailure,
-            WarmupAttemptOutcome::PermanentFailure,
-            WarmupAttemptOutcome::Skipped,
-        ],
-        now - 360,
-    );
-    records.extend([
-        attempt(
+pub async fn summary_7d<B>(backend: Arc<B>, clock: ClockHandle) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: UpstreamStore + UpstreamWarmupAttemptStore,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let upstream = create_upstream(storage.as_ref(), "warmup-summary-7d").await?;
+        let now = chrono::DateTime::<chrono::Utc>::from(clock.now()).timestamp();
+        let mut records = outcomes(
             upstream.id,
-            20,
-            now - SEVEN_DAYS_SECS - 60,
-            WarmupAttemptOutcome::SuccessFresh,
-        ),
-        attempt(
-            upstream.id,
-            21,
-            now - SEVEN_DAYS_SECS - 120,
-            WarmupAttemptOutcome::Skipped,
-        ),
-    ]);
-    insert_all(storage.as_ref(), &records).await?;
+            &[
+                WarmupAttemptOutcome::SuccessFresh,
+                WarmupAttemptOutcome::SuccessFresh,
+                WarmupAttemptOutcome::SuccessRedundant,
+                WarmupAttemptOutcome::TransientFailure,
+                WarmupAttemptOutcome::PermanentFailure,
+                WarmupAttemptOutcome::Skipped,
+            ],
+            now - 360,
+        );
+        records.extend([
+            attempt(
+                upstream.id,
+                20,
+                now - SEVEN_DAYS_SECS - 60,
+                WarmupAttemptOutcome::SuccessFresh,
+            ),
+            attempt(
+                upstream.id,
+                21,
+                now - SEVEN_DAYS_SECS - 120,
+                WarmupAttemptOutcome::Skipped,
+            ),
+        ]);
+        insert_all(storage.as_ref(), &records).await?;
 
-    ensure!(
-        storage
-            .summarize_recent_warmup_attempts(upstream.id, SEVEN_DAYS_SECS)
-            .await?
-            == WarmupAttemptSummary {
-                success_fresh: 2,
-                success_redundant: 1,
-                transient_failure: 1,
-                permanent_failure: 1,
-                skipped: 1,
-            },
-        "summary should count only attempts inside the 7 day window"
-    );
-    Ok(())
-});
+        ensure!(
+            storage
+                .summarize_recent_warmup_attempts(upstream.id, SEVEN_DAYS_SECS)
+                .await?
+                == WarmupAttemptSummary {
+                    success_fresh: 2,
+                    success_redundant: 1,
+                    transient_failure: 1,
+                    permanent_failure: 1,
+                    skipped: 1,
+                },
+            "summary should count only attempts inside the 7 day window"
+        );
+        Ok(())
+    })
+    .await
+}
 
 scenario!(fk_cascade_on_upstream_delete, |storage| async move {
     let upstream = create_upstream(storage.as_ref(), "warmup-fk-cascade").await?;

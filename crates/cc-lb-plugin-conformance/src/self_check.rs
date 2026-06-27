@@ -1,3 +1,4 @@
+use cc_lb_clock::Clock;
 use cc_lb_plugin_api::types::PluginSlot;
 use cc_lb_plugin_wire::self_check::{
     SelfCheckStage as WireSelfCheckStage, SelfCheckStatus as WireSelfCheckStatus,
@@ -5,9 +6,13 @@ use cc_lb_plugin_wire::self_check::{
 use cc_lb_runtime_protocol::self_check::{SelfCheckExecutionError, execute_self_check};
 use thiserror::Error;
 
-pub fn run(wasm: &[u8], supported_slots: &[PluginSlot]) -> Result<SelfCheckReport, SelfCheckError> {
-    let response =
-        execute_self_check(wasm, supported_slots).map_err(SelfCheckError::from_protocol)?;
+pub fn run(
+    wasm: &[u8],
+    supported_slots: &[PluginSlot],
+    clock: &dyn Clock,
+) -> Result<SelfCheckReport, SelfCheckError> {
+    let response = execute_self_check(wasm, supported_slots, clock)
+        .map_err(SelfCheckError::from_protocol)?;
 
     Ok(SelfCheckReport {
         status: response.status.into(),

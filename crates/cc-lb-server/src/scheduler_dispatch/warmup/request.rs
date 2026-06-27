@@ -43,7 +43,7 @@ impl SchedulerDispatch {
         if bundle
             .expires_at_unix_secs
             .saturating_sub(TOKEN_REFRESH_LOOKAHEAD_SECS)
-            > now_unix_secs()
+            > now_unix_secs(&*self.clock)
         {
             return Ok(());
         }
@@ -88,13 +88,16 @@ impl SchedulerDispatch {
             && let Some(lazy_refresher) = self.lazy_refresher.as_ref()
         {
             let outcome = match crate::warmup::dialect::dispatch_warmup_with_dialect(
-                self.runtime.as_ref(),
-                self.stores.as_ref(),
-                self.data_dir.as_ref(),
-                self.aead.clone(),
-                lazy_refresher.clone(),
-                upstream,
-                &self.http,
+                crate::warmup::dialect::WarmupDialectDispatchParams {
+                    runtime: self.runtime.as_ref(),
+                    stores: self.stores.as_ref(),
+                    data_dir: self.data_dir.as_ref(),
+                    aead: self.aead.clone(),
+                    lazy_refresher: lazy_refresher.clone(),
+                    upstream,
+                    http: &self.http,
+                    clock: self.clock.clone(),
+                },
             )
             .await
             {
@@ -170,7 +173,7 @@ impl SchedulerDispatch {
         upstream_id: uuid::Uuid,
         observations: Vec<UnifiedQuotaObservation>,
     ) -> SchedulerResult<()> {
-        let observed_at_unix_millis = now_unix_millis();
+        let observed_at_unix_millis = now_unix_millis(&*self.clock);
         for observation in observations {
             let record =
                 unified_observation_to_record(upstream_id, observation, observed_at_unix_millis);

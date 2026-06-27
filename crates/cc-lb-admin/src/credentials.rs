@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -8,6 +6,7 @@ use axum::{
     routing::{get, post},
 };
 use cc_lb_aead::AeadService;
+use cc_lb_core::Clock;
 use cc_lb_storage_api::{OAuthCredentials, PrincipalRecord, PrincipalStore, Storage};
 use serde::Serialize;
 use serde_json::json;
@@ -81,7 +80,7 @@ pub async fn list_credentials(State(state): State<AdminState>) -> Response {
             return internal_error("storage_error");
         }
     };
-    let now = now_unix_secs();
+    let now = now_unix_secs(&*state.clock);
     let mut credentials = Vec::new();
     for principal in &principals {
         let principal_id = principal.id.to_string();
@@ -110,7 +109,7 @@ pub async fn list_oauth_status(State(state): State<AdminState>) -> Response {
             return internal_error("storage_error");
         }
     };
-    let now = now_unix_secs();
+    let now = now_unix_secs(&*state.clock);
     let mut credentials = Vec::new();
     for principal in &principals {
         let principal_id = principal.id.to_string();
@@ -319,9 +318,6 @@ fn internal_error(error: &str) -> Response {
         .into_response()
 }
 
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+fn now_unix_secs(clock: &dyn Clock) -> u64 {
+    cc_lb_core::clock::unix_secs(clock.now())
 }

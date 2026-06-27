@@ -45,6 +45,7 @@ impl SchedulerDispatch {
                     job,
                     &StorageHandle::new(self.storage.clone()),
                     self.config.api_keys.usage_retention_days,
+                    self.clock.clone(),
                 )
                 .await,
             ),
@@ -58,7 +59,7 @@ impl SchedulerDispatch {
                         StorageHandle::new(self.storage.clone()),
                         config,
                     )
-                    .handle(job, now_unix_secs())
+                    .handle(job, now_unix_secs(&*self.clock))
                     .await,
                 )
             }
@@ -66,7 +67,7 @@ impl SchedulerDispatch {
                 PromptCacheObservationPurgeJobHandler::new(StorageHandle::new(
                     self.storage.clone(),
                 ))
-                .handle(job, now_unix_secs())
+                .handle(job, now_unix_secs(&*self.clock))
                 .await,
             ),
             CronJob::PriceCatalogRefresh(job) => self.dispatch_price_catalog(job).await,
@@ -77,7 +78,7 @@ impl SchedulerDispatch {
                         ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
                     apalis_housekeeping_outcome(
                         ApalisHousekeepingJobHandler::new(sqlite.pool.clone(), config)
-                            .handle(job, now_unix_secs())
+                            .handle(job, now_unix_secs(&*self.clock))
                             .await,
                     )
                 }
@@ -87,7 +88,7 @@ impl SchedulerDispatch {
                         ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
                     apalis_housekeeping_outcome(
                         ApalisHousekeepingJobHandler::new(postgres.pool.clone(), config)
-                            .handle(job, now_unix_secs())
+                            .handle(job, now_unix_secs(&*self.clock))
                             .await,
                     )
                 }
@@ -123,6 +124,7 @@ impl SchedulerDispatch {
             ],
             SubscriptionQuotaSourceMerge::Merged,
             max_staleness_secs,
+            &*self.clock,
         )
         .await
         {
@@ -137,7 +139,8 @@ impl SchedulerDispatch {
             }
         };
 
-        if let Err(error) = record_pool_quota_snapshots_now(self.storage.as_ref(), &aggregate).await
+        if let Err(error) =
+            record_pool_quota_snapshots_now(self.storage.as_ref(), &aggregate, &*self.clock).await
         {
             tracing::warn!(
                 tick_unix_secs = job.tick_unix_secs,
@@ -156,7 +159,7 @@ impl SchedulerDispatch {
             WatchdogEntityKind::Warmup,
             &upstream_ids,
             job.tick_unix_secs,
-            now_unix_secs(),
+            now_unix_secs(&*self.clock),
         )
         .await?;
         tracing::info!(
@@ -177,7 +180,7 @@ impl SchedulerDispatch {
             WatchdogEntityKind::OAuthRefresh,
             &upstream_ids,
             job.tick_unix_secs,
-            now_unix_secs(),
+            now_unix_secs(&*self.clock),
         )
         .await?;
         tracing::info!(
@@ -278,6 +281,7 @@ impl SchedulerDispatch {
                     &AnthropicCompatEtagsStore::new(sqlite.pool.clone()),
                     self.storage.as_ref(),
                     &self.cancel,
+                    &*self.clock,
                 )
                 .await
             }
@@ -288,6 +292,7 @@ impl SchedulerDispatch {
                     &AnthropicCompatEtagsStore::new(postgres.pool.clone()),
                     self.storage.as_ref(),
                     &self.cancel,
+                    &*self.clock,
                 )
                 .await
             }
@@ -304,6 +309,7 @@ impl SchedulerDispatch {
             self.config.api_keys.price_catalog.url.clone(),
             self.config.api_keys.price_catalog.refresh_interval,
             self.config.api_keys.price_catalog.cache_path.clone(),
+            self.clock.clone(),
         );
         match &self.backend {
             #[cfg(feature = "sqlite")]
@@ -312,7 +318,7 @@ impl SchedulerDispatch {
                     PriceCatalogVersionsStore::new(sqlite.pool.clone()),
                     loader,
                 )
-                .handle(job, now_unix_secs())
+                .handle(job, now_unix_secs(&*self.clock))
                 .await,
             ),
             #[cfg(feature = "postgres")]
@@ -321,7 +327,7 @@ impl SchedulerDispatch {
                     PriceCatalogVersionsStore::new(postgres.pool.clone()),
                     loader,
                 )
-                .handle(job, now_unix_secs())
+                .handle(job, now_unix_secs(&*self.clock))
                 .await,
             ),
         }

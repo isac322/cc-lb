@@ -121,19 +121,43 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
         ],
     );
 
-    let limited = build_candidates(&view, "limited", RequestKind::AnthropicMessages, "", &[]);
+    let limited = build_candidates(
+        &view,
+        "limited",
+        RequestKind::AnthropicMessages,
+        "",
+        &[],
+        &cc_lb_core::SystemClock,
+    );
     assert_eq!(
         candidate_ids(&limited),
         vec![allowed_low, allowed_mid, allowed_high]
     );
 
-    let all = build_candidates(&view, "all", RequestKind::AnthropicMessages, "", &[]);
+    let all = build_candidates(
+        &view,
+        "all",
+        RequestKind::AnthropicMessages,
+        "",
+        &[],
+        &cc_lb_core::SystemClock,
+    );
     assert_eq!(
         candidate_ids(&all),
         vec![not_allowed, allowed_low, allowed_mid, allowed_high]
     );
 
-    assert!(build_candidates(&view, "missing", RequestKind::AnthropicMessages, "", &[]).is_empty());
+    assert!(
+        build_candidates(
+            &view,
+            "missing",
+            RequestKind::AnthropicMessages,
+            "",
+            &[],
+            &cc_lb_core::SystemClock
+        )
+        .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -180,7 +204,14 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
         ],
     );
 
-    let built = build_candidates(&view, "limited", RequestKind::AnthropicMessages, "", &[]);
+    let built = build_candidates(
+        &view,
+        "limited",
+        RequestKind::AnthropicMessages,
+        "",
+        &[],
+        &cc_lb_core::SystemClock,
+    );
     assert_eq!(candidate_ids(&built), vec![first, second, third]);
 
     let authn = Arc::new(BuiltinAuthn::new(
@@ -190,11 +221,13 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
             upstream_kind: NoneModeUpstreamKind::AnthropicKey,
         }),
         None,
+        Arc::new(cc_lb_core::SystemClock),
     ));
     let lifecycle = Lifecycle::new_with_dynamic_view(
         authn,
         Arc::new(DynamicViewHolder::new(view)),
         LifecycleConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
     );
 
     let response = lifecycle

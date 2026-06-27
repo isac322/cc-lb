@@ -59,13 +59,14 @@ pub async fn open_storage(
     config: &StorageConfig,
     _aead: Arc<AeadService>,
     _master_key: [u8; 32],
+    clock: cc_lb_core::ClockHandle,
 ) -> Result<OpenedStorage, StorageFactoryError> {
     match config {
         StorageConfig::Postgres {
             url,
             pool: pool_config,
-        } => open_postgres(url, pool_config).await,
-        StorageConfig::Sqlite { path } => open_sqlite(path).await,
+        } => open_postgres(url, pool_config, clock).await,
+        StorageConfig::Sqlite { path } => open_sqlite(path, clock).await,
     }
 }
 
@@ -88,16 +89,22 @@ fn map_init_error(
 }
 
 #[cfg(not(feature = "sqlite"))]
-async fn open_sqlite(_path: &Path) -> Result<OpenedStorage, StorageFactoryError> {
+async fn open_sqlite(
+    _path: &Path,
+    _clock: cc_lb_core::ClockHandle,
+) -> Result<OpenedStorage, StorageFactoryError> {
     Err(StorageFactoryError::FeatureDisabled {
         backend: "sqlite".to_owned(),
     })
 }
 
 #[cfg(feature = "sqlite")]
-async fn open_sqlite(path: &Path) -> Result<OpenedStorage, StorageFactoryError> {
+async fn open_sqlite(
+    path: &Path,
+    clock: cc_lb_core::ClockHandle,
+) -> Result<OpenedStorage, StorageFactoryError> {
     let database_url = format!("sqlite://{}", path.display());
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, clock)
         .await
         .map_err(|error| StorageFactoryError::ConnectionFailed {
             message: error.to_string(),
@@ -119,6 +126,7 @@ async fn open_sqlite(path: &Path) -> Result<OpenedStorage, StorageFactoryError> 
 async fn open_postgres(
     _url: &str,
     _pool: &cc_lb_config::PostgresPoolConfig,
+    _clock: cc_lb_core::ClockHandle,
 ) -> Result<OpenedStorage, StorageFactoryError> {
     Err(StorageFactoryError::FeatureDisabled {
         backend: "postgres".to_owned(),
@@ -136,6 +144,7 @@ async fn probe_postgres_connection_impl(_url: &str) -> Result<(), StorageFactory
 async fn open_postgres(
     url: &str,
     pool_config: &cc_lb_config::PostgresPoolConfig,
+    clock: cc_lb_core::ClockHandle,
 ) -> Result<OpenedStorage, StorageFactoryError> {
     use std::str::FromStr;
     use std::time::Duration;
@@ -181,7 +190,7 @@ async fn open_postgres(
     let plugin_blob_repo = Arc::new(cc_lb_storage_postgres::PostgresPluginBlobRepo::new(
         pool.clone(),
     )) as Arc<dyn PluginBlobRepo>;
-    let storage = cc_lb_storage_postgres::PostgresStorage::new(pool.clone());
+    let storage = cc_lb_storage_postgres::PostgresStorage::new(pool.clone(), clock.clone());
     let storage: Arc<dyn Storage> = Arc::new(storage);
     storage
         .initialize(BackendKind::Postgres)
@@ -190,6 +199,7 @@ async fn open_postgres(
     let managed_key_store = Arc::new(cc_lb_storage_postgres::PostgresManagedKeyStore::new(
         pool,
         Arc::new(cc_lb_storage_postgres::adapter::retry::RetryPolicy::default()),
+        clock,
     ));
     Ok(OpenedStorage {
         storage,

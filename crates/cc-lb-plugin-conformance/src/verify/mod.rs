@@ -36,7 +36,8 @@ pub(crate) fn begin_report(
 ) -> Result<VerifyReport, VerifyError> {
     let identity = identity::read(wasm)?;
     let supported_slots = slot_set_from_negotiated(&handshake.chosen_versions);
-    self_check::run(wasm, &supported_slots)?;
+    let clock = cc_lb_clock::SystemClock;
+    self_check::run(wasm, &supported_slots, &clock)?;
 
     Ok(VerifyReport {
         identity: LayerResult {

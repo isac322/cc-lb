@@ -23,14 +23,16 @@ async fn sighup_reloads_body_defaults() {
         &config_path,
         reload_common::load_config(&config_path),
         Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
+        Arc::new(cc_lb_core::SystemClock),
     ));
     let app = cc_lb_admin::router(AdminState {
         storage: None,
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(Arc::new(
-            cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new(),
-        )),
+        limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
+            Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_core::SystemClock),
+        ),
         lifecycle: None,
         audit_sink: None,
         dynamic_view: reload_common::dynamic_view_holder(
@@ -46,6 +48,7 @@ async fn sighup_reloads_body_defaults() {
         subscription_metadata_hook: None,
         event_bus: None,
         start_time: std::time::Instant::now(),
+        clock: Arc::new(cc_lb_core::SystemClock),
     });
     let before_admin = admin_config(app.clone()).await;
     assert_eq!(before_admin["body"]["messages_cap_bytes"], json!(100));

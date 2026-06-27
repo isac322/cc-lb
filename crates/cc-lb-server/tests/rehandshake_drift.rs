@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{UNIX_EPOCH};
 
 use anyhow::Result;
 use cc_lb_plugin_wire::augmented_metadata::AugmentedMetadata;
@@ -29,6 +29,7 @@ async fn startup_rehandshake_updates_supported_slots_and_warns_on_drift() -> Res
         storage.clone() as Arc<dyn PluginRegistryRepo>,
         storage.clone() as Arc<dyn PluginBlobRepo>,
         build_offer(&BTreeSet::new()),
+        Arc::new(cc_lb_core::SystemClock),
     )?;
 
     let wasm = plugin_wasm("drift-plugin", "1.0.0", &["filter", "shape"]);
@@ -84,6 +85,7 @@ async fn startup_rehandshake_updates_supported_slots_and_warns_on_drift() -> Res
             ..StartupHandshakeOpts::default()
         },
         shutdown,
+        &cc_lb_core::SystemClock,
     )
     .await;
 
@@ -120,7 +122,7 @@ async fn sqlite_storage() -> Result<Arc<SqliteStorage>> {
         "sqlite://{}",
         dir.path().join("rehandshake.sqlite").display()
     );
-    let storage = open_sqlite(&database_url).await?;
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock)).await?;
     storage.initialize(BackendKind::Sqlite).await?;
     std::mem::forget(dir);
     Ok(Arc::new(storage))
@@ -279,7 +281,7 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 
 fn unix_now() -> Result<i64> {
     Ok(i64::try_from(
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+        cc_lb_core::Clock::now(&cc_lb_core::SystemClock).duration_since(UNIX_EPOCH)?.as_secs(),
     )?)
 }
 

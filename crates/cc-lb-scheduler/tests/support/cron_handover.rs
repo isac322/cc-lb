@@ -1,5 +1,6 @@
 use std::{collections::HashSet, future::Future, sync::Arc, time::Duration};
 
+use cc_lb_core::clock::{Clock, SystemClock};
 use cc_lb_scheduler::{
     cron::WorkerBuilder as CronWorkerBuilder, leader_election::LeaderElection,
     worker::ADAPTIVE_QUEUE,
@@ -48,7 +49,8 @@ impl FastSchedule {
 impl apalis_cron::Schedule<Utc> for FastSchedule {
     fn next_tick(&mut self, _: &Utc) -> Option<DateTime<Utc>> {
         let interval = ChronoDuration::from_std(TICK_INTERVAL).ok()?;
-        let next = self.next.unwrap_or_else(|| Utc::now() + interval);
+        let now = DateTime::<Utc>::from(SystemClock.now());
+        let next = self.next.unwrap_or(now + interval);
         self.next = Some(next + interval);
         Some(next)
     }

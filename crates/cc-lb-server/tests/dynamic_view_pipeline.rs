@@ -22,7 +22,9 @@ async fn storage_fixture(seed: u8) -> (tempfile::TempDir, Arc<Storage>) {
         .path()
         .join(format!("dynamic-view-pipeline-{seed}.sqlite"));
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url).await.expect("storage");
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+        .await
+        .expect("storage");
     cc_lb_storage_api::MetaStore::initialize(&storage, BackendKind::Sqlite)
         .await
         .expect("initialize");
@@ -95,6 +97,7 @@ async fn build_view(
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await
     .expect("dynamic view builds")

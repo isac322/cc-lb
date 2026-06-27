@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use cc_lb_storage_api::types::{
     KeyStatus as StoredKeyStatus, PrincipalLimitIdentityKind, PrincipalLimitKind,
@@ -14,6 +14,7 @@ use serde::Serialize;
 use crate::api_keys::concurrent_guard::{KeyConcurrencyGuard, KeyConcurrencyManager};
 use crate::api_keys::principal_view::{PrincipalStatus, PrincipalView};
 use crate::api_keys::types::{Limit, LimitKind};
+use crate::clock::{Clock, ClockHandle, unix_secs};
 
 impl Hash for LimitKind {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -72,6 +73,7 @@ struct LimitEngineInner {
     rolling: RwLock<HashMap<RollingKey, RingCounter>>,
     effective_limits: RwLock<HashMap<(String, String), Vec<Limit>>>,
     concurrent_mgr: Arc<KeyConcurrencyManager>,
+    clock: ClockHandle,
 }
 
 pub struct Reservation {
@@ -153,12 +155,13 @@ impl RingCounter {
 }
 
 impl LimitEngine {
-    pub fn new(concurrent_mgr: Arc<KeyConcurrencyManager>) -> Arc<Self> {
+    pub fn new(concurrent_mgr: Arc<KeyConcurrencyManager>, clock: ClockHandle) -> Arc<Self> {
         Arc::new(Self {
             inner: Arc::new(LimitEngineInner {
                 rolling: RwLock::new(HashMap::new()),
                 effective_limits: RwLock::new(HashMap::new()),
                 concurrent_mgr,
+                clock,
             }),
         })
     }
@@ -174,7 +177,7 @@ impl LimitEngine {
         max_input_estimate: i64,
         cost_estimate_micros: Option<i64>,
     ) -> Result<Reservation, RejectReason> {
-        let now_sec = now_sec();
+        let now_sec = now_sec(&*self.inner.clock);
         let key_id = key_id_for(record);
 
         match view.principal_status(principal_id) {
@@ -330,7 +333,7 @@ impl LimitEngine {
                 actual_input,
                 actual_output,
                 actual_cost_micros,
-                now_sec(),
+                now_sec(&*self.inner.clock),
             );
         }
         reservation.refund_done = true;
@@ -347,7 +350,7 @@ impl LimitEngine {
             return Vec::new();
         };
 
-        let now_sec = now_sec();
+        let now_sec = now_sec(&*self.inner.clock);
         let mut headers = Vec::new();
         let mut emitted_requests = false;
         let mut emitted_tokens = false;
@@ -388,7 +391,7 @@ impl LimitEngine {
         principal_id: &str,
         identity_filter: IdentityFilter,
     ) -> PrincipalLimitsSnapshot {
-        let now_sec = now_sec();
+        let now_sec = now_sec(&*self.inner.clock);
         let defaults = view.default_limits(principal_id).to_vec();
         let effective_limits = self.inner.effective_limits.read().clone();
         let mut identities = Vec::new();
@@ -509,7 +512,7 @@ impl LimitEngine {
             .copied()
             .max()
             .unwrap_or(0);
-        let now = now_sec();
+        let now = now_sec(&*self.inner.clock);
         let events = storage
             .query_request_events(
                 now.saturating_sub(max_window),
@@ -664,7 +667,7 @@ impl Drop for Reservation {
                     amount.kind,
                     amount.window_sec,
                     -amount.amount,
-                    now_sec(),
+                    now_sec(&*engine.clock),
                 );
             }
         }
@@ -893,12 +896,8 @@ fn key_id_for(record: &StoredApiKeyRecord) -> String {
     record.key_hash_b64.clone()
 }
 
-fn now_sec() -> u64 {
-    // unix_epoch is a precondition; sub-epoch system clocks fall back to 0
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs()
+fn now_sec(clock: &dyn Clock) -> u64 {
+    unix_secs(clock.now())
 }
 
 fn unix_to_iso8601(timestamp: u64) -> String {
@@ -937,8 +936,11 @@ mod tests {
 
     #[test]
     fn record_principal_limit_state_feeds_limit_engine_snapshot() {
-        let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()));
-        let observed_at_unix_secs = now_sec();
+        let engine = LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(crate::clock::SystemClock),
+        );
+        let observed_at_unix_secs = now_sec(&*engine.inner.clock);
 
         engine.record_principal_limit_state(&PrincipalLimitState {
             principal_id: "principal-a".to_owned(),
@@ -976,8 +978,11 @@ mod tests {
 
     #[test]
     fn replay_event_restores_all_rolling_counters() {
-        let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()));
-        let observed_at_unix_secs = now_sec();
+        let engine = LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(crate::clock::SystemClock),
+        );
+        let observed_at_unix_secs = now_sec(&*engine.inner.clock);
         let event = RequestEvent {
             key_id: Some("key-a".to_owned()),
             ts: observed_at_unix_secs,

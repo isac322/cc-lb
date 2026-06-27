@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use cc_lb_core::Clock;
 use cc_lb_storage_api::{
     StorageError, StorageResult, UpstreamWarmupAttemptStore, WarmupAttemptListFilters,
     WarmupAttemptOutcome, WarmupAttemptRecord, WarmupAttemptSummary,
@@ -98,7 +99,7 @@ impl UpstreamWarmupAttemptStore for SqliteStorage {
         upstream_id: Uuid,
         window_secs: i64,
     ) -> StorageResult<WarmupAttemptSummary> {
-        let cutoff_unix_secs = recent_cutoff_unix_secs(window_secs)?;
+        let cutoff_unix_secs = recent_cutoff_unix_secs(window_secs, self.clock())?;
         let rows = sqlx::query(
             "SELECT outcome, COUNT(*) AS attempt_count \
              FROM warmup_attempts_v1 \
@@ -256,8 +257,8 @@ fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
     })
 }
 
-fn recent_cutoff_unix_secs(window_secs: i64) -> StorageResult<i64> {
-    chrono::Utc::now()
+fn recent_cutoff_unix_secs(window_secs: i64, clock: &dyn Clock) -> StorageResult<i64> {
+    chrono::DateTime::<chrono::Utc>::from(clock.now())
         .timestamp()
         .checked_sub(window_secs)
         .ok_or_else(|| StorageError::InvalidInput {

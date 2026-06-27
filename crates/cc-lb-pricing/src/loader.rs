@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+
+use cc_lb_clock::{Clock, ClockHandle};
 
 use bytes::Bytes;
 use http::Request;
@@ -28,6 +30,7 @@ pub struct LiteLlmLoader {
     cache_path: PathBuf,
     http: HttpClient,
     last_failure_kind: Arc<Mutex<Option<String>>>,
+    clock: ClockHandle,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,6 +81,7 @@ impl LiteLlmLoader {
         url: String,
         _refresh_interval: Duration,
         cache_path: PathBuf,
+        clock: ClockHandle,
     ) -> Self {
         let http = build_http_client();
 
@@ -88,6 +92,7 @@ impl LiteLlmLoader {
             cache_path,
             http,
             last_failure_kind: Arc::new(Mutex::new(None)),
+            clock,
         }
     }
 
@@ -138,14 +143,19 @@ impl LiteLlmLoader {
         let fetched = self.fetch_and_fingerprint().await?;
         let fetched_at_ms = fetched.fetched_at_ms;
         self.persist_snapshot(&fetched).await?;
-        let _installed = install_cached_bytes(&self.catalog, fetched.bytes, Some(fetched_at_ms))?;
+        let _installed = install_cached_bytes(
+            &self.catalog,
+            fetched.bytes,
+            Some(fetched_at_ms),
+            &*self.clock,
+        )?;
         self.record_success();
         Ok(fetched_at_ms)
     }
 
     pub async fn fetch_and_fingerprint(&self) -> Result<FetchedCatalog, LoaderError> {
         let bytes = self.fetch_bytes().await?;
-        let snapshot = parse_litellm_json(&bytes)?;
+        let snapshot = parse_litellm_json(&bytes, &*self.clock)?;
         Ok(FetchedCatalog {
             fetched_at_ms: snapshot.fetched_at_ms,
             fingerprint: catalog_fingerprint(&bytes),
@@ -191,6 +201,7 @@ impl LiteLlmLoader {
                     &self.catalog,
                     snapshot.json_bytes,
                     Some(snapshot.fetched_at_ms),
+                    &*self.clock,
                 );
             }
             Ok(None) => None,
@@ -198,7 +209,7 @@ impl LiteLlmLoader {
         };
 
         if let Some(bytes) = read_disk_cache(self.cache_path.clone()).await? {
-            return install_cached_bytes(&self.catalog, bytes, None);
+            return install_cached_bytes(&self.catalog, bytes, None, &*self.clock);
         }
 
         match storage_error {
@@ -221,7 +232,7 @@ impl LiteLlmLoader {
     }
 }
 
-fn parse_litellm_json(bytes: &[u8]) -> Result<CatalogSnapshot, LoaderError> {
+fn parse_litellm_json(bytes: &[u8], clock: &dyn Clock) -> Result<CatalogSnapshot, LoaderError> {
     let root: HashMap<String, Value> =
         serde_json::from_slice(bytes).map_err(|error| LoaderError::Json(error.to_string()))?;
     let mut models = HashMap::new();
@@ -296,7 +307,7 @@ fn parse_litellm_json(bytes: &[u8]) -> Result<CatalogSnapshot, LoaderError> {
     }
 
     Ok(CatalogSnapshot {
-        fetched_at_ms: now_ms(),
+        fetched_at_ms: now_ms(clock),
         models,
         raw_json: bytes.to_vec(),
         cache_creation_per_million_usd,
@@ -386,12 +397,13 @@ fn install_cached_bytes(
     catalog: &Arc<PriceCatalog>,
     bytes: Vec<u8>,
     fetched_at_ms: Option<u64>,
+    clock: &dyn Clock,
 ) -> Result<bool, LoaderError> {
     let current = catalog.current();
     if matches!(current.status, CatalogStatus::Ok) && current.raw_json == bytes {
         return Ok(false);
     }
-    let mut snapshot = parse_litellm_json(&bytes)?;
+    let mut snapshot = parse_litellm_json(&bytes, clock)?;
     if let Some(fetched_at_ms) = fetched_at_ms {
         snapshot.fetched_at_ms = fetched_at_ms;
     }
@@ -405,11 +417,10 @@ fn tmp_cache_path(cache_path: &Path) -> PathBuf {
     PathBuf::from(tmp)
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
-        .unwrap_or(0)
+fn now_ms(clock: &dyn Clock) -> u64 {
+    cc_lb_clock::unix_millis(clock.now())
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn catalog_fingerprint(bytes: &[u8]) -> String {

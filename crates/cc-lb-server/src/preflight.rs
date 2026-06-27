@@ -121,7 +121,8 @@ async fn run_inner(
             StorageConfig::Sqlite { path } => validate_sqlite_path(path)?,
         }
         let aead = Arc::new(AeadService::from_master_key(key));
-        let _storage = storage_factory::open_storage(&cfg.storage, aead, key)
+        let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+        let _storage = storage_factory::open_storage(&cfg.storage, aead, key, clock)
             .await
             .map_err(|error| PreflightError::Storage(error.to_string()))?;
     }

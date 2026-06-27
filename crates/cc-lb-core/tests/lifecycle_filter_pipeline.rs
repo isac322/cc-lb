@@ -180,6 +180,7 @@ fn lifecycle_with_pipeline(
         authn.authn.clone(),
         Arc::new(DynamicViewHolder::new(view)),
         LifecycleConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
 }
 

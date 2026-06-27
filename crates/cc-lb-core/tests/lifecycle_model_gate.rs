@@ -27,7 +27,10 @@ fn engine_with_allowed_models(
         HashMap::new(),
     ));
     (
-        LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
+        LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_core::SystemClock),
+        ),
         view,
     )
 }

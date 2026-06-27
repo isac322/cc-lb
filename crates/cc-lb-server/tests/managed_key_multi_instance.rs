@@ -246,7 +246,7 @@ fn test_config(database_url: &str) -> Config {
 }
 
 async fn seed_test_principal(storage: &dyn StorageTrait) -> TestResult<()> {
-    let now = std::time::SystemTime::now()
+    let now = cc_lb_core::Clock::now(&cc_lb_core::SystemClock)
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
@@ -299,6 +299,7 @@ async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
             pool: PostgresPoolConfig::default(),
         },
         &SchedulerConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await?;
     drop(opened);

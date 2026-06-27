@@ -10,7 +10,7 @@ use http::Response;
 use metrics::Unit;
 use thiserror::Error;
 
-use crate::clock::{Clock, SystemClock};
+use crate::clock::{Clock, SystemClock, unix_secs};
 use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
 
 const HALF_OPEN_INITIALIZING: u32 = u32::MAX;
@@ -123,7 +123,7 @@ impl CircuitBreaker {
     }
 
     fn permit_open(self: &Arc<Self>) -> Result<Permit, BreakerError> {
-        let now = self.clock.now_unix_secs();
+        let now = unix_secs(self.clock.now());
         let opened_at = self.last_open_ts.load(Ordering::SeqCst);
         let elapsed = Duration::from_secs(now.saturating_sub(opened_at));
         if elapsed <= self.config.half_open_after {
@@ -278,7 +278,7 @@ impl Permit {
     }
 
     pub fn record_failure(mut self) {
-        let now = self.breaker.clock.now_unix_secs();
+        let now = unix_secs(self.breaker.clock.now());
         let failure_count = self.breaker.increment_failures(now);
         if self.half_open {
             self.breaker.open_from(BreakerState::HalfOpen, now);

@@ -151,6 +151,7 @@ async fn end_to_end_register_then_bridge_round_trip() {
         blob_dyn,
         build_offer(&BTreeSet::new()),
         Arc::new(StubLifecycle),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .expect("registry builds");
 

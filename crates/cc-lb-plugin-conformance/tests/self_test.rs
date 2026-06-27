@@ -35,7 +35,12 @@ fn handshake_negotiates_shape_at_v1() {
 #[test]
 fn self_check_passes_for_shape_fixture() {
     let report =
-        self_check::run(SHAPE_WASM, &[cc_lb_plugin_api::types::PluginSlot::Shape]).unwrap();
+        self_check::run(
+            SHAPE_WASM,
+            &[cc_lb_plugin_api::types::PluginSlot::Shape],
+            &cc_lb_clock::SystemClock,
+        )
+        .unwrap();
 
     assert_eq!(report.status, self_check::SelfCheckStatus::Success);
     assert!(report.failures.is_empty());

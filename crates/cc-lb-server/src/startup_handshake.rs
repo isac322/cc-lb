@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
+use cc_lb_core::clock::Clock;
 use cc_lb_plugin_wire::limits::{
     SKIP_HANDSHAKE_IF_FRESH_TTL_SECS, STARTUP_HANDSHAKE_PARALLEL_MAX,
     STARTUP_HANDSHAKE_TOTAL_BUDGET_MS,
@@ -80,8 +81,9 @@ pub async fn run_startup_handshake(
     repo: &dyn PluginRegistryRepo,
     opts: StartupHandshakeOpts,
     shutdown: ShutdownSignal,
+    clock: &dyn Clock,
 ) -> StartupHandshakeReport {
-    run_startup_handshake_inner(registry, repo, None, opts, shutdown).await
+    run_startup_handshake_inner(registry, repo, None, opts, shutdown, clock).await
 }
 
 pub async fn run_startup_handshake_with_slot_store(
@@ -90,8 +92,9 @@ pub async fn run_startup_handshake_with_slot_store(
     slot_store: Arc<dyn Storage>,
     opts: StartupHandshakeOpts,
     shutdown: ShutdownSignal,
+    clock: &dyn Clock,
 ) -> StartupHandshakeReport {
-    run_startup_handshake_inner(registry, repo, Some(slot_store), opts, shutdown).await
+    run_startup_handshake_inner(registry, repo, Some(slot_store), opts, shutdown, clock).await
 }
 
 #[allow(clippy::manual_clamp)]
@@ -101,9 +104,10 @@ async fn run_startup_handshake_inner(
     slot_store: Option<Arc<dyn Storage>>,
     opts: StartupHandshakeOpts,
     mut shutdown: ShutdownSignal,
+    clock: &dyn Clock,
 ) -> StartupHandshakeReport {
     let mut report = StartupHandshakeReport::default();
-    let now = match unix_now() {
+    let now = match unix_now(clock) {
         Ok(now) => now,
         Err(error) => {
             report.errors.push(([0; 32], error));
@@ -126,7 +130,7 @@ async fn run_startup_handshake_inner(
     };
 
     if shutdown_requested(&shutdown) {
-        write_shutdown_marker(repo, &mut report).await;
+        write_shutdown_marker(repo, &mut report, clock).await;
         return report;
     }
 
@@ -164,7 +168,7 @@ async fn run_startup_handshake_inner(
     loop {
         tokio::select! {
             _ = wait_for_shutdown_signal(&mut shutdown) => {
-                write_shutdown_marker(repo, &mut report).await;
+                write_shutdown_marker(repo, &mut report, clock).await;
                 abort_remaining(repo, &mut join_set, &mut pending, &mut report, false).await;
                 return report;
             }
@@ -335,8 +339,12 @@ async fn abort_remaining(
     }
 }
 
-async fn write_shutdown_marker(repo: &dyn PluginRegistryRepo, report: &mut StartupHandshakeReport) {
-    let now = match unix_now() {
+async fn write_shutdown_marker(
+    repo: &dyn PluginRegistryRepo,
+    report: &mut StartupHandshakeReport,
+    clock: &dyn Clock,
+) {
+    let now = match unix_now(clock) {
         Ok(now) => now,
         Err(error) => {
             report.errors.push(([0; 32], error));
@@ -372,8 +380,9 @@ async fn wait_for_shutdown_signal(shutdown: &mut ShutdownSignal) {
     }
 }
 
-fn unix_now() -> Result<i64, StartupHandshakeError> {
-    let seconds = SystemTime::now()
+fn unix_now(clock: &dyn Clock) -> Result<i64, StartupHandshakeError> {
+    let seconds = clock
+        .now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| StartupHandshakeError::Clock(error.to_string()))?
         .as_secs();
@@ -506,6 +515,7 @@ pub mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
+    use cc_lb_core::clock::TestClock;
     use cc_lb_plugin_wire::handshake::{
         HANDSHAKE_SCHEMA_VERSION_V1, HandshakeAccept, HandshakeOffer,
     };
@@ -521,8 +531,13 @@ pub mod tests {
 
     use super::*;
 
+    fn test_clock() -> TestClock {
+        TestClock::new_at_secs(1_800_000_000)
+    }
+
     #[tokio::test]
     async fn skip_handshake_if_fresh_invalidates_on_offer_change() {
+        let clock = test_clock();
         let repos = Repos::default();
         let old_registry = registry(repos.registry.clone(), repos.blobs.clone(), BTreeSet::new());
         let wasm = plugin_wasm("test-plugin", "1.0.0");
@@ -532,7 +547,7 @@ pub mod tests {
             .await
             .expect("register succeeds");
         record.host_offer_hash = old_registry.host_offer_hash();
-        record.last_handshake_at = unix_now().expect("clock") - 1;
+        record.last_handshake_at = unix_now(&clock).expect("clock") - 1;
         repos.registry.upsert_record(&record).await.expect("seed");
 
         let same_offer_registry =
@@ -544,6 +559,7 @@ pub mod tests {
             repos.registry.as_ref(),
             StartupHandshakeOpts::default(),
             shutdown,
+            &clock,
         )
         .await;
         assert_eq!(fresh_report.processed, 1);
@@ -563,6 +579,7 @@ pub mod tests {
             repos.registry.as_ref(),
             StartupHandshakeOpts::default(),
             shutdown,
+            &clock,
         )
         .await;
 
@@ -575,6 +592,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn mid_startup_shutdown_leaves_recovery_marker() {
+        let clock = test_clock();
         let repos = Repos::default();
         repos.blobs.set_delay(Duration::from_secs(60)).await;
         let registry = registry(repos.registry.clone(), repos.blobs.clone(), BTreeSet::new());
@@ -601,6 +619,7 @@ pub mod tests {
                         force: false,
                     },
                     shutdown,
+                    &clock,
                 )
                 .await
             }
@@ -623,6 +642,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn startup_parallel_max_8() {
+        let clock = test_clock();
         let repos = Repos::default();
         repos.blobs.set_delay(Duration::from_millis(50)).await;
         let registry = registry(repos.registry.clone(), repos.blobs.clone(), BTreeSet::new());
@@ -639,6 +659,7 @@ pub mod tests {
                 force: false,
             },
             shutdown,
+            &clock,
         )
         .await;
 
@@ -648,6 +669,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn startup_budget_exceeded_disables_remaining() {
+        let clock = test_clock();
         let repos = Repos::default();
         repos.blobs.set_delay(Duration::from_secs(60)).await;
         let registry = registry(repos.registry.clone(), repos.blobs.clone(), BTreeSet::new());
@@ -664,6 +686,7 @@ pub mod tests {
                 force: false,
             },
             shutdown,
+            &clock,
         )
         .await;
 
@@ -673,6 +696,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn force_overrides_skip() {
+        let clock = test_clock();
         let repos = Repos::default();
         let registry = registry(repos.registry.clone(), repos.blobs.clone(), BTreeSet::new());
         let wasm = plugin_wasm("test-plugin", "1.0.0");
@@ -692,6 +716,7 @@ pub mod tests {
                 ..StartupHandshakeOpts::default()
             },
             shutdown,
+            &clock,
         )
         .await;
 
@@ -721,6 +746,7 @@ pub mod tests {
             blob_repo,
             build_offer(&caps),
             Arc::new(FastRegistryLifecycle),
+            Arc::new(cc_lb_core::SystemClock),
         )
         .expect("registry builds")
     }

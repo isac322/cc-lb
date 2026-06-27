@@ -110,8 +110,5 @@ fn request_event(
 }
 
 fn current_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+    cc_lb_core::clock::unix_secs(cc_lb_core::Clock::now(&cc_lb_core::SystemClock))
 }

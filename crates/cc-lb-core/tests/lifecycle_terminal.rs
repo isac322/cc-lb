@@ -59,7 +59,10 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
     )
     .with_request_event_storage(Arc::clone(&storage) as Arc<dyn StorageTrait>)
     .with_static_limit_subject(
-        LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
+        LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_core::SystemClock),
+        ),
         "principal-test".to_owned(),
         "key-test".to_owned(),
         active_record(),
@@ -97,7 +100,11 @@ async fn sqlite_storage(
     file_name: &str,
 ) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
     let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url).await?;
+    let storage = cc_lb_storage_sqlite::open_sqlite(
+        &database_url,
+        Arc::new(cc_lb_core::SystemClock),
+    )
+    .await?;
     storage.initialize(BackendKind::Sqlite).await?;
     Ok(storage)
 }
@@ -190,6 +197,7 @@ fn lifecycle_with_terminal(
         authn.authn.clone(),
         Arc::new(DynamicViewHolder::new(view)),
         LifecycleConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
 }
 

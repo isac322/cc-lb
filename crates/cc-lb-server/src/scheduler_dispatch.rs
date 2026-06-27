@@ -13,6 +13,7 @@ use std::sync::Arc;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_core::DynamicViewHolder;
+use cc_lb_core::clock::ClockHandle;
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::metadata_refresh::{
@@ -46,6 +47,7 @@ pub(crate) struct SchedulerDispatchDeps {
     pub replica_id: Option<Uuid>,
     pub price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
     pub dynamic_view: Arc<DynamicViewHolder>,
+    pub clock: ClockHandle,
 }
 
 #[derive(Clone)]
@@ -66,6 +68,7 @@ pub(super) struct SchedulerDispatch {
     pub(super) price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
     pub(super) http: JsonHttpClient,
     pub(super) dynamic_view: Arc<DynamicViewHolder>,
+    pub(super) clock: ClockHandle,
 }
 
 pub(crate) fn build_scheduler_ctx(deps: SchedulerDispatchDeps) -> SchedulerCtx {
@@ -74,6 +77,7 @@ pub(crate) fn build_scheduler_ctx(deps: SchedulerDispatchDeps) -> SchedulerCtx {
         dispatch.config.scheduler.clone(),
         dispatch.clone().adaptive_dispatch(),
         dispatch.clone().cron_dispatch(),
+        dispatch.clock.clone(),
     )
 }
 
@@ -96,6 +100,7 @@ impl SchedulerDispatch {
             price_catalog: deps.price_catalog,
             http: json_http_client(),
             dynamic_view: deps.dynamic_view,
+            clock: deps.clock,
         }
     }
 
@@ -122,6 +127,7 @@ impl SchedulerDispatch {
                     self.storage.clone(),
                     self.aead.clone(),
                     self.cancel.clone(),
+                    self.clock.clone(),
                 );
                 metadata_outcome(MetadataRefreshJobHandler::new(runner).handle(job).await?)
             }

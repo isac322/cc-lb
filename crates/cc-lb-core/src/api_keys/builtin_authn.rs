@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
 use cc_lb_storage_api::{
@@ -12,12 +11,14 @@ use crate::api_keys::{
     principal_view::{PrincipalStatus, PrincipalView},
     secret,
 };
+use crate::clock::{ClockHandle, unix_secs};
 
 #[derive(Clone)]
 pub struct BuiltinAuthn {
     mode: DownstreamAuthMode,
     none_mode: Option<NoneModeConfig>,
     key_store: Option<Arc<KeyStore>>,
+    clock: ClockHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -75,11 +76,13 @@ impl BuiltinAuthn {
         mode: DownstreamAuthMode,
         none_mode: Option<NoneModeConfig>,
         key_store: Option<Arc<KeyStore>>,
+        clock: ClockHandle,
     ) -> Self {
         Self {
             mode,
             none_mode,
             key_store,
+            clock,
         }
     }
 
@@ -113,10 +116,7 @@ impl BuiltinAuthn {
             KeyStatus::Revoked => return Err(BuiltinAuthError::KeyRevoked),
         }
         if let Some(expires_at_unix_secs) = record.expires_at_unix_secs {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let now = unix_secs(self.clock.now());
             if now > expires_at_unix_secs {
                 return Err(BuiltinAuthError::Expired);
             }
@@ -440,6 +440,7 @@ mod tests {
                 upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
             }),
             Some(Arc::new(KeyStore::new(store))),
+            Arc::new(crate::clock::SystemClock),
         );
 
         let success = authn
@@ -469,6 +470,7 @@ mod tests {
             DownstreamAuthMode::ApiKey,
             None,
             Some(Arc::new(KeyStore::new(store.clone()))),
+            Arc::new(crate::clock::SystemClock),
         );
         (authn, store)
     }

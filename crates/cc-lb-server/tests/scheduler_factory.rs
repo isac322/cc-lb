@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use cc_lb_config::{PostgresPoolConfig, SchedulerConfig, StorageConfig};
 use cc_lb_server::scheduler_factory::{
     SchedulerBackend, SchedulerFactoryError, open_scheduler_storage,
@@ -11,7 +13,11 @@ async fn scheduler_factory_sqlite_happy_path_sets_up_tables_and_partial_index() 
         path: directory.path().join("scheduler.sqlite"),
     };
 
-    let opened = open_scheduler_storage(&storage, &SchedulerConfig::default())
+    let opened = open_scheduler_storage(
+        &storage,
+        &SchedulerConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
+    )
         .await
         .expect("sqlite scheduler opens");
 
@@ -50,7 +56,11 @@ async fn scheduler_factory_sqlite_bad_path_returns_connection_failed() {
             .join("scheduler.sqlite"),
     };
 
-    let error = open_scheduler_storage(&storage, &SchedulerConfig::default())
+    let error = open_scheduler_storage(
+        &storage,
+        &SchedulerConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
+    )
         .await
         .expect_err("missing parent cannot open sqlite database");
 
@@ -92,7 +102,11 @@ async fn scheduler_factory_postgres_happy_path_sets_up_tables_index_and_leader()
         url: database_url,
         pool: PostgresPoolConfig::default(),
     };
-    let opened = open_scheduler_storage(&storage, &SchedulerConfig::default())
+    let opened = open_scheduler_storage(
+        &storage,
+        &SchedulerConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
+    )
         .await
         .expect("postgres scheduler opens");
     let SchedulerBackend::Postgres(postgres) = opened.backend else {
@@ -129,7 +143,11 @@ async fn scheduler_factory_postgres_feature_disabled_returns_error() {
         pool: PostgresPoolConfig::default(),
     };
 
-    let error = open_scheduler_storage(&storage, &SchedulerConfig::default())
+    let error = open_scheduler_storage(
+        &storage,
+        &SchedulerConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
+    )
         .await
         .expect_err("postgres feature is disabled");
 
@@ -146,7 +164,11 @@ async fn scheduler_factory_sqlite_feature_disabled_returns_error() {
         path: std::path::PathBuf::from("scheduler.sqlite"),
     };
 
-    let error = open_scheduler_storage(&storage, &SchedulerConfig::default())
+    let error = open_scheduler_storage(
+        &storage,
+        &SchedulerConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
+    )
         .await
         .expect_err("sqlite feature is disabled");
 
@@ -164,7 +186,11 @@ async fn scheduler_factory_postgres_bad_url_returns_connection_failed() {
         pool: PostgresPoolConfig::default(),
     };
 
-    let error = open_scheduler_storage(&storage, &SchedulerConfig::default())
+    let error = open_scheduler_storage(
+        &storage,
+        &SchedulerConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
+    )
         .await
         .expect_err("invalid postgres URL cannot open");
 

@@ -1,11 +1,10 @@
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 use cc_lb_core::usage_pruner::{PruneResult, UsagePruner};
+use cc_lb_core::{Clock, ClockHandle, TestClock, unix_millis, unix_secs};
 use cc_lb_storage_api::{
     AuditEntry, AuditStore, BackendKind, MetaStore, RequestEvent, RequestEventStore,
 };
 use cc_lb_storage_sqlite::SqliteStorage;
+use std::sync::Arc;
 
 const DAY_MS: u64 = 86_400_000;
 const DAY_SECS: u64 = 86_400;
@@ -13,10 +12,11 @@ const DAY_SECS: u64 = 86_400;
 #[tokio::test]
 async fn prune_old_request_events() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, storage) = new_storage().await?;
-    let old_ts_ms = now_unix_ms().saturating_sub(100 * DAY_MS);
+    let clock = test_clock();
+    let old_ts_ms = now_unix_ms(&*clock).saturating_sub(100 * DAY_MS);
     insert_request_events(storage.as_ref(), old_ts_ms).await?;
 
-    let pruner = UsagePruner::new(Arc::clone(&storage), 90);
+    let pruner = UsagePruner::new(Arc::clone(&storage), 90, Arc::clone(&clock));
     let result = pruner.prune_once().await;
 
     assert!(result.request_events_removed >= 5);
@@ -28,10 +28,11 @@ async fn prune_old_request_events() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::test]
 async fn retention_zero_is_no_op() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, storage) = new_storage().await?;
-    let old_ts_ms = now_unix_ms().saturating_sub(100 * DAY_MS);
+    let clock = test_clock();
+    let old_ts_ms = now_unix_ms(&*clock).saturating_sub(100 * DAY_MS);
     insert_request_events(storage.as_ref(), old_ts_ms).await?;
 
-    let pruner = UsagePruner::new(Arc::clone(&storage), 0);
+    let pruner = UsagePruner::new(Arc::clone(&storage), 0, Arc::clone(&clock));
     let result = pruner.prune_once().await;
 
     assert_eq!(result, PruneResult::default());
@@ -43,9 +44,10 @@ async fn retention_zero_is_no_op() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::test]
 async fn recent_rows_preserved() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, storage) = new_storage().await?;
-    insert_request_events(storage.as_ref(), now_unix_ms()).await?;
+    let clock = test_clock();
+    insert_request_events(storage.as_ref(), now_unix_ms(&*clock)).await?;
 
-    let pruner = UsagePruner::new(Arc::clone(&storage), 90);
+    let pruner = UsagePruner::new(Arc::clone(&storage), 90, Arc::clone(&clock));
     let result = pruner.prune_once().await;
 
     assert_eq!(result.request_events_removed, 0);
@@ -57,10 +59,11 @@ async fn recent_rows_preserved() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::test]
 async fn prune_old_audit_log() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, storage) = new_storage().await?;
-    let old_ts = now_unix_secs().saturating_sub(100 * DAY_SECS);
+    let clock = test_clock();
+    let old_ts = now_unix_secs(&*clock).saturating_sub(100 * DAY_SECS);
     insert_audit_entries(storage.as_ref(), old_ts).await?;
 
-    let pruner = UsagePruner::new(Arc::clone(&storage), 90);
+    let pruner = UsagePruner::new(Arc::clone(&storage), 90, Arc::clone(&clock));
     let result = pruner.prune_once().await;
 
     assert!(result.audit_log_removed >= 5);
@@ -76,7 +79,9 @@ async fn new_storage() -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dy
         "sqlite://{}",
         dir.path().join("usage-pruner.sqlite").display()
     );
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url).await?;
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+            .await?;
     storage.initialize(BackendKind::Sqlite).await?;
     Ok((dir, Arc::new(storage)))
 }
@@ -131,16 +136,14 @@ async fn insert_audit_entries(
     Ok(())
 }
 
-fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_millis() as u64
+fn test_clock() -> ClockHandle {
+    Arc::new(TestClock::new_at_secs(4_100_000_000))
 }
 
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs()
+fn now_unix_ms(clock: &dyn Clock) -> u64 {
+    unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
+}
+
+fn now_unix_secs(clock: &dyn Clock) -> u64 {
+    unix_secs(clock.now())
 }

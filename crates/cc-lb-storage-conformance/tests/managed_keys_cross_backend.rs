@@ -1,11 +1,8 @@
 #![cfg(all(feature = "sqlite", feature = "postgres"))]
 
-use std::{
-    str::FromStr,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{str::FromStr, sync::Arc};
 
+use cc_lb_core::{ClockHandle, SystemClock};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_conformance::scenarios::managed_keys::managed_keys_cross_backend_equivalence;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage, adapter::retry};
@@ -39,13 +36,15 @@ async fn run_cross_backend_equivalence(url: String) -> anyhow::Result<()> {
     let sqlite_dir = tempfile::tempdir()?;
     let sqlite_path = sqlite_dir.path().join("managed_keys_cross_backend.sqlite");
     let sqlite_url = format!("sqlite://{}", sqlite_path.display());
-    let sqlite_store = open_sqlite(&sqlite_url).await?;
+    let clock = system_clock();
+    let sqlite_store = open_sqlite(&sqlite_url, Arc::clone(&clock)).await?;
     sqlite_store.initialize(BackendKind::Sqlite).await?;
 
     let fixture = create_postgres_fixture(url).await?;
     let postgres_store = PostgresManagedKeyStore::new(
         fixture.pool.clone(),
         Arc::new(retry::RetryPolicy::default()),
+        clock,
     );
 
     let result = managed_keys_cross_backend_equivalence(&sqlite_store, &postgres_store).await;
@@ -72,7 +71,7 @@ async fn create_postgres_fixture(url: String) -> anyhow::Result<PostgresFixture>
         .max_connections(8)
         .connect_with(PgConnectOptions::from_str(&url)?.options([("search_path", schema.as_str())]))
         .await?;
-    PostgresStorage::new(pool.clone())
+    PostgresStorage::new(pool.clone(), system_clock())
         .initialize(BackendKind::Postgres)
         .await?;
 
@@ -96,11 +95,10 @@ async fn teardown_postgres_fixture(fixture: PostgresFixture) -> anyhow::Result<(
 }
 
 fn schema_name() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!("managed_keys_cross_backend_{nanos}_{}", std::process::id())
+    format!(
+        "managed_keys_cross_backend_{}",
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 fn quote_ident(identifier: &str) -> String {
@@ -113,4 +111,8 @@ fn quote_ident(identifier: &str) -> String {
         "unsafe postgres identifier: {identifier}"
     );
     format!("\"{identifier}\"")
+}
+
+fn system_clock() -> ClockHandle {
+    Arc::new(SystemClock)
 }

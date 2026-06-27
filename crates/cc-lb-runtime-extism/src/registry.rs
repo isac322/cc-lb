@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use cc_lb_core::clock::{ClockHandle, unix_secs};
 use cc_lb_plugin_wire::augmented_metadata::{AugmentedMetadata, AugmentedMetadataError};
 use cc_lb_plugin_wire::handshake::{CanonicalError, HandshakeAccept, HandshakeOffer};
 use cc_lb_plugin_wire::limits::SKIP_HANDSHAKE_IF_FRESH_TTL_SECS;
@@ -26,6 +26,7 @@ pub struct PluginRegistry {
     host_offer: HandshakeOffer,
     host_offer_hash: [u8; 32],
     lifecycle: Arc<dyn RegistryLifecycle>,
+    clock: ClockHandle,
 }
 
 #[doc(hidden)]
@@ -43,7 +44,9 @@ pub trait RegistryLifecycle: Send + Sync {
     ) -> Result<SelfCheckResponse, SelfCheckExecutionError>;
 }
 
-struct ExtismRegistryLifecycle;
+struct ExtismRegistryLifecycle {
+    clock: ClockHandle,
+}
 
 impl RegistryLifecycle for ExtismRegistryLifecycle {
     fn execute_handshake(
@@ -59,7 +62,7 @@ impl RegistryLifecycle for ExtismRegistryLifecycle {
         plugin_bytes: &[u8],
         supported_slots: &[PluginSlot],
     ) -> Result<SelfCheckResponse, SelfCheckExecutionError> {
-        execute_self_check(plugin_bytes, supported_slots)
+        execute_self_check(plugin_bytes, supported_slots, &*self.clock)
     }
 }
 
@@ -72,6 +75,7 @@ impl Clone for PluginRegistry {
             host_offer: self.host_offer.clone(),
             host_offer_hash: self.host_offer_hash,
             lifecycle: self.lifecycle.clone(),
+            clock: self.clock.clone(),
         }
     }
 }
@@ -81,12 +85,16 @@ impl PluginRegistry {
         registry_repo: Arc<dyn PluginRegistryRepo>,
         blob_repo: Arc<dyn PluginBlobRepo>,
         host_offer: HandshakeOffer,
+        clock: ClockHandle,
     ) -> Result<Self, RegistryError> {
         Self::new_with_lifecycle(
             registry_repo,
             blob_repo,
             host_offer,
-            Arc::new(ExtismRegistryLifecycle),
+            Arc::new(ExtismRegistryLifecycle {
+                clock: clock.clone(),
+            }),
+            clock,
         )
     }
 
@@ -96,6 +104,7 @@ impl PluginRegistry {
         blob_repo: Arc<dyn PluginBlobRepo>,
         host_offer: HandshakeOffer,
         lifecycle: Arc<dyn RegistryLifecycle>,
+        clock: ClockHandle,
     ) -> Result<Self, RegistryError> {
         host_offer.validate()?;
         let host_offer_hash = host_offer.canonical_hash()?;
@@ -106,6 +115,7 @@ impl PluginRegistry {
             host_offer,
             host_offer_hash,
             lifecycle,
+            clock,
         })
     }
 
@@ -283,7 +293,10 @@ impl PluginRegistry {
         let accept = self
             .lifecycle
             .execute_handshake(wasm_bytes, &self.host_offer)?;
-        let handshake_completed_at = unix_now()?;
+        let handshake_completed_at =
+            i64::try_from(unix_secs(self.clock.now())).map_err(|source| RegistryError::Clock {
+                reason: source.to_string(),
+            })?;
         let supported_slots = slot_set_from_handshake(&accept.implemented_functions);
         let self_check = self
             .lifecycle
@@ -333,18 +346,6 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
         .as_ref()
         .try_into()
         .expect("sha256 is 32 bytes")
-}
-
-fn unix_now() -> Result<i64, RegistryError> {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|source| RegistryError::Clock {
-            reason: source.to_string(),
-        })?
-        .as_secs();
-    i64::try_from(seconds).map_err(|source| RegistryError::Clock {
-        reason: source.to_string(),
-    })
 }
 
 #[derive(Debug, Error)]
@@ -404,6 +405,7 @@ pub(crate) mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
+    use cc_lb_core::SystemClock;
     use cc_lb_plugin_wire::handshake::{HANDSHAKE_SCHEMA_VERSION_V1, HandshakeAccept};
     use cc_lb_plugin_wire::identity::{CC_LB_PLUGIN_MAGIC, CC_LB_PLUGIN_SECTION_NAME};
     use serde_json::json;
@@ -551,6 +553,7 @@ pub(crate) mod tests {
             registry_repo,
             blob_repo,
             cc_lb_runtime_protocol::handshake::build_offer(&BTreeSet::new()),
+            Arc::new(SystemClock),
         )
         .expect("registry builds")
     }

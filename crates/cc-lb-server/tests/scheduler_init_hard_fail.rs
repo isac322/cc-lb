@@ -68,7 +68,10 @@ fn app_config(storage: StorageConfig) -> Config {
 
 async fn open_main_sqlite(path: &Path) -> TestResult<Arc<cc_lb_storage_sqlite::SqliteStorage>> {
     let database_url = format!("sqlite://{}", path.display());
-    let storage = Arc::new(cc_lb_storage_sqlite::open_sqlite(&database_url).await?);
+    let storage = Arc::new(
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+            .await?,
+    );
     storage.initialize(BackendKind::Sqlite).await?;
     Ok(storage)
 }

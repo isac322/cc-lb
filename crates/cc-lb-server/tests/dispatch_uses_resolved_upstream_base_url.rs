@@ -14,7 +14,7 @@
 //! the fix and PASSES after the dialect is rebuilt for the resolved upstream.
 
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::body::Bytes;
@@ -50,7 +50,10 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         dir.path().join("base-url-dispatch.sqlite").display()
     );
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&database_url)
+        cc_lb_storage_sqlite::open_sqlite(
+            &database_url,
+            Arc::new(cc_lb_core::SystemClock),
+        )
             .await
             .expect("storage"),
     );
@@ -141,6 +144,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         Arc::new(SubscriptionQuotaCache::new()),
         1800,
         &config,
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await
     .expect("dynamic view builds");
@@ -163,9 +167,11 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
                 upstream_kind: NoneModeUpstreamKind::AnthropicKey,
             }),
             None,
+            Arc::new(cc_lb_core::SystemClock),
         )),
         holder,
         LifecycleConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
     );
 
     let response = lifecycle
@@ -355,7 +361,7 @@ fn message_request() -> Request<Bytes> {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now()
+    cc_lb_core::Clock::now(&cc_lb_core::SystemClock)
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()

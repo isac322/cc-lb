@@ -2,9 +2,11 @@
 
 use std::error::Error;
 use std::str::FromStr as _;
+use std::sync::Arc;
 use std::time::Duration;
 
 use apalis::prelude::{IntervalStrategy, StrategyBuilder, TaskSink};
+use cc_lb_core::clock::SystemClock;
 use cc_lb_scheduler::jobs::apalis_housekeeping::ApalisHousekeepingJob;
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
@@ -78,6 +80,7 @@ async fn run_entity_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> 
         storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(
             pool, &config,
         ),
+        clock: Arc::new(SystemClock),
     });
     build_adaptive_worker(&backend, SchedulerCtx::default())?
         .run_for(Duration::from_secs(5))
@@ -100,6 +103,7 @@ async fn run_singleton_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error
             pool,
             ADAPTIVE_QUEUE,
         ),
+        clock: Arc::new(SystemClock),
     });
     let cancel = CancellationToken::new();
     let stop = cancel.clone();

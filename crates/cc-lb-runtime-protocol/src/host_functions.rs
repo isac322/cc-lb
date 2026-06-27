@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use cc_lb_core::clock::{ClockHandle, unix_millis};
 use extism::{Function, PTR, UserData, ValType, host_fn};
 use ring::rand::{SecureRandom, SystemRandom};
 
@@ -67,14 +67,21 @@ pub struct HostFunctionContext {
     plugin_name: String,
     storage_quota_bytes: usize,
     state: Arc<HostState>,
+    clock: ClockHandle,
 }
 
 impl HostFunctionContext {
-    pub fn new(plugin_name: String, storage_quota_bytes: usize, state: Arc<HostState>) -> Self {
+    pub fn new(
+        plugin_name: String,
+        storage_quota_bytes: usize,
+        state: Arc<HostState>,
+        clock: ClockHandle,
+    ) -> Self {
         Self {
             plugin_name,
             storage_quota_bytes,
             state,
+            clock,
         }
     }
 }
@@ -152,13 +159,11 @@ host_fn!(pub cc_lb_storage_put(data: HostFunctionContext; key: String, value: Ve
     Ok(())
 });
 
-host_fn!(pub cc_lb_now_unix_ms(_data: HostFunctionContext; ) -> u64 {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
+host_fn!(pub cc_lb_now_unix_ms(data: HostFunctionContext; ) -> i64 {
+    let context = context_from_user_data(&data)?;
+    let now = unix_millis(context.clock.now())
         .try_into()
-        .unwrap_or(u64::MAX);
+        .unwrap_or(i64::MAX);
     Ok(now)
 });
 
@@ -184,4 +189,46 @@ fn context_from_user_data(
 
 fn scoped_key(plugin_name: &str, key: &str) -> String {
     format!("{plugin_name}:{key}")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use cc_lb_core::TestClock;
+    use extism::{Manifest, PluginBuilder, Wasm};
+
+    use super::*;
+
+    #[test]
+    fn now_host_function_reads_context_clock() {
+        let wasm = wat::parse_str(
+            r#"
+(module
+  (import "extism:host/user" "cc_lb_now_unix_ms" (func $now (result i64)))
+  (func (export "check_now") (result i32)
+    (drop (call $now))
+    (i32.const 0))
+)
+"#,
+        )
+        .expect("wat parses");
+        let context = HostFunctionContext::new(
+            "clock-test".to_owned(),
+            1024,
+            Arc::new(HostState::new()),
+            Arc::new(TestClock::new_at_secs(1_800_000_000)),
+        );
+        let manifest = Manifest::new([Wasm::data(wasm)]).disallow_all_hosts();
+        let mut plugin = PluginBuilder::new(&manifest)
+            .with_functions(functions(context))
+            .with_wasi(false)
+            .with_cache_disabled()
+            .build()
+            .expect("plugin builds");
+
+        plugin
+            .call::<(), ()>("check_now", ())
+            .expect("clock-backed now check succeeds");
+    }
 }

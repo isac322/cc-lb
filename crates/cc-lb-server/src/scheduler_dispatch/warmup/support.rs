@@ -1,3 +1,4 @@
+use cc_lb_core::clock::Clock;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_storage_api::WarmupAttemptReason;
 
@@ -86,7 +87,7 @@ pub(super) fn cycle_key_i64(cycle_key: u64) -> SchedulerResult<i64> {
         .map_err(|_| SchedulerError::Job("warmup cycle key exceeds i64".to_owned()))
 }
 
-pub(super) fn now_unix_secs_i64() -> SchedulerResult<i64> {
-    i64::try_from(now_unix_secs())
+pub(super) fn now_unix_secs_i64(clock: &dyn Clock) -> SchedulerResult<i64> {
+    i64::try_from(now_unix_secs(clock))
         .map_err(|_| SchedulerError::Job("current unix timestamp exceeds i64".to_owned()))
 }

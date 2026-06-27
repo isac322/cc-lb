@@ -25,6 +25,7 @@ fn config_reload_is_storage_driven_and_keeps_runtime_view() {
         initial_config,
         runtime.clone(),
         Some(dynamic_view.clone()),
+        Arc::new(cc_lb_core::SystemClock),
     );
     watcher
         .reload_now()

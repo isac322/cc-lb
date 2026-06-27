@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use cc_lb_aead::EncryptedOAuthTokens;
+use cc_lb_core::{Clock, unix_secs};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
     StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
@@ -143,7 +144,7 @@ impl UpstreamStore for PostgresStorage {
             id,
             UpstreamStatusUpdate {
                 last_apply_error: Some(error),
-                last_apply_at_unix_secs: Some(Some(now_unix_secs())),
+                last_apply_at_unix_secs: Some(Some(now_unix_secs(&*self.clock))),
                 ..UpstreamStatusUpdate::default()
             },
         )
@@ -800,6 +801,6 @@ fn parse_kind(value: String) -> StorageResult<UpstreamKind> {
     }
 }
 
-fn now_unix_secs() -> u64 {
-    u64::try_from(Utc::now().timestamp()).unwrap_or_default()
+fn now_unix_secs(clock: &dyn Clock) -> u64 {
+    unix_secs(clock.now())
 }

@@ -35,7 +35,9 @@ fn stores(storage: Arc<SqliteStorage>) -> Stores {
 async fn storage_fixture() -> (tempfile::TempDir, Arc<SqliteStorage>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!("sqlite://{}", dir.path().join("test.sqlite").display());
-    let storage = open_sqlite(&database_url).await.expect("storage");
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+        .await
+        .expect("storage");
     storage
         .initialize(BackendKind::Sqlite)
         .await
@@ -100,6 +102,7 @@ async fn build(
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await
     .expect("dynamic view builds")

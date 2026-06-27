@@ -49,7 +49,8 @@ pub fn key_store(storage: Arc<SqliteStorage>) -> Arc<KeyStore> {
 
 async fn open_storage(dir: &Path, filename: &str) -> Arc<SqliteStorage> {
     let database_url = format!("sqlite://{}", dir.join(filename).display());
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
         .await
         .unwrap();
     storage.initialize(BackendKind::Sqlite).await.unwrap();
@@ -85,7 +86,10 @@ pub fn test_state(config: Config, storage: Option<Arc<SqliteStorage>>) -> AdminS
         storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
         key_store,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
+        limit_engine: LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_core::SystemClock),
+        ),
         lifecycle: None,
         audit_sink: None,
         dynamic_view,
@@ -99,6 +103,7 @@ pub fn test_state(config: Config, storage: Option<Arc<SqliteStorage>>) -> AdminS
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus,
+        clock: Arc::new(cc_lb_core::SystemClock),
     }
 }
 
@@ -121,7 +126,10 @@ pub async fn apply_state(
         storage: Some(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>),
         key_store: Some(key_store(storage)),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
+        limit_engine: LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_core::SystemClock),
+        ),
         lifecycle: None,
         audit_sink: None,
         dynamic_view,
@@ -135,6 +143,7 @@ pub async fn apply_state(
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus: None,
+        clock: Arc::new(cc_lb_core::SystemClock),
     }
 }
 

@@ -43,7 +43,7 @@ async fn postgres_scheduler_init_failure_aborts_app_build() {
         directory.path().join("main-storage.sqlite").display()
     );
     let sqlite = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&sqlite_url)
+        cc_lb_storage_sqlite::open_sqlite(&sqlite_url, Arc::new(cc_lb_core::SystemClock))
             .await
             .expect("main sqlite storage opens"),
     );
