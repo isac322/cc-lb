@@ -12,6 +12,10 @@ use cc_lb_config::{
 };
 use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_core::{Clock, ClockHandle, DynamicViewHolder, Lifecycle, LifecycleConfig, TestClock};
+use cc_lb_oauth_protocol::{
+    ExistingTokenParts, TokenEndpointResponse, parse_token_endpoint_response,
+    refresh_token_form_body, refreshed_token_parts,
+};
 use cc_lb_plugin_api::{
     RequestContext, ShapedRequest, Upstream, UpstreamDialect, shape_request, sign_request,
 };
@@ -627,19 +631,22 @@ async fn refresh_tokens(
         .decrypt(aead.as_ref(), upstream.id.as_bytes())
         .map_err(|error| SchedulerError::Job(error.to_string()))?;
     let response = request_refresh(oauth_cfg.as_ref(), previous.refresh_token.as_str()).await?;
-    let scopes = response
-        .scope
-        .as_deref()
-        .map(|scope| scope.split_whitespace().map(ToOwned::to_owned).collect())
-        .unwrap_or(previous.scopes);
-    let expires_at_unix_secs = now_secs(clock.as_ref()).saturating_add(response.expires_in);
+    let refreshed = refreshed_token_parts(
+        ExistingTokenParts {
+            refresh_token: previous.refresh_token,
+            scopes: previous.scopes,
+        },
+        response,
+        now_secs(clock.as_ref()),
+    );
+    let expires_at_unix_secs = refreshed.expires_at_unix_secs;
     let encrypted_tokens = EncryptedOAuthTokens::encrypt(
         aead.as_ref(),
         &OAuthTokenBundle {
-            access_token: response.access_token,
-            refresh_token: response.refresh_token.unwrap_or(previous.refresh_token),
+            access_token: refreshed.access_token,
+            refresh_token: refreshed.refresh_token,
             expires_at_unix_secs,
-            scopes,
+            scopes: refreshed.scopes,
         },
         upstream.id.as_bytes(),
     )
@@ -653,14 +660,8 @@ async fn refresh_tokens(
 async fn request_refresh(
     oauth_cfg: &AnthropicOAuthConfig,
     refresh_token: &str,
-) -> SchedulerResult<OAuthTokenResponse> {
-    let body = {
-        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        serializer.append_pair("grant_type", "refresh_token");
-        serializer.append_pair("client_id", oauth_cfg.client_id.as_str());
-        serializer.append_pair("refresh_token", refresh_token);
-        serializer.finish()
-    };
+) -> SchedulerResult<TokenEndpointResponse> {
+    let body = refresh_token_form_body(oauth_cfg.client_id.as_str(), refresh_token);
     let response = raw_http(
         "POST",
         oauth_cfg.token_url.as_str(),
@@ -675,15 +676,8 @@ async fn request_refresh(
             response.status
         )));
     }
-    serde_json::from_slice(&response.body).map_err(|error| SchedulerError::Job(error.to_string()))
-}
-
-#[derive(Deserialize)]
-struct OAuthTokenResponse {
-    access_token: String,
-    refresh_token: Option<String>,
-    expires_in: u64,
-    scope: Option<String>,
+    parse_token_endpoint_response(&response.body)
+        .map_err(|error| SchedulerError::Job(error.to_string()))
 }
 
 async fn enqueue_metadata_refresh(
