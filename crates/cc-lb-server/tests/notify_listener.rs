@@ -237,7 +237,10 @@ async fn fixture() -> Fixture {
     });
     let oauth = Arc::new(AnthropicOAuthConfig::default());
     let aead = Arc::new(AeadService::from_master_key([24; 32]));
-    let runtime = Arc::new(ExtismRuntime::new());
+    let runtime = Arc::new(ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
+    ));
     let initial = build_dynamic_view(
         &stores,
         &oauth,

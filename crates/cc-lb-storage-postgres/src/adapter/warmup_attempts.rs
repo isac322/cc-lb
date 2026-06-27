@@ -130,17 +130,17 @@ impl UpstreamWarmupAttemptStore for PostgresStorage {
     async fn summarize_recent_warmup_attempts(
         &self,
         upstream_id: Uuid,
-        window_secs: i64,
+        cutoff_unix_secs: i64,
     ) -> StorageResult<WarmupAttemptSummary> {
         let rows = sqlx::query(
             "SELECT outcome, COUNT(*) AS attempt_count \
              FROM warmup_attempts_v1 \
              WHERE upstream_id = $1 \
-             AND attempted_at_unix_secs >= (extract(epoch from now())::bigint - $2) \
+             AND attempted_at_unix_secs >= $2 \
              GROUP BY outcome",
         )
         .bind(upstream_id)
-        .bind(window_secs)
+        .bind(cutoff_unix_secs)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx_error)?;

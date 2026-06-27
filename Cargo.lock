@@ -1001,6 +1001,7 @@ name = "cc-lb-plugin-lifecycle-tests"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "cc-lb-core",
  "cc-lb-plugin-api",
  "cc-lb-runtime-extism",
  "http",
@@ -1389,6 +1390,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "cc-lb-config",
+ "cc-lb-core",
  "cc-lb-server",
  "fake-anthropic",
  "ring",

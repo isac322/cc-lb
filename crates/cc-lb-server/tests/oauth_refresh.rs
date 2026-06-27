@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -75,10 +75,7 @@ impl Fixture {
         let dir = tempfile::tempdir().expect("tempdir");
         let database_url = format!("sqlite://{}", dir.path().join("oauth.sqlite").display());
         let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(
-                &database_url,
-                Arc::new(cc_lb_core::SystemClock),
-            )
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
                 .await
                 .expect("storage"),
         );
@@ -249,7 +246,10 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         cancel,
         apalis_handle: fixture.scheduler_backend.clone(),
     }));
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
         fixture.oauth_cfg.as_ref(),
@@ -709,7 +709,11 @@ fn encrypted(
 }
 
 fn now_secs() -> u64 {
-    cc_lb_core::Clock::now(&cc_lb_core::SystemClock)
+    use cc_lb_core::Clock as _;
+
+    let clock = cc_lb_core::SystemClock;
+    clock
+        .now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()

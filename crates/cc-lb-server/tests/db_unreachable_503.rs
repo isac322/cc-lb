@@ -193,7 +193,8 @@ async fn connect_probe(url: &str) -> Result<(), sqlx::Error> {
 async fn build_api_key_app_for_testing_postgres(
     database_url: &str,
 ) -> TestResult<(App, RunningUpstream)> {
-    let fixture_app = build_app_for_testing_postgres(database_url).await?;
+    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+    let fixture_app = build_app_for_testing_postgres(database_url, clock.clone()).await?;
     drop(fixture_app);
     reset_managed_key_tables(database_url).await?;
 
@@ -206,11 +207,14 @@ async fn build_api_key_app_for_testing_postgres(
     let managed_store: Arc<dyn ManagedKeyStore> = Arc::new(PostgresManagedKeyStore::new(
         pool.clone(),
         Arc::new(RetryPolicy::default()),
+        clock.clone(),
     ));
-    let storage: Arc<dyn StorageTrait> = Arc::new(PostgresStorage::new(pool.clone()));
+    let storage: Arc<dyn StorageTrait> =
+        Arc::new(PostgresStorage::new(pool.clone(), clock.clone()));
     seed_app_testing_storage(
         storage.as_ref(),
         Some(Url::parse(&format!("http://{}", upstream.addr))?),
+        &*clock,
     )
     .await?;
     let app = build_app_with_storage(
@@ -219,6 +223,7 @@ async fn build_api_key_app_for_testing_postgres(
         managed_store,
         storage,
         Arc::new(AeadService::from_master_key([0; 32])),
+        clock.clone(),
     )
     .await?;
 
@@ -226,11 +231,12 @@ async fn build_api_key_app_for_testing_postgres(
 }
 
 async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
+    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(database_url)
         .await?;
-    let storage: Arc<dyn StorageTrait> = Arc::new(PostgresStorage::new(pool.clone()));
+    let storage: Arc<dyn StorageTrait> = Arc::new(PostgresStorage::new(pool.clone(), clock));
     storage.initialize(BackendKind::Postgres).await?;
     sqlx::query("TRUNCATE managed_api_key_index_v1, managed_api_keys_v1")
         .execute(&pool)

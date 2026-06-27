@@ -2,13 +2,12 @@ mod common;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{PluginRuntime, Upstream, shape_request};
-use cc_lb_runtime_extism::ExtismRuntime;
 
 #[test]
 fn instantiate_dialect_wrapper() {
     let wat = common::module_with_functions(&[("shape", &common::shape_response())]);
     let fixture = common::fixture("shape", &wat, common::metadata(&[]));
-    let runtime = ExtismRuntime::new();
+    let runtime = common::runtime();
     let dialect = runtime
         .instantiate_dialect(&fixture.manifest)
         .expect("dialect instantiates");
@@ -33,7 +32,7 @@ fn instantiate_observability_batches_by_count() {
         &wat,
         common::metadata(&[("observe_batch_count", 2), ("observe_flush_ms", 10_000)]),
     );
-    let runtime = ExtismRuntime::new();
+    let runtime = common::runtime();
     let hook = runtime
         .instantiate_observability(&fixture.manifest)
         .expect("observability hook instantiates");

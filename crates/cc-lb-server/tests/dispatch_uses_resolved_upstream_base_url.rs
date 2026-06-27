@@ -14,7 +14,7 @@
 //! the fix and PASSES after the dialect is rebuilt for the resolved upstream.
 
 use std::sync::{Arc, Mutex};
-use std::time::{UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
 use axum::body::Bytes;
@@ -50,10 +50,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         dir.path().join("base-url-dispatch.sqlite").display()
     );
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(
-            &database_url,
-            Arc::new(cc_lb_core::SystemClock),
-        )
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
             .await
             .expect("storage"),
     );
@@ -131,7 +128,10 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         redirect_uri: Url::parse("http://unused.invalid/callback").expect("redirect url"),
         scopes: vec!["messages".to_owned()],
     });
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     let config = cc_lb_config::Config::default();
     let view = build_dynamic_view(
         stores.as_ref(),
@@ -361,7 +361,11 @@ fn message_request() -> Request<Bytes> {
 }
 
 fn now_secs() -> u64 {
-    cc_lb_core::Clock::now(&cc_lb_core::SystemClock)
+    use cc_lb_core::Clock as _;
+
+    let clock = cc_lb_core::SystemClock;
+    clock
+        .now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()

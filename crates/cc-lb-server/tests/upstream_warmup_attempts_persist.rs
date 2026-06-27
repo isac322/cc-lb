@@ -18,8 +18,8 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
         "sqlite::memory:",
         std::sync::Arc::new(cc_lb_core::SystemClock),
     )
-        .await
-        .expect("sqlite opens");
+    .await
+    .expect("sqlite opens");
     storage
         .initialize(BackendKind::Sqlite)
         .await

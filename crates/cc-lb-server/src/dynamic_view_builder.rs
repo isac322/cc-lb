@@ -16,7 +16,7 @@ use cc_lb_core::api_keys::principal_view::{
 };
 use cc_lb_core::builtin_filters::cache_affinity::CacheAffinityFilter;
 use cc_lb_core::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_core::clock::{Clock, SystemClock, unix_secs};
+use cc_lb_core::clock::{Clock, unix_secs};
 use cc_lb_core::{
     ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
     UpstreamStatusEntry, UpstreamStatusSnapshot, make_default_dispatcher,
@@ -190,7 +190,7 @@ pub async fn build_dynamic_view(
     let (prompt_cache_observation_cache, prompt_cache_observation_sink) = if prompt_cache_shadow
         .enabled
     {
-        let cache = new_prompt_cache_observation_cache(prompt_cache_shadow);
+        let cache = new_prompt_cache_observation_cache(prompt_cache_shadow, clock.clone());
         let cache = match tokio::time::timeout(
             Duration::from_secs(5),
             cache.hydrate_from_store(stores.prompt_cache_observations.as_ref(), &all_upstream_ids),
@@ -210,14 +210,14 @@ pub async fn build_dynamic_view(
                     %error,
                     "failed to hydrate prompt cache observation cache from store; continuing with empty cache"
                 );
-                new_prompt_cache_observation_cache(prompt_cache_shadow)
+                new_prompt_cache_observation_cache(prompt_cache_shadow, clock.clone())
             }
             Err(_) => {
                 tracing::warn!(
                     timeout_secs = 5,
                     "timed out hydrating prompt cache observation cache from store; continuing with empty cache"
                 );
-                new_prompt_cache_observation_cache(prompt_cache_shadow)
+                new_prompt_cache_observation_cache(prompt_cache_shadow, clock.clone())
             }
         };
         // Spawn the async observation sink writer. The JoinHandle is intentionally
@@ -292,9 +292,10 @@ pub async fn build_dynamic_view(
 
 fn new_prompt_cache_observation_cache(
     config: &PromptCacheShadowConfig,
+    clock: cc_lb_core::ClockHandle,
 ) -> Arc<PromptCacheObservationCache> {
     Arc::new(PromptCacheObservationCache::new_with_debounce(
-        Arc::new(SystemClock),
+        clock,
         config.grace_margin_secs,
         config.warm_set_cap,
         config.refresh_debounce_secs,
@@ -1120,7 +1121,10 @@ mod tests {
             prompt_record(upstream.id, "hash-c", 1_700_000_003),
         ]));
         let stores = stores(storage, prompt_store);
-        let runtime = ExtismRuntime::new();
+        let runtime = ExtismRuntime::with_config(
+            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+            Arc::new(cc_lb_core::SystemClock),
+        );
 
         let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
         let clock = TestClock::new_at_secs(1_700_000_000);
@@ -1160,7 +1164,10 @@ mod tests {
         let upstream = create_upstream(&storage, "sink-wiring-upstream").await;
         let prompt_store = Arc::new(FakePromptCacheObservationStore::new(Vec::new()));
         let stores = stores(storage, prompt_store.clone());
-        let runtime = ExtismRuntime::new();
+        let runtime = ExtismRuntime::with_config(
+            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+            Arc::new(cc_lb_core::SystemClock),
+        );
 
         let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
         let sink = dynamic_view
@@ -1204,7 +1211,10 @@ mod tests {
                 Duration::from_secs(30),
             )),
         );
-        let runtime = ExtismRuntime::new();
+        let runtime = ExtismRuntime::with_config(
+            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+            Arc::new(cc_lb_core::SystemClock),
+        );
         let started = tokio::time::Instant::now();
 
         let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
@@ -1230,7 +1240,10 @@ mod tests {
             storage,
             Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
         );
-        let runtime = ExtismRuntime::new();
+        let runtime = ExtismRuntime::with_config(
+            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+            Arc::new(cc_lb_core::SystemClock),
+        );
         let mut config = cc_lb_config::Config::default();
         config.prompt_cache_shadow.enabled = false;
 
@@ -1250,7 +1263,10 @@ mod tests {
             storage,
             Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
         );
-        let runtime = ExtismRuntime::new();
+        let runtime = ExtismRuntime::with_config(
+            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+            Arc::new(cc_lb_core::SystemClock),
+        );
         let mut config = cc_lb_config::Config::default();
         config.prompt_cache_shadow.enabled = true;
         config.prompt_cache_shadow.grace_margin_secs = 99;

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "postgres")]
 use apalis::prelude::TaskSink;
 use cc_lb_config::{Config, SchedulerConfig};
-use cc_lb_core::clock::{Clock, ClockHandle, SystemClock, unix_millis};
+use cc_lb_core::clock::{Clock, ClockHandle, unix_millis};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -58,17 +58,6 @@ impl SchedulerCtx {
             adaptive_dispatch,
             cron_dispatch,
             clock,
-        }
-    }
-}
-
-impl Default for SchedulerCtx {
-    fn default() -> Self {
-        Self {
-            config: SchedulerConfig::default(),
-            adaptive_dispatch: Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-            cron_dispatch: Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-            clock: Arc::new(SystemClock),
         }
     }
 }

@@ -8,6 +8,7 @@ use cc_lb_config::{Config, RecurringJobConfig};
 use cc_lb_core::clock::SystemClock;
 use cc_lb_scheduler::leader_election::LeaderElection;
 use cc_lb_scheduler::migrations::apply_post_setup_migrations;
+use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{
     ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, SchedulerBackend, SchedulerCtx, SqliteSchedulerStorage,
 };
@@ -34,7 +35,12 @@ async fn sqlite_cron_producer_runs_after_partial_idempotency_index()
     let handles = backend
         .spawn(
             fast_singleton_config(),
-            SchedulerCtx::default(),
+            SchedulerCtx::new(
+                Default::default(),
+                Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+                Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+                Arc::new(SystemClock),
+            ),
             Arc::new(LeaderElection::sqlite()),
             cancel.clone(),
         )

@@ -25,7 +25,7 @@ use cc_lb_core::{
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
     CircuitBreakerDispatch, ClockHandle, DynamicView, DynamicViewBuilder, DynamicViewHolder,
     HopByHopStripLayer, Lifecycle, LifecycleConfig, SubscriptionQuotaSink,
-    SubscriptionQuotaWriterConfig, SystemClock, UpstreamDispatch, UpstreamRateLimitSink,
+    SubscriptionQuotaWriterConfig, UpstreamDispatch, UpstreamRateLimitSink,
     anthropic_error_response,
     api_keys::{
         builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
@@ -281,6 +281,7 @@ pub async fn run_serve(
     strict_preflight: bool,
     skip_handshake_if_fresh: Option<bool>,
     force_handshake: Option<bool>,
+    clock: ClockHandle,
 ) -> Result<(), ServeError> {
     let mut config = Config::load(config_path)?;
     if let Some(data_dir) = data_dir {
@@ -300,6 +301,7 @@ pub async fn run_serve(
         Some(config_path),
         Some(StartupPreflight { strict_preflight }),
         startup_opts,
+        clock,
     )
     .await
     {
@@ -354,17 +356,19 @@ fn startup_handshake_opts_from_flags(
     }
 }
 
-pub async fn build_app(config: Config) -> Result<App, BuildError> {
-    build_app_with_path(config, None).await
+pub async fn build_app(config: Config, clock: ClockHandle) -> Result<App, BuildError> {
+    build_app_with_path(config, None, clock).await
 }
 
-pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError> {
+pub async fn build_app_for_testing(
+    mut config: Config,
+    clock: ClockHandle,
+) -> Result<App, BuildError> {
     let dir = tempfile::TempDir::new()?;
     let path = dir.path().join("storage.sqlite");
     let key = [0u8; 32];
     let aead = Arc::new(AeadService::from_master_key(key));
     let database_url = format!("sqlite://{}", path.display());
-    let clock: ClockHandle = Arc::new(SystemClock);
     let storage_arc =
         Arc::new(cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone()).await?);
     storage_arc.initialize(BackendKind::Sqlite).await?;
@@ -383,7 +387,7 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
     let opened_scheduler = crate::scheduler_factory::open_scheduler_storage(
         &config.storage,
         &config.scheduler,
-        clock,
+        clock.clone(),
     )
     .await?;
     build_app_with_storage_inner(
@@ -397,6 +401,7 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
         StartupHandshakeOpts::default(),
         opened_scheduler,
         None,
+        clock,
     )
     .await
 }
@@ -432,7 +437,10 @@ async fn reset_app_testing_postgres_schema(database_url: &str) -> Result<(), Bui
 }
 
 #[cfg(feature = "postgres")]
-pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, BuildError> {
+pub async fn build_app_for_testing_postgres(
+    database_url: &str,
+    clock: ClockHandle,
+) -> Result<App, BuildError> {
     use cc_lb_storage_api::{BackendKind, Storage as StorageTrait};
     use sqlx::postgres::PgPoolOptions;
 
@@ -456,7 +464,6 @@ pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, B
             message: e.to_string(),
         })?;
 
-    let clock: ClockHandle = Arc::new(SystemClock);
     let init_storage: Arc<dyn StorageTrait> = Arc::new(
         cc_lb_storage_postgres::PostgresStorage::new(pool.clone(), clock.clone()),
     );
@@ -484,7 +491,7 @@ pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, B
     let key = [0u8; 32];
     let aead = Arc::new(AeadService::from_master_key(key));
     let config = build_app_for_testing_postgres_config(database_url);
-    build_app_with_storage(config, None, managed_store, init_storage, aead).await
+    build_app_with_storage(config, None, managed_store, init_storage, aead, clock).await
 }
 
 #[cfg(feature = "postgres")]
@@ -571,8 +578,16 @@ fn build_app_for_testing_postgres_config(database_url: &str) -> Config {
 pub async fn build_app_with_path(
     config: Config,
     config_path: Option<&Path>,
+    clock: ClockHandle,
 ) -> Result<App, BuildError> {
-    build_app_with_path_inner(config, config_path, None, StartupHandshakeOpts::default()).await
+    build_app_with_path_inner(
+        config,
+        config_path,
+        None,
+        StartupHandshakeOpts::default(),
+        clock,
+    )
+    .await
 }
 
 async fn build_app_with_path_inner(
@@ -580,9 +595,9 @@ async fn build_app_with_path_inner(
     config_path: Option<&Path>,
     startup_preflight: Option<StartupPreflight>,
     startup_handshake_opts: StartupHandshakeOpts,
+    clock: ClockHandle,
 ) -> Result<App, BuildError> {
     config.validate()?;
-    let clock: ClockHandle = Arc::new(SystemClock);
     let (
         managed_store,
         storage,
@@ -591,7 +606,7 @@ async fn build_app_with_path_inner(
         plugin_blob_repo,
         lazy_refresh_claim_guard,
         opened_scheduler,
-    ) = open_storage(&config, clock).await?;
+    ) = open_storage(&config, clock.clone()).await?;
     build_app_with_storage_inner(
         config,
         config_path,
@@ -603,6 +618,7 @@ async fn build_app_with_path_inner(
         startup_handshake_opts,
         opened_scheduler,
         Some(lazy_refresh_claim_guard),
+        clock,
     )
     .await
 }
@@ -641,12 +657,12 @@ pub async fn build_app_with_storage(
     managed_store: Arc<dyn ManagedKeyStore>,
     storage: Arc<dyn Storage>,
     aead: Arc<AeadService>,
+    clock: ClockHandle,
 ) -> Result<App, BuildError> {
-    let clock: ClockHandle = Arc::new(SystemClock);
     let opened_scheduler = crate::scheduler_factory::open_scheduler_storage(
         &config.storage,
         &config.scheduler,
-        clock,
+        clock.clone(),
     )
     .await?;
     build_app_with_storage_inner(
@@ -660,6 +676,7 @@ pub async fn build_app_with_storage(
         StartupHandshakeOpts::default(),
         opened_scheduler,
         None,
+        clock,
     )
     .await
 }
@@ -676,8 +693,8 @@ async fn build_app_with_storage_inner(
     startup_handshake_opts: StartupHandshakeOpts,
     opened_scheduler: crate::scheduler_factory::OpenedScheduler,
     lazy_refresh_claim_guard: Option<Arc<dyn LazyRefreshClaimGuard>>,
+    clock: ClockHandle,
 ) -> Result<App, BuildError> {
-    let clock: ClockHandle = Arc::new(SystemClock);
     opened_scheduler.probe_leader().await?;
     let scheduler_lazy_handle = opened_scheduler.lazy_handle();
     let server_state = Arc::new(ServerStateHandle::new_starting());
@@ -717,7 +734,10 @@ async fn build_app_with_storage_inner(
         }),
         clock.clone(),
     ));
-    let runtime = Arc::new(ExtismRuntime::new());
+    let runtime = Arc::new(ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        clock.clone(),
+    ));
     let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
     let storage_for_dynamic = storage.clone();
     let env_token = std::env::var("CC_LB_BOOTSTRAP_ADMIN_TOKEN").ok();
@@ -743,7 +763,7 @@ async fn build_app_with_storage_inner(
         clock.clone(),
     ));
 
-    let (_dispatcher, _breaker_registry) = dispatcher(&config);
+    let (_dispatcher, _breaker_registry) = dispatcher(&config, clock.clone());
 
     let replica_identity = {
         match replica::load_or_create_replica_id(&data_dir) {
@@ -790,7 +810,8 @@ async fn build_app_with_storage_inner(
         .as_ref()
         .map(|identity| identity.id);
     if let Some(startup_preflight) = startup_preflight {
-        let report = preflight::run_preflight(&stores, &lifecycle_config, &data_dir).await?;
+        let report =
+            preflight::run_preflight(&stores, &lifecycle_config, &data_dir, clock.clone()).await?;
         print_preflight_report(&report);
         if startup_preflight.strict_preflight && !report.warnings.is_empty() {
             eprintln!(
@@ -2231,12 +2252,9 @@ pub async fn open_storage(
     let aead = Arc::new(AeadService::from_master_key(key));
     let opened =
         storage_factory::open_storage(&config.storage, aead.clone(), key, clock.clone()).await?;
-    let opened_scheduler = crate::scheduler_factory::open_scheduler_storage(
-        &config.storage,
-        &config.scheduler,
-        clock,
-    )
-    .await?;
+    let opened_scheduler =
+        crate::scheduler_factory::open_scheduler_storage(&config.storage, &config.scheduler, clock)
+            .await?;
     let lazy_refresh_claim_guard =
         crate::refresh::lazy_refresh_claim_guard_from_scheduler(&opened_scheduler.backend);
     Ok((
@@ -2272,7 +2290,10 @@ fn hex_nibble(byte: u8) -> Result<u8, BuildError> {
     }
 }
 
-fn dispatcher(config: &Config) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistry>) {
+fn dispatcher(
+    config: &Config,
+    clock: ClockHandle,
+) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistry>) {
     let bulkhead_config = BulkheadConfig {
         max_conns_per_upstream: config.bulkhead.max_conns_per_upstream,
         semaphore_permits: config.bulkhead.semaphore_per_upstream,
@@ -2294,6 +2315,7 @@ fn dispatcher(config: &Config) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistr
     let breaker_registry = Arc::new(BreakerRegistry::new());
     let breaker_upstream_name = upstream_name.clone();
     let breaker_registry_for_dispatcher = breaker_registry.clone();
+    let breaker_clock = clock;
     let dispatcher_factory = Arc::new(move |max_idle_per_host| {
         let base = make_default_dispatcher(max_idle_per_host);
         Arc::new(CircuitBreakerDispatch::new(
@@ -2301,6 +2323,7 @@ fn dispatcher(config: &Config) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistr
             breaker_registry_for_dispatcher.clone(),
             breaker_config,
             breaker_upstream_name.clone(),
+            breaker_clock.clone(),
         )) as Arc<dyn UpstreamDispatch>
     });
     (
@@ -2372,7 +2395,8 @@ mod tests {
             cc_lb_pricing::CatalogStatus::CostDisabled
         ));
 
-        install_default_fallback_if_uninitialized(&catalog, &cc_lb_core::SystemClock);
+        let clock = cc_lb_core::SystemClock;
+        install_default_fallback_if_uninitialized(&catalog, &clock);
 
         assert!(matches!(catalog.status(), cc_lb_pricing::CatalogStatus::Ok));
         assert!(catalog.lookup("claude-opus-4-5", None).is_some());
@@ -2401,7 +2425,8 @@ mod tests {
             status: cc_lb_pricing::CatalogStatus::Ok,
         });
 
-        install_default_fallback_if_uninitialized(&catalog, &cc_lb_core::SystemClock);
+        let clock = cc_lb_core::SystemClock;
+        install_default_fallback_if_uninitialized(&catalog, &clock);
 
         assert!(catalog.lookup("operator-model-a", None).is_some());
         assert!(catalog.lookup("claude-opus-4-5", None).is_none());

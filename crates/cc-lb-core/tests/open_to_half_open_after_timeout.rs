@@ -6,7 +6,7 @@ use cc_lb_core::{BreakerConfig, BreakerState, CircuitBreaker, TestClock};
 #[test]
 fn open_breaker_allows_half_open_probe_after_timeout() -> Result<(), Box<dyn std::error::Error>> {
     let clock = Arc::new(TestClock::new_at_secs(100));
-    let breaker = CircuitBreaker::with_clock(
+    let breaker = CircuitBreaker::new(
         "bedrock",
         BreakerConfig {
             failures_to_open: 1,

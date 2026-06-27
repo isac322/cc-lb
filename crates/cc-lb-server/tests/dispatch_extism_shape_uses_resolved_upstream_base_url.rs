@@ -33,7 +33,7 @@
 //!   dispatcher captures `host_str() == "target.invalid"` → assertion passes.
 
 use std::sync::{Arc, Mutex};
-use std::time::{UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
 use axum::body::Bytes;
@@ -73,12 +73,10 @@ async fn extism_shape_plugin_receives_resolved_upstream_base_url_via_envelope() 
         "sqlite://{}",
         dir.path().join("extism-shape-base-url.sqlite").display()
     );
-    let storage = cc_lb_storage_sqlite::open_sqlite(
-        &database_url,
-        Arc::new(cc_lb_core::SystemClock),
-    )
-        .await
-        .expect("storage opens");
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+            .await
+            .expect("storage opens");
     storage
         .initialize(BackendKind::Sqlite)
         .await
@@ -138,7 +136,10 @@ async fn extism_shape_plugin_receives_resolved_upstream_base_url_via_envelope() 
         redirect_uri: Url::parse("http://unused.invalid/callback").expect("redirect url"),
         scopes: vec!["messages".to_owned()],
     });
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     let config = cc_lb_config::Config::default();
     let view = build_dynamic_view(
         stores.as_ref(),
@@ -390,7 +391,11 @@ fn message_request() -> Request<Bytes> {
 }
 
 fn now_secs() -> u64 {
-    cc_lb_core::Clock::now(&cc_lb_core::SystemClock)
+    use cc_lb_core::Clock as _;
+
+    let clock = cc_lb_core::SystemClock;
+    clock
+        .now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()

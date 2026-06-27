@@ -112,7 +112,10 @@ async fn build(
 async fn principals_delete_rebuild_removes_deleted_and_increments_generation() {
     let (dir, storage) = storage_fixture().await;
     let stores = stores(storage.clone());
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     let principal_a = create_principal(&storage, "principal-a").await;
     create_principal(&storage, "principal-b").await;
 
@@ -147,7 +150,10 @@ async fn principals_delete_rebuild_removes_deleted_and_increments_generation() {
 async fn corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active() {
     let (dir, storage) = storage_fixture().await;
     let stores = stores(storage.clone());
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     create_principal(&storage, "principal-a").await;
     create_api_key_upstream(&storage, "healthy").await;
     let corrupt = UpstreamStore::create(

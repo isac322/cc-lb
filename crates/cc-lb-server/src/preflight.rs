@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DEFAULT_SQLITE_PATH, StorageConfig, TlsConfig};
-use cc_lb_core::LifecycleConfig;
+use cc_lb_core::{ClockHandle, LifecycleConfig};
 use cc_lb_storage_api::{
     PluginChainEntry, PluginSlot, PrincipalRecord, StorageError as ApiStorageError, UpstreamRecord,
     WasmRegistryEntry,
@@ -58,6 +58,7 @@ pub async fn run_preflight(
     stores: &Stores,
     lifecycle_config: &LifecycleConfig,
     data_dir: &Path,
+    _clock: ClockHandle,
 ) -> Result<PreflightReport, PreflightError> {
     let _replica_identity = lifecycle_config.replica_identity.as_ref();
     let mut report = PreflightReport::default();
@@ -92,21 +93,24 @@ pub async fn run_preflight(
 pub async fn run(
     cfg: &Config,
     options: PreflightOptions,
+    clock: ClockHandle,
 ) -> Result<PreflightReport, PreflightError> {
-    run_inner(cfg, options, true).await
+    run_inner(cfg, options, true, clock).await
 }
 
 pub async fn run_offline(
     cfg: &Config,
     options: PreflightOptions,
+    clock: ClockHandle,
 ) -> Result<PreflightReport, PreflightError> {
-    run_inner(cfg, options, false).await
+    run_inner(cfg, options, false, clock).await
 }
 
 async fn run_inner(
     cfg: &Config,
     options: PreflightOptions,
     probe_storage: bool,
+    clock: ClockHandle,
 ) -> Result<PreflightReport, PreflightError> {
     let report = PreflightReport::default();
     if probe_storage {
@@ -121,7 +125,6 @@ async fn run_inner(
             StorageConfig::Sqlite { path } => validate_sqlite_path(path)?,
         }
         let aead = Arc::new(AeadService::from_master_key(key));
-        let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
         let _storage = storage_factory::open_storage(&cfg.storage, aead, key, clock)
             .await
             .map_err(|error| PreflightError::Storage(error.to_string()))?;

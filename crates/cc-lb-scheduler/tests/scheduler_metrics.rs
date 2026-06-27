@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use apalis::prelude::{IntervalStrategy, StrategyBuilder, TaskSink};
+use cc_lb_config::SchedulerConfig;
 use cc_lb_core::clock::SystemClock;
 use cc_lb_scheduler::jobs::apalis_housekeeping::ApalisHousekeepingJob;
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
@@ -17,6 +18,7 @@ use cc_lb_scheduler::jobs::quota_gc::SubscriptionQuotaGcJob;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
 use cc_lb_scheduler::jobs::usage_rollup::UsageRollupTask;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
+use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::scheduler_metrics;
 use cc_lb_scheduler::worker::{
     ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, CronJob, SchedulerBackend, SchedulerCtx,
@@ -82,9 +84,17 @@ async fn run_entity_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> 
         ),
         clock: Arc::new(SystemClock),
     });
-    build_adaptive_worker(&backend, SchedulerCtx::default())?
-        .run_for(Duration::from_secs(5))
-        .await?;
+    build_adaptive_worker(
+        &backend,
+        SchedulerCtx::new(
+            SchedulerConfig::default(),
+            Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+            Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+            Arc::new(SystemClock),
+        ),
+    )?
+    .run_for(Duration::from_secs(5))
+    .await?;
     Ok(())
 }
 
@@ -111,9 +121,17 @@ async fn run_singleton_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error
         tokio::time::sleep(Duration::from_secs(5)).await;
         stop.cancel();
     });
-    build_cron_worker(&backend, SchedulerCtx::default())?
-        .run_until_cancelled(cancel)
-        .await?;
+    build_cron_worker(
+        &backend,
+        SchedulerCtx::new(
+            SchedulerConfig::default(),
+            Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+            Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+            Arc::new(SystemClock),
+        ),
+    )?
+    .run_until_cancelled(cancel)
+    .await?;
     Ok(())
 }
 

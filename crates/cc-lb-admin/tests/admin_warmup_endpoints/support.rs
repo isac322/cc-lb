@@ -5,6 +5,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
+use cc_lb_core::Clock as _;
 use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::warmup_attempts::{
     WarmupAttemptCursor, WarmupAttemptOutcome, WarmupAttemptReason, WarmupAttemptRecord,
@@ -101,10 +102,8 @@ async fn seed_attempts(
     upstream_spec_revision: u64,
     dialect_plugin: &UpstreamWarmupDialectPlugin,
 ) -> Vec<WarmupAttemptRecord> {
-    let now = i64::try_from(cc_lb_core::clock::unix_secs(cc_lb_core::Clock::now(
-        &cc_lb_core::SystemClock,
-    )))
-    .unwrap_or(i64::MAX);
+    let clock = cc_lb_core::SystemClock;
+    let now = i64::try_from(cc_lb_core::clock::unix_secs(clock.now())).unwrap_or(i64::MAX);
     let plugin_snapshot = serde_json::to_value(dialect_plugin).expect("plugin serializes");
     let attempts = (0..30)
         .map(|index| {

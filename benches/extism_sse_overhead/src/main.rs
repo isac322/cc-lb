@@ -234,7 +234,10 @@ impl ObserveFixture {
         metadata.insert("observe_flush_ms".to_owned(), Value::from(60_000_u64));
         Ok(Self {
             _dir: dir,
-            runtime: cc_lb_runtime_extism::ExtismRuntime::new(),
+            runtime: cc_lb_runtime_extism::ExtismRuntime::with_config(
+                cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+                Arc::new(cc_lb_core::SystemClock),
+            ),
             manifest: PluginManifest {
                 name: format!("observe-{name}"),
                 artifact: artifact.display().to_string(),

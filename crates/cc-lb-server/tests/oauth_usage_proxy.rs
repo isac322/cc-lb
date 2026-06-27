@@ -10,7 +10,8 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn api_oauth_usage_returns_anthropic_usage_shape() {
-    let app = build_app_for_testing(Config::default())
+    let clock: cc_lb_core::ClockHandle = std::sync::Arc::new(cc_lb_core::SystemClock);
+    let app = build_app_for_testing(Config::default(), clock.clone())
         .await
         .expect("build app");
     let request = Request::builder()

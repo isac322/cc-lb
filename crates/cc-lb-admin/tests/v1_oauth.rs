@@ -16,7 +16,7 @@ use axum::{
 use cc_lb_admin::{AdminState, router};
 use cc_lb_aead::{AeadEncryptedField, AeadService, OAuthTokenBundle};
 use cc_lb_config::{AnthropicOAuthConfig, Config};
-use cc_lb_core::spawn_audit_writer;
+use cc_lb_core::{Clock as _, spawn_audit_writer};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{AuditStore, UpstreamCreate, UpstreamStore};
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
@@ -199,7 +199,8 @@ impl Fixture {
 }
 
 fn now_unix_secs() -> u64 {
-    cc_lb_core::clock::unix_secs(cc_lb_core::Clock::now(&cc_lb_core::SystemClock))
+    let clock = cc_lb_core::SystemClock;
+    cc_lb_core::clock::unix_secs(clock.now())
 }
 
 #[tokio::test]

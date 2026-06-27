@@ -84,10 +84,7 @@ async fn setup() -> (
         dir.path().join("legacy-bridge.sqlite").display()
     );
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(
-            &database_url,
-            Arc::new(cc_lb_core::SystemClock),
-        )
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
             .await
             .expect("sqlite opens"),
     );

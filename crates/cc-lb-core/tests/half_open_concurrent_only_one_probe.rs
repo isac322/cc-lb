@@ -7,7 +7,7 @@ use tokio::sync::Barrier;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn half_open_allows_only_one_concurrent_probe() -> Result<(), Box<dyn std::error::Error>> {
     let clock = Arc::new(TestClock::new_at_secs(100));
-    let breaker = CircuitBreaker::with_clock(
+    let breaker = CircuitBreaker::new(
         "bedrock",
         BreakerConfig {
             failures_to_open: 1,

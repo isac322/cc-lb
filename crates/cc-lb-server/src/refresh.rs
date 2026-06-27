@@ -973,12 +973,9 @@ mod tests {
                 dir.path().join("lazy-refresh.sqlite").display()
             );
             let storage = Arc::new(
-                cc_lb_storage_sqlite::open_sqlite(
-                    &database_url,
-                    Arc::new(cc_lb_core::SystemClock),
-                )
-                .await
-                .expect("storage opens"),
+                cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+                    .await
+                    .expect("storage opens"),
             );
             storage
                 .initialize(BackendKind::Sqlite)

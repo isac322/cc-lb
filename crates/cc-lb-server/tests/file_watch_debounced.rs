@@ -16,7 +16,10 @@ async fn file_watch_debounced() {
     let watcher = Arc::new(ConfigWatcher::new(
         &config_path,
         reload_common::load_config(&config_path),
-        Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
+        Arc::new(cc_lb_runtime_extism::ExtismRuntime::with_config(
+            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+            Arc::new(cc_lb_core::SystemClock),
+        )),
         Arc::new(cc_lb_core::SystemClock),
     ));
     let task = watcher.spawn_file_watcher();

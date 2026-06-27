@@ -12,6 +12,7 @@ const TEST_KEY_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123
 
 #[tokio::test]
 async fn sqlite_scheduler_init_failure_aborts_app_build() {
+    let clock: cc_lb_core::ClockHandle = std::sync::Arc::new(cc_lb_core::SystemClock);
     let _env = EnvGuard::set(TEST_KEY_ENV, TEST_KEY_HEX);
     let directory = tempfile::tempdir().expect("tempdir is created");
     let storage_path = directory.path().join("cc-lb.sqlite");
@@ -21,7 +22,7 @@ async fn sqlite_scheduler_init_failure_aborts_app_build() {
     let mut config = app_config(StorageConfig::Sqlite { path: storage_path });
     config.runtime.data_dir = Some(directory.path().join("data"));
 
-    let error = match build_app_with_path(config, None).await {
+    let error = match build_app_with_path(config, None, clock.clone()).await {
         Ok(_) => panic!("scheduler sqlite initialization must abort app startup"),
         Err(error) => error,
     };
@@ -37,13 +38,14 @@ async fn postgres_scheduler_init_failure_aborts_app_build() {
     use cc_lb_server::app::build_app_with_storage;
     use cc_lb_storage_api::{BackendKind, ManagedKeyStore, MetaStore, Storage as StorageTrait};
 
+    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
     let directory = tempfile::tempdir().expect("tempdir is created");
     let sqlite_url = format!(
         "sqlite://{}",
         directory.path().join("main-storage.sqlite").display()
     );
     let sqlite = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&sqlite_url, Arc::new(cc_lb_core::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&sqlite_url, clock.clone())
             .await
             .expect("main sqlite storage opens"),
     );
@@ -67,6 +69,7 @@ async fn postgres_scheduler_init_failure_aborts_app_build() {
         managed_store,
         storage,
         Arc::new(AeadService::from_master_key([0; 32])),
+        clock.clone(),
     )
     .await
     {

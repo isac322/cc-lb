@@ -71,10 +71,7 @@ impl Fixture {
             db_dir.path().join("supported-slots-guard.sqlite").display()
         );
         let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(
-                &database_url,
-                Arc::new(cc_lb_core::SystemClock),
-            )
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
                 .await
                 .expect("storage opens"),
         );
@@ -118,7 +115,10 @@ async fn dynamic_view_hooks_skip_registry_entry_not_supporting_observability_slo
         1000,
     )
     .await;
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
 
     build_dynamic_view_for_test(&fixture, &runtime).await;
 
@@ -143,7 +143,10 @@ async fn warmup_dialect_returns_registry_unsupported_slot_for_non_shape_plugin()
     )
     .await;
     let upstream = seed_warmup_upstream(&fixture.storage, plugin.id).await;
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     let aead = Arc::new(AeadService::from_master_key([92; 32]));
     let lazy_refresher = Arc::new(LazyRefresher::new(LazyRefresherParams {
         deps: LazyRefresherDeps {
@@ -159,16 +162,18 @@ async fn warmup_dialect_returns_registry_unsupported_slot_for_non_shape_plugin()
     }));
     let client = warmup_client();
 
-    let error = match dispatch_warmup_with_dialect(cc_lb_server::warmup::dialect::WarmupDialectDispatchParams {
-        runtime: &runtime,
-        stores: &fixture.stores,
-        data_dir: fixture.data_dir.path(),
-        aead,
-        lazy_refresher,
-        upstream: &upstream,
-        http: &client,
-        clock: Arc::new(cc_lb_core::SystemClock),
-    })
+    let error = match dispatch_warmup_with_dialect(
+        cc_lb_server::warmup::dialect::WarmupDialectDispatchParams {
+            runtime: &runtime,
+            stores: &fixture.stores,
+            data_dir: fixture.data_dir.path(),
+            aead,
+            lazy_refresher,
+            upstream: &upstream,
+            http: &client,
+            clock: Arc::new(cc_lb_core::SystemClock),
+        },
+    )
     .await
     {
         Ok(_) => panic!("unsupported warmup dialect slot should fail before instantiation"),
@@ -212,10 +217,12 @@ async fn preflight_warns_when_chain_entry_registry_does_not_support_slot() {
     )
     .await;
 
+    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
     let report = preflight::run_preflight(
         &fixture.stores,
         &cc_lb_core::LifecycleConfig::default(),
         fixture.data_dir.path(),
+        clock,
     )
     .await
     .expect("preflight completes");

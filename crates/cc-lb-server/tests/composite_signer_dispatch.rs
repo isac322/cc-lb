@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
 use axum::body::Bytes;
@@ -45,7 +45,10 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
     fixture
         .create_principal("oauth-principal", vec![target_id])
         .await;
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
         fixture.oauth_cfg.as_ref(),
@@ -109,10 +112,7 @@ impl Fixture {
             dir.path().join("composite-dispatch.sqlite").display()
         );
         let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(
-                &database_url,
-                Arc::new(cc_lb_core::SystemClock),
-            )
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
                 .await
                 .expect("storage"),
         );
@@ -523,7 +523,11 @@ fn message_request() -> Request<Bytes> {
 }
 
 fn now_secs() -> u64 {
-    cc_lb_core::Clock::now(&cc_lb_core::SystemClock)
+    use cc_lb_core::Clock as _;
+
+    let clock = cc_lb_core::SystemClock;
+    clock
+        .now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()

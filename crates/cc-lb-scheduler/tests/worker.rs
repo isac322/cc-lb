@@ -130,7 +130,12 @@ async fn scheduler_backend_sqlite_push_job_uses_full_idempotency_index()
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn worker_sqlite_uses_default_entity_concurrency() {
-    let ctx = SchedulerCtx::default();
+    let ctx = SchedulerCtx::new(
+        SchedulerConfig::default(),
+        Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        Arc::new(SystemClock),
+    );
 
     assert_eq!(
         ctx.config.entity_concurrency,
@@ -142,7 +147,12 @@ async fn worker_sqlite_uses_default_entity_concurrency() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn scheduler_ctx_default_dispatches_succeed() -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = SchedulerCtx::default();
+    let ctx = SchedulerCtx::new(
+        SchedulerConfig::default(),
+        Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        Arc::new(SystemClock),
+    );
     let upstream_id = Uuid::new_v4();
 
     let entity =

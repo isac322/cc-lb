@@ -312,11 +312,12 @@ struct TestApp {
 }
 
 async fn build_test_app() -> TestResult<TestApp> {
+    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
     let dir = tempfile::tempdir()?;
     let key = [0_u8; 32];
     let storage_path = dir.path().join("state-machine.sqlite");
     let database_url = format!("sqlite://{}", storage_path.display());
-    let storage_arc = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock)).await?;
+    let storage_arc = open_sqlite(&database_url, clock.clone()).await?;
     cc_lb_storage_api::MetaStore::initialize(&storage_arc, BackendKind::Sqlite).await?;
     let storage_arc = Arc::new(storage_arc);
     seed_storage(storage_arc.as_ref()).await?;
@@ -340,6 +341,7 @@ async fn build_test_app() -> TestResult<TestApp> {
         managed_store,
         storage,
         Arc::new(AeadService::from_master_key(key)),
+        clock.clone(),
     )
     .await?;
     Ok(TestApp { app, _dir: dir })

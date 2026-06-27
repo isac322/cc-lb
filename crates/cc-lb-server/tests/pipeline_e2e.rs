@@ -529,7 +529,10 @@ impl PipelineHarness {
         }
 
         let stores = stores(Arc::clone(&storage));
-        let runtime = ExtismRuntime::new();
+        let runtime = ExtismRuntime::with_config(
+            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+            std::sync::Arc::new(cc_lb_core::SystemClock),
+        );
         let view = build_dynamic_view(
             &stores,
             &AnthropicOAuthConfig::default(),
@@ -976,7 +979,11 @@ fn repo_root() -> PathBuf {
 }
 
 fn now_secs() -> u64 {
-    cc_lb_core::Clock::now(&cc_lb_core::SystemClock)
+    use cc_lb_core::Clock as _;
+
+    let clock = cc_lb_core::SystemClock;
+    clock
+        .now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()

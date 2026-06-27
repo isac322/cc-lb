@@ -12,12 +12,10 @@ async fn sqlite_main_storage_and_apalis_setup_share_file_without_migration_colli
     let database_path = directory.path().join("cc-lb.sqlite");
     let database_url = format!("sqlite://{}", database_path.display());
 
-    let main_storage = cc_lb_storage_sqlite::open_sqlite(
-        &database_url,
-        Arc::new(cc_lb_core::SystemClock),
-    )
-        .await
-        .expect("main sqlite storage opens");
+    let main_storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+            .await
+            .expect("main sqlite storage opens");
     main_storage
         .initialize(BackendKind::Sqlite)
         .await
@@ -37,8 +35,8 @@ async fn sqlite_main_storage_and_apalis_setup_share_file_without_migration_colli
         &SchedulerConfig::default(),
         Arc::new(cc_lb_core::SystemClock),
     )
-        .await
-        .expect("scheduler storage opens after main migrations using derived sqlite file");
+    .await
+    .expect("scheduler storage opens after main migrations using derived sqlite file");
 
     #[allow(clippy::infallible_destructuring_match)]
     let sqlite_scheduler = match opened_scheduler.backend {

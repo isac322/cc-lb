@@ -42,7 +42,10 @@ fn boot_and_measure(
     fixture: &StubWasms,
     include_plugins: bool,
 ) -> Result<(ExtismRuntime, u64), Box<dyn std::error::Error>> {
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     if include_plugins {
         let filter_manifest = fixture.filter_manifest();
         let observe_manifest = fixture.observe_manifest();

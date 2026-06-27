@@ -6,7 +6,7 @@ use cc_lb_core::{BreakerConfig, BreakerError, CircuitBreaker, TestClock};
 
 #[test]
 fn open_breaker_returns_error_without_calling_upstream() -> Result<(), Box<dyn std::error::Error>> {
-    let breaker = CircuitBreaker::with_clock(
+    let breaker = CircuitBreaker::new(
         "bedrock",
         BreakerConfig {
             failures_to_open: 1,

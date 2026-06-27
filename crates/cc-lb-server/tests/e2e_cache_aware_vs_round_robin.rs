@@ -164,7 +164,10 @@ async fn run_phase(
         config: json!({}),
         metadata: BTreeMap::new(),
     };
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     let router = runtime
         .instantiate_router(&manifest)
         .map_err(|err| io_err(format!("instantiate {label} router: {err}")))?;

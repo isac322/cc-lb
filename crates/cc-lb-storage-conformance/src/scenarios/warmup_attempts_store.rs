@@ -177,9 +177,12 @@ where
         ]);
         insert_all(storage.as_ref(), &records).await?;
 
+        let cutoff_unix_secs = now
+            .checked_sub(SEVEN_DAYS_SECS)
+            .expect("summary cutoff fits in i64");
         ensure!(
             storage
-                .summarize_recent_warmup_attempts(upstream.id, SEVEN_DAYS_SECS)
+                .summarize_recent_warmup_attempts(upstream.id, cutoff_unix_secs)
                 .await?
                 == WarmupAttemptSummary {
                     success_fresh: 2,

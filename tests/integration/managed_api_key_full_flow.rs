@@ -472,7 +472,8 @@ impl StartedServer {
     async fn start(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
         let proxy_addr = config.listener.proxy_addr;
         let admin_addr = config.listener.admin_addr;
-        let app = build_app(config).await?;
+        let clock: cc_lb_core::ClockHandle = std::sync::Arc::new(cc_lb_core::SystemClock);
+        let app = build_app(config, clock).await?;
         let signal = app.signal_handle();
         let task = tokio::spawn(async move { app.start().await });
         let server = Self {
@@ -636,7 +637,10 @@ fn evidence_dir() -> std::path::PathBuf {
 }
 
 fn now_secs() -> u64 {
-    cc_lb_core::Clock::now(&cc_lb_core::SystemClock)
+    use cc_lb_core::Clock as _;
+    let clock = cc_lb_core::SystemClock;
+    clock
+        .now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()

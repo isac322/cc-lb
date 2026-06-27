@@ -83,11 +83,9 @@ impl Harness {
         let key = [26; 32];
         let storage_path = dir.path().join("round-robin.sqlite");
         let database_url = format!("sqlite://{}", storage_path.display());
-        let storage = cc_lb_storage_sqlite::open_sqlite(
-            &database_url,
-            Arc::new(cc_lb_core::SystemClock),
-        )
-        .await?;
+        let storage =
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+                .await?;
         storage.initialize(BackendKind::Sqlite).await?;
         let storage = Arc::new(storage);
         let aead = Arc::new(AeadService::from_master_key(key));
@@ -117,7 +115,10 @@ impl Harness {
             audit: Some(storage.clone()),
             plugin_registry_repo: None,
         });
-        let runtime = Arc::new(cc_lb_runtime_extism::ExtismRuntime::new());
+        let runtime = Arc::new(cc_lb_runtime_extism::ExtismRuntime::with_config(
+            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+            Arc::new(cc_lb_core::SystemClock),
+        ));
         let oauth_cfg = Arc::new(AnthropicOAuthConfig::default());
         let initial_view = rebuild_test_view(
             &stores,
@@ -691,7 +692,11 @@ fn repo_root() -> PathBuf {
 }
 
 fn now_secs() -> u64 {
-    cc_lb_core::Clock::now(&cc_lb_core::SystemClock)
+    use cc_lb_core::Clock as _;
+
+    let clock = cc_lb_core::SystemClock;
+    clock
+        .now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()

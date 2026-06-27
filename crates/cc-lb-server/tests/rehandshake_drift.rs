@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
-use std::time::{UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use anyhow::Result;
 use cc_lb_plugin_wire::augmented_metadata::AugmentedMetadata;
@@ -280,8 +280,11 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 }
 
 fn unix_now() -> Result<i64> {
+    use cc_lb_core::Clock as _;
+
+    let clock = cc_lb_core::SystemClock;
     Ok(i64::try_from(
-        cc_lb_core::Clock::now(&cc_lb_core::SystemClock).duration_since(UNIX_EPOCH)?.as_secs(),
+        clock.now().duration_since(UNIX_EPOCH)?.as_secs(),
     )?)
 }
 

@@ -1,9 +1,10 @@
 //! Wire-compat snapshot: v1 router snapshots are no longer accepted by runtime-extism.
 
+mod common;
+
 use std::collections::BTreeMap;
 
 use cc_lb_plugin_api::{PluginManifest, PluginRuntime, RuntimeError};
-use cc_lb_runtime_extism::ExtismRuntime;
 use serde_json::json;
 
 #[test]
@@ -21,7 +22,7 @@ fn wire_compat_round_robin_v1_router_snapshot_is_rejected() {
         metadata: BTreeMap::new(),
     };
 
-    let error = match ExtismRuntime::new().instantiate_router(&manifest) {
+    let error = match common::runtime().instantiate_router(&manifest) {
         Ok(_) => panic!("v1/v2 router wire unexpectedly instantiated"),
         Err(error) => error,
     };

@@ -170,10 +170,12 @@ impl Fixture {
 }
 
 async fn run_preflight(fixture: &Fixture) -> PreflightReport {
+    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
     preflight::run_preflight(
         &fixture.stores,
         &LifecycleConfig::default(),
         fixture.data_dir.path(),
+        clock,
     )
     .await
     .unwrap()

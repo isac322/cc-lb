@@ -161,8 +161,11 @@ pub async fn dispatch_warmup_with_dialect(
         params.clock,
     );
     let refresh_handle: Arc<dyn LazyRefreshHandle> = params.lazy_refresher;
-    let factory_with_refresh =
-        AnthropicOAuthSignerFactoryWithLazyRefresh::new(factory, refresh_handle, params.upstream.id);
+    let factory_with_refresh = AnthropicOAuthSignerFactoryWithLazyRefresh::new(
+        factory,
+        refresh_handle,
+        params.upstream.id,
+    );
     let signer = factory_with_refresh
         .build(&upstream_api)
         .await

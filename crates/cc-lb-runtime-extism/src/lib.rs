@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use cc_lb_core::clock::{ClockHandle, SystemClock};
+use cc_lb_core::clock::ClockHandle;
 #[allow(deprecated)]
 use cc_lb_plugin_api::RouterPlugin;
 use cc_lb_plugin_api::{
@@ -143,25 +143,22 @@ pub struct ExtismRuntime {
 }
 
 impl ExtismRuntime {
-    pub fn new() -> Self {
-        Self::with_config(ExtismRuntimeConfig::default())
-    }
-
-    pub fn with_config(config: ExtismRuntimeConfig) -> Self {
+    pub fn with_config(config: ExtismRuntimeConfig, clock: ClockHandle) -> Self {
         Self {
             config,
             manifests: RwLock::new(HashMap::new()),
             instances: RwLock::new(HashMap::new()),
             host_state: Arc::new(HostState::new()),
-            clock: Arc::new(SystemClock),
+            clock,
         }
     }
 
     pub fn with_manifests(
         manifests: impl IntoIterator<Item = PluginManifest>,
         config: ExtismRuntimeConfig,
+        clock: ClockHandle,
     ) -> Result<Self, RuntimeError> {
-        let runtime = Self::with_config(config);
+        let runtime = Self::with_config(config, clock);
         for manifest in manifests {
             runtime.register_slot(&manifest)?;
         }
@@ -401,12 +398,6 @@ pub struct StagedSlot {
     key: SlotKey,
     entry: PluginEntry,
     slot: Arc<PluginSlot>,
-}
-
-impl Default for ExtismRuntime {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 fn router_wire_removed_error() -> RuntimeError {
@@ -722,6 +713,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
 
+    use cc_lb_core::SystemClock;
     use cc_lb_plugin_api::PluginManifest;
     use serde_json::json;
 
@@ -733,7 +725,7 @@ mod tests {
         #[test]
         fn wire_version_v1_default_for_unmarked_plugin() {
             let fixture = wasm_manifest("wire-version-default", noroute_module());
-            let runtime = ExtismRuntime::new();
+            let runtime = runtime();
 
             let slot = runtime
                 .register_slot(&fixture.manifest)
@@ -750,7 +742,7 @@ mod tests {
         fn wire_version_v2_for_marked_plugin() {
             let mut fixture = wasm_manifest("wire-version-v2", noroute_module());
             fixture.manifest.wire_version = Some(WIRE_VERSION_V2);
-            let runtime = ExtismRuntime::new();
+            let runtime = runtime();
 
             let slot = runtime
                 .register_slot(&fixture.manifest)
@@ -767,7 +759,7 @@ mod tests {
         fn wire_version_v3_for_marked_plugin() {
             let mut fixture = wasm_manifest("wire-version-v3", noroute_module());
             fixture.manifest.wire_version = Some(WIRE_VERSION_V3);
-            let runtime = ExtismRuntime::new();
+            let runtime = runtime();
 
             let slot = runtime
                 .register_slot(&fixture.manifest)
@@ -784,7 +776,7 @@ mod tests {
         fn wire_version_unknown_falls_back_to_v1() {
             let mut fixture = wasm_manifest("wire-version-unknown", noroute_module());
             fixture.manifest.wire_version = Some(99);
-            let runtime = ExtismRuntime::new();
+            let runtime = runtime();
 
             let slot = runtime
                 .register_slot(&fixture.manifest)
@@ -801,7 +793,7 @@ mod tests {
     #[test]
     fn slots_with_same_plugin_name_and_different_principals_coexist() {
         let fixture = wasm_manifest("shape", noroute_module());
-        let runtime = ExtismRuntime::new();
+        let runtime = runtime();
         let alice_key = SlotKey::new("alice", "shape");
         let bob_key = SlotKey::new("bob", "shape");
 
@@ -825,7 +817,7 @@ mod tests {
     #[test]
     fn instantiate_filter_for_stages_without_touching_live_maps() {
         let fixture = wasm_manifest("filter", filter_module());
-        let runtime = ExtismRuntime::new();
+        let runtime = runtime();
 
         let (_handle, staged) = runtime
             .instantiate_filter_for(
@@ -857,7 +849,7 @@ mod tests {
     #[test]
     fn commit_staged_registers_both_principal_and_global_in_one_batch() {
         let fixture = wasm_manifest("filter", filter_module());
-        let runtime = ExtismRuntime::new();
+        let runtime = runtime();
 
         let (_global_handle, global_staged) = runtime
             .instantiate_filter_global(
@@ -896,7 +888,7 @@ mod tests {
     #[test]
     fn instantiate_router_for_returns_removed_error_without_staging() {
         let fixture = wasm_manifest("router", router_module());
-        let runtime = ExtismRuntime::new();
+        let runtime = runtime();
 
         let err = match runtime.instantiate_router_for("alice", "router", &fixture.manifest) {
             Ok(_) => panic!("router wire v1/v2 unexpectedly staged"),
@@ -916,7 +908,7 @@ mod tests {
     #[test]
     fn evict_slot_removes_committed_entry() {
         let fixture = wasm_manifest("filter", filter_module());
-        let runtime = ExtismRuntime::new();
+        let runtime = runtime();
         let (_handle, staged) = runtime
             .instantiate_filter_for(
                 "alice",
@@ -939,7 +931,7 @@ mod tests {
     #[test]
     fn instantiate_observability_for_stages_observe_export_check() {
         let fixture = wasm_manifest("hook", observe_module());
-        let runtime = ExtismRuntime::new();
+        let runtime = runtime();
 
         let (_handle, staged) = runtime
             .instantiate_observability_for("alice", "alice-hook", &fixture.manifest)
@@ -962,6 +954,10 @@ mod tests {
 
     fn filter_module() -> &'static str {
         r#"(module (func (export "filter") (result i32) (i32.const 0)))"#
+    }
+
+    fn runtime() -> ExtismRuntime {
+        ExtismRuntime::with_config(ExtismRuntimeConfig::default(), Arc::new(SystemClock))
     }
 
     struct WasmManifestFixture {

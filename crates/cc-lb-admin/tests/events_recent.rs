@@ -2,6 +2,7 @@ mod config_admin_common;
 
 use axum::http::StatusCode;
 use cc_lb_config::Config;
+use cc_lb_core::Clock as _;
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use config_admin_common::{app, authed_bytes, authed_json, temp_storage, test_state};
 use uuid::Uuid;
@@ -110,5 +111,6 @@ fn request_event(
 }
 
 fn current_unix_secs() -> u64 {
-    cc_lb_core::clock::unix_secs(cc_lb_core::Clock::now(&cc_lb_core::SystemClock))
+    let clock = cc_lb_core::SystemClock;
+    cc_lb_core::clock::unix_secs(clock.now())
 }

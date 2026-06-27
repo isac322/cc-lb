@@ -18,8 +18,8 @@ async fn scheduler_factory_sqlite_happy_path_sets_up_tables_and_partial_index() 
         &SchedulerConfig::default(),
         Arc::new(cc_lb_core::SystemClock),
     )
-        .await
-        .expect("sqlite scheduler opens");
+    .await
+    .expect("sqlite scheduler opens");
 
     #[allow(clippy::infallible_destructuring_match)]
     let sqlite = match opened.backend {
@@ -61,8 +61,8 @@ async fn scheduler_factory_sqlite_bad_path_returns_connection_failed() {
         &SchedulerConfig::default(),
         Arc::new(cc_lb_core::SystemClock),
     )
-        .await
-        .expect_err("missing parent cannot open sqlite database");
+    .await
+    .expect_err("missing parent cannot open sqlite database");
 
     assert!(matches!(
         error,
@@ -107,8 +107,8 @@ async fn scheduler_factory_postgres_happy_path_sets_up_tables_index_and_leader()
         &SchedulerConfig::default(),
         Arc::new(cc_lb_core::SystemClock),
     )
-        .await
-        .expect("postgres scheduler opens");
+    .await
+    .expect("postgres scheduler opens");
     let SchedulerBackend::Postgres(postgres) = opened.backend else {
         panic!("expected postgres backend")
     };
@@ -148,8 +148,8 @@ async fn scheduler_factory_postgres_feature_disabled_returns_error() {
         &SchedulerConfig::default(),
         Arc::new(cc_lb_core::SystemClock),
     )
-        .await
-        .expect_err("postgres feature is disabled");
+    .await
+    .expect_err("postgres feature is disabled");
 
     assert!(matches!(
         error,
@@ -169,8 +169,8 @@ async fn scheduler_factory_sqlite_feature_disabled_returns_error() {
         &SchedulerConfig::default(),
         Arc::new(cc_lb_core::SystemClock),
     )
-        .await
-        .expect_err("sqlite feature is disabled");
+    .await
+    .expect_err("sqlite feature is disabled");
 
     assert!(matches!(
         error,
@@ -191,8 +191,8 @@ async fn scheduler_factory_postgres_bad_url_returns_connection_failed() {
         &SchedulerConfig::default(),
         Arc::new(cc_lb_core::SystemClock),
     )
-        .await
-        .expect_err("invalid postgres URL cannot open");
+    .await
+    .expect_err("invalid postgres URL cannot open");
 
     assert!(matches!(
         error,
