@@ -22,7 +22,8 @@ use crate::scenarios::principal_store::{run_all, stale_revision_conflict};
 
 #[tokio::test]
 async fn principal_store_sqlite() -> Result<()> {
-    run_all(Arc::new(SqlitePrincipalBackend)).await
+    let clock: ClockHandle = Arc::new(SystemClock);
+    run_all(Arc::new(SqlitePrincipalBackend { clock })).await
 }
 
 #[tokio::test]
@@ -32,12 +33,14 @@ async fn principal_store_postgres() -> Result<()> {
         eprintln!("skip: CI_POSTGRES_URL not set");
         return Ok(());
     };
-    run_all(Arc::new(PostgresPrincipalBackend { url })).await
+    let clock: ClockHandle = Arc::new(SystemClock);
+    run_all(Arc::new(PostgresPrincipalBackend { url, clock })).await
 }
 
 #[tokio::test]
 async fn principal_store_stale_revision_conflict_sqlite() -> Result<()> {
-    stale_revision_conflict(Arc::new(SqlitePrincipalBackend)).await
+    let clock: ClockHandle = Arc::new(SystemClock);
+    stale_revision_conflict(Arc::new(SqlitePrincipalBackend { clock })).await
 }
 
 #[tokio::test]
@@ -47,10 +50,13 @@ async fn principal_store_stale_revision_conflict_postgres() -> Result<()> {
         eprintln!("skip: CI_POSTGRES_URL not set");
         return Ok(());
     };
-    stale_revision_conflict(Arc::new(PostgresPrincipalBackend { url })).await
+    let clock: ClockHandle = Arc::new(SystemClock);
+    stale_revision_conflict(Arc::new(PostgresPrincipalBackend { url, clock })).await
 }
 
-struct SqlitePrincipalBackend;
+struct SqlitePrincipalBackend {
+    clock: ClockHandle,
+}
 
 struct SqliteFixture {
     _dir: tempfile::TempDir,
@@ -73,7 +79,7 @@ impl ConformanceBackend for SqlitePrincipalBackend {
     }
 
     async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Storage> {
-        let storage = open_sqlite(&fixture.database_url, system_clock()).await?;
+        let storage = open_sqlite(&fixture.database_url, self.clock.clone()).await?;
         storage.initialize(BackendKind::Sqlite).await?;
         Ok(storage)
     }
@@ -90,6 +96,7 @@ impl ConformanceBackend for SqlitePrincipalBackend {
 #[cfg(feature = "postgres")]
 struct PostgresPrincipalBackend {
     url: String,
+    clock: ClockHandle,
 }
 
 #[cfg(feature = "postgres")]
@@ -133,7 +140,10 @@ impl ConformanceBackend for PostgresPrincipalBackend {
     }
 
     async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Storage> {
-        Ok(PostgresStorage::new(fixture.pool.clone(), system_clock()))
+        Ok(PostgresStorage::new(
+            fixture.pool.clone(),
+            self.clock.clone(),
+        ))
     }
 
     async fn teardown(&self, fixture: Self::Fixture) -> Result<()> {
@@ -160,10 +170,6 @@ impl ConformanceBackend for PostgresPrincipalBackend {
 #[cfg(feature = "postgres")]
 fn postgres_url() -> Option<String> {
     std::env::var("CI_POSTGRES_URL").ok()
-}
-
-fn system_clock() -> ClockHandle {
-    Arc::new(SystemClock)
 }
 
 #[cfg(feature = "postgres")]
