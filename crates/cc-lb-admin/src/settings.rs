@@ -198,7 +198,7 @@ pub async fn get_draft(
     clock: &dyn cc_lb_core::Clock,
 ) -> Result<ConfigDraftResponse, SettingsError> {
     let state = storage.get_config_draft().await?;
-    if invalid_draft_expired(&state, now_unix_secs(clock)) {
+    if invalid_draft_expired(&state, cc_lb_core::clock::unix_secs(clock.now())) {
         let revision = state.revision;
         let _ = storage
             .put_config_draft(ConfigDraftState::default(), revision)
@@ -497,10 +497,6 @@ fn invalid_draft_expired(state: &ConfigDraftState, now_unix_secs: u64) -> bool {
         && state
             .saved_at_unix_secs
             .is_some_and(|saved_at| now_unix_secs.saturating_sub(saved_at) > INVALID_DRAFT_TTL_SECS)
-}
-
-fn now_unix_secs(clock: &dyn cc_lb_core::Clock) -> u64 {
-    cc_lb_core::clock::unix_secs(clock.now())
 }
 
 fn deserialize_and_validate_config(value: Value) -> Result<Config, String> {

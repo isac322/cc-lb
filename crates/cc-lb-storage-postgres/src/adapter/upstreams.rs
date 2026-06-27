@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use cc_lb_aead::EncryptedOAuthTokens;
-use cc_lb_core::{Clock, unix_secs};
+use cc_lb_core::unix_secs;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
     StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
@@ -144,7 +144,7 @@ impl UpstreamStore for PostgresStorage {
             id,
             UpstreamStatusUpdate {
                 last_apply_error: Some(error),
-                last_apply_at_unix_secs: Some(Some(now_unix_secs(&*self.clock))),
+                last_apply_at_unix_secs: Some(Some(unix_secs(self.clock.now()))),
                 ..UpstreamStatusUpdate::default()
             },
         )
@@ -799,8 +799,4 @@ fn parse_kind(value: String) -> StorageResult<UpstreamKind> {
             message: format!("invalid upstream kind {other}"),
         }),
     }
-}
-
-fn now_unix_secs(clock: &dyn Clock) -> u64 {
-    unix_secs(clock.now())
 }

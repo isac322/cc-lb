@@ -29,7 +29,7 @@ impl ManagedKeyStore for SqliteStorage {
 
         let record = StoredApiKeyRecord {
             label: params.label,
-            issued_at_unix_secs: now_unix_secs(self.clock()),
+            issued_at_unix_secs: unix_secs(self.clock().now()),
             revoked_at_unix_secs: None,
             key_hash_b64: base64_url_no_pad(&params.verify_hash),
             verify_hash: params.verify_hash,
@@ -130,7 +130,7 @@ impl ManagedKeyStore for SqliteStorage {
 
         record.status = KeyStatus::Revoked;
         if record.revoked_at_unix_secs.is_none() {
-            record.revoked_at_unix_secs = Some(now_unix_secs(self.clock()));
+            record.revoked_at_unix_secs = Some(unix_secs(self.clock().now()));
         }
         record.index_hash = [0; 32];
         record.verify_hash = [0; 32];
@@ -321,7 +321,7 @@ fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation, clo
     }
     if let Some(status) = mutation.status {
         if status == KeyStatus::Revoked && record.revoked_at_unix_secs.is_none() {
-            record.revoked_at_unix_secs = Some(now_unix_secs(clock));
+            record.revoked_at_unix_secs = Some(unix_secs(clock.now()));
         }
         record.status = status;
     }
@@ -427,12 +427,8 @@ fn base64_url_no_pad(value: &[u8]) -> String {
     out
 }
 
-fn now_unix_secs(clock: &dyn Clock) -> u64 {
-    unix_secs(clock.now())
-}
-
 fn now_i64(clock: &dyn Clock) -> StorageResult<i64> {
-    u64_to_i64(now_unix_secs(clock), "now_unix_secs")
+    u64_to_i64(unix_secs(clock.now()), "now_unix_secs")
 }
 
 fn map_managed_sqlx_error(error: sqlx::Error) -> StorageError {

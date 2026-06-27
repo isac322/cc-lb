@@ -124,7 +124,7 @@ pub(crate) async fn complete_pkce_flow(
         &state_token,
         &handshake.verifier,
         &handshake.redirect_uri,
-        now_epoch_secs(clock),
+        cc_lb_core::clock::unix_secs(clock.now()),
     )
     .await
 }
@@ -400,8 +400,4 @@ fn form_body(
         "state": state_token,
     });
     SecretString::new(payload.to_string().into_boxed_str())
-}
-
-fn now_epoch_secs(clock: &dyn Clock) -> u64 {
-    cc_lb_core::clock::unix_secs(clock.now())
 }

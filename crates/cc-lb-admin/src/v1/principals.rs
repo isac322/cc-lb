@@ -5,7 +5,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_core::{AuditEntry, AuditPayload, Clock};
+use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_plugin_api::TerminalStrategy;
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::{
@@ -137,7 +137,13 @@ async fn create_principal(
         default_limits: body.default_limits,
     };
 
-    match PrincipalStore::create(storage, input, unix_now_secs(&*state.clock)).await {
+    match PrincipalStore::create(
+        storage,
+        input,
+        cc_lb_core::clock::unix_secs(state.clock.now()),
+    )
+    .await
+    {
         Ok(record) => {
             emit_audit(
                 &state,
@@ -274,7 +280,7 @@ async fn set_enabled(
         id,
         expected_revision,
         enabled,
-        unix_now_secs(&*state.clock),
+        cc_lb_core::clock::unix_secs(state.clock.now()),
     )
     .await
     {
@@ -310,8 +316,13 @@ async fn delete_principal(
         return error_response(StatusCode::BAD_REQUEST, "invalid_principal_id");
     };
 
-    match PrincipalStore::soft_delete(storage, id, expected_revision, unix_now_secs(&*state.clock))
-        .await
+    match PrincipalStore::soft_delete(
+        storage,
+        id,
+        expected_revision,
+        cc_lb_core::clock::unix_secs(state.clock.now()),
+    )
+    .await
     {
         Ok(Some(record)) => {
             emit_audit(
@@ -424,7 +435,7 @@ async fn update_router_terminal(
             router_terminal_strategy: Some(strategy),
             ..PrincipalUpdate::default()
         },
-        unix_now_secs(&*state.clock),
+        cc_lb_core::clock::unix_secs(state.clock.now()),
     )
     .await
     {
@@ -464,7 +475,7 @@ async fn update_principal_record(
         id,
         expected_revision,
         update,
-        unix_now_secs(&*state.clock),
+        cc_lb_core::clock::unix_secs(state.clock.now()),
     )
     .await
     {
@@ -655,7 +666,7 @@ fn emit_audit(state: &AdminState, payload: AuditPayload) {
     };
     let principal_id = principal_id_for_audit(&payload);
     let action = payload.to_string();
-    let ts = unix_now_secs(&*state.clock);
+    let ts = cc_lb_core::clock::unix_secs(state.clock.now());
     let mut entry: AuditEntry = payload.into();
     entry.ts = ts;
     entry.request_id = format!("admin-v1-principal-{principal_id}-{ts}");
@@ -682,8 +693,4 @@ fn principal_kind_name(kind: PrincipalKind) -> &'static str {
         PrincipalKind::Human => "human",
         PrincipalKind::Admin => "admin",
     }
-}
-
-fn unix_now_secs(clock: &dyn Clock) -> u64 {
-    cc_lb_core::clock::unix_secs(clock.now())
 }

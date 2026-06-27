@@ -478,7 +478,7 @@ impl LazyRefreshHandle for LazyRefresher {
                 upstream_id,
                 &holder,
                 expires_at_unix_secs,
-                now_unix_secs(&*self.clock),
+                unix_secs(self.clock.now()),
             )
             .await
             .map_err(lazy_error)?;
@@ -580,7 +580,7 @@ impl LazyRefreshHandle for LazyRefresher {
                 upstream_id,
                 &holder,
                 expires_at_unix_secs,
-                now_unix_secs(&*self.clock),
+                unix_secs(self.clock.now()),
             )
             .await
             .map_err(lazy_error)?;
@@ -649,7 +649,7 @@ async fn refresh_flow(
     let token = request_refresh(http, oauth_cfg, cancel, &previous.refresh_token).await;
     match token {
         Ok(response) => {
-            let now = now_unix_secs(clock);
+            let now = unix_secs(clock.now());
             let scopes = response
                 .scope
                 .as_deref()
@@ -793,7 +793,7 @@ async fn emit_audit(
     let Some(audit) = audit else {
         return;
     };
-    let now = now_unix_secs(clock);
+    let now = unix_secs(clock.now());
     let entry = AuditEntry {
         ts: now,
         request_id: format!("oauth-refresh-{}-{now}", upstream.id),
@@ -878,10 +878,6 @@ fn scheduler_claim_error(error: cc_lb_scheduler::error::SchedulerError) -> Stora
     StorageError::Unavailable {
         message: error.to_string(),
     }
-}
-
-fn now_unix_secs(clock: &dyn Clock) -> u64 {
-    unix_secs(clock.now())
 }
 
 #[cfg(test)]

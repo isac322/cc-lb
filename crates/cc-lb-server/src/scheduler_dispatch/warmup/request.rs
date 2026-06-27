@@ -1,3 +1,4 @@
+use cc_lb_core::clock::unix_secs;
 #[allow(deprecated)]
 use cc_lb_core::subscription_quota_events::unified_observation_to_record;
 use cc_lb_core::{UnifiedQuotaObservation, parse_anthropic_unified_headers};
@@ -8,7 +9,7 @@ use http::HeaderMap;
 
 use crate::scheduler_dispatch::http::{decrypt_bundle, upstream_base_url};
 use crate::scheduler_dispatch::storage::storage_scheduler_error;
-use crate::scheduler_dispatch::time::{now_unix_millis, now_unix_secs};
+use crate::scheduler_dispatch::time::now_unix_millis;
 use crate::warmup::request::WarmupRequestAttempt;
 use crate::warmup::{WarmupAbandonReason, dispatch_warmup_attempt};
 
@@ -43,7 +44,7 @@ impl SchedulerDispatch {
         if bundle
             .expires_at_unix_secs
             .saturating_sub(TOKEN_REFRESH_LOOKAHEAD_SECS)
-            > now_unix_secs(&*self.clock)
+            > unix_secs(self.clock.now())
         {
             return Ok(());
         }

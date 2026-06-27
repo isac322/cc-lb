@@ -14,7 +14,7 @@ use serde::Serialize;
 use crate::api_keys::concurrent_guard::{KeyConcurrencyGuard, KeyConcurrencyManager};
 use crate::api_keys::principal_view::{PrincipalStatus, PrincipalView};
 use crate::api_keys::types::{Limit, LimitKind};
-use crate::clock::{Clock, ClockHandle, unix_secs};
+use crate::clock::{ClockHandle, unix_secs};
 
 impl Hash for LimitKind {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -177,7 +177,7 @@ impl LimitEngine {
         max_input_estimate: i64,
         cost_estimate_micros: Option<i64>,
     ) -> Result<Reservation, RejectReason> {
-        let now_sec = now_sec(&*self.inner.clock);
+        let now_sec = unix_secs(self.inner.clock.now());
         let key_id = key_id_for(record);
 
         match view.principal_status(principal_id) {
@@ -333,7 +333,7 @@ impl LimitEngine {
                 actual_input,
                 actual_output,
                 actual_cost_micros,
-                now_sec(&*self.inner.clock),
+                unix_secs(self.inner.clock.now()),
             );
         }
         reservation.refund_done = true;
@@ -350,7 +350,7 @@ impl LimitEngine {
             return Vec::new();
         };
 
-        let now_sec = now_sec(&*self.inner.clock);
+        let now_sec = unix_secs(self.inner.clock.now());
         let mut headers = Vec::new();
         let mut emitted_requests = false;
         let mut emitted_tokens = false;
@@ -391,7 +391,7 @@ impl LimitEngine {
         principal_id: &str,
         identity_filter: IdentityFilter,
     ) -> PrincipalLimitsSnapshot {
-        let now_sec = now_sec(&*self.inner.clock);
+        let now_sec = unix_secs(self.inner.clock.now());
         let defaults = view.default_limits(principal_id).to_vec();
         let effective_limits = self.inner.effective_limits.read().clone();
         let mut identities = Vec::new();
@@ -512,7 +512,7 @@ impl LimitEngine {
             .copied()
             .max()
             .unwrap_or(0);
-        let now = now_sec(&*self.inner.clock);
+        let now = unix_secs(self.inner.clock.now());
         let events = storage
             .query_request_events(
                 now.saturating_sub(max_window),
@@ -667,7 +667,7 @@ impl Drop for Reservation {
                     amount.kind,
                     amount.window_sec,
                     -amount.amount,
-                    now_sec(&*engine.clock),
+                    unix_secs(engine.clock.now()),
                 );
             }
         }
@@ -896,10 +896,6 @@ fn key_id_for(record: &StoredApiKeyRecord) -> String {
     record.key_hash_b64.clone()
 }
 
-fn now_sec(clock: &dyn Clock) -> u64 {
-    unix_secs(clock.now())
-}
-
 fn unix_to_iso8601(timestamp: u64) -> String {
     let days = (timestamp / 86_400) as i64;
     let seconds_of_day = timestamp % 86_400;
@@ -940,7 +936,7 @@ mod tests {
             Arc::new(KeyConcurrencyManager::new()),
             Arc::new(crate::clock::SystemClock),
         );
-        let observed_at_unix_secs = now_sec(&*engine.inner.clock);
+        let observed_at_unix_secs = unix_secs(engine.inner.clock.now());
 
         engine.record_principal_limit_state(&PrincipalLimitState {
             principal_id: "principal-a".to_owned(),
@@ -982,7 +978,7 @@ mod tests {
             Arc::new(KeyConcurrencyManager::new()),
             Arc::new(crate::clock::SystemClock),
         );
-        let observed_at_unix_secs = now_sec(&*engine.inner.clock);
+        let observed_at_unix_secs = unix_secs(engine.inner.clock.now());
         let event = RequestEvent {
             key_id: Some("key-a".to_owned()),
             ts: observed_at_unix_secs,

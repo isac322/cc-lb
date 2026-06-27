@@ -22,13 +22,12 @@ where
     E: CompatEtagRepository + Sync,
     K: AnthropicCompatibilityKvStore + ?Sized,
 {
-    let now_unix_secs = current_unix_secs(clock)?;
     handle_anthropic_compat_refresh_job(
         job,
         etags,
         compatibility_kv,
         |compatibility_key, stored_etag| fetch_compat_key(compatibility_key, stored_etag, cancel),
-        now_unix_secs,
+        unix_secs(clock.now()),
     )
     .await
 }
@@ -46,8 +45,4 @@ pub async fn fetch_compat_key(
         etag: None,
         source_url: Some(outcome.source_url),
     })
-}
-
-pub fn current_unix_secs(clock: &dyn Clock) -> Result<u64> {
-    Ok(unix_secs(clock.now()))
 }

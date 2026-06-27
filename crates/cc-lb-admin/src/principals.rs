@@ -276,7 +276,7 @@ async fn build_principal_usage(
     let step = parse_principal_usage_step(query.step.as_deref(), range)?;
     validate_principal_usage_step(range, step)?;
 
-    let now_unix_secs = current_unix_secs(&*state.clock);
+    let now_unix_secs = cc_lb_core::clock::unix_secs(state.clock.now());
     let (window_start_unix_secs, window_end_unix_secs) =
         principal_usage_window(range, step, now_unix_secs);
     let rollups = storage
@@ -483,10 +483,6 @@ fn principal_usage_error_response(error: PrincipalUsageError) -> Response {
         }
     };
     (status, Json(serde_json::json!({ "error": error_code }))).into_response()
-}
-
-fn current_unix_secs(clock: &dyn Clock) -> u64 {
-    cc_lb_core::clock::unix_secs(clock.now())
 }
 
 impl PrincipalUsageRange {

@@ -16,7 +16,7 @@ use cc_lb_core::api_keys::principal_view::{
 };
 use cc_lb_core::builtin_filters::cache_affinity::CacheAffinityFilter;
 use cc_lb_core::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_core::clock::{Clock, unix_secs};
+use cc_lb_core::clock::unix_secs;
 use cc_lb_core::{
     ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
     UpstreamStatusEntry, UpstreamStatusSnapshot, make_default_dispatcher,
@@ -240,14 +240,14 @@ pub async fn build_dynamic_view(
         .await?;
     let upstream_rate_limit_cache = Arc::new(RwLock::new(UpstreamRateLimitCache {
         snapshots: group_rate_limit_observations(upstream_rate_limit_records),
-        updated_at_unix_secs: unix_now_secs(&*clock),
+        updated_at_unix_secs: unix_secs(clock.now()),
     }));
     let principals = list_principals(stores).await?;
     let mut staged = Vec::new();
     let principal_chains =
         build_principal_chains(stores, runtime, data_dir, &principals, &mut staged).await?;
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
-    let now = unix_now_secs(&*clock);
+    let now = unix_secs(clock.now());
     let statuses = apply_upstreams(stores, &upstreams, oauth_anthropic, now).await?;
     let revision_hash = collect_revision_hash(stores).await?;
     let global_router = Arc::new(FirstCandidateRouter);
@@ -261,7 +261,7 @@ pub async fn build_dynamic_view(
     let dispatcher = make_default_dispatcher(50);
     let snapshot = Arc::new(UpstreamStatusSnapshot {
         entries: statuses,
-        applied_at_unix_secs: unix_now_secs(&*clock),
+        applied_at_unix_secs: unix_secs(clock.now()),
         revision_hash,
     });
 
@@ -917,10 +917,6 @@ fn upstream_matches(record: &UpstreamRecord, upstream: &Upstream) -> bool {
     )
 }
 
-fn unix_now_secs(clock: &dyn Clock) -> u64 {
-    unix_secs(clock.now())
-}
-
 fn hex_sha256(sha256: [u8; 32]) -> String {
     let mut output = String::with_capacity(64);
     for byte in sha256 {
@@ -934,7 +930,7 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
 mod tests {
     use std::collections::BTreeSet;
 
-    use cc_lb_core::clock::TestClock;
+    use cc_lb_core::clock::{Clock, TestClock};
     use cc_lb_plugin_api::types::TtlClass as PluginTtlClass;
     use cc_lb_storage_api::{
         BackendKind, MetaStore, PromptCacheObservationRecord, TtlClass as StorageTtlClass,
@@ -1140,7 +1136,7 @@ mod tests {
                     ("hash-b".to_owned(), PluginTtlClass::Ephemeral5m),
                     ("hash-c".to_owned(), PluginTtlClass::Ephemeral5m),
                 ],
-                unix_now_secs(&clock),
+                unix_secs(clock.now()),
             );
         let prefix_hashes = snapshot
             .into_iter()
@@ -1228,7 +1224,7 @@ mod tests {
                 upstream.id,
                 MODEL,
                 &[("hash-a".to_owned(), PluginTtlClass::Ephemeral5m)],
-                unix_now_secs(&clock),
+                unix_secs(clock.now()),
             );
         assert!(snapshot.is_empty());
     }

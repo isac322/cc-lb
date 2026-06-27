@@ -5,9 +5,9 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use cc_lb_core::AuditEntry;
 use cc_lb_core::api_keys::key_store::CreateParams;
 use cc_lb_core::api_keys::secret;
-use cc_lb_core::{AuditEntry, Clock};
 use cc_lb_storage_api::types::{KeyStatus, PrincipalKindLite, UpstreamKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -259,7 +259,7 @@ fn emit_key_audit(state: &AdminState, principal_id: &str, key_id: &str, action: 
     let Some(audit_sink) = &state.audit_sink else {
         return;
     };
-    let ts = unix_now_secs(&*state.clock);
+    let ts = cc_lb_core::clock::unix_secs(state.clock.now());
     let _ = audit_sink.try_enqueue(AuditEntry {
         ts,
         request_id: format!("admin-v1-key-{key_id}-{ts}"),
@@ -277,8 +277,4 @@ fn emit_key_audit(state: &AdminState, principal_id: &str, key_id: &str, action: 
         actor: Some("admin".to_owned()),
         ..AuditEntry::default()
     });
-}
-
-fn unix_now_secs(clock: &dyn Clock) -> u64 {
-    cc_lb_core::clock::unix_secs(clock.now())
 }

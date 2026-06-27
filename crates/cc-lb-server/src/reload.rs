@@ -7,7 +7,7 @@ use arc_swap::ArcSwap;
 use cc_lb_admin::{DynamicViewRebinder, LastReloadStatus, ReloadOutcome};
 use cc_lb_config::{Config, ConfigError, RestartRequiredField, StorageConfig};
 use cc_lb_core::DynamicViewHolder;
-use cc_lb_core::clock::{Clock, ClockHandle, unix_secs};
+use cc_lb_core::clock::{ClockHandle, unix_secs};
 use notify::{Event, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
@@ -192,7 +192,7 @@ impl ConfigWatcher {
     fn record_success(&self, config_path: Option<String>) {
         self.last_reload_status
             .store(Arc::new(Some(LastReloadStatus {
-                timestamp_unix_secs: unix_timestamp_secs(&*self.clock),
+                timestamp_unix_secs: unix_secs(self.clock.now()),
                 outcome: ReloadOutcome::Success,
                 config_path,
             })));
@@ -216,7 +216,7 @@ impl ConfigWatcher {
         );
         self.last_reload_status
             .store(Arc::new(Some(LastReloadStatus {
-                timestamp_unix_secs: unix_timestamp_secs(&*self.clock),
+                timestamp_unix_secs: unix_secs(self.clock.now()),
                 outcome: ReloadOutcome::Failure {
                     reason,
                     principal,
@@ -527,8 +527,4 @@ fn watch_dir_for(path: &Path) -> PathBuf {
         .filter(|parent| !parent.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn unix_timestamp_secs(clock: &dyn Clock) -> u64 {
-    unix_secs(clock.now())
 }

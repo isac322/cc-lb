@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_core::{Clock, ClockHandle, TestClock, unix_secs};
+use cc_lb_core::{ClockHandle, TestClock, unix_secs};
 use cc_lb_storage_api::upstream::{
     UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
     UpstreamUpdate,
@@ -25,7 +25,7 @@ impl UpstreamStore for MemoryUpstreamStore {
         if records.iter().any(|record| record.name == create.name) {
             return Err(conflict("upstream name already exists"));
         }
-        let now = now_unix_secs(&*self.clock);
+        let now = unix_secs(self.clock.now());
         let record = UpstreamRecord {
             id: Uuid::new_v4(),
             name: create.name,
@@ -245,7 +245,7 @@ impl UpstreamStore for MemoryUpstreamStore {
             id,
             UpstreamStatusUpdate {
                 last_apply_error: Some(error),
-                last_apply_at_unix_secs: Some(Some(now_unix_secs(&*self.clock))),
+                last_apply_at_unix_secs: Some(Some(unix_secs(self.clock.now()))),
                 ..UpstreamStatusUpdate::default()
             },
         )
@@ -254,7 +254,7 @@ impl UpstreamStore for MemoryUpstreamStore {
 
     async fn soft_delete(&self, id: Uuid, expected_revision: u64) -> StorageResult<()> {
         self.mutate(id, Some(expected_revision), |record| {
-            record.deleted_at_unix_secs = Some(now_unix_secs(&*self.clock));
+            record.deleted_at_unix_secs = Some(unix_secs(self.clock.now()));
             Ok(())
         })
         .await?;
@@ -280,7 +280,7 @@ impl UpstreamStore for MemoryUpstreamStore {
         }
         record.warmup_dialect_plugin = None;
         record.revision += 1;
-        record.updated_at_unix_secs = now_unix_secs(&*self.clock);
+        record.updated_at_unix_secs = unix_secs(self.clock.now());
         Ok(Some(record.clone()))
     }
 }
@@ -313,7 +313,7 @@ impl MemoryUpstreamStore {
             return Err(conflict("upstream name already exists"));
         }
         record.revision += 1;
-        record.updated_at_unix_secs = now_unix_secs(&*self.clock);
+        record.updated_at_unix_secs = unix_secs(self.clock.now());
         Ok(record.clone())
     }
 
@@ -589,8 +589,4 @@ fn conflict(message: impl Into<String>) -> StorageError {
     StorageError::Conflict {
         message: message.into(),
     }
-}
-
-fn now_unix_secs(clock: &dyn Clock) -> u64 {
-    unix_secs(clock.now())
 }

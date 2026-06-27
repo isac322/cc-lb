@@ -1,4 +1,5 @@
 use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
+use cc_lb_core::clock::unix_secs;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::{
@@ -13,7 +14,7 @@ use cc_lb_storage_api::{UpstreamRecord, UpstreamStore};
 
 use crate::scheduler_dispatch::http::{decrypt_bundle, fetch_usage, request_refresh};
 use crate::scheduler_dispatch::storage::{StorageHandle, storage_scheduler_error};
-use crate::scheduler_dispatch::time::{now_unix_millis, now_unix_secs};
+use crate::scheduler_dispatch::time::now_unix_millis;
 use crate::scheduler_dispatch::usage::observe_usage_body;
 
 use super::SchedulerDispatch;
@@ -31,7 +32,7 @@ impl SchedulerDispatch {
         OAuthRefreshJobHandler::new(StorageHandle::new(self.storage.clone()), replica_id)
             .handle(
                 job,
-                now_unix_secs(&*self.clock),
+                unix_secs(self.clock.now()),
                 |upstream| self.refresh_upstream(upstream),
                 |metadata_job| self.enqueue_metadata_refresh(metadata_job),
                 |upstream_id, expires_at_unix_secs| {
@@ -61,7 +62,7 @@ impl SchedulerDispatch {
         let updated = OAuthTokenBundle {
             access_token: response.access_token,
             refresh_token: response.refresh_token.unwrap_or(bundle.refresh_token),
-            expires_at_unix_secs: now_unix_secs(&*self.clock).saturating_add(response.expires_in),
+            expires_at_unix_secs: unix_secs(self.clock.now()).saturating_add(response.expires_in),
             scopes,
         };
         let encrypted_tokens =
@@ -115,7 +116,7 @@ impl SchedulerDispatch {
             return Ok(OAuthUsagePollObservation::Skip);
         }
         self.ensure_fresh_usage_token(&mut upstream).await?;
-        let observed_at_unix_secs = now_unix_secs(&*self.clock);
+        let observed_at_unix_secs = unix_secs(self.clock.now());
         let first_response = match self.fetch_usage_with_current_token(&upstream).await {
             FetchOutcome::Response(response) => response,
             FetchOutcome::Network => {
@@ -201,7 +202,7 @@ impl SchedulerDispatch {
         if bundle
             .expires_at_unix_secs
             .saturating_sub(TOKEN_REFRESH_LOOKAHEAD_SECS)
-            > now_unix_secs(&*self.clock)
+            > unix_secs(self.clock.now())
         {
             return Ok(());
         }

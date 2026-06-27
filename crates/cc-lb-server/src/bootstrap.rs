@@ -39,7 +39,7 @@ async fn seed_admin_if_absent(
         default_limits: vec![],
     };
 
-    let now = unix_now_secs(clock);
+    let now = unix_secs(clock.now());
 
     match store.get_by_name("admin").await {
         Ok(Some(_)) => Ok(()),
@@ -175,7 +175,7 @@ pub async fn apply_bootstrap(
             apply_plugin_chain(seeder, plugin_store, chain).await?;
         }
 
-        let timestamp = unix_now_secs(clock);
+        let timestamp = unix_secs(clock.now());
         let consumed_name = format!("bootstrap.toml.consumed-{}", timestamp);
         let consumed_path = data_dir.join(&consumed_name);
         fs::rename(&bootstrap_path, &consumed_path)?;
@@ -198,7 +198,7 @@ async fn apply_principal(
         return Ok(());
     }
 
-    let now = unix_now_secs(clock);
+    let now = unix_secs(clock.now());
     let input = PrincipalCreate {
         name: principal.name,
         kind: parse_principal_kind(principal.kind.as_deref()),
@@ -439,10 +439,6 @@ fn parse_plugin_slot(slot: &str) -> Option<PluginSlot> {
         "Shape" | "shape" => Some(PluginSlot::Shape),
         _ => None,
     }
-}
-
-fn unix_now_secs(clock: &dyn Clock) -> u64 {
-    unix_secs(clock.now())
 }
 
 fn parse_upstream_kind(

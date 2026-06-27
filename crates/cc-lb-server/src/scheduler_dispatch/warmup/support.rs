@@ -1,8 +1,7 @@
-use cc_lb_core::clock::Clock;
+use cc_lb_core::clock::{Clock, unix_secs};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_storage_api::WarmupAttemptReason;
 
-use crate::scheduler_dispatch::time::now_unix_secs;
 use crate::warmup::execute::WarmupAttemptExecutionResult;
 use crate::warmup::{WarmupAbandonReason, WarmupResult, classify_response};
 
@@ -88,6 +87,6 @@ pub(super) fn cycle_key_i64(cycle_key: u64) -> SchedulerResult<i64> {
 }
 
 pub(super) fn now_unix_secs_i64(clock: &dyn Clock) -> SchedulerResult<i64> {
-    i64::try_from(now_unix_secs(clock))
+    i64::try_from(unix_secs(clock.now()))
         .map_err(|_| SchedulerError::Job("current unix timestamp exceeds i64".to_owned()))
 }

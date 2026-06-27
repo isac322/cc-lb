@@ -13,9 +13,7 @@ use crate::state_stores::AnthropicCompatEtag;
 mod core_fetcher;
 mod etag_repository;
 
-pub use core_fetcher::{
-    current_unix_secs, fetch_compat_key, handle_anthropic_compat_refresh_job_with_core_fetcher,
-};
+pub use core_fetcher::{fetch_compat_key, handle_anthropic_compat_refresh_job_with_core_fetcher};
 pub use etag_repository::{CompatEtagRepository, CompatJobFuture};
 
 pub const COMPAT_REFRESH_RETRY_DELAY: Duration = Duration::from_secs(30);

@@ -963,7 +963,7 @@ impl Lifecycle {
             return;
         };
         let _ = audit_sink.try_enqueue(AuditEntry {
-            ts: unix_now_secs(&*self.clock),
+            ts: unix_secs(self.clock.now()),
             request_id: ctx.request_id.clone(),
             principal_id: subject.principal_id.clone(),
             route: ctx.path.clone(),
@@ -2810,10 +2810,6 @@ fn next_request_id() -> String {
     request_id.push_str("req_core_");
     let _ = write!(&mut request_id, "{id}");
     request_id
-}
-
-pub(crate) fn unix_now_secs(clock: &dyn Clock) -> u64 {
-    unix_secs(clock.now())
 }
 
 fn system_time_to_unix_secs(value: SystemTime) -> u64 {

@@ -65,7 +65,7 @@ async fn write_warmup_status_after_success(
     clock: &dyn Clock,
 ) {
     let status = UpstreamStatusUpdate {
-        last_warmup_at_unix_secs: Some(Some(unix_now_secs(clock))),
+        last_warmup_at_unix_secs: Some(Some(cc_lb_core::clock::unix_secs(clock.now()))),
         ..UpstreamStatusUpdate::default()
     };
     if let Err(error) = UpstreamStore::set_status(storage, upstream_id, status).await {
@@ -1039,7 +1039,7 @@ async fn seed_warmup_if_toggled(
     let Some(scheduler) = state.scheduler.as_ref() else {
         return Ok(());
     };
-    let seed_secs = unix_now_secs(&*state.clock);
+    let seed_secs = cc_lb_core::clock::unix_secs(state.clock.now());
     match scheduler
         .push_adaptive_task(warmup_bootstrap_task(after.id, seed_secs))
         .await
@@ -1264,7 +1264,7 @@ async fn fresh_enough_access_token(
     upstream: &UpstreamRecord,
     bundle: OAuthTokenBundle,
 ) -> Result<String, UpstreamError> {
-    let now = unix_now_secs(&*state.clock);
+    let now = cc_lb_core::clock::unix_secs(state.clock.now());
     if bundle.expires_at_unix_secs > now.saturating_add(METADATA_REFRESH_LOOKAHEAD_SECS) {
         return Ok(bundle.access_token);
     }
@@ -1522,7 +1522,7 @@ fn enqueue_upstream_audit(state: &AdminState, upstream: &UpstreamRecord, payload
     let Some(audit_sink) = &state.audit_sink else {
         return;
     };
-    let ts = unix_now_secs(&*state.clock);
+    let ts = cc_lb_core::clock::unix_secs(state.clock.now());
     let action = payload.to_string();
     let mut entry: AuditEntry = payload.into();
     entry.ts = ts;
@@ -1537,17 +1537,13 @@ fn enqueue_upstream_audit(state: &AdminState, upstream: &UpstreamRecord, payload
     let _ = audit_sink.try_enqueue(entry);
 }
 
-fn unix_now_secs(clock: &dyn Clock) -> u64 {
-    cc_lb_core::clock::unix_secs(clock.now())
-}
-
 fn unix_now_secs_i64(clock: &dyn Clock) -> Result<i64, UpstreamError> {
-    i64::try_from(unix_now_secs(clock))
+    i64::try_from(cc_lb_core::clock::unix_secs(clock.now()))
         .map_err(|_| invalid_warmup_state("current timestamp overflow"))
 }
 
 fn unix_now_millis(clock: &dyn Clock) -> Result<u64, UpstreamError> {
-    unix_now_secs(clock)
+    cc_lb_core::clock::unix_secs(clock.now())
         .checked_mul(1_000)
         .ok_or_else(|| invalid_warmup_state("current timestamp millis overflow"))
 }
