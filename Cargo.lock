@@ -1102,7 +1102,7 @@ dependencies = [
  "async-trait",
  "base64",
  "bytes",
- "cc-lb-core",
+ "cc-lb-clock",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "extism",

@@ -1,4 +1,4 @@
-use cc_lb_core::clock::{Clock, unix_secs};
+use cc_lb_clock::{Clock, unix_secs};
 use cc_lb_plugin_api::PluginSlot;
 use cc_lb_plugin_wire::limits::{
     IMPLEMENTED_FUNCTIONS_MAX, SELF_CHECK_FUEL, SELF_CHECK_OUTPUT_MAX_BYTES, SELF_CHECK_WALL_MS,
@@ -151,7 +151,7 @@ pub enum SelfCheckExecutionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_core::TestClock;
+    use cc_lb_clock::TestClock;
 
     const TEST_SUPPORTED_SLOTS: &[PluginSlot] = &[
         PluginSlot::Router,

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use cc_lb_core::clock::{ClockHandle, unix_millis};
+use cc_lb_clock::{ClockHandle, unix_millis};
 use extism::{Function, PTR, UserData, ValType, host_fn};
 use ring::rand::{SecureRandom, SystemRandom};
 
@@ -195,7 +195,7 @@ fn scoped_key(plugin_name: &str, key: &str) -> String {
 mod tests {
     use std::sync::Arc;
 
-    use cc_lb_core::TestClock;
+    use cc_lb_clock::TestClock;
     use extism::{Manifest, PluginBuilder, Wasm};
 
     use super::*;

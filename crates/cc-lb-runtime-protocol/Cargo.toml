@@ -13,7 +13,7 @@ keywords = ["cc-lb", "extism", "wasm", "plugin", "protocol"]
 categories = ["wasm", "development-tools"]
 
 [dependencies]
-cc-lb-core = { path = "../cc-lb-core" }
+cc-lb-clock = { workspace = true }
 cc-lb-plugin-wire = { workspace = true }
 cc-lb-plugin-api  = { workspace = true }
 extism.workspace = true
