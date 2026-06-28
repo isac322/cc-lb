@@ -31,7 +31,7 @@ use cc_lb_runtime_protocol::host_functions::{HostFunctionContext, HostState};
 use crate::plugin_wrap::{ExtismDialectPlugin, ExtismFilterPlugin, ExtismSignerFactory};
 use crate::sse_batch::ExtismObservabilityHook;
 
-const DEFAULT_MEMORY_MAX_PAGES: u32 = 32;
+const DEFAULT_MEMORY_MAX_PAGES: u32 = 128;
 const DEFAULT_FUEL_MAX: u64 = 1_000_000_000;
 const DEFAULT_MAX_CALL_DURATION_MS: u64 = 5_000;
 const DEFAULT_STORAGE_QUOTA_BYTES: usize = 1024 * 1024;
