@@ -610,7 +610,6 @@ impl PrincipalStore for EmptyPrincipalStore {
     async fn set_last_apply_error(
         &self,
         _id: Uuid,
-        _expected_revision: u64,
         _error: Option<String>,
         _applied_at_unix_secs: u64,
     ) -> StorageResult<Option<PrincipalRecord>> {
