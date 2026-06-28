@@ -50,7 +50,10 @@ fn delete_registry_rejects_when_referenced_by_warmup_dialect_postgres() {
 
 async fn run_warmup_dialect_guard(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
-    let storage = PostgresStorage::new(fixture.pool.clone());
+    let storage = PostgresStorage::new(
+        fixture.pool.clone(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
 
     let blob_bytes = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
     let blob = WasmBlob {
@@ -162,7 +165,8 @@ impl Fixture {
         .await?;
 
         let pool = schema_pool(url, &schema).await?;
-        let storage = PostgresStorage::new(pool.clone());
+        let storage =
+            PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_core::SystemClock));
         storage.initialize(BackendKind::Postgres).await?;
 
         Ok(Self {

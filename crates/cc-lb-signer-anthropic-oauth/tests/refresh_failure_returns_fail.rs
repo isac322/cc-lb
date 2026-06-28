@@ -4,6 +4,7 @@ use cc_lb_plugin_api::{RetryDecision, Signer};
 
 #[tokio::test]
 async fn refresh_failure_returns_fail() {
+    let clock = common::test_clock();
     let test_storage = common::storage();
     test_storage
         .put_oauth(
@@ -12,7 +13,7 @@ async fn refresh_failure_returns_fail() {
             &common::creds(
                 "sk-ant-oat01-expired",
                 "refresh-old",
-                common::now_epoch_secs() - 10,
+                common::now_epoch_secs(clock.as_ref()) - 10,
             ),
         )
         .await
@@ -22,6 +23,7 @@ async fn refresh_failure_returns_fail() {
         test_storage.storage.clone(),
         test_storage.aead.clone(),
         http.clone(),
+        clock,
     );
 
     match signer.on_unauthorized(&common::unauthorized_error()).await {

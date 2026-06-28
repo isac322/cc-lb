@@ -27,6 +27,17 @@ pub struct WarmupDispatchOutcome {
     pub headers: HeaderMap,
 }
 
+pub struct WarmupDialectDispatchParams<'a> {
+    pub runtime: &'a ExtismRuntime,
+    pub stores: &'a Stores,
+    pub data_dir: &'a Path,
+    pub aead: Arc<AeadService>,
+    pub lazy_refresher: Arc<LazyRefresher>,
+    pub upstream: &'a UpstreamRecord,
+    pub http: &'a WarmupHttpClient,
+    pub clock: cc_lb_core::ClockHandle,
+}
+
 #[derive(Debug, Error)]
 pub enum WarmupDispatchError {
     #[error("upstream has no warmup_dialect_plugin configured")]
@@ -69,20 +80,16 @@ impl WarmupDispatchError {
 }
 
 pub async fn dispatch_warmup_with_dialect(
-    runtime: &ExtismRuntime,
-    stores: &Stores,
-    data_dir: &Path,
-    aead: Arc<AeadService>,
-    lazy_refresher: Arc<LazyRefresher>,
-    upstream: &UpstreamRecord,
-    http: &WarmupHttpClient,
+    params: WarmupDialectDispatchParams<'_>,
 ) -> Result<WarmupDispatchOutcome, WarmupDispatchError> {
-    let plugin_ref = upstream
+    let plugin_ref = params
+        .upstream
         .warmup_dialect_plugin
         .as_ref()
         .ok_or(WarmupDispatchError::MissingPlugin)?;
 
-    let registry_entry = stores
+    let registry_entry = params
+        .stores
         .plugin_registry
         .get_registry_entry_by_id(plugin_ref.wasm_registry_id)
         .await?
@@ -98,7 +105,7 @@ pub async fn dispatch_warmup_with_dialect(
         });
     }
 
-    let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256)
+    let wasm_path = materialize_wasm(params.stores, params.data_dir, registry_entry.sha256)
         .await
         .map_err(|error| WarmupDispatchError::Materialize(error.to_string()))?;
     let manifest = PluginManifest {
@@ -106,14 +113,19 @@ pub async fn dispatch_warmup_with_dialect(
         artifact: wasm_path.to_string_lossy().into_owned(),
         wire_version: plugin_ref.wire_version,
         config: plugin_ref.config.clone(),
-        metadata: bridged_metadata(stores.plugin_registry_repo.as_ref(), registry_entry.sha256)
-            .await,
+        metadata: bridged_metadata(
+            params.stores.plugin_registry_repo.as_ref(),
+            registry_entry.sha256,
+        )
+        .await,
     };
 
-    let synth_name = format!("__warmup__{}", upstream.id);
+    let synth_name = format!("__warmup__{}", params.upstream.id);
     let (dialect, staged) =
-        runtime.instantiate_dialect_for_principal(&synth_name, &manifest.name, &manifest)?;
-    runtime.commit_staged(vec![staged])?;
+        params
+            .runtime
+            .instantiate_dialect_for_principal(&synth_name, &manifest.name, &manifest)?;
+    params.runtime.commit_staged(vec![staged])?;
 
     let body_json = json!({
         "model": WARMUP_MODEL,
@@ -131,25 +143,29 @@ pub async fn dispatch_warmup_with_dialect(
         canonical_model_id: WARMUP_MODEL.to_owned(),
     };
     let principal = Principal {
-        id: upstream.id.to_string(),
+        id: params.upstream.id.to_string(),
         kind: PrincipalKind::ApiKey,
         claims: serde_json::Map::new(),
     };
     let upstream_api = Upstream::AnthropicDirect {
-        base_url: upstream.base_url.clone(),
+        base_url: params.upstream.base_url.clone(),
     };
 
     let shaped = shape_request(dialect.as_ref(), &ctx, &upstream_api, &principal)
         .map_err(|error| WarmupDispatchError::Shape(error.to_string()))?;
 
     let factory = AnthropicOAuthSignerFactory::for_upstream_name(
-        stores.upstreams.clone(),
-        aead,
-        upstream.name.clone(),
+        params.stores.upstreams.clone(),
+        params.aead,
+        params.upstream.name.clone(),
+        params.clock,
     );
-    let refresh_handle: Arc<dyn LazyRefreshHandle> = lazy_refresher;
-    let factory_with_refresh =
-        AnthropicOAuthSignerFactoryWithLazyRefresh::new(factory, refresh_handle, upstream.id);
+    let refresh_handle: Arc<dyn LazyRefreshHandle> = params.lazy_refresher;
+    let factory_with_refresh = AnthropicOAuthSignerFactoryWithLazyRefresh::new(
+        factory,
+        refresh_handle,
+        params.upstream.id,
+    );
     let signer = factory_with_refresh
         .build(&upstream_api)
         .await
@@ -167,7 +183,8 @@ pub async fn dispatch_warmup_with_dialect(
     }
     let request = request_builder.body(Full::new(signed.body().clone()))?;
 
-    let response = http
+    let response = params
+        .http
         .request(request)
         .await
         .map_err(|error| WarmupDispatchError::Http(error.to_string()))?;

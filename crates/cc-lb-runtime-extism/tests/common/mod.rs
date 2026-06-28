@@ -2,12 +2,15 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::sync::Arc;
 
 use bytes::Bytes;
+use cc_lb_core::SystemClock;
 use cc_lb_plugin_api::{
     PluginManifest, Principal, PrincipalKind, RateLimitKind, RateLimitObservation, RequestContext,
     UpstreamCandidate, UpstreamKind,
 };
+use cc_lb_runtime_extism::{ExtismRuntime, ExtismRuntimeConfig};
 use http::{HeaderMap, Method};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -33,6 +36,10 @@ pub fn fixture(name: &str, wat: &str, metadata: BTreeMap<String, Value>) -> Wasm
             metadata,
         },
     }
+}
+
+pub fn runtime() -> ExtismRuntime {
+    ExtismRuntime::with_config(ExtismRuntimeConfig::default(), Arc::new(SystemClock))
 }
 
 pub fn rewrite_fixture(fixture: &WasmFixture, wat: &str) {

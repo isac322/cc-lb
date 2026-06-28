@@ -33,7 +33,10 @@ fn principal_terminal_strategy() {
 
 async fn run_test(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
-    let storage = PostgresStorage::new(fixture.pool.clone());
+    let storage = PostgresStorage::new(
+        fixture.pool.clone(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     storage.initialize(BackendKind::Postgres).await?;
 
     default_strategy_is_first_pick(&storage).await?;

@@ -80,7 +80,7 @@ async fn open_storage() -> (TempDir, Arc<Storage>) {
     let dir = tempfile::tempdir().unwrap();
     let database_url = format!("sqlite://{}", dir.path().join("backfill.sqlite").display());
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&database_url)
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
             .await
             .unwrap(),
     );

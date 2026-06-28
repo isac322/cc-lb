@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use cc_lb_core::clock::ClockHandle;
 use cc_lb_core::usage_pruner::{IntoUsagePrunerStorage, PruneResult, UsagePruner};
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +21,7 @@ pub trait UsagePruneRunner {
     fn prune_once_for_retention(
         &self,
         retention_days: u64,
+        clock: ClockHandle,
     ) -> impl Future<Output = PruneResult> + Send + '_;
 }
 
@@ -28,9 +30,15 @@ where
     Store: ?Sized,
     Arc<Store>: IntoUsagePrunerStorage + Clone + Send + Sync + 'static,
 {
-    async fn prune_once_for_retention(&self, retention_days: u64) -> PruneResult {
+    async fn prune_once_for_retention(
+        &self,
+        retention_days: u64,
+        clock: ClockHandle,
+    ) -> PruneResult {
         let storage = Arc::clone(self);
-        UsagePruner::new(storage, retention_days).prune_once().await
+        UsagePruner::new(storage, retention_days, clock)
+            .prune_once()
+            .await
     }
 }
 
@@ -38,6 +46,7 @@ pub async fn handle_usage_prune_job<Runner>(
     job: UsagePruneJob,
     runner: &Runner,
     usage_retention_days: u64,
+    clock: ClockHandle,
 ) -> UsagePruneJobResult
 where
     Runner: UsagePruneRunner + ?Sized,
@@ -50,7 +59,9 @@ where
         return UsagePruneJobResult::Skip;
     }
 
-    let result = runner.prune_once_for_retention(usage_retention_days).await;
+    let result = runner
+        .prune_once_for_retention(usage_retention_days, clock)
+        .await;
     ::metrics::counter!(crate::scheduler_metrics::PRUNE_ROWS_REMOVED_TOTAL, "table" => "request_events")
         .increment(result.request_events_removed);
     ::metrics::counter!(crate::scheduler_metrics::PRUNE_ROWS_REMOVED_TOTAL, "table" => "audit_log")

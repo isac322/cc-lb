@@ -2316,12 +2316,12 @@ pub fn cc_lb_plugin_conformance::VerifyReport::debug(<T as wiggle::Pointee>::Poi
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for cc_lb_plugin_conformance::VerifyReport where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for cc_lb_plugin_conformance::VerifyReport where V: ppv_lite86::types::MultiLane<T>
 pub fn cc_lb_plugin_conformance::VerifyReport::vzip(self) -> V
-pub fn cc_lb_plugin_conformance::prelude::verify_observability_plugin(&[u8]) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::prelude::verify_observability_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::prelude::verify_router_plugin(&[u8]) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::prelude::verify_router_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::prelude::verify_shape_plugin(&[u8]) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::prelude::verify_shape_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::prelude::verify_observability_plugin(&[u8], &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::prelude::verify_observability_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>, &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::prelude::verify_router_plugin(&[u8], &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::prelude::verify_router_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>, &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::prelude::verify_shape_plugin(&[u8], &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::prelude::verify_shape_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>, &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
 pub mod cc_lb_plugin_conformance::self_check
 #[non_exhaustive] pub enum cc_lb_plugin_conformance::self_check::SelfCheckError
 pub cc_lb_plugin_conformance::self_check::SelfCheckError::FailureStatus
@@ -2623,20 +2623,20 @@ pub fn cc_lb_plugin_conformance::self_check::SelfCheckReport::vzip(self) -> V
 pub fn cc_lb_plugin_conformance::self_check::run(&[u8]) -> core::result::Result<cc_lb_plugin_conformance::self_check::SelfCheckReport, cc_lb_plugin_conformance::self_check::SelfCheckError>
 pub mod cc_lb_plugin_conformance::verify
 pub mod cc_lb_plugin_conformance::verify::observability
-pub fn cc_lb_plugin_conformance::verify::observability::verify_observability_plugin(&[u8]) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::verify::observability::verify_observability_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify::observability::verify_observability_plugin(&[u8], &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify::observability::verify_observability_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>, &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
 pub mod cc_lb_plugin_conformance::verify::router
-pub fn cc_lb_plugin_conformance::verify::router::verify_router_plugin(&[u8]) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::verify::router::verify_router_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify::router::verify_router_plugin(&[u8], &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify::router::verify_router_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>, &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
 pub mod cc_lb_plugin_conformance::verify::shape
-pub fn cc_lb_plugin_conformance::verify::shape::verify_shape_plugin(&[u8]) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::verify::shape::verify_shape_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::verify::verify_observability_plugin(&[u8]) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::verify::verify_observability_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::verify::verify_router_plugin(&[u8]) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::verify::verify_router_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::verify::verify_shape_plugin(&[u8]) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::verify::verify_shape_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify::shape::verify_shape_plugin(&[u8], &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify::shape::verify_shape_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>, &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify::verify_observability_plugin(&[u8], &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify::verify_observability_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>, &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify::verify_router_plugin(&[u8], &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify::verify_router_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>, &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify::verify_shape_plugin(&[u8], &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify::verify_shape_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>, &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
 #[non_exhaustive] pub enum cc_lb_plugin_conformance::VerifyError
 pub cc_lb_plugin_conformance::VerifyError::Dispatch(DispatchError)
 pub cc_lb_plugin_conformance::VerifyError::Handshake(cc_lb_plugin_conformance::handshake::HandshakeError)
@@ -2887,9 +2887,9 @@ pub fn cc_lb_plugin_conformance::VerifyReport::debug(<T as wiggle::Pointee>::Poi
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for cc_lb_plugin_conformance::VerifyReport where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for cc_lb_plugin_conformance::VerifyReport where V: ppv_lite86::types::MultiLane<T>
 pub fn cc_lb_plugin_conformance::VerifyReport::vzip(self) -> V
-pub fn cc_lb_plugin_conformance::verify_observability_plugin(&[u8]) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::verify_observability_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::verify_router_plugin(&[u8]) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::verify_router_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::verify_shape_plugin(&[u8]) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
-pub fn cc_lb_plugin_conformance::verify_shape_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify_observability_plugin(&[u8], &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify_observability_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>, &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify_router_plugin(&[u8], &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify_router_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>, &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify_shape_plugin(&[u8], &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>
+pub fn cc_lb_plugin_conformance::verify_shape_plugin_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>, &dyn cc_lb_clock::Clock) -> core::result::Result<cc_lb_plugin_conformance::VerifyReport, cc_lb_plugin_conformance::VerifyError>

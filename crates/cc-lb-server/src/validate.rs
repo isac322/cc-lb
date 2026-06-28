@@ -15,15 +15,18 @@ pub enum ValidateError {
     Preflight(#[from] preflight::PreflightError),
 }
 
-pub fn run(config_path: &Path) -> Result<(), ValidateError> {
+pub fn run(config_path: &Path, clock: cc_lb_core::ClockHandle) -> Result<(), ValidateError> {
     let config = Config::load(config_path)?;
-    let report = validate_preflight(&config)?;
+    let report = validate_preflight(&config, clock)?;
     println!("validation: ok");
     print_preflight_report(&report);
     Ok(())
 }
 
-fn validate_preflight(config: &Config) -> Result<PreflightReport, ValidateError> {
+fn validate_preflight(
+    config: &Config,
+    clock: cc_lb_core::ClockHandle,
+) -> Result<PreflightReport, ValidateError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -32,6 +35,7 @@ fn validate_preflight(config: &Config) -> Result<PreflightReport, ValidateError>
         .block_on(preflight::run_offline(
             config,
             PreflightOptions { skip_bind: true },
+            clock,
         ))
         .map_err(ValidateError::Preflight)
 }

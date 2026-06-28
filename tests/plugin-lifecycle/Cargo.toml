@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 bytes.workspace = true
+cc-lb-core = { path = "../../crates/cc-lb-core" }
 cc-lb-plugin-api = { path = "../../crates/cc-lb-plugin-api" }
 cc-lb-runtime-extism = { path = "../../crates/cc-lb-runtime-extism" }
 http.workspace = true

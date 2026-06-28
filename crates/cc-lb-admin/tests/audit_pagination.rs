@@ -33,6 +33,7 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus: None,
+        clock: Arc::new(cc_lb_core::SystemClock),
     }
 }
 

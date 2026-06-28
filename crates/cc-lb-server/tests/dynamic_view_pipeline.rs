@@ -22,7 +22,9 @@ async fn storage_fixture(seed: u8) -> (tempfile::TempDir, Arc<Storage>) {
         .path()
         .join(format!("dynamic-view-pipeline-{seed}.sqlite"));
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url).await.expect("storage");
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+        .await
+        .expect("storage");
     cc_lb_storage_api::MetaStore::initialize(&storage, BackendKind::Sqlite)
         .await
         .expect("initialize");
@@ -95,6 +97,7 @@ async fn build_view(
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await
     .expect("dynamic view builds")
@@ -178,7 +181,10 @@ async fn router_pipeline_instantiates_ordered_filters_and_terminal() {
     let early = register_plugin(&storage, "early-filter", filter_wat("early-filter")).await;
     let late_entry = insert_router_entry(&storage, principal.id, &late, 200).await;
     let early_entry = insert_router_entry(&storage, principal.id, &early, 100).await;
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
 
     let view = build_view(&stores, &runtime, dir.path()).await;
 
@@ -213,7 +219,10 @@ async fn router_pipeline_instantiation_failure_sets_error_without_committing_slo
     let principal = create_principal(&storage, "principal-a").await;
     let plugin = register_plugin(&storage, "not-a-filter", observe_only_wat()).await;
     insert_router_entry(&storage, principal.id, &plugin, 100).await;
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
 
     let view = build_view(&stores, &runtime, dir.path()).await;
 
@@ -248,7 +257,10 @@ async fn router_pipeline_depth_above_sixteen_fails_closed() {
         .await;
         insert_router_entry(&storage, principal.id, &plugin, i64::from(index)).await;
     }
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
 
     let view = build_view(&stores, &runtime, dir.path()).await;
 

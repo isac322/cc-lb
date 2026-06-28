@@ -16,7 +16,11 @@ fn invalid_new_config_keeps_old() {
     let watcher = ConfigWatcher::new(
         &config_path,
         reload_common::load_config(&config_path),
-        Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
+        Arc::new(cc_lb_runtime_extism::ExtismRuntime::with_config(
+            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+            Arc::new(cc_lb_core::SystemClock),
+        )),
+        Arc::new(cc_lb_core::SystemClock),
     );
     let before_failed = reload_common::counter_value(&handle, "cc_lb_config_reload_failed_total");
     std::fs::write(&config_path, "[listener\nthis is not valid toml").unwrap();
@@ -64,8 +68,12 @@ fn config_reload_accepts_config_only_change_and_keeps_runtime_view() {
     let watcher = ConfigWatcher::new_with_principal_view(
         &config_path,
         initial_config,
-        Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
+        Arc::new(cc_lb_runtime_extism::ExtismRuntime::with_config(
+            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+            Arc::new(cc_lb_core::SystemClock),
+        )),
         Some(dynamic_view.clone()),
+        Arc::new(cc_lb_core::SystemClock),
     );
     reload_common::write_config_with_principal_model(&config_path, 200, proxy_addr, "[");
 
@@ -103,8 +111,12 @@ fn config_reload_accepts_plugin_unrelated_change_and_records_success() {
     let watcher = ConfigWatcher::new_with_principal_view(
         &config_path,
         initial_config,
-        Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
+        Arc::new(cc_lb_runtime_extism::ExtismRuntime::with_config(
+            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+            Arc::new(cc_lb_core::SystemClock),
+        )),
         Some(dynamic_view.clone()),
+        Arc::new(cc_lb_core::SystemClock),
     );
     reload_common::write_config_with_principal_plugins(
         &config_path,

@@ -105,7 +105,10 @@ fn engine() -> (StdArc<LimitEngine>, StdArc<PrincipalView>) {
     let view = PrincipalView::loom(Vec::new());
 
     (
-        LimitEngine::new(StdArc::new(KeyConcurrencyManager::new())),
+        LimitEngine::new(
+            StdArc::new(KeyConcurrencyManager::new()),
+            StdArc::new(cc_lb_loom_tests::SystemClock),
+        ),
         view,
     )
 }

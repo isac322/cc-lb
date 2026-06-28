@@ -31,7 +31,9 @@ impl MockNotifier {
     }
 
     fn send(&self, channel: ChangeChannel) {
-        let _ = self.tx.send(ChangeEvent::new(channel, "test"));
+        let _ = self
+            .tx
+            .send(ChangeEvent::new(channel, "test", std::time::UNIX_EPOCH));
     }
 
     async fn wait_for_subscriber(&self) {
@@ -215,7 +217,9 @@ async fn fixture() -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("notify.sqlite");
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url).await.expect("storage opens");
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+        .await
+        .expect("storage opens");
     cc_lb_storage_api::MetaStore::initialize(&storage, BackendKind::Sqlite)
         .await
         .expect("initialize");
@@ -233,7 +237,10 @@ async fn fixture() -> Fixture {
     });
     let oauth = Arc::new(AnthropicOAuthConfig::default());
     let aead = Arc::new(AeadService::from_master_key([24; 32]));
-    let runtime = Arc::new(ExtismRuntime::new());
+    let runtime = Arc::new(ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
+    ));
     let initial = build_dynamic_view(
         &stores,
         &oauth,
@@ -245,6 +252,7 @@ async fn fixture() -> Fixture {
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await
     .expect("initial dynamic view builds");
@@ -279,6 +287,7 @@ async fn spawn_listener(
         subscription_quota_cache: Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         subscription_quota_routing_max_staleness_secs: 1800,
         config: Arc::new(cc_lb_config::Config::default()),
+        clock: Arc::new(cc_lb_core::SystemClock),
     }));
     let task = tokio::spawn(async move {
         listener.run().await;

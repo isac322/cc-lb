@@ -78,7 +78,7 @@ pub use circuit_breaker::{
     CircuitBreakerConfig, CircuitBreakerDispatch, Permit,
 };
 #[cfg(not(loom))]
-pub use clock::{Clock, ClockHandle, SystemClock, TestClock};
+pub use clock::{Clock, ClockHandle, SystemClock, TestClock, unix_millis, unix_secs};
 #[cfg(not(loom))]
 pub use dashboard_broadcaster::{DashboardBroadcaster, record_dashboard_sse_lagged};
 #[doc(hidden)]

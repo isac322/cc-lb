@@ -7,6 +7,7 @@ use cc_lb_core::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
 use cc_lb_core::anthropic_metadata::MetadataHttpClient;
+use cc_lb_core::clock::ClockHandle;
 use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, Storage, StorageError, UpstreamRecord, UpstreamStore,
 };
@@ -117,6 +118,7 @@ pub struct CoreMetadataRefreshRunner {
     aead: Arc<AeadService>,
     client: MetadataHttpClient,
     cancel: CancellationToken,
+    clock: ClockHandle,
 }
 
 impl CoreMetadataRefreshRunner {
@@ -124,26 +126,30 @@ impl CoreMetadataRefreshRunner {
         storage: Arc<dyn Storage>,
         aead: Arc<AeadService>,
         cancel: CancellationToken,
+        clock: ClockHandle,
     ) -> Self {
         Self::with_client(
             storage,
             aead,
             cc_lb_core::make_metadata_http_client(),
             cancel,
+            clock,
         )
     }
 
-    pub const fn with_client(
+    pub fn with_client(
         storage: Arc<dyn Storage>,
         aead: Arc<AeadService>,
         client: MetadataHttpClient,
         cancel: CancellationToken,
+        clock: ClockHandle,
     ) -> Self {
         Self {
             storage,
             aead,
             client,
             cancel,
+            clock,
         }
     }
 }
@@ -175,6 +181,7 @@ impl MetadataRefreshRunner for CoreMetadataRefreshRunner {
             &access_token,
             &user_agent,
             &self.cancel,
+            &*self.clock,
         )
         .await
         .map_err(|error| SchedulerError::Job(error.to_string()))

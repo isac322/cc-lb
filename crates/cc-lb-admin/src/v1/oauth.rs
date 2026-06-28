@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
@@ -240,9 +239,10 @@ async fn start_oauth(
         .query_pairs_mut()
         .append_pair("state", &state_token);
 
+    let now = cc_lb_core::clock::unix_secs(state.clock.now());
     let in_flight = InFlightPkce {
         handshake: handshake_state.clone(),
-        created_at_unix_secs: now_unix_secs(),
+        created_at_unix_secs: now,
         target: PkceTarget::ExistingUpstream {
             upstream_id,
             upstream_name: upstream.name.clone(),
@@ -251,7 +251,6 @@ async fn start_oauth(
     };
     match pkce_flows().lock() {
         Ok(mut flows) => {
-            let now = now_unix_secs();
             flows.retain(|_, flow| {
                 now.saturating_sub(flow.created_at_unix_secs) < PKCE_FLOW_TTL_SECS
             });
@@ -313,14 +312,14 @@ async fn start_oauth_draft(State(state): State<AdminState>) -> Response {
         .query_pairs_mut()
         .append_pair("state", &state_token);
 
+    let now = cc_lb_core::clock::unix_secs(state.clock.now());
     let in_flight = InFlightPkce {
         handshake: handshake_state.clone(),
-        created_at_unix_secs: now_unix_secs(),
+        created_at_unix_secs: now,
         target: PkceTarget::PendingDraft { completed: None },
     };
     match pkce_flows().lock() {
         Ok(mut flows) => {
-            let now = now_unix_secs();
             flows.retain(|_, flow| {
                 now.saturating_sub(flow.created_at_unix_secs) < PKCE_FLOW_TTL_SECS
             });
@@ -373,6 +372,7 @@ async fn complete_oauth_draft(
         code,
         payload.state_token.clone(),
         Arc::new(HyperOAuthHttpClient::new()),
+        &*state.clock,
     )
     .await
     {
@@ -415,6 +415,7 @@ async fn complete_oauth_draft(
             &bundle.access_token,
             &user_agent,
             &cancel,
+            &*state.clock,
         ),
     )
     .await
@@ -437,7 +438,7 @@ async fn complete_oauth_draft(
         encrypted_tokens,
         subscription_metadata_record: records.subscription_metadata_record.clone(),
         organization_metadata_record: records.organization_metadata_record.clone(),
-        fetched_at_unix_secs: now_unix_secs(),
+        fetched_at_unix_secs: cc_lb_core::clock::unix_secs(state.clock.now()),
     };
 
     match pkce_flows().lock() {
@@ -700,6 +701,7 @@ async fn complete_oauth(
         code,
         payload.state_token.clone(),
         Arc::new(HyperOAuthHttpClient::new()),
+        &*state.clock,
     )
     .await
     {
@@ -814,10 +816,7 @@ async fn get_oauth_status(
 
     match encrypted.decrypt(state.aead.as_ref(), upstream.id.as_bytes()) {
         Ok(bundle) => {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let now = cc_lb_core::clock::unix_secs(state.clock.now());
             let status = if bundle.expires_at_unix_secs <= now {
                 "expired"
             } else {
@@ -959,7 +958,7 @@ async fn seed_oauth_bootstrap_tasks(
     let Some(scheduler) = state.scheduler.as_ref() else {
         return Ok(());
     };
-    let seed_secs = now_unix_secs();
+    let seed_secs = cc_lb_core::clock::unix_secs(state.clock.now());
     for task in oauth_bootstrap_tasks(upstream.id, seed_secs) {
         match scheduler.push_adaptive_task(task).await {
             Ok(()) | Err(SchedulerError::Conflict(_)) => {}
@@ -1109,7 +1108,7 @@ fn enqueue_upstream_audit(
     let Some(audit_sink) = &state.audit_sink else {
         return;
     };
-    let ts = now_unix_secs();
+    let ts = cc_lb_core::clock::unix_secs(state.clock.now());
     let _ = audit_sink.try_enqueue(AuditEntry {
         ts,
         request_id: format!("admin-upstream-oauth-{upstream_id}-{ts}"),
@@ -1128,13 +1127,6 @@ fn enqueue_upstream_audit(
         admin_action: Some(payload.to_string()),
         actor: Some("admin".to_owned()),
     });
-}
-
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 fn normalize_oauth_code(input: &str) -> String {

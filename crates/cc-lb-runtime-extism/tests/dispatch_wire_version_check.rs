@@ -6,7 +6,6 @@ use cc_lb_plugin_api::RuntimeError;
 use cc_lb_plugin_wire::augmented_metadata::AugmentedMetadata;
 use cc_lb_plugin_wire::handshake::{HANDSHAKE_SCHEMA_VERSION_V1, HandshakeAccept};
 use cc_lb_plugin_wire::identity::{CC_LB_PLUGIN_MAGIC, PluginIdentity};
-use cc_lb_runtime_extism::ExtismRuntime;
 use uuid::Uuid;
 
 #[test]
@@ -20,7 +19,7 @@ fn filter_instantiation_rejects_chain_wire_version_mismatch() {
         )]),
     );
     fixture.manifest.wire_version = Some(3);
-    let runtime = ExtismRuntime::new();
+    let runtime = common::runtime();
 
     let error = match runtime.instantiate_filter_for(
         "principal-test",

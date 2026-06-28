@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_core::clock::{ClockHandle, TestClock};
+use cc_lb_core::clock::{ClockHandle, TestClock, unix_secs};
 use cc_lb_plugin_api::types::TtlClass;
 use cc_lb_server::prompt_cache_observation_cache::PromptCacheObservationCache;
 use uuid::Uuid;
@@ -20,7 +20,7 @@ const BYTES_PER_MIB: usize = 1024 * 1024;
 #[ignore]
 async fn prompt_cache_100k_observations_under_200mib() {
     let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
-    let now = clock.now_unix_secs();
+    let now = unix_secs(clock.now());
     let cache = PromptCacheObservationCache::new_with_debounce(clock, 30, 32, 60);
     let upstreams: Vec<Uuid> = (0..UPSTREAM_COUNT)
         .map(|upstream_index| Uuid::from_u128((upstream_index + 1) as u128))

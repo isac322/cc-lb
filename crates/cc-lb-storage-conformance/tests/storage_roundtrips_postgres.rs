@@ -1,14 +1,9 @@
 #![cfg(feature = "postgres")]
 
-use std::{
-    future::Future,
-    str::FromStr,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{future::Future, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
-use cc_lb_core::{ClockHandle, TestClock};
+use cc_lb_core::{ClockHandle, SystemClock, TestClock};
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PluginRegistryStore, WasmBlob, WasmRegistryEntryInput,
 };
@@ -64,7 +59,7 @@ impl ConformanceBackend for PostgresConformanceBackend {
                 PgConnectOptions::from_str(&self.url)?.options([("search_path", schema.as_str())]),
             )
             .await?;
-        PostgresStorage::new(pool.clone())
+        PostgresStorage::new(pool.clone(), system_clock())
             .initialize(BackendKind::Postgres)
             .await?;
 
@@ -83,7 +78,7 @@ impl ConformanceBackend for PostgresConformanceBackend {
                     .options([("search_path", fixture.schema.as_str())]),
             )
             .await?;
-        Ok(PostgresStorage::new(pool))
+        Ok(PostgresStorage::new(pool, system_clock()))
     }
 
     async fn teardown(&self, fixture: Self::Fixture) -> anyhow::Result<()> {
@@ -276,7 +271,9 @@ fn upstream_subscription_quota_store_postgres() {
 
 #[test]
 fn warmup_attempts_store_postgres() {
-    run_postgres_scenario("warmup_attempts_store", warmup_attempts_store::run_all);
+    run_postgres_scenario("warmup_attempts_store", |backend| async move {
+        warmup_attempts_store::run_all(backend, warmup_attempts_clock()).await
+    });
 }
 
 #[test]
@@ -363,6 +360,14 @@ fn prompt_cache_clock() -> ClockHandle {
     Arc::new(TestClock::new_at_secs(1_700_000_000))
 }
 
+fn warmup_attempts_clock() -> ClockHandle {
+    Arc::new(TestClock::new_at_secs(1_800_604_800))
+}
+
+fn system_clock() -> ClockHandle {
+    Arc::new(SystemClock)
+}
+
 fn postgres_url() -> Option<String> {
     std::env::var("CI_POSTGRES_URL")
         .ok()
@@ -439,11 +444,7 @@ async fn concurrent_upload_returns_existed_once_on_fixture(
 }
 
 fn schema_name() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!("storage_roundtrips_{nanos}_{}", std::process::id())
+    format!("storage_roundtrips_{}", uuid::Uuid::new_v4().simple())
 }
 
 fn quote_ident(identifier: &str) -> String {

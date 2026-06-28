@@ -3,17 +3,19 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
+use cc_lb_core::clock::{Clock, ClockHandle, SystemClock, TestClock, unix_secs};
 use cc_lb_plugin_api::{
     Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder, Upstream,
     UpstreamDialect, shape_request,
 };
 use cc_lb_signer_anthropic_oauth::{
-    AnthropicOAuthSigner, OAuthHttpClient, OAuthHttpError, OAuthTokenRequest, OAuthTokenResponse,
+    AnthropicOAuthSigner, AnthropicOAuthSignerHttpParams, OAuthHttpClient, OAuthHttpError,
+    OAuthTokenRequest, OAuthTokenResponse,
 };
 use cc_lb_storage_api::{
     ApiKeyStore, AuditEntry, AuditStore, BackendKind, ConfigDraftState, ConfigStore, HistoryEntry,
@@ -26,6 +28,8 @@ use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use oauth2::ClientId;
 use secrecy::ExposeSecret;
 use url::Url;
+
+pub const TEST_NOW_SECS: u64 = 1_700_000_000;
 
 #[derive(Debug)]
 pub struct FakeOAuthClient {
@@ -149,16 +153,18 @@ pub fn signer(
     storage: Arc<dyn OAuthCredentialStore>,
     aead: Arc<AeadService>,
     http: Arc<dyn OAuthHttpClient>,
+    clock: ClockHandle,
 ) -> AnthropicOAuthSigner {
-    AnthropicOAuthSigner::with_http(
-        "alice",
-        "anthropic_oauth",
+    AnthropicOAuthSigner::with_http(AnthropicOAuthSignerHttpParams {
+        principal_id: "alice".to_owned(),
+        provider: "anthropic_oauth".to_owned(),
         storage,
         aead,
-        Url::parse("https://platform.claude.com/v1/oauth/token").expect("token url"),
-        ClientId::new("client-test".to_owned()),
+        token_url: Url::parse("https://platform.claude.com/v1/oauth/token").expect("token url"),
+        client_id: ClientId::new("client-test".to_owned()),
         http,
-    )
+        clock,
+    })
 }
 
 pub fn creds(access_token: &str, refresh_token: &str, expires_at: u64) -> OAuthCredentials {
@@ -207,11 +213,16 @@ pub fn failure_response() -> OAuthTokenResponse {
     }
 }
 
-pub fn now_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock after unix epoch")
-        .as_secs()
+pub fn test_clock() -> ClockHandle {
+    Arc::new(TestClock::new_at_secs(TEST_NOW_SECS))
+}
+
+pub fn system_clock() -> ClockHandle {
+    Arc::new(SystemClock)
+}
+
+pub fn now_epoch_secs(clock: &dyn Clock) -> u64 {
+    unix_secs(clock.now())
 }
 
 pub fn shaped_request() -> ShapedRequest {

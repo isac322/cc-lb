@@ -50,6 +50,7 @@ mod tests {
     use std::time::Duration;
 
     use apalis::prelude::Data;
+    use cc_lb_core::clock::SystemClock;
 
     use crate::jobs::metadata_refresh::MetadataRefreshJob;
     use crate::jobs::usage_prune::UsagePruneJob;
@@ -69,6 +70,7 @@ mod tests {
                 Box::pin(async { Ok(JobOutcome::Done) })
             }),
             Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+            Arc::new(SystemClock),
         );
 
         let outcome = entity_job_handler(
@@ -97,6 +99,7 @@ mod tests {
                     })
                 })
             }),
+            Arc::new(SystemClock),
         );
 
         let outcome = singleton_job_handler(

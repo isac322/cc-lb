@@ -20,6 +20,7 @@ type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
 async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestResult<()> {
+    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
     let dir = tempfile::tempdir()?;
     let storage_path = dir.path().join("storage.sqlite");
     let storage_arc = sqlite_storage(&storage_path).await?;
@@ -68,6 +69,7 @@ async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestR
         managed_store,
         storage,
         Arc::new(AeadService::from_master_key([0; 32])),
+        clock.clone(),
     )
     .await?;
 
@@ -92,7 +94,8 @@ async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestR
 
 #[tokio::test]
 async fn proxy_fallbacks_return_anthropic_json_errors() -> TestResult<()> {
-    let app = build_app_for_testing(Config::default()).await?;
+    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+    let app = build_app_for_testing(Config::default(), clock.clone()).await?;
 
     for (method, path, expected_status, expected_message) in [
         (
@@ -140,7 +143,7 @@ async fn proxy_fallbacks_return_anthropic_json_errors() -> TestResult<()> {
 
 async fn sqlite_storage(path: &std::path::Path) -> TestResult<Arc<SqliteStorage>> {
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url).await?;
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock)).await?;
     storage.initialize(BackendKind::Sqlite).await?;
     Ok(Arc::new(storage))
 }

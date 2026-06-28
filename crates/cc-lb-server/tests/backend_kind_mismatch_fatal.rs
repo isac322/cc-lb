@@ -1,4 +1,5 @@
 use std::process::Command;
+use std::sync::Arc;
 
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_sqlite::open_sqlite;
@@ -58,7 +59,7 @@ key_env = "CC_LB_AEAD_KEY"
 fn stamp_sqlite_as_postgres(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let database_url = format!("sqlite://{}", path.display());
     Runtime::new()?.block_on(async {
-        let storage = open_sqlite(&database_url).await?;
+        let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock)).await?;
         storage.initialize(BackendKind::Postgres).await
     })?;
     Ok(())

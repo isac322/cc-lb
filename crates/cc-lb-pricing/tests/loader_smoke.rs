@@ -35,6 +35,7 @@ async fn refresh_once_fetches_installs_and_persists() -> Result<(), Box<dyn std:
         format!("{}/prices", server.uri()),
         Duration::from_secs(60 * 60),
         dir.path().join("litellm-cache.json"),
+        Arc::new(cc_lb_clock::SystemClock),
     );
 
     loader.refresh_once().await?;
@@ -66,6 +67,7 @@ async fn install_latest_local_reads_disk_cache_after_refresh_failure()
         format!("{}/prices", server.uri()),
         Duration::from_secs(60 * 60),
         cache_path,
+        Arc::new(cc_lb_clock::SystemClock),
     );
 
     let error = loader
@@ -99,6 +101,7 @@ async fn install_latest_local_returns_false_without_cache_after_refresh_failure(
         format!("{}/prices", server.uri()),
         Duration::from_secs(60 * 60),
         dir.path().join("missing-cache.json"),
+        Arc::new(cc_lb_clock::SystemClock),
     );
 
     let error = loader
@@ -117,7 +120,9 @@ async fn sqlite_storage(
     file_name: &str,
 ) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
     let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url).await?;
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+            .await?;
     storage.initialize(BackendKind::Sqlite).await?;
     Ok(storage)
 }

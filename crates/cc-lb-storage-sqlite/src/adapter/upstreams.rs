@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use cc_lb_aead::EncryptedOAuthTokens;
+use cc_lb_core::{Clock, unix_secs};
 use cc_lb_storage_api::upstream::{
     UpstreamKind, UpstreamStatusUpdate, UpstreamWarmupDialectPlugin,
 };
@@ -7,7 +8,6 @@ use cc_lb_storage_api::{
     StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
     validate_identifier,
 };
-use chrono::Utc;
 use sqlx::{Row, Sqlite, SqlitePool, Transaction, sqlite::SqliteRow};
 use uuid::Uuid;
 
@@ -138,7 +138,7 @@ impl UpstreamStore for SqliteStorage {
             id,
             UpstreamStatusUpdate {
                 last_apply_error: Some(error),
-                last_apply_at_unix_secs: Some(Some(now_unix_secs_u64()?)),
+                last_apply_at_unix_secs: Some(Some(now_unix_secs_u64(self.clock())?)),
                 ..UpstreamStatusUpdate::default()
             },
         )
@@ -769,10 +769,8 @@ fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
     })
 }
 
-fn now_unix_secs_u64() -> StorageResult<u64> {
-    u64::try_from(Utc::now().timestamp()).map_err(|_| StorageError::Fatal {
-        message: "current unix timestamp cannot be represented as u64".to_owned(),
-    })
+fn now_unix_secs_u64(clock: &dyn Clock) -> StorageResult<u64> {
+    Ok(unix_secs(clock.now()))
 }
 
 fn conflict(message: impl Into<String>) -> StorageError {

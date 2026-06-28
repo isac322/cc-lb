@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use cc_lb_config::Config;
+use cc_lb_core::clock::{Clock, unix_secs};
 use cc_lb_storage_api::plugin_registry::{PluginChainEntryInput, PluginSlot, WasmRegistryEntry};
 use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind};
 use cc_lb_storage_api::sparse_order;
@@ -26,7 +26,11 @@ pub enum BootstrapError {
 
 pub type BootstrapResult<T> = Result<T, BootstrapError>;
 
-async fn seed_admin_if_absent(store: &dyn PrincipalStore, _token: &str) -> StorageResult<()> {
+async fn seed_admin_if_absent(
+    store: &dyn PrincipalStore,
+    _token: &str,
+    clock: &dyn Clock,
+) -> StorageResult<()> {
     let admin_principal = PrincipalCreate {
         name: "admin".to_owned(),
         kind: PrincipalKind::Admin,
@@ -35,7 +39,7 @@ async fn seed_admin_if_absent(store: &dyn PrincipalStore, _token: &str) -> Stora
         default_limits: vec![],
     };
 
-    let now = unix_now_secs();
+    let now = unix_secs(clock.now());
 
     match store.get_by_name("admin").await {
         Ok(Some(_)) => Ok(()),
@@ -114,9 +118,10 @@ pub async fn apply_bootstrap(
     plugin_store: &dyn PluginRegistryStore,
     env_token: Option<String>,
     data_dir: &Path,
+    clock: &dyn Clock,
 ) -> BootstrapResult<()> {
     if let Some(token) = env_token {
-        seed_admin_if_absent(seeder, &token)
+        seed_admin_if_absent(seeder, &token, clock)
             .await
             .map_err(|e| BootstrapError::Storage(e.to_string()))?;
     }
@@ -132,7 +137,7 @@ pub async fn apply_bootstrap(
         };
 
         for principal in spec.principals {
-            apply_principal(seeder, principal).await?;
+            apply_principal(seeder, principal, clock).await?;
         }
 
         for upstream in spec.upstreams {
@@ -170,10 +175,7 @@ pub async fn apply_bootstrap(
             apply_plugin_chain(seeder, plugin_store, chain).await?;
         }
 
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time is always after UNIX_EPOCH")
-            .as_secs();
+        let timestamp = unix_secs(clock.now());
         let consumed_name = format!("bootstrap.toml.consumed-{}", timestamp);
         let consumed_path = data_dir.join(&consumed_name);
         fs::rename(&bootstrap_path, &consumed_path)?;
@@ -185,6 +187,7 @@ pub async fn apply_bootstrap(
 async fn apply_principal(
     principal_store: &dyn PrincipalStore,
     principal: BootstrapPrincipal,
+    clock: &dyn Clock,
 ) -> BootstrapResult<()> {
     if principal_store
         .get_by_name(&principal.name)
@@ -195,7 +198,7 @@ async fn apply_principal(
         return Ok(());
     }
 
-    let now = unix_now_secs();
+    let now = unix_secs(clock.now());
     let input = PrincipalCreate {
         name: principal.name,
         kind: parse_principal_kind(principal.kind.as_deref()),
@@ -438,13 +441,6 @@ fn parse_plugin_slot(slot: &str) -> Option<PluginSlot> {
     }
 }
 
-fn unix_now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time is always after UNIX_EPOCH")
-        .as_secs()
-}
-
 fn parse_upstream_kind(
     kind_str: &str,
 ) -> BootstrapResult<cc_lb_storage_api::upstream::UpstreamKind> {
@@ -460,6 +456,7 @@ fn parse_upstream_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cc_lb_core::clock::TestClock;
     use cc_lb_storage_api::{
         BackendKind, MetaStore, PluginRegistryStore, PrincipalStore, WasmBlob,
         WasmRegistryEntryInput,
@@ -469,6 +466,7 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_seeds_principals_from_toml() {
         let (dir, storage) = fixture().await;
+        let clock = TestClock::new_at_secs(1_800_000_000);
         fs::write(
             dir.path().join("bootstrap.toml"),
             format!(
@@ -485,6 +483,7 @@ mod tests {
             &storage,
             None,
             dir.path(),
+            &clock,
         )
         .await
         .unwrap();
@@ -510,6 +509,7 @@ mod tests {
             &storage,
             None,
             dir.path(),
+            &clock,
         )
         .await
         .unwrap();
@@ -527,6 +527,7 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_seeds_plugin_chain_when_wasm_exists() {
         let (dir, storage) = fixture().await;
+        let clock = TestClock::new_at_secs(1_800_000_000);
         seed_principal(&storage, "plugin-principal").await;
         seed_registry(&storage, "audit").await;
         fs::write(
@@ -547,6 +548,7 @@ plugins = ["audit"]
             &storage,
             None,
             dir.path(),
+            &clock,
         )
         .await
         .unwrap();
@@ -578,6 +580,7 @@ plugins = ["audit"]
             &storage,
             None,
             dir.path(),
+            &clock,
         )
         .await
         .unwrap();
@@ -591,6 +594,7 @@ plugins = ["audit"]
     #[tokio::test]
     async fn bootstrap_skips_chain_when_wasm_missing_with_warning() {
         let (dir, storage) = fixture().await;
+        let clock = TestClock::new_at_secs(1_800_000_000);
         let principal = seed_principal(&storage, "plugin-principal").await;
         fs::write(
             dir.path().join("bootstrap.toml"),
@@ -610,6 +614,7 @@ plugins = ["missing-plugin"]
             &storage,
             None,
             dir.path(),
+            &clock,
         )
         .await
         .unwrap();
@@ -624,9 +629,12 @@ plugins = ["missing-plugin"]
     async fn fixture() -> (tempfile::TempDir, Storage) {
         let dir = tempfile::tempdir().unwrap();
         let database_url = format!("sqlite://{}", dir.path().join("storage.sqlite").display());
-        let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
-            .await
-            .unwrap();
+        let storage = cc_lb_storage_sqlite::open_sqlite(
+            &database_url,
+            std::sync::Arc::new(cc_lb_core::SystemClock),
+        )
+        .await
+        .unwrap();
         storage.initialize(BackendKind::Sqlite).await.unwrap();
         (dir, storage)
     }

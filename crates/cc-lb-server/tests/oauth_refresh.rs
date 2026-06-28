@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -24,7 +24,7 @@ use cc_lb_scheduler::jobs::oauth_refresh::{
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerCtx, SchedulerPushTask};
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
-use cc_lb_server::refresh::LazyRefresher;
+use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
 use cc_lb_server::scheduler_factory::{SchedulerBackend, SqliteSchedulerStorage};
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh,
@@ -75,7 +75,7 @@ impl Fixture {
         let dir = tempfile::tempdir().expect("tempdir");
         let database_url = format!("sqlite://{}", dir.path().join("oauth.sqlite").display());
         let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url)
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
                 .await
                 .expect("storage"),
         );
@@ -185,19 +185,23 @@ async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
     let fixture = Fixture::new().await;
     let upstream_id = fixture.create_oauth_upstream("lazy", now_secs()).await;
     let replica_id = Uuid::new_v4();
-    let lazy = Arc::new(LazyRefresher::new(
-        fixture.stores.clone(),
-        fixture.aead.clone(),
-        fixture.oauth_cfg.clone(),
+    let lazy = Arc::new(LazyRefresher::new(LazyRefresherParams {
+        deps: LazyRefresherDeps {
+            stores: fixture.stores.clone(),
+            aead: fixture.aead.clone(),
+            oauth_cfg: fixture.oauth_cfg.clone(),
+            clock: Arc::new(cc_lb_core::SystemClock),
+        },
         replica_id,
-        None,
-        CancellationToken::new(),
-        fixture.scheduler_backend.clone(),
-    ));
+        metadata_hook: None,
+        cancel: CancellationToken::new(),
+        apalis_handle: fixture.scheduler_backend.clone(),
+    }));
     let base = AnthropicOAuthSignerFactory::for_upstream_name(
         fixture.storage.clone(),
         fixture.aead.clone(),
         "lazy",
+        Arc::new(cc_lb_core::SystemClock),
     );
     let factory = AnthropicOAuthSignerFactoryWithLazyRefresh::new(base, lazy, upstream_id);
     let signer = cc_lb_plugin_api::SignerFactory::build(
@@ -230,16 +234,22 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         .await;
     let cancel = CancellationToken::new();
     let replica_id = Uuid::new_v4();
-    let lazy = Arc::new(LazyRefresher::new(
-        fixture.stores.clone(),
-        fixture.aead.clone(),
-        fixture.oauth_cfg.clone(),
+    let lazy = Arc::new(LazyRefresher::new(LazyRefresherParams {
+        deps: LazyRefresherDeps {
+            stores: fixture.stores.clone(),
+            aead: fixture.aead.clone(),
+            oauth_cfg: fixture.oauth_cfg.clone(),
+            clock: Arc::new(cc_lb_core::SystemClock),
+        },
         replica_id,
-        None,
+        metadata_hook: None,
         cancel,
-        fixture.scheduler_backend.clone(),
-    ));
-    let runtime = ExtismRuntime::new();
+        apalis_handle: fixture.scheduler_backend.clone(),
+    }));
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
         fixture.oauth_cfg.as_ref(),
@@ -251,6 +261,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await
     .expect("dynamic view builds");
@@ -262,9 +273,11 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
                 upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
             }),
             None,
+            Arc::new(cc_lb_core::SystemClock),
         )),
         Arc::new(DynamicViewHolder::new(view)),
         LifecycleConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
     );
 
     let response = lifecycle
@@ -489,6 +502,7 @@ async fn sqlite_scheduler_backend() -> SchedulerBackend {
             &pool,
             cc_lb_scheduler::worker::ADAPTIVE_QUEUE,
         ),
+        clock: Arc::new(cc_lb_core::SystemClock),
     })
 }
 
@@ -516,6 +530,7 @@ fn spawn_oauth_refresh_worker(
                 }
             }),
             Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+            Arc::new(cc_lb_core::SystemClock),
         ),
     )
     .expect("entity worker builds");
@@ -694,7 +709,11 @@ fn encrypted(
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now()
+    use cc_lb_core::Clock as _;
+
+    let clock = cc_lb_core::SystemClock;
+    clock
+        .now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()

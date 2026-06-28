@@ -154,7 +154,7 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
     let dir = tempfile::tempdir().expect("request event storage tempdir");
     let path = dir.path().join("latency-stages.sqlite");
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url)
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
         .await
         .expect("request event storage opens");
     storage
@@ -162,7 +162,10 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
         .await
         .expect("initialize");
     let storage = Arc::new(storage);
-    let limit_engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()));
+    let limit_engine = LimitEngine::new(
+        Arc::new(KeyConcurrencyManager::new()),
+        Arc::new(cc_lb_core::SystemClock),
+    );
     let base_url = Url::parse(base_url).expect("test base URL parses");
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
@@ -177,6 +180,7 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
         authn.authn.clone(),
         Arc::new(DynamicViewHolder::new(view)),
         LifecycleConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .with_request_event_storage(Arc::clone(&storage) as Arc<dyn StorageTrait>)
     .with_static_limit_subject(

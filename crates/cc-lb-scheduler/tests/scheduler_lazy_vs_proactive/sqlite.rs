@@ -6,10 +6,11 @@ use apalis::layers::catch_panic::CatchPanicLayer;
 use apalis::prelude::{IntervalStrategy, StrategyBuilder, WorkerBuilder, WorkerError};
 use cc_lb_aead::AeadService;
 use cc_lb_config::AnthropicOAuthConfig;
+use cc_lb_core::clock::SystemClock;
 use cc_lb_scheduler::middleware::TraceparentLayer;
 use cc_lb_scheduler::retry::RetryClass;
 use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, SchedulerBackend, SqliteSchedulerStorage};
-use cc_lb_server::refresh::LazyRefresher;
+use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::task::JoinHandle;
@@ -30,7 +31,9 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
     let dir = tempfile::tempdir()?;
     let fake = FakeAnthropic::spawn().await?;
     let storage_url = format!("sqlite://{}", dir.path().join("runtime.sqlite").display());
-    let storage = Arc::new(cc_lb_storage_sqlite::open_sqlite(&storage_url).await?);
+    let storage = Arc::new(
+        cc_lb_storage_sqlite::open_sqlite(&storage_url, Arc::new(cc_lb_core::SystemClock)).await?,
+    );
     storage.initialize(BackendKind::Sqlite).await?;
     let scheduler_url = format!("sqlite://{}", dir.path().join("scheduler.sqlite").display());
     let scheduler_options = SqliteConnectOptions::from_str(&scheduler_url)?.create_if_missing(true);
@@ -45,6 +48,7 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
     let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
         pool: scheduler_pool.clone(),
         storage: apalis_sqlite::SqliteStorage::new_with_config(&scheduler_pool, &config),
+        clock: Arc::new(SystemClock),
     });
     let aead = Arc::new(AeadService::from_master_key([38; 32]));
     let oauth_cfg = Arc::new(AnthropicOAuthConfig {
@@ -75,15 +79,18 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
         state,
         cancel.clone(),
     );
-    let lazy = LazyRefresher::new(
-        stores_from_storage(storage.clone()),
-        aead,
-        oauth_cfg,
-        Uuid::new_v4(),
-        None,
-        CancellationToken::new(),
-        backend.clone(),
-    );
+    let lazy = LazyRefresher::new(LazyRefresherParams {
+        deps: LazyRefresherDeps {
+            stores: stores_from_storage(storage.clone()),
+            aead,
+            oauth_cfg,
+            clock: Arc::new(cc_lb_core::SystemClock),
+        },
+        replica_id: Uuid::new_v4(),
+        metadata_hook: None,
+        cancel: CancellationToken::new(),
+        apalis_handle: backend.clone(),
+    });
 
     let result = run_race_scenario(
         &fake,

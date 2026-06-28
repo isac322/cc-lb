@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
@@ -86,8 +86,7 @@ impl PostgresStorage {
             let Some(channel) = ChangeChannel::from_postgres_channel(notification.channel()) else {
                 continue;
             };
-            let mut event = ChangeEvent::new(channel, notification.payload());
-            event.observed_at = SystemTime::now();
+            let event = ChangeEvent::new(channel, notification.payload(), self.clock.now());
             let _ = self.change_tx.send(event);
         }
     }

@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -81,7 +79,7 @@ pub async fn list_credentials(State(state): State<AdminState>) -> Response {
             return internal_error("storage_error");
         }
     };
-    let now = now_unix_secs();
+    let now = cc_lb_core::clock::unix_secs(state.clock.now());
     let mut credentials = Vec::new();
     for principal in &principals {
         let principal_id = principal.id.to_string();
@@ -110,7 +108,7 @@ pub async fn list_oauth_status(State(state): State<AdminState>) -> Response {
             return internal_error("storage_error");
         }
     };
-    let now = now_unix_secs();
+    let now = cc_lb_core::clock::unix_secs(state.clock.now());
     let mut credentials = Vec::new();
     for principal in &principals {
         let principal_id = principal.id.to_string();
@@ -317,11 +315,4 @@ fn internal_error(error: &str) -> Response {
         Json(json!({ "error": error })),
     )
         .into_response()
-}
-
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }

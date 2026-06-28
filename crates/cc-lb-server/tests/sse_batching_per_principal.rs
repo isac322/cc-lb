@@ -33,7 +33,10 @@ fn same_plugin_name_with_different_principals_keeps_sse_batches_independent() {
     assert!(principal_a.sse_per_event);
     assert!(!principal_b.sse_per_event);
 
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     let (hook_a, staged_a) = runtime
         .instantiate_observability_for(
             principal_a.principal_id,

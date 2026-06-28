@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use cc_lb_admin::{DynamicViewRebinder, LastReloadStatus, ReloadOutcome};
 use cc_lb_config::{Config, ConfigError, RestartRequiredField, StorageConfig};
 use cc_lb_core::DynamicViewHolder;
+use cc_lb_core::clock::{ClockHandle, unix_secs};
 use notify::{Event, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
@@ -24,6 +25,7 @@ pub struct ConfigWatcher {
     last_reload_status: Arc<ArcSwap<Option<LastReloadStatus>>>,
     dynamic_view: Option<Arc<DynamicViewHolder>>,
     dynamic_view_rebinder: Mutex<Option<Arc<dyn DynamicViewRebinder>>>,
+    clock: ClockHandle,
 }
 
 impl ConfigWatcher {
@@ -31,8 +33,9 @@ impl ConfigWatcher {
         path: impl AsRef<Path>,
         initial_config: Config,
         _runtime: Arc<cc_lb_runtime_extism::ExtismRuntime>,
+        clock: ClockHandle,
     ) -> Self {
-        Self::new_with_principal_view(path, initial_config, _runtime, None)
+        Self::new_with_principal_view(path, initial_config, _runtime, None, clock)
     }
 
     pub fn new_with_principal_view(
@@ -40,6 +43,7 @@ impl ConfigWatcher {
         initial_config: Config,
         _runtime: Arc<cc_lb_runtime_extism::ExtismRuntime>,
         dynamic_view: Option<Arc<DynamicViewHolder>>,
+        clock: ClockHandle,
     ) -> Self {
         let (reload_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let process_start_config = Arc::new(initial_config.clone());
@@ -52,6 +56,7 @@ impl ConfigWatcher {
             last_reload_status: Arc::new(ArcSwap::from(Arc::new(None))),
             dynamic_view,
             dynamic_view_rebinder: Mutex::new(None),
+            clock,
         }
     }
 
@@ -187,7 +192,7 @@ impl ConfigWatcher {
     fn record_success(&self, config_path: Option<String>) {
         self.last_reload_status
             .store(Arc::new(Some(LastReloadStatus {
-                timestamp_unix_secs: unix_timestamp_secs(),
+                timestamp_unix_secs: unix_secs(self.clock.now()),
                 outcome: ReloadOutcome::Success,
                 config_path,
             })));
@@ -211,7 +216,7 @@ impl ConfigWatcher {
         );
         self.last_reload_status
             .store(Arc::new(Some(LastReloadStatus {
-                timestamp_unix_secs: unix_timestamp_secs(),
+                timestamp_unix_secs: unix_secs(self.clock.now()),
                 outcome: ReloadOutcome::Failure {
                     reason,
                     principal,
@@ -522,11 +527,4 @@ fn watch_dir_for(path: &Path) -> PathBuf {
         .filter(|parent| !parent.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn unix_timestamp_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }

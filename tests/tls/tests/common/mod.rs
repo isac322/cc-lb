@@ -105,7 +105,8 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
         &key_path,
     );
     let config = Config::load(&config_path).expect("load config");
-    let app = build_app_with_path(config, Some(&config_path))
+    let clock: cc_lb_core::ClockHandle = std::sync::Arc::new(cc_lb_core::SystemClock);
+    let app = build_app_with_path(config, Some(&config_path), clock)
         .await
         .expect("build app");
     let signals = app.signal_handle();

@@ -47,12 +47,13 @@ const MESSAGES_BODY: &[u8] = br#"{"model":"claude-3-5-sonnet-20241022","messages
 #[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_postgres_storage_path_writes_a_row() -> TestResult<()> {
+    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
     let Some(database_url) = std::env::var("CI_POSTGRES_URL").ok() else {
         eprintln!("skipped: CI_POSTGRES_URL unset");
         return Ok(());
     };
 
-    let fixture_app = build_app_for_testing_postgres(&database_url).await?;
+    let fixture_app = build_app_for_testing_postgres(&database_url, clock.clone()).await?;
     drop(fixture_app);
 
     let upstream = spawn_test_upstream().await?;
@@ -166,16 +167,20 @@ async fn build_postgres_app(
     pool: PgPool,
     upstream_addr: SocketAddr,
 ) -> TestResult<App> {
-    let storage: Arc<dyn StorageTrait> = Arc::new(PostgresStorage::new(pool.clone()));
+    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+    let storage: Arc<dyn StorageTrait> =
+        Arc::new(PostgresStorage::new(pool.clone(), clock.clone()));
     storage.initialize(BackendKind::Postgres).await?;
     seed_app_testing_storage(
         storage.as_ref(),
         Some(Url::parse(&format!("http://{}", upstream_addr))?),
+        &*clock,
     )
     .await?;
     let managed_store: Arc<dyn ManagedKeyStore> = Arc::new(PostgresManagedKeyStore::new(
         pool,
         Arc::new(RetryPolicy::default()),
+        clock.clone(),
     ));
     Ok(build_app_with_storage(
         test_config(database_url, upstream_addr)?,
@@ -183,6 +188,7 @@ async fn build_postgres_app(
         managed_store,
         storage,
         Arc::new(AeadService::from_master_key([0; 32])),
+        clock.clone(),
     )
     .await?)
 }

@@ -12,18 +12,22 @@ use crate::{VerifyError, VerifyReport};
 
 use super::{begin_report, dispatch_ok, push_dispatch_ok, require_function};
 
-pub fn verify_router_plugin(wasm: &[u8]) -> Result<VerifyReport, VerifyError> {
-    verify_router_plugin_with_caps(wasm, &BTreeSet::new())
+pub fn verify_router_plugin(
+    wasm: &[u8],
+    clock: &dyn cc_lb_clock::Clock,
+) -> Result<VerifyReport, VerifyError> {
+    verify_router_plugin_with_caps(wasm, &BTreeSet::new(), clock)
 }
 
 pub fn verify_router_plugin_with_caps(
     wasm: &[u8],
     host_capabilities: &BTreeSet<String>,
+    clock: &dyn cc_lb_clock::Clock,
 ) -> Result<VerifyReport, VerifyError> {
     let handshake = handshake::run_with_caps(wasm, host_capabilities)?;
     require_function::<FilterFn>(&handshake)?;
 
-    let mut report = begin_report(wasm, handshake, FilterFn::NAME)?;
+    let mut report = begin_report(wasm, handshake, FilterFn::NAME, clock)?;
     let mut session = PluginSession::new_with_caps(wasm, host_capabilities)?;
 
     let empty_response = dispatch_ok::<FilterFn>(&mut session, FilterRequest::dry_run_sample())?;

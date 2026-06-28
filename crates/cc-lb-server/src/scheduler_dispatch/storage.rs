@@ -73,8 +73,9 @@ impl UsagePruneRunner for StorageHandle {
     async fn prune_once_for_retention(
         &self,
         retention_days: u64,
+        clock: cc_lb_core::ClockHandle,
     ) -> cc_lb_core::usage_pruner::PruneResult {
-        cc_lb_core::usage_pruner::UsagePruner::new(self.storage.clone(), retention_days)
+        cc_lb_core::usage_pruner::UsagePruner::new(self.storage.clone(), retention_days, clock)
             .prune_once()
             .await
     }

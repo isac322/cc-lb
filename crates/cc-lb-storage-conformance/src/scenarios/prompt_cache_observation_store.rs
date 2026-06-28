@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
-use cc_lb_core::ClockHandle;
+use cc_lb_core::{ClockHandle, clock::unix_secs};
 use cc_lb_storage_api::{PromptCacheObservationRecord, PromptCacheObservationStore, TtlClass};
 use uuid::Uuid;
 
@@ -19,7 +19,7 @@ where
     B::Storage: PromptCacheObservationStore,
 {
     with_conformance_fixture(backend, |storage| async move {
-        let now = clock.now_unix_secs();
+        let now = unix_secs(clock.now());
         let upstream_id = upstream_id(1);
         let active = observation(
             upstream_id,
@@ -66,7 +66,7 @@ where
     B::Storage: PromptCacheObservationStore,
 {
     with_conformance_fixture(backend, |storage| async move {
-        let now = clock.now_unix_secs();
+        let now = unix_secs(clock.now());
         let upstream_id = upstream_id(2);
         let prefix_hash = "sha256:t15-asymmetric-shared";
         let record_5m = observation(
@@ -117,7 +117,7 @@ where
     B::Storage: PromptCacheObservationStore,
 {
     with_conformance_fixture(backend, |storage| async move {
-        let now = clock.now_unix_secs();
+        let now = unix_secs(clock.now());
         let upstream_id = upstream_id(3);
         let active = observation(
             upstream_id,
@@ -178,7 +178,7 @@ where
 {
     let fixture = backend.create_fixture().await?;
     let result = async {
-        let now = clock.now_unix_secs();
+        let now = unix_secs(clock.now());
         let upstream_id = upstream_id(4);
         let active = observation(
             upstream_id,
@@ -230,7 +230,7 @@ where
     B::Storage: PromptCacheObservationStore,
 {
     with_conformance_fixture(backend, |storage| async move {
-        let now = clock.now_unix_secs();
+        let now = unix_secs(clock.now());
         let upstream_id = upstream_id(5);
 
         let records_to_insert = vec![

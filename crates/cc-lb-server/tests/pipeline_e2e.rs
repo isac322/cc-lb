@@ -7,7 +7,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
@@ -481,7 +481,9 @@ impl PipelineHarness {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("pipeline-e2e.sqlite");
         let database_url = format!("sqlite://{}", path.display());
-        let storage = open_sqlite(&database_url).await.expect("storage opens");
+        let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+            .await
+            .expect("storage opens");
         cc_lb_storage_api::MetaStore::initialize(&storage, BackendKind::Sqlite)
             .await
             .expect("initialize");
@@ -527,7 +529,10 @@ impl PipelineHarness {
         }
 
         let stores = stores(Arc::clone(&storage));
-        let runtime = ExtismRuntime::new();
+        let runtime = ExtismRuntime::with_config(
+            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+            std::sync::Arc::new(cc_lb_core::SystemClock),
+        );
         let view = build_dynamic_view(
             &stores,
             &AnthropicOAuthConfig::default(),
@@ -539,6 +544,7 @@ impl PipelineHarness {
             Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
             1_800,
             &cc_lb_config::Config::default(),
+            Arc::new(cc_lb_core::SystemClock),
         )
         .await?;
         let authn = Arc::new(BuiltinAuthn::new(
@@ -548,17 +554,22 @@ impl PipelineHarness {
                 upstream_kind: NoneModeUpstreamKind::AnthropicKey,
             }),
             None,
+            Arc::new(cc_lb_core::SystemClock),
         ));
         let storage_trait: Arc<dyn StorageTrait> = storage.clone();
         let lifecycle = Lifecycle::new_with_dynamic_view(
             authn,
             Arc::new(DynamicViewHolder::new(view)),
             LifecycleConfig::default(),
+            Arc::new(cc_lb_core::SystemClock),
         )
         .with_terminal_rng_seed(TERMINAL_RNG_SEED)
         .with_request_event_storage(storage_trait)
         .with_static_limit_subject(
-            LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
+            LimitEngine::new(
+                Arc::new(KeyConcurrencyManager::new()),
+                Arc::new(cc_lb_core::SystemClock),
+            ),
             PRINCIPAL_NAME.to_owned(),
             KEY_ID.to_owned(),
             active_record(),
@@ -968,7 +979,11 @@ fn repo_root() -> PathBuf {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now()
+    use cc_lb_core::Clock as _;
+
+    let clock = cc_lb_core::SystemClock;
+    clock
+        .now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()

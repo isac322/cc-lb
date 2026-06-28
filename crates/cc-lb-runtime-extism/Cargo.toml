@@ -11,6 +11,7 @@ arc-swap.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
+cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 cc-lb-runtime-protocol = { workspace = true }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }

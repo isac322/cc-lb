@@ -28,7 +28,7 @@ use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use serde::Serialize;
 
 use cc_lb_core::{
-    AuditWriterSink, DynamicView, DynamicViewHolder, Lifecycle, MetadataHookHandle,
+    AuditWriterSink, ClockHandle, DynamicView, DynamicViewHolder, Lifecycle, MetadataHookHandle,
     RequestEventBus,
     api_keys::{key_store::KeyStore, limit_engine::LimitEngine},
 };
@@ -99,6 +99,7 @@ pub struct AdminState {
     pub admin_token: Option<String>,
     pub start_time: std::time::Instant,
     pub event_bus: Option<Arc<dyn RequestEventBus>>,
+    pub clock: ClockHandle,
 }
 
 #[derive(Debug, thiserror::Error)]

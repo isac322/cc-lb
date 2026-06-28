@@ -26,6 +26,7 @@ type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
 async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResult<()> {
+    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
     let upstream_server = spawn_upstream().await?;
     let dir = tempfile::tempdir()?;
     let key = [0; 32];
@@ -76,6 +77,7 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
         managed_store,
         storage.clone(),
         Arc::new(AeadService::from_master_key(key)),
+        clock.clone(),
     )
     .await?;
 
@@ -123,7 +125,7 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
 
 async fn sqlite_storage(path: &std::path::Path) -> TestResult<Arc<SqliteStorage>> {
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url).await?;
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock)).await?;
     storage.initialize(BackendKind::Sqlite).await?;
     Ok(Arc::new(storage))
 }

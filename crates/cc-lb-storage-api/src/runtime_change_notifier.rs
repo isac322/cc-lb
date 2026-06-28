@@ -52,11 +52,11 @@ pub struct ChangeEvent {
 }
 
 impl ChangeEvent {
-    pub fn new(channel: ChangeChannel, payload: impl AsRef<str>) -> Self {
+    pub fn new(channel: ChangeChannel, payload: impl AsRef<str>, observed_at: SystemTime) -> Self {
         Self {
             channel,
             payload: normalize_payload(payload.as_ref()),
-            observed_at: SystemTime::now(),
+            observed_at,
         }
     }
 }

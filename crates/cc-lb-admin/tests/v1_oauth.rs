@@ -16,7 +16,7 @@ use axum::{
 use cc_lb_admin::{AdminState, router};
 use cc_lb_aead::{AeadEncryptedField, AeadService, OAuthTokenBundle};
 use cc_lb_config::{AnthropicOAuthConfig, Config};
-use cc_lb_core::spawn_audit_writer;
+use cc_lb_core::{Clock as _, spawn_audit_writer};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{AuditStore, UpstreamCreate, UpstreamStore};
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
@@ -66,6 +66,7 @@ impl Fixture {
             admin_token: Some("test-token".to_owned()),
             start_time: std::time::Instant::now(),
             event_bus: None,
+            clock: Arc::new(cc_lb_core::SystemClock),
         };
 
         Self {
@@ -198,10 +199,8 @@ impl Fixture {
 }
 
 fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_secs()
+    let clock = cc_lb_core::SystemClock;
+    cc_lb_core::clock::unix_secs(clock.now())
 }
 
 #[tokio::test]

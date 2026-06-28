@@ -132,11 +132,12 @@ pub trait UpstreamWarmupAttemptStore: Send + Sync {
         filters: WarmupAttemptListFilters,
     ) -> StorageResult<Vec<WarmupAttemptRecord>>;
 
-    /// Counts outcomes for attempts in the last `window_secs` seconds.
+    /// Counts outcomes for attempts with `attempted_at_unix_secs >= cutoff_unix_secs`. The caller
+    /// owns the cutoff so backends stay clock-free and behave identically across SQL dialects.
     async fn summarize_recent_warmup_attempts(
         &self,
         upstream_id: Uuid,
-        window_secs: i64,
+        cutoff_unix_secs: i64,
     ) -> StorageResult<WarmupAttemptSummary>;
 
     async fn latest_warmup_attempt_for_upstream(

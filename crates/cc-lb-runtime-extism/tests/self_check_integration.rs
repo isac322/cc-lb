@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
+use cc_lb_core::TestClock;
 use cc_lb_plugin_wire::handshake::{HANDSHAKE_SCHEMA_VERSION_V1, HandshakeAccept};
 use cc_lb_plugin_wire::identity::{CC_LB_PLUGIN_MAGIC, CC_LB_PLUGIN_SECTION_NAME};
 use cc_lb_plugin_wire::limits::SELF_CHECK_OUTPUT_MAX_BYTES;
@@ -28,7 +29,9 @@ fn handler_panic_does_not_affect_self_check() {
         infinite_loop: false,
     });
 
-    let response = execute_self_check(&wasm, &[PluginSlot::Shape])
+    let clock = TestClock::new_at_secs(1_800_000_000);
+
+    let response = execute_self_check(&wasm, &[PluginSlot::Shape], &clock)
         .expect("self-check succeeds without calling shape");
 
     assert_eq!(response.status, SelfCheckStatus::Success);
@@ -47,7 +50,9 @@ fn host_fn_call_during_self_check_is_rejected() {
         infinite_loop: false,
     });
 
-    let error = execute_self_check(&wasm, &[PluginSlot::Shape])
+    let clock = TestClock::new_at_secs(1_800_000_000);
+
+    let error = execute_self_check(&wasm, &[PluginSlot::Shape], &clock)
         .expect_err("host import is rejected or traps");
 
     match error {
@@ -67,8 +72,10 @@ fn self_check_timeout_is_rejected() {
         infinite_loop: true,
     });
 
-    let error =
-        execute_self_check(&wasm, &[PluginSlot::Shape]).expect_err("infinite loop is rejected");
+    let clock = TestClock::new_at_secs(1_800_000_000);
+
+    let error = execute_self_check(&wasm, &[PluginSlot::Shape], &clock)
+        .expect_err("infinite loop is rejected");
 
     match error {
         SelfCheckExecutionError::Call { reason } => {
@@ -96,8 +103,10 @@ fn self_check_output_too_large_is_rejected() {
         infinite_loop: false,
     });
 
-    let error =
-        execute_self_check(&wasm, &[PluginSlot::Shape]).expect_err("oversized output is rejected");
+    let clock = TestClock::new_at_secs(1_800_000_000);
+
+    let error = execute_self_check(&wasm, &[PluginSlot::Shape], &clock)
+        .expect_err("oversized output is rejected");
 
     match error {
         SelfCheckExecutionError::OutputTooLarge { bytes, max } => {
@@ -119,8 +128,10 @@ fn missing_self_check_export_is_rejected() {
         infinite_loop: false,
     });
 
-    let error =
-        execute_self_check(&wasm, &[PluginSlot::Shape]).expect_err("missing export is rejected");
+    let clock = TestClock::new_at_secs(1_800_000_000);
+
+    let error = execute_self_check(&wasm, &[PluginSlot::Shape], &clock)
+        .expect_err("missing export is rejected");
 
     match error {
         SelfCheckExecutionError::MissingSelfCheckExport => {}
@@ -135,6 +146,7 @@ async fn self_check_failure_status_rejects_registration() {
         repos.registry.clone(),
         repos.blobs.clone(),
         build_offer(&BTreeSet::new()),
+        Arc::new(TestClock::new_at_secs(1_800_000_000)),
     )
     .expect("registry builds");
     let output = json!({

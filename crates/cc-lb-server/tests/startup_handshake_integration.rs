@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -43,6 +43,7 @@ async fn skip_if_fresh_fast_path_100_records_executes_zero_handshakes() -> Resul
         repos.registry_repo.as_ref(),
         StartupHandshakeOpts::default(),
         shutdown,
+        &cc_lb_core::SystemClock,
     )
     .await;
 
@@ -84,6 +85,7 @@ async fn force_handshake_rehandshakes_all_records() -> Result<()> {
             ..StartupHandshakeOpts::default()
         },
         shutdown,
+        &cc_lb_core::SystemClock,
     )
     .await;
 
@@ -121,6 +123,7 @@ async fn host_offer_change_rehandshakes_all_records() -> Result<()> {
         repos.registry_repo.as_ref(),
         StartupHandshakeOpts::default(),
         shutdown,
+        &cc_lb_core::SystemClock,
     )
     .await;
 
@@ -178,6 +181,7 @@ async fn mid_startup_shutdown_saves_partial_progress_and_marker() -> Result<()> 
                     parallelism: 1,
                 },
                 shutdown,
+                &cc_lb_core::SystemClock,
             )
             .await
         }
@@ -234,6 +238,7 @@ async fn recovery_from_mid_shutdown_rehandshakes_stale_records() -> Result<()> {
         repos.registry_repo.as_ref(),
         StartupHandshakeOpts::default(),
         shutdown,
+        &cc_lb_core::SystemClock,
     )
     .await;
 
@@ -279,6 +284,7 @@ async fn parallel_execution_caps_at_8_and_is_time_bounded() -> Result<()> {
             parallelism: 32,
         },
         shutdown,
+        &cc_lb_core::SystemClock,
     )
     .await;
     let elapsed = started.elapsed();
@@ -331,6 +337,7 @@ async fn budget_limit_disables_remaining_records() -> Result<()> {
             parallelism: 32,
         },
         shutdown,
+        &cc_lb_core::SystemClock,
     )
     .await;
 
@@ -357,7 +364,7 @@ struct TestRepos {
 
 impl TestRepos {
     async fn new() -> Result<Self> {
-        let storage = open_sqlite("sqlite::memory:").await?;
+        let storage = open_sqlite("sqlite::memory:", Arc::new(cc_lb_core::SystemClock)).await?;
         cc_lb_storage_api::MetaStore::initialize(&storage, BackendKind::Sqlite).await?;
         for record in storage.list_active().await? {
             storage.delete_by_sha256(&record.sha256).await?;
@@ -377,6 +384,7 @@ impl TestRepos {
             registry_repo,
             blob_repo,
             build_offer(&host_caps),
+            Arc::new(cc_lb_core::SystemClock),
         )?)
     }
 }
@@ -704,7 +712,10 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 }
 
 fn unix_now() -> Result<i64> {
+    use cc_lb_core::Clock as _;
+
+    let clock = cc_lb_core::SystemClock;
     Ok(i64::try_from(
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+        clock.now().duration_since(UNIX_EPOCH)?.as_secs(),
     )?)
 }

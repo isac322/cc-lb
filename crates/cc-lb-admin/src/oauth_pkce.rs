@@ -1,9 +1,9 @@
 use std::fmt;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use cc_lb_core::Clock;
 use cc_lb_storage_api::OAuthCredentials;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderValue, Request, StatusCode};
@@ -114,6 +114,7 @@ pub(crate) async fn complete_pkce_flow(
     auth_code: String,
     state_token: String,
     http: Arc<dyn OAuthHttpClient>,
+    clock: &dyn Clock,
 ) -> Result<OAuthCredentials, OAuthTokenError> {
     exchange_pkce_code(
         http.as_ref(),
@@ -123,7 +124,7 @@ pub(crate) async fn complete_pkce_flow(
         &state_token,
         &handshake.verifier,
         &handshake.redirect_uri,
-        now_epoch_secs(),
+        cc_lb_core::clock::unix_secs(clock.now()),
     )
     .await
 }
@@ -399,11 +400,4 @@ fn form_body(
         "state": state_token,
     });
     SecretString::new(payload.to_string().into_boxed_str())
-}
-
-fn now_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }

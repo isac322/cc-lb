@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result, ensure};
 use cc_lb_storage_api::{
@@ -98,7 +101,7 @@ where
 
 pub fn payload_is_truncated_to_identifier_limit() -> Result<()> {
     let payload = "x".repeat(MAX_CHANGE_PAYLOAD_LEN + 50);
-    let event = ChangeEvent::new(ChangeChannel::Upstream, &payload);
+    let event = ChangeEvent::new(ChangeChannel::Upstream, &payload, UNIX_EPOCH);
     ensure!(
         event.payload.len() == MAX_CHANGE_PAYLOAD_LEN,
         "payload should be truncated to {MAX_CHANGE_PAYLOAD_LEN} chars"
@@ -377,6 +380,7 @@ mod tests {
             let storage = cc_lb_storage_postgres::PostgresStorage::new_with_listener_pool(
                 pool.clone(),
                 listener_pool.clone(),
+                Arc::new(cc_lb_core::SystemClock),
             );
             Ok(Some(Self {
                 schema,

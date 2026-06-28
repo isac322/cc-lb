@@ -18,13 +18,17 @@ fn config_reload_is_storage_driven_and_keeps_runtime_view() {
     write_config_with_principal_routers(&config_path, proxy_addr, &router_path, None);
 
     let initial_config = reload_common::load_config(&config_path);
-    let runtime = Arc::new(cc_lb_runtime_extism::ExtismRuntime::new());
+    let runtime = Arc::new(cc_lb_runtime_extism::ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
+    ));
     let dynamic_view = reload_common::dynamic_view_holder(&initial_config);
     let watcher = ConfigWatcher::new_with_principal_view(
         &config_path,
         initial_config,
         runtime.clone(),
         Some(dynamic_view.clone()),
+        Arc::new(cc_lb_core::SystemClock),
     );
     watcher
         .reload_now()

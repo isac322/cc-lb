@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use cc_lb_core::clock::SystemClock;
 use cc_lb_scheduler::admin::SchedulerAdminHandle;
 use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, AdaptiveJob, SchedulerBackend};
 use uuid::Uuid;
@@ -25,6 +26,7 @@ async fn next_run_for_upstream_returns_earliest_active_warmup() {
         SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerStorage {
             pool: pool.clone(),
             storage,
+            clock: Arc::new(SystemClock),
         }),
         Arc::new(cc_lb_scheduler::leader_election::LeaderElection::sqlite()),
     );
@@ -106,7 +108,11 @@ async fn next_run_for_upstream_returns_none_without_active_warmup() {
     let storage =
         apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(&pool, ADAPTIVE_QUEUE);
     let handle = SchedulerAdminHandle::new(
-        SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerStorage { pool, storage }),
+        SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerStorage {
+            pool,
+            storage,
+            clock: Arc::new(SystemClock),
+        }),
         Arc::new(cc_lb_scheduler::leader_election::LeaderElection::sqlite()),
     );
 

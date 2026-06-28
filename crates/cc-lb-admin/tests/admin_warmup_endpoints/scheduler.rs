@@ -32,7 +32,11 @@ pub async fn scheduler_with_next_warmup(upstream_id: Uuid) -> SchedulerAdminHand
     let storage =
         apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(&pool, ADAPTIVE_QUEUE);
     SchedulerAdminHandle::new(
-        SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerStorage { pool, storage }),
+        SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerStorage {
+            pool,
+            storage,
+            clock: Arc::new(cc_lb_core::SystemClock),
+        }),
         Arc::new(cc_lb_scheduler::leader_election::LeaderElection::sqlite()),
     )
 }

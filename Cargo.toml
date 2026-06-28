@@ -39,6 +39,7 @@ rust-version = "1.96.0"
 [workspace.dependencies]
 # Plugin trio — public crates.io surface. Lockstep via exact-version pin.
 # Bumping any of these requires bumping all three together.
+cc-lb-clock       = { path = "crates/cc-lb-clock", version = "=0.1.0" }
 cc-lb-pdk         = { path = "crates/cc-lb-pdk",         version = "=0.1.1" }
 cc-lb-plugin-wire = { path = "crates/cc-lb-plugin-wire", version = "=0.1.1" }
 cc-lb-plugin-api  = { path = "crates/cc-lb-plugin-api", version = "=0.2.1" }

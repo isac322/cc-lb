@@ -163,7 +163,7 @@ cache_ttl_ceiling_secs = 300
 
 async fn seed_storage(storage_path: &Path, upstream_addr: SocketAddr) {
     let database_url = format!("sqlite://{}", storage_path.display());
-    let storage = open_sqlite(&database_url)
+    let storage = open_sqlite(&database_url, std::sync::Arc::new(cc_lb_core::SystemClock))
         .await
         .expect("test storage opens");
     storage
