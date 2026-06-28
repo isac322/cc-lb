@@ -5,7 +5,7 @@ use cc_lb_core::{BreakerConfig, BreakerState, CircuitBreaker, TestClock};
 
 #[test]
 fn five_failures_within_window_open_breaker() -> Result<(), Box<dyn std::error::Error>> {
-    let breaker = CircuitBreaker::with_clock(
+    let breaker = CircuitBreaker::new(
         "bedrock",
         BreakerConfig {
             failures_to_open: 5,

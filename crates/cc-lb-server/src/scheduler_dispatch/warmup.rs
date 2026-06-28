@@ -1,3 +1,4 @@
+use cc_lb_core::clock::unix_secs;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::retry::JobOutcome;
@@ -5,7 +6,7 @@ use cc_lb_storage_api::{UpstreamRecord, UpstreamStatusUpdate, UpstreamStore};
 use cc_lb_storage_api::{WarmupAttemptOutcome, WarmupAttemptReason, WarmupAttemptTrigger};
 
 use crate::scheduler_dispatch::storage::storage_scheduler_error;
-use crate::scheduler_dispatch::time::{now_unix_millis, now_unix_secs};
+use crate::scheduler_dispatch::time::now_unix_millis;
 use crate::warmup::execute::{WarmupAttemptExecution, execute_warmup_attempt};
 
 mod quota;
@@ -74,10 +75,10 @@ impl SchedulerDispatch {
         drop(view);
         let snapshots = self.subscription_quota_cache.snapshot_for_upstream(
             upstream_id,
-            now_unix_millis(),
+            now_unix_millis(&*self.clock),
             max_staleness_secs,
         );
-        let Ok(now_unix_secs) = now_unix_secs_i64() else {
+        let Ok(now_unix_secs) = now_unix_secs_i64(&*self.clock) else {
             return WarmupQuotaPreflightDecision::Unknown;
         };
         quota_preflight_decision_from_snapshots(&snapshots, now_unix_secs)
@@ -89,7 +90,7 @@ impl SchedulerDispatch {
         job: UpstreamWarmupJob,
         expected_cycle_key: i64,
     ) -> SchedulerResult<JobOutcome> {
-        let attempted_at_unix_secs = now_unix_secs_i64()?;
+        let attempted_at_unix_secs = now_unix_secs_i64(&*self.clock)?;
         let lease_holder = self.replica_id.map(|id| format!("scheduler:{id}"));
         if let Err(error) = self.ensure_fresh_oauth_token(upstream).await {
             if let Some(reason) = pre_request_error_reason(&error) {
@@ -125,7 +126,7 @@ impl SchedulerDispatch {
             initial_attempt
         };
 
-        let completed_at_unix_secs = Some(now_unix_secs_i64()?);
+        let completed_at_unix_secs = Some(now_unix_secs_i64(&*self.clock)?);
         let record = execute_warmup_attempt(WarmupAttemptExecution {
             storage: self.storage.as_ref(),
             upstream,
@@ -189,7 +190,7 @@ impl SchedulerDispatch {
                 SchedulerError::Job("warmup response reset time before unix epoch".to_owned())
             })?;
         let status = UpstreamStatusUpdate {
-            last_warmup_at_unix_secs: Some(Some(now_unix_secs())),
+            last_warmup_at_unix_secs: Some(Some(unix_secs(self.clock.now()))),
             ..UpstreamStatusUpdate::default()
         };
         if let Err(error) =

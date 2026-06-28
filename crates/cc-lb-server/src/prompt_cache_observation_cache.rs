@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use cc_lb_core::clock::ClockHandle;
+use cc_lb_core::clock::{ClockHandle, unix_secs};
 use cc_lb_core::lifecycle::PromptCacheObservationCacheLike;
 use cc_lb_plugin_api::types::{TtlClass, WarmCacheEntry};
 use cc_lb_storage_api::{PromptCacheObservationStore, StorageResult};
@@ -84,7 +84,7 @@ impl PromptCacheObservationCache {
         let mut loaded = 0;
         for upstream_id in upstream_ids {
             let records = store
-                .list_active_for_upstream(*upstream_id, self.clock.now_unix_secs())
+                .list_active_for_upstream(*upstream_id, unix_secs(self.clock.now()))
                 .await?;
             for record in records {
                 if record.hash_schema_version != HASH_SCHEMA_VERSION {
@@ -271,7 +271,7 @@ impl PromptCacheObservationCacheLike for PromptCacheObservationCache {
     }
 
     fn clock_now_unix_secs(&self) -> u64 {
-        self.clock.now_unix_secs()
+        unix_secs(self.clock.now())
     }
 }
 
@@ -303,7 +303,7 @@ pub(crate) mod tests {
     }
 
     fn base_now() -> u64 {
-        TestClock::new_at_secs(BASE_TS).now_unix_secs()
+        unix_secs(TestClock::new_at_secs(BASE_TS).now())
     }
 
     fn upsert(
@@ -463,7 +463,7 @@ pub(crate) mod tests {
             "debounced",
             TtlClass::Ephemeral5m,
             BASE_TS + 300,
-            clock.now_unix_secs(),
+            unix_secs(clock.now()),
         );
 
         clock.advance_secs(30);
@@ -472,7 +472,7 @@ pub(crate) mod tests {
             MODEL,
             "debounced",
             TtlClass::Ephemeral5m,
-            clock.now_unix_secs(),
+            unix_secs(clock.now()),
         ));
         let key = (
             MODEL.to_owned(),
@@ -492,7 +492,7 @@ pub(crate) mod tests {
             MODEL,
             "debounced",
             TtlClass::Ephemeral5m,
-            clock.now_unix_secs(),
+            unix_secs(clock.now()),
         ));
         let guard = cache.entries.read();
         let entry = guard.get(&upstream_id).unwrap().get(&key).unwrap();

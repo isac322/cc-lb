@@ -10,7 +10,7 @@ use http::Response;
 use metrics::Unit;
 use thiserror::Error;
 
-use crate::clock::{Clock, SystemClock};
+use crate::clock::{Clock, ClockHandle, unix_secs};
 use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
 
 const HALF_OPEN_INITIALIZING: u32 = u32::MAX;
@@ -75,14 +75,10 @@ pub struct CircuitBreaker {
 }
 
 impl CircuitBreaker {
-    pub fn new(upstream_name: impl Into<String>, config: BreakerConfig) -> Arc<Self> {
-        Self::with_clock(upstream_name, config, Arc::new(SystemClock))
-    }
-
-    pub fn with_clock(
+    pub fn new(
         upstream_name: impl Into<String>,
         config: BreakerConfig,
-        clock: Arc<dyn Clock>,
+        clock: ClockHandle,
     ) -> Arc<Self> {
         register_circuit_breaker_metrics();
         let breaker = Arc::new(Self {
@@ -123,7 +119,7 @@ impl CircuitBreaker {
     }
 
     fn permit_open(self: &Arc<Self>) -> Result<Permit, BreakerError> {
-        let now = self.clock.now_unix_secs();
+        let now = unix_secs(self.clock.now());
         let opened_at = self.last_open_ts.load(Ordering::SeqCst);
         let elapsed = Duration::from_secs(now.saturating_sub(opened_at));
         if elapsed <= self.config.half_open_after {
@@ -278,7 +274,7 @@ impl Permit {
     }
 
     pub fn record_failure(mut self) {
-        let now = self.breaker.clock.now_unix_secs();
+        let now = unix_secs(self.breaker.clock.now());
         let failure_count = self.breaker.increment_failures(now);
         if self.half_open {
             self.breaker.open_from(BreakerState::HalfOpen, now);
@@ -314,20 +310,12 @@ impl BreakerRegistry {
         &self,
         upstream_name: impl Into<String>,
         config: BreakerConfig,
-    ) -> Arc<CircuitBreaker> {
-        self.breaker_with_clock(upstream_name, config, Arc::new(SystemClock))
-    }
-
-    pub fn breaker_with_clock(
-        &self,
-        upstream_name: impl Into<String>,
-        config: BreakerConfig,
-        clock: Arc<dyn Clock>,
+        clock: ClockHandle,
     ) -> Arc<CircuitBreaker> {
         let upstream_name = upstream_name.into();
         self.map
             .entry(upstream_name.clone())
-            .or_insert_with(|| CircuitBreaker::with_clock(upstream_name, config, clock))
+            .or_insert_with(|| CircuitBreaker::new(upstream_name, config, clock))
             .clone()
     }
 
@@ -359,6 +347,7 @@ pub struct CircuitBreakerDispatch {
     registry: Arc<BreakerRegistry>,
     config: BreakerConfig,
     upstream_name: Arc<dyn Fn(&SignedRequest) -> String + Send + Sync>,
+    clock: ClockHandle,
 }
 
 impl CircuitBreakerDispatch {
@@ -367,12 +356,14 @@ impl CircuitBreakerDispatch {
         registry: Arc<BreakerRegistry>,
         config: BreakerConfig,
         upstream_name: Arc<dyn Fn(&SignedRequest) -> String + Send + Sync>,
+        clock: ClockHandle,
     ) -> Self {
         Self {
             inner,
             registry,
             config,
             upstream_name,
+            clock,
         }
     }
 }
@@ -381,7 +372,9 @@ impl CircuitBreakerDispatch {
 impl UpstreamDispatch for CircuitBreakerDispatch {
     async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
         let upstream_name = (self.upstream_name)(&request);
-        let breaker = self.registry.breaker(upstream_name, self.config);
+        let breaker = self
+            .registry
+            .breaker(upstream_name, self.config, self.clock.clone());
         let permit = breaker.permit().map_err(dispatch_error_from_breaker)?;
         match self.inner.dispatch(request).await {
             Ok(response) => {
@@ -419,11 +412,15 @@ fn register_circuit_breaker_metrics() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::clock::SystemClock;
 
     #[test]
     fn evict_removes_entry() {
         let registry = BreakerRegistry::new();
-        let _breaker = registry.breaker("test-upstream", BreakerConfig::default());
+        let clock = Arc::new(SystemClock);
+        let _breaker = registry.breaker("test-upstream", BreakerConfig::default(), clock);
         assert!(registry.get("test-upstream").is_some());
 
         let removed = registry.evict("test-upstream");
@@ -441,7 +438,8 @@ mod tests {
     #[tokio::test]
     async fn drain_after_grace_period() {
         let registry = BreakerRegistry::new();
-        let _breaker = registry.breaker("test-upstream", BreakerConfig::default());
+        let clock = Arc::new(SystemClock);
+        let _breaker = registry.breaker("test-upstream", BreakerConfig::default(), clock);
         assert!(registry.get("test-upstream").is_some());
 
         let start = std::time::Instant::now();
@@ -457,13 +455,15 @@ mod tests {
     #[tokio::test]
     async fn concurrent_evict_and_breaker_creation_safe() {
         let registry = Arc::new(BreakerRegistry::new());
+        let clock = Arc::new(SystemClock);
         let mut handles = vec![];
 
         for i in 0..5 {
             let reg_clone = Arc::clone(&registry);
+            let clock = Arc::clone(&clock);
             let handle = tokio::spawn(async move {
                 let upstream_name = format!("upstream-{}", i);
-                let _breaker = reg_clone.breaker(&upstream_name, BreakerConfig::default());
+                let _breaker = reg_clone.breaker(&upstream_name, BreakerConfig::default(), clock);
                 tokio::time::sleep(Duration::from_millis(1)).await;
                 reg_clone.evict(&upstream_name)
             });
@@ -472,10 +472,11 @@ mod tests {
 
         for i in 0..5 {
             let reg_clone = Arc::clone(&registry);
+            let clock = Arc::clone(&clock);
             let handle = tokio::spawn(async move {
                 let upstream_name = format!("upstream-{}", i);
                 tokio::time::sleep(Duration::from_millis(2)).await;
-                let _breaker = reg_clone.breaker(&upstream_name, BreakerConfig::default());
+                let _breaker = reg_clone.breaker(&upstream_name, BreakerConfig::default(), clock);
                 true
             });
             handles.push(handle);

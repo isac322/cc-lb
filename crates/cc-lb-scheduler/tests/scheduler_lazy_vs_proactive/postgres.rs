@@ -11,7 +11,7 @@ use cc_lb_scheduler::retry::RetryClass;
 use cc_lb_scheduler::worker::{
     ADAPTIVE_QUEUE, AdaptiveJob, PostgresApalisStorage, PostgresSchedulerStorage, SchedulerBackend,
 };
-use cc_lb_server::refresh::LazyRefresher;
+use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use sqlx::postgres::PgPoolOptions;
 use storage_sqlx::postgres::PgPoolOptions as StoragePgPoolOptions;
@@ -48,6 +48,7 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
     let storage = Arc::new(cc_lb_storage_postgres::PostgresStorage::new(
         storage_pool.clone(),
+        Arc::new(cc_lb_core::SystemClock),
     ));
     storage.initialize(BackendKind::Postgres).await?;
 
@@ -85,15 +86,18 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
         state,
         cancel.clone(),
     );
-    let lazy = LazyRefresher::new(
-        stores_from_storage(storage.clone()),
-        aead,
-        oauth_cfg,
-        Uuid::new_v4(),
-        None,
-        CancellationToken::new(),
-        backend.clone(),
-    );
+    let lazy = LazyRefresher::new(LazyRefresherParams {
+        deps: LazyRefresherDeps {
+            stores: stores_from_storage(storage.clone()),
+            aead,
+            oauth_cfg,
+            clock: Arc::new(cc_lb_core::SystemClock),
+        },
+        replica_id: Uuid::new_v4(),
+        metadata_hook: None,
+        cancel: CancellationToken::new(),
+        apalis_handle: backend.clone(),
+    });
 
     let result = run_race_scenario(
         &fake,

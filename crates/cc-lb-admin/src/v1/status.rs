@@ -143,7 +143,7 @@ pub(crate) async fn status(State(state): State<AdminState>) -> axum::response::R
 }
 
 async fn export(State(state): State<AdminState>) -> axum::response::Response {
-    match build_export(&state, unix_now_secs()).await {
+    match build_export(&state, cc_lb_core::clock::unix_secs(state.clock.now())).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => status_error_response(error),
     }
@@ -504,11 +504,4 @@ impl From<StorageError> for StatusError {
     fn from(error: StorageError) -> Self {
         Self::Storage(error)
     }
-}
-
-fn unix_now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }

@@ -4,6 +4,7 @@ use cc_lb_plugin_api::{RetryDecision, Signer};
 
 #[tokio::test]
 async fn circuit_breaker_fails_fast_after_three_failures() {
+    let clock = common::test_clock();
     let test_storage = common::storage();
     test_storage
         .put_oauth(
@@ -12,7 +13,7 @@ async fn circuit_breaker_fails_fast_after_three_failures() {
             &common::creds(
                 "sk-ant-oat01-expired",
                 "refresh-old",
-                common::now_epoch_secs() - 10,
+                common::now_epoch_secs(clock.as_ref()) - 10,
             ),
         )
         .await
@@ -27,6 +28,7 @@ async fn circuit_breaker_fails_fast_after_three_failures() {
         test_storage.storage.clone(),
         test_storage.aead.clone(),
         http.clone(),
+        clock,
     );
 
     for _ in 0..3 {

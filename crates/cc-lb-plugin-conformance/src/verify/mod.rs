@@ -33,10 +33,11 @@ pub(crate) fn begin_report(
     wasm: &[u8],
     handshake: HandshakeReport,
     required_function: &'static str,
+    clock: &dyn cc_lb_clock::Clock,
 ) -> Result<VerifyReport, VerifyError> {
     let identity = identity::read(wasm)?;
     let supported_slots = slot_set_from_negotiated(&handshake.chosen_versions);
-    self_check::run(wasm, &supported_slots)?;
+    self_check::run(wasm, &supported_slots, clock)?;
 
     Ok(VerifyReport {
         identity: LayerResult {

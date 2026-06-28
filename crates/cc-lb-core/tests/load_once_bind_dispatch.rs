@@ -31,7 +31,12 @@ use common::{DispatchMode, MockDispatch, TestAuthn, TestState, collect_body, mes
 #[test]
 fn builtin_authn_accepts_bound_principal_view() -> Result<(), Box<dyn std::error::Error>> {
     let view = principal_view("principal-a", None);
-    let authn = BuiltinAuthn::new(DownstreamAuthMode::ApiKey, None, None);
+    let authn = BuiltinAuthn::new(
+        DownstreamAuthMode::ApiKey,
+        None,
+        None,
+        Arc::new(cc_lb_core::SystemClock),
+    );
 
     let error = tokio::runtime::Builder::new_current_thread()
         .build()?
@@ -45,7 +50,10 @@ fn builtin_authn_accepts_bound_principal_view() -> Result<(), Box<dyn std::error
 #[test]
 fn limit_engine_reserve_accepts_bound_principal_view() {
     let view = principal_view("principal-a", None);
-    let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()));
+    let engine = LimitEngine::new(
+        Arc::new(KeyConcurrencyManager::new()),
+        Arc::new(cc_lb_core::SystemClock),
+    );
     let record = StoredApiKeyRecord {
         key_hash_b64: "key-a".to_owned(),
         status: KeyStatus::Active,
@@ -106,6 +114,7 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
         authn.authn.clone(),
         Arc::new(DynamicViewHolder::new(dynamic_view)),
         LifecycleConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
     );
 
     let response = lifecycle
@@ -178,6 +187,7 @@ fn none_mode_authn(
                 upstream_kind: NoneModeUpstreamKind::AnthropicKey,
             }),
             None,
+            Arc::new(cc_lb_core::SystemClock),
         )),
         principal_view: view,
         state,

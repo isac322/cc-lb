@@ -134,7 +134,8 @@ async fn enable_on_revoked_returns_err() -> Result<(), Box<dyn std::error::Error
 async fn new_store() -> Result<(tempfile::TempDir, KeyStore), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let database_url = format!("sqlite://{}", dir.path().join("key_store.sqlite").display());
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url).await?;
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock)).await?;
     storage.initialize(BackendKind::Sqlite).await?;
     Ok((dir, KeyStore::new(Arc::new(storage))))
 }

@@ -139,7 +139,8 @@ mod tests {
                 create_minimal_pool_history_table(&pool).await;
                 insert_pool_history_summary_row(&pool).await;
 
-                let storage = SqliteStorage::new(pool);
+                let storage =
+                    SqliteStorage::new(pool, std::sync::Arc::new(cc_lb_core::SystemClock));
 
                 let latest = PoolQuotaHistoryStore::list_latest_pool_quota_snapshot_summaries(
                     &storage,

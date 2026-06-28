@@ -11,6 +11,7 @@ sqlite = []
 postgres = []
 
 [dependencies]
+cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 globset.workspace = true

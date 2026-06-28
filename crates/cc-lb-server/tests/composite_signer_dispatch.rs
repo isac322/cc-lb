@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
 use axum::body::Bytes;
@@ -45,7 +45,10 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
     fixture
         .create_principal("oauth-principal", vec![target_id])
         .await;
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
         fixture.oauth_cfg.as_ref(),
@@ -57,6 +60,7 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await
     .expect("dynamic view builds");
@@ -68,9 +72,11 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
                 upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
             }),
             None,
+            Arc::new(cc_lb_core::SystemClock),
         )),
         Arc::new(DynamicViewHolder::new(view)),
         LifecycleConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
     );
 
     let response = lifecycle
@@ -106,7 +112,7 @@ impl Fixture {
             dir.path().join("composite-dispatch.sqlite").display()
         );
         let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url)
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
                 .await
                 .expect("storage"),
         );
@@ -517,7 +523,11 @@ fn message_request() -> Request<Bytes> {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now()
+    use cc_lb_core::Clock as _;
+
+    let clock = cc_lb_core::SystemClock;
+    clock
+        .now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()

@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use http::{HeaderMap, StatusCode};
 
@@ -472,7 +472,8 @@ impl StartedServer {
     async fn start(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
         let proxy_addr = config.listener.proxy_addr;
         let admin_addr = config.listener.admin_addr;
-        let app = build_app(config).await?;
+        let clock: cc_lb_core::ClockHandle = std::sync::Arc::new(cc_lb_core::SystemClock);
+        let app = build_app(config, clock).await?;
         let signal = app.signal_handle();
         let task = tokio::spawn(async move { app.start().await });
         let server = Self {
@@ -636,7 +637,10 @@ fn evidence_dir() -> std::path::PathBuf {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now()
+    use cc_lb_core::Clock as _;
+    let clock = cc_lb_core::SystemClock;
+    clock
+        .now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
@@ -749,7 +753,7 @@ async fn sqlite_storage(
     path: &std::path::Path,
 ) -> Result<Arc<SqliteStorage>, Box<dyn std::error::Error>> {
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url).await?;
+    let storage = open_sqlite(&database_url, std::sync::Arc::new(cc_lb_core::SystemClock)).await?;
     storage.initialize(BackendKind::Sqlite).await?;
     Ok(Arc::new(storage))
 }

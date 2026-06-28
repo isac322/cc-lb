@@ -10,6 +10,7 @@ use humantime::parse_duration;
 use serde::{Deserialize, Serialize};
 
 use crate::{AdminState, management::ManagementError};
+use cc_lb_core::Clock;
 use cc_lb_core::api_keys::limit_engine::{IdentityFilter, PrincipalLimitsSnapshot};
 use cc_lb_storage_api::{StorageError, UsageRollup, UsageRollupResolution};
 
@@ -122,7 +123,7 @@ pub async fn principal_key_usage(
         message: format!("invalid step: {error}"),
     })?;
 
-    let now_ms = now_unix_ms()?;
+    let now_ms = now_unix_ms(&*state.clock)?;
     let range_ms = duration_to_ms(range).max(1);
     let step_ms = duration_to_ms(step).max(1);
     let range_start_ms = now_ms.saturating_sub(range_ms);
@@ -275,7 +276,7 @@ async fn build_principal_usage(
     let step = parse_principal_usage_step(query.step.as_deref(), range)?;
     validate_principal_usage_step(range, step)?;
 
-    let now_unix_secs = current_unix_secs();
+    let now_unix_secs = cc_lb_core::clock::unix_secs(state.clock.now());
     let (window_start_unix_secs, window_end_unix_secs) =
         principal_usage_window(range, step, now_unix_secs);
     let rollups = storage
@@ -484,13 +485,6 @@ fn principal_usage_error_response(error: PrincipalUsageError) -> Response {
     (status, Json(serde_json::json!({ "error": error_code }))).into_response()
 }
 
-fn current_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 impl PrincipalUsageRange {
     fn as_str(self) -> &'static str {
         match self {
@@ -524,12 +518,6 @@ fn duration_to_ms(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-fn now_unix_ms() -> Result<u64, ManagementError> {
-    Ok(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| ManagementError::InvalidRequest {
-            message: "system clock is before unix epoch".to_owned(),
-        })?
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64)
+fn now_unix_ms(clock: &dyn Clock) -> Result<u64, ManagementError> {
+    Ok(cc_lb_core::clock::unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64)
 }

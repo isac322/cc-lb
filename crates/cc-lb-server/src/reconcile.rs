@@ -5,6 +5,7 @@ use std::time::Duration;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_core::DynamicViewHolder;
+use cc_lb_core::clock::ClockHandle;
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_storage_api::{PluginSlot, StorageResult};
 use tokio_util::sync::CancellationToken;
@@ -26,6 +27,7 @@ pub struct Reconciler {
     pub subscription_quota_cache: Arc<SubscriptionQuotaCache>,
     pub subscription_quota_routing_max_staleness_secs: u64,
     pub config: Arc<Config>,
+    pub clock: ClockHandle,
 }
 
 impl Reconciler {
@@ -42,6 +44,7 @@ impl Reconciler {
         subscription_quota_cache: Arc<SubscriptionQuotaCache>,
         subscription_quota_routing_max_staleness_secs: u64,
         config: Arc<Config>,
+        clock: ClockHandle,
     ) -> Self {
         Self {
             stores,
@@ -55,6 +58,7 @@ impl Reconciler {
             subscription_quota_cache,
             subscription_quota_routing_max_staleness_secs,
             config,
+            clock,
         }
     }
 
@@ -106,6 +110,7 @@ impl Reconciler {
             self.subscription_quota_cache.clone(),
             self.subscription_quota_routing_max_staleness_secs,
             &self.config,
+            self.clock.clone(),
         )
         .await
         {

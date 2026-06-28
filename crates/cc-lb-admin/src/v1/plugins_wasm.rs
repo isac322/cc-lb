@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Multipart, Request, State};
@@ -203,17 +203,18 @@ async fn upload_wasm_inner(
         }
     };
     let admin_id = admin_id_from_headers(headers);
+    let uploaded_at_unix_secs = cc_lb_core::clock::unix_secs(state.clock.now());
     let blob = WasmBlob {
         sha256,
         size_bytes: bytes.len() as u64,
         bytes: bytes.clone(),
-        parse_validated_at_unix_secs: unix_now_secs(),
+        parse_validated_at_unix_secs: uploaded_at_unix_secs,
     };
     let entry_input = WasmRegistryEntryInput {
         name,
         original_filename: original_filename.clone(),
         label: None,
-        uploaded_at_unix_secs: unix_now_secs(),
+        uploaded_at_unix_secs,
         uploaded_by_admin_id: admin_id,
         wire_version: fresh_wire_version,
         supported_slots: supported_slots.clone(),
@@ -610,7 +611,7 @@ fn enqueue_upload_audit(
         original_filename: original_filename.to_owned(),
     };
     let mut entry: AuditEntry = payload.into();
-    entry.ts = unix_now_secs();
+    entry.ts = cc_lb_core::clock::unix_secs(state.clock.now());
     entry.request_id = format!("admin-plugin-registry-upload-{sha256}-{}", entry.ts);
     entry.principal_id = "admin".to_owned();
     entry.route = "/admin/v1/plugins/wasm".to_owned();
@@ -623,7 +624,7 @@ fn enqueue_upload_attempt_audit(state: &AdminState, status: u16) {
     let Some(audit_sink) = &state.audit_sink else {
         return;
     };
-    let ts = unix_now_secs();
+    let ts = cc_lb_core::clock::unix_secs(state.clock.now());
     let _ = audit_sink.try_enqueue(AuditEntry {
         ts,
         request_id: format!("admin-plugin-registry-upload-attempt-{ts}"),
@@ -662,11 +663,4 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
         let _ = write!(&mut output, "{byte:02x}");
     }
     output
-}
-
-fn unix_now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }

@@ -11,6 +11,7 @@ build = "build.rs"
 postgres = []
 
 [dependencies]
+cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }

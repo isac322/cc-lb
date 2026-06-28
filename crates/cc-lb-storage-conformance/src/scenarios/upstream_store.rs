@@ -616,13 +616,19 @@ mod tests {
                             .options([("search_path", schema.as_str())]),
                     )
                     .await?;
-                let storage = PostgresStorage::new(pool.clone());
+                let storage = PostgresStorage::new(
+                    pool.clone(),
+                    std::sync::Arc::new(cc_lb_core::SystemClock),
+                );
                 MetaStore::initialize(&storage, BackendKind::Postgres).await?;
                 Ok(PostgresFixture { url, schema, pool })
             }
 
             async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Store> {
-                Ok(PostgresStorage::new(fixture.pool.clone()))
+                Ok(PostgresStorage::new(
+                    fixture.pool.clone(),
+                    std::sync::Arc::new(cc_lb_core::SystemClock),
+                ))
             }
 
             async fn teardown(&self, fixture: Self::Fixture) -> Result<()> {

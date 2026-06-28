@@ -2,6 +2,7 @@ mod common;
 
 #[tokio::test]
 async fn debug_does_not_include_raw_token() {
+    let clock = common::test_clock();
     let test_storage = common::storage();
     test_storage
         .put_oauth(
@@ -10,7 +11,7 @@ async fn debug_does_not_include_raw_token() {
             &common::creds(
                 "sk-ant-oat01-secret-debug",
                 "refresh-secret-debug",
-                common::now_epoch_secs() + 600,
+                common::now_epoch_secs(clock.as_ref()) + 600,
             ),
         )
         .await
@@ -20,6 +21,7 @@ async fn debug_does_not_include_raw_token() {
         test_storage.storage.clone(),
         test_storage.aead.clone(),
         http,
+        clock,
     );
 
     let debug = format!("{signer:?}");

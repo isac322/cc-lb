@@ -28,7 +28,7 @@ use cc_lb_server::SubscriptionQuotaCache;
 use cc_lb_server::bootstrap::{BootstrapError, apply_bootstrap};
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::preflight;
-use cc_lb_server::refresh::LazyRefresher;
+use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
 use cc_lb_server::scheduler_factory::{SchedulerBackend, SqliteSchedulerStorage};
 use cc_lb_server::warmup::dialect::{WarmupDispatchError, dispatch_warmup_with_dialect};
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -71,7 +71,7 @@ impl Fixture {
             db_dir.path().join("supported-slots-guard.sqlite").display()
         );
         let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url)
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
                 .await
                 .expect("storage opens"),
         );
@@ -115,7 +115,10 @@ async fn dynamic_view_hooks_skip_registry_entry_not_supporting_observability_slo
         1000,
     )
     .await;
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
 
     build_dynamic_view_for_test(&fixture, &runtime).await;
 
@@ -140,27 +143,36 @@ async fn warmup_dialect_returns_registry_unsupported_slot_for_non_shape_plugin()
     )
     .await;
     let upstream = seed_warmup_upstream(&fixture.storage, plugin.id).await;
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     let aead = Arc::new(AeadService::from_master_key([92; 32]));
-    let lazy_refresher = Arc::new(LazyRefresher::new(
-        fixture.stores.clone(),
-        aead.clone(),
-        Arc::new(AnthropicOAuthConfig::default()),
-        Uuid::new_v4(),
-        None,
-        CancellationToken::new(),
-        sqlite_scheduler_backend().await,
-    ));
+    let lazy_refresher = Arc::new(LazyRefresher::new(LazyRefresherParams {
+        deps: LazyRefresherDeps {
+            stores: fixture.stores.clone(),
+            aead: aead.clone(),
+            oauth_cfg: Arc::new(AnthropicOAuthConfig::default()),
+            clock: Arc::new(cc_lb_core::SystemClock),
+        },
+        replica_id: Uuid::new_v4(),
+        metadata_hook: None,
+        cancel: CancellationToken::new(),
+        apalis_handle: sqlite_scheduler_backend().await,
+    }));
     let client = warmup_client();
 
     let error = match dispatch_warmup_with_dialect(
-        &runtime,
-        &fixture.stores,
-        fixture.data_dir.path(),
-        aead,
-        lazy_refresher,
-        &upstream,
-        &client,
+        cc_lb_server::warmup::dialect::WarmupDialectDispatchParams {
+            runtime: &runtime,
+            stores: &fixture.stores,
+            data_dir: fixture.data_dir.path(),
+            aead,
+            lazy_refresher,
+            upstream: &upstream,
+            http: &client,
+            clock: Arc::new(cc_lb_core::SystemClock),
+        },
     )
     .await
     {
@@ -205,10 +217,12 @@ async fn preflight_warns_when_chain_entry_registry_does_not_support_slot() {
     )
     .await;
 
+    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
     let report = preflight::run_preflight(
         &fixture.stores,
         &cc_lb_core::LifecycleConfig::default(),
         fixture.data_dir.path(),
+        clock,
     )
     .await
     .expect("preflight completes");
@@ -254,6 +268,7 @@ plugins = ["shape-only-bootstrap"]
         fixture.storage.as_ref(),
         None,
         fixture.data_dir.path(),
+        &cc_lb_core::SystemClock,
     )
     .await
     .expect_err("unsupported bootstrap plugin slot should be a hard error");
@@ -353,6 +368,7 @@ async fn build_dynamic_view_for_test(fixture: &Fixture, runtime: &ExtismRuntime)
         Arc::new(SubscriptionQuotaCache::new()),
         1800,
         &Config::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await
     .expect("dynamic view builds");
@@ -506,6 +522,7 @@ async fn sqlite_scheduler_backend() -> SchedulerBackend {
             &pool,
             cc_lb_scheduler::worker::ADAPTIVE_QUEUE,
         ),
+        clock: Arc::new(cc_lb_core::SystemClock),
     })
 }
 
@@ -575,7 +592,10 @@ fn admin_state(storage: Arc<Storage>) -> AdminState {
         storage: Some(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>),
         key_store: Some(Arc::new(KeyStore::new(storage))),
         aead: Arc::new(AeadService::from_master_key([0; 32])),
-        limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
+        limit_engine: LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_core::SystemClock),
+        ),
         lifecycle: None,
         subscription_metadata_hook: None,
         lazy_refresher: None,
@@ -589,6 +609,7 @@ fn admin_state(storage: Arc<Storage>) -> AdminState {
         admin_token: Some(ADMIN_TOKEN.to_owned()),
         event_bus: None,
         start_time: std::time::Instant::now(),
+        clock: Arc::new(cc_lb_core::SystemClock),
     }
 }
 

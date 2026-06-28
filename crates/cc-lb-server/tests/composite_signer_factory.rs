@@ -45,7 +45,7 @@ impl Fixture {
         let dir = tempfile::tempdir().expect("tempdir");
         let database_url = format!("sqlite://{}", dir.path().join("composite.sqlite").display());
         let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url)
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
                 .await
                 .expect("storage"),
         );
@@ -168,6 +168,7 @@ async fn oauth_upstream_routes_to_oauth_signer() {
         fixture.storage.clone(),
         fixture.aead.clone(),
         "oauth-test",
+        Arc::new(cc_lb_core::SystemClock),
     );
 
     let signer = factory
@@ -229,7 +230,10 @@ async fn router_choice_selects_matching_oauth_upstream() {
     fixture
         .create_oauth_upstream_with_access_token("oauth-bob", "sk-ant-oat01-bob-token")
         .await;
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     let view = build_dynamic_view(
         fixture._stores.as_ref(),
         fixture._oauth_cfg.as_ref(),
@@ -241,6 +245,7 @@ async fn router_choice_selects_matching_oauth_upstream() {
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await
     .expect("dynamic view builds");
@@ -270,7 +275,10 @@ async fn router_choice_selects_matching_oauth_upstream() {
 async fn empty_router_choice_errors() {
     let fixture = Fixture::new().await;
     fixture.create_oauth_upstream("oauth-only").await;
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     let view = build_dynamic_view(
         fixture._stores.as_ref(),
         fixture._oauth_cfg.as_ref(),
@@ -282,6 +290,7 @@ async fn empty_router_choice_errors() {
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await
     .expect("dynamic view builds");
@@ -317,6 +326,7 @@ async fn missing_oauth_credentials_returns_proper_signer_error() {
         fixture.storage.clone(),
         fixture.aead.clone(),
         "oauth-missing",
+        Arc::new(cc_lb_core::SystemClock),
     );
 
     let result = factory
@@ -411,7 +421,11 @@ impl UpstreamDialect for DirectDialect {
 }
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now()
+    use cc_lb_core::Clock as _;
+
+    let clock = cc_lb_core::SystemClock;
+    clock
+        .now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()

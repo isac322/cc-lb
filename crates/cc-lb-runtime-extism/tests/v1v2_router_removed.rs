@@ -3,7 +3,6 @@ mod common;
 use std::collections::BTreeSet;
 
 use cc_lb_plugin_api::{PluginRuntime, RuntimeError};
-use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_runtime_extism::handshake::build_offer;
 
 #[test]
@@ -14,7 +13,7 @@ fn router_wire_v1_v2_instantiation_is_removed() {
         common::metadata(&[]),
     );
 
-    let error = match ExtismRuntime::new().instantiate_router(&fixture.manifest) {
+    let error = match common::runtime().instantiate_router(&fixture.manifest) {
         Ok(_) => panic!("router wire v1/v2 unexpectedly instantiated"),
         Err(error) => error,
     };

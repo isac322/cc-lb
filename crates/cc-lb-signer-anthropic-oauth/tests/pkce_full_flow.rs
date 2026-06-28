@@ -6,6 +6,7 @@ use url::Url;
 
 #[tokio::test]
 async fn pkce_start_and_complete_flow() {
+    let clock = common::test_clock();
     let http = common::FakeOAuthClient::new(vec![common::success_response(
         "sk-ant-oat01-pkce",
         Some("refresh-pkce"),
@@ -26,9 +27,14 @@ async fn pkce_start_and_complete_flow() {
             .any(|(name, value)| { name == "code_challenge_method" && value == "S256" })
     );
 
-    let creds = complete_pkce_flow(handshake, "auth-code".to_owned(), http.clone())
-        .await
-        .expect("complete pkce");
+    let creds = complete_pkce_flow(
+        handshake,
+        "auth-code".to_owned(),
+        http.clone(),
+        clock.as_ref(),
+    )
+    .await
+    .expect("complete pkce");
 
     assert_eq!(creds.access_token, "sk-ant-oat01-pkce");
     assert_eq!(creds.refresh_token, "refresh-pkce");

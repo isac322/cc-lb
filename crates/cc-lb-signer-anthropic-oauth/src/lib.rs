@@ -7,10 +7,10 @@ mod single_flight;
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, OAuthTokenBundle};
+use cc_lb_core::clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
     SignerFactory, SigningCapability, Upstream, UpstreamError,
@@ -220,12 +220,35 @@ pub struct AnthropicOAuthSharedState {
     pub breaker_state: BreakerMap,
 }
 
+pub struct AnthropicOAuthSignerHttpParams {
+    pub principal_id: String,
+    pub provider: String,
+    pub storage: Arc<dyn OAuthCredentialStore>,
+    pub aead: Arc<AeadService>,
+    pub token_url: Url,
+    pub client_id: ClientId,
+    pub http: Arc<dyn OAuthHttpClient>,
+    pub clock: ClockHandle,
+}
+
+pub struct AnthropicOAuthSignerSharedParams {
+    pub principal_id: String,
+    pub provider: String,
+    pub storage: Arc<dyn OAuthCredentialStore>,
+    pub aead: Arc<AeadService>,
+    pub token_url: Url,
+    pub client_id: ClientId,
+    pub shared: AnthropicOAuthSharedState,
+    pub clock: ClockHandle,
+}
+
 #[derive(Clone)]
 pub struct AnthropicOAuthSigner {
     pub principal_id: String,
     pub provider: String,
     pub storage: Arc<dyn OAuthCredentialStore>,
     pub aead: Arc<AeadService>,
+    pub clock: ClockHandle,
     pub refresh_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     pub breaker_state: BreakerMap,
     pub http: Arc<dyn OAuthHttpClient>,
@@ -244,68 +267,52 @@ impl AnthropicOAuthSigner {
         aead: Arc<AeadService>,
         token_url: Url,
         client_id: ClientId,
+        clock: ClockHandle,
     ) -> Self {
-        Self::with_http(
-            principal_id,
-            provider,
+        Self::with_http(AnthropicOAuthSignerHttpParams {
+            principal_id: principal_id.into(),
+            provider: provider.into(),
             storage,
             aead,
             token_url,
             client_id,
-            Arc::new(HyperOAuthHttpClient::new()),
-        )
+            http: Arc::new(HyperOAuthHttpClient::new()),
+            clock,
+        })
     }
 
-    pub fn with_http(
-        principal_id: impl Into<String>,
-        provider: impl Into<String>,
-        storage: Arc<dyn OAuthCredentialStore>,
-        aead: Arc<AeadService>,
-        token_url: Url,
-        client_id: ClientId,
-        http: Arc<dyn OAuthHttpClient>,
-    ) -> Self {
-        let principal_id = principal_id.into();
-        let provider = provider.into();
+    pub fn with_http(params: AnthropicOAuthSignerHttpParams) -> Self {
         Self {
-            metrics_principal: principal_id.clone(),
-            metrics_provider: provider.clone(),
-            principal_id,
-            provider,
-            storage,
-            aead,
+            metrics_principal: params.principal_id.clone(),
+            metrics_provider: params.provider.clone(),
+            principal_id: params.principal_id,
+            provider: params.provider,
+            storage: params.storage,
+            aead: params.aead,
+            clock: params.clock,
             refresh_locks: new_refresh_locks(),
             breaker_state: refresh::new_breaker_map(),
-            http,
-            token_url,
-            client_id,
+            http: params.http,
+            token_url: params.token_url,
+            client_id: params.client_id,
             signed_access_token: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub fn with_shared_state(
-        principal_id: impl Into<String>,
-        provider: impl Into<String>,
-        storage: Arc<dyn OAuthCredentialStore>,
-        aead: Arc<AeadService>,
-        token_url: Url,
-        client_id: ClientId,
-        shared: AnthropicOAuthSharedState,
-    ) -> Self {
-        let principal_id = principal_id.into();
-        let provider = provider.into();
+    pub fn with_shared_state(params: AnthropicOAuthSignerSharedParams) -> Self {
         Self {
-            metrics_principal: principal_id.clone(),
-            metrics_provider: provider.clone(),
-            principal_id,
-            provider,
-            storage,
-            aead,
-            refresh_locks: shared.refresh_locks,
-            breaker_state: shared.breaker_state,
-            http: shared.http,
-            token_url,
-            client_id,
+            metrics_principal: params.principal_id.clone(),
+            metrics_provider: params.provider.clone(),
+            principal_id: params.principal_id,
+            provider: params.provider,
+            storage: params.storage,
+            aead: params.aead,
+            clock: params.clock,
+            refresh_locks: params.shared.refresh_locks,
+            breaker_state: params.shared.breaker_state,
+            http: params.shared.http,
+            token_url: params.token_url,
+            client_id: params.client_id,
             signed_access_token: Arc::new(Mutex::new(None)),
         }
     }
@@ -319,7 +326,7 @@ impl AnthropicOAuthSigner {
                 reason: "oauth credentials not found".to_owned(),
             })?;
 
-        if refresh::is_expiring(&creds, now_epoch_secs()) {
+        if refresh::is_expiring(&creds, unix_secs(self.clock.now())) {
             return self
                 .refresh_under_single_flight(creds)
                 .await
@@ -337,7 +344,7 @@ impl AnthropicOAuthSigner {
         let _guard = lock.lock().await;
 
         let current = self.load_credentials().await?.unwrap_or(fallback);
-        let now = now_epoch_secs();
+        let now = unix_secs(self.clock.now());
         if !refresh::is_expiring(&current, now) {
             return Ok(current);
         }
@@ -358,7 +365,7 @@ impl AnthropicOAuthSigner {
             return Ok(current);
         }
 
-        self.refresh_current_credentials(&current, now_epoch_secs())
+        self.refresh_current_credentials(&current, unix_secs(self.clock.now()))
             .await
     }
 
@@ -367,7 +374,7 @@ impl AnthropicOAuthSigner {
         current: &OAuthCredentials,
         observed_access_token: Option<&SecretString>,
     ) -> bool {
-        if refresh::is_expiring(current, now_epoch_secs()) {
+        if refresh::is_expiring(current, unix_secs(self.clock.now())) {
             return false;
         }
 
@@ -509,6 +516,7 @@ impl Signer for AnthropicOAuthSigner {
 pub struct AnthropicOAuthSignerFactory {
     store: Arc<dyn UpstreamStore>,
     aead: Arc<AeadService>,
+    clock: ClockHandle,
     upstream_name: Option<String>,
     refresh_handle: Option<Arc<dyn LazyRefreshHandle>>,
     refresh_locks: RefreshLocks,
@@ -516,10 +524,11 @@ pub struct AnthropicOAuthSignerFactory {
 }
 
 impl AnthropicOAuthSignerFactory {
-    pub fn new(store: Arc<dyn UpstreamStore>, aead: Arc<AeadService>) -> Self {
+    pub fn new(store: Arc<dyn UpstreamStore>, aead: Arc<AeadService>, clock: ClockHandle) -> Self {
         Self {
             store,
             aead,
+            clock,
             upstream_name: None,
             refresh_handle: None,
             refresh_locks: new_refresh_locks(),
@@ -531,10 +540,12 @@ impl AnthropicOAuthSignerFactory {
         store: Arc<dyn UpstreamStore>,
         aead: Arc<AeadService>,
         upstream_name: impl Into<String>,
+        clock: ClockHandle,
     ) -> Self {
         Self {
             aead,
             store,
+            clock,
             upstream_name: Some(upstream_name.into()),
             refresh_handle: None,
             refresh_locks: new_refresh_locks(),
@@ -596,6 +607,7 @@ impl fmt::Debug for AnthropicOAuthSignerFactory {
             .debug_struct("AnthropicOAuthSignerFactory")
             .field("store", &"UpstreamStore")
             .field("aead", &"AeadService")
+            .field("clock", &"Clock")
             .field("upstream_name", &self.upstream_name)
             .field(
                 "refresh_handle",
@@ -643,6 +655,7 @@ impl SignerFactory for AnthropicOAuthSignerFactory {
             expires_at_unix_secs: tokens.expires_at_unix_secs,
             store: self.store.clone(),
             aead: self.aead.clone(),
+            clock: self.clock.clone(),
             upstream_id: self.refresh_upstream_id.unwrap_or(record.id),
             refresh_handle: self.refresh_handle.clone(),
             refresh_locks: self.refresh_locks.clone(),
@@ -656,6 +669,7 @@ struct PersistedAnthropicOAuthSigner {
     expires_at_unix_secs: u64,
     store: Arc<dyn UpstreamStore>,
     aead: Arc<AeadService>,
+    clock: ClockHandle,
     upstream_id: Uuid,
     refresh_handle: Option<Arc<dyn LazyRefreshHandle>>,
     refresh_locks: RefreshLocks,
@@ -669,6 +683,7 @@ impl fmt::Debug for PersistedAnthropicOAuthSigner {
             .field("expires_at_unix_secs", &self.expires_at_unix_secs)
             .field("store", &"UpstreamStore")
             .field("aead", &"AeadService")
+            .field("clock", &"Clock")
             .field("upstream_id", &self.upstream_id)
             .field(
                 "refresh_handle",
@@ -704,7 +719,7 @@ impl PersistedAnthropicOAuthSigner {
             })?;
 
         let refreshed = self.load_current_tokens().await?;
-        if persisted_token_is_usable(refreshed.expires_at_unix_secs) {
+        if persisted_token_is_usable(refreshed.expires_at_unix_secs, self.clock.as_ref()) {
             Ok(refreshed)
         } else {
             Err(SignerError::ExpiredToken {
@@ -727,7 +742,7 @@ impl PersistedAnthropicOAuthSigner {
     }
 
     fn storage_has_newer_usable_token(&self, current: &OAuthTokenBundle) -> bool {
-        persisted_token_is_usable(current.expires_at_unix_secs)
+        persisted_token_is_usable(current.expires_at_unix_secs, self.clock.as_ref())
             && current.access_token != self.access_token.expose_secret()
     }
 
@@ -737,6 +752,7 @@ impl PersistedAnthropicOAuthSigner {
             expires_at_unix_secs: tokens.expires_at_unix_secs,
             store: self.store.clone(),
             aead: self.aead.clone(),
+            clock: self.clock.clone(),
             upstream_id: self.upstream_id,
             refresh_handle: self.refresh_handle.clone(),
             refresh_locks: self.refresh_locks.clone(),
@@ -783,7 +799,7 @@ impl Signer for PersistedAnthropicOAuthSigner {
         mut shaped: ShapedRequest,
         capability: &mut SigningCapability,
     ) -> Result<SignedRequest, SignerError> {
-        let now = now_epoch_secs();
+        let now = unix_secs(self.clock.now());
         if self.expires_at_unix_secs <= now.saturating_add(OAUTH_EXPIRY_SKEW_SECS) {
             return Err(SignerError::ExpiredToken {
                 reason: "oauth access token expired".to_owned(),
@@ -874,8 +890,8 @@ fn decrypt_upstream_tokens(
         })
 }
 
-fn persisted_token_is_usable(expires_at_unix_secs: u64) -> bool {
-    expires_at_unix_secs > now_epoch_secs().saturating_add(OAUTH_EXPIRY_SKEW_SECS)
+fn persisted_token_is_usable(expires_at_unix_secs: u64, clock: &dyn Clock) -> bool {
+    expires_at_unix_secs > unix_secs(clock.now()).saturating_add(OAUTH_EXPIRY_SKEW_SECS)
 }
 
 fn storage_error_to_signer(source: StorageError) -> SignerError {
@@ -932,24 +948,17 @@ fn bearer_header_value(token: &str) -> Result<HeaderValue, SignerError> {
     })
 }
 
-fn now_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 #[allow(deprecated)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use async_trait::async_trait;
     use bytes::Bytes;
     use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
+    use cc_lb_core::clock::{SystemClock, TestClock};
     use cc_lb_plugin_api::{
         RequestContext, Upstream, UpstreamDialect, shape_request, sign_request,
     };
@@ -966,10 +975,20 @@ mod tests {
 
     use super::*;
 
-    #[derive(Default)]
     struct MemoryUpstreamStore {
+        clock: ClockHandle,
         records: Mutex<Vec<UpstreamRecord>>,
         oauth: Mutex<HashMap<(String, String), Vec<u8>>>,
+    }
+
+    impl Default for MemoryUpstreamStore {
+        fn default() -> Self {
+            Self {
+                clock: Arc::new(SystemClock),
+                records: Mutex::new(Vec::new()),
+                oauth: Mutex::new(HashMap::new()),
+            }
+        }
     }
 
     #[async_trait]
@@ -980,7 +999,7 @@ mod tests {
             if records.iter().any(|record| record.name == create.name) {
                 return Err(conflict("upstream name already exists"));
             }
-            let now = now_secs();
+            let now = now_secs(self.clock.as_ref());
             let record = UpstreamRecord {
                 id: UpstreamRecordId::new_v4(),
                 name: create.name,
@@ -1170,7 +1189,7 @@ mod tests {
             expected_revision: u64,
         ) -> StorageResult<()> {
             self.mutate(id, Some(expected_revision), |record| {
-                record.deleted_at_unix_secs = Some(now_secs());
+                record.deleted_at_unix_secs = Some(now_secs(self.clock.as_ref()));
                 Ok(())
             })
             .await?;
@@ -1211,7 +1230,7 @@ mod tests {
             }
             mutate(record)?;
             record.revision += 1;
-            record.updated_at_unix_secs = now_secs();
+            record.updated_at_unix_secs = now_secs(self.clock.as_ref());
             Ok(record.clone())
         }
     }
@@ -1271,8 +1290,10 @@ mod tests {
 
     #[tokio::test]
     async fn build_missing_returns_missing_credentials() {
+        let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
-        let factory = AnthropicOAuthSignerFactory::for_upstream_name(store, aead(), "missing");
+        let factory =
+            AnthropicOAuthSignerFactory::for_upstream_name(store, aead(), "missing", clock);
 
         let error = build_error(&factory).await;
 
@@ -1281,6 +1302,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_disabled_returns_missing_credentials() {
+        let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
         let record = create_upstream(&store, "primary").await;
         let service = aead();
@@ -1288,7 +1310,7 @@ mod tests {
             .store_oauth_tokens(
                 record.id,
                 record.revision,
-                encrypted_tokens(&service, record.id, now_secs() + 600),
+                encrypted_tokens(&service, record.id, now_secs(clock.as_ref()) + 600),
             )
             .await
             .unwrap();
@@ -1297,7 +1319,8 @@ mod tests {
             .set_enabled(record.id, record.revision, false)
             .await
             .unwrap();
-        let factory = AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary");
+        let factory =
+            AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary", clock);
 
         let error = build_error(&factory).await;
 
@@ -1306,6 +1329,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_expired_token_returns_expired_token_error() {
+        let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
         let record = create_upstream(&store, "primary").await;
         let service = aead();
@@ -1313,11 +1337,12 @@ mod tests {
             .store_oauth_tokens(
                 record.id,
                 record.revision,
-                encrypted_tokens(&service, record.id, now_secs()),
+                encrypted_tokens(&service, record.id, now_secs(clock.as_ref())),
             )
             .await
             .unwrap();
-        let factory = AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary");
+        let factory =
+            AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary", clock);
         let signer = factory
             .build(&Upstream::AnthropicDirect { base_url: None })
             .await
@@ -1332,6 +1357,7 @@ mod tests {
 
     #[tokio::test]
     async fn decryption_failure_with_wrong_aad_returns_aead_error() {
+        let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
         let record = create_upstream(&store, "primary").await;
         let service = aead();
@@ -1340,11 +1366,12 @@ mod tests {
             .store_oauth_tokens(
                 record.id,
                 record.revision,
-                encrypted_tokens(&service, wrong_record.id, now_secs() + 600),
+                encrypted_tokens(&service, wrong_record.id, now_secs(clock.as_ref()) + 600),
             )
             .await
             .unwrap();
-        let factory = AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary");
+        let factory =
+            AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary", clock);
 
         let error = build_error(&factory).await;
 
@@ -1355,6 +1382,7 @@ mod tests {
 
     #[tokio::test]
     async fn signer_sets_bearer_header_with_access_token() {
+        let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
         let record = create_upstream(&store, "primary").await;
         let service = aead();
@@ -1362,11 +1390,12 @@ mod tests {
             .store_oauth_tokens(
                 record.id,
                 record.revision,
-                encrypted_tokens(&service, record.id, now_secs() + 600),
+                encrypted_tokens(&service, record.id, now_secs(clock.as_ref()) + 600),
             )
             .await
             .unwrap();
-        let factory = AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary");
+        let factory =
+            AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary", clock);
         let signer = factory
             .build(&Upstream::AnthropicDirect { base_url: None })
             .await
@@ -1473,9 +1502,10 @@ mod tests {
     const MERGED_CLIENT_BETA_FLAGS: &str = "claude-code-20250219, interleaved-thinking-2025-05-14, context-management-2025-06-27, prompt-caching-scope-2026-01-05, effort-2025-11-24, structured-outputs-2025-12-15, oauth-2025-04-20";
 
     async fn active_signer() -> AnthropicOAuthSigner {
+        let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
         let service = aead();
-        store_live_credentials(&store, &service, now_secs() + 600).await;
+        store_live_credentials(&store, &service, now_secs(clock.as_ref()) + 600).await;
         AnthropicOAuthSigner::new(
             "principal",
             "anthropic_oauth",
@@ -1483,10 +1513,12 @@ mod tests {
             service,
             Url::parse("https://platform.claude.com/v1/oauth/token").unwrap(),
             ClientId::new("client-test".to_owned()),
+            clock,
         )
     }
 
     async fn persisted_signer() -> Arc<dyn Signer> {
+        let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
         let record = create_upstream(&store, "primary").await;
         let service = aead();
@@ -1494,11 +1526,12 @@ mod tests {
             .store_oauth_tokens(
                 record.id,
                 record.revision,
-                encrypted_tokens(&service, record.id, now_secs() + 600),
+                encrypted_tokens(&service, record.id, now_secs(clock.as_ref()) + 600),
             )
             .await
             .unwrap();
-        let factory = AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary");
+        let factory =
+            AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary", clock);
         factory
             .build(&Upstream::AnthropicDirect { base_url: None })
             .await
@@ -1549,6 +1582,7 @@ mod tests {
 
     #[tokio::test]
     async fn persisted_signer_refreshes_on_unauthorized() {
+        let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
         let record = create_upstream(&store, "primary").await;
         let service = aead();
@@ -1556,16 +1590,17 @@ mod tests {
             .store_oauth_tokens(
                 record.id,
                 record.revision,
-                encrypted_tokens(&service, record.id, now_secs() + 600),
+                encrypted_tokens(&service, record.id, now_secs(clock.as_ref()) + 600),
             )
             .await
             .unwrap();
         let refresh_handle = Arc::new(RefreshingLazyHandle {
             store: store.clone(),
             aead: service.clone(),
+            clock: clock.clone(),
             calls: AtomicU32::new(0),
         });
-        let base = AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary");
+        let base = AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary", clock);
         let factory = AnthropicOAuthSignerFactoryWithLazyRefresh::new(
             base,
             refresh_handle.clone(),
@@ -1597,6 +1632,7 @@ mod tests {
     struct RefreshingLazyHandle {
         store: Arc<MemoryUpstreamStore>,
         aead: Arc<AeadService>,
+        clock: ClockHandle,
         calls: AtomicU32,
     }
 
@@ -1626,7 +1662,7 @@ mod tests {
                         &self.aead,
                         record.id,
                         "refreshed-access-token",
-                        now_secs() + 600,
+                        now_secs(self.clock.as_ref()) + 600,
                     ),
                 )
                 .await
@@ -1744,6 +1780,10 @@ mod tests {
         Arc::new(AeadService::from_master_key([7; 32]))
     }
 
+    fn test_clock() -> ClockHandle {
+        Arc::new(TestClock::new_at_secs(1_700_000_000))
+    }
+
     async fn build_error(factory: &AnthropicOAuthSignerFactory) -> SignerError {
         match factory
             .build(&Upstream::AnthropicDirect { base_url: None })
@@ -1760,10 +1800,7 @@ mod tests {
         }
     }
 
-    fn now_secs() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
+    fn now_secs(clock: &dyn Clock) -> u64 {
+        unix_secs(clock.now())
     }
 }

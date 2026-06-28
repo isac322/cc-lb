@@ -19,6 +19,7 @@ mod postgres {
             WorkerBuilder as ApalisWorkerBuilder, WorkerError,
         },
     };
+    use cc_lb_core::clock::{Clock, SystemClock};
     use cc_lb_scheduler::{
         leader_election::{LeaderElection, LeaderState},
         retry::JobOutcome,
@@ -62,7 +63,7 @@ mod postgres {
             tokio::time::sleep(TICK_INTERVAL + Duration::from_millis(250)).await;
             assert_eq!(count_replica_ticks(&pool, "B").await?, 0);
 
-            let drop_started = chrono::Utc::now();
+            let drop_started = chrono::DateTime::<chrono::Utc>::from(SystemClock.now());
             leader_a.close().await?;
             cancel_a.cancel();
             cron_a.await?;

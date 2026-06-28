@@ -24,7 +24,10 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 pub fn limit_engine() -> Arc<LimitEngine> {
-    LimitEngine::new(Arc::new(KeyConcurrencyManager::new()))
+    LimitEngine::new(
+        Arc::new(KeyConcurrencyManager::new()),
+        Arc::new(cc_lb_core::SystemClock),
+    )
 }
 
 pub fn key_store(storage: Arc<SqliteStorage>) -> Arc<cc_lb_core::api_keys::key_store::KeyStore> {
@@ -136,6 +139,7 @@ pub async fn spawn_admin_server() -> SpawnedAdminServer {
         admin_token: Some("test-token".to_owned()),
         start_time: std::time::Instant::now(),
         event_bus: None,
+        clock: Arc::new(cc_lb_core::SystemClock),
     };
     SpawnedAdminServer {
         _dir: dir,
@@ -150,9 +154,10 @@ pub async fn spawn_admin_server() -> SpawnedAdminServer {
 
 pub async fn sqlite_storage(dir: &std::path::Path, filename: &str) -> Arc<SqliteStorage> {
     let database_url = format!("sqlite://{}", dir.join(filename).display());
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
-        .await
-        .expect("admin sqlite opens");
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+            .await
+            .expect("admin sqlite opens");
     storage
         .initialize(BackendKind::Sqlite)
         .await

@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use axum::{
     Json, Router,
     extract::{Query, State},
@@ -40,7 +38,13 @@ pub(crate) async fn handle_dashboard_summary(
         Ok(range) => range,
         Err(_) => return bad_request("invalid_range"),
     };
-    match build_dashboard_summary(storage.as_ref(), range, now_unix_secs()).await {
+    match build_dashboard_summary(
+        storage.as_ref(),
+        range,
+        cc_lb_core::clock::unix_secs(state.clock.now()),
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => {
             tracing::error!(%error, "dashboard summary failed");
@@ -98,7 +102,7 @@ pub(crate) async fn handle_dashboard_usage(
         step,
         group_by,
         upstream_id,
-        now_unix_secs(),
+        cc_lb_core::clock::unix_secs(state.clock.now()),
     )
     .await
     {
@@ -129,11 +133,4 @@ fn internal_error(error: &str) -> Response {
         Json(json!({ "error": error })),
     )
         .into_response()
-}
-
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }

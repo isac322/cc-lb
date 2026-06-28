@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
+use cc_lb_core::TestClock;
 use cc_lb_plugin_wire::handshake::{HANDSHAKE_SCHEMA_VERSION_V1, HandshakeAccept, HandshakeOffer};
 use cc_lb_plugin_wire::identity::{CC_LB_PLUGIN_MAGIC, CC_LB_PLUGIN_SECTION_NAME};
 use cc_lb_plugin_wire::self_check::{SelfCheckResponse, SelfCheckStatus};
@@ -110,6 +111,7 @@ fn registry(repos: &Repos, lifecycle: Arc<CountingLifecycle>) -> PluginRegistry 
         repos.blobs.clone(),
         cc_lb_runtime_extism::handshake::build_offer(&BTreeSet::new()),
         lifecycle,
+        Arc::new(TestClock::new_at_secs(1_800_000_000)),
     )
     .expect("registry builds")
 }

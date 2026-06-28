@@ -35,7 +35,9 @@ fn stores(storage: Arc<SqliteStorage>) -> Stores {
 async fn storage_fixture() -> (tempfile::TempDir, Arc<SqliteStorage>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!("sqlite://{}", dir.path().join("test.sqlite").display());
-    let storage = open_sqlite(&database_url).await.expect("storage");
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+        .await
+        .expect("storage");
     storage
         .initialize(BackendKind::Sqlite)
         .await
@@ -100,6 +102,7 @@ async fn build(
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await
     .expect("dynamic view builds")
@@ -109,7 +112,10 @@ async fn build(
 async fn principals_delete_rebuild_removes_deleted_and_increments_generation() {
     let (dir, storage) = storage_fixture().await;
     let stores = stores(storage.clone());
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     let principal_a = create_principal(&storage, "principal-a").await;
     create_principal(&storage, "principal-b").await;
 
@@ -144,7 +150,10 @@ async fn principals_delete_rebuild_removes_deleted_and_increments_generation() {
 async fn corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active() {
     let (dir, storage) = storage_fixture().await;
     let stores = stores(storage.clone());
-    let runtime = ExtismRuntime::new();
+    let runtime = ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        std::sync::Arc::new(cc_lb_core::SystemClock),
+    );
     create_principal(&storage, "principal-a").await;
     create_api_key_upstream(&storage, "healthy").await;
     let corrupt = UpstreamStore::create(

@@ -52,6 +52,7 @@ use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as Li
 use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
 use crate::audit_writer::{AuditEntry, AuditWriterSink};
+use crate::clock::{Clock, ClockHandle, unix_millis, unix_secs};
 use crate::dynamic_view::{
     DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
 };
@@ -181,6 +182,7 @@ pub fn build_candidates(
     request_kind: RequestKind,
     canonical_model: &str,
     request_breakpoints: &[CacheBreakpoint],
+    clock: &dyn Clock,
 ) -> Vec<UpstreamCandidate> {
     let Some(allowed_upstreams) = view.principal_view.allowed_upstreams(principal_id) else {
         return Vec::new();
@@ -188,7 +190,7 @@ pub fn build_candidates(
 
     let mut candidates: Vec<UpstreamCandidate> = {
         let rate_limit_cache = view.upstream_rate_limit_cache.read();
-        let now_unix_millis = unix_now_ms();
+        let now_unix_millis = unix_now_ms(clock);
         let prompt_cache = view.prompt_cache_observation_cache_opt();
         let request_breakpoint_hashes_with_ttl = request_breakpoints
             .iter()
@@ -746,26 +748,32 @@ pub struct Lifecycle {
     subscription_quota_sink: Option<SubscriptionQuotaSink>,
     subscription_metadata_hook: Option<MetadataHookHandle>,
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
+    clock: ClockHandle,
     rng: Mutex<StdRng>,
+}
+
+pub struct LifecycleStaticView {
+    pub principal_view: Arc<PrincipalView>,
+    pub signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
+    pub global_router: Arc<dyn RouterPlugin>,
+    pub dispatcher: Arc<dyn UpstreamDispatch>,
+    pub global_observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
 }
 
 impl Lifecycle {
     pub fn new(
         authn: Arc<BuiltinAuthn>,
-        principal_view: Arc<PrincipalView>,
-        signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
-        global_router: Arc<dyn RouterPlugin>,
-        dispatcher: Arc<dyn UpstreamDispatch>,
-        global_observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
+        static_view: LifecycleStaticView,
         config: LifecycleConfig,
+        clock: ClockHandle,
     ) -> Self {
         let dynamic_view = DynamicViewBuilder::new(0)
-            .signer_factory(signer_factory)
-            .global_router(global_router)
-            .dispatcher(dispatcher)
-            .global_observability_hooks(global_observability_hooks)
+            .signer_factory(static_view.signer_factory)
+            .global_router(static_view.global_router)
+            .dispatcher(static_view.dispatcher)
+            .global_observability_hooks(static_view.global_observability_hooks)
             .error_normalizer(Arc::new(ErrorNormalizer::new()))
-            .principal_view(principal_view)
+            .principal_view(static_view.principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build();
         Self {
@@ -781,6 +789,7 @@ impl Lifecycle {
             subscription_quota_sink: None,
             subscription_metadata_hook: None,
             subscription_quota_cache: None,
+            clock,
             rng: Mutex::new(rand::make_rng()),
         }
     }
@@ -789,6 +798,7 @@ impl Lifecycle {
         authn: Arc<BuiltinAuthn>,
         dynamic_view: Arc<DynamicViewHolder>,
         config: LifecycleConfig,
+        clock: ClockHandle,
     ) -> Self {
         Self {
             authn,
@@ -803,6 +813,7 @@ impl Lifecycle {
             subscription_quota_sink: None,
             subscription_metadata_hook: None,
             subscription_quota_cache: None,
+            clock,
             rng: Mutex::new(rand::make_rng()),
         }
     }
@@ -952,7 +963,7 @@ impl Lifecycle {
             return;
         };
         let _ = audit_sink.try_enqueue(AuditEntry {
-            ts: unix_now_secs(),
+            ts: unix_secs(self.clock.now()),
             request_id: ctx.request_id.clone(),
             principal_id: subject.principal_id.clone(),
             route: ctx.path.clone(),
@@ -1111,6 +1122,7 @@ impl Lifecycle {
             RequestKind::AnthropicMessages,
             &ctx.canonical_model_id,
             &ctx.cache_breakpoints,
+            &*self.clock,
         );
         let pipeline_result = execute_filter_pipeline(
             &router_pipeline.user_filters,
@@ -1388,7 +1400,7 @@ impl Lifecycle {
         }
 
         if response.status().is_success() || response.status() == StatusCode::TOO_MANY_REQUESTS {
-            let observed_at = SystemTime::now();
+            let observed_at = self.clock.now();
             self.record_upstream_rate_limit_observations(
                 &view,
                 response.headers(),
@@ -1682,7 +1694,7 @@ impl Lifecycle {
         if let (Some(storage), Some(active_limit)) =
             (self.request_event_storage.as_ref(), active_limit.as_ref())
         {
-            let now_ms = unix_now_ms();
+            let now_ms = unix_now_ms(&*self.clock);
             let total_ms = duration_to_ms(duration);
             let mut event = RequestEvent {
                 ts: now_ms / 1_000,
@@ -1757,7 +1769,7 @@ impl Lifecycle {
         let Some(storage) = self.request_event_storage.as_ref() else {
             return;
         };
-        let now_ms = unix_now_ms();
+        let now_ms = unix_now_ms(&*self.clock);
         let event = RequestEvent {
             ts: now_ms / 1_000,
             ts_ms: Some(now_ms),
@@ -1997,6 +2009,7 @@ impl Lifecycle {
         let event_bus = self.event_bus.clone();
         let limit_engine = self.limit_engine.clone();
         let prompt_cache_shadow_enabled = self.config.prompt_cache_shadow.enabled;
+        let clock = Arc::clone(&self.clock);
         let stream = async_stream::stream! {
             let mut batch_index = 0_u64;
             let mut buffer: Vec<u8> = Vec::new();
@@ -2224,7 +2237,7 @@ impl Lifecycle {
                     limit_reconcile_ms = Some(duration_to_ms(limit_reconcile_start.elapsed()));
                 }
                 if let Some(storage) = storage.as_ref() {
-                    let now_ms = unix_now_ms();
+                    let now_ms = unix_now_ms(&*clock);
                     let mut event = RequestEvent {
                         ts: now_ms / 1_000,
                         ts_ms: Some(now_ms),
@@ -2778,13 +2791,6 @@ fn next_request_id() -> String {
     request_id.push_str("req_core_");
     let _ = write!(&mut request_id, "{id}");
     request_id
-}
-
-pub(crate) fn unix_now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 fn system_time_to_unix_secs(value: SystemTime) -> u64 {
@@ -3359,12 +3365,8 @@ impl ApiKeyMetricContext {
     }
 }
 
-fn unix_now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64
+fn unix_now_ms(clock: &dyn Clock) -> u64 {
+    unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
 }
 
 fn duration_to_ms(duration: Duration) -> u64 {
@@ -3923,6 +3925,7 @@ mod tests {
             RequestKind::AnthropicMessages,
             TEST_MODEL,
             &breakpoints,
+            &crate::clock::SystemClock,
         );
 
         let score = candidates[0].cache_score.as_ref().expect("cache score");
@@ -3971,6 +3974,7 @@ mod tests {
             RequestKind::AnthropicMessages,
             TEST_MODEL,
             &breakpoints,
+            &crate::clock::SystemClock,
         );
 
         let score = candidates[0].cache_score.as_ref().expect("cache score");
@@ -4025,6 +4029,7 @@ mod tests {
                     RequestKind::AnthropicMessages,
                     TEST_MODEL,
                     &breakpoints,
+                    &crate::clock::SystemClock,
                 );
                 samples.push(start.elapsed().as_nanos());
             }
@@ -4063,6 +4068,7 @@ mod tests {
             RequestKind::AnthropicMessages,
             TEST_MODEL,
             &breakpoints,
+            &crate::clock::SystemClock,
         );
 
         assert_eq!(candidates[0].cache_score, None);
@@ -4099,6 +4105,7 @@ mod tests {
             RequestKind::AnthropicMessages,
             TEST_MODEL,
             &breakpoints,
+            &crate::clock::SystemClock,
         );
 
         let score = candidates[0].cache_score.as_ref().expect("cache score");

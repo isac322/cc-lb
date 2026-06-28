@@ -10,7 +10,6 @@ use cc_lb_plugin_api::{
     ShapedRequestBuilder, SignerError, Upstream, UpstreamDialect, UpstreamError, shape_request,
     sign_request,
 };
-use cc_lb_runtime_extism::ExtismRuntime;
 use http::{HeaderMap, Method, StatusCode};
 use metrics::{
     Counter, CounterFn, Gauge, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
@@ -36,7 +35,7 @@ async fn sign_fail_request_fallback() {
         &[("build_signer", &common::build_signer_response())],
     );
     let fixture = common::fixture("sign-fallback", &wat, common::metadata(&[]));
-    let runtime = ExtismRuntime::new();
+    let runtime = common::runtime();
     let factory = runtime
         .instantiate_signer_factory(&fixture.manifest)
         .expect("signer factory instantiates");
@@ -58,7 +57,7 @@ async fn sign_fail_request_fallback() {
 async fn build_signer_fail_request_fallback() {
     let wat = module_with_panicking_export("build_signer", &[]);
     let fixture = common::fixture("build-signer-fallback", &wat, common::metadata(&[]));
-    let runtime = ExtismRuntime::new();
+    let runtime = common::runtime();
     let factory = runtime
         .instantiate_signer_factory(&fixture.manifest)
         .expect("signer factory instantiates");
@@ -79,7 +78,7 @@ async fn build_signer_fail_request_fallback() {
 fn shape_fail_request_fallback() {
     let wat = module_with_panicking_export("shape", &[]);
     let fixture = common::fixture("shape-fallback", &wat, common::metadata(&[]));
-    let runtime = ExtismRuntime::new();
+    let runtime = common::runtime();
     let dialect = runtime
         .instantiate_dialect(&fixture.manifest)
         .expect("dialect instantiates");
@@ -104,7 +103,7 @@ fn observe_silent_skip_fallback() {
         &wat,
         common::metadata(&[("observe_batch_count", 1), ("observe_flush_ms", 10_000)]),
     );
-    let runtime = ExtismRuntime::new();
+    let runtime = common::runtime();
     let hook = runtime
         .instantiate_observability(&fixture.manifest)
         .expect("observability hook instantiates");
@@ -126,7 +125,7 @@ fn normalize_error_pass_through_fallback() {
     let wat =
         module_with_panicking_export("normalize_error", &[("shape", &common::shape_response())]);
     let fixture = common::fixture("normalize-error-fallback", &wat, common::metadata(&[]));
-    let runtime = ExtismRuntime::new();
+    let runtime = common::runtime();
     let dialect = runtime
         .instantiate_dialect(&fixture.manifest)
         .expect("dialect instantiates");
@@ -150,7 +149,7 @@ async fn on_unauthorized_pass_through_fallback() {
         &[("build_signer", &common::build_signer_response())],
     );
     let fixture = common::fixture("on-unauthorized-fallback", &wat, common::metadata(&[]));
-    let runtime = ExtismRuntime::new();
+    let runtime = common::runtime();
     let factory = runtime
         .instantiate_signer_factory(&fixture.manifest)
         .expect("signer factory instantiates");

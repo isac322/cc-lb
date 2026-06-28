@@ -18,7 +18,7 @@ impl SchedulerDispatch {
         cycle_key: Option<i64>,
         error_detail: Option<&str>,
     ) {
-        let attempted_at_unix_secs = now_unix_secs_i64().unwrap_or(expected_cycle_key);
+        let attempted_at_unix_secs = now_unix_secs_i64(&*self.clock).unwrap_or(expected_cycle_key);
         execute_warmup_attempt(WarmupAttemptExecution {
             storage: self.storage.as_ref(),
             upstream,
@@ -58,7 +58,9 @@ impl SchedulerDispatch {
             lease_holder,
             expected_cycle_key: Some(expected_cycle_key),
             attempted_at_unix_secs,
-            completed_at_unix_secs: Some(now_unix_secs_i64().unwrap_or(attempted_at_unix_secs)),
+            completed_at_unix_secs: Some(
+                now_unix_secs_i64(&*self.clock).unwrap_or(attempted_at_unix_secs),
+            ),
             result: WarmupAttemptExecutionResult::PermanentFailure {
                 reason,
                 http_status: None,

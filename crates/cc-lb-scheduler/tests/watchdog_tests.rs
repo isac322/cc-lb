@@ -1,7 +1,9 @@
 #![cfg(all(feature = "sqlite", not(feature = "postgres")))]
 
 use std::str::FromStr as _;
+use std::sync::Arc;
 
+use cc_lb_core::clock::SystemClock;
 use cc_lb_scheduler::jobs::watchdog::{WatchdogEntityKind, run_entity_watchdog};
 use cc_lb_scheduler::worker::AdaptiveJob;
 use cc_lb_scheduler::worker::{
@@ -175,6 +177,7 @@ impl Fixture {
         let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
             pool: pool.clone(),
             storage,
+            clock: Arc::new(SystemClock),
         });
         Ok(Self {
             _dir: dir,

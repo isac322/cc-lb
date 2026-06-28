@@ -1,7 +1,6 @@
 #![allow(clippy::result_large_err, clippy::manual_clamp)]
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
@@ -10,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use cc_lb_core::DynamicViewHolder;
+use cc_lb_core::{Clock, DynamicViewHolder};
 use cc_lb_plugin_api::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaHistoryStore,
@@ -462,7 +461,7 @@ async fn build_pool_history_response(
 ) -> Result<PoolHistoryResponse, Response> {
     let storage = storage(state)?;
     let windows = parse_pool_history_windows(query.windows.as_deref())?;
-    let now_unix_secs = (now_unix_millis() / 1_000) as i64;
+    let now_unix_secs = (now_unix_millis(&*state.clock) / 1_000) as i64;
     let default_lookback_secs: i64 = 6 * 60 * 60;
     let since_unix_secs = query
         .since_unix_secs
@@ -624,6 +623,7 @@ fn apply_etag(mut resp: Response, etag: Option<&str>) -> Response {
 pub async fn build_cc_lb_oauth_usage_response(
     storage: &dyn Storage,
     dynamic_view: &DynamicViewHolder,
+    clock: &dyn Clock,
 ) -> Result<CcLbOAuthUsageResponse, StorageError> {
     let aggregate = build_cc_lb_aggregate_response(
         storage,
@@ -639,6 +639,7 @@ pub async fn build_cc_lb_oauth_usage_response(
         dynamic_view
             .load()
             .subscription_quota_routing_max_staleness_secs,
+        clock,
     )
     .await?;
     let mut response = oauth_usage_from_aggregate(&aggregate);
@@ -648,6 +649,7 @@ pub async fn build_cc_lb_oauth_usage_response(
         dynamic_view
             .load()
             .subscription_quota_routing_max_staleness_secs,
+        clock,
     )
     .await?;
     Ok(response)
@@ -670,7 +672,7 @@ async fn build_latest_response(
             .load()
             .subscription_quota_routing_max_staleness_secs
     });
-    let now_unix_millis = now_unix_millis();
+    let now_unix_millis = now_unix_millis(&*state.clock);
     let upstreams = upstreams_for_optional_query(storage, query.upstream_ids.as_deref()).await?;
     let dynamic_view = state.dynamic_view.load();
     let mut response_upstreams = Vec::with_capacity(upstreams.len());
@@ -882,6 +884,7 @@ async fn build_aggregate_response(
         windows,
         source,
         max_staleness_secs,
+        &*state.clock,
     )
     .await
     .map_err(storage_error)
@@ -894,8 +897,9 @@ pub async fn build_cc_lb_aggregate_response(
     windows: Vec<SubscriptionQuotaWindow>,
     source: SubscriptionQuotaSourceMerge,
     max_staleness_secs: u64,
+    clock: &dyn Clock,
 ) -> Result<AggregateResponse, StorageError> {
-    let now_unix_millis = now_unix_millis();
+    let now_unix_millis = now_unix_millis(clock);
     let now_unix_secs = now_unix_millis / 1_000;
     let requested = upstream_ids.map(|ids| ids.into_iter().collect::<HashSet<_>>());
     let mut upstreams = pool_quota_upstreams(
@@ -1121,8 +1125,9 @@ pub fn pool_quota_snapshots_from_aggregate(
 pub async fn record_pool_quota_snapshots_now(
     storage: &dyn Storage,
     aggregate: &AggregateResponse,
+    clock: &dyn Clock,
 ) -> Result<(), StorageError> {
-    let computed_at_unix_millis = i64::try_from(now_unix_millis()).unwrap_or(i64::MAX);
+    let computed_at_unix_millis = i64::try_from(now_unix_millis(clock)).unwrap_or(i64::MAX);
     let snapshot_at_unix_secs = computed_at_unix_millis / 1_000;
     let records = pool_quota_snapshots_from_aggregate(
         aggregate,
@@ -1475,6 +1480,7 @@ async fn build_cc_lb_oauth_extra_usage(
     storage: &dyn Storage,
     dynamic_view: &DynamicViewHolder,
     max_staleness_secs: u64,
+    clock: &dyn Clock,
 ) -> Result<Option<CcLbOAuthExtraUsage>, StorageError> {
     let upstreams = list_all_upstreams_storage(storage)
         .await?
@@ -1483,7 +1489,7 @@ async fn build_cc_lb_oauth_extra_usage(
         .filter(|upstream| upstream.enabled)
         .filter(|upstream| upstream.kind == UpstreamKind::AnthropicOauth)
         .collect::<Vec<_>>();
-    let now_unix_millis = now_unix_millis();
+    let now_unix_millis = now_unix_millis(clock);
     let dynamic_view = dynamic_view.load();
     let mut enabled = None;
     let mut monthly_limit = 0.0;
@@ -2431,11 +2437,8 @@ fn internal_error(error: &str) -> Response {
         .into_response()
 }
 
-fn now_unix_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+fn now_unix_millis(clock: &dyn Clock) -> u64 {
+    cc_lb_core::clock::unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]

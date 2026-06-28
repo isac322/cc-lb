@@ -1,5 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
+use cc_lb_clock::{Clock, unix_secs};
 use cc_lb_plugin_api::PluginSlot;
 use cc_lb_plugin_wire::limits::{
     IMPLEMENTED_FUNCTIONS_MAX, SELF_CHECK_FUEL, SELF_CHECK_OUTPUT_MAX_BYTES, SELF_CHECK_WALL_MS,
@@ -16,6 +15,7 @@ const SELF_CHECK_EXPORT: &str = "cc_lb_self_check";
 pub fn execute_self_check(
     plugin_bytes: &[u8],
     supported_slots: &[PluginSlot],
+    clock: &dyn Clock,
 ) -> Result<SelfCheckResponse, SelfCheckExecutionError> {
     let mut plugin =
         build_plugin(plugin_bytes, SELF_CHECK_WALL_MS, SELF_CHECK_FUEL).map_err(|source| {
@@ -34,13 +34,13 @@ pub fn execute_self_check(
         let response = SelfCheckResponse {
             status: SelfCheckStatus::Success,
             failures: Vec::new(),
-            completed_at: unix_timestamp()?,
+            completed_at: unix_timestamp(clock)?,
         };
         response.validate()?;
         return Ok(response);
     }
 
-    let request = build_request(supported_slots)?;
+    let request = build_request(supported_slots, clock)?;
     let request = serde_json::to_string(&request).map_err(|source| {
         SelfCheckExecutionError::SerializeRequest {
             reason: source.to_string(),
@@ -72,6 +72,7 @@ pub fn execute_self_check(
 
 fn build_request(
     supported_slots: &[PluginSlot],
+    clock: &dyn Clock,
 ) -> Result<SelfCheckRequest, SelfCheckExecutionError> {
     let functions: Vec<_> = supported_slots
         .iter()
@@ -85,7 +86,7 @@ fn build_request(
         ));
     }
 
-    let initiated_at = unix_timestamp()?;
+    let initiated_at = unix_timestamp(clock)?;
     let request = SelfCheckRequest {
         functions_to_test: functions,
         initiated_at,
@@ -96,13 +97,8 @@ fn build_request(
     Ok(request)
 }
 
-fn unix_timestamp() -> Result<i64, SelfCheckExecutionError> {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|source| SelfCheckExecutionError::Clock {
-            reason: source.to_string(),
-        })?
-        .as_secs();
+fn unix_timestamp(clock: &dyn Clock) -> Result<i64, SelfCheckExecutionError> {
+    let seconds = unix_secs(clock.now());
     i64::try_from(seconds).map_err(|source| SelfCheckExecutionError::Clock {
         reason: source.to_string(),
     })
@@ -155,6 +151,7 @@ pub enum SelfCheckExecutionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cc_lb_clock::TestClock;
 
     const TEST_SUPPORTED_SLOTS: &[PluginSlot] = &[
         PluginSlot::Router,
@@ -169,8 +166,10 @@ mod tests {
             false,
         );
 
+        let clock = TestClock::new_at_secs(1_800_000_000);
+
         let response =
-            execute_self_check(&wasm, TEST_SUPPORTED_SLOTS).expect("self-check succeeds");
+            execute_self_check(&wasm, TEST_SUPPORTED_SLOTS, &clock).expect("self-check succeeds");
 
         assert_eq!(response.status, SelfCheckStatus::Success);
         assert!(response.failures.is_empty());
@@ -183,7 +182,9 @@ mod tests {
             false,
         );
 
-        let err = execute_self_check(&wasm, TEST_SUPPORTED_SLOTS)
+        let clock = TestClock::new_at_secs(1_800_000_000);
+
+        let err = execute_self_check(&wasm, TEST_SUPPORTED_SLOTS, &clock)
             .expect_err("failure status rejected at executor level");
 
         match err {
@@ -197,8 +198,10 @@ mod tests {
         let wasm = wat::parse_str(r#"(module (func (export "shape") (result i32) (i32.const 0)))"#)
             .expect("wat parses");
 
-        let err =
-            execute_self_check(&wasm, TEST_SUPPORTED_SLOTS).expect_err("missing export rejected");
+        let clock = TestClock::new_at_secs(1_800_000_000);
+
+        let err = execute_self_check(&wasm, TEST_SUPPORTED_SLOTS, &clock)
+            .expect_err("missing export rejected");
 
         match err {
             SelfCheckExecutionError::MissingSelfCheckExport => {}
@@ -213,8 +216,10 @@ mod tests {
             true,
         );
 
-        let err =
-            execute_self_check(&wasm, TEST_SUPPORTED_SLOTS).expect_err("host import rejected");
+        let clock = TestClock::new_at_secs(1_800_000_000);
+
+        let err = execute_self_check(&wasm, TEST_SUPPORTED_SLOTS, &clock)
+            .expect_err("host import rejected");
 
         match err {
             SelfCheckExecutionError::Instantiate { .. } | SelfCheckExecutionError::Call { .. } => {}
@@ -227,7 +232,9 @@ mod tests {
         let output = "x".repeat(SELF_CHECK_OUTPUT_MAX_BYTES + 1);
         let wasm = self_check_module(&output, false);
 
-        let err = execute_self_check(&wasm, TEST_SUPPORTED_SLOTS)
+        let clock = TestClock::new_at_secs(1_800_000_000);
+
+        let err = execute_self_check(&wasm, TEST_SUPPORTED_SLOTS, &clock)
             .expect_err("oversized response rejected");
 
         match err {
@@ -246,7 +253,9 @@ mod tests {
             false,
         );
 
-        let err = execute_self_check(&wasm, TEST_SUPPORTED_SLOTS)
+        let clock = TestClock::new_at_secs(1_800_000_000);
+
+        let err = execute_self_check(&wasm, TEST_SUPPORTED_SLOTS, &clock)
             .expect_err("status/failures mismatch rejected");
 
         match err {
@@ -262,7 +271,9 @@ mod tests {
             false,
         );
 
-        let err = execute_self_check(&wasm, TEST_SUPPORTED_SLOTS)
+        let clock = TestClock::new_at_secs(1_800_000_000);
+
+        let err = execute_self_check(&wasm, TEST_SUPPORTED_SLOTS, &clock)
             .expect_err("status/failures mismatch rejected");
 
         match err {
@@ -278,8 +289,10 @@ mod tests {
             false,
         );
 
-        let err =
-            execute_self_check(&wasm, TEST_SUPPORTED_SLOTS).expect_err("invalid response rejected");
+        let clock = TestClock::new_at_secs(1_800_000_000);
+
+        let err = execute_self_check(&wasm, TEST_SUPPORTED_SLOTS, &clock)
+            .expect_err("invalid response rejected");
 
         match err {
             SelfCheckExecutionError::Validation(SelfCheckError::InvalidTimestamp(_)) => {}

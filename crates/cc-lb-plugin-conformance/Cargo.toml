@@ -22,6 +22,7 @@ default = ["dispatch"]
 dispatch = []
 
 [dependencies]
+cc-lb-clock = { workspace = true }
 cc-lb-runtime-protocol = { workspace = true }
 cc-lb-plugin-wire = { workspace = true }
 cc-lb-plugin-api  = { workspace = true }

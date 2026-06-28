@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use cc_lb_config::Config;
 use cc_lb_core::anthropic_compat::CLAUDE_CODE_STABLE_VERSION_KEY;
+use cc_lb_core::clock::ClockHandle;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -35,16 +36,17 @@ pub(super) fn spawn_cron_producer(
     config: Config,
     leader: Arc<LeaderElection>,
     cancel: CancellationToken,
+    clock: ClockHandle,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         match backend {
             #[cfg(feature = "sqlite")]
             SchedulerBackend::Sqlite(sqlite) => {
-                run_sqlite_cron_producer(sqlite, config, leader, cancel).await;
+                run_sqlite_cron_producer(sqlite, config, leader, cancel, clock).await;
             }
             #[cfg(feature = "postgres")]
             SchedulerBackend::Postgres(postgres) => {
-                run_postgres_cron_producer(postgres, config, leader, cancel).await;
+                run_postgres_cron_producer(postgres, config, leader, cancel, clock).await;
             }
         }
     })
@@ -56,14 +58,16 @@ async fn run_sqlite_cron_producer(
     config: Config,
     leader: Arc<LeaderElection>,
     cancel: CancellationToken,
+    clock: ClockHandle,
 ) {
     let mut handles = Vec::new();
-    for spec in singleton_cron_specs(&config) {
+    for spec in singleton_cron_specs(&config, clock.clone()) {
         let pool = sqlite.pool.clone();
         let leader = leader.clone();
         let cancel = cancel.clone();
+        let clock = clock.clone();
         handles.push(tokio::spawn(async move {
-            run_sqlite_singleton_cron_loop(pool, spec, leader, cancel).await;
+            run_sqlite_singleton_cron_loop(pool, spec, leader, cancel, clock).await;
         }));
     }
     cancel.cancelled().await;
@@ -76,9 +80,10 @@ async fn run_postgres_cron_producer(
     config: Config,
     leader: Arc<LeaderElection>,
     cancel: CancellationToken,
+    clock: ClockHandle,
 ) {
     let mut handles = Vec::new();
-    for spec in singleton_cron_specs(&config) {
+    for spec in singleton_cron_specs(&config, clock) {
         let pool = postgres.pool.clone();
         let leader = leader.clone();
         let cancel = cancel.clone();
@@ -124,13 +129,17 @@ async fn run_sqlite_singleton_cron_loop(
     spec: SingletonCronSpec,
     leader: Arc<LeaderElection>,
     cancel: CancellationToken,
+    clock: ClockHandle,
 ) {
     loop {
         if cancel.is_cancelled() {
             break;
         }
-        let storage =
-            crate::sqlite_enqueue::SqliteSingletonCronStorage::new(pool.clone(), CRON_QUEUE);
+        let storage = crate::sqlite_enqueue::SqliteSingletonCronStorage::new(
+            pool.clone(),
+            CRON_QUEUE,
+            clock.clone(),
+        );
         let worker = CronWorkerBuilder::singleton_queue_factory(
             CRON_QUEUE,
             spec.schedule.clone(),
@@ -186,49 +195,68 @@ struct SingletonCronSpec {
     factory: CronJobFactory,
 }
 
-fn singleton_cron_specs(config: &Config) -> Vec<SingletonCronSpec> {
+fn singleton_cron_specs(config: &Config, clock: ClockHandle) -> Vec<SingletonCronSpec> {
     let mut specs = Vec::new();
-    push_singleton_spec(&mut specs, config, "usage_rollup", |_| {
+    push_singleton_spec(&mut specs, config, &clock, "usage_rollup", |_| {
         CronJob::UsageRollup(Default::default())
     });
-    push_singleton_spec(&mut specs, config, "usage_prune", |_| {
+    push_singleton_spec(&mut specs, config, &clock, "usage_prune", |_| {
         CronJob::UsagePrune(Default::default())
     });
-    push_singleton_spec(&mut specs, config, "quota_gc", |_| {
+    push_singleton_spec(&mut specs, config, &clock, "quota_gc", |_| {
         CronJob::QuotaGc(Default::default())
     });
-    push_singleton_spec(&mut specs, config, "prompt_cache_purge", |_| {
+    push_singleton_spec(&mut specs, config, &clock, "prompt_cache_purge", |_| {
         CronJob::PromptCachePurge(Default::default())
     });
-    push_singleton_spec(&mut specs, config, "price_catalog_refresh", |_| {
+    push_singleton_spec(&mut specs, config, &clock, "price_catalog_refresh", |_| {
         CronJob::PriceCatalogRefresh(Default::default())
     });
-    push_singleton_spec(&mut specs, config, "apalis_housekeeping", |_| {
+    push_singleton_spec(&mut specs, config, &clock, "apalis_housekeeping", |_| {
         CronJob::ApalisHousekeeping(Default::default())
     });
-    push_singleton_spec(&mut specs, config, "anthropic_compat_refresh", |_| {
-        CronJob::AnthropicCompatRefresh(AnthropicCompatRefreshJob::new(
-            CLAUDE_CODE_STABLE_VERSION_KEY,
-        ))
-    });
-    push_singleton_spec(&mut specs, config, "warmup_watchdog", |tick_secs| {
+    push_singleton_spec(
+        &mut specs,
+        config,
+        &clock,
+        "anthropic_compat_refresh",
+        |_| {
+            CronJob::AnthropicCompatRefresh(AnthropicCompatRefreshJob::new(
+                CLAUDE_CODE_STABLE_VERSION_KEY,
+            ))
+        },
+    );
+    push_singleton_spec(&mut specs, config, &clock, "warmup_watchdog", |tick_secs| {
         CronJob::WarmupWatchdog(WarmupWatchdogJob::new(tick_secs))
     });
-    push_singleton_spec(&mut specs, config, "oauth_refresh_watchdog", |tick_secs| {
-        CronJob::OAuthRefreshWatchdog(OAuthRefreshWatchdogJob::new(tick_secs))
-    });
-    push_singleton_spec(&mut specs, config, "oauth_usage_poll", |tick_secs| {
-        CronJob::OAuthUsagePoll(OAuthUsagePollCronJob::new(tick_secs))
-    });
-    push_singleton_spec(&mut specs, config, "pool_quota_snapshot", |tick_secs| {
-        CronJob::PoolQuotaSnapshot(PoolQuotaSnapshotCronJob::new(tick_secs))
-    });
+    push_singleton_spec(
+        &mut specs,
+        config,
+        &clock,
+        "oauth_refresh_watchdog",
+        |tick_secs| CronJob::OAuthRefreshWatchdog(OAuthRefreshWatchdogJob::new(tick_secs)),
+    );
+    push_singleton_spec(
+        &mut specs,
+        config,
+        &clock,
+        "oauth_usage_poll",
+        |tick_secs| CronJob::OAuthUsagePoll(OAuthUsagePollCronJob::new(tick_secs)),
+    );
+    push_singleton_spec(
+        &mut specs,
+        config,
+        &clock,
+        "pool_quota_snapshot",
+        |tick_secs| CronJob::PoolQuotaSnapshot(PoolQuotaSnapshotCronJob::new(tick_secs)),
+    );
     specs
 }
 
 fn push_singleton_spec(
     specs: &mut Vec<SingletonCronSpec>,
     config: &Config,
+    clock: &ClockHandle,
     name: &'static str,
     factory: CronJobFactory,
 ) {
@@ -240,20 +268,26 @@ fn push_singleton_spec(
     }
     specs.push(SingletonCronSpec {
         name,
-        schedule: IntervalSchedule::new(name, job_config.interval_secs, job_config.jitter_secs),
+        schedule: IntervalSchedule::new(
+            name,
+            job_config.interval_secs,
+            job_config.jitter_secs,
+            clock.clone(),
+        ),
         factory,
     });
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct IntervalSchedule {
     interval: chrono::Duration,
     first_delay: chrono::Duration,
     next: Option<DateTime<Utc>>,
+    clock: ClockHandle,
 }
 
 impl IntervalSchedule {
-    fn new(name: &str, interval_secs: u64, jitter_secs: u64) -> Self {
+    fn new(name: &str, interval_secs: u64, jitter_secs: u64, clock: ClockHandle) -> Self {
         let bounded_jitter = if jitter_secs == 0 {
             0
         } else {
@@ -263,13 +297,15 @@ impl IntervalSchedule {
             interval: chrono_seconds(interval_secs.max(1)),
             first_delay: chrono_seconds(interval_secs.max(1).saturating_add(bounded_jitter)),
             next: None,
+            clock,
         }
     }
 }
 
 impl apalis_cron::Schedule<Utc> for IntervalSchedule {
     fn next_tick(&mut self, _: &Utc) -> Option<DateTime<Utc>> {
-        let next = self.next.unwrap_or_else(|| Utc::now() + self.first_delay);
+        let now = DateTime::<Utc>::from(self.clock.now());
+        let next = self.next.unwrap_or(now + self.first_delay);
         self.next = Some(next + self.interval);
         Some(next)
     }

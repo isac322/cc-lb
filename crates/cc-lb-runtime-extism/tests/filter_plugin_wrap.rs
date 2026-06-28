@@ -3,7 +3,6 @@ mod common;
 use std::collections::BTreeMap;
 
 use cc_lb_plugin_api::{FilterError, PerCandidateReason, UpstreamCandidate};
-use cc_lb_runtime_extism::ExtismRuntime;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -43,7 +42,7 @@ fn filter_plugin_happy_path_maps_wire_v3_response() {
         BTreeMap::new(),
     );
     fixture.manifest.wire_version = Some(3);
-    let runtime = ExtismRuntime::new();
+    let runtime = common::runtime();
     let plugin_id =
         Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").expect("fixture UUID parses");
     let (filter, staged) = runtime
@@ -81,7 +80,7 @@ fn filter_plugin_happy_path_maps_wire_v3_response() {
 fn filter_plugin_maps_wasm_trap_to_filter_trap() {
     let mut fixture = common::fixture("filter-trap", trap_filter_module(), BTreeMap::new());
     fixture.manifest.wire_version = Some(3);
-    let runtime = ExtismRuntime::new();
+    let runtime = common::runtime();
     let filter = runtime
         .instantiate_filter(&fixture.manifest)
         .expect("filter plugin instantiates");
@@ -105,7 +104,7 @@ fn filter_plugin_maps_invalid_encoding_to_filter_runtime() {
         BTreeMap::new(),
     );
     fixture.manifest.wire_version = Some(3);
-    let runtime = ExtismRuntime::new();
+    let runtime = common::runtime();
     let filter = runtime
         .instantiate_filter(&fixture.manifest)
         .expect("filter plugin instantiates");

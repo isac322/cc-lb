@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use apalis::prelude::{IntervalStrategy, Status, StrategyBuilder, TaskSink};
 use cc_lb_config::SchedulerConfig;
+use cc_lb_core::clock::SystemClock;
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
@@ -40,6 +41,7 @@ async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
         storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(
             &pool, &config,
         ),
+        clock: Arc::new(SystemClock),
     });
     let worker = build_adaptive_worker(&backend, done_scheduler_ctx())?;
     worker.run_for(Duration::from_secs(5)).await?;
@@ -83,6 +85,7 @@ async fn scheduler_backend_sqlite_push_job_uses_full_idempotency_index()
         storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(
             &pool, &config,
         ),
+        clock: Arc::new(SystemClock),
     });
     let upstream_id = Uuid::new_v4();
 
@@ -127,7 +130,12 @@ async fn scheduler_backend_sqlite_push_job_uses_full_idempotency_index()
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn worker_sqlite_uses_default_entity_concurrency() {
-    let ctx = SchedulerCtx::default();
+    let ctx = SchedulerCtx::new(
+        SchedulerConfig::default(),
+        Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        Arc::new(SystemClock),
+    );
 
     assert_eq!(
         ctx.config.entity_concurrency,
@@ -139,7 +147,12 @@ async fn worker_sqlite_uses_default_entity_concurrency() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn scheduler_ctx_default_dispatches_succeed() -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = SchedulerCtx::default();
+    let ctx = SchedulerCtx::new(
+        SchedulerConfig::default(),
+        Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        Arc::new(SystemClock),
+    );
     let upstream_id = Uuid::new_v4();
 
     let entity =
@@ -188,5 +201,6 @@ fn done_scheduler_ctx() -> SchedulerCtx {
         SchedulerConfig::default(),
         Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
         Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        Arc::new(SystemClock),
     )
 }

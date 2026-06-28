@@ -13,9 +13,12 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn healthz_always_200() {
+    let clock: cc_lb_core::ClockHandle = std::sync::Arc::new(cc_lb_core::SystemClock);
     let (upstream_addr, _upstream) = healthcheck_common::spawn_upstream(StatusCode::OK).await;
     let config = healthcheck_common::config_for_upstream(upstream_addr, 5);
-    let app = build_app_for_testing(config).await.expect("build app");
+    let app = build_app_for_testing(config, clock.clone())
+        .await
+        .expect("build app");
 
     let request = Request::builder()
         .method("GET")

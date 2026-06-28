@@ -96,9 +96,8 @@ impl UpstreamWarmupAttemptStore for SqliteStorage {
     async fn summarize_recent_warmup_attempts(
         &self,
         upstream_id: Uuid,
-        window_secs: i64,
+        cutoff_unix_secs: i64,
     ) -> StorageResult<WarmupAttemptSummary> {
-        let cutoff_unix_secs = recent_cutoff_unix_secs(window_secs)?;
         let rows = sqlx::query(
             "SELECT outcome, COUNT(*) AS attempt_count \
              FROM warmup_attempts_v1 \
@@ -254,14 +253,4 @@ fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
     u64::try_from(value).map_err(|_| StorageError::Corrupted {
         message: format!("{field} is negative in sqlite storage"),
     })
-}
-
-fn recent_cutoff_unix_secs(window_secs: i64) -> StorageResult<i64> {
-    chrono::Utc::now()
-        .timestamp()
-        .checked_sub(window_secs)
-        .ok_or_else(|| StorageError::InvalidInput {
-            field: "warmup attempt window_secs".to_owned(),
-            reason: "would overflow unix timestamp cutoff".to_owned(),
-        })
 }

@@ -40,6 +40,7 @@ async fn none_mode_terminal_selects_bound_principal_upstream() {
             upstream_kind: NoneModeUpstreamKind::AnthropicKey,
         }),
         None,
+        Arc::new(cc_lb_core::SystemClock),
     ));
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(RecordingSignerFactory {
@@ -63,6 +64,7 @@ async fn none_mode_terminal_selects_bound_principal_upstream() {
         authn,
         Arc::new(DynamicViewHolder::new(view)),
         LifecycleConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
     );
 
     let response = lifecycle

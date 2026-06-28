@@ -8,6 +8,7 @@ use tokio::sync::Barrier;
 
 #[tokio::test]
 async fn concurrent_unauthorized_refreshes_single_flight() {
+    let clock = common::test_clock();
     let test_storage = common::storage();
     test_storage
         .put_oauth(
@@ -16,7 +17,7 @@ async fn concurrent_unauthorized_refreshes_single_flight() {
             &common::creds(
                 "sk-ant-oat01-expired",
                 "refresh-old",
-                common::now_epoch_secs() - 10,
+                common::now_epoch_secs(clock.as_ref()) - 10,
             ),
         )
         .await
@@ -33,6 +34,7 @@ async fn concurrent_unauthorized_refreshes_single_flight() {
         test_storage.storage.clone(),
         test_storage.aead.clone(),
         http.clone(),
+        clock,
     );
     let task_count = 50;
     let barrier = Arc::new(Barrier::new(task_count));

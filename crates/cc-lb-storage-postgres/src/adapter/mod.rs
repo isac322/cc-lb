@@ -1,5 +1,6 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
+use cc_lb_core::ClockHandle;
 use cc_lb_storage_api::{ChangeEvent, StorageError, StorageResult};
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::PgPool;
@@ -29,23 +30,25 @@ pub mod usage_rollups;
 mod warmup_attempt_mapping;
 pub mod warmup_attempts;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PostgresStorage {
     pub(crate) pool: PgPool,
     pub(crate) listener_pool: PgPool,
+    pub(crate) clock: ClockHandle,
     pub(crate) change_tx: tokio::sync::broadcast::Sender<ChangeEvent>,
     pub(crate) notifier_running: Arc<AtomicBool>,
 }
 
 impl PostgresStorage {
-    pub fn new(pool: PgPool) -> Self {
-        Self::new_with_listener_pool(pool.clone(), pool)
+    pub fn new(pool: PgPool, clock: ClockHandle) -> Self {
+        Self::new_with_listener_pool(pool.clone(), pool, clock)
     }
 
-    pub fn new_with_listener_pool(pool: PgPool, listener_pool: PgPool) -> Self {
+    pub fn new_with_listener_pool(pool: PgPool, listener_pool: PgPool, clock: ClockHandle) -> Self {
         Self {
             pool,
             listener_pool,
+            clock,
             change_tx: notifier::change_sender(),
             notifier_running: Arc::new(AtomicBool::new(false)),
         }

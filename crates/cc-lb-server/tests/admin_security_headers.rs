@@ -117,7 +117,10 @@ fn assert_security_headers_absent(response: &Response) {
 
 #[tokio::test]
 async fn admin_responses_include_browser_security_headers() {
-    let app = build_app_for_testing(Config::default()).await.unwrap();
+    let clock: cc_lb_core::ClockHandle = std::sync::Arc::new(cc_lb_core::SystemClock);
+    let app = build_app_for_testing(Config::default(), clock.clone())
+        .await
+        .unwrap();
 
     let html = get(app.admin_router.clone(), "/").await;
     assert_eq!(html.status(), StatusCode::OK);
@@ -155,7 +158,10 @@ async fn admin_responses_include_browser_security_headers() {
 
 #[tokio::test]
 async fn proxy_responses_omit_admin_browser_security_headers() {
-    let app = build_app_for_testing(Config::default()).await.unwrap();
+    let clock: cc_lb_core::ClockHandle = std::sync::Arc::new(cc_lb_core::SystemClock);
+    let app = build_app_for_testing(Config::default(), clock.clone())
+        .await
+        .unwrap();
 
     let health = get(app.router.clone(), "/healthz").await;
     assert_eq!(health.status(), StatusCode::OK);

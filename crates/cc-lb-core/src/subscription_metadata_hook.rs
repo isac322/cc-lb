@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{OrganizationMetadataRecord, Storage, UpstreamSubscriptionMetadataRecord};
@@ -11,10 +10,12 @@ use crate::anthropic_metadata::{
     MetadataHttpClient, OverageGrantResponse, ProfileResponse, RolesResponse,
     fetch_claude_cli_roles, fetch_oauth_profile, fetch_overage_credit_grant,
 };
+use crate::clock::{Clock, ClockHandle, unix_millis};
 
 #[derive(Clone)]
 pub struct MetadataHookHandle {
     apalis_handle: Arc<dyn MetadataRefreshEnqueue>,
+    pub clock: ClockHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -40,8 +41,12 @@ pub trait MetadataRefreshEnqueue: Send + Sync {
 
 pub fn start_subscription_metadata_hook(
     apalis_handle: Arc<dyn MetadataRefreshEnqueue>,
+    clock: ClockHandle,
 ) -> MetadataHookHandle {
-    MetadataHookHandle { apalis_handle }
+    MetadataHookHandle {
+        apalis_handle,
+        clock,
+    }
 }
 
 impl MetadataHookHandle {
@@ -72,8 +77,10 @@ pub async fn run_metadata_refresh(
     access_token: &str,
     user_agent: &str,
     cancel: &CancellationToken,
+    clock: &dyn Clock,
 ) -> Result<(), MetadataRefreshError> {
-    let records = fetch_metadata_only(client, upstream_id, access_token, user_agent, cancel).await;
+    let records =
+        fetch_metadata_only(client, upstream_id, access_token, user_agent, cancel, clock).await;
     storage
         .put_upstream_subscription_metadata(&records.subscription_metadata_record)
         .await
@@ -95,8 +102,9 @@ pub async fn fetch_metadata_only(
     access_token: &str,
     user_agent: &str,
     cancel: &CancellationToken,
+    clock: &dyn Clock,
 ) -> MetadataRefreshRecords {
-    let observed_at_unix_millis = now_unix_millis();
+    let observed_at_unix_millis = now_unix_millis(clock);
     let mut errors = Vec::new();
 
     let profile = match fetch_oauth_profile(client, access_token, user_agent, cancel).await {
@@ -275,13 +283,8 @@ fn parse_unix_secs_from_iso(value: &Option<String>) -> Option<i64> {
     })
 }
 
-fn now_unix_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(i64::MAX)
+fn now_unix_millis(clock: &dyn Clock) -> i64 {
+    unix_millis(clock.now()).try_into().unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]

@@ -17,7 +17,10 @@ fn engine(enabled: bool) -> (Arc<LimitEngine>, Arc<PrincipalView>) {
     ));
 
     (
-        LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
+        LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_core::SystemClock),
+        ),
         view,
     )
 }

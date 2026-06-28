@@ -2,13 +2,14 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "postgres")]
 use apalis::prelude::TaskSink;
 use cc_lb_config::{Config, SchedulerConfig};
+use cc_lb_core::clock::{Clock, ClockHandle, unix_millis};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -42,6 +43,7 @@ pub struct SchedulerCtx {
     pub config: SchedulerConfig,
     pub adaptive_dispatch: AdaptiveDispatchFn,
     pub cron_dispatch: CronDispatchFn,
+    pub clock: ClockHandle,
 }
 
 impl SchedulerCtx {
@@ -49,21 +51,13 @@ impl SchedulerCtx {
         config: SchedulerConfig,
         adaptive_dispatch: AdaptiveDispatchFn,
         cron_dispatch: CronDispatchFn,
+        clock: ClockHandle,
     ) -> Self {
         Self {
             config,
             adaptive_dispatch,
             cron_dispatch,
-        }
-    }
-}
-
-impl Default for SchedulerCtx {
-    fn default() -> Self {
-        Self {
-            config: SchedulerConfig::default(),
-            adaptive_dispatch: Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-            cron_dispatch: Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+            clock,
         }
     }
 }
@@ -84,10 +78,11 @@ pub type SqliteApalisStorage = apalis_sqlite::SqliteStorage<
 >;
 
 #[cfg(feature = "sqlite")]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SqliteSchedulerStorage {
     pub pool: sqlx::SqlitePool,
     pub storage: SqliteApalisStorage,
+    pub clock: ClockHandle,
 }
 
 #[cfg(feature = "postgres")]
@@ -113,12 +108,13 @@ impl SchedulerBackend {
         leader: Arc<LeaderElection>,
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerError> {
-        let mut handles = self.spawn_consumers(ctx, cancel.clone())?;
+        let mut handles = self.spawn_consumers(ctx.clone(), cancel.clone())?;
         handles.push(cron::spawn_cron_producer(
             self.clone(),
             config,
             leader,
             cancel,
+            ctx.clock,
         ));
         Ok(handles)
     }
@@ -128,7 +124,8 @@ impl SchedulerBackend {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(sqlite) => {
                 let queue = sqlite.storage.config().queue().as_ref().to_owned();
-                crate::sqlite_enqueue::push_entity_job(&sqlite.pool, &queue, job).await?;
+                crate::sqlite_enqueue::push_entity_job(&sqlite.pool, &queue, job, &*sqlite.clock)
+                    .await?;
             }
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => postgres
@@ -147,13 +144,20 @@ impl SchedulerBackend {
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerError> {
         let backend = self.clone();
+        let worker_instance_id = make_worker_instance_id(&*ctx.clock);
         Ok(vec![
             tokio::spawn(run_adaptive_consumer_loop(
                 backend.clone(),
                 ctx.clone(),
                 cancel.clone(),
+                worker_instance_id.clone(),
             )),
-            tokio::spawn(run_singleton_consumer_loop(backend, ctx, cancel)),
+            tokio::spawn(run_singleton_consumer_loop(
+                backend,
+                ctx,
+                cancel,
+                worker_instance_id,
+            )),
         ])
     }
 }
@@ -162,29 +166,22 @@ const CONSUMER_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const CONSUMER_BACKOFF_CAP: Duration = Duration::from_secs(60);
 const CONSUMER_LONG_RUN_THRESHOLD: Duration = Duration::from_secs(30);
 
-static WORKER_INSTANCE_ID: LazyLock<String> = LazyLock::new(|| {
+pub fn make_worker_instance_id(clock: &dyn Clock) -> String {
     let pid = std::process::id();
-    let started_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    let started_ms = unix_millis(clock.now());
     format!("{pid}-{started_ms}")
-});
+}
 
 static WORKER_RUN_SEQ: AtomicU64 = AtomicU64::new(0);
 
-fn next_worker_name(queue: &str) -> String {
+fn next_worker_name(queue: &str, worker_instance_id: &str) -> String {
     let seq = WORKER_RUN_SEQ.fetch_add(1, Ordering::Relaxed);
-    format!("{queue}-{}-{seq}", &*WORKER_INSTANCE_ID)
+    format!("{queue}-{worker_instance_id}-{seq}")
 }
 
-fn jitter(d: Duration) -> Duration {
-    // Deterministic ~±20% jitter from wall clock nanos; rand is not a workspace dep.
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|t| t.as_nanos() as u64)
-        .unwrap_or(0);
-    let frac = (nanos % 400) as f64 / 1000.0;
+fn jitter(d: Duration, clock: &dyn Clock) -> Duration {
+    let millis = unix_millis(clock.now());
+    let frac = (millis % 400) as f64 / 1000.0;
     let factor = 0.8_f64 + frac;
     Duration::from_secs_f64(d.as_secs_f64() * factor)
 }
@@ -200,13 +197,14 @@ async fn run_adaptive_consumer_loop(
     backend: SchedulerBackend,
     ctx: SchedulerCtx,
     cancel: CancellationToken,
+    worker_instance_id: String,
 ) {
     let mut backoff = CONSUMER_BACKOFF_INITIAL;
     loop {
         if cancel.is_cancelled() {
             return;
         }
-        let worker_name = next_worker_name(ADAPTIVE_QUEUE);
+        let worker_name = next_worker_name(ADAPTIVE_QUEUE, &worker_instance_id);
         let worker = match layers::build_backend_adaptive_worker_named(
             &backend,
             ctx.clone(),
@@ -225,7 +223,7 @@ async fn run_adaptive_consumer_loop(
                     "reason" => "build_failed",
                 )
                 .increment(1);
-                if !sleep_or_cancel(jitter(backoff), &cancel).await {
+                if !sleep_or_cancel(jitter(backoff, &*ctx.clock), &cancel).await {
                     return;
                 }
                 backoff = (backoff * 2).min(CONSUMER_BACKOFF_CAP);
@@ -272,7 +270,7 @@ async fn run_adaptive_consumer_loop(
         } else {
             (backoff * 2).min(CONSUMER_BACKOFF_CAP)
         };
-        if !sleep_or_cancel(jitter(backoff), &cancel).await {
+        if !sleep_or_cancel(jitter(backoff, &*ctx.clock), &cancel).await {
             return;
         }
     }
@@ -282,13 +280,14 @@ async fn run_singleton_consumer_loop(
     backend: SchedulerBackend,
     ctx: SchedulerCtx,
     cancel: CancellationToken,
+    worker_instance_id: String,
 ) {
     let mut backoff = CONSUMER_BACKOFF_INITIAL;
     loop {
         if cancel.is_cancelled() {
             return;
         }
-        let worker_name = next_worker_name(CRON_QUEUE);
+        let worker_name = next_worker_name(CRON_QUEUE, &worker_instance_id);
         let worker =
             match layers::build_cron_worker_named(&backend, ctx.clone(), worker_name.clone()) {
                 Ok(worker) => worker,
@@ -304,7 +303,7 @@ async fn run_singleton_consumer_loop(
                         "reason" => "build_failed",
                     )
                     .increment(1);
-                    if !sleep_or_cancel(jitter(backoff), &cancel).await {
+                    if !sleep_or_cancel(jitter(backoff, &*ctx.clock), &cancel).await {
                         return;
                     }
                     backoff = (backoff * 2).min(CONSUMER_BACKOFF_CAP);
@@ -351,9 +350,19 @@ async fn run_singleton_consumer_loop(
         } else {
             (backoff * 2).min(CONSUMER_BACKOFF_CAP)
         };
-        if !sleep_or_cancel(jitter(backoff), &cancel).await {
+        if !sleep_or_cancel(jitter(backoff, &*ctx.clock), &cancel).await {
             return;
         }
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl std::fmt::Debug for SqliteSchedulerStorage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SqliteSchedulerStorage")
+            .field("pool", &self.pool)
+            .finish_non_exhaustive()
     }
 }
 

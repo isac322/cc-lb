@@ -47,7 +47,14 @@ fn build_candidates_populates_observations_from_dynamic_view_cache() {
         cache,
     );
 
-    let candidates = build_candidates(&view, "principal", RequestKind::AnthropicMessages, "", &[]);
+    let candidates = build_candidates(
+        &view,
+        "principal",
+        RequestKind::AnthropicMessages,
+        "",
+        &[],
+        &cc_lb_core::SystemClock,
+    );
 
     let candidate = candidates
         .iter()

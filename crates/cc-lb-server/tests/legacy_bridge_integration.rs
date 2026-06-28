@@ -84,7 +84,7 @@ async fn setup() -> (
         dir.path().join("legacy-bridge.sqlite").display()
     );
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&database_url)
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
             .await
             .expect("sqlite opens"),
     );
@@ -97,6 +97,7 @@ async fn setup() -> (
         blob_repo,
         build_offer(&BTreeSet::new()),
         lifecycle.clone(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .expect("plugin registry builds");
     let storage_dyn: Arc<dyn PluginRegistryStore> = storage;

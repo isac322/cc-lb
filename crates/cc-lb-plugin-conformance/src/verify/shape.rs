@@ -12,18 +12,22 @@ use crate::{VerifyError, VerifyReport};
 
 use super::{begin_report, dispatch_ok, push_dispatch_ok, require_function};
 
-pub fn verify_shape_plugin(wasm: &[u8]) -> Result<VerifyReport, VerifyError> {
-    verify_shape_plugin_with_caps(wasm, &BTreeSet::new())
+pub fn verify_shape_plugin(
+    wasm: &[u8],
+    clock: &dyn cc_lb_clock::Clock,
+) -> Result<VerifyReport, VerifyError> {
+    verify_shape_plugin_with_caps(wasm, &BTreeSet::new(), clock)
 }
 
 pub fn verify_shape_plugin_with_caps(
     wasm: &[u8],
     host_capabilities: &BTreeSet<String>,
+    clock: &dyn cc_lb_clock::Clock,
 ) -> Result<VerifyReport, VerifyError> {
     let handshake = handshake::run_with_caps(wasm, host_capabilities)?;
     require_function::<ShapeFn>(&handshake)?;
 
-    let mut report = begin_report(wasm, handshake, ShapeFn::NAME)?;
+    let mut report = begin_report(wasm, handshake, ShapeFn::NAME, clock)?;
     let mut session = PluginSession::new_with_caps(wasm, host_capabilities)?;
 
     run_shape_case(&mut report, &mut session, "basic", "e30=")?;

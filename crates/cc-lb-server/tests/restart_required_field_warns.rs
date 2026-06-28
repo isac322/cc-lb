@@ -16,7 +16,11 @@ fn restart_required_field_warns() {
     let watcher = ConfigWatcher::new(
         &config_path,
         reload_common::load_config(&config_path),
-        Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
+        Arc::new(cc_lb_runtime_extism::ExtismRuntime::with_config(
+            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+            Arc::new(cc_lb_core::SystemClock),
+        )),
+        Arc::new(cc_lb_core::SystemClock),
     );
     reload_common::write_config(&config_path, 100, proxy_b);
 
@@ -53,7 +57,11 @@ fn reload_does_not_warn_per_principal_path_change() {
     let watcher = ConfigWatcher::new(
         &config_path,
         reload_common::load_config(&config_path),
-        Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
+        Arc::new(cc_lb_runtime_extism::ExtismRuntime::with_config(
+            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+            Arc::new(cc_lb_core::SystemClock),
+        )),
+        Arc::new(cc_lb_core::SystemClock),
     );
     reload_common::write_config_with_principal_plugins(
         &config_path,

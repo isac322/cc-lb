@@ -55,7 +55,7 @@ async fn storage_fixture() -> (tempfile::TempDir, Arc<Storage>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!("sqlite://{}", dir.path().join("test.sqlite").display());
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&database_url)
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
             .await
             .expect("storage"),
     );
@@ -150,6 +150,7 @@ async fn initial_holder(
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
+        Arc::new(cc_lb_core::SystemClock),
     )
     .await
     .expect("initial dynamic view");
@@ -175,6 +176,7 @@ fn reconciler(
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         Arc::new(cc_lb_config::Config::default()),
+        Arc::new(cc_lb_core::SystemClock),
     ))
 }
 
@@ -196,7 +198,10 @@ async fn unchanged_tick_emits_unchanged_metric_and_does_not_rebuild() {
     create_principal(&storage, "principal-a").await;
     create_upstream(&storage, "upstream-a").await;
     let stores = stores(storage);
-    let runtime = Arc::new(ExtismRuntime::new());
+    let runtime = Arc::new(ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
+    ));
     let holder = initial_holder(&stores, &runtime, dir.path()).await;
     let generation = holder.load().generation;
     let before = labeled_counter_value(&metrics, "cclb_reconcile_total", "outcome", "unchanged");
@@ -216,7 +221,10 @@ async fn notify_dropped_then_reconcile_catches_up_within_one_tick() {
     create_principal(&storage, "principal-a").await;
     create_upstream(&storage, "upstream-a").await;
     let stores = stores(storage.clone());
-    let runtime = Arc::new(ExtismRuntime::new());
+    let runtime = Arc::new(ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
+    ));
     let holder = initial_holder(&stores, &runtime, dir.path()).await;
     let generation = holder.load().generation;
     let before = labeled_counter_value(&metrics, "cclb_reconcile_total", "outcome", "changed");
@@ -236,7 +244,10 @@ async fn reconciler_rebuilds_after_registry_entry_insert() {
     create_principal(&storage, "principal-registry-insert").await;
     create_upstream(&storage, "upstream-registry-insert").await;
     let stores = stores(storage.clone());
-    let runtime = Arc::new(ExtismRuntime::new());
+    let runtime = Arc::new(ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
+    ));
     let holder = initial_holder(&stores, &runtime, dir.path()).await;
     let generation = holder.load().generation;
 
@@ -255,7 +266,10 @@ async fn reconciler_rebuilds_after_registry_entry_delete() {
     create_upstream(&storage, "upstream-registry-delete").await;
     let entry = seed_registry(&storage, 32, "plugin-registry-delete").await;
     let stores = stores(storage.clone());
-    let runtime = Arc::new(ExtismRuntime::new());
+    let runtime = Arc::new(ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
+    ));
     let holder = initial_holder(&stores, &runtime, dir.path()).await;
     let generation = holder.load().generation;
 
@@ -278,7 +292,10 @@ async fn reconciler_rebuilds_after_registry_entry_update() {
     create_upstream(&storage, "upstream-registry-update").await;
     let entry = seed_registry(&storage, 33, "plugin-registry-update").await;
     let stores = stores(storage.clone());
-    let runtime = Arc::new(ExtismRuntime::new());
+    let runtime = Arc::new(ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
+    ));
     let holder = initial_holder(&stores, &runtime, dir.path()).await;
     let generation = holder.load().generation;
 
@@ -308,7 +325,10 @@ async fn cancel_during_tick_is_graceful() {
         plugin_registry_repo: None,
     });
     let (_dir, storage) = storage_fixture().await;
-    let runtime = Arc::new(ExtismRuntime::new());
+    let runtime = Arc::new(ExtismRuntime::with_config(
+        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
+        Arc::new(cc_lb_core::SystemClock),
+    ));
     let real_stores = stores(storage);
     let data_dir = tempfile::tempdir().expect("tempdir");
     let holder = initial_holder(&real_stores, &runtime, data_dir.path()).await;

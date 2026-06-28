@@ -1,3 +1,4 @@
+use cc_lb_core::TestClock;
 use cc_lb_plugin_wire::self_check::SelfCheckStatus;
 use cc_lb_runtime_extism::self_check::execute_self_check;
 use cc_lb_storage_api::PluginSlot;
@@ -17,7 +18,9 @@ fn router_supported_slot_passes_only_filter_to_self_check() {
         ],
     );
 
-    let response = execute_self_check(&wasm, &[PluginSlot::Router])
+    let clock = TestClock::new_at_secs(1_800_000_000);
+
+    let response = execute_self_check(&wasm, &[PluginSlot::Router], &clock)
         .expect("router self-check receives only filter");
 
     assert_eq!(response.status, SelfCheckStatus::Success);
@@ -37,7 +40,9 @@ fn router_and_shape_supported_slots_pass_filter_and_shape_to_self_check() {
         ],
     );
 
-    let response = execute_self_check(&wasm, &[PluginSlot::Router, PluginSlot::Shape])
+    let clock = TestClock::new_at_secs(1_800_000_000);
+
+    let response = execute_self_check(&wasm, &[PluginSlot::Router, PluginSlot::Shape], &clock)
         .expect("router plus shape self-check receives filter and shape");
 
     assert_eq!(response.status, SelfCheckStatus::Success);
@@ -48,10 +53,14 @@ fn router_and_shape_supported_slots_pass_filter_and_shape_to_self_check() {
 fn empty_supported_slots_skip_self_check_invocation() {
     let wasm = trapping_self_check_module();
 
-    let response = execute_self_check(&wasm, &[]).expect("empty slots skip self-check invocation");
+    let clock = TestClock::new_at_secs(1_800_000_000);
+
+    let response =
+        execute_self_check(&wasm, &[], &clock).expect("empty slots skip self-check invocation");
 
     assert_eq!(response.status, SelfCheckStatus::Success);
     assert!(response.failures.is_empty());
+    assert_eq!(response.completed_at, 1_800_000_000);
 }
 
 fn request_asserting_self_check_module(required: &[&str], forbidden: &[&str]) -> Vec<u8> {

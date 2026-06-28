@@ -3,7 +3,7 @@
 use std::{future::Future, sync::Arc};
 
 use async_trait::async_trait;
-use cc_lb_core::{ClockHandle, TestClock};
+use cc_lb_core::{ClockHandle, SystemClock, TestClock};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
@@ -41,7 +41,7 @@ impl ConformanceBackend for SqliteConformanceBackend {
     }
 
     async fn open(&self, fixture: &Self::Fixture) -> anyhow::Result<Self::Storage> {
-        let storage = open_sqlite(&fixture.database_url).await?;
+        let storage = open_sqlite(&fixture.database_url, system_clock()).await?;
         storage.initialize(BackendKind::Sqlite).await?;
         Ok(storage)
     }
@@ -235,7 +235,9 @@ upstream_subscription_quota_sqlite_test!(
 
 #[test]
 fn warmup_attempts_store_sqlite() {
-    run_sqlite_scenario("warmup_attempts_store", warmup_attempts_store::run_all);
+    run_sqlite_scenario("warmup_attempts_store", |backend| async move {
+        warmup_attempts_store::run_all(backend, warmup_attempts_clock()).await
+    });
 }
 
 macro_rules! prompt_cache_observation_sqlite_test {
@@ -393,4 +395,12 @@ where
 
 fn prompt_cache_clock() -> ClockHandle {
     Arc::new(TestClock::new_at_secs(1_700_000_000))
+}
+
+fn warmup_attempts_clock() -> ClockHandle {
+    Arc::new(TestClock::new_at_secs(1_800_604_800))
+}
+
+fn system_clock() -> ClockHandle {
+    Arc::new(SystemClock)
 }

@@ -1,8 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use apalis_core::backend::codec::Codec as _;
 use apalis_core::backend::{Backend, TaskSink, TaskSinkError};
 use apalis_core::task::Task;
+use cc_lb_core::clock::{Clock, ClockHandle, unix_secs};
 use futures_util::stream::{self, BoxStream};
 use futures_util::{Stream, StreamExt as _};
 use sqlx::SqlitePool;
@@ -13,15 +12,16 @@ use crate::worker::{AdaptiveJob, CronJob};
 const DEFAULT_MAX_ATTEMPTS: i32 = 5;
 const DEFAULT_PRIORITY: i32 = 0;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct SqliteSingletonCronStorage {
     pool: SqlitePool,
     queue: &'static str,
+    clock: ClockHandle,
 }
 
 impl SqliteSingletonCronStorage {
-    pub(crate) const fn new(pool: SqlitePool, queue: &'static str) -> Self {
-        Self { pool, queue }
+    pub(crate) fn new(pool: SqlitePool, queue: &'static str, clock: ClockHandle) -> Self {
+        Self { pool, queue, clock }
     }
 }
 
@@ -57,7 +57,7 @@ impl TaskSink<CronJob> for SqliteSingletonCronStorage {
             payload,
             ulid::Ulid::new().to_string(),
             DEFAULT_MAX_ATTEMPTS,
-            now_unix_secs_sqlx()?,
+            now_unix_secs_sqlx(&*self.clock)?,
             DEFAULT_PRIORITY,
             "{}".to_owned(),
             singleton_idempotency_key(&job),
@@ -136,10 +136,11 @@ pub(crate) async fn push_entity_job(
     pool: &SqlitePool,
     queue: &str,
     job: AdaptiveJob,
+    clock: &dyn Clock,
 ) -> Result<()> {
     let payload = apalis_codec::json::JsonCodec::<Vec<u8>>::encode(&job)
         .map_err(|error| SchedulerError::Job(format!("encode entity job: {error}")))?;
-    let run_at = now_unix_secs()?;
+    let run_at = now_unix_secs(clock)?;
     let idempotency_key = entity_idempotency_key(&job, run_at)?;
     sqlx::query(
         "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, last_result, lock_at, lock_by, done_at, priority, metadata, idempotency_key) \
@@ -210,15 +211,12 @@ fn entity_idempotency_key(job: &AdaptiveJob, run_at_unix_secs: i64) -> Result<St
     }
 }
 
-fn now_unix_secs() -> Result<i64> {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| SchedulerError::Job(format!("system clock before unix epoch: {error}")))?
-        .as_secs();
+fn now_unix_secs(clock: &dyn Clock) -> Result<i64> {
+    let seconds = unix_secs(clock.now());
     i64::try_from(seconds)
         .map_err(|_| SchedulerError::Job("current time exceeds i64::MAX".to_owned()))
 }
 
-fn now_unix_secs_sqlx() -> std::result::Result<i64, sqlx::Error> {
-    now_unix_secs().map_err(|error| sqlx::Error::Protocol(error.to_string()))
+fn now_unix_secs_sqlx(clock: &dyn Clock) -> std::result::Result<i64, sqlx::Error> {
+    now_unix_secs(clock).map_err(|error| sqlx::Error::Protocol(error.to_string()))
 }

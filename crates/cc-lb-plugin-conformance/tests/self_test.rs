@@ -34,8 +34,13 @@ fn handshake_negotiates_shape_at_v1() {
 
 #[test]
 fn self_check_passes_for_shape_fixture() {
-    let report =
-        self_check::run(SHAPE_WASM, &[cc_lb_plugin_api::types::PluginSlot::Shape]).unwrap();
+    let clock = cc_lb_clock::SystemClock;
+    let report = self_check::run(
+        SHAPE_WASM,
+        &[cc_lb_plugin_api::types::PluginSlot::Shape],
+        &clock,
+    )
+    .unwrap();
 
     assert_eq!(report.status, self_check::SelfCheckStatus::Success);
     assert!(report.failures.is_empty());
@@ -44,7 +49,8 @@ fn self_check_passes_for_shape_fixture() {
 #[cfg(feature = "dispatch")]
 #[test]
 fn verify_shape_plugin_succeeds() {
-    let report = verify_shape_plugin(SHAPE_WASM).unwrap();
+    let clock = cc_lb_clock::SystemClock;
+    let report = verify_shape_plugin(SHAPE_WASM, &clock).unwrap();
 
     assert!(
         report.identity.passed
@@ -57,7 +63,8 @@ fn verify_shape_plugin_succeeds() {
 #[cfg(feature = "dispatch")]
 #[test]
 fn verify_router_plugin_succeeds() {
-    let report = verify_router_plugin(ROUTER_WASM).unwrap();
+    let clock = cc_lb_clock::SystemClock;
+    let report = verify_router_plugin(ROUTER_WASM, &clock).unwrap();
 
     assert!(
         report.identity.passed
@@ -70,8 +77,10 @@ fn verify_router_plugin_succeeds() {
 #[cfg(feature = "dispatch")]
 #[test]
 fn verify_observability_plugin_succeeds() {
+    let clock = cc_lb_clock::SystemClock;
     let capabilities = observability_capabilities();
-    let report = verify_observability_plugin_with_caps(OBSERVE_WASM, &capabilities).unwrap();
+    let report =
+        verify_observability_plugin_with_caps(OBSERVE_WASM, &capabilities, &clock).unwrap();
 
     assert!(
         report.identity.passed
@@ -99,10 +108,11 @@ fn shape_dispatch_round_trip_basic() {
 #[cfg(feature = "dispatch")]
 #[test]
 fn verify_shape_plugin_rejects_malformed_custom_section() {
+    let clock = cc_lb_clock::SystemClock;
     let wasm = shape_wasm_with_malformed_custom_section();
 
-    let error =
-        verify_shape_plugin(&wasm).expect_err("malformed identity custom section is rejected");
+    let error = verify_shape_plugin(&wasm, &clock)
+        .expect_err("malformed identity custom section is rejected");
 
     assert_malformed_custom_section_error(error);
 }
@@ -110,7 +120,9 @@ fn verify_shape_plugin_rejects_malformed_custom_section() {
 #[cfg(feature = "dispatch")]
 #[test]
 fn verify_router_plugin_rejects_wrong_kind_wasm() {
-    let error = verify_router_plugin(SHAPE_WASM).expect_err("shape wasm is not a router plugin");
+    let clock = cc_lb_clock::SystemClock;
+    let error =
+        verify_router_plugin(SHAPE_WASM, &clock).expect_err("shape wasm is not a router plugin");
 
     assert!(matches!(
         error,
@@ -121,7 +133,8 @@ fn verify_router_plugin_rejects_wrong_kind_wasm() {
 #[cfg(feature = "dispatch")]
 #[test]
 fn verify_observability_plugin_capability_gate() {
-    let error = verify_observability_plugin(OBSERVE_WASM)
+    let clock = cc_lb_clock::SystemClock;
+    let error = verify_observability_plugin(OBSERVE_WASM, &clock)
         .expect_err("observability fixture requires observability:emit");
     assert!(
         matches!(
@@ -133,7 +146,8 @@ fn verify_observability_plugin_capability_gate() {
     );
 
     let capabilities = observability_capabilities();
-    let report = verify_observability_plugin_with_caps(OBSERVE_WASM, &capabilities).unwrap();
+    let report =
+        verify_observability_plugin_with_caps(OBSERVE_WASM, &capabilities, &clock).unwrap();
     assert!(
         report.identity.passed
             && report.handshake.passed

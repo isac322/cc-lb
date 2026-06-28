@@ -120,6 +120,7 @@ fn version_requested() -> bool {
 fn run() -> Result<(), RunError> {
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).map_err(RunError::Cli)?;
+    let clock: cc_lb_core::ClockHandle = std::sync::Arc::new(cc_lb_core::SystemClock);
 
     match cli.command {
         Some(Command::Serve {
@@ -140,12 +141,13 @@ fn run() -> Result<(), RunError> {
                     strict_preflight,
                     skip_handshake_if_fresh,
                     force_handshake,
+                    clock.clone(),
                 ))
                 .map_err(RunError::Serve)
         }
         Some(Command::Config {
             command: ConfigCommand::Validate { config, .. },
-        }) => validate::run(&config).map_err(RunError::Validation),
+        }) => validate::run(&config, clock.clone()).map_err(RunError::Validation),
         Some(Command::Doctor {
             command: DoctorCommand::ListAbandonedChainEntries,
         }) => {
@@ -154,7 +156,7 @@ fn run() -> Result<(), RunError> {
                 .build()
                 .map_err(RunError::Runtime)?;
             runtime
-                .block_on(run_list_abandoned_chain_entries())
+                .block_on(run_list_abandoned_chain_entries(clock))
                 .map_err(RunError::Doctor)
         }
         None => {
@@ -166,7 +168,9 @@ fn run() -> Result<(), RunError> {
     }
 }
 
-async fn run_list_abandoned_chain_entries() -> Result<(), DoctorError> {
+async fn run_list_abandoned_chain_entries(
+    clock: cc_lb_core::ClockHandle,
+) -> Result<(), DoctorError> {
     let path = doctor_storage_path();
     if !path.exists() {
         return Err(DoctorError::StorageNotFound {
@@ -175,7 +179,7 @@ async fn run_list_abandoned_chain_entries() -> Result<(), DoctorError> {
     }
 
     let database_url = format!("sqlite://{}", path.display());
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, clock)
         .await
         .map_err(DoctorError::StorageOpen)?;
     storage

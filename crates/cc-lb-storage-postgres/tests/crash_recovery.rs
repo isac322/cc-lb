@@ -141,7 +141,8 @@ impl CrashFixture {
 
         let app_name = format!("cc_lb_crash_{scenario}_{}", Uuid::new_v4().simple());
         let pool = schema_pool(url, schema, &app_name, 1).await?;
-        let storage = PostgresStorage::new(pool.clone());
+        let storage =
+            PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_core::SystemClock));
         storage.initialize(BackendKind::Postgres).await?;
         install_checkpoint_sleep_trigger(&pool, checkpoint_sleep_secs).await?;
         seed_request_events(&storage).await?;
@@ -158,7 +159,8 @@ impl CrashFixture {
 
     async fn reconnect(&self) -> Result<Self, Box<dyn std::error::Error>> {
         let pool = schema_pool(&self.url, &self.schema, &self.app_name, 1).await?;
-        let storage = PostgresStorage::new(pool.clone());
+        let storage =
+            PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_core::SystemClock));
         Ok(Self {
             url: self.url.clone(),
             schema: self.schema.clone(),

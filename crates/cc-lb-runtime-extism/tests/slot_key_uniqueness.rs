@@ -3,7 +3,6 @@ mod common;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use cc_lb_runtime_extism::ExtismRuntime;
 use proptest::prelude::*;
 
 fn identifier() -> impl Strategy<Value = String> {
@@ -22,7 +21,7 @@ proptest! {
         pairs in proptest::collection::vec((identifier(), identifier()), 1..=256),
     ) {
         let fixture = common::fixture("filter", filter_module(), common::metadata(&[]));
-        let runtime = ExtismRuntime::new();
+        let runtime = common::runtime();
         let unique_pairs = pairs.iter().cloned().collect::<HashSet<_>>();
         let mut staged = Vec::with_capacity(pairs.len());
 
@@ -47,7 +46,7 @@ proptest! {
 #[test]
 fn staged_filter_handles_are_distinct_for_different_principals_with_same_plugin_name() {
     let fixture = common::fixture("filter", filter_module(), common::metadata(&[]));
-    let runtime = ExtismRuntime::new();
+    let runtime = common::runtime();
 
     let (alice_handle, alice_slot) = runtime
         .instantiate_filter_for("alice", uuid::Uuid::new_v4(), "shared", &fixture.manifest)

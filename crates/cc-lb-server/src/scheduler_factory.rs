@@ -122,10 +122,11 @@ pub enum SchedulerFactoryError {
 pub async fn open_scheduler_storage(
     storage: &StorageConfig,
     scheduler: &SchedulerConfig,
+    clock: cc_lb_core::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
     let opened = match storage {
-        StorageConfig::Sqlite { path } => open_sqlite(path, scheduler).await,
-        StorageConfig::Postgres { url, pool: _ } => open_postgres(url, scheduler).await,
+        StorageConfig::Sqlite { path } => open_sqlite(path, scheduler, clock).await,
+        StorageConfig::Postgres { url, pool: _ } => open_postgres(url, scheduler, clock).await,
     };
     cc_lb_scheduler::scheduler_metrics::set_scheduler_init_failure(opened.is_err());
     opened
@@ -135,6 +136,7 @@ pub async fn open_scheduler_storage(
 async fn open_sqlite(
     _path: &std::path::Path,
     _scheduler: &SchedulerConfig,
+    _clock: cc_lb_core::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
     Err(SchedulerFactoryError::FeatureDisabled {
         backend: "sqlite".to_owned(),
@@ -145,6 +147,7 @@ async fn open_sqlite(
 async fn open_sqlite(
     path: &std::path::Path,
     scheduler: &SchedulerConfig,
+    clock: cc_lb_core::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
     use std::str::FromStr as _;
     use std::time::Duration;
@@ -191,7 +194,11 @@ async fn open_sqlite(
     let storage =
         apalis_sqlite::SqliteStorage::new_in_queue(&pool, cc_lb_scheduler::worker::ADAPTIVE_QUEUE);
     Ok(OpenedScheduler {
-        backend: SchedulerBackend::Sqlite(SqliteSchedulerStorage { pool, storage }),
+        backend: SchedulerBackend::Sqlite(SqliteSchedulerStorage {
+            pool,
+            storage,
+            clock,
+        }),
         leader_connection: None,
     })
 }
@@ -205,6 +212,7 @@ fn scheduler_sqlite_path(path: &std::path::Path) -> std::path::PathBuf {
 async fn open_postgres(
     _url: &str,
     _scheduler: &SchedulerConfig,
+    _clock: cc_lb_core::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
     Err(SchedulerFactoryError::FeatureDisabled {
         backend: "postgres".to_owned(),
@@ -215,6 +223,7 @@ async fn open_postgres(
 async fn open_postgres(
     url: &str,
     scheduler: &SchedulerConfig,
+    _clock: cc_lb_core::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
     use std::str::FromStr as _;
     use std::time::Duration;
