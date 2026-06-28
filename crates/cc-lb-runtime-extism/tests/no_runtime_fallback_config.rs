@@ -28,7 +28,7 @@ fn extism_runtime_config_has_no_fallback_policy_field() {
         observe_flush_interval,
     } = ExtismRuntimeConfig::default();
 
-    assert!(memory_max_pages > 0);
+    assert_eq!(memory_max_pages, 128);
     assert!(fuel_max > 0);
     assert!(max_call_duration > Duration::ZERO);
     assert!(storage_quota_bytes > 0);
