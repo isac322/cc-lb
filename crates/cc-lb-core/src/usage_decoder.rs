@@ -38,7 +38,7 @@ pub enum UsageDecoder {
     /// honour that. Servers that send raw DEFLATE under this name are out of
     /// spec and not handled.
     Deflate(flate2::write::ZlibDecoder<Vec<u8>>),
-    Brotli(brotli::DecompressorWriter<Vec<u8>>),
+    Brotli(Box<brotli::DecompressorWriter<Vec<u8>>>),
     /// Boxed because [`zstd::stream::write::Decoder`] has a non-trivial size
     /// and the rest of the enum is small.
     Zstd(Box<zstd::stream::write::Decoder<'static, Vec<u8>>>),
@@ -74,7 +74,7 @@ impl UsageDecoder {
             "" | "identity" => Self::Identity,
             "gzip" | "x-gzip" => Self::Gzip(flate2::write::GzDecoder::new(Vec::new())),
             "deflate" => Self::Deflate(flate2::write::ZlibDecoder::new(Vec::new())),
-            "br" => Self::Brotli(brotli::DecompressorWriter::new(Vec::new(), 4096)),
+            "br" => Self::Brotli(Box::new(brotli::DecompressorWriter::new(Vec::new(), 4096))),
             "zstd" => match zstd::stream::write::Decoder::new(Vec::new()) {
                 Ok(decoder) => Self::Zstd(Box::new(decoder)),
                 Err(_) => Self::Unsupported(normalized),
@@ -112,7 +112,7 @@ impl UsageDecoder {
             Self::Identity => return Ok(input.to_vec()),
             Self::Gzip(inner) => write_and_drain(inner, input, |w| w.get_mut()),
             Self::Deflate(inner) => write_and_drain(inner, input, |w| w.get_mut()),
-            Self::Brotli(inner) => write_and_drain(inner, input, |w| w.get_mut()),
+            Self::Brotli(inner) => write_and_drain(inner.as_mut(), input, |w| w.get_mut()),
             Self::Zstd(inner) => write_and_drain(inner.as_mut(), input, |w| w.get_mut()),
             Self::Unsupported(_) | Self::Poisoned => return Ok(Vec::new()),
         };
@@ -134,7 +134,7 @@ impl UsageDecoder {
             Self::Gzip(inner) => inner.finish(),
             Self::Deflate(inner) => inner.finish(),
             Self::Brotli(inner) => {
-                let mut buf = inner.into_inner().map_err(|_| {
+                let mut buf = (*inner).into_inner().map_err(|_| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "brotli decoder failed to finalise",
