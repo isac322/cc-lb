@@ -1397,10 +1397,7 @@ mod tests {
             .await
             .unwrap();
         let record = store.get_by_name("primary").await.unwrap().unwrap();
-        store
-            .soft_delete(record.id, record.revision)
-            .await
-            .unwrap();
+        store.soft_delete(record.id, record.revision).await.unwrap();
         let factory =
             AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary", clock)
                 .allow_disabled_upstream(true);
