@@ -360,22 +360,27 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
   let statusLabel = 'Paused';
 
   if (upstream.warmup_enabled) {
+    const last = summary?.last_attempt;
+    const skippedBecauseAlreadyActive =
+      last?.outcome === 'skipped' && last?.reason === 'window_already_active';
+
     if (incident) {
       statusTone = 'danger';
       statusLabel = 'Down';
     } else if (
-      summary?.last_attempt?.outcome === 'transient_failure' ||
-      summary?.last_attempt?.outcome === 'permanent_failure' ||
-      summary?.last_attempt?.outcome === 'skipped'
-    ) {
-      statusTone = 'warn';
-      statusLabel = 'Degraded';
-    } else if (
-      summary?.last_attempt?.outcome === 'success_fresh' ||
-      summary?.last_attempt?.outcome === 'success_redundant'
+      last?.outcome === 'success_fresh' ||
+      last?.outcome === 'success_redundant' ||
+      skippedBecauseAlreadyActive
     ) {
       statusTone = 'ok';
       statusLabel = 'Healthy';
+    } else if (
+      last?.outcome === 'transient_failure' ||
+      last?.outcome === 'permanent_failure' ||
+      last?.outcome === 'skipped'
+    ) {
+      statusTone = 'warn';
+      statusLabel = 'Degraded';
     } else {
       statusTone = 'neutral';
       statusLabel = 'Pending';
