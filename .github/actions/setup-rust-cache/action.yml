@@ -1,5 +1,5 @@
 name: Setup Rust cache
-description: Enable sccache (S3/garage backend) and restore Cargo registry caches.
+description: Restore Cargo caches and enable persisted sccache compiler artifacts.
 
 inputs:
   rust-cache-key:
@@ -7,7 +7,7 @@ inputs:
     required: false
     default: ""
   cache-targets:
-    description: Whether Swatinem/rust-cache should restore/save target directories. On — restoring target/ lets cargo skip unchanged crates entirely (much faster than sccache alone); sccache still accelerates changed crates across jobs.
+    description: Whether Swatinem/rust-cache should restore/save target directories.
     required: false
     default: "true"
   stable-build-metadata:
@@ -18,21 +18,29 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install sccache
+    - name: Run sccache-cache
       id: sccache-setup
       uses: mozilla-actions/sccache-action@v0.0.10
       continue-on-error: true
 
-    # The sccache storage backend (SCCACHE_BUCKET/SCCACHE_ENDPOINT/AWS_* = garage S3) is
-    # inherited from the runner env; here we only enable the wrapper and set deterministic
-    # build metadata.
-    - name: Enable sccache compiler cache
+    - name: Restore sccache directory
+      if: steps.sccache-setup.outcome == 'success'
+      uses: actions/cache@v5
+      with:
+        path: .sccache
+        key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-
+
+    - name: Export Rust compiler cache env
       if: steps.sccache-setup.outcome == 'success'
       shell: bash
       run: |
         echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
-        # EXPERIMENT: sccache off — isolate whether S3 fetch is overhead when target restore already covers deps
-        # echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_DIR=$GITHUB_WORKSPACE/.sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
+        echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
         if [ "${{ inputs.stable-build-metadata }}" = "true" ]; then
           echo "GIT_SHA=0000000" >> "$GITHUB_ENV"
           echo "SOURCE_DATE_EPOCH=0" >> "$GITHUB_ENV"
@@ -50,8 +58,6 @@ runs:
         EOF
         echo "EXTISM_CACHE_CONFIG=$GITHUB_WORKSPACE/.extism-cache.toml" >> "$GITHUB_ENV"
 
-    # Swatinem restores target/ (cargo skips unchanged crates) + cargo registry/git;
-    # sccache (RUSTC_WRAPPER) additionally caches compilation of changed crates across jobs.
     - uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
