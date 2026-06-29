@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="EMPTY_MODULE" version="4">
+  <component name="NewModuleRootManager">
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/benches/extism_sse_overhead/benches" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/benches/extism_sse_overhead/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/aws-eventstream-codec/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-admin/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-admin/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-config/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-config/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-core/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-core/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-dialect-anthropic/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-dialect-anthropic/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-dialect-bedrock/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-dialect-bedrock/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-dialect-vertex/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-dialect-vertex/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-observability/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-observability/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-plugin-api/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-plugin-api/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-pricing/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-runtime-extism/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-runtime-extism/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-server/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-server/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-signer-anthropic-key/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-signer-anthropic-key/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-signer-anthropic-oauth/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-signer-anthropic-oauth/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-signer-aws/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-signer-aws/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-signer-gcp/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-signer-gcp/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-storage-redb/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-storage-redb/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-storage-redb/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/examples/plugin-api-key/extism-pdk-macros/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/examples/plugin-api-key/extism-pdk/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/examples/plugin-api-key/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/examples/plugin-api-key/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/examples/plugin-internal-key-mapping/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/examples/plugin-internal-key-mapping/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/examples/plugin-oauth-anthropic-pro/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/examples/plugin-oauth-anthropic-pro/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/crash-recovery/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/crash-recovery/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/fixtures/fake-anthropic/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/fixtures/fake-anthropic/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/fixtures/fake-bedrock-mantle/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/fixtures/fake-bedrock-mantle/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/fixtures/fake-bedrock-runtime/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/fixtures/fake-bedrock-runtime/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/fixtures/fake-vertex/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/fixtures/fake-vertex/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/fixtures/mock-anthropic-oauth-server/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/load/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/load/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/loom/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/loom/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/plugin-lifecycle/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/property/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/property/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/tls/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-aead/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-server/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-storage-api/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-storage-api/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-storage-conformance/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-storage-postgres/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-storage-postgres/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-pricing/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-storage-conformance/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-pdk/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-plugin-conformance/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-plugin-conformance/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-plugin-wire/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-plugin-wire/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-runtime-protocol/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-scheduler/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-scheduler/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-storage-sqlite/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/plugins/router/cache-aware/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/plugins/router/cache-aware/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/fixtures/extism-echo-plugin/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/fixtures/plugin-handshake-spike/host_check/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/fixtures/plugin-handshake-spike/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/multi-replica/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/real-client/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cc-lb-clock/src" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/target" />
+      <excludeFolder url="file://$MODULE_DIR$/tests/fixtures/plugin-handshake-spike/target" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>

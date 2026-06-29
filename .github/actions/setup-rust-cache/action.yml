@@ -63,3 +63,6 @@ runs:
         cache-on-failure: true
         cache-targets: ${{ inputs.cache-targets }}
         key: ${{ inputs.rust-cache-key }}
+
+# master-style cache: local sccache (.sccache via actions/cache) + Swatinem target.
+# RUSTUP_HOME is shared via runner env (toolchain reuse).
