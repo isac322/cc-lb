@@ -43,8 +43,8 @@ cc-lb-clock       = { path = "crates/cc-lb-clock", version = "=0.1.0" }
 cc-lb-pdk         = { path = "crates/cc-lb-pdk",         version = "=0.1.1" }
 cc-lb-plugin-wire = { path = "crates/cc-lb-plugin-wire", version = "=0.1.1" }
 cc-lb-plugin-api  = { path = "crates/cc-lb-plugin-api", version = "=0.2.1" }
-cc-lb-runtime-protocol  = { path = "crates/cc-lb-runtime-protocol", version = "=0.2.2" }
-cc-lb-plugin-conformance = { path = "crates/cc-lb-plugin-conformance", version = "=0.1.3" }
+cc-lb-runtime-protocol  = { path = "crates/cc-lb-runtime-protocol", version = "=0.3.0" }
+cc-lb-plugin-conformance = { path = "crates/cc-lb-plugin-conformance", version = "=0.1.4" }
 
 anyhow = "1"
 arc-swap = "1"
