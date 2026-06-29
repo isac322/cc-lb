@@ -33,12 +33,7 @@ fn keeps_api_key_when_subscription_quota_is_exhausted() {
     let oauth = oauth_with(
         "oauth",
         1,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(1.0)
-                .status("rejected")
-                .build(),
-        ],
+        vec![fresh(WINDOW_FIVE_HOUR).util(1.0).status("rejected").build()],
     );
     let api_key = api_key("api-key", 2);
     let output = filter_for_model(&[oauth, api_key.clone()], MODEL_AGNOSTIC);
@@ -53,10 +48,7 @@ fn keeps_api_key_when_one_window_is_exhausted_and_others_missing() {
         "oauth",
         1,
         vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(1.0)
-                .status("rejected")
-                .build(),
+            fresh(WINDOW_FIVE_HOUR).util(1.0).status("rejected").build(),
             missing(WINDOW_SEVEN_DAY).build(),
             missing(WINDOW_OVERAGE).build(),
         ],
@@ -121,10 +113,7 @@ fn keeps_api_key_when_seven_day_window_is_fresh_exhausted_even_if_five_hour_is_a
         1,
         vec![
             fresh(WINDOW_FIVE_HOUR).util(0.3).status("allowed").build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(1.0)
-                .status("rejected")
-                .build(),
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
         ],
     );
     let api_key = api_key("api-key", 2);
@@ -263,10 +252,7 @@ fn keeps_api_key_when_shared_seven_day_is_exhausted_for_opus_request() {
         1,
         vec![
             fresh(WINDOW_FIVE_HOUR).util(0.3).build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(1.0)
-                .status("rejected")
-                .build(),
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
             fresh(WINDOW_SEVEN_DAY_OPUS).util(0.1).build(),
         ],
     );
@@ -325,12 +311,7 @@ fn five_hour_and_shared_seven_day_exhaustion_gates_routing_for_every_model() {
             let oauth = oauth_with(
                 "oauth",
                 1,
-                vec![
-                    fresh(exhausted_window)
-                        .util(1.0)
-                        .status("rejected")
-                        .build(),
-                ],
+                vec![fresh(exhausted_window).util(1.0).status("rejected").build()],
             );
             let api_key = api_key("api-key", 2);
             let output = filter_for_model(&[oauth, api_key.clone()], model);
@@ -355,10 +336,7 @@ fn pre_filters_seven_day_exhaustion_independently_per_candidate() {
         1,
         vec![
             fresh(WINDOW_FIVE_HOUR).util(0.2).build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(1.0)
-                .status("rejected")
-                .build(),
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
         ],
     );
     let alive = oauth_with(
@@ -769,9 +747,7 @@ fn s11_bit_identical_candidates_break_tie_by_original_index() {
                 .build(),
         ],
     );
-    let second = UpstreamCandidate {
-        ..first.clone()
-    };
+    let second = UpstreamCandidate { ..first.clone() };
 
     let output = filter_for_model(&[first.clone(), second], MODEL_AGNOSTIC);
     assert_eq!(output.kept_upstream_ids, vec![first.upstream_id]);
@@ -1034,12 +1010,7 @@ fn snapshot_observed_at_zero_uses_candidate_observed_at() {
         "b",
         2,
         T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.3)
-                .observed_millis(0)
-                .build(),
-        ],
+        vec![fresh(WINDOW_FIVE_HOUR).util(0.3).observed_millis(0).build()],
     );
 
     // Snapshot millis=0 is ignored, candidate observed_at wins.
@@ -1703,28 +1674,26 @@ fn missing_snapshot_with_all_exhausted_fields_does_not_exhaust() {
         "oauth",
         1,
         T0_SECS,
-        vec![
-            SubscriptionQuotaCandidateSnapshot {
-                window: WINDOW_SEVEN_DAY.to_owned(),
-                state: SubscriptionQuotaDataState::Missing,
-                source: None,
-                utilization: Some(1.0),
-                status: Some("rejected".to_owned()),
-                resets_at_unix_secs: None,
-                surpassed_threshold: None,
-                representative_claim: None,
-                disabled_reason: Some("operator force-disabled".to_owned()),
-                extra_usage_enabled: None,
-                extra_usage_monthly_limit: None,
-                extra_usage_used_credits: None,
-                observed_at_unix_millis: None,
-                max_staleness_secs: 60,
-                fallback_available: None,
-                overage_in_use: None,
-                overage_period_monthly_utilization: None,
-                upgrade_paths: None,
-            },
-        ],
+        vec![SubscriptionQuotaCandidateSnapshot {
+            window: WINDOW_SEVEN_DAY.to_owned(),
+            state: SubscriptionQuotaDataState::Missing,
+            source: None,
+            utilization: Some(1.0),
+            status: Some("rejected".to_owned()),
+            resets_at_unix_secs: None,
+            surpassed_threshold: None,
+            representative_claim: None,
+            disabled_reason: Some("operator force-disabled".to_owned()),
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            observed_at_unix_millis: None,
+            max_staleness_secs: 60,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+        }],
     );
     let api_key = api_key("api-key", 2);
     let output = filter_for_model(&[oauth.clone(), api_key], MODEL_AGNOSTIC);

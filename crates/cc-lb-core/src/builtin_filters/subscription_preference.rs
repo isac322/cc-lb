@@ -159,7 +159,12 @@ fn pick_best_subscription_candidate<'a>(
         .iter()
         .enumerate()
         .filter(|(_, candidate)| is_alive_subscription_candidate(candidate, canonical_model))
-        .map(|(index, candidate)| (candidate, score_candidate(candidate, canonical_model, index)))
+        .map(|(index, candidate)| {
+            (
+                candidate,
+                score_candidate(candidate, canonical_model, index),
+            )
+        })
         .min_by(|left, right| compare_score_records(&left.1, &right.1))
         .map(|(candidate, _)| candidate)
 }
@@ -378,10 +383,7 @@ fn estimated_now_secs(
     candidate.observed_at_unix_secs.max(snapshot_secs)
 }
 
-fn snapshot_is_exhausted(
-    snapshot: &SubscriptionQuotaCandidateSnapshot,
-    now_secs: u64,
-) -> bool {
+fn snapshot_is_exhausted(snapshot: &SubscriptionQuotaCandidateSnapshot, now_secs: u64) -> bool {
     if snapshot.state == SubscriptionQuotaDataState::Missing {
         return false;
     }
