@@ -34,7 +34,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.0",
+    "@biomejs/biome": "2.5.1",
     "@playwright/test": "^1.61.0",
     "@tailwindcss/container-queries": "^0.1.1",
     "@tailwindcss/vite": "4.3.1",
