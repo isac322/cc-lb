@@ -8,11 +8,6 @@
 #   - Fuzz workspace (excluded from the root workspace, so registered separately)
 #   - Bun-based admin web app (uses bun.lock; officially supported by Dependabot
 #     as of 2025-02-13 via package-ecosystem: "bun")
-#
-# Not registered:
-#   - third_party/gcp_auth: vendored snapshot of the crates.io `gcp_auth` 0.12.6
-#     release (Cargo-normalized Cargo.toml). Dependabot PRs against vendored
-#     copies would only churn or conflict, so it is intentionally excluded.
 
 version: 2
 updates:

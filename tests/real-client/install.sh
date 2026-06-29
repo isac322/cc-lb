@@ -54,6 +54,6 @@ install_client() {
   return 0
 }
 
-install_client claude-code @anthropic-ai/claude-code 2.1.185 claude CLAUDE_CODE_BIN
-install_client opencode opencode-ai 1.17.9 opencode OPENCODE_BIN
-install_client pi @earendil-works/pi-coding-agent 0.79.9 pi PI_BIN
+install_client claude-code @anthropic-ai/claude-code 2.1.195 claude CLAUDE_CODE_BIN
+install_client opencode opencode-ai 1.17.11 opencode OPENCODE_BIN
+install_client pi @earendil-works/pi-coding-agent 0.80.2 pi PI_BIN
