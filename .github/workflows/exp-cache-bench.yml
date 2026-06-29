@@ -1,0 +1,157 @@
+name: exp-cache-bench
+
+# Controlled cache benchmark. Single job, runs alone on the node when maxRunners=1,
+# so there is NO CPU contention from other workflows during measurement.
+# For each config: cold (caches purged) then warm (caches populated) build of the
+# same workspace, same commit, same command. CARGO_INCREMENTAL=0 and SCCACHE_BASEDIRS
+# are applied identically to every sccache leg.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exp-cache-bench
+  cancel-in-progress: false
+
+env:
+  CC_LB_ADMIN_SKIP_SPA: "1"
+
+jobs:
+  bench:
+    runs-on: oracle4-cc-lb
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install wasm targets
+        run: rustup target add wasm32-unknown-unknown wasm32-wasip1
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Run benchmark
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID_IN: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY_IN: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          set -uo pipefail
+          WS="$GITHUB_WORKSPACE"
+          SCDIR="$WS/.sccache"
+          CMD='cargo build --workspace --all-targets --no-default-features --features sqlite'
+          SC="${SCCACHE_PATH:-sccache}"
+
+          # Variables held constant across every sccache config (the previously-missing controls).
+          export CARGO_INCREMENTAL=0
+          export SCCACHE_BASEDIRS="$WS"
+          export SCCACHE_CACHE_SIZE=10G
+
+          clear_sccache_env() {
+            unset RUSTC_WRAPPER SCCACHE_DIR \
+              SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_S3_USE_SSL SCCACHE_REGION \
+              SCCACHE_S3_KEY_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+          }
+          setup_none()  { clear_sccache_env; }
+          setup_local() {
+            clear_sccache_env
+            export RUSTC_WRAPPER="$SC"
+            export SCCACHE_DIR="$SCDIR"
+          }
+          setup_s3() {
+            clear_sccache_env
+            export RUSTC_WRAPPER="$SC"
+            export SCCACHE_BUCKET=sccache
+            export SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
+            export SCCACHE_S3_USE_SSL=off
+            export SCCACHE_REGION=garage
+            # Unique prefix per run guarantees a genuinely cold start without wiping garage.
+            export SCCACHE_S3_KEY_PREFIX="exp-${GITHUB_RUN_ID}-$1"
+            export AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID_IN"
+            export AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY_IN"
+          }
+
+          restart_sccache() {
+            if [ -n "${RUSTC_WRAPPER:-}" ]; then
+              "$SC" --stop-server >/dev/null 2>&1 || true
+              "$SC" --start-server >/dev/null 2>&1 || true
+              "$SC" --zero-stats  >/dev/null 2>&1 || true
+            fi
+          }
+
+          # Times $CMD, prints "<seconds> <rc>".
+          timed() {
+            local s e rc
+            s=$(date +%s.%N)
+            eval "$CMD" >/tmp/build.log 2>&1
+            rc=$?
+            e=$(date +%s.%N)
+            printf '%s %s' "$(awk "BEGIN{printf \"%.1f\", $e-$s}")" "$rc"
+          }
+
+          sccache_hitpct() {
+            "$SC" --show-stats 2>/dev/null \
+              | awk '/Compile requests executed/{req=$NF} /Cache hits[^a-zA-Z]*[0-9]/{if(h=="")h=$NF} END{if(req>0)printf "%.0f%%", 100*h/req; else print "n/a"}'
+          }
+          store_size() {
+            case "$1" in
+              local) du -sh "$SCDIR" 2>/dev/null | awk '{print $1}' ;;
+              s3)    echo "shared(garage)" ;;
+              *)     du -sh "$WS/target" 2>/dev/null | awk '{print $1}' ;;
+            esac
+          }
+
+          SUM="$GITHUB_STEP_SUMMARY"
+          echo "## exp-cache-bench results" >> "$SUM"
+          echo "" >> "$SUM"
+          echo "commit \`${GITHUB_SHA:0:7}\` · cmd \`$CMD\`" >> "$SUM"
+          echo "" >> "$SUM"
+          echo "| config | cold (s) | warm (s) | warm hit% | store | cold rc | warm rc |" >> "$SUM"
+          echo "|---|---|---|---|---|---|---|" >> "$SUM"
+
+          # run_cfg <name> <setup-fn> <backend> <warm_keep_target>
+          run_cfg() {
+            local name="$1" setupfn="$2" backend="$3" keep="$4"
+
+            "$SC" --stop-server >/dev/null 2>&1 || true
+            rm -rf "$WS/target" "$SCDIR"
+            "$setupfn" "$name"
+            restart_sccache
+
+            echo "::group::[$name] COLD"
+            rm -rf "$WS/target"
+            read -r c_t c_rc <<<"$(timed)"
+            tail -n 3 /tmp/build.log || true
+            echo "::endgroup::"
+
+            local hit store
+            store="$(store_size "$backend")"
+
+            echo "::group::[$name] WARM"
+            [ "$keep" = "1" ] || rm -rf "$WS/target"
+            "$SC" --zero-stats >/dev/null 2>&1 || true
+            read -r w_t w_rc <<<"$(timed)"
+            tail -n 3 /tmp/build.log || true
+            "$SC" --show-stats 2>/dev/null || true
+            echo "::endgroup::"
+            hit="$(sccache_hitpct)"
+            [ "$backend" = "none" ] && hit="-"
+
+            echo "| $name | $c_t | $w_t | $hit | $store | $c_rc | $w_rc |" >> "$SUM"
+            echo "[$name] cold=${c_t}s(rc$c_rc) warm=${w_t}s(rc$w_rc) hit=$hit store=$store"
+          }
+
+          #        name  setup        backend warm_keep_target
+          run_cfg  N     setup_none   none    0
+          run_cfg  D     setup_none   none    1
+          run_cfg  L     setup_local  local   0
+          run_cfg  X     setup_s3     s3      0
+          run_cfg  M     setup_local  local   1
+
+          echo "done."
