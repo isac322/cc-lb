@@ -29,8 +29,10 @@ cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
+brotli.workspace = true
 dashmap.workspace = true
 eventsource-stream.workspace = true
+flate2.workspace = true
 futures-core = "0.3"
 hickory-resolver = { workspace = true, features = ["tokio", "system-config"] }
 http.workspace = true
@@ -55,6 +57,7 @@ url.workspace = true
 uuid.workspace = true
 tower-service.workspace = true
 tower.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
