@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
-use cc_lb_core::Clock as _;
+use cc_lb_core::{ClockHandle, TestClock};
 use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::warmup_attempts::{
     WarmupAttemptCursor, WarmupAttemptOutcome, WarmupAttemptReason, WarmupAttemptRecord,
@@ -19,6 +19,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 const TEST_TOKEN: &str = "test-token";
+const TEST_NOW_UNIX_SECS: u64 = 1_700_000_000;
 pub use crate::scheduler_support::NEXT_SCHEDULED_AT;
 pub const RECENT_7D_COUNTS: (u64, u64, u64, u64, u64) = (3, 3, 3, 3, 2);
 
@@ -32,7 +33,14 @@ pub struct Fixture {
 
 pub async fn new_fixture() -> Fixture {
     let dir = tempfile::tempdir().expect("temp admin warmup dir");
-    let storage = crate::admin_test_common::sqlite_storage(dir.path(), "admin_warmup.sqlite").await;
+    let test_clock = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
+    let clock: ClockHandle = test_clock.clone();
+    let storage = crate::admin_test_common::sqlite_storage_with_clock(
+        dir.path(),
+        "admin_warmup.sqlite",
+        clock.clone(),
+    )
+    .await;
     let dialect_plugin = UpstreamWarmupDialectPlugin {
         wasm_registry_id: Uuid::from_u128(0x1111_1111_2222_3333_4444_5555_6666_7777),
         config: json!({"mode": "compact", "max_tokens": 1}),
@@ -57,12 +65,14 @@ pub async fn new_fixture() -> Fixture {
         upstream.id,
         upstream.revision,
         &dialect_plugin,
+        clock.as_ref(),
     )
     .await;
-    let scheduler = crate::scheduler_support::scheduler_with_next_warmup(upstream.id).await;
+    let scheduler =
+        crate::scheduler_support::scheduler_with_next_warmup(upstream.id, clock.clone()).await;
     Fixture {
         _dir: dir,
-        app: router(test_state(storage, scheduler)),
+        app: router(test_state(storage, scheduler, clock)),
         upstream_id: upstream.id,
         attempts,
         dialect_plugin,
@@ -72,13 +82,14 @@ pub async fn new_fixture() -> Fixture {
 fn test_state(
     storage: Arc<SqliteStorage>,
     scheduler: cc_lb_scheduler::admin::SchedulerAdminHandle,
+    clock: ClockHandle,
 ) -> AdminState {
     let config = Config::default();
     AdminState {
         storage: Some(storage.clone()),
         key_store: Some(crate::admin_test_common::key_store(storage)),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: crate::admin_test_common::limit_engine(),
+        limit_engine: crate::admin_test_common::limit_engine_with_clock(clock.clone()),
         lifecycle: None,
         subscription_metadata_hook: None,
         lazy_refresher: None,
@@ -92,7 +103,7 @@ fn test_state(
         admin_token: Some(TEST_TOKEN.to_owned()),
         start_time: std::time::Instant::now(),
         event_bus: None,
-        clock: Arc::new(cc_lb_core::SystemClock),
+        clock,
     }
 }
 
@@ -101,8 +112,8 @@ async fn seed_attempts(
     upstream_id: Uuid,
     upstream_spec_revision: u64,
     dialect_plugin: &UpstreamWarmupDialectPlugin,
+    clock: &dyn cc_lb_core::Clock,
 ) -> Vec<WarmupAttemptRecord> {
-    let clock = cc_lb_core::SystemClock;
     let now = i64::try_from(cc_lb_core::clock::unix_secs(clock.now())).unwrap_or(i64::MAX);
     let plugin_snapshot = serde_json::to_value(dialect_plugin).expect("plugin serializes");
     let attempts = (0..30)

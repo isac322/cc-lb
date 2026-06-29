@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use cc_lb_core::{Clock, TestClock};
 use cc_lb_plugin_wire::augmented_metadata::AugmentedMetadata;
 use cc_lb_plugin_wire::handshake::{HANDSHAKE_SCHEMA_VERSION_V1, HandshakeAccept};
 use cc_lb_plugin_wire::identity::{CC_LB_PLUGIN_MAGIC, CC_LB_PLUGIN_SECTION_NAME, PluginIdentity};
@@ -32,7 +33,7 @@ async fn skip_if_fresh_fast_path_100_records_executes_zero_handshakes() -> Resul
     let seeded = seed_records(
         &repos,
         100,
-        unix_now()?.saturating_sub(1),
+        unix_now(repos.clock.as_ref())?.saturating_sub(1),
         registry.host_offer_hash(),
     )
     .await?;
@@ -43,7 +44,7 @@ async fn skip_if_fresh_fast_path_100_records_executes_zero_handshakes() -> Resul
         repos.registry_repo.as_ref(),
         StartupHandshakeOpts::default(),
         shutdown,
-        &cc_lb_core::SystemClock,
+        repos.clock.as_ref(),
     )
     .await;
 
@@ -71,7 +72,7 @@ async fn force_handshake_rehandshakes_all_records() -> Result<()> {
     seed_records(
         &repos,
         count,
-        unix_now()?.saturating_sub(120),
+        unix_now(repos.clock.as_ref())?.saturating_sub(120),
         registry.host_offer_hash(),
     )
     .await?;
@@ -85,7 +86,7 @@ async fn force_handshake_rehandshakes_all_records() -> Result<()> {
             ..StartupHandshakeOpts::default()
         },
         shutdown,
-        &cc_lb_core::SystemClock,
+        repos.clock.as_ref(),
     )
     .await;
 
@@ -112,7 +113,7 @@ async fn host_offer_change_rehandshakes_all_records() -> Result<()> {
     let seeded = seed_records(
         &repos,
         count,
-        unix_now()?.saturating_sub(1),
+        unix_now(repos.clock.as_ref())?.saturating_sub(1),
         old_registry.host_offer_hash(),
     )
     .await?;
@@ -123,7 +124,7 @@ async fn host_offer_change_rehandshakes_all_records() -> Result<()> {
         repos.registry_repo.as_ref(),
         StartupHandshakeOpts::default(),
         shutdown,
-        &cc_lb_core::SystemClock,
+        repos.clock.as_ref(),
     )
     .await;
 
@@ -153,7 +154,7 @@ async fn mid_startup_shutdown_saves_partial_progress_and_marker() -> Result<()> 
     let _test_guard = TEST_LOCK.lock().await;
     let repos = TestRepos::new().await?;
     let registry = repos.registry(BTreeSet::new())?;
-    let original_last_handshake_at = unix_now()?.saturating_sub(120);
+    let original_last_handshake_at = unix_now(repos.clock.as_ref())?.saturating_sub(120);
     let seeded = seed_records(
         &repos,
         8,
@@ -170,6 +171,7 @@ async fn mid_startup_shutdown_saves_partial_progress_and_marker() -> Result<()> 
     let task = tokio::spawn({
         let registry = registry.clone();
         let registry_repo = repos.registry_repo.clone();
+        let clock = repos.clock.clone();
         async move {
             run_startup_handshake(
                 &registry,
@@ -181,7 +183,7 @@ async fn mid_startup_shutdown_saves_partial_progress_and_marker() -> Result<()> 
                     parallelism: 1,
                 },
                 shutdown,
-                &cc_lb_core::SystemClock,
+                clock.as_ref(),
             )
             .await
         }
@@ -219,7 +221,7 @@ async fn recovery_from_mid_shutdown_rehandshakes_stale_records() -> Result<()> {
     let _test_guard = TEST_LOCK.lock().await;
     let repos = TestRepos::new().await?;
     let registry = repos.registry(BTreeSet::new())?;
-    let shutdown_marker = unix_now()?;
+    let shutdown_marker = unix_now(repos.clock.as_ref())?;
     let seeded = seed_records(
         &repos,
         12,
@@ -238,7 +240,7 @@ async fn recovery_from_mid_shutdown_rehandshakes_stale_records() -> Result<()> {
         repos.registry_repo.as_ref(),
         StartupHandshakeOpts::default(),
         shutdown,
-        &cc_lb_core::SystemClock,
+        repos.clock.as_ref(),
     )
     .await;
 
@@ -266,7 +268,7 @@ async fn parallel_execution_caps_at_8_and_is_time_bounded() -> Result<()> {
     seed_records(
         &repos,
         12,
-        unix_now()?.saturating_sub(120),
+        unix_now(repos.clock.as_ref())?.saturating_sub(120),
         registry.host_offer_hash(),
     )
     .await?;
@@ -284,7 +286,7 @@ async fn parallel_execution_caps_at_8_and_is_time_bounded() -> Result<()> {
             parallelism: 32,
         },
         shutdown,
-        &cc_lb_core::SystemClock,
+        repos.clock.as_ref(),
     )
     .await;
     let elapsed = started.elapsed();
@@ -320,7 +322,7 @@ async fn budget_limit_disables_remaining_records() -> Result<()> {
     let seeded = seed_records(
         &repos,
         100,
-        unix_now()?.saturating_sub(120),
+        unix_now(repos.clock.as_ref())?.saturating_sub(120),
         registry.host_offer_hash(),
     )
     .await?;
@@ -337,7 +339,7 @@ async fn budget_limit_disables_remaining_records() -> Result<()> {
             parallelism: 32,
         },
         shutdown,
-        &cc_lb_core::SystemClock,
+        repos.clock.as_ref(),
     )
     .await;
 
@@ -358,13 +360,15 @@ async fn budget_limit_disables_remaining_records() -> Result<()> {
 }
 
 struct TestRepos {
+    clock: Arc<TestClock>,
     registry_repo: Arc<SqliteStorage>,
     blobs: Arc<InstrumentedBlobRepo>,
 }
 
 impl TestRepos {
     async fn new() -> Result<Self> {
-        let storage = open_sqlite("sqlite::memory:", Arc::new(cc_lb_core::SystemClock)).await?;
+        let clock = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let storage = open_sqlite("sqlite::memory:", clock.clone()).await?;
         cc_lb_storage_api::MetaStore::initialize(&storage, BackendKind::Sqlite).await?;
         for record in storage.list_active().await? {
             storage.delete_by_sha256(&record.sha256).await?;
@@ -372,6 +376,7 @@ impl TestRepos {
         let storage = Arc::new(storage);
         let blobs = Arc::new(InstrumentedBlobRepo::new(storage.clone()));
         Ok(Self {
+            clock,
             registry_repo: storage,
             blobs,
         })
@@ -384,7 +389,7 @@ impl TestRepos {
             registry_repo,
             blob_repo,
             build_offer(&host_caps),
-            Arc::new(cc_lb_core::SystemClock),
+            self.clock.clone(),
         )?)
     }
 }
@@ -711,10 +716,7 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-fn unix_now() -> Result<i64> {
-    use cc_lb_core::Clock as _;
-
-    let clock = cc_lb_core::SystemClock;
+fn unix_now(clock: &dyn Clock) -> Result<i64> {
     Ok(i64::try_from(
         clock.now().duration_since(UNIX_EPOCH)?.as_secs(),
     )?)
