@@ -24,6 +24,10 @@ updates:
       time: "09:00"
       timezone: "Asia/Seoul"
     open-pull-requests-limit: 10
+    groups:
+      github-actions:
+        patterns:
+          - "*"
 
   - package-ecosystem: "cargo"
     directory: "/"
@@ -33,6 +37,10 @@ updates:
       time: "09:00"
       timezone: "Asia/Seoul"
     open-pull-requests-limit: 10
+    groups:
+      cargo-workspace:
+        patterns:
+          - "*"
 
   - package-ecosystem: "cargo"
     directory: "/fuzz"
@@ -42,6 +50,10 @@ updates:
       time: "09:00"
       timezone: "Asia/Seoul"
     open-pull-requests-limit: 5
+    groups:
+      cargo-fuzz:
+        patterns:
+          - "*"
 
   - package-ecosystem: "bun"
     directory: "/crates/cc-lb-admin/web"
@@ -51,3 +63,7 @@ updates:
       time: "09:00"
       timezone: "Asia/Seoul"
     open-pull-requests-limit: 10
+    groups:
+      admin-web:
+        patterns:
+          - "*"
