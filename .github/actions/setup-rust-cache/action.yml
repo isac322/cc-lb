@@ -7,9 +7,9 @@ inputs:
     required: false
     default: ""
   cache-targets:
-    description: Whether Swatinem/rust-cache should restore/save target directories. Off by default — sccache caches compilation, so caching target/ is redundant.
+    description: Whether Swatinem/rust-cache should restore/save target directories. On — restoring target/ lets cargo skip unchanged crates entirely (much faster than sccache alone); sccache still accelerates changed crates across jobs.
     required: false
-    default: "false"
+    default: "true"
   stable-build-metadata:
     description: Whether to stabilize build metadata for better compiler cache reuse.
     required: false
@@ -49,8 +49,8 @@ runs:
         EOF
         echo "EXTISM_CACHE_CONFIG=$GITHUB_WORKSPACE/.extism-cache.toml" >> "$GITHUB_ENV"
 
-    # sccache covers compilation, so target/ caching is off by default (cache-targets);
-    # Swatinem only caches cargo registry/git (the dependency download cache).
+    # Swatinem restores target/ (cargo skips unchanged crates) + cargo registry/git;
+    # sccache (RUSTC_WRAPPER) additionally caches compilation of changed crates across jobs.
     - uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
