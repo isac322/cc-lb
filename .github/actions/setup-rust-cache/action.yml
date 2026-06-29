@@ -31,7 +31,8 @@ runs:
       shell: bash
       run: |
         echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
-        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        # EXPERIMENT: sccache off — isolate whether S3 fetch is overhead when target restore already covers deps
+        # echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         if [ "${{ inputs.stable-build-metadata }}" = "true" ]; then
           echo "GIT_SHA=0000000" >> "$GITHUB_ENV"
           echo "SOURCE_DATE_EPOCH=0" >> "$GITHUB_ENV"
