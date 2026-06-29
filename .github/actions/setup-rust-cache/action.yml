@@ -1,5 +1,5 @@
 name: Setup Rust cache
-description: Restore Cargo caches and enable persisted sccache compiler artifacts.
+description: Enable sccache (S3/garage backend) and restore Cargo registry caches.
 
 inputs:
   rust-cache-key:
@@ -7,9 +7,9 @@ inputs:
     required: false
     default: ""
   cache-targets:
-    description: Whether Swatinem/rust-cache should restore/save target directories.
+    description: Whether Swatinem/rust-cache should restore/save target directories. Off by default — sccache caches compilation, so caching target/ is redundant.
     required: false
-    default: "true"
+    default: "false"
   stable-build-metadata:
     description: Whether to stabilize build metadata for better compiler cache reuse.
     required: false
@@ -18,29 +18,19 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Run sccache-cache
+    - name: Install sccache
       id: sccache-setup
       uses: mozilla-actions/sccache-action@v0.0.10
       continue-on-error: true
 
-    - name: Restore sccache directory
-      if: steps.sccache-setup.outcome == 'success'
-      uses: actions/cache@v5
-      with:
-        path: .sccache
-        key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: |
-          sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-
-
-    - name: Export Rust compiler cache env
+    # sccache 저장소는 runner env(SCCACHE_BUCKET/SCCACHE_ENDPOINT/AWS_* = garage S3)에서
+    # 상속받는다. 여기서는 wrapper 활성화와 결정적 빌드 메타데이터만 설정.
+    - name: Enable sccache compiler cache
       if: steps.sccache-setup.outcome == 'success'
       shell: bash
       run: |
         echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-        echo "SCCACHE_DIR=$GITHUB_WORKSPACE/.sccache" >> "$GITHUB_ENV"
-        echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
-        echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
         if [ "${{ inputs.stable-build-metadata }}" = "true" ]; then
           echo "GIT_SHA=0000000" >> "$GITHUB_ENV"
           echo "SOURCE_DATE_EPOCH=0" >> "$GITHUB_ENV"
@@ -58,6 +48,7 @@ runs:
         EOF
         echo "EXTISM_CACHE_CONFIG=$GITHUB_WORKSPACE/.extism-cache.toml" >> "$GITHUB_ENV"
 
+    # target/ 캐싱은 sccache가 대체(cache-targets 기본 false). cargo registry/git 만 캐싱.
     - uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
