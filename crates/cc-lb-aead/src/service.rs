@@ -1,4 +1,4 @@
-use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
+use chacha20poly1305::aead::{Aead, Generate, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use zeroize::Zeroize;
 
@@ -38,7 +38,7 @@ impl AeadService {
     }
 
     pub fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> AeadResult<Vec<u8>> {
-        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let nonce = Nonce::generate();
         let payload = Payload {
             msg: plaintext,
             aad,
