@@ -25,6 +25,7 @@ jobs:
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+      CC_LB_ADMIN_SKIP_SPA: "1"   # admin 크레이트 build.rs가 bun 요구 → SPA 빌드 스킵
     steps:
       - uses: actions/checkout@v7
 
