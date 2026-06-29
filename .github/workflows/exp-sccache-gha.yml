@@ -1,0 +1,79 @@
+name: exp-sccache-gha
+
+# 실험 전용: sccache 네이티브 GHA 백엔드(SCCACHE_GHA_ENABLED)가
+# self-hosted falcondev cache-server에 붙는지 / 히트나는지 / 동시 빌드에서
+# dep-info 손상이 안 나는지 검증. master 워크플로우와 무관. exp 브랜치에서만 동작.
+
+on:
+  push:
+    branches:
+      - exp/sccache-gha-backend
+  workflow_dispatch:
+
+# 두 shard를 동시에 유지(취소 안 함) — 동시성 검증이 목적.
+concurrency:
+  group: exp-sccache-gha-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: oracle4-cc-lb
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [a, b]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add wasm targets
+        run: rustup target add wasm32-unknown-unknown wasm32-wasip1
+
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      # 로컬 SCCACHE_DIR 대신 네이티브 GHA 백엔드로만 동작시킨다.
+      - name: Enable sccache GHA backend
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+
+      # ① 붙는가: sccache가 보는 캐시 엔드포인트가 무엇인지(=cache-server로 덮였는지) 판별.
+      - name: Probe cache endpoint env
+        shell: bash
+        run: |
+          echo "shard=${{ matrix.shard }}"
+          echo "ACTIONS_CACHE_URL=${ACTIONS_CACHE_URL:-<unset>}"
+          echo "ACTIONS_RESULTS_URL=${ACTIONS_RESULTS_URL:-<unset>}"
+          echo "ACTIONS_RUNTIME_TOKEN present=${ACTIONS_RUNTIME_TOKEN:+yes}"
+          sccache --version
+
+      - name: sccache stats (before)
+        shell: bash
+        run: sccache --show-stats
+
+      # 동시 2개 잡이 같은 백엔드에 store/get 한다.
+      - name: Build workspace (sqlite features)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --workspace --no-default-features --features sqlite 2>&1 | tee /tmp/build.log
+
+      # ③ 동시 dep-info 손상 검출.
+      - name: Check for dep-info corruption
+        if: always()
+        shell: bash
+        run: |
+          if grep -n "could not parse/generate dep info" /tmp/build.log; then
+            echo "::error::DEP_INFO_ERROR_FOUND"
+            exit 1
+          fi
+          echo "no dep-info error"
+
+      # ② 히트: writes>0(store됨), 재실행 시 hits>0 이어야 한다.
+      - name: sccache stats (after)
+        if: always()
+        shell: bash
+        run: sccache --show-stats
