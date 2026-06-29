@@ -23,8 +23,9 @@ runs:
       uses: mozilla-actions/sccache-action@v0.0.10
       continue-on-error: true
 
-    # sccache 저장소는 runner env(SCCACHE_BUCKET/SCCACHE_ENDPOINT/AWS_* = garage S3)에서
-    # 상속받는다. 여기서는 wrapper 활성화와 결정적 빌드 메타데이터만 설정.
+    # The sccache storage backend (SCCACHE_BUCKET/SCCACHE_ENDPOINT/AWS_* = garage S3) is
+    # inherited from the runner env; here we only enable the wrapper and set deterministic
+    # build metadata.
     - name: Enable sccache compiler cache
       if: steps.sccache-setup.outcome == 'success'
       shell: bash
@@ -48,7 +49,8 @@ runs:
         EOF
         echo "EXTISM_CACHE_CONFIG=$GITHUB_WORKSPACE/.extism-cache.toml" >> "$GITHUB_ENV"
 
-    # target/ 캐싱은 sccache가 대체(cache-targets 기본 false). cargo registry/git 만 캐싱.
+    # sccache covers compilation, so target/ caching is off by default (cache-targets);
+    # Swatinem only caches cargo registry/git (the dependency download cache).
     - uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
