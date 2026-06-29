@@ -352,22 +352,40 @@ impl LazyRefresher {
             }
 
             if let Some(idempotency_key) = idempotency_key {
-                match self
+                let task_state = self
                     .claim_guard
                     .task_state(idempotency_key)
                     .await
-                    .map_err(lazy_error)?
-                {
-                    LazyRefreshTaskState::Active => {}
-                    LazyRefreshTaskState::Done => {
+                    .map_err(lazy_error)?;
+                if !matches!(task_state, LazyRefreshTaskState::Active) {
+                    // The worker may have committed complete_refresh AND marked the task
+                    // terminal between our upstream read above and this task_state read.
+                    // Re-read the upstream so we observe its post-commit state before
+                    // concluding that the job completed without advancing the generation.
+                    let Some(post_terminal) = self
+                        .stores
+                        .upstreams
+                        .get_by_id(upstream_id)
+                        .await
+                        .map_err(lazy_error)?
+                    else {
                         return Err(LazyRefreshError::Failed {
+                            reason: "oauth upstream not found".to_owned(),
+                        });
+                    };
+                    if post_terminal.oauth_token_generation > starting_generation {
+                        return Ok(());
+                    }
+                    return match task_state {
+                        LazyRefreshTaskState::Done => Err(LazyRefreshError::Failed {
                             reason: "oauth refresh job completed without advancing generation"
                                 .to_owned(),
-                        });
-                    }
-                    LazyRefreshTaskState::TerminalFailure { reason } => {
-                        return Err(LazyRefreshError::Failed { reason });
-                    }
+                        }),
+                        LazyRefreshTaskState::TerminalFailure { reason } => {
+                            Err(LazyRefreshError::Failed { reason })
+                        }
+                        LazyRefreshTaskState::Active => unreachable!(),
+                    };
                 }
             }
 
@@ -901,8 +919,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        LazyRefreshClaim, LazyRefreshClaimGuard, LazyRefreshContentionConfig, LazyRefresher,
-        LazyRefresherDeps, SchedulerBackend,
+        LazyRefreshClaim, LazyRefreshClaimGuard, LazyRefreshContentionConfig, LazyRefreshTaskState,
+        LazyRefresher, LazyRefresherDeps, SchedulerBackend,
     };
 
     #[tokio::test]
@@ -945,6 +963,45 @@ mod tests {
             .expect("scheduler-backed wait times out and falls back to in-proc refresh");
 
         assert_eq!(fixture.refresh_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn wait_for_token_generation_returns_ok_when_done_state_races_with_generation_advance() {
+        // Race between wait_for_token_generation's two consecutive reads:
+        //   1. Lazy reads upstream snapshot → generation still equals the starting value
+        //      (the worker has not yet committed complete_refresh).
+        //   2. The proactive worker commits complete_refresh (generation += 1) and apalis
+        //      marks the task as Done.
+        //   3. Lazy reads task_state → Done.
+        //
+        // Without the fix the lazy refresher concludes "completed without advancing
+        // generation" and falls back to in_process_refresh, firing a redundant HTTP
+        // refresh against the OAuth provider. With the fix the lazy refresher re-reads
+        // the upstream after observing the terminal task state, sees the advanced
+        // generation, and returns Ok without triggering the fallback.
+        let fixture = LazyRefreshFixture::new(Duration::ZERO).await;
+        let upstream_id = fixture.create_oauth_upstream().await;
+        let claims: Arc<dyn LazyRefreshClaimGuard> = Arc::new(RaceDoneClaims::new(
+            fixture.storage.clone(),
+            fixture.aead.clone(),
+            upstream_id,
+        ));
+        let config = LazyRefreshContentionConfig::for_tests(
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+        );
+        let refresher = fixture.lazy_refresher(claims, config);
+
+        refresher
+            .refresh_one(upstream_id)
+            .await
+            .expect("lazy refresh observes the racing winner's generation advance");
+
+        assert_eq!(
+            fixture.refresh_call_count(),
+            0,
+            "no in-process HTTP fallback should fire when the worker advanced the generation",
+        );
     }
 
     struct LazyRefreshFixture {
@@ -1067,7 +1124,7 @@ mod tests {
 
         fn lazy_refresher(
             &self,
-            claims: Arc<TestOAuthRefreshClaims>,
+            claims: Arc<dyn LazyRefreshClaimGuard>,
             config: LazyRefreshContentionConfig,
         ) -> LazyRefresher {
             LazyRefresher::new_with_claim_guard_for_tests(
@@ -1195,6 +1252,84 @@ mod tests {
             _holder: &str,
         ) -> StorageResult<bool> {
             Ok(true)
+        }
+    }
+
+    struct RaceDoneClaims {
+        storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+        aead: Arc<AeadService>,
+        upstream_id: Uuid,
+        invoked: AtomicBool,
+    }
+
+    impl RaceDoneClaims {
+        fn new(
+            storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+            aead: Arc<AeadService>,
+            upstream_id: Uuid,
+        ) -> Self {
+            Self {
+                storage,
+                aead,
+                upstream_id,
+                invoked: AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LazyRefreshClaimGuard for RaceDoneClaims {
+        async fn begin_refresh(
+            &self,
+            _upstream_id: Uuid,
+            _holder: &str,
+            _expires_at_unix_secs: u64,
+            _now_unix_secs: u64,
+        ) -> StorageResult<LazyRefreshClaim> {
+            Ok(LazyRefreshClaim::Enqueued {
+                idempotency_key: "race:done".to_owned(),
+            })
+        }
+
+        async fn complete_and_bump_generation(
+            &self,
+            _upstream_id: Uuid,
+            _holder: &str,
+            _generation: u64,
+        ) -> StorageResult<bool> {
+            Ok(true)
+        }
+
+        async fn release_if_holder(
+            &self,
+            _upstream_id: Uuid,
+            _holder: &str,
+        ) -> StorageResult<bool> {
+            Ok(true)
+        }
+
+        async fn task_state(&self, _idempotency_key: &str) -> StorageResult<LazyRefreshTaskState> {
+            if !self.invoked.swap(true, Ordering::SeqCst) {
+                let rotated = EncryptedOAuthTokens::encrypt(
+                    self.aead.as_ref(),
+                    &OAuthTokenBundle {
+                        access_token: "sk-ant-oat01-rotated".to_owned(),
+                        refresh_token: "sk-ant-ort01-rotated".to_owned(),
+                        expires_at_unix_secs: 9_999_999_999,
+                        scopes: vec!["messages".to_owned()],
+                    },
+                    self.upstream_id.as_bytes(),
+                )
+                .expect("rotated tokens encrypt");
+                UpstreamStore::complete_refresh(
+                    self.storage.as_ref(),
+                    self.upstream_id,
+                    Uuid::new_v4(),
+                    rotated,
+                )
+                .await?;
+            }
+            Ok(LazyRefreshTaskState::Done)
         }
     }
 }
