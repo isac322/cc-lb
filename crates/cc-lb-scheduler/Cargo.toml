@@ -69,7 +69,7 @@ cc-lb-server = { path = "../cc-lb-server", default-features = false }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
-cron = "0.16"
+cron = "0.17"
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
 http.workspace = true
 metrics-exporter-prometheus.workspace = true
