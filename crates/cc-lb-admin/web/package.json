@@ -25,7 +25,7 @@
     "@tanstack/react-router": "1.170.16",
     "cmdk": "1.1.1",
     "eventsource-client": "^1.2.0",
-    "lucide-react": "1.21.0",
+    "lucide-react": "1.22.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "react-timeago": "8.3.0",
