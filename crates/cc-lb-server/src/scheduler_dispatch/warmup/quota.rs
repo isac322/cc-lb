@@ -1,34 +1,42 @@
 use cc_lb_plugin_api::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_storage_api::UpstreamRecord;
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow, WarmupAttemptReason};
+use cc_lb_storage_api::{
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, WarmupPermanentFailureReason,
+    WarmupSkipReason,
+};
 
 const QUOTA_PREFLIGHT_MAX_AGE_SECS: i64 = 180;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct WarmupPreflightSkip {
-    pub(super) reason: WarmupAttemptReason,
-    pub(super) cycle_key: Option<i64>,
+pub(super) enum WarmupPreflightReject {
+    Skip(WarmupSkipReason),
+    PermanentFailure(WarmupPermanentFailureReason),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WarmupQuotaPreflightDecision {
-    Skip(WarmupPreflightSkip),
+    ActiveWindow { cycle_key: i64 },
+    SevenDayQuotaExhausted { cycle_key: i64 },
     SendWarmup,
     Unknown,
 }
 
-pub(super) fn warmup_preflight_skip_reason(
-    upstream: &UpstreamRecord,
-) -> Option<WarmupAttemptReason> {
+pub(super) fn warmup_preflight_reject(upstream: &UpstreamRecord) -> Option<WarmupPreflightReject> {
     if upstream.deleted_at_unix_secs.is_some() {
-        return Some(WarmupAttemptReason::UpstreamDeleted);
+        return Some(WarmupPreflightReject::Skip(
+            WarmupSkipReason::UpstreamDeleted,
+        ));
     }
     if upstream.kind != UpstreamKind::AnthropicOauth || !upstream.warmup_enabled {
-        return Some(WarmupAttemptReason::UpstreamDisabled);
+        return Some(WarmupPreflightReject::Skip(
+            WarmupSkipReason::UpstreamDisabled,
+        ));
     }
     if upstream.oauth_credentials.is_none() {
-        return Some(WarmupAttemptReason::OauthCredentialsMissing);
+        return Some(WarmupPreflightReject::PermanentFailure(
+            WarmupPermanentFailureReason::OauthCredentialsMissing,
+        ));
     }
     None
 }
@@ -51,10 +59,7 @@ pub(super) fn quota_preflight_decision_from_snapshots(
             .filter(|snapshot| quota_snapshot_is_exhausted(snapshot))
             .and_then(|snapshot| quota_snapshot_future_reset(snapshot, now_unix_secs))
         {
-            return WarmupQuotaPreflightDecision::Skip(WarmupPreflightSkip {
-                reason: WarmupAttemptReason::SevenDayQuotaExhausted,
-                cycle_key: Some(cycle_key),
-            });
+            return WarmupQuotaPreflightDecision::SevenDayQuotaExhausted { cycle_key };
         }
     }
 
@@ -64,10 +69,7 @@ pub(super) fn quota_preflight_decision_from_snapshots(
         .filter(|snapshot| quota_snapshot_is_usable(snapshot, now_unix_secs))
     {
         Some(snapshot) => match quota_snapshot_future_reset(snapshot, now_unix_secs) {
-            Some(cycle_key) => WarmupQuotaPreflightDecision::Skip(WarmupPreflightSkip {
-                reason: WarmupAttemptReason::WindowAlreadyActive,
-                cycle_key: Some(cycle_key),
-            }),
+            Some(cycle_key) => WarmupQuotaPreflightDecision::ActiveWindow { cycle_key },
             None => WarmupQuotaPreflightDecision::SendWarmup,
         },
         None => WarmupQuotaPreflightDecision::Unknown,

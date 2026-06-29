@@ -37,16 +37,14 @@ import { detectActiveIncident } from './parts/warmupViewModel';
 import { WarmupHistoryDrawer } from './WarmupHistoryDrawer';
 
 const LAST_OUTCOME_LABEL = {
-  success_fresh: 'Success',
-  success_redundant: 'Success',
+  success: 'Success',
   transient_failure: 'Retrying',
   permanent_failure: 'Failed',
   skipped: 'Skipped',
 } as const;
 
 const LAST_OUTCOME_TONE = {
-  success_fresh: 'ok',
-  success_redundant: 'ok',
+  success: 'ok',
   transient_failure: 'warn',
   permanent_failure: 'danger',
   skipped: 'neutral',
@@ -360,30 +358,34 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
   let statusLabel = 'Paused';
 
   if (upstream.warmup_enabled) {
-    const last = summary?.last_attempt;
-    const skippedBecauseAlreadyActive =
-      last?.outcome === 'skipped' && last?.reason === 'window_already_active';
-
     if (incident) {
       statusTone = 'danger';
       statusLabel = 'Down';
-    } else if (
-      last?.outcome === 'success_fresh' ||
-      last?.outcome === 'success_redundant' ||
-      skippedBecauseAlreadyActive
-    ) {
-      statusTone = 'ok';
-      statusLabel = 'Healthy';
-    } else if (
-      last?.outcome === 'transient_failure' ||
-      last?.outcome === 'permanent_failure' ||
-      last?.outcome === 'skipped'
-    ) {
-      statusTone = 'warn';
-      statusLabel = 'Degraded';
     } else {
-      statusTone = 'neutral';
-      statusLabel = 'Pending';
+      const last = summary?.last_attempt;
+      if (!last) {
+        statusTone = 'neutral';
+        statusLabel = 'Pending';
+      } else {
+        switch (last.status) {
+          case 'success':
+            statusTone = 'ok';
+            statusLabel = 'Healthy';
+            break;
+          case 'skipped':
+            statusTone = 'neutral';
+            statusLabel = 'Idle';
+            break;
+          case 'transient_failure':
+            statusTone = 'warn';
+            statusLabel = 'Degraded';
+            break;
+          case 'permanent_failure':
+            statusTone = 'danger';
+            statusLabel = 'Down';
+            break;
+        }
+      }
     }
   }
 
@@ -501,8 +503,8 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
                       aria-label="Open last warm-up attempt detail"
                     >
                       <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-text">
-                        <Badge tone={LAST_OUTCOME_TONE[lastAttempt.outcome]}>
-                          {LAST_OUTCOME_LABEL[lastAttempt.outcome]}
+                        <Badge tone={LAST_OUTCOME_TONE[lastAttempt.status]}>
+                          {LAST_OUTCOME_LABEL[lastAttempt.status]}
                         </Badge>
                         <RelativeTime
                           compact
@@ -569,7 +571,7 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
               <div
                 className={cx(
                   'rounded-sm border p-2 text-xs leading-relaxed',
-                  lastAttempt.outcome === 'permanent_failure'
+                  lastAttempt.status === 'permanent_failure'
                     ? 'border-[color:var(--color-danger)]/30 bg-red-500/10 text-[color:var(--color-danger)]'
                     : 'border-[color:var(--color-warn)]/30 bg-amber-500/10 text-[color:var(--color-warn)]',
                 )}

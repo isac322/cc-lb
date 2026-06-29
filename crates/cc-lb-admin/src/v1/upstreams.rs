@@ -30,8 +30,9 @@ use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, Storage, StorageError, SubscriptionQuotaLatestRecord,
     SubscriptionQuotaWindow, UpstreamCreate, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
-    UpstreamSubscriptionMetadataRecord, UpstreamUpdate, WarmupAttemptOutcome, WarmupAttemptReason,
-    WarmupAttemptTrigger,
+    UpstreamSubscriptionMetadataRecord, UpstreamUpdate, WarmupAttemptOutcome, WarmupAttemptTrigger,
+    WarmupDispatchKind, WarmupPermanentFailureReason, WarmupSkipReason,
+    WarmupTransientFailureReason,
 };
 use http_body_util::Full;
 use hyper_rustls::HttpsConnectorBuilder;
@@ -178,6 +179,20 @@ struct SubscriptionMetadataResponse {
     upstream_id: String,
     subscription_metadata: Option<UpstreamSubscriptionMetadataRecord>,
     organization_metadata: Option<OrganizationMetadataRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct FireNowFiredResponse {
+    fired: bool,
+    cycle_key: i64,
+    outcome: WarmupAttemptOutcome,
+}
+
+#[derive(Debug, Serialize)]
+struct FireNowNotFiredResponse {
+    fired: bool,
+    #[serde(flatten)]
+    outcome: WarmupAttemptOutcome,
 }
 
 enum UpstreamError {
@@ -455,34 +470,33 @@ async fn fire_now_upstream_warmup(
     }
     let now_unix_secs = unix_now_secs_i64(&*state.clock)?;
     if !upstream.warmup_enabled {
-        record_fire_now_skip(
+        let outcome = record_fire_now_skip(
             storage.as_ref(),
             &upstream,
             now_unix_secs,
-            WarmupAttemptReason::UpstreamDisabled,
+            WarmupSkipReason::UpstreamDisabled,
             None,
         )
         .await;
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "warmup_disabled" })),
-        )
-            .into_response());
+        return Ok(fire_now_not_fired_response(StatusCode::ACCEPTED, outcome));
     }
     if upstream.oauth_credentials.is_none() {
-        record_fire_now_skip(
+        let outcome = record_fire_now_failure(
             storage.as_ref(),
             &upstream,
             now_unix_secs,
-            WarmupAttemptReason::OauthCredentialsMissing,
+            now_unix_secs,
+            None,
+            WarmupPermanentFailureReason::OauthCredentialsMissing,
+            WarmupDispatchKind::NotDispatched,
+            None,
             None,
         )
         .await;
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "fired": false, "reason": "oauth_credentials_missing" })),
-        )
-            .into_response());
+        return Ok(fire_now_not_fired_response(
+            StatusCode::BAD_GATEWAY,
+            outcome,
+        ));
     }
 
     let holder = format!("fire-now:{}", Uuid::new_v4());
@@ -499,22 +513,22 @@ async fn fire_now_upstream_warmup(
             || state.warmup_dialect_dispatcher.is_none())
     {
         tracing::warn!(target: "warmup", upstream_id = %upstream_id, holder = %holder, action = "cycle_abandoned", reason = "dialect_plugin_failed");
-        record_fire_now_failure(
+        let outcome = record_fire_now_failure(
             storage.as_ref(),
             &upstream,
             now_unix_secs,
             candidate_cycle_key,
-            &holder,
-            WarmupAttemptReason::DialectPluginFailed,
+            Some(holder.as_str()),
+            WarmupPermanentFailureReason::DialectPluginFailed,
+            WarmupDispatchKind::NotDispatched,
             Some(StatusCode::BAD_GATEWAY),
             Some("warmup dialect dispatcher unavailable"),
         )
         .await;
-        return Ok((
+        return Ok(fire_now_not_fired_response(
             StatusCode::BAD_GATEWAY,
-            Json(json!({ "fired": false, "reason": "dialect_plugin_failed" })),
-        )
-            .into_response());
+            outcome,
+        ));
     }
     let dialect_dispatch_bundle = upstream.warmup_dialect_plugin.as_ref().and_then(|_| {
         let runtime = state.runtime.as_deref()?;
@@ -531,25 +545,32 @@ async fn fire_now_upstream_warmup(
         )
         .await
         {
-            Ok(Ok(outcome)) => fire_now_response_attempt(outcome.status, outcome.headers),
+            Ok(Ok(outcome)) => fire_now_response_attempt(
+                outcome.status,
+                outcome.headers,
+                WarmupDispatchKind::DialectPlugin,
+            ),
             Ok(Err(error)) => match error.kind {
                 WarmupDialectDispatchErrorKind::Transient => {
                     FireNowDispatchAttempt::TransientFailure {
-                        reason: WarmupAttemptReason::DialectPluginTransient,
+                        reason: WarmupTransientFailureReason::DialectPluginTransient,
+                        dispatch_kind: WarmupDispatchKind::DialectPlugin,
                         status: StatusCode::SERVICE_UNAVAILABLE,
                         error_detail: error.detail,
                     }
                 }
                 WarmupDialectDispatchErrorKind::Permanent => {
                     FireNowDispatchAttempt::PermanentFailure {
-                        reason: WarmupAttemptReason::DialectPluginFailed,
+                        reason: WarmupPermanentFailureReason::DialectPluginFailed,
+                        dispatch_kind: WarmupDispatchKind::DialectPlugin,
                         status: StatusCode::BAD_GATEWAY,
                         error_detail: error.detail,
                     }
                 }
             },
             Err(_) => FireNowDispatchAttempt::TransientFailure {
-                reason: WarmupAttemptReason::RequestTimeout,
+                reason: WarmupTransientFailureReason::RequestTimeout,
+                dispatch_kind: WarmupDispatchKind::DialectPlugin,
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 error_detail: "warmup dispatch timed out".to_owned(),
             },
@@ -563,8 +584,9 @@ async fn fire_now_upstream_warmup(
                     &upstream,
                     now_unix_secs,
                     candidate_cycle_key,
-                    &holder,
-                    WarmupAttemptReason::CredentialDecryptFailed,
+                    Some(holder.as_str()),
+                    WarmupPermanentFailureReason::CredentialDecryptFailed,
+                    WarmupDispatchKind::NotDispatched,
                     None,
                     Some("oauth credential decrypt failed"),
                 )
@@ -581,8 +603,9 @@ async fn fire_now_upstream_warmup(
                         &upstream,
                         now_unix_secs,
                         candidate_cycle_key,
-                        &holder,
-                        WarmupAttemptReason::OauthRefreshFailed,
+                        Some(holder.as_str()),
+                        WarmupPermanentFailureReason::OauthRefreshFailed,
+                        WarmupDispatchKind::NotDispatched,
                         None,
                         Some("oauth refresh failed"),
                     )
@@ -598,8 +621,9 @@ async fn fire_now_upstream_warmup(
                     &upstream,
                     now_unix_secs,
                     candidate_cycle_key,
-                    &holder,
-                    WarmupAttemptReason::RequestBuildFailed,
+                    Some(holder.as_str()),
+                    WarmupPermanentFailureReason::RequestBuildFailed,
+                    WarmupDispatchKind::NotDispatched,
                     None,
                     Some("warmup base url resolution failed"),
                 )
@@ -616,7 +640,8 @@ async fn fire_now_upstream_warmup(
         {
             Ok(attempt) => attempt,
             Err(_) => FireNowDispatchAttempt::TransientFailure {
-                reason: WarmupAttemptReason::RequestTimeout,
+                reason: WarmupTransientFailureReason::RequestTimeout,
+                dispatch_kind: WarmupDispatchKind::Http,
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 error_detail: "warmup dispatch timed out".to_owned(),
             },
@@ -632,6 +657,7 @@ async fn fire_now_upstream_warmup(
         expected_cycle_key: Some(candidate_cycle_key),
         attempted_at_unix_secs: now_unix_secs,
         completed_at_unix_secs: Some(unix_now_secs_i64(&*state.clock)?),
+        dispatch_kind: fire_now_attempt_dispatch_kind(&dispatch_attempt),
         result: execution_result_from_fire_now_attempt(&dispatch_attempt),
     })
     .await;
@@ -648,39 +674,44 @@ async fn fire_now_upstream_warmup(
     tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, status = %status, outcome = ?record.outcome, dispatch_error = record.error_detail.as_deref(), action = "dispatch_result");
 
     match record.outcome {
-        WarmupAttemptOutcome::SuccessFresh | WarmupAttemptOutcome::SuccessRedundant => {
+        WarmupAttemptOutcome::Success(_) => {
             let response_cycle_key = record.cycle_key.unwrap_or(candidate_cycle_key);
             tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, cycle_key = %candidate_cycle_key, response_cycle_key = %response_cycle_key, action = "dispatch_succeeded");
             write_warmup_status_after_success(storage.as_ref(), upstream_id, &*state.clock).await;
-            Ok(Json(json!({ "fired": true, "cycle_key": response_cycle_key })).into_response())
+            Ok(Json(FireNowFiredResponse {
+                fired: true,
+                cycle_key: response_cycle_key,
+                outcome: record.outcome,
+            })
+            .into_response())
         }
-        WarmupAttemptOutcome::PermanentFailure => {
-            let reason = record
-                .reason
-                .unwrap_or(WarmupAttemptReason::DialectPluginFailed);
-            tracing::warn!(target: "warmup", upstream_id = %upstream_id, reason = %warmup_attempt_reason_str(reason), action = "cycle_abandoned");
-            Ok((
+        WarmupAttemptOutcome::PermanentFailure(reason) => {
+            tracing::warn!(target: "warmup", upstream_id = %upstream_id, reason = ?reason, action = "cycle_abandoned");
+            Ok(fire_now_not_fired_response(
                 StatusCode::BAD_GATEWAY,
-                Json(json!({ "fired": false, "reason": warmup_attempt_reason_str(reason) })),
-            )
-                .into_response())
+                record.outcome,
+            ))
         }
-        WarmupAttemptOutcome::TransientFailure => Ok((
+        WarmupAttemptOutcome::TransientFailure(_) => Ok(fire_now_not_fired_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "fired": false, "reason": "transient" })),
-        )
-            .into_response()),
-        WarmupAttemptOutcome::Skipped => {
-            let reason = record
-                .reason
-                .expect("Skipped warm-up attempt always carries a reason");
-            Ok((
-                StatusCode::ACCEPTED,
-                Json(json!({ "fired": false, "reason": warmup_attempt_reason_str(reason) })),
-            )
-                .into_response())
-        }
+            record.outcome,
+        )),
+        WarmupAttemptOutcome::Skipped(_) => Ok(fire_now_not_fired_response(
+            StatusCode::ACCEPTED,
+            record.outcome,
+        )),
     }
+}
+
+fn fire_now_not_fired_response(status: StatusCode, outcome: WarmupAttemptOutcome) -> Response {
+    (
+        status,
+        Json(FireNowNotFiredResponse {
+            fired: false,
+            outcome,
+        }),
+    )
+        .into_response()
 }
 
 async fn latest_five_hour_quota(
@@ -712,16 +743,22 @@ async fn dispatch_fire_now_warmup(
         Ok(request) => request,
         Err(error) => {
             return FireNowDispatchAttempt::PermanentFailure {
-                reason: WarmupAttemptReason::RequestBuildFailed,
+                reason: WarmupPermanentFailureReason::RequestBuildFailed,
+                dispatch_kind: WarmupDispatchKind::NotDispatched,
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 error_detail: error,
             };
         }
     };
     match client.request(request).await {
-        Ok(response) => fire_now_response_attempt(response.status(), response.headers().clone()),
+        Ok(response) => fire_now_response_attempt(
+            response.status(),
+            response.headers().clone(),
+            WarmupDispatchKind::Http,
+        ),
         Err(error) => FireNowDispatchAttempt::TransientFailure {
-            reason: WarmupAttemptReason::NetworkError,
+            reason: WarmupTransientFailureReason::NetworkError,
+            dispatch_kind: WarmupDispatchKind::Http,
             status: StatusCode::BAD_GATEWAY,
             error_detail: error.to_string(),
         },
@@ -789,25 +826,33 @@ async fn record_fire_now_subscription_quota_observations(
 enum FireNowDispatchAttempt {
     Response {
         status: StatusCode,
+        dispatch_kind: WarmupDispatchKind,
         headers: HeaderMap,
         observations: Vec<UnifiedQuotaObservation>,
     },
     TransientFailure {
-        reason: WarmupAttemptReason,
+        reason: WarmupTransientFailureReason,
+        dispatch_kind: WarmupDispatchKind,
         status: StatusCode,
         error_detail: String,
     },
     PermanentFailure {
-        reason: WarmupAttemptReason,
+        reason: WarmupPermanentFailureReason,
+        dispatch_kind: WarmupDispatchKind,
         status: StatusCode,
         error_detail: String,
     },
 }
 
-fn fire_now_response_attempt(status: StatusCode, headers: HeaderMap) -> FireNowDispatchAttempt {
+fn fire_now_response_attempt(
+    status: StatusCode,
+    headers: HeaderMap,
+    dispatch_kind: WarmupDispatchKind,
+) -> FireNowDispatchAttempt {
     let observations = parse_anthropic_unified_headers(&headers);
     FireNowDispatchAttempt::Response {
         status,
+        dispatch_kind,
         headers,
         observations,
     }
@@ -830,6 +875,7 @@ fn execution_result_from_fire_now_attempt(
             reason,
             status,
             error_detail,
+            ..
         } => WarmupAttemptExecutionResult::TransientFailure {
             reason: *reason,
             http_status: Some(*status),
@@ -839,6 +885,7 @@ fn execution_result_from_fire_now_attempt(
             reason,
             status,
             error_detail,
+            ..
         } => WarmupAttemptExecutionResult::PermanentFailure {
             reason: *reason,
             http_status: Some(*status),
@@ -855,13 +902,21 @@ fn fire_now_attempt_status(attempt: &FireNowDispatchAttempt) -> StatusCode {
     }
 }
 
+fn fire_now_attempt_dispatch_kind(attempt: &FireNowDispatchAttempt) -> WarmupDispatchKind {
+    match attempt {
+        FireNowDispatchAttempt::Response { dispatch_kind, .. }
+        | FireNowDispatchAttempt::TransientFailure { dispatch_kind, .. }
+        | FireNowDispatchAttempt::PermanentFailure { dispatch_kind, .. } => *dispatch_kind,
+    }
+}
+
 async fn record_fire_now_skip(
     storage: &dyn Storage,
     upstream: &UpstreamRecord,
     now_unix_secs: i64,
-    reason: WarmupAttemptReason,
+    reason: WarmupSkipReason,
     error_detail: Option<&str>,
-) {
+) -> WarmupAttemptOutcome {
     execute_warmup_attempt(WarmupAttemptExecution {
         storage,
         upstream,
@@ -872,13 +927,15 @@ async fn record_fire_now_skip(
         expected_cycle_key: None,
         attempted_at_unix_secs: now_unix_secs,
         completed_at_unix_secs: Some(now_unix_secs),
+        dispatch_kind: WarmupDispatchKind::NotDispatched,
         result: WarmupAttemptExecutionResult::Skipped {
             reason,
             cycle_key: None,
             error_detail,
         },
     })
-    .await;
+    .await
+    .outcome
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -887,52 +944,31 @@ async fn record_fire_now_failure(
     upstream: &UpstreamRecord,
     now_unix_secs: i64,
     candidate_cycle_key: i64,
-    holder: &str,
-    reason: WarmupAttemptReason,
+    holder: Option<&str>,
+    reason: WarmupPermanentFailureReason,
+    dispatch_kind: WarmupDispatchKind,
     status: Option<StatusCode>,
     error_detail: Option<&str>,
-) {
+) -> WarmupAttemptOutcome {
     execute_warmup_attempt(WarmupAttemptExecution {
         storage,
         upstream,
         scheduled_for_unix_secs: now_unix_secs,
         trigger: WarmupAttemptTrigger::Manual,
         replica_id: None,
-        lease_holder: Some(holder),
+        lease_holder: holder,
         expected_cycle_key: Some(candidate_cycle_key),
         attempted_at_unix_secs: now_unix_secs,
         completed_at_unix_secs: Some(now_unix_secs),
+        dispatch_kind,
         result: WarmupAttemptExecutionResult::PermanentFailure {
             reason,
             http_status: status,
             error_detail,
         },
     })
-    .await;
-}
-
-const fn warmup_attempt_reason_str(reason: WarmupAttemptReason) -> &'static str {
-    match reason {
-        WarmupAttemptReason::WindowAlreadyActive => "window_already_active",
-        WarmupAttemptReason::SevenDayQuotaExhausted => "seven_day_quota_exhausted",
-        WarmupAttemptReason::Http429MissingCycleKey => "http_429_missing_cycle_key",
-        WarmupAttemptReason::Upstream5xx => "upstream_5xx",
-        WarmupAttemptReason::NetworkError => "network_error",
-        WarmupAttemptReason::RequestTimeout => "request_timeout",
-        WarmupAttemptReason::RequestBuildFailed => "request_build_failed",
-        WarmupAttemptReason::OauthRefreshFailed => "oauth_refresh_failed",
-        WarmupAttemptReason::CredentialDecryptFailed => "credential_decrypt_failed",
-        WarmupAttemptReason::AuthFailed => "auth_failed",
-        WarmupAttemptReason::Forbidden => "forbidden",
-        WarmupAttemptReason::BadRequest => "bad_request",
-        WarmupAttemptReason::NotFound => "not_found",
-        WarmupAttemptReason::DialectPluginFailed => "dialect_plugin_failed",
-        WarmupAttemptReason::DialectPluginTransient => "dialect_plugin_transient",
-        WarmupAttemptReason::OauthCredentialsMissing => "oauth_credentials_missing",
-        WarmupAttemptReason::LeaseHeld => "lease_held",
-        WarmupAttemptReason::UpstreamDisabled => "upstream_disabled",
-        WarmupAttemptReason::UpstreamDeleted => "upstream_deleted",
-    }
+    .await
+    .outcome
 }
 
 fn upstream_base_url(upstream: &UpstreamRecord) -> Result<Url, UpstreamError> {

@@ -1,31 +1,39 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     StorageError, StorageResult, UpstreamWarmupAttemptStore, WarmupAttemptListFilters,
-    WarmupAttemptOutcome, WarmupAttemptRecord, WarmupAttemptSummary,
+    WarmupAttemptRecord, WarmupAttemptStatus, WarmupAttemptSummary,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sqlx::{AssertSqlSafe, Row, sqlite::SqliteRow};
 use uuid::Uuid;
 
-use crate::{SqliteStorage, map_sqlx_error};
+use crate::{
+    SqliteStorage,
+    adapter::warmup_attempt_mapping::{
+        dispatch_kind_from_str, dispatch_kind_to_str, outcome_components, parse_reason,
+        status_from_str, status_to_str,
+    },
+    map_sqlx_error,
+};
 
 const DEFAULT_LIST_LIMIT: u32 = 50;
 const WARMUP_ATTEMPT_COLUMNS: &str = "id, upstream_id, attempted_at_unix_secs, \
-    completed_at_unix_secs, scheduled_for_unix_secs, trigger, outcome, reason, http_status, \
-    cycle_key, expected_cycle_key, idle_secs_since_prev_window, replica_id, lease_holder, \
-    upstream_spec_revision, dialect_plugin_snapshot, error_detail";
+    completed_at_unix_secs, scheduled_for_unix_secs, trigger, outcome, reason, dispatch_kind, \
+    http_status, cycle_key, expected_cycle_key, idle_secs_since_prev_window, replica_id, \
+    lease_holder, upstream_spec_revision, dialect_plugin_snapshot, error_detail";
 
 #[async_trait]
 impl UpstreamWarmupAttemptStore for SqliteStorage {
     async fn insert_warmup_attempt(&self, attempt: &WarmupAttemptRecord) -> StorageResult<()> {
+        let (outcome, reason) = outcome_components(attempt.outcome);
         sqlx::query(
             "INSERT INTO warmup_attempts_v1 \
              (id, upstream_id, attempted_at_unix_secs, completed_at_unix_secs, \
-              scheduled_for_unix_secs, trigger, outcome, reason, http_status, cycle_key, \
-              expected_cycle_key, idle_secs_since_prev_window, replica_id, lease_holder, \
+              scheduled_for_unix_secs, trigger, outcome, reason, dispatch_kind, http_status, \
+              cycle_key, expected_cycle_key, idle_secs_since_prev_window, replica_id, lease_holder, \
               upstream_spec_revision, dialect_plugin_snapshot, error_detail) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(attempt.id.to_string())
         .bind(attempt.upstream_id.to_string())
@@ -33,13 +41,9 @@ impl UpstreamWarmupAttemptStore for SqliteStorage {
         .bind(attempt.completed_at_unix_secs)
         .bind(attempt.scheduled_for_unix_secs)
         .bind(enum_to_db(attempt.trigger, "trigger")?)
-        .bind(enum_to_db(attempt.outcome, "outcome")?)
-        .bind(
-            attempt
-                .reason
-                .map(|reason| enum_to_db(reason, "reason"))
-                .transpose()?,
-        )
+        .bind(outcome)
+        .bind(reason)
+        .bind(attempt.dispatch_kind.map(dispatch_kind_to_str))
         .bind(attempt.http_status)
         .bind(attempt.cycle_key)
         .bind(attempt.expected_cycle_key)
@@ -63,7 +67,7 @@ impl UpstreamWarmupAttemptStore for SqliteStorage {
         let mut sql = format!(
             "SELECT {WARMUP_ATTEMPT_COLUMNS} FROM warmup_attempts_v1 WHERE upstream_id = ?"
         );
-        if filters.outcome.is_some() {
+        if filters.status.is_some() {
             sql.push_str(" AND outcome = ?");
         }
         if filters.before.is_some() {
@@ -75,8 +79,8 @@ impl UpstreamWarmupAttemptStore for SqliteStorage {
         sql.push_str(" ORDER BY attempted_at_unix_secs DESC, id DESC LIMIT ?");
 
         let mut query = sqlx::query(AssertSqlSafe(sql)).bind(upstream_id.to_string());
-        if let Some(outcome) = filters.outcome {
-            query = query.bind(enum_to_db(outcome, "outcome")?);
+        if let Some(status) = filters.status {
+            query = query.bind(status_to_str(status));
         }
         if let Some(cursor) = filters.before {
             query = query
@@ -112,8 +116,7 @@ impl UpstreamWarmupAttemptStore for SqliteStorage {
 
         let mut summary = WarmupAttemptSummary::default();
         for row in rows {
-            let outcome = enum_from_db::<WarmupAttemptOutcome>(
-                "outcome",
+            let status = status_from_str(
                 &row.try_get::<String, _>("outcome")
                     .map_err(map_sqlx_error)?,
             )?;
@@ -122,12 +125,11 @@ impl UpstreamWarmupAttemptStore for SqliteStorage {
                     .map_err(map_sqlx_error)?,
                 "warmup attempt summary count",
             )?;
-            match outcome {
-                WarmupAttemptOutcome::SuccessFresh => summary.success_fresh = count,
-                WarmupAttemptOutcome::SuccessRedundant => summary.success_redundant = count,
-                WarmupAttemptOutcome::TransientFailure => summary.transient_failure = count,
-                WarmupAttemptOutcome::PermanentFailure => summary.permanent_failure = count,
-                WarmupAttemptOutcome::Skipped => summary.skipped = count,
+            match status {
+                WarmupAttemptStatus::Success => summary.success = count,
+                WarmupAttemptStatus::Skipped => summary.skipped = count,
+                WarmupAttemptStatus::TransientFailure => summary.transient_failure = count,
+                WarmupAttemptStatus::PermanentFailure => summary.permanent_failure = count,
             }
         }
         Ok(summary)
@@ -157,8 +159,12 @@ fn row_to_record(row: SqliteRow) -> StorageResult<WarmupAttemptRecord> {
     let replica_id = row
         .try_get::<Option<String>, _>("replica_id")
         .map_err(map_sqlx_error)?;
-    let reason = row
-        .try_get::<Option<String>, _>("reason")
+    let outcome = row
+        .try_get::<String, _>("outcome")
+        .map_err(map_sqlx_error)?;
+    let reason = row.try_get::<String, _>("reason").map_err(map_sqlx_error)?;
+    let dispatch_kind = row
+        .try_get::<Option<String>, _>("dispatch_kind")
         .map_err(map_sqlx_error)?;
 
     Ok(WarmupAttemptRecord {
@@ -178,14 +184,10 @@ fn row_to_record(row: SqliteRow) -> StorageResult<WarmupAttemptRecord> {
             &row.try_get::<String, _>("trigger")
                 .map_err(map_sqlx_error)?,
         )?,
-        outcome: enum_from_db(
-            "outcome",
-            &row.try_get::<String, _>("outcome")
-                .map_err(map_sqlx_error)?,
-        )?,
-        reason: reason
+        outcome: parse_reason(status_from_str(&outcome)?, &reason)?,
+        dispatch_kind: dispatch_kind
             .as_deref()
-            .map(|value| enum_from_db("reason", value))
+            .map(dispatch_kind_from_str)
             .transpose()?,
         http_status: row.try_get("http_status").map_err(map_sqlx_error)?,
         cycle_key: row.try_get("cycle_key").map_err(map_sqlx_error)?,

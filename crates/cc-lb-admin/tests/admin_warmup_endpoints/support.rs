@@ -8,8 +8,9 @@ use cc_lb_config::Config;
 use cc_lb_core::Clock as _;
 use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::warmup_attempts::{
-    WarmupAttemptCursor, WarmupAttemptOutcome, WarmupAttemptReason, WarmupAttemptRecord,
-    WarmupAttemptTrigger,
+    WarmupAttemptCursor, WarmupAttemptOutcome, WarmupAttemptRecord, WarmupAttemptTrigger,
+    WarmupDispatchKind, WarmupPermanentFailureReason, WarmupSkipReason, WarmupSuccessReason,
+    WarmupTransientFailureReason,
 };
 use cc_lb_storage_api::{UpstreamStore, UpstreamWarmupAttemptStore};
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -20,7 +21,7 @@ use uuid::Uuid;
 
 const TEST_TOKEN: &str = "test-token";
 pub use crate::scheduler_support::NEXT_SCHEDULED_AT;
-pub const RECENT_7D_COUNTS: (u64, u64, u64, u64, u64) = (3, 3, 3, 3, 2);
+pub const RECENT_7D_COUNTS: (u64, u64, u64, u64) = (6, 2, 3, 3);
 
 pub struct Fixture {
     pub _dir: tempfile::TempDir,
@@ -142,23 +143,22 @@ fn seeded_attempt(
         scheduled_for_unix_secs: attempted_at_unix_secs - 60,
         trigger: trigger_for_index(index),
         outcome,
-        reason: reason_for_outcome(outcome),
+        dispatch_kind: Some(dispatch_kind_for_outcome(outcome)),
         http_status: http_status_for_outcome(outcome),
-        cycle_key: (outcome == WarmupAttemptOutcome::SuccessFresh)
-            .then_some(attempted_at_unix_secs / (5 * 3600)),
-        expected_cycle_key: (outcome == WarmupAttemptOutcome::SuccessRedundant)
-            .then_some((attempted_at_unix_secs / (5 * 3600)) + 1),
-        idle_secs_since_prev_window: (outcome == WarmupAttemptOutcome::SuccessFresh).then_some(600),
+        cycle_key: cycle_key_for_outcome(outcome, attempted_at_unix_secs),
+        expected_cycle_key: expected_cycle_key_for_outcome(outcome, attempted_at_unix_secs),
+        idle_secs_since_prev_window: idle_secs_since_prev_window_for_outcome(outcome),
         replica_id: (index.is_multiple_of(2)).then_some(Uuid::from_u128(
             0xBBBB_0000_0000_0000_0000_0000_0000_0000 + index as u128,
         )),
-        lease_holder: (outcome == WarmupAttemptOutcome::Skipped).then_some("replica-2".to_owned()),
+        lease_holder: matches!(outcome, WarmupAttemptOutcome::Skipped(_))
+            .then_some("replica-2".to_owned()),
         upstream_spec_revision: i64::try_from(upstream_spec_revision)
             .expect("test revision fits i64"),
         dialect_plugin_snapshot: Some(plugin_snapshot.clone()),
         error_detail: matches!(
             outcome,
-            WarmupAttemptOutcome::TransientFailure | WarmupAttemptOutcome::PermanentFailure
+            WarmupAttemptOutcome::TransientFailure(_) | WarmupAttemptOutcome::PermanentFailure(_)
         )
         .then_some("seeded warmup outcome".to_owned()),
     }
@@ -183,30 +183,69 @@ const fn trigger_for_index(index: usize) -> WarmupAttemptTrigger {
 
 const fn outcome_for_index(index: usize) -> WarmupAttemptOutcome {
     match index % 5 {
-        0 => WarmupAttemptOutcome::SuccessFresh,
-        1 => WarmupAttemptOutcome::SuccessRedundant,
-        2 => WarmupAttemptOutcome::TransientFailure,
-        3 => WarmupAttemptOutcome::PermanentFailure,
-        _ => WarmupAttemptOutcome::Skipped,
+        0 => WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
+        1 => WarmupAttemptOutcome::Success(WarmupSuccessReason::WindowAlreadyActive),
+        2 => WarmupAttemptOutcome::TransientFailure(WarmupTransientFailureReason::Upstream5xx),
+        3 => WarmupAttemptOutcome::PermanentFailure(WarmupPermanentFailureReason::AuthFailed),
+        _ => WarmupAttemptOutcome::Skipped(WarmupSkipReason::UpstreamDisabled),
     }
 }
 
-const fn reason_for_outcome(outcome: WarmupAttemptOutcome) -> Option<WarmupAttemptReason> {
+const fn dispatch_kind_for_outcome(outcome: WarmupAttemptOutcome) -> WarmupDispatchKind {
     match outcome {
-        WarmupAttemptOutcome::SuccessFresh => None,
-        WarmupAttemptOutcome::SuccessRedundant => Some(WarmupAttemptReason::WindowAlreadyActive),
-        WarmupAttemptOutcome::TransientFailure => Some(WarmupAttemptReason::Upstream5xx),
-        WarmupAttemptOutcome::PermanentFailure => Some(WarmupAttemptReason::AuthFailed),
-        WarmupAttemptOutcome::Skipped => Some(WarmupAttemptReason::LeaseHeld),
+        WarmupAttemptOutcome::Success(_)
+        | WarmupAttemptOutcome::TransientFailure(_)
+        | WarmupAttemptOutcome::PermanentFailure(_) => WarmupDispatchKind::Http,
+        WarmupAttemptOutcome::Skipped(_) => WarmupDispatchKind::NotDispatched,
     }
 }
 
 const fn http_status_for_outcome(outcome: WarmupAttemptOutcome) -> Option<i32> {
     match outcome {
-        WarmupAttemptOutcome::SuccessFresh | WarmupAttemptOutcome::SuccessRedundant => Some(200),
-        WarmupAttemptOutcome::TransientFailure => Some(503),
-        WarmupAttemptOutcome::PermanentFailure => Some(401),
-        WarmupAttemptOutcome::Skipped => None,
+        WarmupAttemptOutcome::Success(_) => Some(200),
+        WarmupAttemptOutcome::TransientFailure(_) => Some(503),
+        WarmupAttemptOutcome::PermanentFailure(_) => Some(401),
+        WarmupAttemptOutcome::Skipped(_) => None,
+    }
+}
+
+const fn cycle_key_for_outcome(
+    outcome: WarmupAttemptOutcome,
+    attempted_at_unix_secs: i64,
+) -> Option<i64> {
+    match outcome {
+        WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced) => {
+            Some(attempted_at_unix_secs / (5 * 3600))
+        }
+        WarmupAttemptOutcome::Success(WarmupSuccessReason::WindowAlreadyActive)
+        | WarmupAttemptOutcome::Skipped(_)
+        | WarmupAttemptOutcome::TransientFailure(_)
+        | WarmupAttemptOutcome::PermanentFailure(_) => None,
+    }
+}
+
+const fn expected_cycle_key_for_outcome(
+    outcome: WarmupAttemptOutcome,
+    attempted_at_unix_secs: i64,
+) -> Option<i64> {
+    match outcome {
+        WarmupAttemptOutcome::Success(WarmupSuccessReason::WindowAlreadyActive) => {
+            Some((attempted_at_unix_secs / (5 * 3600)) + 1)
+        }
+        WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced)
+        | WarmupAttemptOutcome::Skipped(_)
+        | WarmupAttemptOutcome::TransientFailure(_)
+        | WarmupAttemptOutcome::PermanentFailure(_) => None,
+    }
+}
+
+const fn idle_secs_since_prev_window_for_outcome(outcome: WarmupAttemptOutcome) -> Option<i64> {
+    match outcome {
+        WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced) => Some(600),
+        WarmupAttemptOutcome::Success(WarmupSuccessReason::WindowAlreadyActive)
+        | WarmupAttemptOutcome::Skipped(_)
+        | WarmupAttemptOutcome::TransientFailure(_)
+        | WarmupAttemptOutcome::PermanentFailure(_) => None,
     }
 }
 

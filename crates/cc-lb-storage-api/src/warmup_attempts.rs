@@ -9,25 +9,43 @@ const BASE64_ALPHABET: &[u8; 64] =
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WarmupAttemptOutcome {
-    SuccessFresh,
-    SuccessRedundant,
+pub enum WarmupAttemptStatus {
+    Success,
+    Skipped,
     TransientFailure,
     PermanentFailure,
-    Skipped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WarmupAttemptReason {
+pub enum WarmupSuccessReason {
+    CycleAdvanced,
     WindowAlreadyActive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarmupSkipReason {
     SevenDayQuotaExhausted,
-    #[serde(rename = "http_429_missing_cycle_key")]
-    Http429MissingCycleKey,
+    UpstreamDisabled,
+    UpstreamDeleted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarmupTransientFailureReason {
+    RateLimitedCycleKeyMissing,
     #[serde(rename = "upstream_5xx")]
     Upstream5xx,
     NetworkError,
     RequestTimeout,
+    DialectPluginTransient,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarmupPermanentFailureReason {
+    OauthCredentialsMissing,
     RequestBuildFailed,
     OauthRefreshFailed,
     CredentialDecryptFailed,
@@ -36,11 +54,34 @@ pub enum WarmupAttemptReason {
     BadRequest,
     NotFound,
     DialectPluginFailed,
-    DialectPluginTransient,
-    OauthCredentialsMissing,
-    LeaseHeld,
-    UpstreamDisabled,
-    UpstreamDeleted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "status", content = "reason", rename_all = "snake_case")]
+pub enum WarmupAttemptOutcome {
+    Success(WarmupSuccessReason),
+    Skipped(WarmupSkipReason),
+    TransientFailure(WarmupTransientFailureReason),
+    PermanentFailure(WarmupPermanentFailureReason),
+}
+
+impl WarmupAttemptOutcome {
+    pub fn status(self) -> WarmupAttemptStatus {
+        match self {
+            Self::Success(_) => WarmupAttemptStatus::Success,
+            Self::Skipped(_) => WarmupAttemptStatus::Skipped,
+            Self::TransientFailure(_) => WarmupAttemptStatus::TransientFailure,
+            Self::PermanentFailure(_) => WarmupAttemptStatus::PermanentFailure,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarmupDispatchKind {
+    NotDispatched,
+    Http,
+    DialectPlugin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -58,8 +99,9 @@ pub struct WarmupAttemptRecord {
     pub completed_at_unix_secs: Option<i64>,
     pub scheduled_for_unix_secs: i64,
     pub trigger: WarmupAttemptTrigger,
+    #[serde(flatten)]
     pub outcome: WarmupAttemptOutcome,
-    pub reason: Option<WarmupAttemptReason>,
+    pub dispatch_kind: Option<WarmupDispatchKind>,
     pub http_status: Option<i32>,
     pub cycle_key: Option<i64>,
     pub expected_cycle_key: Option<i64>,
@@ -105,16 +147,15 @@ impl WarmupAttemptCursor {
 pub struct WarmupAttemptListFilters {
     pub limit: Option<u32>,
     pub before: Option<WarmupAttemptCursor>,
-    pub outcome: Option<WarmupAttemptOutcome>,
+    pub status: Option<WarmupAttemptStatus>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WarmupAttemptSummary {
-    pub success_fresh: u64,
-    pub success_redundant: u64,
+    pub success: u64,
+    pub skipped: u64,
     pub transient_failure: u64,
     pub permanent_failure: u64,
-    pub skipped: u64,
 }
 
 #[async_trait]
@@ -278,23 +319,29 @@ mod tests {
     }
 
     #[test]
-    fn warmup_attempt_reason_serializes_schema_values() {
-        let http_429_reason = serde_json::to_string(&WarmupAttemptReason::Http429MissingCycleKey)
-            .map_err(|error| error.to_string());
-        let upstream_5xx_reason = serde_json::to_string(&WarmupAttemptReason::Upstream5xx)
-            .map_err(|error| error.to_string());
-        let seven_day_quota_exhausted_reason =
-            serde_json::to_string(&WarmupAttemptReason::SevenDayQuotaExhausted)
-                .map_err(|error| error.to_string());
-
-        assert_eq!(
-            http_429_reason.as_deref(),
-            Ok("\"http_429_missing_cycle_key\"")
+    fn warmup_outcome_flattens_to_status_and_reason_pair() {
+        let outcome = WarmupAttemptOutcome::TransientFailure(
+            WarmupTransientFailureReason::RateLimitedCycleKeyMissing,
         );
-        assert_eq!(upstream_5xx_reason.as_deref(), Ok("\"upstream_5xx\""));
+        let json = serde_json::to_string(&outcome).expect("serialize outcome");
         assert_eq!(
-            seven_day_quota_exhausted_reason.as_deref(),
-            Ok("\"seven_day_quota_exhausted\"")
+            json,
+            r#"{"status":"transient_failure","reason":"rate_limited_cycle_key_missing"}"#
+        );
+
+        let upstream_5xx =
+            WarmupAttemptOutcome::TransientFailure(WarmupTransientFailureReason::Upstream5xx);
+        let upstream_5xx_json = serde_json::to_string(&upstream_5xx).expect("serialize outcome");
+        assert_eq!(
+            upstream_5xx_json,
+            r#"{"status":"transient_failure","reason":"upstream_5xx"}"#
+        );
+
+        let success = WarmupAttemptOutcome::Success(WarmupSuccessReason::WindowAlreadyActive);
+        let success_json = serde_json::to_string(&success).expect("serialize outcome");
+        assert_eq!(
+            success_json,
+            r#"{"status":"success","reason":"window_already_active"}"#
         );
     }
 }

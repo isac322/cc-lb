@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    StorageResult, UpstreamWarmupAttemptStore, WarmupAttemptListFilters, WarmupAttemptOutcome,
-    WarmupAttemptRecord, WarmupAttemptSummary,
+    StorageResult, UpstreamWarmupAttemptStore, WarmupAttemptListFilters, WarmupAttemptRecord,
+    WarmupAttemptStatus, WarmupAttemptSummary,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -10,7 +10,8 @@ use crate::{
     adapter::{
         PostgresStorage, i64_to_u64,
         warmup_attempt_mapping::{
-            outcome_from_str, outcome_to_str, reason_to_str, row_to_attempt, trigger_to_str,
+            dispatch_kind_to_str, outcome_components, row_to_attempt, status_from_str,
+            status_to_str, trigger_to_str,
         },
     },
     error_map::map_sqlx_error,
@@ -21,13 +22,14 @@ const DEFAULT_WARMUP_ATTEMPT_LIMIT: i64 = 50;
 #[async_trait]
 impl UpstreamWarmupAttemptStore for PostgresStorage {
     async fn insert_warmup_attempt(&self, attempt: &WarmupAttemptRecord) -> StorageResult<()> {
+        let (outcome, reason) = outcome_components(attempt.outcome);
         sqlx::query(
             "INSERT INTO warmup_attempts_v1 \
-             (id, upstream_id, attempted_at_unix_secs, completed_at_unix_secs, scheduled_for_unix_secs, \
-              trigger, outcome, reason, http_status, cycle_key, expected_cycle_key, \
-              idle_secs_since_prev_window, replica_id, lease_holder, upstream_spec_revision, \
-              dialect_plugin_snapshot, error_detail) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17)",
+              (id, upstream_id, attempted_at_unix_secs, completed_at_unix_secs, scheduled_for_unix_secs, \
+               trigger, outcome, reason, dispatch_kind, http_status, cycle_key, expected_cycle_key, \
+               idle_secs_since_prev_window, replica_id, lease_holder, upstream_spec_revision, \
+               dialect_plugin_snapshot, error_detail) \
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18)",
         )
         .bind(attempt.id)
         .bind(attempt.upstream_id)
@@ -35,8 +37,9 @@ impl UpstreamWarmupAttemptStore for PostgresStorage {
         .bind(attempt.completed_at_unix_secs)
         .bind(attempt.scheduled_for_unix_secs)
         .bind(trigger_to_str(attempt.trigger))
-        .bind(outcome_to_str(attempt.outcome))
-        .bind(attempt.reason.map(reason_to_str))
+        .bind(outcome)
+        .bind(reason)
+        .bind(attempt.dispatch_kind.map(dispatch_kind_to_str))
         .bind(attempt.http_status)
         .bind(attempt.cycle_key)
         .bind(attempt.expected_cycle_key)
@@ -61,8 +64,8 @@ impl UpstreamWarmupAttemptStore for PostgresStorage {
             .limit
             .map(i64::from)
             .unwrap_or(DEFAULT_WARMUP_ATTEMPT_LIMIT);
-        let rows = match (filters.outcome, filters.before) {
-            (Some(outcome), Some(before)) => {
+        let rows = match (filters.status, filters.before) {
+            (Some(status), Some(before)) => {
                 sqlx::query(
                     "SELECT * FROM warmup_attempts_v1 \
                  WHERE upstream_id = $1 \
@@ -73,14 +76,14 @@ impl UpstreamWarmupAttemptStore for PostgresStorage {
                  LIMIT $5",
                 )
                 .bind(upstream_id)
-                .bind(outcome_to_str(outcome))
+                .bind(status_to_str(status))
                 .bind(before.attempted_at_unix_secs)
                 .bind(before.id)
                 .bind(limit)
                 .fetch_all(&self.pool)
                 .await
             }
-            (Some(outcome), None) => {
+            (Some(status), None) => {
                 sqlx::query(
                     "SELECT * FROM warmup_attempts_v1 \
                  WHERE upstream_id = $1 \
@@ -89,7 +92,7 @@ impl UpstreamWarmupAttemptStore for PostgresStorage {
                  LIMIT $3",
                 )
                 .bind(upstream_id)
-                .bind(outcome_to_str(outcome))
+                .bind(status_to_str(status))
                 .bind(limit)
                 .fetch_all(&self.pool)
                 .await
@@ -147,7 +150,7 @@ impl UpstreamWarmupAttemptStore for PostgresStorage {
 
         let mut summary = WarmupAttemptSummary::default();
         for row in rows {
-            let outcome = outcome_from_str(
+            let status = status_from_str(
                 &row.try_get::<String, _>("outcome")
                     .map_err(map_sqlx_error)?,
             )?;
@@ -155,12 +158,11 @@ impl UpstreamWarmupAttemptStore for PostgresStorage {
                 row.try_get("attempt_count").map_err(map_sqlx_error)?,
                 "warmup attempt summary count",
             )?;
-            match outcome {
-                WarmupAttemptOutcome::SuccessFresh => summary.success_fresh = count,
-                WarmupAttemptOutcome::SuccessRedundant => summary.success_redundant = count,
-                WarmupAttemptOutcome::TransientFailure => summary.transient_failure = count,
-                WarmupAttemptOutcome::PermanentFailure => summary.permanent_failure = count,
-                WarmupAttemptOutcome::Skipped => summary.skipped = count,
+            match status {
+                WarmupAttemptStatus::Success => summary.success = count,
+                WarmupAttemptStatus::Skipped => summary.skipped = count,
+                WarmupAttemptStatus::TransientFailure => summary.transient_failure = count,
+                WarmupAttemptStatus::PermanentFailure => summary.permanent_failure = count,
             }
         }
         Ok(summary)

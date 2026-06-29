@@ -1,34 +1,34 @@
 use cc_lb_core::clock::{Clock, unix_secs};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
-use cc_lb_storage_api::WarmupAttemptReason;
+use cc_lb_storage_api::WarmupPermanentFailureReason;
 
 use crate::warmup::execute::WarmupAttemptExecutionResult;
 use crate::warmup::{WarmupAbandonReason, WarmupResult, classify_response};
 
-use super::WarmupDispatchAttempt;
+use super::request::{WarmupDispatchAttempt, WarmupDispatchResult};
 
 pub(super) fn response_is_auth_failed(
     attempt: &WarmupDispatchAttempt,
     expected_cycle_key: i64,
 ) -> bool {
-    match attempt {
-        WarmupDispatchAttempt::Response {
+    match &attempt.result {
+        WarmupDispatchResult::Response {
             status,
             observations,
         } => matches!(
             classify_response(*status, observations, expected_cycle_key),
             WarmupResult::AbandonCyclePermanent(WarmupAbandonReason::AuthFailed)
         ),
-        WarmupDispatchAttempt::TransientFailure { .. }
-        | WarmupDispatchAttempt::PermanentFailure { .. } => false,
+        WarmupDispatchResult::TransientFailure { .. }
+        | WarmupDispatchResult::PermanentFailure { .. } => false,
     }
 }
 
 pub(super) fn execution_result_from_dispatch_attempt(
     attempt: &WarmupDispatchAttempt,
 ) -> WarmupAttemptExecutionResult<'_> {
-    match attempt {
-        WarmupDispatchAttempt::Response {
+    match &attempt.result {
+        WarmupDispatchResult::Response {
             status,
             observations,
         } => WarmupAttemptExecutionResult::Response {
@@ -36,7 +36,7 @@ pub(super) fn execution_result_from_dispatch_attempt(
             observations,
             error_detail: None,
         },
-        WarmupDispatchAttempt::TransientFailure {
+        WarmupDispatchResult::TransientFailure {
             reason,
             error_detail,
         } => WarmupAttemptExecutionResult::TransientFailure {
@@ -44,7 +44,7 @@ pub(super) fn execution_result_from_dispatch_attempt(
             http_status: None,
             error_detail: Some(error_detail.as_str()),
         },
-        WarmupDispatchAttempt::PermanentFailure {
+        WarmupDispatchResult::PermanentFailure {
             reason,
             error_detail,
         } => WarmupAttemptExecutionResult::PermanentFailure {
@@ -59,24 +59,26 @@ pub(super) fn transient_attempt_error(
     attempt: &WarmupDispatchAttempt,
     http_status: Option<i32>,
 ) -> String {
-    match attempt {
-        WarmupDispatchAttempt::Response { status, .. } => {
+    match &attempt.result {
+        WarmupDispatchResult::Response { status, .. } => {
             format!("warmup returned transient status {status}")
         }
-        WarmupDispatchAttempt::TransientFailure { error_detail, .. } => error_detail.clone(),
-        WarmupDispatchAttempt::PermanentFailure { .. } => http_status
+        WarmupDispatchResult::TransientFailure { error_detail, .. } => error_detail.clone(),
+        WarmupDispatchResult::PermanentFailure { .. } => http_status
             .map(|status| format!("warmup returned transient status {status}"))
             .unwrap_or_else(|| "warmup returned transient failure".to_owned()),
     }
 }
 
-pub(super) fn pre_request_error_reason(error: &SchedulerError) -> Option<WarmupAttemptReason> {
+pub(super) fn pre_request_error_reason(
+    error: &SchedulerError,
+) -> Option<WarmupPermanentFailureReason> {
     let detail = error.to_string();
     if detail.contains("oauth decrypt failed") {
-        return Some(WarmupAttemptReason::CredentialDecryptFailed);
+        return Some(WarmupPermanentFailureReason::CredentialDecryptFailed);
     }
     if detail.contains("missing oauth credentials") {
-        return Some(WarmupAttemptReason::OauthCredentialsMissing);
+        return Some(WarmupPermanentFailureReason::OauthCredentialsMissing);
     }
     None
 }

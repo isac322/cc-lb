@@ -1,7 +1,8 @@
 use anyhow::Result;
 use cc_lb_storage_api::{
     UpstreamStore, UpstreamWarmupAttemptStore, WarmupAttemptCursor, WarmupAttemptListFilters,
-    WarmupAttemptOutcome, WarmupAttemptRecord, WarmupAttemptTrigger,
+    WarmupAttemptOutcome, WarmupAttemptRecord, WarmupAttemptStatus, WarmupAttemptTrigger,
+    WarmupDispatchKind,
     upstream::{UpstreamCreate, UpstreamKind, UpstreamRecord},
 };
 use uuid::Uuid;
@@ -44,7 +45,7 @@ pub fn attempt(
         scheduled_for_unix_secs: attempted_at_unix_secs - 60,
         trigger: WarmupAttemptTrigger::Scheduled,
         outcome,
-        reason: None,
+        dispatch_kind: Some(WarmupDispatchKind::NotDispatched),
         http_status: None,
         cycle_key: None,
         expected_cycle_key: None,
@@ -79,12 +80,12 @@ pub fn outcomes(
 pub fn filters(
     limit: Option<u32>,
     before: Option<WarmupAttemptCursor>,
-    outcome: Option<WarmupAttemptOutcome>,
+    status: Option<WarmupAttemptStatus>,
 ) -> WarmupAttemptListFilters {
     WarmupAttemptListFilters {
         limit,
         before,
-        outcome,
+        status,
     }
 }
 
