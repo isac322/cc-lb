@@ -470,7 +470,7 @@ async fn fire_now_upstream_warmup(
     }
     let now_unix_secs = unix_now_secs_i64(&*state.clock)?;
     if !upstream.warmup_enabled {
-        let outcome = record_fire_now_skip(
+        let _ = record_fire_now_skip(
             storage.as_ref(),
             &upstream,
             now_unix_secs,
@@ -478,7 +478,11 @@ async fn fire_now_upstream_warmup(
             None,
         )
         .await;
-        return Ok(fire_now_not_fired_response(StatusCode::ACCEPTED, outcome));
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "warmup_disabled" })),
+        )
+            .into_response());
     }
     if upstream.oauth_credentials.is_none() {
         let outcome = record_fire_now_failure(
@@ -494,7 +498,7 @@ async fn fire_now_upstream_warmup(
         )
         .await;
         return Ok(fire_now_not_fired_response(
-            StatusCode::BAD_GATEWAY,
+            StatusCode::BAD_REQUEST,
             outcome,
         ));
     }
@@ -1839,7 +1843,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["fired"], false);
-        assert_eq!(body["reason"], "transient");
+        assert_eq!(body["reason"], "upstream_5xx");
         server.abort();
     }
 
