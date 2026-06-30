@@ -116,7 +116,7 @@ jobs:
           stable-build-metadata: "true"
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov,cargo-nextest
+          tool: cargo-llvm-cov,cargo-nextest,sqlx-cli
 
       - name: Preflight - CI_POSTGRES_URL must be set
         run: |
@@ -124,6 +124,11 @@ jobs:
             echo "CI_POSTGRES_URL is empty; postgres service container did not configure the env." >&2
             exit 1
           fi
+
+      - name: Run Postgres migrations
+        run: sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
+        env:
+          DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
 
       - name: Clean coverage artifacts
         run: cargo llvm-cov clean --workspace
