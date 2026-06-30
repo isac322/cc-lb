@@ -1,5 +1,4 @@
 use super::*;
-use crate::scheduler_dispatch::warmup::quota::WarmupPreflightSkip;
 use cc_lb_plugin_api::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow};
 
@@ -38,10 +37,9 @@ fn quota_preflight_skips_fresh_seven_day_exhausted_snapshot() {
 
     assert_eq!(
         quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
-        WarmupQuotaPreflightDecision::Skip(WarmupPreflightSkip {
-            reason: WarmupAttemptReason::SevenDayQuotaExhausted,
-            cycle_key: Some(1_782_414_000),
-        })
+        WarmupQuotaPreflightDecision::SevenDayQuotaExhausted {
+            cycle_key: 1_782_414_000
+        }
     );
 }
 
@@ -66,15 +64,14 @@ fn quota_preflight_prefers_seven_day_over_five_hour_snapshot() {
 
     assert_eq!(
         quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
-        WarmupQuotaPreflightDecision::Skip(WarmupPreflightSkip {
-            reason: WarmupAttemptReason::SevenDayQuotaExhausted,
-            cycle_key: Some(1_782_414_000),
-        })
+        WarmupQuotaPreflightDecision::SevenDayQuotaExhausted {
+            cycle_key: 1_782_414_000
+        }
     );
 }
 
 #[test]
-fn quota_preflight_skips_fresh_five_hour_active_snapshot() {
+fn quota_preflight_reports_active_window_for_fresh_five_hour_snapshot() {
     let snapshots = [quota_snapshot(
         SubscriptionQuotaWindow::FiveHour,
         SubscriptionQuotaDataState::Fresh,
@@ -85,10 +82,9 @@ fn quota_preflight_skips_fresh_five_hour_active_snapshot() {
 
     assert_eq!(
         quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
-        WarmupQuotaPreflightDecision::Skip(WarmupPreflightSkip {
-            reason: WarmupAttemptReason::WindowAlreadyActive,
-            cycle_key: Some(1_782_018_000),
-        })
+        WarmupQuotaPreflightDecision::ActiveWindow {
+            cycle_key: 1_782_018_000
+        }
     );
 }
 

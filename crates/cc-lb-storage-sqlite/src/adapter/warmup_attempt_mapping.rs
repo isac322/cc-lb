@@ -1,59 +1,8 @@
 use cc_lb_storage_api::{
-    StorageError, StorageResult, WarmupAttemptOutcome, WarmupAttemptRecord, WarmupAttemptStatus,
-    WarmupAttemptTrigger, WarmupDispatchKind, WarmupPermanentFailureReason, WarmupSkipReason,
-    WarmupSuccessReason, WarmupTransientFailureReason,
+    StorageError, StorageResult, WarmupAttemptOutcome, WarmupAttemptStatus, WarmupDispatchKind,
+    WarmupPermanentFailureReason, WarmupSkipReason, WarmupSuccessReason,
+    WarmupTransientFailureReason,
 };
-use sqlx::{Row, postgres::PgRow};
-
-use crate::error_map::map_sqlx_error;
-
-pub(crate) fn row_to_attempt(row: PgRow) -> StorageResult<WarmupAttemptRecord> {
-    Ok(WarmupAttemptRecord {
-        id: row.try_get("id").map_err(map_sqlx_error)?,
-        upstream_id: row.try_get("upstream_id").map_err(map_sqlx_error)?,
-        attempted_at_unix_secs: row
-            .try_get("attempted_at_unix_secs")
-            .map_err(map_sqlx_error)?,
-        completed_at_unix_secs: row
-            .try_get("completed_at_unix_secs")
-            .map_err(map_sqlx_error)?,
-        scheduled_for_unix_secs: row
-            .try_get("scheduled_for_unix_secs")
-            .map_err(map_sqlx_error)?,
-        trigger: trigger_from_str(
-            &row.try_get::<String, _>("trigger")
-                .map_err(map_sqlx_error)?,
-        )?,
-        outcome: parse_reason(
-            status_from_str(
-                &row.try_get::<String, _>("outcome")
-                    .map_err(map_sqlx_error)?,
-            )?,
-            &row.try_get::<String, _>("reason").map_err(map_sqlx_error)?,
-        )?,
-        dispatch_kind: row
-            .try_get::<Option<String>, _>("dispatch_kind")
-            .map_err(map_sqlx_error)?
-            .as_deref()
-            .map(dispatch_kind_from_str)
-            .transpose()?,
-        http_status: row.try_get("http_status").map_err(map_sqlx_error)?,
-        cycle_key: row.try_get("cycle_key").map_err(map_sqlx_error)?,
-        expected_cycle_key: row.try_get("expected_cycle_key").map_err(map_sqlx_error)?,
-        idle_secs_since_prev_window: row
-            .try_get("idle_secs_since_prev_window")
-            .map_err(map_sqlx_error)?,
-        replica_id: row.try_get("replica_id").map_err(map_sqlx_error)?,
-        lease_holder: row.try_get("lease_holder").map_err(map_sqlx_error)?,
-        upstream_spec_revision: row
-            .try_get("upstream_spec_revision")
-            .map_err(map_sqlx_error)?,
-        dialect_plugin_snapshot: row
-            .try_get("dialect_plugin_snapshot")
-            .map_err(map_sqlx_error)?,
-        error_detail: row.try_get("error_detail").map_err(map_sqlx_error)?,
-    })
-}
 
 pub(crate) fn outcome_components(outcome: WarmupAttemptOutcome) -> (&'static str, &'static str) {
     match outcome {
@@ -235,23 +184,6 @@ pub(crate) fn dispatch_kind_from_str(value: &str) -> StorageResult<WarmupDispatc
         "dialect_plugin" => Ok(WarmupDispatchKind::DialectPlugin),
         value => Err(StorageError::Corrupted {
             message: format!("invalid warmup attempt dispatch_kind {value}"),
-        }),
-    }
-}
-
-pub(crate) fn trigger_to_str(trigger: WarmupAttemptTrigger) -> &'static str {
-    match trigger {
-        WarmupAttemptTrigger::Scheduled => "scheduled",
-        WarmupAttemptTrigger::Manual => "manual",
-    }
-}
-
-fn trigger_from_str(value: &str) -> StorageResult<WarmupAttemptTrigger> {
-    match value {
-        "scheduled" => Ok(WarmupAttemptTrigger::Scheduled),
-        "manual" => Ok(WarmupAttemptTrigger::Manual),
-        value => Err(StorageError::Corrupted {
-            message: format!("invalid warmup attempt trigger {value}"),
         }),
     }
 }

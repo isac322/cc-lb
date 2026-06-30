@@ -1,20 +1,22 @@
 import type {
   WarmupAttempt,
+  WarmupAttemptStatus,
   WarmupDialectPluginSnapshot,
-  WarmupOutcome,
-  WarmupReason,
+  WarmupPermanentFailureReason,
+  WarmupSkipReason,
+  WarmupSuccessReason,
   WarmupSummary,
+  WarmupTransientFailureReason,
 } from '../../../../lib/queries';
 import { REASON_LABEL } from './copy';
 
 export type Severity = 'ok' | 'warn' | 'danger' | 'neutral';
 
-export const OUTCOME_SEVERITY: Record<WarmupOutcome, Severity> = {
-  success_fresh: 'ok',
-  success_redundant: 'warn',
+export const OUTCOME_SEVERITY: Record<WarmupAttemptStatus, Severity> = {
+  success: 'ok',
+  skipped: 'neutral',
   transient_failure: 'warn',
   permanent_failure: 'danger',
-  skipped: 'neutral',
 };
 
 export const SEVERITY_DOT_CLASS: Record<Severity, string> = {
@@ -50,11 +52,11 @@ export function formatResultNarrative(
   const reasonSuffix = attempt.reason
     ? ` · ${REASON_LABEL[attempt.reason]}`
     : '';
-  switch (attempt.outcome) {
-    case 'success_fresh':
-      return 'Fresh window started';
-    case 'success_redundant':
-      return 'Window was already active';
+  switch (attempt.status) {
+    case 'success':
+      return attempt.reason === 'cycle_advanced'
+        ? 'Fresh window started'
+        : 'Window was already active';
     case 'transient_failure':
       return `Transient failure${reasonSuffix}`;
     case 'permanent_failure':
@@ -69,15 +71,16 @@ export function formatFreshnessLine(
   attempt: WarmupAttempt | null | undefined,
 ): string {
   if (!attempt) return '—';
-  switch (attempt.outcome) {
-    case 'success_fresh': {
-      const idle = attempt.idle_secs_since_prev_window;
-      if (idle != null && idle > 0)
-        return `Started a new 5h window — idle ${formatDuration(idle)} before warm-up`;
-      return 'Started a new 5h window';
-    }
-    case 'success_redundant':
+  switch (attempt.status) {
+    case 'success': {
+      if (attempt.reason === 'cycle_advanced') {
+        const idle = attempt.idle_secs_since_prev_window;
+        if (idle != null && idle > 0)
+          return `Started a new 5h window — idle ${formatDuration(idle)} before warm-up`;
+        return 'Started a new 5h window';
+      }
       return 'Window was already active — no new cycle started';
+    }
     case 'transient_failure':
     case 'permanent_failure':
       return 'Not evaluated — the call failed';
@@ -140,8 +143,8 @@ export function detectActiveIncident(
   let lastFailure: WarmupAttempt | null = null;
   let consecutive = 0;
   for (const a of attempts) {
-    if (a.outcome === 'skipped') continue;
-    if (a.outcome === 'success_fresh' || a.outcome === 'success_redundant') {
+    if (a.status === 'skipped') continue;
+    if (a.status === 'success') {
       // A success was seen. If we already collected failures NEWER than this
       // success, those are the active streak — keep them. Otherwise no incident.
       break;
@@ -159,12 +162,9 @@ export function detectActiveIncident(
   const reasonCounts = new Map<string, number>();
   let total = 0;
   for (const a of attempts) {
-    if (
-      a.outcome === 'permanent_failure' ||
-      a.outcome === 'transient_failure'
-    ) {
+    if (a.status === 'permanent_failure' || a.status === 'transient_failure') {
       total++;
-      const key = a.reason ?? a.outcome;
+      const key = a.reason ?? a.status;
       reasonCounts.set(key, (reasonCounts.get(key) ?? 0) + 1);
     }
   }
@@ -173,7 +173,7 @@ export function detectActiveIncident(
   for (const [k, v] of reasonCounts) {
     if (v > max) {
       max = v;
-      dominant = REASON_LABEL[k as WarmupReason] ?? k;
+      dominant = REASON_LABEL[k as keyof typeof REASON_LABEL] ?? k;
     }
   }
   return {
@@ -191,14 +191,19 @@ export function findLastActionableAttempt(
 ): WarmupAttempt | null {
   if (!summary) return null;
   for (const a of summary.recent_attempts ?? []) {
-    if (a.outcome !== 'skipped') return a;
+    if (a.status !== 'skipped') return a;
   }
   return null;
 }
 
 /** Failure breakdown by reason within `windowSecs` (default 7 days). */
 export interface ReasonBreakdownEntry {
-  reason: WarmupReason | 'unknown';
+  reason:
+    | WarmupSuccessReason
+    | WarmupSkipReason
+    | WarmupTransientFailureReason
+    | WarmupPermanentFailureReason
+    | 'unknown';
   label: string;
   count: number;
 }
@@ -213,16 +218,23 @@ export function buildFailureReasonBreakdown(
   const counts = new Map<string, number>();
   for (const a of attempts) {
     if (a.attempted_at_unix_secs < cutoff) continue;
-    if (a.outcome !== 'permanent_failure' && a.outcome !== 'transient_failure')
+    if (a.status !== 'permanent_failure' && a.status !== 'transient_failure')
       continue;
     const key = a.reason ?? 'unknown';
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return [...counts.entries()]
     .map(([k, v]) => ({
-      reason: k as WarmupReason | 'unknown',
+      reason: k as
+        | WarmupSuccessReason
+        | WarmupSkipReason
+        | WarmupTransientFailureReason
+        | WarmupPermanentFailureReason
+        | 'unknown',
       label:
-        k === 'unknown' ? 'Unknown' : (REASON_LABEL[k as WarmupReason] ?? k),
+        k === 'unknown'
+          ? 'Unknown'
+          : (REASON_LABEL[k as keyof typeof REASON_LABEL] ?? k),
       count: v,
     }))
     .sort((a, b) => b.count - a.count);

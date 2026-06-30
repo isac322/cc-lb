@@ -7,7 +7,7 @@ use axum::{
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_storage_api::upstream::{UpstreamRecord, UpstreamStore, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::warmup_attempts::{
-    WarmupAttemptCursor, WarmupAttemptListFilters, WarmupAttemptOutcome, WarmupAttemptRecord,
+    WarmupAttemptCursor, WarmupAttemptListFilters, WarmupAttemptRecord, WarmupAttemptStatus,
     WarmupAttemptSummary,
 };
 use cc_lb_storage_api::{Storage, StorageError};
@@ -27,7 +27,8 @@ const WARMUP_JOB_KIND: &str = "warmup";
 pub(crate) struct WarmupAttemptsQuery {
     limit: Option<u32>,
     before: Option<String>,
-    outcome: Option<WarmupAttemptOutcome>,
+    #[serde(alias = "outcome")]
+    status: Option<WarmupAttemptStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -116,7 +117,7 @@ pub(crate) async fn get_upstream_warmup(
             WarmupAttemptListFilters {
                 limit: Some(RECENT_ATTEMPT_LIMIT),
                 before: None,
-                outcome: None,
+                status: None,
             },
         )
         .await?;
@@ -161,7 +162,7 @@ pub(crate) async fn list_upstream_warmup_attempts(
             WarmupAttemptListFilters {
                 limit: Some(limit),
                 before,
-                outcome: query.outcome,
+                status: query.status,
             },
         )
         .await?;

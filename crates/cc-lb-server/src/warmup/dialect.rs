@@ -159,7 +159,8 @@ pub async fn dispatch_warmup_with_dialect(
         params.aead,
         params.upstream.name.clone(),
         params.clock,
-    );
+    )
+    .allow_disabled_upstream(true);
     let refresh_handle: Arc<dyn LazyRefreshHandle> = params.lazy_refresher;
     let factory_with_refresh = AnthropicOAuthSignerFactoryWithLazyRefresh::new(
         factory,

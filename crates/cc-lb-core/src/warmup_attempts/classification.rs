@@ -1,5 +1,7 @@
 use cc_lb_storage_api::{
-    SubscriptionQuotaStatus, SubscriptionQuotaWindow, WarmupAttemptOutcome, WarmupAttemptReason,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, WarmupAttemptOutcome,
+    WarmupPermanentFailureReason, WarmupSkipReason, WarmupSuccessReason,
+    WarmupTransientFailureReason,
 };
 use http::StatusCode;
 
@@ -8,7 +10,6 @@ use super::{WarmupAttemptExecution, WarmupAttemptExecutionResult};
 #[derive(Clone, Debug)]
 pub(super) struct AttemptFields {
     pub(super) outcome: WarmupAttemptOutcome,
-    pub(super) reason: Option<WarmupAttemptReason>,
     pub(super) http_status: Option<i32>,
     pub(super) cycle_key: Option<i64>,
     pub(super) error_detail: Option<String>,
@@ -16,21 +17,20 @@ pub(super) struct AttemptFields {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ResponseClassification {
-    Success {
+    SuccessNewCycle {
         cycle_key: i64,
     },
     WindowAlreadyActive {
         cycle_key: i64,
     },
-    Skipped {
-        reason: WarmupAttemptReason,
+    SevenDayExhausted {
         cycle_key: i64,
     },
     Transient {
-        reason: WarmupAttemptReason,
+        reason: WarmupTransientFailureReason,
     },
     Permanent {
-        reason: WarmupAttemptReason,
+        reason: WarmupPermanentFailureReason,
     },
 }
 
@@ -52,8 +52,7 @@ pub(super) fn attempt_fields(execution: &WarmupAttemptExecution<'_>) -> AttemptF
             http_status,
             error_detail,
         } => AttemptFields {
-            outcome: WarmupAttemptOutcome::TransientFailure,
-            reason: Some(reason),
+            outcome: WarmupAttemptOutcome::TransientFailure(reason),
             http_status: http_status.map(status_to_i32),
             cycle_key: None,
             error_detail: error_detail.map(ToOwned::to_owned),
@@ -63,8 +62,7 @@ pub(super) fn attempt_fields(execution: &WarmupAttemptExecution<'_>) -> AttemptF
             http_status,
             error_detail,
         } => AttemptFields {
-            outcome: WarmupAttemptOutcome::PermanentFailure,
-            reason: Some(reason),
+            outcome: WarmupAttemptOutcome::PermanentFailure(reason),
             http_status: http_status.map(status_to_i32),
             cycle_key: None,
             error_detail: error_detail.map(ToOwned::to_owned),
@@ -74,11 +72,16 @@ pub(super) fn attempt_fields(execution: &WarmupAttemptExecution<'_>) -> AttemptF
             cycle_key,
             error_detail,
         } => AttemptFields {
-            outcome: WarmupAttemptOutcome::Skipped,
-            reason: Some(reason),
+            outcome: WarmupAttemptOutcome::Skipped(reason),
             http_status: None,
             cycle_key,
             error_detail: error_detail.map(ToOwned::to_owned),
+        },
+        WarmupAttemptExecutionResult::PreflightActiveWindow { cycle_key } => AttemptFields {
+            outcome: WarmupAttemptOutcome::Success(WarmupSuccessReason::WindowAlreadyActive),
+            http_status: None,
+            cycle_key: Some(cycle_key),
+            error_detail: None,
         },
     }
 }
@@ -91,66 +94,45 @@ fn response_attempt_fields(
     error_detail: Option<&str>,
 ) -> AttemptFields {
     let candidate_cycle_key = expected_cycle_key.unwrap_or(scheduled_for_unix_secs);
+    let http_status = Some(status_to_i32(status));
+    let owned_detail = error_detail.map(ToOwned::to_owned);
     match classify_response(status, observations, candidate_cycle_key) {
-        ResponseClassification::Success { cycle_key } => {
-            success_fields(cycle_key, expected_cycle_key, status, None, error_detail)
+        ResponseClassification::SuccessNewCycle { cycle_key } => {
+            let success_reason = match expected_cycle_key {
+                Some(expected) if cycle_key > expected => WarmupSuccessReason::CycleAdvanced,
+                Some(_) | None => WarmupSuccessReason::WindowAlreadyActive,
+            };
+            AttemptFields {
+                outcome: WarmupAttemptOutcome::Success(success_reason),
+                http_status,
+                cycle_key: Some(cycle_key),
+                error_detail: owned_detail,
+            }
         }
-        ResponseClassification::WindowAlreadyActive { cycle_key } => success_fields(
-            cycle_key,
-            expected_cycle_key,
-            status,
-            Some(WarmupAttemptReason::WindowAlreadyActive),
-            error_detail,
-        ),
-        ResponseClassification::Skipped { reason, cycle_key } => AttemptFields {
-            outcome: WarmupAttemptOutcome::Skipped,
-            reason: Some(reason),
-            http_status: Some(status_to_i32(status)),
+        ResponseClassification::WindowAlreadyActive { cycle_key } => AttemptFields {
+            outcome: WarmupAttemptOutcome::Success(WarmupSuccessReason::WindowAlreadyActive),
+            http_status,
             cycle_key: Some(cycle_key),
-            error_detail: error_detail.map(ToOwned::to_owned),
+            error_detail: owned_detail,
+        },
+        ResponseClassification::SevenDayExhausted { cycle_key } => AttemptFields {
+            outcome: WarmupAttemptOutcome::Skipped(WarmupSkipReason::SevenDayQuotaExhausted),
+            http_status,
+            cycle_key: Some(cycle_key),
+            error_detail: owned_detail,
         },
         ResponseClassification::Transient { reason } => AttemptFields {
-            outcome: WarmupAttemptOutcome::TransientFailure,
-            reason: Some(reason),
-            http_status: Some(status_to_i32(status)),
+            outcome: WarmupAttemptOutcome::TransientFailure(reason),
+            http_status,
             cycle_key: None,
-            error_detail: error_detail.map(ToOwned::to_owned),
+            error_detail: owned_detail,
         },
         ResponseClassification::Permanent { reason } => AttemptFields {
-            outcome: WarmupAttemptOutcome::PermanentFailure,
-            reason: Some(reason),
-            http_status: Some(status_to_i32(status)),
+            outcome: WarmupAttemptOutcome::PermanentFailure(reason),
+            http_status,
             cycle_key: None,
-            error_detail: error_detail.map(ToOwned::to_owned),
+            error_detail: owned_detail,
         },
-    }
-}
-
-fn success_fields(
-    cycle_key: i64,
-    expected_cycle_key: Option<i64>,
-    status: StatusCode,
-    reason: Option<WarmupAttemptReason>,
-    error_detail: Option<&str>,
-) -> AttemptFields {
-    let outcome = match expected_cycle_key {
-        Some(expected) if cycle_key > expected => WarmupAttemptOutcome::SuccessFresh,
-        Some(_) | None => WarmupAttemptOutcome::SuccessRedundant,
-    };
-    AttemptFields {
-        outcome,
-        reason: reason.or(match outcome {
-            WarmupAttemptOutcome::SuccessRedundant => {
-                Some(WarmupAttemptReason::WindowAlreadyActive)
-            }
-            WarmupAttemptOutcome::SuccessFresh
-            | WarmupAttemptOutcome::TransientFailure
-            | WarmupAttemptOutcome::PermanentFailure
-            | WarmupAttemptOutcome::Skipped => None,
-        }),
-        http_status: Some(status_to_i32(status)),
-        cycle_key: Some(cycle_key),
-        error_detail: error_detail.map(ToOwned::to_owned),
     }
 }
 
@@ -160,7 +142,7 @@ fn classify_response(
     candidate_cycle_key: i64,
 ) -> ResponseClassification {
     if status.is_success() {
-        return ResponseClassification::Success {
+        return ResponseClassification::SuccessNewCycle {
             cycle_key: five_hour_cycle_key(observations).unwrap_or(candidate_cycle_key),
         };
     }
@@ -169,10 +151,7 @@ fn classify_response(
             if let Some(cycle_key) = seven_day_exhausted_cycle_key(observations)
                 && cycle_key > candidate_cycle_key
             {
-                return ResponseClassification::Skipped {
-                    reason: WarmupAttemptReason::SevenDayQuotaExhausted,
-                    cycle_key,
-                };
+                return ResponseClassification::SevenDayExhausted { cycle_key };
             }
 
             match five_hour_cycle_key(observations) {
@@ -180,27 +159,27 @@ fn classify_response(
                     ResponseClassification::WindowAlreadyActive { cycle_key }
                 }
                 Some(_) | None => ResponseClassification::Transient {
-                    reason: WarmupAttemptReason::Http429MissingCycleKey,
+                    reason: WarmupTransientFailureReason::RateLimitedCycleKeyMissing,
                 },
             }
         }
         StatusCode::UNAUTHORIZED => ResponseClassification::Permanent {
-            reason: WarmupAttemptReason::AuthFailed,
+            reason: WarmupPermanentFailureReason::AuthFailed,
         },
         StatusCode::FORBIDDEN => ResponseClassification::Permanent {
-            reason: WarmupAttemptReason::Forbidden,
+            reason: WarmupPermanentFailureReason::Forbidden,
         },
         StatusCode::BAD_REQUEST => ResponseClassification::Permanent {
-            reason: WarmupAttemptReason::BadRequest,
+            reason: WarmupPermanentFailureReason::BadRequest,
         },
         StatusCode::NOT_FOUND => ResponseClassification::Permanent {
-            reason: WarmupAttemptReason::NotFound,
+            reason: WarmupPermanentFailureReason::NotFound,
         },
         status if status.is_server_error() => ResponseClassification::Transient {
-            reason: WarmupAttemptReason::Upstream5xx,
+            reason: WarmupTransientFailureReason::Upstream5xx,
         },
         _ => ResponseClassification::Transient {
-            reason: WarmupAttemptReason::NetworkError,
+            reason: WarmupTransientFailureReason::NetworkError,
         },
     }
 }

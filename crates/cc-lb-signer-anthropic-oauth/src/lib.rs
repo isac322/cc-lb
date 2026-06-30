@@ -521,6 +521,7 @@ pub struct AnthropicOAuthSignerFactory {
     refresh_handle: Option<Arc<dyn LazyRefreshHandle>>,
     refresh_locks: RefreshLocks,
     refresh_upstream_id: Option<Uuid>,
+    allow_disabled_upstream: bool,
 }
 
 impl AnthropicOAuthSignerFactory {
@@ -533,6 +534,7 @@ impl AnthropicOAuthSignerFactory {
             refresh_handle: None,
             refresh_locks: new_refresh_locks(),
             refresh_upstream_id: None,
+            allow_disabled_upstream: false,
         }
     }
 
@@ -550,7 +552,14 @@ impl AnthropicOAuthSignerFactory {
             refresh_handle: None,
             refresh_locks: new_refresh_locks(),
             refresh_upstream_id: None,
+            allow_disabled_upstream: false,
         }
+    }
+
+    #[must_use]
+    pub fn allow_disabled_upstream(mut self, allow: bool) -> Self {
+        self.allow_disabled_upstream = allow;
+        self
     }
 
     async fn load_record_and_tokens(
@@ -569,7 +578,7 @@ impl AnthropicOAuthSignerFactory {
             self.resolve_without_name(upstream).await?
         };
 
-        ensure_oauth_upstream_usable(&record)?;
+        ensure_oauth_upstream_usable(&record, self.allow_disabled_upstream)?;
         let tokens = decrypt_upstream_tokens(&self.aead, &record)?;
         Ok((record, tokens))
     }
@@ -659,6 +668,7 @@ impl SignerFactory for AnthropicOAuthSignerFactory {
             upstream_id: self.refresh_upstream_id.unwrap_or(record.id),
             refresh_handle: self.refresh_handle.clone(),
             refresh_locks: self.refresh_locks.clone(),
+            allow_disabled_upstream: self.allow_disabled_upstream,
         }))
     }
 }
@@ -673,6 +683,7 @@ struct PersistedAnthropicOAuthSigner {
     upstream_id: Uuid,
     refresh_handle: Option<Arc<dyn LazyRefreshHandle>>,
     refresh_locks: RefreshLocks,
+    allow_disabled_upstream: bool,
 }
 
 impl fmt::Debug for PersistedAnthropicOAuthSigner {
@@ -737,7 +748,7 @@ impl PersistedAnthropicOAuthSigner {
             .ok_or_else(|| SignerError::MissingCredentials {
                 reason: "oauth upstream not found".to_owned(),
             })?;
-        ensure_oauth_upstream_usable(&record)?;
+        ensure_oauth_upstream_usable(&record, self.allow_disabled_upstream)?;
         decrypt_upstream_tokens(&self.aead, &record)
     }
 
@@ -756,6 +767,7 @@ impl PersistedAnthropicOAuthSigner {
             upstream_id: self.upstream_id,
             refresh_handle: self.refresh_handle.clone(),
             refresh_locks: self.refresh_locks.clone(),
+            allow_disabled_upstream: self.allow_disabled_upstream,
         }
     }
 
@@ -856,7 +868,10 @@ fn refresh_error_to_signer(error: RefreshError) -> SignerError {
     }
 }
 
-fn ensure_oauth_upstream_usable(record: &UpstreamRecord) -> Result<(), SignerError> {
+fn ensure_oauth_upstream_usable(
+    record: &UpstreamRecord,
+    allow_disabled: bool,
+) -> Result<(), SignerError> {
     if record.kind != cc_lb_storage_api::upstream::UpstreamKind::AnthropicOauth
         || record.deleted_at_unix_secs.is_some()
     {
@@ -864,7 +879,7 @@ fn ensure_oauth_upstream_usable(record: &UpstreamRecord) -> Result<(), SignerErr
             reason: "oauth upstream not found".to_owned(),
         });
     }
-    if !record.enabled {
+    if !record.enabled && !allow_disabled {
         return Err(SignerError::MissingCredentials {
             reason: "oauth upstream disabled".to_owned(),
         });
@@ -1321,6 +1336,71 @@ mod tests {
             .unwrap();
         let factory =
             AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary", clock);
+
+        let error = build_error(&factory).await;
+
+        assert!(matches!(error, SignerError::MissingCredentials { .. }));
+    }
+
+    #[tokio::test]
+    async fn build_disabled_with_allow_disabled_upstream_succeeds() {
+        let clock = test_clock();
+        let store = Arc::new(MemoryUpstreamStore::default());
+        let record = create_upstream(&store, "primary").await;
+        let service = aead();
+        store
+            .store_oauth_tokens(
+                record.id,
+                record.revision,
+                encrypted_tokens(&service, record.id, now_secs(clock.as_ref()) + 600),
+            )
+            .await
+            .unwrap();
+        let record = store.get_by_name("primary").await.unwrap().unwrap();
+        store
+            .set_enabled(record.id, record.revision, false)
+            .await
+            .unwrap();
+        let factory =
+            AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary", clock)
+                .allow_disabled_upstream(true);
+
+        let signer = factory
+            .build(&Upstream::AnthropicDirect { base_url: None })
+            .await
+            .expect("disabled upstream should sign when allow_disabled_upstream is true");
+
+        let signed = sign_request(signer.as_ref(), shaped_request())
+            .await
+            .unwrap();
+        assert_eq!(
+            signed
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer access-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn build_deleted_with_allow_disabled_upstream_still_rejects() {
+        let clock = test_clock();
+        let store = Arc::new(MemoryUpstreamStore::default());
+        let record = create_upstream(&store, "primary").await;
+        let service = aead();
+        store
+            .store_oauth_tokens(
+                record.id,
+                record.revision,
+                encrypted_tokens(&service, record.id, now_secs(clock.as_ref()) + 600),
+            )
+            .await
+            .unwrap();
+        let record = store.get_by_name("primary").await.unwrap().unwrap();
+        store.soft_delete(record.id, record.revision).await.unwrap();
+        let factory =
+            AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary", clock)
+                .allow_disabled_upstream(true);
 
         let error = build_error(&factory).await;
 

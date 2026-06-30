@@ -1486,7 +1486,6 @@ async fn build_cc_lb_oauth_extra_usage(
         .await?
         .into_iter()
         .filter(|upstream| upstream.deleted_at_unix_secs.is_none())
-        .filter(|upstream| upstream.enabled)
         .filter(|upstream| upstream.kind == UpstreamKind::AnthropicOauth)
         .collect::<Vec<_>>();
     let now_unix_millis = now_unix_millis(clock);
@@ -2106,7 +2105,6 @@ fn pool_quota_upstreams(
     upstreams
         .into_iter()
         .filter(|upstream| upstream.deleted_at_unix_secs.is_none())
-        .filter(|upstream| upstream.enabled)
         .filter(|upstream| upstream.kind == UpstreamKind::AnthropicOauth)
         .filter(|upstream| {
             requested
@@ -2611,7 +2609,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_quota_upstreams_excludes_disabled_oauth_upstreams() {
+    fn pool_quota_upstreams_includes_disabled_oauth_upstreams() {
         let enabled_oauth_id = Uuid::new_v4();
         let disabled_oauth_id = Uuid::new_v4();
         let non_oauth_id = Uuid::new_v4();
@@ -2625,8 +2623,11 @@ mod tests {
             None,
         );
 
-        assert_eq!(upstreams.len(), 1);
-        assert_eq!(upstreams[0].id, enabled_oauth_id);
+        let ids: HashSet<Uuid> = upstreams.iter().map(|upstream| upstream.id).collect();
+        assert_eq!(upstreams.len(), 2);
+        assert!(ids.contains(&enabled_oauth_id));
+        assert!(ids.contains(&disabled_oauth_id));
+        assert!(!ids.contains(&non_oauth_id));
     }
 
     #[test]

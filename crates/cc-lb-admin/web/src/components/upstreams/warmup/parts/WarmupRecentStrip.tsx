@@ -1,4 +1,7 @@
-import type { WarmupAttempt, WarmupOutcome } from '../../../../lib/queries';
+import type {
+  WarmupAttempt,
+  WarmupAttemptStatus,
+} from '../../../../lib/queries';
 import { cx, Hint } from '../../../ui/primitives';
 import { OUTCOME_LABEL, REASON_LABEL } from './copy';
 
@@ -9,9 +12,8 @@ interface Props {
   onClick?: (attempt: WarmupAttempt) => void;
 }
 
-const OUTCOME_BG: Record<WarmupOutcome, string> = {
-  success_fresh: 'bg-[color:var(--color-ok)]',
-  success_redundant: 'bg-[color:var(--color-warn)]',
+const OUTCOME_BG: Record<WarmupAttemptStatus, string> = {
+  success: 'bg-[color:var(--color-ok)]',
   transient_failure:
     'bg-[color:color-mix(in_oklab,var(--color-warn)_55%,var(--color-danger))]',
   permanent_failure: 'bg-[color:var(--color-danger)]',
@@ -23,7 +25,7 @@ function formatHover(attempt: WarmupAttempt): string {
     attempt.attempted_at_unix_secs * 1000,
   ).toLocaleString();
   const reason = attempt.reason ? ` · ${REASON_LABEL[attempt.reason]}` : '';
-  return `${OUTCOME_LABEL[attempt.outcome]}${reason} · ${stamp}`;
+  return `${OUTCOME_LABEL[attempt.status]}${reason} · ${stamp}`;
 }
 
 export function WarmupRecentStrip({ attempts, count = 10, onClick }: Props) {
@@ -58,7 +60,7 @@ export function WarmupRecentStrip({ attempts, count = 10, onClick }: Props) {
                 onClick={onClick ? () => onClick(attempt) : undefined}
                 className={cx(
                   'w-3 h-3 rounded-full ring-1 ring-black/30 cursor-help',
-                  OUTCOME_BG[attempt.outcome],
+                  OUTCOME_BG[attempt.status],
                 )}
                 aria-label={formatHover(attempt)}
               />

@@ -328,14 +328,14 @@ test.describe('WarmupCard', () => {
 
   test('Scenario 5: Fire-now 503 transient', async ({ page }) => {
     await installAppFixtures(page, {
-      onFireNow: () => ({ status: 503, body: { fired: false, reason: 'transient' } }),
+      onFireNow: () => ({ status: 503, body: { fired: false, reason: 'dialect_plugin_transient' } }),
     });
     await openUpstreams(page);
     await confirmFireNow(page);
 
     const panel = page.getByTestId('warmup-error-panel');
-    await expect(panel).toHaveAttribute('data-reason', 'transient');
-    await expect(panel).toHaveText(COPY.fireErrorReasons.transient);
+    await expect(panel).toHaveAttribute('data-reason', 'dialect_plugin_transient');
+    await expect(panel).toHaveText(COPY.fireErrorReasons.dialect_plugin_transient);
     await page.screenshot({ path: evidencePath('scenario-5-transient.png'), fullPage: true });
   });
 
