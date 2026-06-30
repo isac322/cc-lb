@@ -12,7 +12,7 @@ concurrency:
 jobs:
   rss-soak:
     if: github.ref == 'refs/heads/master'
-    runs-on: oracle4-cc-lb
+    runs-on: self-hosted
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
