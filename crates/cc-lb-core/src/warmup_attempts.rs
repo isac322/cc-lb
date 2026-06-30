@@ -1,7 +1,8 @@
 use cc_lb_storage_api::upstream::UpstreamRecord;
 use cc_lb_storage_api::{
-    Storage, SubscriptionQuotaWindow, WarmupAttemptOutcome, WarmupAttemptReason,
-    WarmupAttemptRecord, WarmupAttemptTrigger,
+    Storage, SubscriptionQuotaWindow, WarmupAttemptOutcome, WarmupAttemptRecord,
+    WarmupAttemptTrigger, WarmupDispatchKind, WarmupPermanentFailureReason, WarmupSkipReason,
+    WarmupSuccessReason, WarmupTransientFailureReason,
 };
 use http::StatusCode;
 use uuid::Uuid;
@@ -21,6 +22,7 @@ pub struct WarmupAttemptExecution<'a> {
     pub expected_cycle_key: Option<i64>,
     pub attempted_at_unix_secs: i64,
     pub completed_at_unix_secs: Option<i64>,
+    pub dispatch_kind: WarmupDispatchKind,
     pub result: WarmupAttemptExecutionResult<'a>,
 }
 
@@ -32,26 +34,29 @@ pub enum WarmupAttemptExecutionResult<'a> {
         error_detail: Option<&'a str>,
     },
     TransientFailure {
-        reason: WarmupAttemptReason,
+        reason: WarmupTransientFailureReason,
         http_status: Option<StatusCode>,
         error_detail: Option<&'a str>,
     },
     PermanentFailure {
-        reason: WarmupAttemptReason,
+        reason: WarmupPermanentFailureReason,
         http_status: Option<StatusCode>,
         error_detail: Option<&'a str>,
     },
     Skipped {
-        reason: WarmupAttemptReason,
+        reason: WarmupSkipReason,
         cycle_key: Option<i64>,
         error_detail: Option<&'a str>,
+    },
+    PreflightActiveWindow {
+        cycle_key: i64,
     },
 }
 
 pub async fn execute_warmup_attempt(execution: WarmupAttemptExecution<'_>) -> WarmupAttemptRecord {
     let fields = attempt_fields(&execution);
     let idle_secs_since_prev_window = match fields.outcome {
-        WarmupAttemptOutcome::SuccessFresh => {
+        WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced) => {
             idle_secs_since_prev_window(
                 execution.storage,
                 execution.upstream.id,
@@ -59,10 +64,10 @@ pub async fn execute_warmup_attempt(execution: WarmupAttemptExecution<'_>) -> Wa
             )
             .await
         }
-        WarmupAttemptOutcome::SuccessRedundant
-        | WarmupAttemptOutcome::TransientFailure
-        | WarmupAttemptOutcome::PermanentFailure
-        | WarmupAttemptOutcome::Skipped => None,
+        WarmupAttemptOutcome::Success(WarmupSuccessReason::WindowAlreadyActive)
+        | WarmupAttemptOutcome::Skipped(_)
+        | WarmupAttemptOutcome::TransientFailure(_)
+        | WarmupAttemptOutcome::PermanentFailure(_) => None,
     };
     let record = WarmupAttemptRecord {
         id: Uuid::new_v4(),
@@ -72,7 +77,7 @@ pub async fn execute_warmup_attempt(execution: WarmupAttemptExecution<'_>) -> Wa
         scheduled_for_unix_secs: execution.scheduled_for_unix_secs,
         trigger: execution.trigger,
         outcome: fields.outcome,
-        reason: fields.reason,
+        dispatch_kind: Some(execution.dispatch_kind),
         http_status: fields.http_status,
         cycle_key: fields.cycle_key,
         expected_cycle_key: execution.expected_cycle_key,
@@ -87,7 +92,6 @@ pub async fn execute_warmup_attempt(execution: WarmupAttemptExecution<'_>) -> Wa
         tracing::error!(
             upstream_id = %record.upstream_id,
             outcome = ?record.outcome,
-            reason = ?record.reason,
             %error,
             "warmup attempt persistence failed"
         );

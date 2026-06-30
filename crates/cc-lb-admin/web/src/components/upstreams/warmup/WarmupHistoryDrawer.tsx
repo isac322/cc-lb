@@ -6,7 +6,7 @@ import {
   type Upstream,
   useWarmupAttempts,
   type WarmupAttempt,
-  type WarmupOutcome,
+  type WarmupAttemptStatus,
 } from '../../../lib/queries';
 import { Button, cx, EmptyState, Spinner } from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
@@ -32,10 +32,9 @@ const HORIZON_SECS: Record<Exclude<Horizon, 'all'>, number> = {
   '7d': 7 * 86400,
 };
 
-const FILTERS: { key: WarmupOutcome | 'all'; label: string }[] = [
+const FILTERS: { key: WarmupAttemptStatus | 'all'; label: string }[] = [
   { key: 'all', label: 'All' },
-  { key: 'success_fresh', label: OUTCOME_LABEL.success_fresh },
-  { key: 'success_redundant', label: OUTCOME_LABEL.success_redundant },
+  { key: 'success', label: OUTCOME_LABEL.success },
   { key: 'transient_failure', label: OUTCOME_LABEL.transient_failure },
   { key: 'permanent_failure', label: OUTCOME_LABEL.permanent_failure },
   { key: 'skipped', label: OUTCOME_LABEL.skipped },
@@ -52,23 +51,19 @@ function OverviewStrip({
   const cutoff = horizon === 'all' ? 0 : now - HORIZON_SECS[horizon];
   const inWindow = attempts.filter((a) => a.attempted_at_unix_secs >= cutoff);
   const counts = {
-    success_fresh: 0,
-    success_redundant: 0,
+    success: 0,
     transient_failure: 0,
     permanent_failure: 0,
     skipped: 0,
   };
-  for (const a of inWindow) counts[a.outcome]++;
+  for (const a of inWindow) counts[a.status]++;
   const total = inWindow.length;
   const failed = counts.transient_failure + counts.permanent_failure;
 
   // Dominant failure reason.
   const reasonCounts = new Map<string, number>();
   for (const a of inWindow) {
-    if (
-      a.outcome === 'permanent_failure' ||
-      a.outcome === 'transient_failure'
-    ) {
+    if (a.status === 'permanent_failure' || a.status === 'transient_failure') {
       const r = a.reason ?? 'unknown';
       reasonCounts.set(r, (reasonCounts.get(r) ?? 0) + 1);
     }
@@ -90,8 +85,8 @@ function OverviewStrip({
         </span>
         <span className="text-sm font-medium text-text">{total} attempts</span>
         <span className="text-[11px] text-text-faint">
-          · {counts.success_fresh} fresh · {counts.success_redundant} redundant
-          · {failed} failed · {counts.skipped} skipped
+          · {counts.success} success · {failed} failed · {counts.skipped}{' '}
+          skipped
         </span>
       </div>
       {dominantReason && failed > 0 && (
@@ -134,12 +129,12 @@ function HorizonToggle({
 }
 
 export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
-  const [filter, setFilter] = useState<WarmupOutcome | 'all'>('all');
+  const [filter, setFilter] = useState<WarmupAttemptStatus | 'all'>('all');
   const [horizon, setHorizon] = useState<Horizon>('24h');
   const [selected, setSelected] = useState<WarmupAttempt | null>(null);
 
   const query = useWarmupAttempts(upstream.id, {
-    outcome: filter === 'all' ? null : filter,
+    status: filter === 'all' ? null : filter,
     limit: 50,
   });
 
@@ -303,7 +298,7 @@ function AttemptListRow({
           <span
             className={cx(
               'w-2 h-2 rounded-full shrink-0',
-              SEVERITY_DOT_CLASS[OUTCOME_SEVERITY[attempt.outcome]],
+              SEVERITY_DOT_CLASS[OUTCOME_SEVERITY[attempt.status]],
             )}
             aria-hidden
           />
@@ -312,7 +307,7 @@ function AttemptListRow({
               ts={formatRelativeUnixSeconds(attempt.attempted_at_unix_secs)}
             />
           </span>
-          <WarmupOutcomeBadge outcome={attempt.outcome} />
+          <WarmupOutcomeBadge outcome={attempt.status} />
           {attempt.trigger === 'manual' && (
             <span className="text-[10px] uppercase tracking-wider text-accent font-mono">
               manual
@@ -327,7 +322,7 @@ function AttemptListRow({
         <p className="text-[11px] text-text-muted mt-0.5 truncate">
           {attempt.reason
             ? REASON_LABEL[attempt.reason]
-            : attempt.outcome === 'success_fresh'
+            : attempt.status === 'success'
               ? 'Cycle key advanced — fresh 5h window'
               : '—'}
         </p>
@@ -409,6 +404,11 @@ function AttemptDetail({
         <dd className="text-text">
           {duration != null && duration > 0 ? formatDuration(duration) : '—'}
         </dd>
+
+        <dt className="text-[10px] uppercase text-text-faint pt-0.5">
+          Dispatch
+        </dt>
+        <dd className="text-text">{attempt.dispatch_kind ?? '—'}</dd>
 
         <dt className="text-[10px] uppercase text-text-faint pt-0.5">HTTP</dt>
         <dd className="text-text">{attempt.http_status ?? '—'}</dd>

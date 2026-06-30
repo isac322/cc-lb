@@ -655,14 +655,9 @@ export interface UpdateUpstreamWarmupSettingsRequest {
 }
 
 export type FireNowErrorReason =
-  | 'auth_failed'
-  | 'forbidden'
-  | 'bad_request'
-  | 'not_found'
-  | 'dialect_plugin_failed'
-  | 'oauth_credentials_missing'
-  | 'seven_day_quota_exhausted'
-  | 'transient';
+  | WarmupSkipReason
+  | WarmupTransientFailureReason
+  | WarmupPermanentFailureReason;
 
 export type FireNowResponse =
   | { fired: true; cycle_key: number }
@@ -1159,19 +1154,25 @@ export function useCreateFromOauthDraft() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Warmup attempts history + summary
 
-export type WarmupOutcome =
-  | 'success_fresh'
-  | 'success_redundant'
+export type WarmupAttemptStatus =
+  | 'success'
+  | 'skipped'
   | 'transient_failure'
-  | 'permanent_failure'
-  | 'skipped';
+  | 'permanent_failure';
 
-export type WarmupReason =
-  | 'window_already_active'
-  | 'http_429_missing_cycle_key'
+export type WarmupSuccessReason = 'cycle_advanced' | 'window_already_active';
+export type WarmupSkipReason =
+  | 'seven_day_quota_exhausted'
+  | 'upstream_disabled'
+  | 'upstream_deleted';
+export type WarmupTransientFailureReason =
+  | 'rate_limited_cycle_key_missing'
   | 'upstream_5xx'
   | 'network_error'
   | 'request_timeout'
+  | 'dialect_plugin_transient';
+export type WarmupPermanentFailureReason =
+  | 'oauth_credentials_missing'
   | 'request_build_failed'
   | 'oauth_refresh_failed'
   | 'credential_decrypt_failed'
@@ -1179,12 +1180,19 @@ export type WarmupReason =
   | 'forbidden'
   | 'bad_request'
   | 'not_found'
-  | 'dialect_plugin_failed'
-  | 'dialect_plugin_transient'
-  | 'oauth_credentials_missing'
-  | 'lease_held'
-  | 'upstream_disabled'
-  | 'upstream_deleted';
+  | 'dialect_plugin_failed';
+
+export type WarmupAttemptOutcome =
+  | { status: 'success'; reason: WarmupSuccessReason }
+  | { status: 'skipped'; reason: WarmupSkipReason }
+  | { status: 'transient_failure'; reason: WarmupTransientFailureReason }
+  | { status: 'permanent_failure'; reason: WarmupPermanentFailureReason };
+
+export type WarmupDispatchKind = 'not_dispatched' | 'http' | 'dialect_plugin';
+
+export function attemptOutcome(a: WarmupAttempt): WarmupAttemptOutcome {
+  return { status: a.status, reason: a.reason } as WarmupAttemptOutcome;
+}
 
 export type WarmupTrigger = 'scheduled' | 'manual';
 
@@ -1201,8 +1209,13 @@ export interface WarmupAttempt {
   completed_at_unix_secs: number | null;
   scheduled_for_unix_secs: number;
   trigger: WarmupTrigger;
-  outcome: WarmupOutcome;
-  reason: WarmupReason | null;
+  status: WarmupAttemptStatus;
+  reason:
+    | WarmupSuccessReason
+    | WarmupSkipReason
+    | WarmupTransientFailureReason
+    | WarmupPermanentFailureReason;
+  dispatch_kind: WarmupDispatchKind | null;
   http_status: number | null;
   cycle_key: number | null;
   expected_cycle_key: number | null;
@@ -1215,11 +1228,10 @@ export interface WarmupAttempt {
 }
 
 export interface WarmupRecentSummary {
-  success_fresh: number;
-  success_redundant: number;
+  success: number;
+  skipped: number;
   transient_failure: number;
   permanent_failure: number;
-  skipped: number;
 }
 
 export interface WarmupSummary {
@@ -1240,7 +1252,7 @@ export const warmupKeys = {
   summary: (upstreamId: string) => ['warmup', 'summary', upstreamId] as const,
   attempts: (
     upstreamId: string,
-    filters: { outcome?: WarmupOutcome | null; limit?: number },
+    filters: { status?: WarmupAttemptStatus | null; limit?: number },
   ) => ['warmup', 'attempts', upstreamId, filters] as const,
 };
 
@@ -1257,7 +1269,7 @@ export function useWarmupSummary(upstreamId: string) {
 
 export function useWarmupAttempts(
   upstreamId: string,
-  filters: { outcome?: WarmupOutcome | null; limit?: number } = {},
+  filters: { status?: WarmupAttemptStatus | null; limit?: number } = {},
 ) {
   return useInfiniteQuery({
     queryKey: warmupKeys.attempts(upstreamId, filters),
@@ -1265,7 +1277,7 @@ export function useWarmupAttempts(
     initialPageParam: undefined as string | undefined,
     queryFn: async ({ pageParam }) => {
       const params = new URLSearchParams();
-      if (filters.outcome) params.set('outcome', filters.outcome);
+      if (filters.status) params.set('status', filters.status);
       if (filters.limit) params.set('limit', String(filters.limit));
       if (pageParam) params.set('before', pageParam);
       const qs = params.toString();

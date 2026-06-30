@@ -9,23 +9,21 @@ const SEVEN_DAY_RESET: i64 = 1_783_017_600;
 #[derive(Clone, Copy)]
 struct ExpectedAttempt {
     outcome: WarmupAttemptOutcome,
-    reason: Option<WarmupAttemptReason>,
     cycle_key: Option<i64>,
 }
 
 const SEVEN_DAY_SKIPPED: ExpectedAttempt = ExpectedAttempt {
-    outcome: WarmupAttemptOutcome::Skipped,
-    reason: Some(WarmupAttemptReason::SevenDayQuotaExhausted),
+    outcome: WarmupAttemptOutcome::Skipped(WarmupSkipReason::SevenDayQuotaExhausted),
     cycle_key: Some(SEVEN_DAY_RESET),
 };
 const FIVE_HOUR_REDUNDANT: ExpectedAttempt = ExpectedAttempt {
-    outcome: WarmupAttemptOutcome::SuccessRedundant,
-    reason: Some(WarmupAttemptReason::WindowAlreadyActive),
+    outcome: WarmupAttemptOutcome::Success(WarmupSuccessReason::WindowAlreadyActive),
     cycle_key: Some(FIVE_HOUR_RESET),
 };
 const MISSING_CYCLE_KEY: ExpectedAttempt = ExpectedAttempt {
-    outcome: WarmupAttemptOutcome::TransientFailure,
-    reason: Some(WarmupAttemptReason::Http429MissingCycleKey),
+    outcome: WarmupAttemptOutcome::TransientFailure(
+        WarmupTransientFailureReason::RateLimitedCycleKeyMissing,
+    ),
     cycle_key: None,
 };
 
@@ -108,7 +106,6 @@ fn assert_429(observations: &[UnifiedQuotaObservation], expected: ExpectedAttemp
     );
 
     assert_eq!(fields.outcome, expected.outcome);
-    assert_eq!(fields.reason, expected.reason);
     assert_eq!(fields.cycle_key, expected.cycle_key);
 }
 

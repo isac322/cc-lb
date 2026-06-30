@@ -4,7 +4,10 @@ use cc_lb_core::subscription_quota_events::unified_observation_to_record;
 use cc_lb_core::{UnifiedQuotaObservation, parse_anthropic_unified_headers};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
-use cc_lb_storage_api::{UpstreamRecord, UpstreamStore, WarmupAttemptReason};
+use cc_lb_storage_api::{
+    UpstreamRecord, UpstreamStore, WarmupDispatchKind, WarmupPermanentFailureReason,
+    WarmupTransientFailureReason,
+};
 use http::HeaderMap;
 
 use crate::scheduler_dispatch::http::{decrypt_bundle, upstream_base_url};
@@ -17,17 +20,22 @@ use super::SchedulerDispatch;
 
 const TOKEN_REFRESH_LOOKAHEAD_SECS: u64 = 60;
 
-pub(super) enum WarmupDispatchAttempt {
+pub(super) struct WarmupDispatchAttempt {
+    pub(super) dispatch_kind: WarmupDispatchKind,
+    pub(super) result: WarmupDispatchResult,
+}
+
+pub(super) enum WarmupDispatchResult {
     Response {
         status: http::StatusCode,
         observations: Vec<UnifiedQuotaObservation>,
     },
     TransientFailure {
-        reason: WarmupAttemptReason,
+        reason: WarmupTransientFailureReason,
         error_detail: String,
     },
     PermanentFailure {
-        reason: WarmupAttemptReason,
+        reason: WarmupPermanentFailureReason,
         error_detail: String,
     },
 }
@@ -104,39 +112,54 @@ impl SchedulerDispatch {
             {
                 Ok(outcome) => outcome,
                 Err(error) if error.is_transient() => {
-                    return WarmupDispatchAttempt::TransientFailure {
-                        reason: WarmupAttemptReason::DialectPluginTransient,
-                        error_detail: error.to_string(),
+                    return WarmupDispatchAttempt {
+                        dispatch_kind: WarmupDispatchKind::DialectPlugin,
+                        result: WarmupDispatchResult::TransientFailure {
+                            reason: WarmupTransientFailureReason::DialectPluginTransient,
+                            error_detail: error.to_string(),
+                        },
                     };
                 }
                 Err(error) => {
                     tracing::warn!(error = %error, reason = WarmupAbandonReason::DialectPlugin.as_str(), "warmup dialect failed permanently");
-                    return WarmupDispatchAttempt::PermanentFailure {
-                        reason: WarmupAttemptReason::DialectPluginFailed,
-                        error_detail: error.to_string(),
+                    return WarmupDispatchAttempt {
+                        dispatch_kind: WarmupDispatchKind::DialectPlugin,
+                        result: WarmupDispatchResult::PermanentFailure {
+                            reason: WarmupPermanentFailureReason::DialectPluginFailed,
+                            error_detail: error.to_string(),
+                        },
                     };
                 }
             };
-            return WarmupDispatchAttempt::Response {
-                status: outcome.status,
-                observations: parse_headers(&outcome.headers),
+            return WarmupDispatchAttempt {
+                dispatch_kind: WarmupDispatchKind::DialectPlugin,
+                result: WarmupDispatchResult::Response {
+                    status: outcome.status,
+                    observations: parse_headers(&outcome.headers),
+                },
             };
         }
         let bundle = match decrypt_bundle(upstream, self.aead.as_ref()) {
             Ok(bundle) => bundle,
             Err(error) => {
-                return WarmupDispatchAttempt::PermanentFailure {
-                    reason: WarmupAttemptReason::CredentialDecryptFailed,
-                    error_detail: error.to_string(),
+                return WarmupDispatchAttempt {
+                    dispatch_kind: WarmupDispatchKind::NotDispatched,
+                    result: WarmupDispatchResult::PermanentFailure {
+                        reason: WarmupPermanentFailureReason::CredentialDecryptFailed,
+                        error_detail: error.to_string(),
+                    },
                 };
             }
         };
         let base_url = match upstream_base_url(upstream) {
             Ok(base_url) => base_url,
             Err(error) => {
-                return WarmupDispatchAttempt::PermanentFailure {
-                    reason: WarmupAttemptReason::RequestBuildFailed,
-                    error_detail: error.to_string(),
+                return WarmupDispatchAttempt {
+                    dispatch_kind: WarmupDispatchKind::NotDispatched,
+                    result: WarmupDispatchResult::PermanentFailure {
+                        reason: WarmupPermanentFailureReason::RequestBuildFailed,
+                        error_detail: error.to_string(),
+                    },
                 };
             }
         };
@@ -150,22 +173,27 @@ impl SchedulerDispatch {
             WarmupRequestAttempt::Response {
                 status,
                 observations,
-            } => WarmupDispatchAttempt::Response {
-                status,
-                observations,
+            } => WarmupDispatchAttempt {
+                dispatch_kind: WarmupDispatchKind::Http,
+                result: WarmupDispatchResult::Response {
+                    status,
+                    observations,
+                },
             },
-            WarmupRequestAttempt::RequestBuildFailed { error } => {
-                WarmupDispatchAttempt::PermanentFailure {
-                    reason: WarmupAttemptReason::RequestBuildFailed,
+            WarmupRequestAttempt::RequestBuildFailed { error } => WarmupDispatchAttempt {
+                dispatch_kind: WarmupDispatchKind::NotDispatched,
+                result: WarmupDispatchResult::PermanentFailure {
+                    reason: WarmupPermanentFailureReason::RequestBuildFailed,
                     error_detail: error,
-                }
-            }
-            WarmupRequestAttempt::NetworkError { error } => {
-                WarmupDispatchAttempt::TransientFailure {
-                    reason: WarmupAttemptReason::NetworkError,
+                },
+            },
+            WarmupRequestAttempt::NetworkError { error } => WarmupDispatchAttempt {
+                dispatch_kind: WarmupDispatchKind::Http,
+                result: WarmupDispatchResult::TransientFailure {
+                    reason: WarmupTransientFailureReason::NetworkError,
                     error_detail: error,
-                }
-            }
+                },
+            },
         }
     }
 

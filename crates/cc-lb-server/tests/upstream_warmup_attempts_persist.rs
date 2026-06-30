@@ -7,7 +7,9 @@ use cc_lb_storage_api::{
     BackendKind, MetaStore, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSource, SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamCreate,
     UpstreamStore, UpstreamSubscriptionQuotaStore, UpstreamWarmupAttemptStore,
-    WarmupAttemptListFilters, WarmupAttemptOutcome, WarmupAttemptReason, WarmupAttemptTrigger,
+    WarmupAttemptListFilters, WarmupAttemptOutcome, WarmupAttemptStatus, WarmupAttemptTrigger,
+    WarmupDispatchKind, WarmupPermanentFailureReason, WarmupSkipReason, WarmupSuccessReason,
+    WarmupTransientFailureReason,
 };
 use http::StatusCode;
 use uuid::Uuid;
@@ -45,8 +47,9 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
     let redundant_observations = [five_hour_observation(1_800_001_000)];
     let cases = [
         ExpectedAttempt {
-            outcome: WarmupAttemptOutcome::SuccessFresh,
+            outcome: WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
             expected_idle_secs: Some(2_000),
+            dispatch_kind: WarmupDispatchKind::Http,
             result: WarmupAttemptExecutionResult::Response {
                 status: StatusCode::OK,
                 observations: &fresh_observations,
@@ -54,8 +57,9 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
             },
         },
         ExpectedAttempt {
-            outcome: WarmupAttemptOutcome::SuccessRedundant,
+            outcome: WarmupAttemptOutcome::Success(WarmupSuccessReason::WindowAlreadyActive),
             expected_idle_secs: None,
+            dispatch_kind: WarmupDispatchKind::Http,
             result: WarmupAttemptExecutionResult::Response {
                 status: StatusCode::OK,
                 observations: &redundant_observations,
@@ -63,28 +67,35 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
             },
         },
         ExpectedAttempt {
-            outcome: WarmupAttemptOutcome::TransientFailure,
+            outcome: WarmupAttemptOutcome::TransientFailure(
+                WarmupTransientFailureReason::NetworkError,
+            ),
             expected_idle_secs: None,
+            dispatch_kind: WarmupDispatchKind::Http,
             result: WarmupAttemptExecutionResult::TransientFailure {
-                reason: WarmupAttemptReason::NetworkError,
+                reason: WarmupTransientFailureReason::NetworkError,
                 http_status: None,
                 error_detail: Some("dial tcp failed"),
             },
         },
         ExpectedAttempt {
-            outcome: WarmupAttemptOutcome::PermanentFailure,
+            outcome: WarmupAttemptOutcome::PermanentFailure(
+                WarmupPermanentFailureReason::Forbidden,
+            ),
             expected_idle_secs: None,
+            dispatch_kind: WarmupDispatchKind::Http,
             result: WarmupAttemptExecutionResult::PermanentFailure {
-                reason: WarmupAttemptReason::Forbidden,
+                reason: WarmupPermanentFailureReason::Forbidden,
                 http_status: Some(StatusCode::FORBIDDEN),
                 error_detail: None,
             },
         },
         ExpectedAttempt {
-            outcome: WarmupAttemptOutcome::Skipped,
+            outcome: WarmupAttemptOutcome::Skipped(WarmupSkipReason::UpstreamDisabled),
             expected_idle_secs: None,
+            dispatch_kind: WarmupDispatchKind::NotDispatched,
             result: WarmupAttemptExecutionResult::Skipped {
-                reason: WarmupAttemptReason::UpstreamDisabled,
+                reason: WarmupSkipReason::UpstreamDisabled,
                 cycle_key: None,
                 error_detail: None,
             },
@@ -103,10 +114,12 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
             expected_cycle_key: Some(1_800_002_000),
             attempted_at_unix_secs,
             completed_at_unix_secs: Some(attempted_at_unix_secs + 1),
+            dispatch_kind: case.dispatch_kind,
             result: case.result,
         })
         .await;
         assert_eq!(record.outcome, case.outcome);
+        assert_eq!(record.dispatch_kind, Some(case.dispatch_kind));
         assert_eq!(
             record.idle_secs_since_prev_window, case.expected_idle_secs,
             "idle_secs mismatch for outcome={:?}: expected {:?}, got {:?}",
@@ -119,7 +132,7 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
                 WarmupAttemptListFilters {
                     limit: Some(10),
                     before: None,
-                    outcome: None,
+                    status: None,
                 },
             )
             .await
@@ -134,24 +147,24 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
             WarmupAttemptListFilters {
                 limit: Some(10),
                 before: None,
-                outcome: None,
+                status: None,
             },
         )
         .await
         .expect("attempts list");
-    let mut outcomes = attempts
+    let mut statuses = attempts
         .iter()
-        .map(|attempt| attempt.outcome)
+        .map(|attempt| attempt.outcome.status())
         .collect::<Vec<_>>();
-    outcomes.sort_by_key(outcome_order);
+    statuses.sort_by_key(status_order);
     assert_eq!(
-        outcomes,
+        statuses,
         [
-            WarmupAttemptOutcome::SuccessFresh,
-            WarmupAttemptOutcome::SuccessRedundant,
-            WarmupAttemptOutcome::TransientFailure,
-            WarmupAttemptOutcome::PermanentFailure,
-            WarmupAttemptOutcome::Skipped,
+            WarmupAttemptStatus::Success,
+            WarmupAttemptStatus::Success,
+            WarmupAttemptStatus::TransientFailure,
+            WarmupAttemptStatus::PermanentFailure,
+            WarmupAttemptStatus::Skipped,
         ]
     );
 }
@@ -160,6 +173,7 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
 struct ExpectedAttempt<'a> {
     outcome: WarmupAttemptOutcome,
     expected_idle_secs: Option<i64>,
+    dispatch_kind: WarmupDispatchKind,
     result: WarmupAttemptExecutionResult<'a>,
 }
 
@@ -197,12 +211,11 @@ fn previous_quota(upstream_id: Uuid) -> SubscriptionQuotaObservationRecord {
     }
 }
 
-fn outcome_order(outcome: &WarmupAttemptOutcome) -> u8 {
-    match outcome {
-        WarmupAttemptOutcome::SuccessFresh => 0,
-        WarmupAttemptOutcome::SuccessRedundant => 1,
-        WarmupAttemptOutcome::TransientFailure => 2,
-        WarmupAttemptOutcome::PermanentFailure => 3,
-        WarmupAttemptOutcome::Skipped => 4,
+fn status_order(status: &WarmupAttemptStatus) -> u8 {
+    match status {
+        WarmupAttemptStatus::Success => 0,
+        WarmupAttemptStatus::Skipped => 3,
+        WarmupAttemptStatus::TransientFailure => 1,
+        WarmupAttemptStatus::PermanentFailure => 2,
     }
 }

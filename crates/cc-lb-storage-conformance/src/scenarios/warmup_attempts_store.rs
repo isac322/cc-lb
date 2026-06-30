@@ -4,7 +4,8 @@ use anyhow::{Result, ensure};
 use cc_lb_core::ClockHandle;
 use cc_lb_storage_api::{
     UpstreamStore, UpstreamWarmupAttemptStore, WarmupAttemptListFilters, WarmupAttemptOutcome,
-    WarmupAttemptReason, WarmupAttemptSummary,
+    WarmupAttemptStatus, WarmupAttemptSummary, WarmupPermanentFailureReason, WarmupSkipReason,
+    WarmupSuccessReason, WarmupTransientFailureReason,
 };
 
 use crate::{
@@ -44,9 +45,12 @@ macro_rules! scenario {
 
 scenario!(insert_and_read_back, |storage| async move {
     let upstream = create_upstream(storage.as_ref(), "warmup-insert-read").await?;
-    let record = attempt(upstream.id, 1, 1_800_000_000, WarmupAttemptOutcome::Skipped);
-    let mut record = record;
-    record.reason = Some(WarmupAttemptReason::SevenDayQuotaExhausted);
+    let record = attempt(
+        upstream.id,
+        1,
+        1_800_000_000,
+        WarmupAttemptOutcome::Skipped(WarmupSkipReason::SevenDayQuotaExhausted),
+    );
     storage.insert_warmup_attempt(&record).await?;
 
     ensure!(
@@ -74,7 +78,7 @@ scenario!(cursor_pagination, |storage| async move {
                 upstream.id,
                 idx + 1,
                 1_800_000_000 + idx as i64,
-                WarmupAttemptOutcome::SuccessFresh,
+                WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
             )
         })
         .collect::<Vec<_>>();
@@ -111,11 +115,11 @@ scenario!(outcome_filter, |storage| async move {
     let records = outcomes(
         upstream.id,
         &[
-            WarmupAttemptOutcome::SuccessFresh,
-            WarmupAttemptOutcome::TransientFailure,
-            WarmupAttemptOutcome::SuccessFresh,
-            WarmupAttemptOutcome::Skipped,
-            WarmupAttemptOutcome::SuccessFresh,
+            WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
+            WarmupAttemptOutcome::TransientFailure(WarmupTransientFailureReason::NetworkError),
+            WarmupAttemptOutcome::Success(WarmupSuccessReason::WindowAlreadyActive),
+            WarmupAttemptOutcome::Skipped(WarmupSkipReason::UpstreamDisabled),
+            WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
         ],
         1_800_000_010,
     );
@@ -124,15 +128,15 @@ scenario!(outcome_filter, |storage| async move {
     let listed = storage
         .list_warmup_attempts_for_upstream(
             upstream.id,
-            filters(Some(10), None, Some(WarmupAttemptOutcome::SuccessFresh)),
+            filters(Some(10), None, Some(WarmupAttemptStatus::Success)),
         )
         .await?;
 
     ensure!(
         listed
             .iter()
-            .all(|record| record.outcome == WarmupAttemptOutcome::SuccessFresh),
-        "outcome filter should return only success_fresh rows"
+            .all(|record| record.outcome.status() == WarmupAttemptStatus::Success),
+        "status filter should return only success rows"
     );
     ensure!(
         ids(&listed) == [records[4].id, records[2].id, records[0].id],
@@ -152,12 +156,12 @@ where
         let mut records = outcomes(
             upstream.id,
             &[
-                WarmupAttemptOutcome::SuccessFresh,
-                WarmupAttemptOutcome::SuccessFresh,
-                WarmupAttemptOutcome::SuccessRedundant,
-                WarmupAttemptOutcome::TransientFailure,
-                WarmupAttemptOutcome::PermanentFailure,
-                WarmupAttemptOutcome::Skipped,
+                WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
+                WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
+                WarmupAttemptOutcome::Success(WarmupSuccessReason::WindowAlreadyActive),
+                WarmupAttemptOutcome::TransientFailure(WarmupTransientFailureReason::NetworkError),
+                WarmupAttemptOutcome::PermanentFailure(WarmupPermanentFailureReason::AuthFailed),
+                WarmupAttemptOutcome::Skipped(WarmupSkipReason::UpstreamDisabled),
             ],
             now - 360,
         );
@@ -166,13 +170,13 @@ where
                 upstream.id,
                 20,
                 now - SEVEN_DAYS_SECS - 60,
-                WarmupAttemptOutcome::SuccessFresh,
+                WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
             ),
             attempt(
                 upstream.id,
                 21,
                 now - SEVEN_DAYS_SECS - 120,
-                WarmupAttemptOutcome::Skipped,
+                WarmupAttemptOutcome::Skipped(WarmupSkipReason::UpstreamDisabled),
             ),
         ]);
         insert_all(storage.as_ref(), &records).await?;
@@ -185,11 +189,10 @@ where
                 .summarize_recent_warmup_attempts(upstream.id, cutoff_unix_secs)
                 .await?
                 == WarmupAttemptSummary {
-                    success_fresh: 2,
-                    success_redundant: 1,
+                    success: 3,
+                    skipped: 1,
                     transient_failure: 1,
                     permanent_failure: 1,
-                    skipped: 1,
                 },
             "summary should count only attempts inside the 7 day window"
         );
@@ -204,7 +207,7 @@ scenario!(fk_cascade_on_upstream_delete, |storage| async move {
         upstream.id,
         1,
         1_800_000_000,
-        WarmupAttemptOutcome::SuccessFresh,
+        WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
     );
     storage.insert_warmup_attempt(&record).await?;
     storage.hard_delete(upstream.id).await?;

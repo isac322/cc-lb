@@ -49,11 +49,11 @@ async fn test_summary_returns_expected_shape() {
         serde_json::to_value(&fixture.dialect_plugin).unwrap()
     );
     assert_eq!(
-        body["recent_summary_7d"]["success_fresh"],
+        body["recent_summary_7d"]["success"],
         support::RECENT_7D_COUNTS.0
     );
     assert_eq!(
-        body["recent_summary_7d"]["success_redundant"],
+        body["recent_summary_7d"]["skipped"],
         support::RECENT_7D_COUNTS.1
     );
     assert_eq!(
@@ -63,10 +63,6 @@ async fn test_summary_returns_expected_shape() {
     assert_eq!(
         body["recent_summary_7d"]["permanent_failure"],
         support::RECENT_7D_COUNTS.3
-    );
-    assert_eq!(
-        body["recent_summary_7d"]["skipped"],
-        support::RECENT_7D_COUNTS.4
     );
 }
 
@@ -116,7 +112,7 @@ async fn test_attempts_outcome_filter() {
     let expected = fixture
         .attempts
         .iter()
-        .filter(|attempt| attempt.outcome == WarmupAttemptOutcome::PermanentFailure)
+        .filter(|attempt| matches!(attempt.outcome, WarmupAttemptOutcome::PermanentFailure(_)))
         .cloned()
         .collect::<Vec<_>>();
 
@@ -139,7 +135,7 @@ async fn test_attempts_outcome_filter() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|attempt| attempt["outcome"] == "permanent_failure")
+            .all(|attempt| attempt["status"] == "permanent_failure")
     );
     assert_eq!(body["next_cursor"], Value::Null);
 }

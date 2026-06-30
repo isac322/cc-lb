@@ -45,8 +45,17 @@ export const COPY = {
       'Warmup cannot fire: this upstream has no OAuth credentials yet. Complete the OAuth flow first.',
     seven_day_quota_exhausted:
       'Warmup skipped: the 7-day subscription quota is exhausted. The scheduler will retry after the reset window.',
-    transient:
-      'Warmup failed transiently. The background loop will retry automatically.',
+    upstream_disabled: 'Warmup skipped: upstream is disabled.',
+    upstream_deleted: 'Warmup skipped: upstream was deleted.',
+    rate_limited_cycle_key_missing:
+      'Warmup failed: 429 without anthropic-ratelimit-* headers.',
+    upstream_5xx: 'Warmup failed: upstream returned 5xx.',
+    network_error: 'Warmup failed: network error.',
+    request_timeout: 'Warmup failed: request timeout.',
+    dialect_plugin_transient: 'Warmup failed: shape plugin transient error.',
+    request_build_failed: 'Warmup failed: could not build request.',
+    oauth_refresh_failed: 'Warmup failed: OAuth refresh failed.',
+    credential_decrypt_failed: 'Warmup failed: credential decrypt failed.',
   },
 } as const;
 
