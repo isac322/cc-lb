@@ -135,15 +135,14 @@ gives the dependency chain. Check the upstream crate's latest stable on crates.i
 - If a newer upstream release exists that relaxes the pin → bump the upstream too (chain bump).
 - If the upstream's latest stable still has the pin → genuine block. Move on.
 
-Always cross-reference `deny.toml` `[advisories] ignore` — the cc-lb team already records known unfixable upstream blocks (RUSTSEC IDs for `wasmtime` via `extism`, `rustls-pemfile` via `rustls`, `bincode` 2.x unmaintained status). These are not "I missed it" — they are tracked and gated. Quote the deny.toml `reason` field in your PR body.
+Always cross-reference `deny.toml` `[advisories] ignore` — the cc-lb team already records known unfixable upstream blocks (`rustls-pemfile` via `rustls`, `bincode` 2.x unmaintained status). These are not "I missed it" — they are tracked and gated. Quote the deny.toml `reason` field in your PR body.
 
 Known durable blocks (snapshot — re-verify each run):
 - `bincode 2.0.1 → 3.0.0` — 3.0.0 is an [xkcd 2347](https://xkcd.com/2347/) joke release containing `compile_error!`. Real latest stable production is 2.0.1. Confirmed both by attempting build (immediate compile error) and by deny.toml note ("upstream team ceased development permanently").
 - `generic-array 0.14.x → 0.14.9` — pinned via `chacha20poly1305 0.10.x → aead 0.5.x → crypto-common 0.1.x`. Unblocks when `chacha20poly1305 0.11` stable lands (currently `-rc.*` / `-pre.*`).
 - `matchit 0.8.4 → 0.8.6` — exact-pinned by `axum 0.8.9`. Unblocks when axum cuts a release that relaxes the pin.
-- `wasmtime 43.0.2` — transitive via `extism 1.30.0` (latest). 4 RUSTSEC advisories ignored in deny.toml pending extism upstream bump.
 
-If any of those clear up between runs (newer chacha20poly1305 / axum / extism / bincode replacement), bump them and remove the corresponding entry from deny.toml `ignore`.
+If any of those clear up between runs (newer chacha20poly1305 / axum / bincode replacement), bump them and remove the corresponding entry from deny.toml `ignore`.
 
 ### Phase 5: Verify locally (light)
 

@@ -535,7 +535,7 @@ async fn fire_now_upstream_warmup(
         ));
     }
     let dialect_dispatch_bundle = upstream.warmup_dialect_plugin.as_ref().and_then(|_| {
-        let runtime = state.runtime.as_deref()?;
+        let runtime = state.runtime.as_ref()?;
         let data_dir = state.data_dir.as_deref()?;
         let dispatcher = state.warmup_dialect_dispatcher.as_deref()?;
         Some((runtime, data_dir, dispatcher))

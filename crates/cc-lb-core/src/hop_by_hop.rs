@@ -13,9 +13,9 @@ type DynStripFuture<T> = dyn Future<Output = T> + Send;
 
 // Hop-by-hop stripping only removes RFC hop-by-hop headers. End-to-end
 // request metadata such as x-organization-uuid and X-Trusted-Device-Token must
-// survive this layer in the default/non-ExtismSigner flow because the
-// direct/custom dialect path clones downstream headers verbatim before signing.
-// ExtismSigner can still replace headers wholesale via headers_mut().clear(),
+// survive this layer in the built-in signer flow because the direct/custom
+// dialect path clones downstream headers verbatim before signing. A wasmtime
+// shape plugin can still replace headers wholesale via headers_mut().clear(),
 // so that plugin boundary remains outside this preservation contract.
 const HOP_BY_HOP_HEADERS: [HeaderName; 9] = [
     HeaderName::from_static("connection"),

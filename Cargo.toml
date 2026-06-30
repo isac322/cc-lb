@@ -1,21 +1,15 @@
 [workspace]
 members = [
     "crates/cc-lb-pricing",
-    "crates/cc-lb-plugin-wire",
-    "crates/cc-lb-runtime-protocol",
-    "crates/cc-lb-plugin-conformance",
     "crates/cc-lb-storage-sqlite",
     "crates/cc-lb-*",
-    "benches/extism_sse_overhead",
-    "plugins/router/cache-aware",
+    "plugins/router/cache-aware-wasmtime",
+    "plugins/test-fixtures/wasmtime-shape-passthrough",
+    "plugins/test-fixtures/wasmtime-observe-noop",
     "tests/fixtures/fake-anthropic",
-    "tests/fixtures/extism-echo-plugin",
-    "tests/fixtures/plugin-handshake-spike",
-    "tests/fixtures/plugin-handshake-spike/host_check",
     "tests/fixtures/mock-anthropic-oauth-server",
     "tests/load",
     "tests/loom",
-    "tests/plugin-lifecycle",
     "tests/property",
     "tests/tls",
     "tests/integration",
@@ -24,9 +18,6 @@ members = [
 ]
 exclude = [
     "fuzz",
-    "crates/cc-lb-plugin-conformance/tests/fixtures/conformance-plugin-observe",
-    "crates/cc-lb-plugin-conformance/tests/fixtures/conformance-plugin-router",
-    "crates/cc-lb-plugin-conformance/tests/fixtures/conformance-plugin-shape",
 ]
 resolver = "2"
 
@@ -37,14 +28,24 @@ license = "Apache-2.0"
 rust-version = "1.96.0"
 
 [workspace.dependencies]
-# Plugin trio — public crates.io surface. Lockstep via exact-version pin.
-# Bumping any of these requires bumping all three together.
-cc-lb-clock       = { path = "crates/cc-lb-clock", version = "=0.1.0" }
-cc-lb-pdk         = { path = "crates/cc-lb-pdk",         version = "=0.1.1" }
-cc-lb-plugin-wire = { path = "crates/cc-lb-plugin-wire", version = "=0.1.1" }
-cc-lb-plugin-api  = { path = "crates/cc-lb-plugin-api", version = "=0.2.1" }
-cc-lb-runtime-protocol  = { path = "crates/cc-lb-runtime-protocol", version = "=0.2.2" }
-cc-lb-plugin-conformance = { path = "crates/cc-lb-plugin-conformance", version = "=0.1.3" }
+# Public crates.io surface — only cc-lb-plugin-api remains.
+cc-lb-plugin-api = { path = "crates/cc-lb-plugin-api", version = "=0.3.0" }
+
+# Wasmtime plugin runtime quartet — internal, unpublished until Phase 2 ABI freeze.
+# See docs/rfc/0001-plugin-runtime-vnext.md.
+cc-lb-runtime-wasmtime    = { path = "crates/cc-lb-runtime-wasmtime",    version = "0.1.0" }
+cc-lb-plugin-types        = { path = "crates/cc-lb-plugin-types",        version = "0.2.0" }
+cc-lb-pdk-wasmtime        = { path = "crates/cc-lb-pdk-wasmtime",        version = "0.1.0" }
+cc-lb-pdk-wasmtime-macros = { path = "crates/cc-lb-pdk-wasmtime-macros", version = "0.1.0" }
+
+# External wasmtime/rkyv ecosystem — wired up by cc-lb-runtime-wasmtime in Phase 1+.
+# Phase 0 declares them here so member crates can opt in via `<name>.workspace = true`
+# without churning the manifest.
+wasmtime  = "46"
+rkyv      = { version = "0.8", default-features = false }
+bytecheck = { version = "0.8", default-features = false }
+blake3    = { version = "1", default-features = false }
+wasmparser = "0.241"
 
 anyhow = "1"
 arc-swap = "1"
@@ -61,7 +62,6 @@ criterion = "0.8"
 crc32fast = "1"
 dashmap = "6"
 eventsource-stream = "0.2"
-extism = { version = "1", default-features = false, features = ["wasmtime-default-features"] }
 figment = "0.10"
 flate2 = "1"
 brotli = "8"
@@ -110,7 +110,6 @@ rustls = { version = "0.23", default-features = false, features = ["std", "ring"
 url = "2"
 zeroize = "1"
 wat = "1"
-extism-pdk = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [profile.release]

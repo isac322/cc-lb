@@ -22,10 +22,7 @@ async fn sighup_reloads_body_defaults() {
     let watcher = Arc::new(ConfigWatcher::new(
         &config_path,
         reload_common::load_config(&config_path),
-        Arc::new(cc_lb_runtime_extism::ExtismRuntime::with_config(
-            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-            Arc::new(cc_lb_core::SystemClock),
-        )),
+        Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
         Arc::new(cc_lb_core::SystemClock),
     ));
     let app = cc_lb_admin::router(AdminState {

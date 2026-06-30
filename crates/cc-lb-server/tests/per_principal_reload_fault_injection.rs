@@ -18,10 +18,8 @@ fn config_reload_is_storage_driven_and_keeps_runtime_view() {
     write_config_with_principal_routers(&config_path, proxy_addr, &router_path, None);
 
     let initial_config = reload_common::load_config(&config_path);
-    let runtime = Arc::new(cc_lb_runtime_extism::ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
-    ));
+    let runtime =
+        Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build"));
     let dynamic_view = reload_common::dynamic_view_holder(&initial_config);
     let watcher = ConfigWatcher::new_with_principal_view(
         &config_path,
@@ -34,9 +32,8 @@ fn config_reload_is_storage_driven_and_keeps_runtime_view() {
         .reload_now()
         .expect("initial config-only reload succeeds");
     let previous_view = dynamic_view.load();
-    let mut pre_reload_keys = runtime.registered_slot_keys();
-    pre_reload_keys.sort();
-    assert!(pre_reload_keys.is_empty());
+    let pre_reload_slot_count = runtime.slot_count();
+    assert_eq!(pre_reload_slot_count, 0);
 
     write_config_with_principal_routers(
         &config_path,
@@ -65,9 +62,7 @@ fn config_reload_is_storage_driven_and_keeps_runtime_view() {
         status.outcome,
         cc_lb_admin::ReloadOutcome::Success
     ));
-    let mut post_reload_keys = runtime.registered_slot_keys();
-    post_reload_keys.sort();
-    assert_eq!(post_reload_keys, pre_reload_keys);
+    assert_eq!(runtime.slot_count(), pre_reload_slot_count);
 }
 
 fn write_config_with_principal_routers(

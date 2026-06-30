@@ -86,7 +86,7 @@ function StatusTab() {
   return (
     <Section
       title="Runtime status"
-      subtitle="Live state of every Extism plugin bound to a slot. Polled from /admin/status every 15 s."
+      subtitle="Live state of every wasm plugin bound to a slot. Polled from /admin/status every 15 s."
       className="mt-6"
     >
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

@@ -641,7 +641,7 @@ async fn insert_registry_in_tx(
         .iter()
         .map(|slot| slot.as_str().to_owned())
         .collect();
-    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, revision, wire_version, supported_slots) VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision, wire_version, supported_slots")
+    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, revision, wire_version, supported_slots, schema_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision, wire_version, supported_slots, schema_hash")
         .bind(id)
         .bind(sha256.as_slice())
         .bind(&input.name)
@@ -651,6 +651,7 @@ async fn insert_registry_in_tx(
         .bind(input.uploaded_by_admin_id)
         .bind(i16::from(input.wire_version))
         .bind(&supported_slots)
+        .bind(input.schema_hash.as_ref().map(|h| h.as_slice()))
         .fetch_optional(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -711,13 +712,23 @@ fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEn
             .into_iter()
             .filter_map(|s| PluginSlot::parse(&s))
             .collect(),
+        schema_hash: row
+            .try_get::<Option<Vec<u8>>, _>("schema_hash")
+            .map_err(map_sqlx_error)?
+            .map(|bytes| sha_to_array(&bytes))
+            .transpose()?,
     })
 }
 
 fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEntryInput) -> bool {
+    let schema_hash_ok = match (existing.schema_hash, input.schema_hash) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    };
     existing.name == input.name
         && existing.original_filename == input.original_filename
         && existing.label == input.label
+        && schema_hash_ok
 }
 
 fn is_singleton_slot(slot: PluginSlot) -> bool {

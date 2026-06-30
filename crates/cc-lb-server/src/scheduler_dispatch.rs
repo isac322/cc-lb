@@ -14,7 +14,7 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_core::DynamicViewHolder;
 use cc_lb_core::clock::ClockHandle;
-use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::metadata_refresh::{
     CoreMetadataRefreshRunner, MetadataRefreshJobHandler,
@@ -38,7 +38,7 @@ pub(crate) struct SchedulerDispatchDeps {
     pub stores: Arc<Stores>,
     pub aead: Arc<AeadService>,
     pub oauth_cfg: Arc<AnthropicOAuthConfig>,
-    pub runtime: Arc<ExtismRuntime>,
+    pub runtime: Arc<WasmtimeRuntime>,
     pub data_dir: std::path::PathBuf,
     pub lazy_refresher: Option<Arc<LazyRefresher>>,
     pub subscription_quota_sink: cc_lb_core::SubscriptionQuotaSink,
@@ -58,7 +58,7 @@ pub(super) struct SchedulerDispatch {
     pub(super) stores: Arc<Stores>,
     pub(super) aead: Arc<AeadService>,
     pub(super) oauth_cfg: Arc<AnthropicOAuthConfig>,
-    pub(super) runtime: Arc<ExtismRuntime>,
+    pub(super) runtime: Arc<WasmtimeRuntime>,
     pub(super) data_dir: Arc<std::path::PathBuf>,
     pub(super) lazy_refresher: Option<Arc<LazyRefresher>>,
     pub(super) subscription_quota_sink: cc_lb_core::SubscriptionQuotaSink,

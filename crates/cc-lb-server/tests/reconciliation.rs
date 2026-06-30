@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use cc_lb_aead::AeadService;
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::DynamicViewHolder;
-use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::reconcile::Reconciler;
 use cc_lb_storage_api::{
@@ -120,6 +120,7 @@ async fn seed_registry(storage: &Storage, seed: u8, name: &str) -> WasmRegistryE
                 parse_validated_at_unix_secs: 1_800_000_000,
             },
             WasmRegistryEntryInput {
+                schema_hash: None,
                 name: name.to_owned(),
                 original_filename: format!("{name}.wasm"),
                 label: None,
@@ -136,7 +137,7 @@ async fn seed_registry(storage: &Storage, seed: u8, name: &str) -> WasmRegistryE
 
 async fn initial_holder(
     stores: &Stores,
-    runtime: &ExtismRuntime,
+    runtime: &Arc<WasmtimeRuntime>,
     data_dir: &std::path::Path,
 ) -> Arc<DynamicViewHolder> {
     let view = build_dynamic_view(
@@ -160,7 +161,7 @@ async fn initial_holder(
 fn reconciler(
     stores: Arc<Stores>,
     holder: Arc<DynamicViewHolder>,
-    runtime: Arc<ExtismRuntime>,
+    runtime: Arc<WasmtimeRuntime>,
     cancel: CancellationToken,
     data_dir: &std::path::Path,
 ) -> Arc<Reconciler> {
@@ -198,10 +199,7 @@ async fn unchanged_tick_emits_unchanged_metric_and_does_not_rebuild() {
     create_principal(&storage, "principal-a").await;
     create_upstream(&storage, "upstream-a").await;
     let stores = stores(storage);
-    let runtime = Arc::new(ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
-    ));
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let holder = initial_holder(&stores, &runtime, dir.path()).await;
     let generation = holder.load().generation;
     let before = labeled_counter_value(&metrics, "cclb_reconcile_total", "outcome", "unchanged");
@@ -221,10 +219,7 @@ async fn notify_dropped_then_reconcile_catches_up_within_one_tick() {
     create_principal(&storage, "principal-a").await;
     create_upstream(&storage, "upstream-a").await;
     let stores = stores(storage.clone());
-    let runtime = Arc::new(ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
-    ));
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let holder = initial_holder(&stores, &runtime, dir.path()).await;
     let generation = holder.load().generation;
     let before = labeled_counter_value(&metrics, "cclb_reconcile_total", "outcome", "changed");
@@ -244,10 +239,7 @@ async fn reconciler_rebuilds_after_registry_entry_insert() {
     create_principal(&storage, "principal-registry-insert").await;
     create_upstream(&storage, "upstream-registry-insert").await;
     let stores = stores(storage.clone());
-    let runtime = Arc::new(ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
-    ));
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let holder = initial_holder(&stores, &runtime, dir.path()).await;
     let generation = holder.load().generation;
 
@@ -266,10 +258,7 @@ async fn reconciler_rebuilds_after_registry_entry_delete() {
     create_upstream(&storage, "upstream-registry-delete").await;
     let entry = seed_registry(&storage, 32, "plugin-registry-delete").await;
     let stores = stores(storage.clone());
-    let runtime = Arc::new(ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
-    ));
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let holder = initial_holder(&stores, &runtime, dir.path()).await;
     let generation = holder.load().generation;
 
@@ -292,10 +281,7 @@ async fn reconciler_rebuilds_after_registry_entry_update() {
     create_upstream(&storage, "upstream-registry-update").await;
     let entry = seed_registry(&storage, 33, "plugin-registry-update").await;
     let stores = stores(storage.clone());
-    let runtime = Arc::new(ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
-    ));
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let holder = initial_holder(&stores, &runtime, dir.path()).await;
     let generation = holder.load().generation;
 
@@ -325,10 +311,7 @@ async fn cancel_during_tick_is_graceful() {
         plugin_registry_repo: None,
     });
     let (_dir, storage) = storage_fixture().await;
-    let runtime = Arc::new(ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
-    ));
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let real_stores = stores(storage);
     let data_dir = tempfile::tempdir().expect("tempdir");
     let holder = initial_holder(&real_stores, &runtime, data_dir.path()).await;

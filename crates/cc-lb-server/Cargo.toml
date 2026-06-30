@@ -34,7 +34,6 @@ postgres = [
     "dep:sqlx",
     "scheduler-sqlx/postgres",
 ]
-wasmtime = []
 
 [[bin]]
 name = "cc-lb"
@@ -58,9 +57,8 @@ cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-dialect-anthropic = { path = "../cc-lb-dialect-anthropic" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
-cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
-cc-lb-runtime-extism = { path = "../cc-lb-runtime-extism" }
+cc-lb-runtime-wasmtime = { workspace = true }
 cc-lb-scheduler = { path = "../cc-lb-scheduler", optional = true, default-features = false }
 cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }

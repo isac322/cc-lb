@@ -1,3 +1,4 @@
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,7 +33,7 @@ impl ConfigWatcher {
     pub fn new(
         path: impl AsRef<Path>,
         initial_config: Config,
-        _runtime: Arc<cc_lb_runtime_extism::ExtismRuntime>,
+        _runtime: Arc<WasmtimeRuntime>,
         clock: ClockHandle,
     ) -> Self {
         Self::new_with_principal_view(path, initial_config, _runtime, None, clock)
@@ -41,7 +42,7 @@ impl ConfigWatcher {
     pub fn new_with_principal_view(
         path: impl AsRef<Path>,
         initial_config: Config,
-        _runtime: Arc<cc_lb_runtime_extism::ExtismRuntime>,
+        _runtime: Arc<WasmtimeRuntime>,
         dynamic_view: Option<Arc<DynamicViewHolder>>,
         clock: ClockHandle,
     ) -> Self {

@@ -1,9 +1,9 @@
 # release-plz config — https://release-plz.dev/docs/config
 #
 # Policy:
-#   * Plugin trio (cc-lb-pdk / cc-lb-plugin-wire / cc-lb-plugin-api) is the
-#     only public surface. Published to crates.io via trusted publishing,
-#     tagged, and released on GitHub.
+#   * Only cc-lb-plugin-api is published to crates.io. The historical
+#     plugin trio + companion crates were deleted in the wasmtime
+#     cutover, so this file degenerated from "trio publish" to solo.
 #   * All other workspace crates are excluded from release-plz entirely
 #     (`release = false` default). Their versions are bumped manually
 #     by editing workspace.package.version in the root Cargo.toml.
@@ -15,26 +15,6 @@
 release = false
 
 [[package]]
-name = "cc-lb-pdk"
-release = true
-semver_check = true
-
-[[package]]
-name = "cc-lb-plugin-wire"
-release = true
-semver_check = true
-
-[[package]]
 name = "cc-lb-plugin-api"
-release = true
-semver_check = true
-
-[[package]]
-name = "cc-lb-runtime-protocol"
-release = true
-semver_check = true
-
-[[package]]
-name = "cc-lb-plugin-conformance"
 release = true
 semver_check = true

@@ -9,9 +9,9 @@ name: release-plz
 #      and CHANGELOG entries for any crate touched since the last release.
 #   2. On merge of that PR, the `release` job runs again, detects new versions
 #      in Cargo.toml, creates git tags + GitHub releases, and publishes the
-#      plugin trio (cc-lb-pdk / cc-lb-plugin-wire / cc-lb-plugin-api) to
-#      crates.io via trusted publishing (OIDC). Other crates skip publish
-#      because their Cargo.toml carries `publish = false`.
+#      only crate that opted in (cc-lb-plugin-api) to crates.io via trusted
+#      publishing (OIDC). Other crates skip publish because their Cargo.toml
+#      carries `publish = false`.
 
 on:
   push:

@@ -4,7 +4,7 @@ use axum::http::StatusCode;
 use cc_lb_config::Config;
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
-    PrincipalStore, WasmBlob, WasmRegistryEntryInput,
+    PrincipalStore, WasmBlob, WasmRegistryEntryInput, default_wire_version,
 };
 use config_admin_common::{app, authed_json, temp_storage, test_state};
 use serde_json::json;
@@ -102,7 +102,7 @@ async fn insert_chain_accepts_builtin_cache_affinity_wire_version() {
         Some(json!({
             "slot": "Router",
             "wasm_registry_id": BUILTIN_CACHE_AFFINITY_ID,
-            "wire_version": 3
+            "wire_version": default_wire_version()
         })),
     )
     .await;
@@ -112,7 +112,7 @@ async fn insert_chain_accepts_builtin_cache_affinity_wire_version() {
         body["wasm_registry_id"],
         BUILTIN_CACHE_AFFINITY_ID.to_string()
     );
-    assert_eq!(body["wire_version"], 3);
+    assert_eq!(body["wire_version"], default_wire_version());
 }
 
 async fn seed_principal(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &str) -> Uuid {
@@ -147,6 +147,7 @@ async fn seed_registry_with_wire_version(
                 parse_validated_at_unix_secs: 1_800_000_000,
             },
             WasmRegistryEntryInput {
+                schema_hash: None,
                 name: name.to_owned(),
                 original_filename: format!("{name}.wasm"),
                 label: None,

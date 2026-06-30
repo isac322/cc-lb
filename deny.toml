@@ -7,8 +7,8 @@ confidence-threshold = 0.8
 
 [advisories]
 # cargo audit gates warnings as failures in CI via `cargo audit --deny warnings`.
-# `rustls-pemfile` remains reachable through `rustls 0.23`; removing it requires a broader
-# TLS stack migration than this quality-gate task.
+# `rustls-pemfile` remains reachable through `rustls 0.23`; removing it requires
+# a broader TLS stack migration than this quality-gate task.
 yanked = "warn"
 ignore = [
     { id = "RUSTSEC-2025-0134", reason = "rustls 0.23 still depends on rustls-pemfile 2.2.0; removing it requires a broader TLS stack migration." },

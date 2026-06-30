@@ -31,12 +31,13 @@ pub use traits::{
     PluginRuntime, Signer, SignerFactory, UpstreamDialect,
 };
 pub use types::{
-    CredentialStrategy, InternalError, InternalErrorKind, InternalErrorStage, ObserveEvent,
-    PerCandidateReason, PluginManifest, PluginSlot, Principal, PrincipalKind, PrincipalQuotas,
-    RateLimitKind, RateLimitObservation, RequestContext, RetryDecision, RouteDecision,
-    RoutingTrace, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability,
-    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy, Upstream,
-    UpstreamCandidate, UpstreamKind, shape_request, sign_request,
+    CredentialStrategy, GLOBAL_PRINCIPAL, InternalError, InternalErrorKind, InternalErrorStage,
+    ObserveEvent, PerCandidateReason, PluginManifest, PluginSlot, Principal, PrincipalKind,
+    PrincipalQuotas, RateLimitKind, RateLimitObservation, RequestContext, RetryDecision,
+    RouteDecision, RoutingTrace, ShapedRequest, ShapedRequestBuilder, SignedRequest,
+    SigningCapability, SlotKey, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
+    TerminalStrategy, Upstream, UpstreamCandidate, UpstreamKind, default_pure, shape_request,
+    sign_request,
 };
 
 /// Stable registry id for the built-in cache-affinity router filter.
@@ -45,17 +46,11 @@ pub const BUILTIN_CACHE_AFFINITY_ID: uuid::Uuid = uuid::Uuid::from_u128(1);
 /// Stable registry name for the built-in cache-affinity router filter.
 pub const BUILTIN_CACHE_AFFINITY_NAME: &str = "cache-affinity";
 
-/// Wire version exposed by the built-in cache-affinity router filter.
-pub const BUILTIN_CACHE_AFFINITY_WIRE_VERSION: u8 = 3;
-
 /// Stable registry id for the built-in subscription-preference router filter.
 pub const BUILTIN_SUBSCRIPTION_PREFERENCE_ID: uuid::Uuid = uuid::Uuid::from_u128(2);
 
 /// Stable registry name for the built-in subscription-preference router filter.
 pub const BUILTIN_SUBSCRIPTION_PREFERENCE_NAME: &str = "subscription-preference";
-
-/// Wire version exposed by the built-in subscription-preference router filter.
-pub const BUILTIN_SUBSCRIPTION_PREFERENCE_WIRE_VERSION: u8 = 3;
 
 mod private {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]

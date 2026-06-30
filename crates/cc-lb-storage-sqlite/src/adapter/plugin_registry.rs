@@ -48,7 +48,7 @@ impl PluginRegistryStore for SqliteStorage {
         let metadata = metadata_from_input(&input)?;
         let id = Uuid::new_v4();
         let registry_insert = sqlx::query(
-            "INSERT INTO wasm_registry_v2 (id, sha256, plugin_name, plugin_version, label, uploaded_by_admin_id, revision, wire_version, supported_slots, abi_envelope, augmented_metadata, host_offer_hash, handshake_schema_version, last_handshake_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?) ON CONFLICT(sha256) DO NOTHING",
+            "INSERT INTO wasm_registry_v2 (id, sha256, plugin_name, plugin_version, label, uploaded_by_admin_id, revision, wire_version, supported_slots, schema_hash, abi_envelope, augmented_metadata, host_offer_hash, handshake_schema_version, last_handshake_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?) ON CONFLICT(sha256) DO NOTHING",
         )
         .bind(id.to_string())
         .bind(blob.sha256.as_slice())
@@ -58,6 +58,7 @@ impl PluginRegistryStore for SqliteStorage {
         .bind(input.uploaded_by_admin_id.to_string())
         .bind(i64::from(input.wire_version))
         .bind(slots_to_json(&input.supported_slots)?)
+        .bind(input.schema_hash.as_ref().map(|h| h.as_slice()))
         .bind(i64::from(input.wire_version))
         .bind(serde_json::to_string(&metadata)?)
         .bind(blob.sha256.as_slice())
@@ -796,6 +797,11 @@ fn registry_from_row(row: SqliteRow) -> StorageResult<WasmRegistryEntry> {
         &row.try_get::<String, _>("supported_slots")
             .map_err(map_sqlx_error)?,
     )?;
+    let schema_hash = row
+        .try_get::<Option<Vec<u8>>, _>("schema_hash")
+        .map_err(map_sqlx_error)?
+        .map(|bytes| sha_to_array(&bytes))
+        .transpose()?;
     Ok(WasmRegistryEntry {
         id,
         sha256,
@@ -814,6 +820,7 @@ fn registry_from_row(row: SqliteRow) -> StorageResult<WasmRegistryEntry> {
         is_builtin: false,
         metadata: None,
         supported_slots,
+        schema_hash,
     })
 }
 
@@ -988,9 +995,14 @@ fn metadata_from_input(input: &WasmRegistryEntryInput) -> StorageResult<Augmente
 }
 
 fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEntryInput) -> bool {
+    let schema_hash_ok = match (existing.schema_hash, input.schema_hash) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    };
     existing.name == input.name
         && existing.original_filename == input.original_filename
         && existing.label == input.label
+        && schema_hash_ok
 }
 
 fn is_singleton_slot(slot: PluginSlot) -> bool {

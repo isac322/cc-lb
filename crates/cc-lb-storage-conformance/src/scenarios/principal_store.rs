@@ -523,6 +523,7 @@ where
                 parse_validated_at_unix_secs: BASE_TS,
             },
             WasmRegistryEntryInput {
+                schema_hash: None,
                 name: format!("principal-cascade-plugin-{seed}"),
                 original_filename: format!("principal-cascade-plugin-{seed}.wasm"),
                 label: None,

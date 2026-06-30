@@ -1,0 +1,19 @@
+[package]
+name = "cc-lb-plugin-types"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Shared host/guest types for the cc-lb wasmtime plugin runtime (Phase 0 skeleton)."
+repository = "https://github.com/isac322/cc-lb"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+rkyv = { workspace = true, features = ["alloc", "bytecheck"] }
+
+[features]
+default = []
+std = ["rkyv/std"]

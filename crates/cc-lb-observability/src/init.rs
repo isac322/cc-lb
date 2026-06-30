@@ -26,7 +26,7 @@ const CACHE_TOKEN_DRIFT_BUCKETS: [f64; 11] = [
 const REQUEST_DURATION_BUCKETS: [f64; 12] = [
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
-const EXTISM_DURATION_BUCKETS: [f64; 11] = [
+const PLUGIN_CALL_DURATION_BUCKETS: [f64; 11] = [
     0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
 ];
 const SUBSCRIPTION_QUOTA_BATCH_BUCKETS: [f64; 9] =
@@ -179,9 +179,9 @@ const METRIC_DEFINITIONS: [MetricDefinition; 36] = [
         description: "SSE events relayed by upstream and event type.",
     },
     MetricDefinition {
-        name: "cc_lb_extism_call_duration_seconds",
+        name: "cc_lb_plugin_call_duration_seconds",
         kind: MetricKind::Histogram,
-        description: "Extism plugin hook call duration in seconds.",
+        description: "Plugin hook call duration in seconds.",
     },
     MetricDefinition {
         name: "cc_lb_tokens_total",
@@ -339,9 +339,9 @@ pub fn register_metrics() {
         "SSE events relayed by upstream and event type."
     );
     metrics::describe_histogram!(
-        "cc_lb_extism_call_duration_seconds",
+        "cc_lb_plugin_call_duration_seconds",
         Unit::Seconds,
-        "Extism plugin hook call duration in seconds."
+        "Plugin hook call duration in seconds."
     );
     metrics::describe_counter!(
         "cc_lb_tokens_total",
@@ -377,8 +377,8 @@ fn install_prometheus(cfg: &ObservabilityConfig) -> Result<Option<PrometheusHand
             message: source.to_string(),
         })?
         .set_buckets_for_metric(
-            Matcher::Full("cc_lb_extism_call_duration_seconds".to_owned()),
-            &EXTISM_DURATION_BUCKETS,
+            Matcher::Full("cc_lb_plugin_call_duration_seconds".to_owned()),
+            &PLUGIN_CALL_DURATION_BUCKETS,
         )
         .map_err(|source| InitError::Prometheus {
             message: source.to_string(),
@@ -472,7 +472,7 @@ fn touch_metrics() {
     )
     .increment(0);
     metrics::histogram!(
-        "cc_lb_extism_call_duration_seconds",
+        "cc_lb_plugin_call_duration_seconds",
         "plugin" => "unknown",
         "hook" => "unknown"
     )

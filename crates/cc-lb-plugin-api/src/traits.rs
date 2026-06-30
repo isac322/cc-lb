@@ -12,8 +12,8 @@ use crate::errors::{
 };
 use crate::types::{
     ObserveEvent, PerCandidateReason, PluginManifest, Principal, RequestContext, RetryDecision,
-    RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, Upstream,
-    UpstreamCandidate,
+    RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, SlotKey,
+    Upstream, UpstreamCandidate,
 };
 
 /// Filter plugin output containing upstream selection results and per-candidate reasons.
@@ -76,6 +76,19 @@ pub trait FilterPlugin: Send + Sync {
 
     /// Returns the human-readable plugin name.
     fn plugin_name(&self) -> &str;
+
+    /// Returns the composite key identifying this filter slot — the
+    /// principal it is bound to and the plugin name. Callers use this
+    /// to address cache eviction, hot reload, and per-slot metrics
+    /// uniformly across runtime implementations.
+    ///
+    /// The default impl returns a global slot key derived from
+    /// [`Self::plugin_name`]. Runtime impls bound to a specific
+    /// principal (e.g. wasmtime) override this to return the
+    /// principal × plugin pair they were instantiated with.
+    fn slot_key(&self) -> SlotKey {
+        SlotKey::global(self.plugin_name())
+    }
 }
 
 /// Router plugin boundary.
@@ -146,7 +159,7 @@ pub trait ObservabilityHook: Send + Sync {
     fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError>;
 }
 
-/// Runtime abstraction for concrete plugin systems such as Extism.
+/// Runtime abstraction for concrete plugin systems (currently wasmtime).
 pub trait PluginRuntime: Send + Sync {
     /// Instantiates a router plugin.
     #[allow(deprecated)]
@@ -162,10 +175,22 @@ pub trait PluginRuntime: Send + Sync {
     ) -> Result<Arc<dyn UpstreamDialect>, RuntimeError>;
 
     /// Instantiates a signer factory plugin.
+    ///
+    /// Signer plugin extension is no longer supported — cc-lb-server uses
+    /// built-in `AnthropicKeySigner` / `AnthropicOAuthSigner` directly.
+    /// New runtime impls should leave the default `unimplemented!()` body
+    /// in place. The trait method is retained as a deprecated shim so
+    /// that out-of-tree runtimes do not see a hard trait-shape break;
+    /// it is scheduled for removal in the next semver-major bump.
     fn instantiate_signer_factory(
         &self,
-        manifest: &PluginManifest,
-    ) -> Result<Arc<dyn SignerFactory>, RuntimeError>;
+        _manifest: &PluginManifest,
+    ) -> Result<Arc<dyn SignerFactory>, RuntimeError> {
+        unimplemented!(
+            "signer plugin extension dropped; use built-in \
+             AnthropicKeySigner / AnthropicOAuthSigner instead"
+        )
+    }
 
     /// Instantiates an observability hook plugin.
     fn instantiate_observability(

@@ -1,15 +1,15 @@
 name: publish-check
 
-# PR-stage validation that plugin trio crates remain publish-ready.
+# PR-stage validation that cc-lb-plugin-api remains publish-ready.
 # Catches manifest regressions (missing description/license/repository,
 # excluded source files, broken workspace inheritance) before they reach
-# the release workflow.
+# the release workflow. After the Extism removal sweep the published set
+# degenerated from the historical trio (cc-lb-pdk / cc-lb-plugin-wire /
+# cc-lb-plugin-api) to a solo crate; the matrix shrinks to match.
 
 on:
   pull_request:
     paths:
-      - 'crates/cc-lb-pdk/**'
-      - 'crates/cc-lb-plugin-wire/**'
       - 'crates/cc-lb-plugin-api/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -31,21 +31,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Leaf crates with no internal deps — full `cargo publish --dry-run`
-          # is deterministic and catches every manifest issue.
-          - crate: cc-lb-plugin-wire
-            mode: publish
           - crate: cc-lb-plugin-api
             mode: publish
-          # cc-lb-pdk depends on cc-lb-plugin-wire pinned at an exact version,
-          # so `cargo publish --dry-run` can only resolve once plugin-wire is
-          # already on crates.io at that exact version. That never holds for
-          # release PRs (both bumped together) nor for the first release.
-          # Fall back to `cargo check`; manifest-shape regressions still
-          # surface in the leaf jobs above since all three crates share the
-          # same workspace inheritance pattern.
-          - crate: cc-lb-pdk
-            mode: check
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

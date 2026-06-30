@@ -32,7 +32,7 @@ cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-scheduler = { path = "../cc-lb-scheduler", default-features = false }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
-cc-lb-runtime-extism = { path = "../cc-lb-runtime-extism" }
+cc-lb-runtime-wasmtime = { workspace = true }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 tracing.workspace = true
 http.workspace = true
@@ -48,7 +48,6 @@ oauth2.workspace = true
 secrecy.workspace = true
 sha2.workspace = true
 siphasher = "1"
-extism.workspace = true
 tower.workspace = true
 thiserror.workspace = true
 ring.workspace = true
@@ -61,6 +60,9 @@ nix = { version = "0.31.3", features = ["signal"] }
 [dev-dependencies]
 tower.workspace = true
 http-body-util.workspace = true
+wat = "1"
+blake3 = { workspace = true, features = ["std"] }
+cc-lb-plugin-types = { path = "../cc-lb-plugin-types", features = ["std"] }
 humantime = "2.3"
 insta.workspace = true
 tempfile.workspace = true

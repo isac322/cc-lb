@@ -45,16 +45,6 @@ runs:
           echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
         fi
 
-    - name: Configure Extism compilation cache
-      shell: bash
-      run: |
-        mkdir -p "$GITHUB_WORKSPACE/.extism-cache"
-        cat > "$GITHUB_WORKSPACE/.extism-cache.toml" <<EOF
-        [cache]
-        directory = "$GITHUB_WORKSPACE/.extism-cache"
-        EOF
-        echo "EXTISM_CACHE_CONFIG=$GITHUB_WORKSPACE/.extism-cache.toml" >> "$GITHUB_ENV"
-
     - uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
