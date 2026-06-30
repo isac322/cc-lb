@@ -67,7 +67,6 @@ use crate::rate_limit_headers::{
 use crate::request_timing::{
     REQUEST_STAGE_TIMINGS, RequestStageTimings, finalize_connection_reused_if_unset,
 };
-use crate::sse_relay;
 use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{TerminalObserver, error_codes};
@@ -2827,7 +2826,7 @@ fn observe_finished_for_principal(
         "status" => status.as_u16().to_string(),
     )
     .increment(1);
-    let usage = sse_relay::usage_from_json_bytes(body);
+    let usage = usage_parser::usage_from_json_body(body);
     let input_tokens = (usage.input_tokens > 0).then_some(usage.input_tokens);
     let output_tokens = (usage.output_tokens > 0).then_some(usage.output_tokens);
     let cache_creation_input_tokens =

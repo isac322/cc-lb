@@ -46,6 +46,7 @@ where
 {
     audit_store_roundtrip(Arc::clone(&backend)).await?;
     request_event_store_roundtrip(Arc::clone(&backend)).await?;
+    request_event_store_event_id_idempotency(Arc::clone(&backend)).await?;
     config_store_roundtrip(Arc::clone(&backend)).await?;
     oauth_credential_store_roundtrip(backend).await?;
 
@@ -93,6 +94,83 @@ where
 
         let read_back = storage.query_request_events(0, u64::MAX, 10).await?;
         assert_byte_identical_vec!(read_back, events, "RequestEventStore readback")?;
+
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.teardown().await;
+    result?;
+    teardown
+}
+
+/// Guards the `event_id` partial UNIQUE INDEX UPSERT match: writing the
+/// same `event_id` twice must succeed silently (ON CONFLICT DO NOTHING) and
+/// keep exactly one row. Catches partial-index WHERE-clause mismatches that
+/// would otherwise return `ON CONFLICT clause does not match any PRIMARY KEY
+/// or UNIQUE constraint` at runtime.
+pub async fn request_event_store_event_id_idempotency<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
+{
+    let mut fixture = ConformanceFixture::new(backend).await?;
+    let result: Result<()> = async {
+        let storage = fixture.storage();
+
+        let event_id = "0193a7b8-1234-7e2f-9012-deadbeefcafe".to_owned();
+        let first = RequestEvent {
+            ts: 1_900_400_100,
+            request_id: "idempotency-event-001".to_owned(),
+            event_id: Some(event_id.clone()),
+            principal_id: Some("idempotency-principal".to_owned()),
+            principal_kind: Some("api_key".to_owned()),
+            upstream: Some(RequestEventUpstream::AnthropicDirect),
+            status: 200,
+            duration_ms: 50,
+            ..Default::default()
+        };
+        let second = RequestEvent {
+            ts: 1_900_400_200,
+            request_id: "idempotency-event-001".to_owned(),
+            event_id: Some(event_id.clone()),
+            principal_id: Some("idempotency-principal".to_owned()),
+            principal_kind: Some("api_key".to_owned()),
+            upstream: Some(RequestEventUpstream::AnthropicDirect),
+            status: 500,
+            duration_ms: 999,
+            error_code: Some("retry_after_first_write".to_owned()),
+            ..Default::default()
+        };
+
+        storage
+            .append_request_event(&first)
+            .await
+            .context("first write must succeed (no partial-index match error)")?;
+        storage
+            .append_request_event(&second)
+            .await
+            .context("second write with same event_id must succeed (ON CONFLICT DO NOTHING)")?;
+
+        let read_back = storage.query_request_events(0, u64::MAX, 10).await?;
+        ensure!(
+            read_back.len() == 1,
+            "exactly one row expected after duplicate event_id write, got {}",
+            read_back.len()
+        );
+        let stored = &read_back[0];
+        ensure!(
+            stored.event_id.as_deref() == Some(event_id.as_str()),
+            "stored event_id should match first write"
+        );
+        ensure!(
+            stored.status == 200,
+            "first write should win (ON CONFLICT DO NOTHING semantics), got status {}",
+            stored.status
+        );
+        ensure!(
+            stored.error_code.is_none(),
+            "first write had no error_code; duplicate must not overwrite"
+        );
 
         Ok(())
     }
@@ -278,6 +356,7 @@ fn request_events() -> Vec<RequestEvent> {
         RequestEvent {
             ts: 1_800_300_100,
             request_id: "roundtrip-event-001".to_owned(),
+            event_id: Some("0193a7b8-9c5d-7e2f-9012-aabbccddeeff".to_owned()),
             ts_ms: Some(1_800_300_100_123),
             principal_id: Some("roundtrip-principal-a".to_owned()),
             key_id: Some("key-a".to_owned()),
@@ -329,6 +408,7 @@ fn request_events() -> Vec<RequestEvent> {
         RequestEvent {
             ts: 1_800_300_101,
             request_id: "roundtrip-event-002".to_owned(),
+            event_id: Some("0193a7b8-9c5d-7e2f-9012-bbccddeeff00".to_owned()),
             principal_id: Some("roundtrip-principal-b".to_owned()),
             principal_kind: Some("oauth".to_owned()),
             upstream: Some(RequestEventUpstream::AnthropicDirect),

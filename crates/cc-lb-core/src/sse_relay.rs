@@ -655,7 +655,7 @@ fn update_usage_from_event(event: &Event, usage: &mut StreamingUsage) -> Streami
     update
 }
 
-pub(crate) fn usage_from_json_bytes(bytes: &Bytes) -> StreamingUsage {
+fn usage_from_json_bytes(bytes: &Bytes) -> StreamingUsage {
     let mut usage = StreamingUsage::default();
     if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
         update_usage_from_value(&value, &mut usage);
