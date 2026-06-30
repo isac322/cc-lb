@@ -16,7 +16,7 @@ impl RequestEventStore for SqliteStorage {
             "INSERT INTO request_events_v1 \
              (request_id, ts, event_type, upstream_id, principal_id, created_at, key_id, model, upstream_name, cache_state, thread_id, message_id, message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, event_id, error_code, upstream_error_type, upstream_error_message, thinking_tokens, web_search_requests, web_fetch_requests, service_tier, inference_geo, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, payload) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(event_id) DO NOTHING",
+             ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING",
         )
         .bind(&event.request_id)
         .bind(u64_to_i64(event_ts_secs(event), "request event ts")?)

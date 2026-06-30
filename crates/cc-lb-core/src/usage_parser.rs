@@ -32,6 +32,17 @@ pub(crate) struct UsageCounts {
     pub(crate) service_tier: Option<String>,
     pub(crate) inference_geo: Option<String>,
     pub(crate) iterations: Option<Value>,
+    /// Accumulator for the per-frame `delta.estimated_tokens` field surfaced by
+    /// the beta `thinking-token-count-2026-05-13` header on
+    /// `content_block_delta` events whose `delta.type == "thinking_delta"`.
+    ///
+    /// This is a delta (must be summed), and the value is documented as a
+    /// **lossy estimate** — `message_delta.usage.output_tokens` /
+    /// `usage.output_tokens_details.thinking_tokens` remain authoritative for
+    /// billing. We track it purely to drive live-progress broadcasts and to
+    /// flip `present=true` early enough for the dashboard to see motion before
+    /// the final `message_delta` arrives.
+    pub(crate) estimated_thinking_progress: u64,
 }
 
 impl UsageCounts {
@@ -116,6 +127,15 @@ pub(crate) fn accumulate_sse_usage(raw: &[u8], usage: &mut UsageCounts) -> SseUs
             .or_else(|| sse_event_name(raw).and_then(|name| std::str::from_utf8(name).ok()));
         if event_type == Some("message_stop") {
             update.message_stop = true;
+        }
+        if event_type == Some("content_block_delta")
+            && let Some(delta) = value.get("delta")
+            && delta.get("type").and_then(Value::as_str) == Some("thinking_delta")
+            && let Some(estimated) = delta.get("estimated_tokens").and_then(Value::as_u64)
+        {
+            usage.estimated_thinking_progress =
+                usage.estimated_thinking_progress.saturating_add(estimated);
+            usage.present = true;
         }
         let reported = value
             .get("usage")
@@ -388,6 +408,57 @@ mod tests {
         let msg = err.error_message.expect("message present");
         assert!(msg.len() <= UPSTREAM_ERROR_MESSAGE_MAX_BYTES + 3);
         assert!(msg.ends_with("..."));
+    }
+
+    #[test]
+    fn content_block_delta_thinking_delta_accumulates_estimated_tokens() {
+        let mut usage = UsageCounts::default();
+        let frame1 = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"estimated_tokens\":12}}\n\n".to_vec();
+        let frame2 = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"estimated_tokens\":34}}\n\n".to_vec();
+        let update1 = accumulate_sse_usage(&frame1, &mut usage);
+        let update2 = accumulate_sse_usage(&frame2, &mut usage);
+        assert!(!update1.message_start_usage && !update1.message_stop);
+        assert!(!update2.message_start_usage && !update2.message_stop);
+        assert!(usage.present);
+        assert_eq!(usage.estimated_thinking_progress, 46);
+        assert_eq!(
+            usage.thinking_tokens, 0,
+            "authoritative field must remain 0"
+        );
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn content_block_delta_text_delta_does_not_touch_thinking_progress() {
+        let mut usage = UsageCounts::default();
+        let frame = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n".to_vec();
+        accumulate_sse_usage(&frame, &mut usage);
+        assert!(!usage.present);
+        assert_eq!(usage.estimated_thinking_progress, 0);
+    }
+
+    #[test]
+    fn content_block_delta_null_estimated_tokens_is_noop() {
+        let mut usage = UsageCounts::default();
+        let frame = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"estimated_tokens\":null}}\n\n".to_vec();
+        accumulate_sse_usage(&frame, &mut usage);
+        assert!(!usage.present);
+        assert_eq!(usage.estimated_thinking_progress, 0);
+    }
+
+    #[test]
+    fn thinking_delta_progress_does_not_overwrite_authoritative_thinking_tokens() {
+        let mut usage = UsageCounts::default();
+        let prog = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"estimated_tokens\":7}}\n\n".to_vec();
+        accumulate_sse_usage(&prog, &mut usage);
+        let delta = raw_event(
+            r#"{"type":"message_delta","usage":{"output_tokens":50,"output_tokens_details":{"thinking_tokens":42}}}"#,
+        );
+        accumulate_sse_usage(&delta, &mut usage);
+        assert_eq!(usage.estimated_thinking_progress, 7);
+        assert_eq!(usage.thinking_tokens, 42);
+        assert_eq!(usage.output_tokens, 50);
     }
 
     #[test]

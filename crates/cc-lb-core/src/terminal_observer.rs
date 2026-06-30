@@ -242,6 +242,18 @@ impl TerminalObserver {
         self.inner.bus.publish(RequestEventUpdate::final_(event));
     }
 
+    /// Snapshot current state and broadcast as a `Partial` update for live
+    /// dashboard consumers. Does NOT flip the `finalized` flag, does NOT
+    /// persist (the writer pipeline only persists `Final` events), and may be
+    /// called any number of times during a request's lifetime.
+    pub(crate) fn publish_partial_snapshot(&self) {
+        if self.inner.finalized.load(Ordering::Acquire) {
+            return;
+        }
+        let event = self.inner.make_request_event(None);
+        self.inner.bus.publish(RequestEventUpdate::partial(event));
+    }
+
     fn lock_state(&self) -> std::sync::MutexGuard<'_, TerminalState> {
         self.inner
             .state
@@ -440,6 +452,69 @@ mod tests {
         assert_eq!(update.event.input_tokens, Some(42));
         assert_eq!(update.event.output_tokens, Some(100));
         assert_eq!(update.event.thinking_tokens, Some(16));
+    }
+
+    #[tokio::test]
+    async fn publish_partial_snapshot_emits_partial_without_finalizing() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = bus.attach_writer(8);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = TerminalObserver::new(
+            "req_partial".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.update_usage(&UsageCounts {
+            present: true,
+            input_tokens: 5,
+            output_tokens: 12,
+            ..UsageCounts::default()
+        });
+        observer.publish_partial_snapshot();
+        observer.update_usage(&UsageCounts {
+            present: true,
+            input_tokens: 5,
+            output_tokens: 42,
+            ..UsageCounts::default()
+        });
+        observer.publish_partial_snapshot();
+        observer.set_terminal(StatusCode::OK, error_codes::UPSTREAM_4XX);
+        observer.finish();
+
+        let first = rx.recv().await.expect("first partial");
+        assert_eq!(first.phase, RequestEventPhase::Partial);
+        assert_eq!(first.event.output_tokens, Some(12));
+        let second = rx.recv().await.expect("second partial");
+        assert_eq!(second.phase, RequestEventPhase::Partial);
+        assert_eq!(second.event.output_tokens, Some(42));
+        let final_ev = rx.recv().await.expect("final");
+        assert_eq!(final_ev.phase, RequestEventPhase::Final);
+        assert_eq!(
+            final_ev.event.error_code.as_deref(),
+            Some(error_codes::UPSTREAM_4XX)
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_partial_snapshot_is_noop_after_finalize() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = bus.attach_writer(8);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = TerminalObserver::new(
+            "req_partial_after_final".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.set_terminal(StatusCode::OK, error_codes::UPSTREAM_4XX);
+        observer.finish();
+        observer.publish_partial_snapshot();
+        let first = rx.recv().await.expect("final delivered");
+        assert_eq!(first.phase, RequestEventPhase::Final);
+        let try_again = rx.try_recv();
+        assert!(
+            try_again.is_err(),
+            "publish_partial_snapshot must be a no-op after finish; got {try_again:?}"
+        );
     }
 
     #[tokio::test]

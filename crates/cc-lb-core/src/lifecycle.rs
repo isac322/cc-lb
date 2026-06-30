@@ -992,15 +992,23 @@ impl Lifecycle {
         let view = self.dynamic_view.load();
         let principal_view = Arc::clone(&view.principal_view);
         let started = Instant::now();
-        let parsed = self.parse(req);
-        let mut ctx = match parsed {
-            Ok(ctx) => ctx,
-            Err(response) => return Ok(*response),
-        };
+        let (mut ctx, body_too_large) = self.parse(req);
         let observer: Option<TerminalObserver> = self
             .event_bus
             .as_ref()
             .map(|bus| TerminalObserver::new(ctx.request_id.clone(), bus.clone(), &self.clock));
+        if let Some(response) = body_too_large {
+            observe_finished(
+                &view.global_observability_hooks,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                started,
+            );
+            if let Some(o) = observer.as_ref() {
+                o.set_terminal(StatusCode::PAYLOAD_TOO_LARGE, error_codes::BODY_TOO_LARGE);
+                o.finish();
+            }
+            return Ok(*response);
+        }
         let cache_metadata = request_cache_metadata(&ctx.downstream_headers, &ctx.body_bytes);
         let cache_breakpoints = if view.prompt_cache_observation_cache_opt().is_some()
             && self.config.prompt_cache_shadow.enabled
@@ -1965,24 +1973,23 @@ impl Lifecycle {
         }
     }
 
-    fn parse(&self, req: Request<Bytes>) -> Result<RequestContext, Box<Response<Body>>> {
+    fn parse(&self, req: Request<Bytes>) -> (RequestContext, Option<Box<Response<Body>>>) {
         let (mut parts, body) = req.into_parts();
         let path = parts.uri.path().to_owned();
         let cap = body_cap_for_path(&self.config, &path);
-        if body.len() > cap {
-            let response = anthropic_error_response(
+        let body_too_large = (body.len() > cap).then(|| {
+            Box::new(anthropic_error_response(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "body_too_large",
                 "request body exceeds configured cap",
-            );
-            return Err(Box::new(response));
-        }
+            ))
+        });
 
         let request_id = header_to_string(&parts.headers, "request-id")
             .or_else(|| header_to_string(&parts.headers, "x-request-id"))
             .unwrap_or_else(next_request_id);
 
-        Ok(RequestContext {
+        let ctx = RequestContext {
             request_id,
             downstream_headers: {
                 strip_hop_by_hop(&mut parts.headers);
@@ -1994,7 +2001,8 @@ impl Lifecycle {
             body_bytes: body,
             cache_breakpoints: Vec::new(),
             canonical_model_id: String::new(),
-        })
+        };
+        (ctx, body_too_large)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2144,6 +2152,8 @@ impl Lifecycle {
             let mut content_delta_count: u64 = 0;
             let mut ping_count: u64 = 0;
             let mut total_bytes: u64 = 0;
+            let mut last_partial_at: Option<Instant> = None;
+            let mut last_partial_output_tokens: u64 = 0;
             while let Some(frame) = body.frame().await {
                 match frame {
                     Ok(frame) => {
@@ -2256,6 +2266,25 @@ impl Lifecycle {
                                             context.cache.clock_now_unix_secs(),
                                         );
                                         prompt_cache_enqueued = true;
+                                    }
+                                }
+                                if let Some(o) = observer.as_ref() {
+                                    o.update_usage(&usage);
+                                    let force_publish = usage_update.message_start_usage
+                                        || usage_update.message_stop;
+                                    let time_since_last = last_partial_at
+                                        .map(|t| now.duration_since(t))
+                                        .unwrap_or(Duration::MAX);
+                                    let tokens_since_last = usage
+                                        .output_tokens
+                                        .saturating_sub(last_partial_output_tokens);
+                                    let throttle_ok = time_since_last
+                                        >= Duration::from_millis(1000)
+                                        || tokens_since_last >= 100;
+                                    if force_publish || throttle_ok {
+                                        o.publish_partial_snapshot();
+                                        last_partial_at = Some(now);
+                                        last_partial_output_tokens = usage.output_tokens;
                                     }
                                 }
                             }
