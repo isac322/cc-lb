@@ -27,7 +27,7 @@ env:
 
 jobs:
   verify:
-    runs-on: self-hosted
+    runs-on: oracle4-cc-lb
     container:
       image: messense/rust-musl-cross:aarch64-musl
     env:

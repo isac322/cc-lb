@@ -27,7 +27,7 @@ env:
 
 jobs:
   fmt:
-    runs-on: self-hosted
+    runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -36,7 +36,7 @@ jobs:
       - run: cargo fmt --check
 
   clippy:
-    runs-on: self-hosted
+    runs-on: oracle4-cc-lb
     strategy:
       matrix:
         features: [sqlite, postgres]
@@ -59,7 +59,7 @@ jobs:
           fi
 
   nextest:
-    runs-on: self-hosted
+    runs-on: oracle4-cc-lb
     strategy:
       matrix:
         features: [sqlite, postgres]
