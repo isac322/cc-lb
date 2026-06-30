@@ -30,7 +30,7 @@ env:
 
 jobs:
   matrix:
-    runs-on: self-hosted
+    runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
