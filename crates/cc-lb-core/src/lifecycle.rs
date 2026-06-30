@@ -5120,7 +5120,10 @@ mod tests {
             events_seen += 1;
         }
 
-        assert_eq!(events_seen, 4, "expected 4 SSE events parsed from decoded stream");
+        assert_eq!(
+            events_seen, 4,
+            "expected 4 SSE events parsed from decoded stream"
+        );
         assert!(usage.present, "usage must be marked present after parsing");
         assert_eq!(usage.input_tokens, 48);
         assert_eq!(usage.output_tokens, 72);

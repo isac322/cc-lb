@@ -198,19 +198,28 @@ mod tests {
     #[test]
     fn identity_when_header_absent() {
         let h = HeaderMap::new();
-        assert!(matches!(UsageDecoder::from_headers(&h), UsageDecoder::Identity));
+        assert!(matches!(
+            UsageDecoder::from_headers(&h),
+            UsageDecoder::Identity
+        ));
     }
 
     #[test]
     fn identity_when_header_identity() {
         let h = headers_with("identity");
-        assert!(matches!(UsageDecoder::from_headers(&h), UsageDecoder::Identity));
+        assert!(matches!(
+            UsageDecoder::from_headers(&h),
+            UsageDecoder::Identity
+        ));
     }
 
     #[test]
     fn x_gzip_aliases_gzip() {
         let h = headers_with("x-gzip");
-        assert!(matches!(UsageDecoder::from_headers(&h), UsageDecoder::Gzip(_)));
+        assert!(matches!(
+            UsageDecoder::from_headers(&h),
+            UsageDecoder::Gzip(_)
+        ));
     }
 
     #[test]
@@ -248,7 +257,8 @@ mod tests {
     #[test]
     fn deflate_round_trip() {
         let plaintext = b"hello deflate";
-        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(plaintext).unwrap();
         let compressed = encoder.finish().unwrap();
 
