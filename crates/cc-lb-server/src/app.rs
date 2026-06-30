@@ -945,12 +945,11 @@ async fn build_app_with_storage_inner(
     let in_memory_bus = cc_lb_core::InMemoryBus::new();
     let request_event_writer_rx = in_memory_bus.attach_writer(cc_lb_core::DEFAULT_WRITER_CAPACITY);
     let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(in_memory_bus);
-    let request_event_writer_handle = cc_lb_core::spawn_request_event_writer(
-        storage.clone(),
-        request_event_writer_rx,
-    );
-    let request_event_writer_slot: Arc<tokio::sync::Mutex<Option<cc_lb_core::RequestEventWriterHandle>>> =
-        Arc::new(tokio::sync::Mutex::new(Some(request_event_writer_handle)));
+    let request_event_writer_handle =
+        cc_lb_core::spawn_request_event_writer(storage.clone(), request_event_writer_rx);
+    let request_event_writer_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::RequestEventWriterHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(Some(request_event_writer_handle)));
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
         dynamic_view_holder.clone(),

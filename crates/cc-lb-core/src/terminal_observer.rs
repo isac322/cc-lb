@@ -266,11 +266,7 @@ impl Inner {
             }
             return event;
         }
-        let duration_ms = self
-            .started
-            .elapsed()
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64;
+        let duration_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         let mut event = RequestEvent {
             ts: self.started_unix_ms / 1_000,
             ts_ms: Some(self.started_unix_ms),
@@ -358,8 +354,14 @@ mod tests {
         let update = rx.recv().await.expect("update delivered");
         assert_eq!(update.phase, RequestEventPhase::Final);
         assert_eq!(update.event.request_id, "req_finish");
-        assert_eq!(update.event.event_id.as_deref(), Some(expected_event_id.as_str()));
-        assert_eq!(update.event.error_code.as_deref(), Some(error_codes::UPSTREAM_4XX));
+        assert_eq!(
+            update.event.event_id.as_deref(),
+            Some(expected_event_id.as_str())
+        );
+        assert_eq!(
+            update.event.error_code.as_deref(),
+            Some(error_codes::UPSTREAM_4XX)
+        );
     }
 
     #[tokio::test]
@@ -400,7 +402,10 @@ mod tests {
         }
         let first = rx.recv().await.expect("first delivered");
         assert_eq!(first.event.request_id, "req_norace");
-        assert_eq!(first.event.error_code.as_deref(), Some(error_codes::UPSTREAM_4XX));
+        assert_eq!(
+            first.event.error_code.as_deref(),
+            Some(error_codes::UPSTREAM_4XX)
+        );
         // No second event should be queued.
         let try_again = rx.try_recv();
         assert!(
@@ -463,5 +468,4 @@ mod tests {
             Some(error_codes::TERMINAL_DROPPED)
         );
     }
-
 }

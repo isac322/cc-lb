@@ -69,10 +69,7 @@ pub fn spawn_request_event_writer(
 ) -> RequestEventWriterHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join = tokio::spawn(writer_loop(storage, rx, shutdown_rx));
-    RequestEventWriterHandle {
-        shutdown_tx,
-        join,
-    }
+    RequestEventWriterHandle { shutdown_tx, join }
 }
 
 async fn writer_loop(
@@ -110,10 +107,7 @@ async fn persist_if_final(storage: &dyn RequestEventStore, update: RequestEventU
             request_id = %update.event.request_id,
             "request event writer: failed to persist event",
         );
-        cc_lb_observability::increment_dropped_events_by(
-            "request_event_writer_storage_error",
-            1,
-        );
+        cc_lb_observability::increment_dropped_events_by("request_event_writer_storage_error", 1);
     }
 }
 

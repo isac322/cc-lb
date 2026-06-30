@@ -53,11 +53,11 @@ pub mod subscription_metadata_hook;
 #[cfg(not(loom))]
 pub mod subscription_quota_events;
 #[cfg(not(loom))]
+mod terminal_observer;
+#[cfg(not(loom))]
 pub mod tokenizer;
 #[cfg(not(loom))]
 pub mod upstream_rate_limit_events;
-#[cfg(not(loom))]
-mod terminal_observer;
 #[cfg(not(loom))]
 pub mod usage_decoder;
 #[cfg(not(loom))]

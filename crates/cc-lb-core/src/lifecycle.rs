@@ -59,10 +59,6 @@ use crate::dynamic_view::{
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::ErrorNormalizer;
 use crate::event_bus::{RequestEventBus, RequestEventUpdate};
-use crate::terminal_observer::{TerminalObserver, error_codes};
-use crate::usage_parser::{
-    self, UsageCounts, accumulate_sse_usage, sse_event_name, usage_from_json_body,
-};
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::rate_limit_headers::{
@@ -74,8 +70,12 @@ use crate::request_timing::{
 use crate::sse_relay;
 use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
+use crate::terminal_observer::{TerminalObserver, error_codes};
 use crate::upstream_rate_limit_events::UpstreamRateLimitSink;
 use crate::usage_decoder::{UsageDecoder, decode_full_body};
+use crate::usage_parser::{
+    self, UsageCounts, accumulate_sse_usage, sse_event_name, usage_from_json_body,
+};
 use cc_lb_observability::{inc_cache_hit, inc_cache_miss, redact_internal_errors, truncate_reason};
 
 pub type Body = AxumBody;
@@ -997,9 +997,10 @@ impl Lifecycle {
             Ok(ctx) => ctx,
             Err(response) => return Ok(*response),
         };
-        let observer: Option<TerminalObserver> = self.event_bus.as_ref().map(|bus| {
-            TerminalObserver::new(ctx.request_id.clone(), bus.clone(), &self.clock)
-        });
+        let observer: Option<TerminalObserver> = self
+            .event_bus
+            .as_ref()
+            .map(|bus| TerminalObserver::new(ctx.request_id.clone(), bus.clone(), &self.clock));
         let cache_metadata = request_cache_metadata(&ctx.downstream_headers, &ctx.body_bytes);
         let cache_breakpoints = if view.prompt_cache_observation_cache_opt().is_some()
             && self.config.prompt_cache_shadow.enabled
@@ -1320,13 +1321,7 @@ impl Lifecycle {
             Ok(active_limit) => active_limit,
             Err(response) => {
                 let status = response.status();
-                observe_finished_for_principal(
-                    hooks,
-                    status,
-                    started,
-                    &principal,
-                    &ctx.body_bytes,
-                );
+                observe_finished_for_principal(hooks, status, started, &principal, &ctx.body_bytes);
                 if let Some(o) = observer.as_ref() {
                     o.set_terminal(status, error_codes::LIMIT_REJECTED);
                     o.finish();
@@ -1398,13 +1393,7 @@ impl Lifecycle {
                 let mut response = *response;
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
                 let status = response.status();
-                observe_finished_for_principal(
-                    hooks,
-                    status,
-                    started,
-                    &principal,
-                    &ctx.body_bytes,
-                );
+                observe_finished_for_principal(hooks, status, started, &principal, &ctx.body_bytes);
                 if let Some(o) = observer.as_ref() {
                     o.set_terminal(status, error_codes::UPSTREAM_DISPATCH_FAILED);
                     o.finish();
@@ -1459,13 +1448,7 @@ impl Lifecycle {
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
                 let status = response.status();
                 record_api_key_request_metric(&metric_context, status);
-                observe_finished_for_principal(
-                    hooks,
-                    status,
-                    started,
-                    &principal,
-                    &ctx.body_bytes,
-                );
+                observe_finished_for_principal(hooks, status, started, &principal, &ctx.body_bytes);
                 if let Some(o) = observer.as_ref() {
                     let code = if status.is_client_error() {
                         error_codes::UPSTREAM_4XX
@@ -1507,13 +1490,7 @@ impl Lifecycle {
             self.attach_limit_headers(&mut response, active_limit.as_ref());
             let status = response.status();
             record_api_key_request_metric(&metric_context, status);
-            observe_finished_for_principal(
-                hooks,
-                status,
-                started,
-                &principal,
-                &ctx.body_bytes,
-            );
+            observe_finished_for_principal(hooks, status, started, &principal, &ctx.body_bytes);
             if let Some(o) = observer.as_ref() {
                 let code = if status.is_client_error() {
                     error_codes::UPSTREAM_4XX

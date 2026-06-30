@@ -42,8 +42,7 @@ impl UsageCounts {
         event.thinking_tokens = (self.thinking_tokens > 0).then_some(self.thinking_tokens);
         event.web_search_requests =
             (self.web_search_requests > 0).then_some(self.web_search_requests);
-        event.web_fetch_requests =
-            (self.web_fetch_requests > 0).then_some(self.web_fetch_requests);
+        event.web_fetch_requests = (self.web_fetch_requests > 0).then_some(self.web_fetch_requests);
         event.service_tier = self.service_tier.clone();
         event.inference_geo = self.inference_geo.clone();
         event.iterations = self.iterations.clone();
@@ -337,7 +336,10 @@ mod tests {
         let preserved = usage.iterations.expect("iterations preserved");
         let arr = preserved.as_array().expect("iterations is array");
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0].get("model").and_then(Value::as_str), Some("claude-x"));
+        assert_eq!(
+            arr[0].get("model").and_then(Value::as_str),
+            Some("claude-x")
+        );
     }
 
     #[test]
