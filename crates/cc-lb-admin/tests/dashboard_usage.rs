@@ -1,11 +1,18 @@
 mod config_admin_common;
 
+use std::sync::Arc;
+
 use axum::http::StatusCode;
 use cc_lb_config::Config;
-use cc_lb_core::Clock as _;
+use cc_lb_core::{ClockHandle, TestClock};
 use cc_lb_storage_api::{RequestEvent, RequestEventStore, UsageRollupStore};
-use config_admin_common::{app, authed_bytes, authed_json, temp_storage, test_state};
+use config_admin_common::{
+    app, authed_bytes, authed_json, temp_storage, temp_storage_with_clock, test_state,
+    test_state_with_clock,
+};
 use uuid::Uuid;
+
+const TEST_NOW_UNIX_SECS: u64 = 1_700_000_000;
 
 #[tokio::test]
 async fn usage_returns_200_grouped_by_model() {
@@ -83,10 +90,11 @@ async fn usage_rejects_invalid_group_by() {
 
 #[tokio::test]
 async fn usage_filters_by_upstream_id() {
-    let (_dir, storage) = temp_storage().await;
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(1);
     let other_upstream_id = Uuid::from_u128(2);
-    let bucket_ts = current_unix_secs().saturating_sub(3_600);
+    let bucket_ts = current_unix_secs(clock.as_ref()).saturating_sub(3_600);
 
     storage
         .append_request_event(&usage_event(
@@ -110,7 +118,7 @@ async fn usage_filters_by_upstream_id() {
         .unwrap();
     storage.rollup_usage_once().await.unwrap();
 
-    let state = test_state(Config::default(), Some(storage));
+    let state = test_state_with_clock(Config::default(), Some(storage), clock);
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
@@ -145,8 +153,11 @@ async fn usage_503_when_storage_missing() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
-fn current_unix_secs() -> u64 {
-    let clock = cc_lb_core::SystemClock;
+fn test_clock() -> ClockHandle {
+    Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS))
+}
+
+fn current_unix_secs(clock: &dyn cc_lb_core::Clock) -> u64 {
     cc_lb_core::clock::unix_secs(clock.now())
 }
 

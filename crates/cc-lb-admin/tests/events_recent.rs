@@ -1,11 +1,18 @@
 mod config_admin_common;
 
+use std::sync::Arc;
+
 use axum::http::StatusCode;
 use cc_lb_config::Config;
-use cc_lb_core::Clock as _;
+use cc_lb_core::{ClockHandle, TestClock};
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
-use config_admin_common::{app, authed_bytes, authed_json, temp_storage, test_state};
+use config_admin_common::{
+    app, authed_bytes, authed_json, temp_storage, temp_storage_with_clock, test_state,
+    test_state_with_clock,
+};
 use uuid::Uuid;
+
+const TEST_NOW_UNIX_SECS: u64 = 1_700_000_000;
 
 #[tokio::test]
 async fn events_recent_returns_empty_with_no_traffic() {
@@ -41,12 +48,14 @@ async fn events_recent_rejects_invalid_limit() {
 
 #[tokio::test]
 async fn events_recent_filters_by_upstream_id() {
-    let (_dir, storage) = temp_storage().await;
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(1);
     let other_upstream_id = Uuid::from_u128(2);
 
     storage
         .append_request_event(&request_event(
+            clock.as_ref(),
             1,
             "req-target",
             upstream_id,
@@ -56,6 +65,7 @@ async fn events_recent_filters_by_upstream_id() {
         .unwrap();
     storage
         .append_request_event(&request_event(
+            clock.as_ref(),
             2,
             "req-other",
             other_upstream_id,
@@ -64,7 +74,7 @@ async fn events_recent_filters_by_upstream_id() {
         .await
         .unwrap();
 
-    let state = test_state(Config::default(), Some(storage));
+    let state = test_state_with_clock(Config::default(), Some(storage), clock);
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
@@ -89,13 +99,14 @@ async fn events_recent_503_when_storage_missing() {
 }
 
 fn request_event(
+    clock: &dyn cc_lb_core::Clock,
     index: u64,
     request_id: &str,
     upstream_id: Uuid,
     upstream_name: &str,
 ) -> RequestEvent {
     RequestEvent {
-        ts_ms: Some((current_unix_secs().saturating_sub(60) + index) * 1000),
+        ts_ms: Some((current_unix_secs(clock).saturating_sub(60) + index) * 1000),
         request_id: request_id.to_owned(),
         principal_id: Some("principal-a".to_owned()),
         key_id: Some(format!("key-{index}")),
@@ -110,7 +121,10 @@ fn request_event(
     }
 }
 
-fn current_unix_secs() -> u64 {
-    let clock = cc_lb_core::SystemClock;
+fn test_clock() -> ClockHandle {
+    Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS))
+}
+
+fn current_unix_secs(clock: &dyn cc_lb_core::Clock) -> u64 {
     cc_lb_core::clock::unix_secs(clock.now())
 }

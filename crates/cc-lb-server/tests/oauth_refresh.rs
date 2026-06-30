@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -11,7 +11,7 @@ use cc_lb_config::{
     AnthropicOAuthConfig, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind,
 };
 use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_core::{DynamicViewHolder, Lifecycle, LifecycleConfig};
+use cc_lb_core::{Clock, ClockHandle, DynamicViewHolder, Lifecycle, LifecycleConfig, TestClock};
 use cc_lb_plugin_api::{
     RequestContext, ShapedRequest, Upstream, UpstreamDialect, shape_request, sign_request,
 };
@@ -52,6 +52,7 @@ use uuid::Uuid;
 
 struct Fixture {
     _dir: tempfile::TempDir,
+    clock: Arc<TestClock>,
     storage: Arc<Storage>,
     stores: Arc<Stores>,
     aead: Arc<AeadService>,
@@ -74,13 +75,19 @@ impl Fixture {
         let fake_addr = spawn_fake_anthropic().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let database_url = format!("sqlite://{}", dir.path().join("oauth.sqlite").display());
+        // Pin the test clock at real wall-clock "now" so the apalis scheduler's
+        // real-time "due check" agrees with timestamps the SUT writes through
+        // this TestClock. Using a far-past epoch (e.g. 1_700_000_000) makes
+        // every scheduler-enqueued OAuth refresh job look overdue and fire a
+        // second time, which is not the behavior we want to assert.
+        let clock = Arc::new(TestClock::new_at(SystemTime::now()));
         let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+            cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
                 .await
                 .expect("storage"),
         );
         storage.initialize(BackendKind::Sqlite).await.unwrap();
-        let scheduler_backend = sqlite_scheduler_backend().await;
+        let scheduler_backend = sqlite_scheduler_backend(clock.clone()).await;
         let stores = Arc::new(Stores {
             upstreams: storage.clone(),
             principals: storage.clone(),
@@ -106,9 +113,11 @@ impl Fixture {
             storage.clone(),
             aead.clone(),
             oauth_cfg.clone(),
+            clock.clone(),
         );
         Self {
             _dir: dir,
+            clock,
             storage,
             stores,
             aead,
@@ -173,7 +182,7 @@ impl Fixture {
                 allowed_upstreams: Vec::new(),
                 default_limits: Vec::new(),
             },
-            now_secs(),
+            now_secs(self.clock.as_ref()),
         )
         .await
         .expect("principal created");
@@ -183,14 +192,16 @@ impl Fixture {
 #[tokio::test]
 async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
     let fixture = Fixture::new().await;
-    let upstream_id = fixture.create_oauth_upstream("lazy", now_secs()).await;
+    let upstream_id = fixture
+        .create_oauth_upstream("lazy", now_secs(fixture.clock.as_ref()))
+        .await;
     let replica_id = Uuid::new_v4();
     let lazy = Arc::new(LazyRefresher::new(LazyRefresherParams {
         deps: LazyRefresherDeps {
             stores: fixture.stores.clone(),
             aead: fixture.aead.clone(),
             oauth_cfg: fixture.oauth_cfg.clone(),
-            clock: Arc::new(cc_lb_core::SystemClock),
+            clock: fixture.clock.clone(),
         },
         replica_id,
         metadata_hook: None,
@@ -201,7 +212,7 @@ async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
         fixture.storage.clone(),
         fixture.aead.clone(),
         "lazy",
-        Arc::new(cc_lb_core::SystemClock),
+        fixture.clock.clone(),
     );
     let factory = AnthropicOAuthSignerFactoryWithLazyRefresh::new(base, lazy, upstream_id);
     let signer = cc_lb_plugin_api::SignerFactory::build(
@@ -227,7 +238,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
     fixture
         .create_oauth_upstream_with_tokens(
             "oauth-target",
-            now_secs().saturating_sub(1),
+            now_secs(fixture.clock.as_ref()).saturating_sub(1),
             tokens,
             Some(Url::parse(&fixture.fake_base).expect("fake url")),
         )
@@ -239,7 +250,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
             stores: fixture.stores.clone(),
             aead: fixture.aead.clone(),
             oauth_cfg: fixture.oauth_cfg.clone(),
-            clock: Arc::new(cc_lb_core::SystemClock),
+            clock: fixture.clock.clone(),
         },
         replica_id,
         metadata_hook: None,
@@ -248,7 +259,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
     }));
     let runtime = ExtismRuntime::with_config(
         cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        std::sync::Arc::new(cc_lb_core::SystemClock),
+        fixture.clock.clone(),
     );
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
@@ -261,7 +272,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        fixture.clock.clone(),
     )
     .await
     .expect("dynamic view builds");
@@ -273,11 +284,11 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
                 upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
             }),
             None,
-            Arc::new(cc_lb_core::SystemClock),
+            fixture.clock.clone(),
         )),
         Arc::new(DynamicViewHolder::new(view)),
         LifecycleConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        fixture.clock.clone(),
     );
 
     let response = lifecycle
@@ -484,7 +495,7 @@ async fn refresh_history_len(base: &str) -> usize {
     body["refreshes"].as_array().expect("refreshes").len()
 }
 
-async fn sqlite_scheduler_backend() -> SchedulerBackend {
+async fn sqlite_scheduler_backend(clock: ClockHandle) -> SchedulerBackend {
     let pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -502,7 +513,7 @@ async fn sqlite_scheduler_backend() -> SchedulerBackend {
             &pool,
             cc_lb_scheduler::worker::ADAPTIVE_QUEUE,
         ),
-        clock: Arc::new(cc_lb_core::SystemClock),
+        clock,
     })
 }
 
@@ -511,8 +522,10 @@ fn spawn_oauth_refresh_worker(
     storage: Arc<Storage>,
     aead: Arc<AeadService>,
     oauth_cfg: Arc<AnthropicOAuthConfig>,
+    clock: ClockHandle,
 ) -> (CancellationToken, JoinHandle<()>) {
     let cancel = CancellationToken::new();
+    let handler_clock = clock.clone();
     let worker = cc_lb_scheduler::worker::build_adaptive_worker(
         &backend,
         SchedulerCtx::new(
@@ -524,13 +537,15 @@ fn spawn_oauth_refresh_worker(
                     let storage = storage.clone();
                     let aead = aead.clone();
                     let oauth_cfg = oauth_cfg.clone();
+                    let clock = handler_clock.clone();
                     Box::pin(async move {
-                        dispatch_oauth_refresh_job(backend, storage, aead, oauth_cfg, job).await
+                        dispatch_oauth_refresh_job(backend, storage, aead, oauth_cfg, clock, job)
+                            .await
                     })
                 }
             }),
             Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-            Arc::new(cc_lb_core::SystemClock),
+            clock,
         ),
     )
     .expect("entity worker builds");
@@ -548,16 +563,19 @@ async fn dispatch_oauth_refresh_job(
     storage: Arc<Storage>,
     aead: Arc<AeadService>,
     oauth_cfg: Arc<AnthropicOAuthConfig>,
+    clock: ClockHandle,
     job: AdaptiveJob,
 ) -> SchedulerResult<JobOutcome> {
     let AdaptiveJob::OAuthRefresh(job) = job else {
         return Ok(JobOutcome::Done);
     };
+    let now = now_secs(clock.as_ref());
+    let refresh_clock = clock.clone();
     OAuthRefreshJobHandler::new(TestOAuthRefreshUpstreams { storage }, Uuid::new_v4())
         .handle(
             job,
-            now_secs(),
-            move |upstream| refresh_tokens(aead, oauth_cfg, upstream),
+            now,
+            move |upstream| refresh_tokens(aead, oauth_cfg, refresh_clock, upstream),
             {
                 let backend = backend.clone();
                 move |metadata_job| enqueue_metadata_refresh(backend.clone(), metadata_job)
@@ -602,6 +620,7 @@ impl OAuthRefreshUpstreams for TestOAuthRefreshUpstreams {
 async fn refresh_tokens(
     aead: Arc<AeadService>,
     oauth_cfg: Arc<AnthropicOAuthConfig>,
+    clock: ClockHandle,
     upstream: UpstreamRecord,
 ) -> SchedulerResult<RefreshedOAuthTokens> {
     let previous = upstream
@@ -616,7 +635,7 @@ async fn refresh_tokens(
         .as_deref()
         .map(|scope| scope.split_whitespace().map(ToOwned::to_owned).collect())
         .unwrap_or(previous.scopes);
-    let expires_at_unix_secs = now_secs().saturating_add(response.expires_in);
+    let expires_at_unix_secs = now_secs(clock.as_ref()).saturating_add(response.expires_in);
     let encrypted_tokens = EncryptedOAuthTokens::encrypt(
         aead.as_ref(),
         &OAuthTokenBundle {
@@ -708,10 +727,7 @@ fn encrypted(
     EncryptedOAuthTokens::encrypt(aead, bundle, upstream_id.as_bytes()).expect("encrypt")
 }
 
-fn now_secs() -> u64 {
-    use cc_lb_core::Clock as _;
-
-    let clock = cc_lb_core::SystemClock;
+fn now_secs(clock: &dyn Clock) -> u64 {
     clock
         .now()
         .duration_since(UNIX_EPOCH)

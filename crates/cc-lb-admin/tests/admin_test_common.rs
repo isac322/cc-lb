@@ -10,9 +10,9 @@ use cc_lb_core::api_keys::{
     concurrent_guard::KeyConcurrencyManager, principal_view::PrincipalView,
 };
 use cc_lb_core::{
-    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder,
-    ErrorNormalizer, UpstreamDispatch, UpstreamStatusSnapshot, api_keys::limit_engine::LimitEngine,
-    spawn_audit_writer,
+    ApiKeyAwareSignerFactory, ClockHandle, DispatchError, DynamicViewBuilder, DynamicViewHolder,
+    ErrorNormalizer, SystemClock, UpstreamDispatch, UpstreamStatusSnapshot,
+    api_keys::limit_engine::LimitEngine, spawn_audit_writer,
 };
 use cc_lb_plugin_api::{
     ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
@@ -24,10 +24,15 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 pub fn limit_engine() -> Arc<LimitEngine> {
-    LimitEngine::new(
-        Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(cc_lb_core::SystemClock),
-    )
+    limit_engine_with_clock(system_clock())
+}
+
+pub fn limit_engine_with_clock(clock: ClockHandle) -> Arc<LimitEngine> {
+    LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock)
+}
+
+fn system_clock() -> ClockHandle {
+    Arc::new(SystemClock)
 }
 
 pub fn key_store(storage: Arc<SqliteStorage>) -> Arc<cc_lb_core::api_keys::key_store::KeyStore> {
@@ -117,15 +122,19 @@ pub struct AdminClient {
 }
 
 pub async fn spawn_admin_server() -> SpawnedAdminServer {
+    spawn_admin_server_with_clock(system_clock()).await
+}
+
+pub async fn spawn_admin_server_with_clock(clock: ClockHandle) -> SpawnedAdminServer {
     let dir = tempfile::tempdir().expect("temp admin server dir");
-    let storage = sqlite_storage(dir.path(), "admin.sqlite").await;
+    let storage = sqlite_storage_with_clock(dir.path(), "admin.sqlite", clock.clone()).await;
     let (audit_sink, audit_task) = spawn_audit_writer(storage.clone(), 128);
     let config = Config::default();
     let state = cc_lb_admin::AdminState {
         storage: Some(storage.clone()),
         key_store: Some(key_store(storage.clone())),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: limit_engine(),
+        limit_engine: limit_engine_with_clock(clock.clone()),
         lifecycle: None,
         subscription_metadata_hook: None,
         lazy_refresher: None,
@@ -139,7 +148,7 @@ pub async fn spawn_admin_server() -> SpawnedAdminServer {
         admin_token: Some("test-token".to_owned()),
         start_time: std::time::Instant::now(),
         event_bus: None,
-        clock: Arc::new(cc_lb_core::SystemClock),
+        clock,
     };
     SpawnedAdminServer {
         _dir: dir,
@@ -153,11 +162,18 @@ pub async fn spawn_admin_server() -> SpawnedAdminServer {
 }
 
 pub async fn sqlite_storage(dir: &std::path::Path, filename: &str) -> Arc<SqliteStorage> {
+    sqlite_storage_with_clock(dir, filename, system_clock()).await
+}
+
+pub async fn sqlite_storage_with_clock(
+    dir: &std::path::Path,
+    filename: &str,
+    clock: ClockHandle,
+) -> Arc<SqliteStorage> {
     let database_url = format!("sqlite://{}", dir.join(filename).display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
-            .await
-            .expect("admin sqlite opens");
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, clock)
+        .await
+        .expect("admin sqlite opens");
     storage
         .initialize(BackendKind::Sqlite)
         .await

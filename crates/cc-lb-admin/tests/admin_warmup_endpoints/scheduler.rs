@@ -6,7 +6,10 @@ use uuid::Uuid;
 
 pub const NEXT_SCHEDULED_AT: i64 = 1_900_000_000;
 
-pub async fn scheduler_with_next_warmup(upstream_id: Uuid) -> SchedulerAdminHandle {
+pub async fn scheduler_with_next_warmup(
+    upstream_id: Uuid,
+    clock: cc_lb_core::ClockHandle,
+) -> SchedulerAdminHandle {
     let pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -35,7 +38,7 @@ pub async fn scheduler_with_next_warmup(upstream_id: Uuid) -> SchedulerAdminHand
         SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerStorage {
             pool,
             storage,
-            clock: Arc::new(cc_lb_core::SystemClock),
+            clock,
         }),
         Arc::new(cc_lb_scheduler::leader_election::LeaderElection::sqlite()),
     )
