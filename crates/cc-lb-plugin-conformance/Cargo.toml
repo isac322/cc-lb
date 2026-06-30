@@ -2,7 +2,7 @@
 name = "cc-lb-plugin-conformance"
 # Public crates.io surface — independent SemVer line, decoupled from workspace
 # version. Lockstep with workspace.dependencies `=` pin in root Cargo.toml.
-version = "0.1.3"
+version = "0.1.4"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
