@@ -139,13 +139,6 @@ jobs:
 
       - name: Run tests with coverage instrumentation
         run: |
-          # principal_store_postgres tests rely on a hardcoded MIGRATIONS const
-          # in crates/cc-lb-storage-conformance/src/principal_store.rs that omits
-          # the plugin_chains_v2 migrations (0017, 0021, 0022, 0031, 0034, 0035),
-          # so they panic with `relation "plugin_chains_v2" does not exist`.
-          # postgres.yml previously avoided this by never running them; the
-          # consolidated workspace coverage run does, exposing the latent gap.
-          # Skip until the conformance fixture loads all migrations.
           cargo llvm-cov nextest \
             --workspace \
             --exclude cc-lb-loadgen \
@@ -159,8 +152,7 @@ jobs:
             --exclude extism-pdk \
             --exclude extism-pdk-macros \
             --all-features \
-            --no-report \
-            -E 'not test(/principal_store_postgres/)'
+            --no-report
 
       - name: Generate workspace lcov report
         run: |

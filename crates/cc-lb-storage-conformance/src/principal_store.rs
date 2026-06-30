@@ -129,9 +129,8 @@ impl ConformanceBackend for PostgresPrincipalBackend {
                 PgConnectOptions::from_str(&self.url)?.options([("search_path", schema.as_str())]),
             )
             .await?;
-        for migration in MIGRATIONS {
-            sqlx::raw_sql(*migration).execute(&pool).await?;
-        }
+        let storage = PostgresStorage::new(pool.clone(), self.clock.clone());
+        MetaStore::initialize(&storage, BackendKind::Postgres).await?;
         Ok(PostgresFixture {
             url: self.url.clone(),
             schema,
@@ -171,23 +170,3 @@ impl ConformanceBackend for PostgresPrincipalBackend {
 fn postgres_url() -> Option<String> {
     std::env::var("CI_POSTGRES_URL").ok()
 }
-
-#[cfg(feature = "postgres")]
-const MIGRATIONS: &[&str] = &[
-    include_str!("../../cc-lb-storage-postgres/migrations/0001_meta.sql"),
-    include_str!("../../cc-lb-storage-postgres/migrations/0002_killswitch.sql"),
-    include_str!("../../cc-lb-storage-postgres/migrations/0003_audit_log.sql"),
-    include_str!("../../cc-lb-storage-postgres/migrations/0004_request_events.sql"),
-    include_str!("../../cc-lb-storage-postgres/migrations/0005_quotas.sql"),
-    include_str!("../../cc-lb-storage-postgres/migrations/0006_principal_limit_states.sql"),
-    include_str!("../../cc-lb-storage-postgres/migrations/0007_oauth_credentials.sql"),
-    include_str!("../../cc-lb-storage-postgres/migrations/0008_api_keys.sql"),
-    include_str!("../../cc-lb-storage-postgres/migrations/0009_anthropic_api_keys.sql"),
-    include_str!("../../cc-lb-storage-postgres/migrations/0010_usage_rollups.sql"),
-    include_str!("../../cc-lb-storage-postgres/migrations/0011_config_draft.sql"),
-    include_str!("../../cc-lb-storage-postgres/migrations/0012_config_history.sql"),
-    include_str!("../../cc-lb-storage-postgres/migrations/0016_principals.sql"),
-    include_str!("../../cc-lb-storage-postgres/migrations/0019_principal_allowed_upstreams.sql"),
-    include_str!("../../cc-lb-storage-postgres/migrations/0033_router_pipeline.sql"),
-    include_str!("../../cc-lb-storage-postgres/migrations/0045_audit_log_wider_columns.sql"),
-];
