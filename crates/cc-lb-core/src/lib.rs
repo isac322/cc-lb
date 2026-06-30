@@ -57,6 +57,8 @@ pub mod tokenizer;
 #[cfg(not(loom))]
 pub mod upstream_rate_limit_events;
 #[cfg(not(loom))]
+pub mod usage_decoder;
+#[cfg(not(loom))]
 pub mod usage_pruner;
 #[cfg(not(loom))]
 pub mod warmup_attempts;

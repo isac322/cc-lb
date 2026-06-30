@@ -866,6 +866,7 @@ dependencies = [
  "axum",
  "base64",
  "bincode",
+ "brotli",
  "bytes",
  "cc-lb-aead",
  "cc-lb-clock",
@@ -878,6 +879,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "eventsource-stream",
+ "flate2",
  "futures-core",
  "globset",
  "hickory-resolver",
@@ -906,6 +908,7 @@ dependencies = [
  "ulid",
  "url",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
