@@ -7,9 +7,6 @@ confidence-threshold = 0.8
 
 [advisories]
 # cargo audit gates warnings as failures in CI via `cargo audit --deny warnings`.
-# The workspace pins `extism 1.30.0`, which resolves to `wasmtime 43.0.2`.
-# Several Wasmtime advisories remain unpatched upstream in the 43.x line and are
-# documented here as a follow-up runtime upgrade item once a fixed release lands.
 # `rustls-pemfile` remains reachable through `rustls 0.23`; removing it requires a broader
 # TLS stack migration than this quality-gate task.
 yanked = "warn"
