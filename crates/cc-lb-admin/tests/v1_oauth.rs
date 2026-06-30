@@ -16,7 +16,7 @@ use axum::{
 use cc_lb_admin::{AdminState, router};
 use cc_lb_aead::{AeadEncryptedField, AeadService, OAuthTokenBundle};
 use cc_lb_config::{AnthropicOAuthConfig, Config};
-use cc_lb_core::{Clock as _, spawn_audit_writer};
+use cc_lb_core::{ClockHandle, TestClock, spawn_audit_writer};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{AuditStore, UpstreamCreate, UpstreamStore};
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
@@ -31,12 +31,14 @@ use url::Url;
 use uuid::Uuid;
 
 const MASTER_KEY: [u8; 32] = [7; 32];
+const TEST_NOW_UNIX_SECS: u64 = 1_700_000_000;
 
 struct Fixture {
     _temp_dir: tempfile::TempDir,
     app: axum::Router,
     storage: Arc<Storage>,
     aead: Arc<AeadService>,
+    clock: ClockHandle,
     _audit_task: tokio::task::JoinHandle<()>,
 }
 
@@ -44,7 +46,14 @@ impl Fixture {
     async fn new() -> Self {
         let oauth_addr = spawn_fake_anthropic().await;
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let storage = admin_test_common::sqlite_storage(temp_dir.path(), "test.sqlite").await;
+        let test_clock = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
+        let clock: ClockHandle = test_clock.clone();
+        let storage = admin_test_common::sqlite_storage_with_clock(
+            temp_dir.path(),
+            "test.sqlite",
+            clock.clone(),
+        )
+        .await;
         let aead = Arc::new(AeadService::from_master_key(MASTER_KEY));
         let config = test_config(oauth_addr);
         let (audit_sink, audit_task) = spawn_audit_writer(storage.clone(), 64);
@@ -52,7 +61,7 @@ impl Fixture {
             storage: Some(storage.clone()),
             key_store: Some(admin_test_common::key_store(storage.clone())),
             aead: Arc::clone(&aead),
-            limit_engine: admin_test_common::limit_engine(),
+            limit_engine: admin_test_common::limit_engine_with_clock(clock.clone()),
             lifecycle: None,
             subscription_metadata_hook: None,
             lazy_refresher: None,
@@ -66,7 +75,7 @@ impl Fixture {
             admin_token: Some("test-token".to_owned()),
             start_time: std::time::Instant::now(),
             event_bus: None,
-            clock: Arc::new(cc_lb_core::SystemClock),
+            clock: clock.clone(),
         };
 
         Self {
@@ -74,6 +83,7 @@ impl Fixture {
             app: router(state),
             storage,
             aead,
+            clock,
             _audit_task: audit_task,
         }
     }
@@ -178,7 +188,7 @@ impl Fixture {
         &self,
         upstream: &cc_lb_storage_api::UpstreamRecord,
     ) -> cc_lb_storage_api::UpstreamRecord {
-        let expired_at = now_unix_secs().saturating_sub(3600);
+        let expired_at = now_unix_secs(self.clock.as_ref()).saturating_sub(3600);
         let bundle = OAuthTokenBundle {
             access_token: "sk-ant-oat01-expired-seed".to_owned(),
             refresh_token: "sk-ant-ort01-expired-seed".to_owned(),
@@ -198,8 +208,7 @@ impl Fixture {
     }
 }
 
-fn now_unix_secs() -> u64 {
-    let clock = cc_lb_core::SystemClock;
+fn now_unix_secs(clock: &dyn cc_lb_core::Clock) -> u64 {
     cc_lb_core::clock::unix_secs(clock.now())
 }
 
@@ -472,7 +481,7 @@ async fn oauth_status_reflects_completion_realtime() {
         .as_u64()
         .expect("expires_at_unix_secs present after complete");
     assert!(
-        expires > now_unix_secs(),
+        expires > now_unix_secs(fixture.clock.as_ref()),
         "expires_at_unix_secs {expires} should be in the future"
     );
     assert_eq!(after["refresh_token_present"], true);
@@ -518,7 +527,7 @@ async fn oauth_status_flips_from_expired_to_active_after_reconnect() {
         .as_u64()
         .expect("seeded expiry");
     assert!(
-        before_expires < now_unix_secs(),
+        before_expires < now_unix_secs(fixture.clock.as_ref()),
         "seeded expiry {before_expires} must be in the past"
     );
 
@@ -537,7 +546,7 @@ async fn oauth_status_flips_from_expired_to_active_after_reconnect() {
         .as_u64()
         .expect("expiry after reconnect");
     assert!(
-        after_expires > now_unix_secs(),
+        after_expires > now_unix_secs(fixture.clock.as_ref()),
         "post-reconnect expiry {after_expires} must be in the future"
     );
     assert_ne!(
