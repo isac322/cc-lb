@@ -4,7 +4,7 @@ githubConfigSecret: pre-defined-secret
 # 단일 노드(4코어) 보호: runner 수 상한. 미설정 시 잡 백로그에 ARC가 수십 개
 # runner 를 띄워 노드 CPU/MEM 포화 → 같은 노드 k3s API starvation(TLS timeout) 유발.
 minRunners: 0
-maxRunners: 4
+maxRunners: 3
 
 # dind 를 chart 자동생성 대신 직접 정의 (registry-proxy CA 주입 위해).
 # chart 업그레이드 시 dind 스펙(args 등)을 직접 동기화할 것.
