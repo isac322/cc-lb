@@ -20,12 +20,13 @@ template:
             mountPath: /home/runner/tmpDir
       - name: toolcache-perms
         image: busybox:1.36
-        command: ["sh", "-c", "mkdir -p /opt/hostedtoolcache /opt/rustup && chown 1001:1001 /opt/hostedtoolcache /opt/rustup"]
+        command: ["sh", "-c", "mkdir -p /opt/hostedtoolcache /opt/rustup /opt/sccache && chown 1001:1001 /opt/hostedtoolcache /opt/rustup /opt/sccache"]
         securityContext:
           runAsUser: 0
         volumeMounts:
           - {name: tool-cache, mountPath: /opt/hostedtoolcache}
           - {name: rustup-home, mountPath: /opt/rustup}
+          - {name: sccache-cache, mountPath: /opt/sccache}
     containers:
       - name: runner
         image: ghcr.io/isac322/cc-lb-actions-runner:2.334.0-cclb-1
@@ -47,8 +48,17 @@ template:
             value: "120"
           - name: CUSTOM_ACTIONS_RESULTS_URL
             value: http://gha-cache-server.arc-systems.svc.cluster.local:3000/
+          # Shared sccache compiler cache via node hostPath (single node): every
+          # job's sccache server reads/writes one content-addressed store, so
+          # parallel jobs share compilations (~98% cross-job hits, 0 errors -
+          # verified under concurrent multi-server access) at a few GB instead of
+          # per-job target tarballs. SCCACHE_BASEDIRS (set by setup-rust-cache)
+          # normalises per-job workspace paths so artifacts hit across jobs.
+          - name: SCCACHE_DIR
+            value: /opt/sccache
+          - name: SCCACHE_CACHE_SIZE
+            value: "20G"
           # --- target 축소 (무위험 디스크 이득: incremental 캐시 제거 + 디버그 심볼 축소) ---
-          # sccache 공유는 dep-info 이슈로 보류; 이 두 가지는 워크플로우와 무관하게 적용.
           - name: CARGO_INCREMENTAL
             value: "0"
           - name: CARGO_PROFILE_DEV_DEBUG
@@ -58,6 +68,7 @@ template:
         volumeMounts:
           - {name: tool-cache, mountPath: /opt/hostedtoolcache}
           - {name: rustup-home, mountPath: /opt/rustup}
+          - {name: sccache-cache, mountPath: /opt/sccache}
           - {name: work, mountPath: /home/runner/_work}
           - {name: dind-sock, mountPath: /var/run}
       - name: dind
@@ -92,5 +103,7 @@ template:
         hostPath: {path: /opt/actions-tool-cache, type: DirectoryOrCreate}
       - name: rustup-home
         hostPath: {path: /opt/actions-rustup, type: DirectoryOrCreate}
+      - name: sccache-cache
+        hostPath: {path: /opt/actions-sccache, type: DirectoryOrCreate}
       - name: registry-proxy-ca
         configMap: {name: registry-proxy-ca}
