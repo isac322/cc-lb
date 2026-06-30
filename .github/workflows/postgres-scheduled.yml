@@ -15,7 +15,7 @@ concurrency:
 jobs:
   postgres-storage-stress:
     name: Postgres storage stress
-    runs-on: oracle4-cc-lb
+    runs-on: self-hosted
 
     services:
       postgres:
@@ -62,7 +62,7 @@ jobs:
 
   postgres-e2e:
     name: Postgres E2E and chaos
-    runs-on: oracle4-cc-lb
+    runs-on: self-hosted
 
     env:
       DOCKER_HOST: tcp://localhost:2375
