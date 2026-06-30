@@ -71,6 +71,7 @@ use crate::sse_relay;
 use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::upstream_rate_limit_events::UpstreamRateLimitSink;
+use crate::usage_decoder::{UsageDecoder, decode_full_body};
 use cc_lb_observability::{inc_cache_hit, inc_cache_miss, redact_internal_errors, truncate_reason};
 
 pub type Body = AxumBody;
@@ -1607,7 +1608,31 @@ impl Lifecycle {
             total_ms = duration_to_ms(duration),
             "request latency breakdown"
         );
-        let usage = usage_from_json_body(&body);
+        let usage = match decode_full_body(&parts.headers, &body) {
+            Ok(Some(plaintext)) => usage_from_json_body(&plaintext),
+            Ok(None) => {
+                if let Some(encoding) = parts
+                    .headers
+                    .get(http::header::CONTENT_ENCODING)
+                    .and_then(|v| v.to_str().ok())
+                {
+                    tracing::warn!(
+                        request_id = %event_ctx.request_id,
+                        content_encoding = encoding,
+                        "skipping usage extraction: unsupported content-encoding"
+                    );
+                }
+                UsageCounts::default()
+            }
+            Err(error) => {
+                tracing::warn!(
+                    request_id = %event_ctx.request_id,
+                    %error,
+                    "skipping usage extraction: failed to decode response body"
+                );
+                UsageCounts::default()
+            }
+        };
         if usage.present && self.config.prompt_cache_shadow.enabled {
             observe_prompt_cache_token_drift(
                 prompt_cache_observation_context.as_ref(),
@@ -2004,6 +2029,14 @@ impl Lifecycle {
     ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
+        let usage_decoder = UsageDecoder::from_headers(&parts.headers);
+        if let Some(encoding) = usage_decoder.unsupported_encoding() {
+            tracing::warn!(
+                request_id = %event_ctx.request_id,
+                content_encoding = encoding,
+                "skipping streaming usage extraction: unsupported content-encoding"
+            );
+        }
         let relay_start = Instant::now();
         let storage = self.request_event_storage.clone();
         let event_bus = self.event_bus.clone();
@@ -2011,6 +2044,7 @@ impl Lifecycle {
         let prompt_cache_shadow_enabled = self.config.prompt_cache_shadow.enabled;
         let clock = Arc::clone(&self.clock);
         let stream = async_stream::stream! {
+            let mut usage_decoder = usage_decoder;
             let mut batch_index = 0_u64;
             let mut buffer: Vec<u8> = Vec::new();
             let mut usage = UsageCounts::default();
@@ -2039,7 +2073,16 @@ impl Lifecycle {
                             }
                             last_chunk_at = Some(now);
                             total_bytes = total_bytes.saturating_add(data.len() as u64);
-                            buffer.extend_from_slice(&data);
+                            match usage_decoder.push(&data) {
+                                Ok(plaintext) => buffer.extend_from_slice(&plaintext),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        request_id = %event_ctx.request_id,
+                                        %error,
+                                        "skipping streaming usage extraction: chunk decode failed"
+                                    );
+                                }
+                            }
                             while let Some(end) = sse_relay::find_sse_event_end(&buffer) {
                                 let raw = buffer.drain(..end).collect::<Vec<u8>>();
                                 let usage_update = accumulate_sse_usage(&raw, &mut usage);
@@ -2132,6 +2175,24 @@ impl Lifecycle {
                         }
                     }
                     Err(_source) => break,
+                }
+            }
+            match usage_decoder.finish() {
+                Ok(tail) if !tail.is_empty() => {
+                    buffer.extend_from_slice(&tail);
+                    while let Some(end) = sse_relay::find_sse_event_end(&buffer) {
+                        let raw = buffer.drain(..end).collect::<Vec<u8>>();
+                        let _ = accumulate_sse_usage(&raw, &mut usage);
+                        sse_event_count = sse_event_count.saturating_add(1);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        request_id = %event_ctx.request_id,
+                        %error,
+                        "streaming usage extractor decoder finish failed"
+                    );
                 }
             }
             if status == StatusCode::OK
@@ -3588,7 +3649,7 @@ fn parse_cache_creation_split(usage: &Value) -> (u64, u64, u64) {
     (flat, flat, 0)
 }
 
-fn usage_from_json_body(body: &Bytes) -> UsageCounts {
+fn usage_from_json_body(body: &[u8]) -> UsageCounts {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return UsageCounts::default();
     };
@@ -5008,5 +5069,63 @@ mod tests {
 
         inc_cache_hit("test-upstream", "test-model");
         inc_cache_miss("test-upstream", "test-model");
+    }
+
+    #[test]
+    fn gzip_encoded_sse_stream_yields_usage_via_decoder() {
+        use std::io::Write as _;
+
+        let sse_plaintext = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":48,\"output_tokens\":1}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":72}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        )
+        .as_bytes();
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(sse_plaintext).expect("gzip encode");
+        let compressed = encoder.finish().expect("finish gzip");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("gzip"),
+        );
+        let mut decoder = UsageDecoder::from_headers(&headers);
+        assert!(decoder.is_active(), "gzip decoder should be active");
+
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut usage = UsageCounts::default();
+        let mut events_seen = 0_u64;
+
+        for chunk in compressed.chunks(7) {
+            let plaintext = decoder.push(chunk).expect("decode chunk");
+            buffer.extend_from_slice(&plaintext);
+            while let Some(end) = sse_relay::find_sse_event_end(&buffer) {
+                let raw = buffer.drain(..end).collect::<Vec<u8>>();
+                let _ = accumulate_sse_usage(&raw, &mut usage);
+                events_seen += 1;
+            }
+        }
+        let tail = decoder.finish().expect("decoder finish");
+        buffer.extend_from_slice(&tail);
+        while let Some(end) = sse_relay::find_sse_event_end(&buffer) {
+            let raw = buffer.drain(..end).collect::<Vec<u8>>();
+            let _ = accumulate_sse_usage(&raw, &mut usage);
+            events_seen += 1;
+        }
+
+        assert_eq!(
+            events_seen, 4,
+            "expected 4 SSE events parsed from decoded stream"
+        );
+        assert!(usage.present, "usage must be marked present after parsing");
+        assert_eq!(usage.input_tokens, 48);
+        assert_eq!(usage.output_tokens, 72);
     }
 }
