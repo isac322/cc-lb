@@ -17,6 +17,9 @@ on:
       - 'LICENSE'
       - '.gitignore'
       - '.editorconfig'
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -33,7 +36,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
       - run: cargo fmt --check
+      - name: Audit-redaction lint
+        run: bash scripts/lint-audit-redaction.sh
 
   clippy:
     runs-on: oracle4-cc-lb
@@ -58,29 +66,113 @@ jobs:
             sccache --show-stats
           fi
 
-  nextest:
+  cargo-deny:
     runs-on: oracle4-cc-lb
-    strategy:
-      matrix:
-        features: [sqlite, postgres]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
+
+  nextest-cov:
+    runs-on: oracle4-cc-lb
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: testpw
+          POSTGRES_DB: cc_lb_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
       CC_LB_TEST_READY_TIMEOUT_SECS: "120"
+      CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
+
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
       - name: Install wasm targets for pinned toolchain
         run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
+      # Registry-only: target/ must not be shared across branches. The
+      # Swatinem cache key hashes Cargo.lock/Cargo.toml but not the test
+      # file set, so a branch can otherwise leak its per-test binaries into
+      # target/llvm-cov-target/debug/deps/ and cargo invokes them on restore
+      # against a source tree that never contained those files.
       - uses: ./.github/actions/setup-rust-cache
         with:
+          rust-cache-key: coverage
+          cache-targets: false
           stable-build-metadata: "true"
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest
-      - name: Pre-build handshake spike wasm artifact
+          tool: cargo-llvm-cov,cargo-nextest
+
+      - name: Preflight - CI_POSTGRES_URL must be set
+        run: |
+          if [ -z "${CI_POSTGRES_URL:-}" ]; then
+            echo "CI_POSTGRES_URL is empty; postgres service container did not configure the env." >&2
+            exit 1
+          fi
+
+      - name: Clean coverage artifacts
+        run: cargo llvm-cov clean --workspace
+      - name: Build Extism echo fixture
+        run: cargo build -p extism-echo-plugin --target wasm32-unknown-unknown --release
+      - name: Build handshake spike fixture
         run: cargo build -p plugin-handshake-spike --target wasm32-unknown-unknown --release
-      - run: cargo nextest run --workspace --exclude cc-lb-loadgen --no-default-features --features ${{ matrix.features }}
+
+      - name: Run tests with coverage instrumentation
+        run: |
+          cargo llvm-cov nextest \
+            --workspace \
+            --exclude cc-lb-loadgen \
+            --exclude plugin-handshake-spike \
+            --exclude plugin-handshake-spike-host-check \
+            --exclude plugin-api-key \
+            --exclude plugin-oauth-anthropic-pro \
+            --exclude plugin-internal-key-mapping \
+            --exclude extism-pdk \
+            --exclude extism-pdk-macros \
+            --all-features \
+            --no-report
+
+      - name: Generate workspace lcov report
+        run: |
+          cargo llvm-cov report \
+            --lcov \
+            --output-path target/coverage.lcov \
+            --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+
+      - name: Check per-package coverage gates
+        run: |
+          set -euo pipefail
+          cargo llvm-cov report --package cc-lb-core                  --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-dialect-anthropic     --fail-under-lines 80 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-admin                 --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-config                --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-observability         --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-plugin-api            --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-runtime-extism        --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-signer-anthropic-key  --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-signer-anthropic-oauth --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-server                --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-storage-sqlite        --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-storage-postgres      --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-scheduler             --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+
       - name: Show sccache stats
         if: always()
         run: |
@@ -89,3 +181,45 @@ jobs:
           elif command -v sccache >/dev/null 2>&1; then
             sccache --show-stats
           fi
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: task-43-coverage-lcov
+          path: target/coverage.lcov
+          if-no-files-found: error
+
+  e2e:
+    runs-on: oracle4-cc-lb
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Cache pinned real clients
+        uses: actions/cache@v6
+        with:
+          path: target/test-bins
+          key: real-client-test-bins-${{ runner.os }}-${{ hashFiles('tests/real-client/install.sh') }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust-cache
+      - name: Install pinned real clients
+        run: tests/real-client/install.sh
+      - name: Run real-client matrix
+        run: tests/real-client/matrix.sh
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats
+          fi
+      - name: Upload real-client evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: task-36-real-client-evidence
+          path: .omo/evidence/task-36-*
+          if-no-files-found: error
