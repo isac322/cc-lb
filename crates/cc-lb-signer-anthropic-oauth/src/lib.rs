@@ -973,7 +973,7 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
     use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-    use cc_lb_core::clock::{SystemClock, TestClock};
+    use cc_lb_core::clock::TestClock;
     use cc_lb_plugin_api::{
         RequestContext, Upstream, UpstreamDialect, shape_request, sign_request,
     };
@@ -999,7 +999,7 @@ mod tests {
     impl Default for MemoryUpstreamStore {
         fn default() -> Self {
             Self {
-                clock: Arc::new(SystemClock),
+                clock: Arc::new(TestClock::new_at_secs(1_700_000_000)),
                 records: Mutex::new(Vec::new()),
                 oauth: Mutex::new(HashMap::new()),
             }

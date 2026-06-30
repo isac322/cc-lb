@@ -1,5 +1,5 @@
 name: Setup Rust cache
-description: Restore Cargo caches and enable persisted sccache compiler artifacts.
+description: Enable the node-shared sccache compiler cache and restore the Cargo registry cache.
 
 inputs:
   rust-cache-key:
@@ -7,9 +7,13 @@ inputs:
     required: false
     default: ""
   cache-targets:
-    description: Whether Swatinem/rust-cache should restore/save target directories.
+    description: >-
+      Whether Swatinem/rust-cache should restore/save target directories.
+      Default off: the shared sccache (node hostPath) is the cross-job
+      compiler cache, and the per-job target tarballs (~tens of GB) do not
+      fit the single node's disk.
     required: false
-    default: "true"
+    default: "false"
   stable-build-metadata:
     description: Whether to stabilize build metadata for better compiler cache reuse.
     required: false
@@ -23,23 +27,16 @@ runs:
       uses: mozilla-actions/sccache-action@v0.0.10
       continue-on-error: true
 
-    - name: Restore sccache directory
-      if: steps.sccache-setup.outcome == 'success'
-      uses: actions/cache@v5
-      with:
-        path: .sccache
-        key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: |
-          sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-
-
+    # No actions/cache round-trip: sccache stores into a node-shared hostPath
+    # (SCCACHE_DIR=/opt/sccache, set on the runner) so every job on the node
+    # shares one content-addressed compiler cache. SCCACHE_DIR / SCCACHE_CACHE_SIZE
+    # come from the runner env (.deploy/arc-cc-lb-values.yaml).
     - name: Export Rust compiler cache env
       if: steps.sccache-setup.outcome == 'success'
       shell: bash
       run: |
         echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-        echo "SCCACHE_DIR=$GITHUB_WORKSPACE/.sccache" >> "$GITHUB_ENV"
-        echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
         echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
         if [ "${{ inputs.stable-build-metadata }}" = "true" ]; then
           echo "GIT_SHA=0000000" >> "$GITHUB_ENV"

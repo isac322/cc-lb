@@ -54,7 +54,7 @@ axum = "0.8"
 bincode = { version = "2.0.1", features = ["serde"] }
 bytes = "1"
 async-trait = "0.1"
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = "4"
 criterion = "0.8"

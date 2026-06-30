@@ -15,8 +15,8 @@ use cc_lb_core::api_keys::{
     principal_view::PrincipalView,
 };
 use cc_lb_core::{
-    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder,
-    ErrorNormalizer, UpstreamDispatch, UpstreamStatusSnapshot,
+    ApiKeyAwareSignerFactory, ClockHandle, DispatchError, DynamicViewBuilder, DynamicViewHolder,
+    ErrorNormalizer, SystemClock, UpstreamDispatch, UpstreamStatusSnapshot,
 };
 use cc_lb_plugin_api::{
     ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
@@ -31,14 +31,24 @@ use tower::ServiceExt;
 pub const TOKEN: &str = "test-token";
 
 pub async fn temp_storage() -> (tempfile::TempDir, Arc<SqliteStorage>) {
+    temp_storage_with_clock(system_clock()).await
+}
+
+pub async fn temp_storage_with_clock(
+    clock: ClockHandle,
+) -> (tempfile::TempDir, Arc<SqliteStorage>) {
     let dir = tempfile::tempdir().unwrap();
-    let storage = open_storage(dir.path(), "test.sqlite").await;
+    let storage = open_storage(dir.path(), "test.sqlite", clock).await;
     (dir, storage)
 }
 
 pub async fn test_storage() -> Arc<SqliteStorage> {
+    test_storage_with_clock(system_clock()).await
+}
+
+pub async fn test_storage_with_clock(clock: ClockHandle) -> Arc<SqliteStorage> {
     let dir = tempfile::tempdir().unwrap();
-    let storage = open_storage(dir.path(), "test.sqlite").await;
+    let storage = open_storage(dir.path(), "test.sqlite", clock).await;
     std::mem::forget(dir);
     storage
 }
@@ -47,12 +57,11 @@ pub fn key_store(storage: Arc<SqliteStorage>) -> Arc<KeyStore> {
     Arc::new(KeyStore::new(storage))
 }
 
-async fn open_storage(dir: &Path, filename: &str) -> Arc<SqliteStorage> {
+async fn open_storage(dir: &Path, filename: &str, clock: ClockHandle) -> Arc<SqliteStorage> {
     let database_url = format!("sqlite://{}", dir.join(filename).display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
-            .await
-            .unwrap();
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, clock)
+        .await
+        .unwrap();
     storage.initialize(BackendKind::Sqlite).await.unwrap();
     Arc::new(storage)
 }
@@ -73,6 +82,14 @@ pub fn config_value(default_requests_per_window: u64) -> Value {
 }
 
 pub fn test_state(config: Config, storage: Option<Arc<SqliteStorage>>) -> AdminState {
+    test_state_with_clock(config, storage, system_clock())
+}
+
+pub fn test_state_with_clock(
+    config: Config,
+    storage: Option<Arc<SqliteStorage>>,
+    clock: ClockHandle,
+) -> AdminState {
     let principal_view = Arc::new(PrincipalView::from_db(
         &[],
         std::collections::HashMap::new(),
@@ -86,10 +103,7 @@ pub fn test_state(config: Config, storage: Option<Arc<SqliteStorage>>) -> AdminS
         storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
         key_store,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: LimitEngine::new(
-            Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_core::SystemClock),
-        ),
+        limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone()),
         lifecycle: None,
         audit_sink: None,
         dynamic_view,
@@ -103,8 +117,12 @@ pub fn test_state(config: Config, storage: Option<Arc<SqliteStorage>>) -> AdminS
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus,
-        clock: Arc::new(cc_lb_core::SystemClock),
+        clock,
     }
+}
+
+fn system_clock() -> ClockHandle {
+    Arc::new(SystemClock)
 }
 
 pub fn test_state_without_storage() -> AdminState {
@@ -116,20 +134,26 @@ pub async fn apply_state(
     _config_path: PathBuf,
     reloader: Arc<TestReloader>,
 ) -> AdminState {
+    apply_state_with_clock(_storage, _config_path, reloader, system_clock()).await
+}
+
+pub async fn apply_state_with_clock(
+    _storage: Arc<SqliteStorage>,
+    _config_path: PathBuf,
+    reloader: Arc<TestReloader>,
+    clock: ClockHandle,
+) -> AdminState {
     let principal_view = Arc::new(PrincipalView::from_db(
         &[],
         std::collections::HashMap::new(),
     ));
     let dynamic_view = dynamic_view_holder(principal_view);
-    let storage = test_storage().await;
+    let storage = test_storage_with_clock(clock.clone()).await;
     AdminState {
         storage: Some(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>),
         key_store: Some(key_store(storage)),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: LimitEngine::new(
-            Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_core::SystemClock),
-        ),
+        limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone()),
         lifecycle: None,
         audit_sink: None,
         dynamic_view,
@@ -143,7 +167,7 @@ pub async fn apply_state(
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus: None,
-        clock: Arc::new(cc_lb_core::SystemClock),
+        clock,
     }
 }
 

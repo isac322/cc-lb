@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use anyhow::Result;
+use cc_lb_core::{Clock, ClockHandle, TestClock};
 use cc_lb_plugin_wire::augmented_metadata::AugmentedMetadata;
 use cc_lb_plugin_wire::handshake::{HANDSHAKE_SCHEMA_VERSION_V1, HandshakeAccept};
 use cc_lb_plugin_wire::identity::{CC_LB_PLUGIN_MAGIC, CC_LB_PLUGIN_SECTION_NAME, PluginIdentity};
@@ -24,12 +25,13 @@ use uuid::Uuid;
 
 #[tokio::test(flavor = "current_thread")]
 async fn startup_rehandshake_updates_supported_slots_and_warns_on_drift() -> Result<()> {
-    let storage = sqlite_storage().await?;
+    let clock = Arc::new(TestClock::new_at_secs(1_700_000_000));
+    let storage = sqlite_storage(clock.clone()).await?;
     let registry = PluginRegistry::new(
         storage.clone() as Arc<dyn PluginRegistryRepo>,
         storage.clone() as Arc<dyn PluginBlobRepo>,
         build_offer(&BTreeSet::new()),
-        Arc::new(cc_lb_core::SystemClock),
+        clock.clone(),
     )?;
 
     let wasm = plugin_wasm("drift-plugin", "1.0.0", &["filter", "shape"]);
@@ -60,7 +62,7 @@ async fn startup_rehandshake_updates_supported_slots_and_warns_on_drift() -> Res
             "drift-plugin",
             "1.0.0",
             registry.host_offer_hash(),
-            unix_now()? - 120,
+            unix_now(clock.as_ref())? - 120,
             &["filter"],
         )?)
         .await?;
@@ -85,7 +87,7 @@ async fn startup_rehandshake_updates_supported_slots_and_warns_on_drift() -> Res
             ..StartupHandshakeOpts::default()
         },
         shutdown,
-        &cc_lb_core::SystemClock,
+        clock.as_ref(),
     )
     .await;
 
@@ -116,13 +118,13 @@ async fn startup_rehandshake_updates_supported_slots_and_warns_on_drift() -> Res
     Ok(())
 }
 
-async fn sqlite_storage() -> Result<Arc<SqliteStorage>> {
+async fn sqlite_storage(clock: ClockHandle) -> Result<Arc<SqliteStorage>> {
     let dir = tempfile::tempdir()?;
     let database_url = format!(
         "sqlite://{}",
         dir.path().join("rehandshake.sqlite").display()
     );
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock)).await?;
+    let storage = open_sqlite(&database_url, clock).await?;
     storage.initialize(BackendKind::Sqlite).await?;
     std::mem::forget(dir);
     Ok(Arc::new(storage))
@@ -279,10 +281,7 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-fn unix_now() -> Result<i64> {
-    use cc_lb_core::Clock as _;
-
-    let clock = cc_lb_core::SystemClock;
+fn unix_now(clock: &dyn Clock) -> Result<i64> {
     Ok(i64::try_from(
         clock.now().duration_since(UNIX_EPOCH)?.as_secs(),
     )?)

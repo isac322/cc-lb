@@ -1,0 +1,109 @@
+githubConfigUrl: https://github.com/isac322/cc-lb
+githubConfigSecret: pre-defined-secret
+
+# 단일 노드(4코어) 보호: runner 수 상한. 미설정 시 잡 백로그에 ARC가 수십 개
+# runner 를 띄워 노드 CPU/MEM 포화 → 같은 노드 k3s API starvation(TLS timeout) 유발.
+minRunners: 0
+maxRunners: 4
+
+# dind 를 chart 자동생성 대신 직접 정의 (registry-proxy CA 주입 위해).
+# chart 업그레이드 시 dind 스펙(args 등)을 직접 동기화할 것.
+template:
+  spec:
+    initContainers:
+      - name: init-dind-externals
+        image: ghcr.io/isac322/cc-lb-actions-runner:2.334.0-cclb-1
+        command: ["cp"]
+        args: ["-r", "/home/runner/externals/.", "/home/runner/tmpDir/"]
+        volumeMounts:
+          - name: dind-externals
+            mountPath: /home/runner/tmpDir
+      - name: toolcache-perms
+        image: busybox:1.36
+        command: ["sh", "-c", "mkdir -p /opt/hostedtoolcache /opt/rustup /opt/sccache && chown 1001:1001 /opt/hostedtoolcache /opt/rustup /opt/sccache"]
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+          - {name: tool-cache, mountPath: /opt/hostedtoolcache}
+          - {name: rustup-home, mountPath: /opt/rustup}
+          - {name: sccache-cache, mountPath: /opt/sccache}
+    containers:
+      - name: runner
+        image: ghcr.io/isac322/cc-lb-actions-runner:2.334.0-cclb-1
+        command: ["/home/runner/run.sh"]
+        resources:
+          requests:
+            cpu: "1"            # 동시 빌드 수 제한 (노드 4코어 → ~3개), limit 없어 burst
+        env:
+          - name: RUNNER_TOOL_CACHE
+            value: /opt/hostedtoolcache
+          # rustup toolchain/components/targets are installed under RUSTUP_HOME, which
+          # rustup-based setup actions don't put in the tool cache. Share it via hostPath
+          # (single node) so toolchain+wasm targets install once and are reused.
+          - name: RUSTUP_HOME
+            value: /opt/rustup
+          - name: DOCKER_HOST
+            value: unix:///var/run/docker.sock
+          - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+            value: "120"
+          - name: CUSTOM_ACTIONS_RESULTS_URL
+            value: http://gha-cache-server.arc-systems.svc.cluster.local:3000/
+          # Shared sccache compiler cache via node hostPath (single node): every
+          # job's sccache server reads/writes one content-addressed store, so
+          # parallel jobs share compilations (~98% cross-job hits, 0 errors -
+          # verified under concurrent multi-server access) at a few GB instead of
+          # per-job target tarballs. SCCACHE_BASEDIRS (set by setup-rust-cache)
+          # normalises per-job workspace paths so artifacts hit across jobs.
+          - name: SCCACHE_DIR
+            value: /opt/sccache
+          - name: SCCACHE_CACHE_SIZE
+            value: "20G"
+          # --- target 축소 (무위험 디스크 이득: incremental 캐시 제거 + 디버그 심볼 축소) ---
+          - name: CARGO_INCREMENTAL
+            value: "0"
+          - name: CARGO_PROFILE_DEV_DEBUG
+            value: line-tables-only
+          - name: CARGO_PROFILE_TEST_DEBUG
+            value: line-tables-only
+        volumeMounts:
+          - {name: tool-cache, mountPath: /opt/hostedtoolcache}
+          - {name: rustup-home, mountPath: /opt/rustup}
+          - {name: sccache-cache, mountPath: /opt/sccache}
+          - {name: work, mountPath: /home/runner/_work}
+          - {name: dind-sock, mountPath: /var/run}
+      - name: dind
+        image: docker:dind
+        command: ["sh", "-c"]
+        args:
+          - |
+            cp /registry-proxy-ca/ca.crt /usr/local/share/ca-certificates/registry-proxy.crt
+            update-ca-certificates
+            exec dockerd --host=unix:///var/run/docker.sock --group="$DOCKER_GROUP_GID"
+        env:
+          - name: DOCKER_GROUP_GID
+            value: "123"
+          - name: HTTP_PROXY
+            value: http://docker-registry-proxy.arc-systems.svc.cluster.local:3128/
+          - name: HTTPS_PROXY
+            value: http://docker-registry-proxy.arc-systems.svc.cluster.local:3128/
+          - name: NO_PROXY
+            value: localhost,127.0.0.1,10.42.0.0/16,10.43.0.0/16,.svc,.cluster.local
+        securityContext:
+          privileged: true
+        volumeMounts:
+          - {name: work, mountPath: /home/runner/_work}
+          - {name: dind-sock, mountPath: /var/run}
+          - {name: dind-externals, mountPath: /home/runner/externals}
+          - {name: registry-proxy-ca, mountPath: /registry-proxy-ca}
+    volumes:
+      - {name: dind-sock, emptyDir: {}}
+      - {name: dind-externals, emptyDir: {}}
+      - {name: work, emptyDir: {}}
+      - name: tool-cache
+        hostPath: {path: /opt/actions-tool-cache, type: DirectoryOrCreate}
+      - name: rustup-home
+        hostPath: {path: /opt/actions-rustup, type: DirectoryOrCreate}
+      - name: sccache-cache
+        hostPath: {path: /opt/actions-sccache, type: DirectoryOrCreate}
+      - name: registry-proxy-ca
+        configMap: {name: registry-proxy-ca}
