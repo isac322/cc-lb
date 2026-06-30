@@ -17,8 +17,6 @@ mod circuit_breaker;
 #[cfg(not(loom))]
 pub mod clock;
 #[cfg(not(loom))]
-mod dashboard_broadcaster;
-#[cfg(not(loom))]
 mod dns_cache;
 #[cfg(not(loom))]
 mod drain;
@@ -43,6 +41,8 @@ pub mod model_resolution;
 #[allow(dead_code)]
 mod rate_limit_headers;
 #[cfg(not(loom))]
+pub mod request_event_writer;
+#[cfg(not(loom))]
 pub mod request_timing;
 #[cfg(not(loom))]
 mod sse_error_frame;
@@ -57,7 +57,11 @@ pub mod tokenizer;
 #[cfg(not(loom))]
 pub mod upstream_rate_limit_events;
 #[cfg(not(loom))]
+mod terminal_observer;
+#[cfg(not(loom))]
 pub mod usage_decoder;
+#[cfg(not(loom))]
+mod usage_parser;
 #[cfg(not(loom))]
 pub mod usage_pruner;
 #[cfg(not(loom))]
@@ -81,8 +85,6 @@ pub use circuit_breaker::{
 };
 #[cfg(not(loom))]
 pub use clock::{Clock, ClockHandle, SystemClock, TestClock, unix_millis, unix_secs};
-#[cfg(not(loom))]
-pub use dashboard_broadcaster::{DashboardBroadcaster, record_dashboard_sse_lagged};
 #[doc(hidden)]
 #[cfg(not(loom))]
 pub use dns_cache::make_resolver_with_factory;
@@ -103,7 +105,11 @@ pub use error_format::{anthropic_error_body, anthropic_error_response};
 #[cfg(not(loom))]
 pub use error_normalizer::{ErrorNormalizer, NormalizerError, UpstreamKind};
 #[cfg(not(loom))]
-pub use event_bus::{BusError, BusReceiver, InMemoryBus, RequestEventBus, new_in_memory_bus};
+pub use event_bus::{
+    BusError, BusReceiver, DEFAULT_BROADCAST_CAPACITY, DEFAULT_WRITER_CAPACITY, InMemoryBus,
+    RequestEventBus, RequestEventPhase, RequestEventUpdate, new_in_memory_bus,
+    record_dashboard_sse_lagged,
+};
 #[cfg(not(loom))]
 pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop};
 #[cfg(not(loom))]
@@ -121,6 +127,8 @@ pub use rate_limit_headers::{
     UnifiedQuotaObservation, clamp_utilization_fraction, parse_anthropic_unified_headers,
     percent_to_utilization_fraction,
 };
+#[cfg(not(loom))]
+pub use request_event_writer::{RequestEventWriterHandle, spawn_request_event_writer};
 #[cfg(not(loom))]
 pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
 #[cfg(not(loom))]

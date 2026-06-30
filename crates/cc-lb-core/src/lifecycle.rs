@@ -58,7 +58,11 @@ use crate::dynamic_view::{
 };
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::ErrorNormalizer;
-use crate::event_bus::RequestEventBus;
+use crate::event_bus::{RequestEventBus, RequestEventUpdate};
+use crate::terminal_observer::{TerminalObserver, error_codes};
+use crate::usage_parser::{
+    self, UsageCounts, accumulate_sse_usage, sse_event_name, usage_from_json_body,
+};
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::rate_limit_headers::{
@@ -993,6 +997,9 @@ impl Lifecycle {
             Ok(ctx) => ctx,
             Err(response) => return Ok(*response),
         };
+        let observer: Option<TerminalObserver> = self.event_bus.as_ref().map(|bus| {
+            TerminalObserver::new(ctx.request_id.clone(), bus.clone(), &self.clock)
+        });
         let cache_metadata = request_cache_metadata(&ctx.downstream_headers, &ctx.body_bytes);
         let cache_breakpoints = if view.prompt_cache_observation_cache_opt().is_some()
             && self.config.prompt_cache_shadow.enabled
@@ -1057,6 +1064,10 @@ impl Lifecycle {
                         ),
                     };
                     observe_finished(&view.global_observability_hooks, status, started);
+                    if let Some(o) = observer.as_ref() {
+                        o.set_terminal(status, error_codes::AUTHENTICATION_FAILED);
+                        o.finish();
+                    }
                     return Ok(response);
                 }
             }
@@ -1081,6 +1092,14 @@ impl Lifecycle {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 started,
             );
+            if let Some(o) = observer.as_ref() {
+                o.attach_principal(principal_id.clone(), None, None);
+                o.set_terminal(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_codes::PRINCIPAL_MISSING,
+                );
+                o.finish();
+            }
             return Ok(response);
         };
         let hooks = cached.resolved_hooks(&view.global_observability_hooks);
@@ -1091,6 +1110,13 @@ impl Lifecycle {
             claims: serde_json::Map::new(),
         };
 
+        if let Some(o) = observer.as_ref() {
+            o.attach_principal(
+                principal.id.clone(),
+                Some(success.key_id.clone()),
+                Some("api_key".to_owned()),
+            );
+        }
         let router_pipeline = cached.resolved_pipeline(None);
         if let Some(error) = router_pipeline.instantiation_error.as_deref() {
             observe_error(hooks, "router_pipeline_unavailable", error, "router");
@@ -1106,6 +1132,13 @@ impl Lifecycle {
                 &principal,
                 &ctx.body_bytes,
             );
+            if let Some(o) = observer.as_ref() {
+                o.set_terminal(
+                    StatusCode::BAD_GATEWAY,
+                    error_codes::ROUTER_PIPELINE_UNAVAILABLE,
+                );
+                o.finish();
+            }
             return Ok(response);
         }
         observe_many(
@@ -1147,6 +1180,7 @@ impl Lifecycle {
                 message: Some(message.to_owned()),
             });
             self.emit_routing_failure_event(
+                observer.as_ref(),
                 &ctx,
                 &success,
                 &principal,
@@ -1204,6 +1238,10 @@ impl Lifecycle {
                 &principal,
                 &ctx.body_bytes,
             );
+            if let Some(o) = observer.as_ref() {
+                o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::ROUTE_NOT_CONFIGURED);
+                o.finish();
+            }
             return Ok(response);
         };
         let router_chosen_upstream_name = resolved_record.name.clone();
@@ -1229,6 +1267,10 @@ impl Lifecycle {
                     &principal,
                     &ctx.body_bytes,
                 );
+                if let Some(o) = observer.as_ref() {
+                    o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::ROUTE_NOT_CONFIGURED);
+                    o.finish();
+                }
                 return Ok(response);
             }
         };
@@ -1239,6 +1281,14 @@ impl Lifecycle {
             dialect,
         };
         let route_ms = duration_to_ms(route_start.elapsed());
+        if let Some(o) = observer.as_ref() {
+            o.attach_route(
+                resolved_upstream_id,
+                router_chosen_upstream_name.clone(),
+                None,
+            );
+            o.set_routing_trace(pipeline_result.routing_trace(terminal_decision.clone()));
+        }
         let metric_context = ApiKeyMetricContext::new(&success, &route.upstream, &ctx.body_bytes);
         let predicted_cache_read_tokens = pipeline_result
             .candidates
@@ -1269,13 +1319,18 @@ impl Lifecycle {
         {
             Ok(active_limit) => active_limit,
             Err(response) => {
+                let status = response.status();
                 observe_finished_for_principal(
                     hooks,
-                    response.status(),
+                    status,
                     started,
                     &principal,
                     &ctx.body_bytes,
                 );
+                if let Some(o) = observer.as_ref() {
+                    o.set_terminal(status, error_codes::LIMIT_REJECTED);
+                    o.finish();
+                }
                 return Ok(response);
             }
         };
@@ -1307,6 +1362,10 @@ impl Lifecycle {
                     &principal,
                     &ctx.body_bytes,
                 );
+                if let Some(o) = observer.as_ref() {
+                    o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::SIGNER_FAILED);
+                    o.finish();
+                }
                 return Ok(response);
             }
         };
@@ -1338,13 +1397,18 @@ impl Lifecycle {
             Err(response) => {
                 let mut response = *response;
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
+                let status = response.status();
                 observe_finished_for_principal(
                     hooks,
-                    response.status(),
+                    status,
                     started,
                     &principal,
                     &ctx.body_bytes,
                 );
+                if let Some(o) = observer.as_ref() {
+                    o.set_terminal(status, error_codes::UPSTREAM_DISPATCH_FAILED);
+                    o.finish();
+                }
                 return Ok(response);
             }
         };
@@ -1375,27 +1439,42 @@ impl Lifecycle {
                     Err(response) => {
                         let mut response = *response;
                         self.attach_limit_headers(&mut response, active_limit.as_ref());
+                        let status = response.status();
                         observe_finished_for_principal(
                             hooks,
-                            response.status(),
+                            status,
                             started,
                             &principal,
                             &ctx.body_bytes,
                         );
+                        if let Some(o) = observer.as_ref() {
+                            o.set_terminal(status, error_codes::UPSTREAM_DISPATCH_FAILED);
+                            o.finish();
+                        }
                         return Ok(response);
                     }
                 };
             } else {
                 let mut response = response_from_collected(unauthorized);
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
-                record_api_key_request_metric(&metric_context, response.status());
+                let status = response.status();
+                record_api_key_request_metric(&metric_context, status);
                 observe_finished_for_principal(
                     hooks,
-                    response.status(),
+                    status,
                     started,
                     &principal,
                     &ctx.body_bytes,
                 );
+                if let Some(o) = observer.as_ref() {
+                    let code = if status.is_client_error() {
+                        error_codes::UPSTREAM_4XX
+                    } else {
+                        error_codes::UPSTREAM_5XX
+                    };
+                    o.set_terminal(status, code);
+                    o.finish();
+                }
                 return Ok(response);
             }
         }
@@ -1426,14 +1505,24 @@ impl Lifecycle {
             }
             strip_hop_by_hop(response.headers_mut());
             self.attach_limit_headers(&mut response, active_limit.as_ref());
-            record_api_key_request_metric(&metric_context, response.status());
+            let status = response.status();
+            record_api_key_request_metric(&metric_context, status);
             observe_finished_for_principal(
                 hooks,
-                response.status(),
+                status,
                 started,
                 &principal,
                 &ctx.body_bytes,
             );
+            if let Some(o) = observer.as_ref() {
+                let code = if status.is_client_error() {
+                    error_codes::UPSTREAM_4XX
+                } else {
+                    error_codes::UPSTREAM_5XX
+                };
+                o.set_terminal(status, code);
+                o.finish();
+            }
             return Ok(response);
         }
 
@@ -1460,6 +1549,7 @@ impl Lifecycle {
                     internal_errors,
                 },
                 prompt_cache_observation_context,
+                observer.clone(),
             )
             .await;
         observe_finished_for_principal(hooks, status, started, &principal, &ctx.body_bytes);
@@ -1549,6 +1639,7 @@ impl Lifecycle {
         stream_hooks: StreamHooks,
         event_ctx: RequestEventContext,
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
+        observer: Option<TerminalObserver>,
     ) -> Response<Body> {
         let mut active_limit = active_limit;
         if active_limit
@@ -1566,6 +1657,7 @@ impl Lifecycle {
                 metric_context.clone(),
                 event_ctx.clone(),
                 prompt_cache_observation_context,
+                observer,
             );
             self.attach_limit_headers(&mut response, None);
             return response;
@@ -1767,11 +1859,18 @@ impl Lifecycle {
                 ..Default::default()
             };
             event_ctx.cache_metadata.apply_to(&mut event, &usage);
-            if let Err(error) = storage.append_request_event(&event).await {
-                tracing::warn!(%error, "failed to append api key request event");
-            }
-            if let Some(bus) = self.event_bus.as_ref() {
-                bus.publish(event).await;
+            usage.apply_extras_to(&mut event);
+            if let Some(o) = observer.as_ref() {
+                o.update_usage(&usage);
+                o.set_prebuilt_event(event);
+                o.finish();
+            } else {
+                if let Err(error) = storage.append_request_event(&event).await {
+                    tracing::warn!(%error, "failed to append api key request event");
+                }
+                if let Some(bus) = self.event_bus.as_ref() {
+                    bus.publish(RequestEventUpdate::final_(event));
+                }
             }
         }
         Response::from_parts(parts, Body::from(body))
@@ -1780,6 +1879,7 @@ impl Lifecycle {
     #[allow(clippy::too_many_arguments)]
     async fn emit_routing_failure_event(
         &self,
+        observer: Option<&TerminalObserver>,
         ctx: &RequestContext,
         authn_success: &AuthnSuccess,
         principal: &Principal,
@@ -1791,9 +1891,6 @@ impl Lifecycle {
         routing_trace: Option<RoutingTrace>,
         internal_errors: Vec<InternalError>,
     ) {
-        let Some(storage) = self.request_event_storage.as_ref() else {
-            return;
-        };
         let now_ms = unix_now_ms(&*self.clock);
         let event = RequestEvent {
             ts: now_ms / 1_000,
@@ -1814,7 +1911,13 @@ impl Lifecycle {
             internal_errors,
             ..Default::default()
         };
-        if let Err(error) = storage.append_request_event(&event).await {
+        if let Some(o) = observer {
+            o.set_prebuilt_event(event);
+            o.set_terminal(status, error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER);
+            o.finish();
+        } else if let Some(storage) = self.request_event_storage.as_ref()
+            && let Err(error) = storage.append_request_event(&event).await
+        {
             tracing::warn!(%error, "failed to append routing failure request event");
         }
     }
@@ -2026,6 +2129,7 @@ impl Lifecycle {
         metric_context: ApiKeyMetricContext,
         event_ctx: RequestEventContext,
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
+        observer: Option<TerminalObserver>,
     ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
@@ -2083,9 +2187,22 @@ impl Lifecycle {
                                     );
                                 }
                             }
-                            while let Some(end) = sse_relay::find_sse_event_end(&buffer) {
+                            while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
                                 let raw = buffer.drain(..end).collect::<Vec<u8>>();
                                 let usage_update = accumulate_sse_usage(&raw, &mut usage);
+                                if let Some(o) = observer.as_ref()
+                                    && let Some(err) =
+                                        usage_parser::detect_mid_stream_error(&raw)
+                                {
+                                    o.set_upstream_error(
+                                        err.error_type.clone(),
+                                        err.error_message.clone(),
+                                    );
+                                    o.set_terminal(
+                                        StatusCode::OK,
+                                        error_codes::UPSTREAM_STREAM_ERROR,
+                                    );
+                                }
                                 sse_event_count = sse_event_count.saturating_add(1);
                                 match sse_event_name(&raw) {
                                     Some(b"message_start") if message_start_at.is_none() => {
@@ -2180,9 +2297,21 @@ impl Lifecycle {
             match usage_decoder.finish() {
                 Ok(tail) if !tail.is_empty() => {
                     buffer.extend_from_slice(&tail);
-                    while let Some(end) = sse_relay::find_sse_event_end(&buffer) {
+                    while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
                         let raw = buffer.drain(..end).collect::<Vec<u8>>();
                         let _ = accumulate_sse_usage(&raw, &mut usage);
+                        if let Some(o) = observer.as_ref()
+                            && let Some(err) = usage_parser::detect_mid_stream_error(&raw)
+                        {
+                            o.set_upstream_error(
+                                err.error_type.clone(),
+                                err.error_message.clone(),
+                            );
+                            o.set_terminal(
+                                StatusCode::OK,
+                                error_codes::UPSTREAM_STREAM_ERROR,
+                            );
+                        }
                         sse_event_count = sse_event_count.saturating_add(1);
                     }
                 }
@@ -2356,25 +2485,24 @@ impl Lifecycle {
                         ..Default::default()
                     };
                     event_ctx.cache_metadata.apply_to(&mut event, &usage);
-                    if let Err(error) = storage.append_request_event(&event).await {
-                        tracing::warn!(%error, "failed to append streaming request event");
-                    }
-                    if let Some(bus) = event_bus.as_ref() {
-                        bus.publish(event).await;
+                    usage.apply_extras_to(&mut event);
+                    if let Some(o) = observer.as_ref() {
+                        o.update_usage(&usage);
+                        o.set_prebuilt_event(event);
+                        o.finish();
+                    } else {
+                        if let Err(error) = storage.append_request_event(&event).await {
+                            tracing::warn!(%error, "failed to append streaming request event");
+                        }
+                        if let Some(bus) = event_bus.as_ref() {
+                            bus.publish(RequestEventUpdate::final_(event));
+                        }
                     }
                 }
             }
         };
         Response::from_parts(parts, Body::from_stream(stream))
     }
-}
-
-fn sse_event_name(raw_event: &[u8]) -> Option<&[u8]> {
-    raw_event
-        .split(|b| *b == b'\n')
-        .filter_map(|line| line.strip_prefix(b"event:"))
-        .map(|name| name.trim_ascii())
-        .next()
 }
 
 pub fn observe_rate_limits(
@@ -3368,17 +3496,6 @@ fn hex_sha256(bytes: &[u8]) -> String {
     output
 }
 
-#[derive(Default)]
-struct UsageCounts {
-    present: bool,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_creation_input_tokens: u64,
-    cache_creation_input_tokens_5m: u64,
-    cache_creation_input_tokens_1h: u64,
-    cache_read_input_tokens: u64,
-}
-
 #[derive(Clone, Copy, Default)]
 struct CostBreakdownOptions {
     total: Option<i64>,
@@ -3566,114 +3683,6 @@ fn limit_reject_metric_kind(reason: &RejectReason) -> Option<&'static str> {
         | RejectReason::ModelNotAllowed
         | RejectReason::CostUnavailable
         | RejectReason::OutputCapExceeded { .. } => None,
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct SseUsageUpdate {
-    message_start_usage: bool,
-    message_stop: bool,
-}
-
-fn accumulate_sse_usage(raw: &[u8], usage: &mut UsageCounts) -> SseUsageUpdate {
-    let mut update = SseUsageUpdate::default();
-    let text = match std::str::from_utf8(raw) {
-        Ok(text) => text,
-        Err(_) => return update,
-    };
-    for line in text.lines() {
-        let Some(payload) = line.strip_prefix("data:").map(str::trim_start) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<Value>(payload) else {
-            continue;
-        };
-        let event_type = value
-            .get("type")
-            .and_then(Value::as_str)
-            .or_else(|| sse_event_name(raw).and_then(|name| std::str::from_utf8(name).ok()));
-        if event_type == Some("message_stop") {
-            update.message_stop = true;
-        }
-        let reported = value
-            .get("usage")
-            .or_else(|| value.get("message").and_then(|m| m.get("usage")));
-        let Some(reported) = reported else {
-            continue;
-        };
-        if event_type == Some("message_start") {
-            update.message_start_usage = true;
-        }
-        usage.present = true;
-        if let Some(input_tokens) = reported.get("input_tokens").and_then(Value::as_u64) {
-            usage.input_tokens = input_tokens;
-        }
-        if let Some(output_tokens) = reported.get("output_tokens").and_then(Value::as_u64) {
-            usage.output_tokens = output_tokens;
-        }
-        let (cc_total, cc_5m, cc_1h) = parse_cache_creation_split(reported);
-        if cc_total > 0
-            || reported.get("cache_creation").is_some()
-            || reported.get("cache_creation_input_tokens").is_some()
-        {
-            usage.cache_creation_input_tokens = cc_total;
-            usage.cache_creation_input_tokens_5m = cc_5m;
-            usage.cache_creation_input_tokens_1h = cc_1h;
-        }
-        if let Some(cache_read) = reported
-            .get("cache_read_input_tokens")
-            .and_then(Value::as_u64)
-        {
-            usage.cache_read_input_tokens = cache_read;
-        }
-    }
-    update
-}
-
-fn parse_cache_creation_split(usage: &Value) -> (u64, u64, u64) {
-    if let Some(cc) = usage.get("cache_creation").and_then(Value::as_object) {
-        let m5 = cc
-            .get("ephemeral_5m_input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let m1 = cc
-            .get("ephemeral_1h_input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        return (m5.saturating_add(m1), m5, m1);
-    }
-    let flat = usage
-        .get("cache_creation_input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    (flat, flat, 0)
-}
-
-fn usage_from_json_body(body: &[u8]) -> UsageCounts {
-    let Ok(value) = serde_json::from_slice::<Value>(body) else {
-        return UsageCounts::default();
-    };
-    let Some(usage) = value.get("usage") else {
-        return UsageCounts::default();
-    };
-    let (cc_total, cc_5m, cc_1h) = parse_cache_creation_split(usage);
-    UsageCounts {
-        present: true,
-        input_tokens: usage
-            .get("input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        output_tokens: usage
-            .get("output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        cache_creation_input_tokens: cc_total,
-        cache_creation_input_tokens_5m: cc_5m,
-        cache_creation_input_tokens_1h: cc_1h,
-        cache_read_input_tokens: usage
-            .get("cache_read_input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
     }
 }
 
@@ -5106,7 +5115,7 @@ mod tests {
         for chunk in compressed.chunks(7) {
             let plaintext = decoder.push(chunk).expect("decode chunk");
             buffer.extend_from_slice(&plaintext);
-            while let Some(end) = sse_relay::find_sse_event_end(&buffer) {
+            while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
                 let raw = buffer.drain(..end).collect::<Vec<u8>>();
                 let _ = accumulate_sse_usage(&raw, &mut usage);
                 events_seen += 1;
@@ -5114,7 +5123,7 @@ mod tests {
         }
         let tail = decoder.finish().expect("decoder finish");
         buffer.extend_from_slice(&tail);
-        while let Some(end) = sse_relay::find_sse_event_end(&buffer) {
+        while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
             let raw = buffer.drain(..end).collect::<Vec<u8>>();
             let _ = accumulate_sse_usage(&raw, &mut usage);
             events_seen += 1;

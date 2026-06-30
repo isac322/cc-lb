@@ -352,7 +352,7 @@ impl RelayRuntime {
         prompt_cache_observations: &mut Vec<DecodedPromptCacheObservation>,
         prompt_cache_observations_buffered: &mut bool,
     ) -> Result<(), ()> {
-        while let Some(end) = find_sse_event_end(buffer) {
+        while let Some(end) = crate::usage_parser::find_sse_event_end(buffer) {
             let raw = buffer.split_to(end).freeze();
             let mut outgoing = raw.clone();
             match parse_one_event(raw).await {
@@ -691,28 +691,6 @@ fn update_usage_from_value(value: &Value, usage: &mut StreamingUsage) {
     {
         usage.cache_read_input_tokens = cache_read_input_tokens;
     }
-}
-
-pub(crate) fn find_sse_event_end(buffer: &[u8]) -> Option<usize> {
-    let mut index = 0;
-    while index < buffer.len() {
-        if buffer[index] == b'\n' && buffer.get(index + 1) == Some(&b'\n') {
-            return Some(index + 2);
-        }
-        if buffer[index] == b'\r' {
-            if buffer.get(index + 1) == Some(&b'\r') {
-                return Some(index + 2);
-            }
-            if buffer.get(index + 1) == Some(&b'\n')
-                && buffer.get(index + 2) == Some(&b'\r')
-                && buffer.get(index + 3) == Some(&b'\n')
-            {
-                return Some(index + 4);
-            }
-        }
-        index += 1;
-    }
-    None
 }
 
 fn reset_deadline(deadline: &mut Pin<Box<Sleep>>, max_age: Duration) {

@@ -14,8 +14,9 @@ impl RequestEventStore for SqliteStorage {
         let cache_breakpoints = serde_json::to_string(&event.cache_breakpoints)?;
         sqlx::query(
             "INSERT INTO request_events_v1 \
-             (request_id, ts, event_type, upstream_id, principal_id, created_at, key_id, model, upstream_name, cache_state, thread_id, message_id, message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, payload) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (request_id, ts, event_type, upstream_id, principal_id, created_at, key_id, model, upstream_name, cache_state, thread_id, message_id, message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, event_id, error_code, upstream_error_type, upstream_error_message, thinking_tokens, web_search_requests, web_fetch_requests, service_tier, inference_geo, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, payload) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(event_id) DO NOTHING",
         )
         .bind(&event.request_id)
         .bind(u64_to_i64(event_ts_secs(event), "request event ts")?)
@@ -46,6 +47,23 @@ impl RequestEventStore for SqliteStorage {
         .bind(option_u64_to_i64(
             event.cache_read_input_tokens,
             "request event cache_read_input_tokens",
+        )?)
+        .bind(event.event_id.as_deref())
+        .bind(event.error_code.as_deref())
+        .bind(event.upstream_error_type.as_deref())
+        .bind(event.upstream_error_message.as_deref())
+        .bind(option_u64_to_i64(event.thinking_tokens, "request event thinking_tokens")?)
+        .bind(option_u64_to_i64(event.web_search_requests, "request event web_search_requests")?)
+        .bind(option_u64_to_i64(event.web_fetch_requests, "request event web_fetch_requests")?)
+        .bind(event.service_tier.as_deref())
+        .bind(event.inference_geo.as_deref())
+        .bind(option_u64_to_i64(
+            event.cache_creation_input_tokens_5m,
+            "request event cache_creation_input_tokens_5m",
+        )?)
+        .bind(option_u64_to_i64(
+            event.cache_creation_input_tokens_1h,
+            "request event cache_creation_input_tokens_1h",
         )?)
         .bind(payload)
         .execute(self.pool())
