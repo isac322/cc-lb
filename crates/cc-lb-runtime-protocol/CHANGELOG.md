@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-protocol-v0.2.2...cc-lb-runtime-protocol-v0.3.0) - 2026-06-30
+
+### Other
+
+- inject Clock trait for all wall-clock reads workspace-wide ([#183](https://github.com/isac322/cc-lb/pull/183))
+
 ## [0.2.2](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-protocol-v0.2.1...cc-lb-runtime-protocol-v0.2.2) - 2026-06-26
 
 ### Other
