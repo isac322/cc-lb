@@ -44,7 +44,7 @@ if [ "${RUN_MULTI_REPLICA:-0}" = "1" ]; then
   log="$EVIDENCE_DIR/task-37-multi-replica-postgres.log"
   printf 'running multi-replica-postgres\n' > "$log"
   set +e
-  "$SCRIPT_DIR/multi-replica-postgres.sh" >> "$log" 2>&1
+  "$SCRIPT_DIR/../multi-replica/multi-replica-postgres.sh" >> "$log" 2>&1
   code=$?
   set -e
   if [ "$code" -eq 0 ]; then
