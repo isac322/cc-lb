@@ -96,6 +96,22 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
       CC_LB_TEST_READY_TIMEOUT_SECS: "120"
       CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
+      # Alias the same Postgres URL under DATABASE_URL and DATABASE_URL_TEST so
+      # tests that check one of the latter env vars (cc-lb-scheduler integration
+      # tests; cc-lb-storage-postgres migration_0037/0040 regression tests) run
+      # instead of silently returning Ok(()) after an eprintln!("skip: ...").
+      # Literal URL (not ${{ env.CI_POSTGRES_URL }}) — same-map GitHub Actions
+      # env aliasing is not portable.
+      DATABASE_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
+      DATABASE_URL_TEST: postgres://postgres:testpw@localhost:5432/cc_lb_test
+      # Force offline sqlx macro verification. apalis-sqlite ships SQLite-flavored
+      # sqlx::query_file!() macros; with DATABASE_URL set to Postgres they would
+      # try to prepare their SQLite SQL against Postgres and fail with
+      # "relation \"jobs\" does not exist". Both apalis-sqlite and apalis-postgres
+      # ship .sqlx/ offline caches in their crate sources so this always compiles.
+      # This crate's own code uses no compile-time sqlx macros, only runtime
+      # queries — so runtime DB access is unaffected.
+      SQLX_OFFLINE: "true"
 
     steps:
       - uses: actions/checkout@v7
