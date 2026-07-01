@@ -1077,7 +1077,11 @@ function OverviewPage() {
           />
           <div className="flex-1 overflow-auto min-h-0 max-h-96 xl:max-h-none">
             <div className="flex flex-col">
-              {topPrincipals.length === 0 ? (
+              {principalUsage.isPending || principalUsage.isPlaceholderData ? (
+                <div className="p-4 text-center text-xs text-text-faint">
+                  Loading top principals…
+                </div>
+              ) : topPrincipals.length === 0 ? (
                 <div className="p-4 text-center text-xs text-text-faint">
                   No usage data
                 </div>

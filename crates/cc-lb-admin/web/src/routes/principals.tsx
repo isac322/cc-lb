@@ -382,17 +382,19 @@ function RecentRequestsCard({ principal }: { principal: Principal }) {
       <CardHeader
         title="Recent Requests"
         subtitle={
-          events.length === 0
-            ? `No recent requests from ${principal.name}`
-            : `Last ${events.length} from ${principal.name}`
+          recent.isPending || recent.isPlaceholderData
+            ? `Loading recent requests for ${principal.name}…`
+            : events.length === 0
+              ? `No recent requests from ${principal.name}`
+              : `Last ${events.length} from ${principal.name}`
         }
       />
       <div className="overflow-x-auto">
         <RequestEventsTable
-          events={events}
+          events={recent.isPlaceholderData ? [] : events}
           principalNameMap={principalNameMap}
           upstreamNameMap={upstreamNameMap}
-          loading={recent.isLoading}
+          loading={recent.isPending || recent.isPlaceholderData}
           columns={{
             principal: false,
             cost: true,

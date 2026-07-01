@@ -1084,7 +1084,7 @@ function DetailView({
               />
               <CardBody className="p-3 pt-1">
                 <div className="w-full h-[240px]" style={{ minWidth: 0 }}>
-                  {quotaSeries.isLoading ? (
+                  {quotaSeries.isPending || quotaSeries.isPlaceholderData ? (
                     <div className="h-full flex items-center justify-center text-text-faint text-sm">
                       Loading…
                     </div>
@@ -1669,8 +1669,8 @@ function DetailView({
         {!isOauth && (
           <Section title="API Usage">
             <ApiUsageCard
-              data={apiUsageQ.data}
-              isLoading={apiUsageQ.isLoading}
+              data={apiUsageQ.isPlaceholderData ? undefined : apiUsageQ.data}
+              isLoading={apiUsageQ.isPending || apiUsageQ.isPlaceholderData}
               range={apiUsageRange}
               onRangeChange={setApiUsageRange}
               metric={apiUsageMetric}
@@ -1797,17 +1797,19 @@ function DetailView({
           <CardHeader
             title="Recent Requests"
             subtitle={
-              recentForUpstream.length === 0
-                ? `No recent requests against ${upstream.name}`
-                : `Last ${recentForUpstream.length} against ${upstream.name}`
+              recent.isPending || recent.isPlaceholderData
+                ? `Loading recent requests for ${upstream.name}…`
+                : recentForUpstream.length === 0
+                  ? `No recent requests against ${upstream.name}`
+                  : `Last ${recentForUpstream.length} against ${upstream.name}`
             }
           />
           <div className="overflow-x-auto">
             <RequestEventsTable
-              events={recentForUpstream}
+              events={recent.isPlaceholderData ? [] : recentForUpstream}
               principalNameMap={principalNameMap}
               upstreamNameMap={upstreamNameMap}
-              loading={recent.isLoading}
+              loading={recent.isPending || recent.isPlaceholderData}
               columns={{
                 upstream: false,
                 cost: true,
