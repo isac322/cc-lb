@@ -5689,9 +5689,11 @@ dependencies = [
  "http",
  "serde_json",
  "serde_yaml",
+ "sqlx 0.9.0",
  "tempfile",
  "tokio",
  "url",
+ "uuid",
  "wiremock",
 ]
 
