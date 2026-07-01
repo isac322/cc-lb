@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -309,7 +309,22 @@ pub async fn build_dynamic_view(
         updated_at_unix_secs: unix_secs(clock.now()),
     }));
     let principals = list_principals(stores).await?;
-    let principal_chains = build_principal_chains(stores, runtime, data_dir, &principals).await?;
+    let (principal_chains, registered_slot_keys) =
+        build_principal_chains(stores, runtime, data_dir, &principals).await?;
+    // RFC-0001 gap-analysis #1: sweep any runtime slot whose key is
+    // no longer referenced by the freshly-built view. Must run AFTER
+    // build_principal_chains succeeds so we don't tear down slots the
+    // still-active view is dispatching against; already-cloned
+    // `Arc<PluginSlot>` handles keep the evicted cells alive for the
+    // duration of any in-flight call (see `WasmtimeRuntime::evict_slot`
+    // docs).
+    let evicted = runtime.retain_slots(&registered_slot_keys);
+    if !evicted.is_empty() {
+        tracing::info!(
+            evicted_count = evicted.len(),
+            "reconcile swept orphan plugin slots",
+        );
+    }
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
     let now = unix_secs(clock.now());
     let statuses = apply_upstreams(stores, &upstreams, oauth_anthropic, now).await?;
@@ -438,9 +453,16 @@ async fn build_principal_chains(
     runtime: &Arc<WasmtimeRuntime>,
     data_dir: &Path,
     principals: &[PrincipalRecord],
-) -> Result<HashMap<String, PrincipalRoutingArtifacts>, RebindError> {
+) -> Result<
+    (
+        HashMap<String, PrincipalRoutingArtifacts>,
+        HashSet<cc_lb_plugin_api::SlotKey>,
+    ),
+    RebindError,
+> {
     let registry = list_registry_by_id(stores).await?;
     let mut chains = HashMap::new();
+    let mut registered_slot_keys: HashSet<cc_lb_plugin_api::SlotKey> = HashSet::new();
     for principal in principals {
         let router_entries = stores
             .plugin_registry
@@ -462,6 +484,7 @@ async fn build_principal_chains(
             principal,
             router_entries,
             &registry,
+            &mut registered_slot_keys,
         )
         .await?;
 
@@ -507,6 +530,7 @@ async fn build_principal_chains(
             };
             let slot_key =
                 cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
+            registered_slot_keys.insert(slot_key.clone());
             match register_observe_slot(runtime, &slot_key, &manifest).await {
                 Ok(slot) => {
                     let handle: Arc<dyn cc_lb_plugin_api::ObservabilityHook> =
@@ -557,6 +581,7 @@ async fn build_principal_chains(
             };
             let slot_key =
                 cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
+            registered_slot_keys.insert(slot_key.clone());
             match register_shape_slot(runtime, &slot_key, &manifest).await {
                 Ok(slot) => {
                     let handle: Arc<dyn cc_lb_plugin_api::UpstreamDialect> =
@@ -580,7 +605,7 @@ async fn build_principal_chains(
 
         chains.insert(principal.name.clone(), (router, hooks, dialect));
     }
-    Ok(chains)
+    Ok((chains, registered_slot_keys))
 }
 
 async fn list_registry_by_id(
@@ -649,6 +674,7 @@ async fn build_router_pipeline(
     principal: &PrincipalRecord,
     mut router_entries: Vec<cc_lb_storage_api::PluginChainEntry>,
     registry: &HashMap<Uuid, cc_lb_storage_api::WasmRegistryEntry>,
+    registered_slot_keys: &mut HashSet<cc_lb_plugin_api::SlotKey>,
 ) -> Result<Option<Arc<RouterPipelineCache>>, RebindError> {
     if router_entries.is_empty() {
         return Ok(None);
@@ -714,6 +740,7 @@ async fn build_router_pipeline(
         };
         let slot_key =
             cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
+        registered_slot_keys.insert(slot_key.clone());
         match register_filter_slot(runtime, &slot_key, &manifest).await {
             Ok(slot) => {
                 let handle: Arc<dyn FilterPlugin> = Arc::new(WasmtimeFilterPlugin::new(

@@ -101,7 +101,8 @@
         "startup_handshake": {
           "force": false,
           "skip_if_fresh": true
-        }
+        },
+        "wasmtime": {}
       }
     },
     "scheduler": {
@@ -676,6 +677,10 @@
             "force": false,
             "skip_if_fresh": true
           }
+        },
+        "wasmtime": {
+          "$ref": "#/$defs/WasmtimeConfig",
+          "default": {}
         }
       }
     },
@@ -1100,6 +1105,19 @@
         "reload_on_sighup": {
           "type": "boolean",
           "default": true
+        }
+      }
+    },
+    "WasmtimeConfig": {
+      "type": "object",
+      "properties": {
+        "memory_max_pages": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
         }
       }
     }

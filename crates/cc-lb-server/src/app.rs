@@ -701,8 +701,12 @@ async fn build_app_with_storage_inner(
         }),
         clock.clone(),
     ));
+    let mut hot_engine_cfg = cc_lb_runtime_wasmtime::HotEngineConfig::default();
+    if let Some(pages) = config.runtime.wasmtime.memory_max_pages {
+        hot_engine_cfg.memory_max_pages = pages;
+    }
     let runtime =
-        Arc::new(WasmtimeRuntime::with_defaults().map_err(BuildError::WasmtimeRuntimeInit)?);
+        Arc::new(WasmtimeRuntime::new(hot_engine_cfg).map_err(BuildError::WasmtimeRuntimeInit)?);
     let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
     let storage_for_dynamic = storage.clone();
     let env_token = std::env::var("CC_LB_BOOTSTRAP_ADMIN_TOKEN").ok();
