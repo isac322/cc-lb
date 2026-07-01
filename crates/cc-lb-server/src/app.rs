@@ -78,6 +78,9 @@ use cc_lb_admin::{
 const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_millis(500);
 const PRICE_CATALOG_LOCAL_INSTALL_INTERVAL: Duration = Duration::from_secs(60);
 
+#[derive(Clone, Copy)]
+struct TowerTimeoutMarker;
+
 pub const PROXY_FILES_ROUTE_COLLECTION: &str = "/v1/files";
 pub const PROXY_FILES_ROUTE_ITEM: &str = "/v1/files/{id}";
 pub const PROXY_FILES_ROUTE_ITEM_CONTENT: &str = "/v1/files/{id}/content";
@@ -1609,6 +1612,10 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             request_ids,
             request_id_middleware,
         ));
+    let service_builder = service_builder.layer(middleware::from_fn_with_state(
+        state.clone(),
+        lifecycle_middleware,
+    ));
     let service_builder = service_builder.layer(crate::chaos::ChaosLayer::from_env());
     let service_builder = service_builder
         .layer(HandleErrorLayer::new(timeout_error))
@@ -1733,13 +1740,17 @@ fn oauth_credentials_decryptable(aead: &AeadService, upstreams: &[UpstreamRecord
 }
 
 async fn timeout_error(error: tower::BoxError) -> Response<Body> {
-    let status = if error.is::<tower::timeout::error::Elapsed>() {
+    let is_elapsed = error.is::<tower::timeout::error::Elapsed>();
+    let status = if is_elapsed {
         StatusCode::GATEWAY_TIMEOUT
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
     };
     let mut response = Response::new(Body::from("request timed out"));
     *response.status_mut() = status;
+    if is_elapsed {
+        response.extensions_mut().insert(TowerTimeoutMarker);
+    }
     response
 }
 
@@ -1859,6 +1870,32 @@ async fn request_id_middleware(
     response
         .headers_mut()
         .insert(HeaderName::from_static("request-id"), request_id);
+    response
+}
+
+async fn lifecycle_middleware(
+    State(state): State<ProxyState>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let ctx: Option<cc_lb_core::LifecycleContext> = state.lifecycle.event_bus().map(|bus| {
+        let request_id = request
+            .headers()
+            .get("request-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("req_server_unknown")
+            .to_owned();
+        cc_lb_core::LifecycleContext::new(request_id, bus, &state.clock)
+    });
+    if let Some(c) = ctx.as_ref() {
+        request.extensions_mut().insert(c.clone());
+    }
+    let response = next.run(request).await;
+    if response.extensions().get::<TowerTimeoutMarker>().is_some()
+        && let Some(c) = ctx.as_ref()
+    {
+        c.terminate_tower_timeout();
+    }
     response
 }
 

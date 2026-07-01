@@ -4,7 +4,7 @@
 //!
 //! # Lifecycle
 //!
-//! 1. `TerminalObserver::new(...)` is constructed at the top of
+//! 1. `LifecycleContext::new(...)` is constructed at the top of
 //!    `lifecycle::handle` (before authn). It generates a fresh `event_id`
 //!    (UUID v7) used as the DB row uniqueness key. The client-supplied
 //!    `request_id` is intentionally distinct because it is forwarded to/from
@@ -75,9 +75,11 @@ pub(crate) mod error_codes {
 }
 
 #[derive(Clone)]
-pub(crate) struct TerminalObserver {
+pub struct LifecycleContext {
     inner: Arc<Inner>,
 }
+
+pub(crate) type TerminalObserver = LifecycleContext;
 
 struct Inner {
     event_id: String,
@@ -116,12 +118,8 @@ struct TerminalState {
     prebuilt_event: Option<RequestEvent>,
 }
 
-impl TerminalObserver {
-    pub(crate) fn new(
-        request_id: String,
-        bus: Arc<dyn RequestEventBus>,
-        clock: &ClockHandle,
-    ) -> Self {
+impl LifecycleContext {
+    pub fn new(request_id: String, bus: Arc<dyn RequestEventBus>, clock: &ClockHandle) -> Self {
         let event_id = Uuid::now_v7().to_string();
         let started_unix_ms = unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64;
         Self {
@@ -240,6 +238,13 @@ impl TerminalObserver {
         }
         let event = self.inner.make_request_event(None);
         self.inner.bus.publish(RequestEventUpdate::final_(event));
+    }
+
+    /// Terminate with Tower timeout status (504 GATEWAY_TIMEOUT).
+    /// Sets the error code to `TOWER_TIMEOUT` and publishes the final event.
+    pub fn terminate_tower_timeout(&self) {
+        self.set_terminal(StatusCode::GATEWAY_TIMEOUT, error_codes::TOWER_TIMEOUT);
+        self.finish();
     }
 
     /// Snapshot current state and broadcast as a `Partial` update for live
