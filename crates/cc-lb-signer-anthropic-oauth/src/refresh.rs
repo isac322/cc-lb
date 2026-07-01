@@ -2,15 +2,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytes::Bytes;
+use cc_lb_oauth_protocol::{
+    ExistingTokenParts, parse_token_endpoint_response, refresh_token_form_body,
+    refreshed_token_parts,
+};
 use cc_lb_storage_api::{OAuthCredentials, StorageError};
 use dashmap::DashMap;
 use http::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
 use thiserror::Error;
 use url::Url;
 
-use crate::http_client::{OAuthHttpClient, OAuthTokenRequest};
+use crate::http_client::{APPLICATION_JSON, FORM_URLENCODED, OAuthHttpClient, OAuthTokenRequest};
 
 pub const REFRESH_BUFFER_SECS: u64 = 60;
 pub const REFRESH_SOFT_BUFFER_SECS: u64 = 300;
@@ -60,14 +63,6 @@ pub enum RefreshError {
     },
 }
 
-#[derive(Debug, Deserialize)]
-struct TokenEndpointJson {
-    access_token: String,
-    refresh_token: Option<String>,
-    expires_in: u64,
-    scope: Option<String>,
-}
-
 pub fn new_breaker_map() -> BreakerMap {
     Arc::new(DashMap::new())
 }
@@ -97,11 +92,14 @@ pub async fn refresh_credentials(
     existing: &OAuthCredentials,
     now_epoch_secs: u64,
 ) -> Result<OAuthCredentials, RefreshError> {
-    let body = form_body(client_id, &existing.refresh_token, None);
+    let body = SecretString::new(
+        refresh_token_form_body(client_id, &existing.refresh_token).into_boxed_str(),
+    );
     let response = http
         .post_token(OAuthTokenRequest {
             endpoint: token_url.clone(),
             form_body: body,
+            content_type: FORM_URLENCODED,
         })
         .await
         .map_err(|source| RefreshError::Http {
@@ -126,15 +124,17 @@ pub async fn exchange_pkce_code(
     redirect_uri: &Url,
     now_epoch_secs: u64,
 ) -> Result<OAuthCredentials, RefreshError> {
-    let body = form_body(
+    let body = pkce_token_body(
         client_id,
         code_verifier.expose_secret(),
-        Some((auth_code, redirect_uri)),
+        auth_code,
+        redirect_uri,
     );
     let response = http
         .post_token(OAuthTokenRequest {
             endpoint: token_url.clone(),
             form_body: body,
+            content_type: APPLICATION_JSON,
         })
         .await
         .map_err(|source| RefreshError::Http {
@@ -171,39 +171,38 @@ fn parse_token_response(
     existing: &OAuthCredentials,
     now_epoch_secs: u64,
 ) -> Result<OAuthCredentials, RefreshError> {
-    let parsed: TokenEndpointJson =
-        serde_json::from_slice(&body).map_err(|source| RefreshError::Json {
-            reason: source.to_string(),
-        })?;
-    let scopes = parsed
-        .scope
-        .map(|scope| scope.split_whitespace().map(str::to_owned).collect())
-        .unwrap_or_else(|| existing.scopes.clone());
+    let parsed = parse_token_endpoint_response(&body).map_err(|source| RefreshError::Json {
+        reason: source.to_string(),
+    })?;
+    let refreshed = refreshed_token_parts(
+        ExistingTokenParts {
+            refresh_token: existing.refresh_token.clone(),
+            scopes: existing.scopes.clone(),
+        },
+        parsed,
+        now_epoch_secs,
+    );
 
     Ok(OAuthCredentials {
-        access_token: parsed.access_token,
-        refresh_token: parsed
-            .refresh_token
-            .unwrap_or_else(|| existing.refresh_token.clone()),
-        expires_at: now_epoch_secs.saturating_add(parsed.expires_in),
-        scopes,
+        access_token: refreshed.access_token,
+        refresh_token: refreshed.refresh_token,
+        expires_at: refreshed.expires_at_unix_secs,
+        scopes: refreshed.scopes,
     })
 }
 
-fn form_body(client_id: &str, token: &str, pkce: Option<(&str, &Url)>) -> SecretString {
-    let payload = match pkce {
-        Some((auth_code, redirect_uri)) => serde_json::json!({
-            "grant_type": "authorization_code",
-            "code": auth_code,
-            "code_verifier": token,
-            "redirect_uri": redirect_uri.as_str(),
-            "client_id": client_id,
-        }),
-        None => serde_json::json!({
-            "grant_type": "refresh_token",
-            "refresh_token": token,
-            "client_id": client_id,
-        }),
-    };
+fn pkce_token_body(
+    client_id: &str,
+    code_verifier: &str,
+    auth_code: &str,
+    redirect_uri: &Url,
+) -> SecretString {
+    let payload = serde_json::json!({
+        "grant_type": "authorization_code",
+        "code": auth_code,
+        "code_verifier": code_verifier,
+        "redirect_uri": redirect_uri.as_str(),
+        "client_id": client_id,
+    });
     SecretString::new(payload.to_string().into_boxed_str())
 }

@@ -10,10 +10,14 @@ use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 use url::Url;
 
+pub const APPLICATION_JSON: &str = "application/json";
+pub const FORM_URLENCODED: &str = "application/x-www-form-urlencoded";
+
 #[derive(Clone)]
 pub struct OAuthTokenRequest {
     pub endpoint: Url,
     pub form_body: SecretString,
+    pub content_type: &'static str,
 }
 
 impl std::fmt::Debug for OAuthTokenRequest {
@@ -22,6 +26,7 @@ impl std::fmt::Debug for OAuthTokenRequest {
             .debug_struct("OAuthTokenRequest")
             .field("endpoint", &self.endpoint)
             .field("form_body", &"[REDACTED]")
+            .field("content_type", &self.content_type)
             .finish()
     }
 }
@@ -95,7 +100,7 @@ impl OAuthHttpClient for HyperOAuthHttpClient {
             }
         })?;
         let http_request = Request::post(request.endpoint.as_str())
-            .header(CONTENT_TYPE, "application/json")
+            .header(CONTENT_TYPE, request.content_type)
             .header(CONTENT_LENGTH, content_length)
             .body(Full::new(Bytes::from(body)))
             .map_err(|source| OAuthHttpError::RequestBuild {

@@ -15,6 +15,7 @@ async-trait.workspace = true
 bytes.workspace = true
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-core = { path = "../cc-lb-core" }
+cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 dashmap.workspace = true

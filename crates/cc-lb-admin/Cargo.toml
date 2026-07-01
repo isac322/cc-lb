@@ -30,6 +30,7 @@ cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-config = { path = "../cc-lb-config" }
+cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-scheduler = { path = "../cc-lb-scheduler", default-features = false }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 cc-lb-runtime-wasmtime = { workspace = true }
