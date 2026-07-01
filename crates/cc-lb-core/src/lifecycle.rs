@@ -1002,6 +1002,13 @@ impl Lifecycle {
                 .as_ref()
                 .map(|bus| TerminalObserver::new(ctx.request_id.clone(), bus.clone(), &self.clock))
         });
+        if let Some(o) = observer.as_ref() {
+            let stream = serde_json::from_slice::<Value>(&ctx.body_bytes)
+                .ok()
+                .and_then(|v| v.get("stream").and_then(Value::as_bool))
+                .unwrap_or(false);
+            o.emit_request_started(stream);
+        }
         if let Some(response) = body_too_large {
             observe_finished(
                 &view.global_observability_hooks,
@@ -1009,10 +1016,34 @@ impl Lifecycle {
                 started,
             );
             if let Some(o) = observer.as_ref() {
+                let cap = body_cap_for_path(&self.config, &ctx.path);
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
+                    event_id: o.event_id().to_owned(),
+                    result: Err(cc_lb_lifecycle::ParseFailure::BodyTooLarge {
+                        limit_bytes: cap as u64,
+                    }),
+                });
                 o.set_terminal(StatusCode::PAYLOAD_TOO_LARGE, error_codes::BODY_TOO_LARGE);
                 o.finish();
             }
             return Ok(*response);
+        }
+        if let Some(o) = observer.as_ref() {
+            let stream = serde_json::from_slice::<Value>(&ctx.body_bytes)
+                .ok()
+                .and_then(|v| v.get("stream").and_then(Value::as_bool))
+                .unwrap_or(false);
+            let model = extract_model(&ctx.body_bytes);
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
+                event_id: o.event_id().to_owned(),
+                result: Ok(cc_lb_lifecycle::ParseInfo {
+                    path: ctx.path.clone(),
+                    method: ctx.method.to_string(),
+                    model,
+                    stream,
+                    body_bytes: ctx.body_bytes.len() as u64,
+                }),
+            });
         }
         let cache_metadata = request_cache_metadata(&ctx.downstream_headers, &ctx.body_bytes);
         let cache_breakpoints = if view.prompt_cache_observation_cache_opt().is_some()
@@ -1079,6 +1110,12 @@ impl Lifecycle {
                     };
                     observe_finished(&view.global_observability_hooks, status, started);
                     if let Some(o) = observer.as_ref() {
+                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+                            event_id: o.event_id().to_owned(),
+                            result: Err(cc_lb_lifecycle::AuthFailure::AuthenticationFailed {
+                                http_status: status.as_u16(),
+                            }),
+                        });
                         o.set_terminal(status, error_codes::AUTHENTICATION_FAILED);
                         o.finish();
                     }
@@ -1088,6 +1125,18 @@ impl Lifecycle {
         };
         let auth_ms = duration_to_ms(auth_start.elapsed());
         let principal_id = success.principal_id.clone();
+        if let Some(o) = observer.as_ref() {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+                event_id: o.event_id().to_owned(),
+                result: Ok(cc_lb_lifecycle::AuthInfo {
+                    principal_id: principal_id.clone(),
+                    key_id: Some(success.key_id.clone()),
+                    principal_kind: Some(
+                        principal_kind_lite_as_str(&success.record.principal_kind).to_owned(),
+                    ),
+                }),
+            });
+        }
         let Some(cached) = principal_view.get(&principal_id) else {
             tracing::error!(%principal_id, "authenticated principal missing from principal view");
             observe_error(
@@ -1108,6 +1157,12 @@ impl Lifecycle {
             );
             if let Some(o) = observer.as_ref() {
                 o.attach_principal(principal_id.clone(), None, None);
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+                    event_id: o.event_id().to_owned(),
+                    result: Err(cc_lb_lifecycle::AuthFailure::PrincipalMissing {
+                        principal_id: principal_id.clone(),
+                    }),
+                });
                 o.set_terminal(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     error_codes::PRINCIPAL_MISSING,
@@ -1147,6 +1202,10 @@ impl Lifecycle {
                 &ctx.body_bytes,
             );
             if let Some(o) = observer.as_ref() {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+                    event_id: o.event_id().to_owned(),
+                    result: Err(cc_lb_lifecycle::RouteFailure::RouterPipelineUnavailable),
+                });
                 o.set_terminal(
                     StatusCode::BAD_GATEWAY,
                     error_codes::ROUTER_PIPELINE_UNAVAILABLE,
@@ -1253,6 +1312,10 @@ impl Lifecycle {
                 &ctx.body_bytes,
             );
             if let Some(o) = observer.as_ref() {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+                    event_id: o.event_id().to_owned(),
+                    result: Err(cc_lb_lifecycle::RouteFailure::RouteNotConfigured),
+                });
                 o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::ROUTE_NOT_CONFIGURED);
                 o.finish();
             }
@@ -1282,6 +1345,10 @@ impl Lifecycle {
                     &ctx.body_bytes,
                 );
                 if let Some(o) = observer.as_ref() {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+                        event_id: o.event_id().to_owned(),
+                        result: Err(cc_lb_lifecycle::RouteFailure::RouteNotConfigured),
+                    });
                     o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::ROUTE_NOT_CONFIGURED);
                     o.finish();
                 }
@@ -1296,6 +1363,14 @@ impl Lifecycle {
         };
         let route_ms = duration_to_ms(route_start.elapsed());
         if let Some(o) = observer.as_ref() {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+                event_id: o.event_id().to_owned(),
+                result: Ok(cc_lb_lifecycle::RouteInfo {
+                    upstream_id: resolved_upstream_id,
+                    upstream_name: router_chosen_upstream_name.clone(),
+                    model: extract_model(&ctx.body_bytes),
+                }),
+            });
             o.attach_route(
                 resolved_upstream_id,
                 router_chosen_upstream_name.clone(),
@@ -1336,6 +1411,12 @@ impl Lifecycle {
                 let status = response.status();
                 observe_finished_for_principal(hooks, status, started, &principal, &ctx.body_bytes);
                 if let Some(o) = observer.as_ref() {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
+                        event_id: o.event_id().to_owned(),
+                        decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
+                            reason: "limit_rejected".to_owned(),
+                        },
+                    });
                     o.set_terminal(status, error_codes::LIMIT_REJECTED);
                     o.finish();
                 }
@@ -1343,6 +1424,27 @@ impl Lifecycle {
             }
         };
         let limit_reserve_ms = duration_to_ms(limit_reserve_start.elapsed());
+        if let Some(o) = observer.as_ref() {
+            let decision = if let Some(limit) = active_limit.as_ref() {
+                cc_lb_lifecycle::LimitDecisionKind::Reserved {
+                    reservation_id: limit
+                        .reservation
+                        .as_ref()
+                        .map(|r| format!("{}-{}", r.principal_id, r.key_id))
+                        .unwrap_or_default(),
+                    amount: limit.request.max_tokens as u64,
+                }
+            } else {
+                cc_lb_lifecycle::LimitDecisionKind::Reserved {
+                    reservation_id: String::new(),
+                    amount: 0,
+                }
+            };
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
+                event_id: o.event_id().to_owned(),
+                decision,
+            });
+        }
 
         let signer_factory = view.signer_factory.with_router_choice(
             success.api_key.clone().unwrap_or_default(),
@@ -1387,6 +1489,13 @@ impl Lifecycle {
             ..Default::default()
         };
         let mut internal_errors = pipeline_result.internal_errors.clone();
+        if let Some(o) = observer.as_ref() {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt {
+                event_id: o.event_id().to_owned(),
+                attempt_num: 1,
+                upstream_id: resolved_upstream_id,
+            });
+        }
         let mut response = match self
             .attempt(
                 view.dispatcher.as_ref(),
@@ -1401,7 +1510,16 @@ impl Lifecycle {
             )
             .await
         {
-            Ok(response) => response,
+            Ok(response) => {
+                let status = response.status();
+                if let Some(o) = observer.as_ref() {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
+                        event_id: o.event_id().to_owned(),
+                        status: status.as_u16(),
+                    });
+                }
+                response
+            }
             Err(response) => {
                 let mut response = *response;
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
@@ -1852,6 +1970,11 @@ impl Lifecycle {
             usage.apply_extras_to(&mut event);
             if let Some(o) = observer.as_ref() {
                 o.update_usage(&usage);
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                    event_id: o.event_id().to_owned(),
+                    usage: to_usage_snapshot(&usage),
+                    source: cc_lb_lifecycle::UsageSource::NonStreamBody,
+                });
                 o.set_prebuilt_event(event);
                 o.finish();
             } else {
@@ -1902,6 +2025,10 @@ impl Lifecycle {
             ..Default::default()
         };
         if let Some(o) = observer {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+                event_id: o.event_id().to_owned(),
+                result: Err(cc_lb_lifecycle::RouteFailure::RouteNoUpstreamAfterFilter),
+            });
             o.set_prebuilt_event(event);
             o.set_terminal(status, error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER);
             o.finish();
@@ -2186,6 +2313,13 @@ impl Lifecycle {
                                     && let Some(err) =
                                         usage_parser::detect_mid_stream_error(&raw)
                                 {
+                                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
+                                        event_id: o.event_id().to_owned(),
+                                        result: Err(cc_lb_lifecycle::StreamError {
+                                            error_type: err.error_type.clone().unwrap_or_default(),
+                                            error_message: err.error_message.clone().unwrap_or_default(),
+                                        }),
+                                    });
                                     o.set_upstream_error(
                                         err.error_type.clone(),
                                         err.error_message.clone(),
@@ -2275,6 +2409,19 @@ impl Lifecycle {
                                 }
                                 if let Some(o) = observer.as_ref() {
                                     o.update_usage(&usage);
+                                    if usage_update.message_start_usage {
+                                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                            event_id: o.event_id().to_owned(),
+                                            usage: to_usage_snapshot(&usage),
+                                            source: cc_lb_lifecycle::UsageSource::MessageStart,
+                                        });
+                                    } else if usage_update.message_stop {
+                                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                            event_id: o.event_id().to_owned(),
+                                            usage: to_usage_snapshot(&usage),
+                                            source: cc_lb_lifecycle::UsageSource::MessageStop,
+                                        });
+                                    }
                                     let force_publish = usage_update.message_start_usage
                                         || usage_update.message_stop;
                                     let time_since_last = last_partial_at
@@ -2287,6 +2434,13 @@ impl Lifecycle {
                                         >= Duration::from_millis(1000)
                                         || tokens_since_last >= 100;
                                     if force_publish || throttle_ok {
+                                        if !usage_update.message_start_usage && !usage_update.message_stop {
+                                            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                                                event_id: o.event_id().to_owned(),
+                                                usage: to_usage_snapshot(&usage),
+                                                source: cc_lb_lifecycle::UsageSource::MessageDelta,
+                                            });
+                                        }
                                         o.publish_partial_snapshot();
                                         last_partial_at = Some(now);
                                         last_partial_output_tokens = usage.output_tokens;
@@ -2499,6 +2653,13 @@ impl Lifecycle {
                     usage.apply_extras_to(&mut event);
                     if let Some(o) = observer.as_ref() {
                         o.update_usage(&usage);
+                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
+                            event_id: o.event_id().to_owned(),
+                            result: Ok(cc_lb_lifecycle::StreamSuccess {
+                                usage: to_usage_snapshot(&usage),
+                                sse_event_count,
+                            }),
+                        });
                         o.set_prebuilt_event(event);
                         o.finish();
                     } else {
@@ -3914,6 +4075,29 @@ fn is_sse_response(headers: &HeaderMap) -> bool {
 fn observe_many(hooks: &[Arc<dyn ObservabilityHook>], event: ObserveEvent) {
     for hook in hooks {
         let _result = hook.observe(event.clone());
+    }
+}
+
+fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
+    cc_lb_lifecycle::UsageSnapshot {
+        input_tokens: u.input_tokens,
+        output_tokens: u.output_tokens,
+        cache_creation_input_tokens: u.cache_creation_input_tokens,
+        cache_creation_input_tokens_5m: u.cache_creation_input_tokens_5m,
+        cache_creation_input_tokens_1h: u.cache_creation_input_tokens_1h,
+        cache_read_input_tokens: u.cache_read_input_tokens,
+        thinking_tokens: u.thinking_tokens,
+        web_search_requests: u.web_search_requests,
+        web_fetch_requests: u.web_fetch_requests,
+        service_tier: u.service_tier.clone(),
+        inference_geo: u.inference_geo.clone(),
+    }
+}
+
+fn principal_kind_lite_as_str(kind: &cc_lb_storage_api::types::PrincipalKindLite) -> &'static str {
+    match kind {
+        cc_lb_storage_api::types::PrincipalKindLite::Machine => "machine",
+        cc_lb_storage_api::types::PrincipalKindLite::Human => "human",
     }
 }
 

@@ -30,6 +30,9 @@ rust-version = "1.96.0"
 # Public crates.io surface — only cc-lb-plugin-api remains.
 cc-lb-plugin-api = { path = "crates/cc-lb-plugin-api", version = "=0.3.0" }
 
+# Internal, unpublished — RFC-0002 event-driven lifecycle vocabulary.
+cc-lb-lifecycle = { path = "crates/cc-lb-lifecycle", version = "0.1.0" }
+
 # Wasmtime plugin runtime quartet — internal, unpublished until Phase 2 ABI freeze.
 # See docs/rfc/0001-plugin-runtime-vnext.md.
 cc-lb-runtime-wasmtime    = { path = "crates/cc-lb-runtime-wasmtime",    version = "0.1.0" }
