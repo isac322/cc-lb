@@ -52,7 +52,7 @@ const MIGRATIONS_TO_0039: &[&str] = &[
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
-#[sqlx::test]
+#[tokio::test]
 async fn migration_0039_wasm_registry_has_no_wire_version() -> TestResult {
     let Some(url) = postgres_url() else {
         eprintln!("skip: CI_POSTGRES_URL or DATABASE_URL_TEST not set");
@@ -67,7 +67,7 @@ async fn migration_0039_wasm_registry_has_no_wire_version() -> TestResult {
     teardown
 }
 
-#[sqlx::test]
+#[tokio::test]
 async fn migration_0040_adds_wire_version_and_updates_builtin() -> TestResult {
     let Some(url) = postgres_url() else {
         eprintln!("skip: CI_POSTGRES_URL or DATABASE_URL_TEST not set");
@@ -86,7 +86,7 @@ async fn migration_0040_adds_wire_version_and_updates_builtin() -> TestResult {
     teardown
 }
 
-#[sqlx::test]
+#[tokio::test]
 async fn migration_0040_is_idempotent() -> TestResult {
     let Some(url) = postgres_url() else {
         eprintln!("skip: CI_POSTGRES_URL or DATABASE_URL_TEST not set");
