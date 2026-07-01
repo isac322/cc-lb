@@ -277,9 +277,6 @@ Treat this as a hint, not a contract. Re-discover every run per Phase 1.
 - `tests/real-client/install.sh` — three `install_client <name> <pkg> <ver> ...` lines
 - `tests/real-client/VERSIONS.md` — mirror table; the Pinned version column + Output column both need bumping
 
-### Tracked `.opencode/` (NOT runtime deps)
-- `.opencode/skills/graphify/.graphify_version` — metadata stamp recording which graphify version produced the skill content. **Don't bump as part of a dep sweep** — bumping requires re-running graphify, not just editing the file.
-
 ### Explicitly not in scope
 - `.opencode/package.json` — gitignored, local-only opencode runtime
 - `docs/cc-lb-guide.html`, `docs/plugin-author-guide.md` — example command lines, not version pins
