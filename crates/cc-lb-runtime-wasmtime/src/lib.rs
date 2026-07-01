@@ -304,10 +304,8 @@ impl WasmtimeRuntime {
                 .filter(|k| !keep.contains(*k))
                 .cloned()
                 .collect();
-            let removed: Vec<Arc<PluginSlot>> = orphan_keys
-                .iter()
-                .filter_map(|k| slots.remove(k))
-                .collect();
+            let removed: Vec<Arc<PluginSlot>> =
+                orphan_keys.iter().filter_map(|k| slots.remove(k)).collect();
             (orphan_keys, removed)
         };
         for key in &evicted_keys {
