@@ -417,6 +417,43 @@ async fn terminal_upstream_stream_error() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_tower_timeout() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(happy_response())
+                .set_delay(Duration::from_secs(5)),
+        )
+        .mount(&upstream)
+        .await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    let (plaintext_key, _) = seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let mut config = base_config(sqlite_path.clone(), litellm.uri());
+    config.timeouts.upstream_total_secs = 1;
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    let response = send_messages(&server, &plaintext_key, false).await?;
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+
+    let row = wait_for_request_event(&sqlite_path).await?;
+    assert_eq!(row.error_code.as_deref(), Some("tower_timeout"));
+    assert_eq!(row.status, 504);
+    assert!(row.event_id.is_some(), "event_id must be populated");
+
+    server.shutdown().await;
+    Ok(())
+}
+
 fn happy_sse_stream() -> String {
     concat!(
         "event: message_start\n",

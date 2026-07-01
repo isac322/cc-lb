@@ -844,6 +844,10 @@ impl Lifecycle {
         self.config.replica_identity.clone()
     }
 
+    pub fn event_bus(&self) -> Option<Arc<dyn crate::event_bus::RequestEventBus>> {
+        self.event_bus.clone()
+    }
+
     pub fn with_audit_sink(mut self, audit_sink: Arc<AuditWriterSink>) -> Self {
         self.audit_sink = Some(audit_sink);
         self
@@ -991,11 +995,13 @@ impl Lifecycle {
         let view = self.dynamic_view.load();
         let principal_view = Arc::clone(&view.principal_view);
         let started = Instant::now();
+        let observer_from_ext = req.extensions().get::<TerminalObserver>().cloned();
         let (mut ctx, body_too_large) = self.parse(req);
-        let observer: Option<TerminalObserver> = self
-            .event_bus
-            .as_ref()
-            .map(|bus| TerminalObserver::new(ctx.request_id.clone(), bus.clone(), &self.clock));
+        let observer: Option<TerminalObserver> = observer_from_ext.or_else(|| {
+            self.event_bus
+                .as_ref()
+                .map(|bus| TerminalObserver::new(ctx.request_id.clone(), bus.clone(), &self.clock))
+        });
         if let Some(response) = body_too_large {
             observe_finished(
                 &view.global_observability_hooks,
