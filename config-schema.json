@@ -66,6 +66,12 @@
       "$ref": "#/$defs/EgressConfig",
       "default": {}
     },
+    "lifecycle_hook_adapter": {
+      "$ref": "#/$defs/LifecycleHookAdapterConfig",
+      "default": {
+        "enabled": false
+      }
+    },
     "lifecycle_shadow_writer": {
       "$ref": "#/$defs/LifecycleShadowWriterConfig",
       "default": {
@@ -459,6 +465,15 @@
           "items": {
             "type": "string"
           }
+        }
+      }
+    },
+    "LifecycleHookAdapterConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
         }
       }
     },

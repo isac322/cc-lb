@@ -50,6 +50,7 @@ pub const DEFAULT_LIFECYCLE_BROADCAST_CAPACITY: usize = 2048;
 /// [`LifecycleEventLogger`](crate::lifecycle_event_logger::LifecycleEventLogger).
 pub const DEFAULT_LIFECYCLE_WRITER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY: usize = 4096;
+pub const DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY: usize = 4096;
 
 /// Errors surfaced by [`RequestEventBus`] implementations.
 #[derive(Debug, thiserror::Error)]
@@ -166,6 +167,7 @@ struct InMemoryBusInner {
     lifecycle_broadcast_tx: broadcast::Sender<LifecycleEvent>,
     lifecycle_writer_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_assembler_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
+    lifecycle_hook_adapter_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
 }
 
 impl InMemoryBus {
@@ -186,6 +188,7 @@ impl InMemoryBus {
                 lifecycle_broadcast_tx,
                 lifecycle_writer_tx: Mutex::new(None),
                 lifecycle_assembler_tx: Mutex::new(None),
+                lifecycle_hook_adapter_tx: Mutex::new(None),
             }),
         }
     }
@@ -229,6 +232,17 @@ impl InMemoryBus {
             .lifecycle_assembler_tx
             .lock()
             .expect("event bus lifecycle assembler mutex poisoned");
+        *guard = Some(tx);
+        rx
+    }
+
+    pub fn attach_lifecycle_hook_adapter(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        let mut guard = self
+            .inner
+            .lifecycle_hook_adapter_tx
+            .lock()
+            .expect("event bus lifecycle hook adapter mutex poisoned");
         *guard = Some(tx);
         rx
     }
@@ -302,6 +316,14 @@ impl RequestEventBus for InMemoryBus {
                 .expect("event bus lifecycle assembler mutex poisoned");
             guard.clone()
         };
+        let hook_adapter_tx = {
+            let guard = self
+                .inner
+                .lifecycle_hook_adapter_tx
+                .lock()
+                .expect("event bus lifecycle hook adapter mutex poisoned");
+            guard.clone()
+        };
         if let Some(tx) = writer_tx {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
@@ -319,7 +341,7 @@ impl RequestEventBus for InMemoryBus {
             }
         }
         if let Some(tx) = assembler_tx {
-            match tx.try_send(event) {
+            match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
                     cc_lb_observability::increment_dropped_events_by("lifecycle_assembler_full", 1);
@@ -331,6 +353,25 @@ impl RequestEventBus for InMemoryBus {
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     tracing::debug!("lifecycle assembler mpsc closed");
+                }
+            }
+        }
+        if let Some(tx) = hook_adapter_tx {
+            match tx.try_send(event) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(dropped)) => {
+                    cc_lb_observability::increment_dropped_events_by(
+                        "lifecycle_hook_adapter_full",
+                        1,
+                    );
+                    tracing::warn!(
+                        kind = dropped.kind(),
+                        event_id = %dropped.event_id(),
+                        "lifecycle hook adapter mpsc full; dropping event (hook fire may be missing)",
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::debug!("lifecycle hook adapter mpsc closed");
                 }
             }
         }

@@ -64,6 +64,8 @@ pub struct Config {
     pub prompt_cache_shadow: PromptCacheShadowConfig,
     #[serde(default)]
     pub lifecycle_shadow_writer: LifecycleShadowWriterConfig,
+    #[serde(default)]
+    pub lifecycle_hook_adapter: LifecycleHookAdapterConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -663,6 +665,13 @@ impl Default for PromptCacheShadowConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LifecycleShadowWriterConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecycleHookAdapterConfig {
     #[serde(default)]
     pub enabled: bool,
 }
