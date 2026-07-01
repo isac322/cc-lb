@@ -51,6 +51,7 @@ pub const DEFAULT_LIFECYCLE_BROADCAST_CAPACITY: usize = 2048;
 pub const DEFAULT_LIFECYCLE_WRITER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY: usize = 4096;
+pub const DEFAULT_LIFECYCLE_PRICING_CAPACITY: usize = 4096;
 
 /// Errors surfaced by [`RequestEventBus`] implementations.
 #[derive(Debug, thiserror::Error)]
@@ -168,6 +169,7 @@ struct InMemoryBusInner {
     lifecycle_writer_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_assembler_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_hook_adapter_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
+    lifecycle_pricing_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
 }
 
 impl InMemoryBus {
@@ -189,6 +191,7 @@ impl InMemoryBus {
                 lifecycle_writer_tx: Mutex::new(None),
                 lifecycle_assembler_tx: Mutex::new(None),
                 lifecycle_hook_adapter_tx: Mutex::new(None),
+                lifecycle_pricing_tx: Mutex::new(None),
             }),
         }
     }
@@ -243,6 +246,17 @@ impl InMemoryBus {
             .lifecycle_hook_adapter_tx
             .lock()
             .expect("event bus lifecycle hook adapter mutex poisoned");
+        *guard = Some(tx);
+        rx
+    }
+
+    pub fn attach_lifecycle_pricing(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        let mut guard = self
+            .inner
+            .lifecycle_pricing_tx
+            .lock()
+            .expect("event bus lifecycle pricing mutex poisoned");
         *guard = Some(tx);
         rx
     }
@@ -324,6 +338,14 @@ impl RequestEventBus for InMemoryBus {
                 .expect("event bus lifecycle hook adapter mutex poisoned");
             guard.clone()
         };
+        let pricing_tx = {
+            let guard = self
+                .inner
+                .lifecycle_pricing_tx
+                .lock()
+                .expect("event bus lifecycle pricing mutex poisoned");
+            guard.clone()
+        };
         if let Some(tx) = writer_tx {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
@@ -357,7 +379,7 @@ impl RequestEventBus for InMemoryBus {
             }
         }
         if let Some(tx) = hook_adapter_tx {
-            match tx.try_send(event) {
+            match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
                     cc_lb_observability::increment_dropped_events_by(
@@ -372,6 +394,22 @@ impl RequestEventBus for InMemoryBus {
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     tracing::debug!("lifecycle hook adapter mpsc closed");
+                }
+            }
+        }
+        if let Some(tx) = pricing_tx {
+            match tx.try_send(event) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(dropped)) => {
+                    cc_lb_observability::increment_dropped_events_by("lifecycle_pricing_full", 1);
+                    tracing::warn!(
+                        kind = dropped.kind(),
+                        event_id = %dropped.event_id(),
+                        "lifecycle pricing subscriber mpsc full; dropping event (shadow cost may be missing)",
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::debug!("lifecycle pricing subscriber mpsc closed");
                 }
             }
         }

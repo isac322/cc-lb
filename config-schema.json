@@ -72,6 +72,12 @@
         "enabled": false
       }
     },
+    "lifecycle_pricing_subscriber": {
+      "$ref": "#/$defs/LifecyclePricingSubscriberConfig",
+      "default": {
+        "enabled": false
+      }
+    },
     "lifecycle_shadow_writer": {
       "$ref": "#/$defs/LifecycleShadowWriterConfig",
       "default": {
@@ -469,6 +475,15 @@
       }
     },
     "LifecycleHookAdapterConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "LifecyclePricingSubscriberConfig": {
       "type": "object",
       "properties": {
         "enabled": {

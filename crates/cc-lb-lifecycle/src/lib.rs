@@ -127,6 +127,24 @@ pub enum LifecycleEvent {
         client_status: u16,
         duration_ms: u64,
     },
+    /// Emitted by the Phase-5 pricing subscriber after cost is computed
+    /// from usage counts + model + upstream kind. Advisory: the assembler
+    /// merges these micros into the shadow row.
+    Priced {
+        event_id: EventId,
+        cost: CostBreakdown,
+    },
+    /// Emitted by the Phase-5 cache observation subscriber when prompt cache
+    /// state can be inferred from the completed stream / non-stream body.
+    /// Advisory: the assembler merges the cache breakpoints + prefix into
+    /// the shadow row.
+    CacheObserved {
+        event_id: EventId,
+        cache_read_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+        cache_creation_input_tokens_5m: u64,
+        cache_creation_input_tokens_1h: u64,
+    },
 }
 
 impl LifecycleEvent {
@@ -142,7 +160,9 @@ impl LifecycleEvent {
             | Self::UpstreamResponseStarted { event_id, .. }
             | Self::UsageObserved { event_id, .. }
             | Self::StreamCompleted { event_id, .. }
-            | Self::RequestTerminated { event_id, .. } => event_id,
+            | Self::RequestTerminated { event_id, .. }
+            | Self::Priced { event_id, .. }
+            | Self::CacheObserved { event_id, .. } => event_id,
         }
     }
 
@@ -159,8 +179,24 @@ impl LifecycleEvent {
             Self::UsageObserved { .. } => "usage_observed",
             Self::StreamCompleted { .. } => "stream_completed",
             Self::RequestTerminated { .. } => "request_terminated",
+            Self::Priced { .. } => "priced",
+            Self::CacheObserved { .. } => "cache_observed",
         }
     }
+}
+
+/// Cost breakdown in micro-USD, produced by the pricing subscriber.
+///
+/// Field semantics mirror `RequestEvent.cost_*_micros` for direct assembler
+/// merge.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CostBreakdown {
+    pub total_micros: Option<i64>,
+    pub input_micros: Option<i64>,
+    pub output_micros: Option<i64>,
+    pub cache_creation_5m_micros: Option<i64>,
+    pub cache_creation_1h_micros: Option<i64>,
+    pub cache_read_micros: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +259,11 @@ pub struct RouteInfo {
     pub upstream_id: Uuid,
     pub upstream_name: String,
     pub model: Option<String>,
+    /// Pricing bucket for the chosen upstream. Values used by the pricing
+    /// subscriber to select the correct cost model: `"anthropic_key"` or
+    /// `"anthropic_oauth"`. `None` means the pricing default (Anthropic key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_kind: Option<String>,
 }
 
 /// Reason routing failed.
@@ -433,6 +474,19 @@ mod tests {
                 duration_ms: 1,
             }
             .kind(),
+            LifecycleEvent::Priced {
+                event_id: sample_event_id(),
+                cost: CostBreakdown::default(),
+            }
+            .kind(),
+            LifecycleEvent::CacheObserved {
+                event_id: sample_event_id(),
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_creation_input_tokens_5m: 0,
+                cache_creation_input_tokens_1h: 0,
+            }
+            .kind(),
         ];
         assert_eq!(
             labels,
@@ -447,6 +501,8 @@ mod tests {
                 "usage_observed",
                 "stream_completed",
                 "request_terminated",
+                "priced",
+                "cache_observed",
             ],
         );
     }

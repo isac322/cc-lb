@@ -52,7 +52,6 @@ pub fn spawn_with_config(
 #[derive(Default)]
 struct Partial {
     inserted_at: Option<Instant>,
-    started: Option<Instant>,
     usage: UsageSnapshot,
     usage_seen: bool,
 }
@@ -61,7 +60,6 @@ impl Partial {
     fn new(now: Instant) -> Self {
         Self {
             inserted_at: Some(now),
-            started: Some(now),
             ..Self::default()
         }
     }

@@ -66,6 +66,8 @@ pub struct Config {
     pub lifecycle_shadow_writer: LifecycleShadowWriterConfig,
     #[serde(default)]
     pub lifecycle_hook_adapter: LifecycleHookAdapterConfig,
+    #[serde(default)]
+    pub lifecycle_pricing_subscriber: LifecyclePricingSubscriberConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -672,6 +674,13 @@ pub struct LifecycleShadowWriterConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LifecycleHookAdapterConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecyclePricingSubscriberConfig {
     #[serde(default)]
     pub enabled: bool,
 }

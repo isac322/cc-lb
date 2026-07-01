@@ -1369,6 +1369,9 @@ impl Lifecycle {
                     upstream_id: resolved_upstream_id,
                     upstream_name: router_chosen_upstream_name.clone(),
                     model: extract_model(&ctx.body_bytes),
+                    upstream_kind: pricing_upstream_kind(&route.upstream)
+                        .map(pricing_upstream_kind_label)
+                        .map(str::to_owned),
                 }),
             });
             o.attach_route(
@@ -3669,16 +3672,16 @@ fn hex_sha256(bytes: &[u8]) -> String {
 }
 
 #[derive(Clone, Copy, Default)]
-struct CostBreakdownOptions {
-    total: Option<i64>,
-    input: Option<i64>,
-    output: Option<i64>,
-    cache_creation_5m: Option<i64>,
-    cache_creation_1h: Option<i64>,
-    cache_read: Option<i64>,
+pub(crate) struct CostBreakdownOptions {
+    pub(crate) total: Option<i64>,
+    pub(crate) input: Option<i64>,
+    pub(crate) output: Option<i64>,
+    pub(crate) cache_creation_5m: Option<i64>,
+    pub(crate) cache_creation_1h: Option<i64>,
+    pub(crate) cache_read: Option<i64>,
 }
 
-fn cost_breakdown_to_event_options(
+pub(crate) fn cost_breakdown_to_event_options(
     breakdown: &cc_lb_pricing::CostBreakdown,
 ) -> CostBreakdownOptions {
     match breakdown.pricing_status {
@@ -4041,6 +4044,21 @@ fn audit_upstream_name(upstream: &Upstream) -> &'static str {
 fn pricing_upstream_kind(upstream: &Upstream) -> Option<cc_lb_pricing::UpstreamKind> {
     match upstream {
         Upstream::AnthropicDirect { .. } => Some(cc_lb_pricing::UpstreamKind::AnthropicKey),
+    }
+}
+
+pub(crate) fn pricing_upstream_kind_label(kind: cc_lb_pricing::UpstreamKind) -> &'static str {
+    match kind {
+        cc_lb_pricing::UpstreamKind::AnthropicKey => "anthropic_key",
+        cc_lb_pricing::UpstreamKind::AnthropicOAuth => "anthropic_oauth",
+    }
+}
+
+pub(crate) fn pricing_upstream_kind_from_label(label: &str) -> Option<cc_lb_pricing::UpstreamKind> {
+    match label {
+        "anthropic_key" => Some(cc_lb_pricing::UpstreamKind::AnthropicKey),
+        "anthropic_oauth" => Some(cc_lb_pricing::UpstreamKind::AnthropicOAuth),
+        _ => None,
     }
 }
 
