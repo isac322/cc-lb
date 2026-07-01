@@ -2,19 +2,28 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
+use tokio::time::Instant;
 
 use cc_lb_storage_api::types::{
     KeyStatus as StoredKeyStatus, PrincipalLimitIdentityKind, PrincipalLimitKind,
     PrincipalLimitState, StoredApiKeyRecord,
 };
 use cc_lb_storage_api::{RequestEvent, Storage, StorageError};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
+use uuid::Uuid;
 
 use crate::api_keys::concurrent_guard::{KeyConcurrencyGuard, KeyConcurrencyManager};
 use crate::api_keys::principal_view::{PrincipalStatus, PrincipalView};
 use crate::api_keys::types::{Limit, LimitKind};
 use crate::clock::{ClockHandle, unix_secs};
+
+/// Stable identifier for a live [`Reservation`].
+///
+/// Post-RFC-0002 Phase 7 the engine stores reservation state by this ID so
+/// out-of-band consumers (Phase 8 `LimitReconcileSubscriber`, TTL sweeper)
+/// can reconcile or refund without holding the `Reservation` handle.
+pub type ReservationId = String;
 
 impl Hash for LimitKind {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -72,18 +81,40 @@ pub struct LimitEngine {
 struct LimitEngineInner {
     rolling: RwLock<HashMap<RollingKey, RingCounter>>,
     effective_limits: RwLock<HashMap<(String, String), Vec<Limit>>>,
+    reservations: Mutex<HashMap<ReservationId, ReservationRecord>>,
     concurrent_mgr: Arc<KeyConcurrencyManager>,
     clock: ClockHandle,
 }
 
 pub struct Reservation {
     engine: Weak<LimitEngineInner>,
-    pub(crate) key_id: String,
-    pub(crate) principal_id: String,
+    pub(crate) id: ReservationId,
+}
+
+impl Reservation {
+    /// Stable engine-side identifier used by
+    /// [`LimitEngine::reconcile_by_id`] and [`LimitEngine::refund_by_id`].
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// Engine-side reservation state. Stored inside
+/// [`LimitEngineInner::reservations`] and looked up by [`ReservationId`].
+///
+/// Moved out of `Reservation` in Phase 7 so out-of-band consumers can
+/// reconcile without owning the handle. `Reservation` is now just an
+/// RAII refund guard keyed by `id`.
+#[allow(dead_code)]
+struct ReservationRecord {
+    key_id: String,
+    principal_id: String,
     effective_limits: Vec<Limit>,
     reserved: Vec<ReservedAmount>,
+    /// Held here to keep the concurrent-request slot occupied until refund
+    /// or reconcile removes the record.
     concurrent_guards: Vec<KeyConcurrencyGuard>,
-    refund_done: bool,
+    created_at: Instant,
 }
 
 struct ReservedAmount {
@@ -160,6 +191,7 @@ impl LimitEngine {
             inner: Arc::new(LimitEngineInner {
                 rolling: RwLock::new(HashMap::new()),
                 effective_limits: RwLock::new(HashMap::new()),
+                reservations: Mutex::new(HashMap::new()),
                 concurrent_mgr,
                 clock,
             }),
@@ -307,36 +339,92 @@ impl LimitEngine {
             effective_limits.clone(),
         );
 
+        let id = Uuid::now_v7().to_string();
+        self.inner.reservations.lock().insert(
+            id.clone(),
+            ReservationRecord {
+                key_id: key_id.clone(),
+                principal_id: principal_id.to_owned(),
+                effective_limits,
+                reserved,
+                concurrent_guards,
+                created_at: Instant::now(),
+            },
+        );
+
         Ok(Reservation {
             engine: Arc::downgrade(&self.inner),
-            key_id,
-            principal_id: principal_id.to_owned(),
-            effective_limits,
-            reserved,
-            concurrent_guards,
-            refund_done: false,
+            id,
         })
     }
 
     pub fn reconcile(
         &self,
-        mut reservation: Reservation,
+        reservation: Reservation,
         actual_input: u64,
         actual_output: u64,
         actual_cost_micros: i64,
     ) {
-        if let Some(inner) = reservation.engine.upgrade() {
-            refund_difference(
-                &inner,
-                &reservation.key_id,
-                &reservation.reserved,
-                actual_input,
-                actual_output,
-                actual_cost_micros,
-                unix_secs(self.inner.clock.now()),
+        self.reconcile_by_id(
+            &reservation.id,
+            actual_input,
+            actual_output,
+            actual_cost_micros,
+        );
+    }
+
+    /// Reconcile a reservation by ID (RFC-0002 Phase 7).
+    ///
+    /// Used by the Phase 8 `LimitReconcileSubscriber` to reconcile out of
+    /// band with the handler. Returns `true` if the reservation was found
+    /// and reconciled, `false` if the ID is unknown (already reconciled,
+    /// refunded, TTL-evicted, or never issued).
+    ///
+    /// Semantics match the handler-driven [`Self::reconcile`]: subtract the
+    /// difference between reserved and actual for each `ReservedAmount`,
+    /// then delete the record so `Drop` on the handle is a no-op.
+    pub fn reconcile_by_id(
+        &self,
+        id: &str,
+        actual_input: u64,
+        actual_output: u64,
+        actual_cost_micros: i64,
+    ) -> bool {
+        let Some(record) = self.inner.reservations.lock().remove(id) else {
+            return false;
+        };
+        refund_difference(
+            &self.inner,
+            &record.key_id,
+            &record.reserved,
+            actual_input,
+            actual_output,
+            actual_cost_micros,
+            unix_secs(self.inner.clock.now()),
+        );
+        true
+    }
+
+    /// Refund a reservation in full by ID (RFC-0002 Phase 7).
+    ///
+    /// Used by the TTL sweeper and by out-of-band callers that know a
+    /// request will never reconcile (e.g. client hang-up before response).
+    /// Returns `true` if the reservation was found and refunded.
+    pub fn refund_by_id(&self, id: &str) -> bool {
+        let Some(record) = self.inner.reservations.lock().remove(id) else {
+            return false;
+        };
+        let now_sec = unix_secs(self.inner.clock.now());
+        for amount in &record.reserved {
+            self.inner.record_amount(
+                &record.key_id,
+                amount.kind,
+                amount.window_sec,
+                -amount.amount,
+                now_sec,
             );
         }
-        reservation.refund_done = true;
+        true
     }
 
     pub fn headers_for(&self, key_id: &str, principal_id: &str) -> Vec<(String, String)> {
@@ -651,25 +739,23 @@ impl LimitEngineInner {
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        let _ = (
-            &self.principal_id,
-            &self.effective_limits,
-            &self.concurrent_guards,
-        );
-        if self.refund_done {
+        // RAII refund: if the engine still holds our record (nobody called
+        // reconcile_by_id / refund_by_id / TTL sweeper), refund in full.
+        let Some(engine) = self.engine.upgrade() else {
             return;
-        }
-
-        if let Some(engine) = self.engine.upgrade() {
-            for amount in &self.reserved {
-                engine.record_amount(
-                    &self.key_id,
-                    amount.kind,
-                    amount.window_sec,
-                    -amount.amount,
-                    unix_secs(engine.clock.now()),
-                );
-            }
+        };
+        let Some(record) = engine.reservations.lock().remove(&self.id) else {
+            return;
+        };
+        let now_sec = unix_secs(engine.clock.now());
+        for amount in &record.reserved {
+            engine.record_amount(
+                &record.key_id,
+                amount.kind,
+                amount.window_sec,
+                -amount.amount,
+                now_sec,
+            );
         }
     }
 }
@@ -920,6 +1006,75 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     (year, month as u32, day as u32)
 }
 
+/// Handle to the TTL sweeper task spawned by
+/// [`spawn_reservation_ttl_sweeper`]. Dropping the handle stops the task on
+/// the next tick.
+pub struct ReservationTtlSweeperHandle {
+    shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl ReservationTtlSweeperHandle {
+    /// Signal the sweeper to stop and wait for it to exit.
+    pub async fn shutdown(self) {
+        let _ = self.shutdown_tx.send(());
+        if let Err(error) = self.join.await {
+            tracing::warn!(%error, "limit reservation ttl sweeper task panicked");
+        }
+    }
+}
+
+/// Spawn the TTL sweeper (RFC-0002 Phase 7).
+///
+/// Every `tick_interval` the sweeper walks the engine's reservation map and
+/// refunds any reservation older than `ttl`. Off by default via
+/// `features.limit_reservation_ttl.enabled`; enabled unconditionally in
+/// Phase 8 once the subscriber path is authoritative.
+pub fn spawn_reservation_ttl_sweeper(
+    engine: Arc<LimitEngine>,
+    ttl: Duration,
+    tick_interval: Duration,
+) -> ReservationTtlSweeperHandle {
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let engine = Arc::downgrade(&engine);
+    let join = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(tick_interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await;
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => break,
+                _ = ticker.tick() => {
+                    let Some(engine) = engine.upgrade() else { break };
+                    sweep_expired(&engine, ttl);
+                }
+            }
+        }
+    });
+    ReservationTtlSweeperHandle { shutdown_tx, join }
+}
+
+fn sweep_expired(engine: &LimitEngine, ttl: Duration) {
+    let now = Instant::now();
+    let mut evicted = 0u64;
+    let expired_ids: Vec<ReservationId> = {
+        let map = engine.inner.reservations.lock();
+        map.iter()
+            .filter(|(_, r)| now.duration_since(r.created_at) >= ttl)
+            .map(|(k, _)| k.clone())
+            .collect()
+    };
+    for id in expired_ids {
+        if engine.refund_by_id(&id) {
+            evicted += 1;
+        }
+    }
+    if evicted > 0 {
+        metrics::counter!("cc_lb_limit_reservation_ttl_evicted_total").increment(evicted);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -970,6 +1125,161 @@ mod tests {
         assert_eq!(requests.limit, Some(10));
         assert_eq!(requests.remaining, Some(7));
         assert!(requests.observed);
+    }
+
+    fn engine_with_output_token_limit(
+        cap: i64,
+    ) -> (Arc<LimitEngine>, PrincipalView, StoredApiKeyRecord) {
+        let engine = LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(crate::clock::SystemClock),
+        );
+        let default_limits = vec![cc_lb_storage_api::principal::Limit {
+            kind: cc_lb_storage_api::principal::LimitKind::OutputTokens,
+            window_secs: 60,
+            cap_micros: cap,
+        }];
+        let view = PrincipalView::for_tests(
+            "principal-a",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            default_limits,
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            index_hash: [7u8; 32],
+            ..StoredApiKeyRecord::default()
+        };
+        (engine, view, record)
+    }
+
+    #[test]
+    fn reserve_returns_stable_unique_ids() {
+        let (engine, view, record) = engine_with_output_token_limit(1_000_000);
+        let a = engine
+            .reserve(&view, &record, "principal-a", "claude-3-opus", 10, 0, None)
+            .expect("reserve a");
+        let b = engine
+            .reserve(&view, &record, "principal-a", "claude-3-opus", 10, 0, None)
+            .expect("reserve b");
+        assert_ne!(a.id(), b.id());
+        assert!(!a.id().is_empty());
+        assert!(!b.id().is_empty());
+    }
+
+    #[test]
+    fn reconcile_by_id_refunds_difference_and_removes_entry() {
+        let (engine, view, record) = engine_with_output_token_limit(1_000_000);
+        let key_id = key_id_for(&record);
+        let now_sec = unix_secs(engine.inner.clock.now());
+        let res = engine
+            .reserve(&view, &record, "principal-a", "claude-3-opus", 100, 0, None)
+            .expect("reserve");
+        assert_eq!(
+            engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
+            100,
+        );
+        let id = res.id().to_owned();
+        std::mem::forget(res); // ensure Drop does not interfere with the refund path we assert
+
+        assert!(engine.reconcile_by_id(&id, 0, 40, 0));
+        assert_eq!(
+            engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
+            40,
+            "reserved 100, actual output 40 → 60 refunded → 40 remaining",
+        );
+        assert!(
+            !engine.reconcile_by_id(&id, 0, 0, 0),
+            "second call is idempotent no-op"
+        );
+    }
+
+    #[test]
+    fn refund_by_id_removes_full_reservation() {
+        let (engine, view, record) = engine_with_output_token_limit(1_000_000);
+        let key_id = key_id_for(&record);
+        let now_sec = unix_secs(engine.inner.clock.now());
+        let res = engine
+            .reserve(&view, &record, "principal-a", "claude-3-opus", 55, 0, None)
+            .expect("reserve");
+        assert_eq!(
+            engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
+            55,
+        );
+        let id = res.id().to_owned();
+        std::mem::forget(res);
+        assert!(engine.refund_by_id(&id));
+        assert_eq!(
+            engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
+            0,
+        );
+        assert!(!engine.refund_by_id(&id));
+    }
+
+    #[test]
+    fn drop_refunds_when_neither_reconcile_nor_refund_called() {
+        let (engine, view, record) = engine_with_output_token_limit(1_000_000);
+        let key_id = key_id_for(&record);
+        let now_sec = unix_secs(engine.inner.clock.now());
+        {
+            let _res = engine
+                .reserve(&view, &record, "principal-a", "claude-3-opus", 25, 0, None)
+                .expect("reserve");
+            assert_eq!(
+                engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
+                25,
+            );
+        }
+        assert_eq!(
+            engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
+            0,
+            "Drop refunds full reservation on scope exit",
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn sweep_expired_refunds_stale_reservation() {
+        let (engine, view, record) = engine_with_output_token_limit(1_000_000);
+        let key_id = key_id_for(&record);
+        let now_sec = unix_secs(engine.inner.clock.now());
+        let res = engine
+            .reserve(&view, &record, "principal-a", "claude-3-opus", 33, 0, None)
+            .expect("reserve");
+        let id = res.id().to_owned();
+        std::mem::forget(res);
+        // Advance the paused tokio clock past the TTL threshold so the
+        // reservation's `created_at` is now considered expired.
+        tokio::time::advance(Duration::from_millis(200)).await;
+        sweep_expired(&engine, Duration::from_millis(50));
+        assert_eq!(
+            engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
+            0,
+            "sweep_expired refunded {id}",
+        );
+        assert!(
+            !engine.refund_by_id(&id),
+            "sweep_expired removed the record from the map",
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn sweep_expired_leaves_recent_reservation_intact() {
+        let (engine, view, record) = engine_with_output_token_limit(1_000_000);
+        let key_id = key_id_for(&record);
+        let now_sec = unix_secs(engine.inner.clock.now());
+        let res = engine
+            .reserve(&view, &record, "principal-a", "claude-3-opus", 33, 0, None)
+            .expect("reserve");
+        let id = res.id().to_owned();
+        std::mem::forget(res);
+        // Advance less than the TTL: reservation must survive the sweep.
+        tokio::time::advance(Duration::from_millis(20)).await;
+        sweep_expired(&engine, Duration::from_millis(50));
+        assert_eq!(
+            engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
+            33,
+        );
+        assert!(engine.refund_by_id(&id));
     }
 
     #[test]

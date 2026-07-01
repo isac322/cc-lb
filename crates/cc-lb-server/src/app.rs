@@ -721,6 +721,20 @@ async fn build_app_with_storage_inner(
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
     let limit_engine = LimitEngine::new(concurrent_mgr, clock.clone());
     limit_engine.startup_replay(storage.clone()).await;
+    let limit_reservation_ttl_handle = if config.limit_reservation_ttl.enabled {
+        Some(
+            cc_lb_core::api_keys::limit_engine::spawn_reservation_ttl_sweeper(
+                limit_engine.clone(),
+                std::time::Duration::from_secs(config.limit_reservation_ttl.ttl_secs.max(1)),
+                std::time::Duration::from_secs(config.limit_reservation_ttl.tick_secs.max(1)),
+            ),
+        )
+    } else {
+        None
+    };
+    let limit_reservation_ttl_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::api_keys::limit_engine::ReservationTtlSweeperHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(limit_reservation_ttl_handle));
     let builtin_authn = Arc::new(BuiltinAuthn::new(
         config.downstream_auth.mode.clone(),
         config.downstream_auth.none_mode.clone(),
@@ -901,6 +915,13 @@ async fn build_app_with_storage_inner(
     } else {
         None
     };
+    let lifecycle_limit_reconcile_rx = if config.lifecycle_limit_reconcile_subscriber.enabled {
+        Some(in_memory_bus.attach_lifecycle_limit_reconcile(
+            cc_lb_core::event_bus::DEFAULT_LIFECYCLE_LIMIT_RECONCILE_CAPACITY,
+        ))
+    } else {
+        None
+    };
     let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(in_memory_bus);
     let request_event_writer_handle = request_event_writer_rx
         .map(|rx| cc_lb_core::spawn_request_event_writer(storage.clone(), rx));
@@ -914,6 +935,14 @@ async fn build_app_with_storage_inner(
     });
     let lifecycle_pricing_subscriber_handle = lifecycle_pricing_rx
         .map(|rx| cc_lb_core::spawn_lifecycle_pricing_subscriber(rx, event_bus.clone()));
+    let lifecycle_limit_reconcile_subscriber_handle = lifecycle_limit_reconcile_rx.map(|rx| {
+        let mode = if config.lifecycle_limit_reconcile_subscriber.shadow {
+            cc_lb_core::LimitReconcileMode::Shadow
+        } else {
+            cc_lb_core::LimitReconcileMode::Authoritative
+        };
+        cc_lb_core::spawn_lifecycle_limit_reconcile_subscriber(rx, limit_engine.clone(), mode)
+    });
     let request_event_writer_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_core::RequestEventWriterHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(request_event_writer_handle));
@@ -929,6 +958,11 @@ async fn build_app_with_storage_inner(
     let lifecycle_pricing_subscriber_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_core::PricingSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(lifecycle_pricing_subscriber_handle));
+    let lifecycle_limit_reconcile_subscriber_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::LimitReconcileSubscriberHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(
+        lifecycle_limit_reconcile_subscriber_handle,
+    ));
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
         dynamic_view_holder.clone(),
@@ -1051,6 +1085,30 @@ async fn build_app_with_storage_inner(
             let pricing_slot = pricing_slot.clone();
             async move {
                 let mut guard = pricing_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let ttl_slot = limit_reservation_ttl_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let ttl_slot = ttl_slot.clone();
+            async move {
+                let mut guard = ttl_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let reconcile_slot = lifecycle_limit_reconcile_subscriber_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let reconcile_slot = reconcile_slot.clone();
+            async move {
+                let mut guard = reconcile_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }
