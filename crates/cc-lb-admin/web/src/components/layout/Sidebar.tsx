@@ -8,6 +8,7 @@ import {
   ScrollText,
   Server,
   Settings as SettingsIcon,
+  Sliders,
   Users,
 } from 'lucide-react';
 import { cx } from '../ui/primitives';
@@ -21,6 +22,7 @@ const NAV = [
   { path: '/audit', label: 'Audit', Icon: FileClock },
   { path: '/credentials', label: 'Credentials', Icon: KeyRound },
   { path: '/status', label: 'Status', Icon: Activity },
+  { path: '/config', label: 'Config', Icon: Sliders },
   { path: '/settings', label: 'Settings', Icon: SettingsIcon },
 ] as const;
 

@@ -1,5 +1,9 @@
 # cc-lb Plugin Author Guide
 
+> **As of the env-only release, plugins are configured exclusively through the
+> admin API and dashboard `/config` page.** The legacy `cc-lb.toml` file is no
+> longer loaded.
+
 This guide describes the current wasmtime plugin contract for cc-lb plugin
 authors. It covers the published crates, metadata requirements, per-hook wire
 versioning, layout fingerprints, upload admission, and conformance testing.
@@ -32,9 +36,8 @@ with `StoreLimits` derived from `runtime.wasmtime.memory_max_pages`,
 and the runtime holds a process-wide store budget derived from
 `pool_total_core_instances` so on-demand execution cannot instantiate
 unbounded concurrent stores. Operators that need Wasmtime's pooling
-allocator can opt in with `[runtime.wasmtime] allocation_strategy =
-"pooling"` and tune the reservation/guard/pool totals in the same
-   section.
+allocator can opt in with the `runtime.wasmtime.allocation_strategy` dashboard
+setting and tune the reservation, guard, and pool totals alongside it.
 
 ## Quick Start
 

@@ -22,7 +22,7 @@ async fn sqlite_scheduler_init_failure_aborts_app_build() {
     let mut config = app_config(StorageConfig::Sqlite { path: storage_path });
     config.runtime.data_dir = Some(directory.path().join("data"));
 
-    let error = match build_app_with_path(config, None, clock.clone()).await {
+    let error = match build_app_with_path(config, clock.clone()).await {
         Ok(_) => panic!("scheduler sqlite initialization must abort app startup"),
         Err(error) => error,
     };
@@ -65,7 +65,6 @@ async fn postgres_scheduler_init_failure_aborts_app_build() {
 
     let error = match build_app_with_storage(
         config,
-        None,
         managed_store,
         storage,
         Arc::new(AeadService::from_master_key([0; 32])),

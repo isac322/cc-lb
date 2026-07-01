@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    ConfigDraftState, ConfigStore, HistoryEntry, HistorySummary, StorageResult,
+    ConfigDraftState, ConfigStore, EffectiveConfig, HistoryEntry, HistorySummary, StorageResult,
 };
 use serde_json::Value;
 use sqlx::Row;
@@ -100,6 +100,50 @@ impl ConfigStore for PostgresStorage {
         .map_err(map_sqlx_error)?;
 
         tx.commit().await.map_err(map_sqlx_error)
+    }
+
+    async fn get_effective_config(&self) -> StorageResult<Option<EffectiveConfig>> {
+        let row = sqlx::query(
+            "SELECT revision, config, applied_at FROM effective_config_v1 WHERE id = 'singleton'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        row.map(|row| {
+            let revision = row.try_get::<i64, _>("revision").map_err(map_sqlx_error)?;
+            let applied_at = row
+                .try_get::<i64, _>("applied_at")
+                .map_err(map_sqlx_error)?;
+            Ok(EffectiveConfig {
+                revision: i64_to_u64(revision, "effective config revision")?,
+                config: row.try_get::<Value, _>("config").map_err(map_sqlx_error)?,
+                applied_at_unix_secs: i64_to_u64(applied_at, "effective config applied_at")?,
+            })
+        })
+        .transpose()
+    }
+
+    async fn put_effective_config(
+        &self,
+        revision: u64,
+        config_json: serde_json::Value,
+        applied_at_unix_secs: u64,
+    ) -> StorageResult<()> {
+        sqlx::query(
+            "INSERT INTO effective_config_v1 (id, revision, config, applied_at)              VALUES ('singleton', $1, $2, $3)              ON CONFLICT (id) DO UPDATE              SET revision = EXCLUDED.revision, config = EXCLUDED.config, applied_at = EXCLUDED.applied_at",
+        )
+        .bind(u64_to_i64(revision, "effective config revision")?)
+        .bind(config_json)
+        .bind(u64_to_i64(
+            applied_at_unix_secs,
+            "effective config applied_at",
+        )?)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        Ok(())
     }
 
     async fn append_config_history(

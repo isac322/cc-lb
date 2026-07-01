@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 
-use cc_lb_config::LifecyclePromptCacheObservationSubscriberConfig;
 use cc_lb_lifecycle::{LifecycleEvent, PromptCacheObservationKindWire, PromptCacheObservationWire};
 use cc_lb_observability::EngineMetricsHook;
 use cc_lb_observability::cache_observation_dropped_reason;
@@ -38,26 +37,17 @@ impl PromptCacheObservationSubscriberHandle {
 
 pub fn spawn_lifecycle_prompt_cache_observation_subscriber(
     rx: mpsc::Receiver<LifecycleEvent>,
-    config: LifecyclePromptCacheObservationSubscriberConfig,
     cache: Arc<dyn PromptCacheObservationCacheLike>,
     sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     metrics: Arc<dyn EngineMetricsHook>,
 ) -> PromptCacheObservationSubscriberHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(subscriber_loop(
-        rx,
-        config,
-        cache,
-        sink,
-        metrics,
-        shutdown_rx,
-    ));
+    let join = tokio::spawn(subscriber_loop(rx, cache, sink, metrics, shutdown_rx));
     PromptCacheObservationSubscriberHandle { shutdown_tx, join }
 }
 
 async fn subscriber_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
-    config: LifecyclePromptCacheObservationSubscriberConfig,
     cache: Arc<dyn PromptCacheObservationCacheLike>,
     sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     metrics: Arc<dyn EngineMetricsHook>,
@@ -68,7 +58,7 @@ async fn subscriber_loop(
             biased;
                 event = rx.recv() => {
                     match event {
-                        Some(event) => handle_event(&config, cache.as_ref(), sink.as_deref(), metrics.as_ref(), event),
+                        Some(event) => handle_event(cache.as_ref(), sink.as_deref(), metrics.as_ref(), event),
                         None => break,
                     }
                 }
@@ -77,18 +67,11 @@ async fn subscriber_loop(
     }
 
     while let Ok(event) = rx.try_recv() {
-        handle_event(
-            &config,
-            cache.as_ref(),
-            sink.as_deref(),
-            metrics.as_ref(),
-            event,
-        );
+        handle_event(cache.as_ref(), sink.as_deref(), metrics.as_ref(), event);
     }
 }
 
 fn handle_event(
-    config: &LifecyclePromptCacheObservationSubscriberConfig,
     cache: &dyn PromptCacheObservationCacheLike,
     sink: Option<&dyn PromptCacheObservationSinkLike>,
     metrics: &dyn EngineMetricsHook,
@@ -105,9 +88,6 @@ fn handle_event(
     else {
         return;
     };
-    if !config.enabled {
-        return;
-    }
     increment_drop_metric(
         metrics,
         cache_observation_dropped_reason::BELOW_THRESHOLD,
@@ -230,7 +210,6 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let handle = spawn_lifecycle_prompt_cache_observation_subscriber(
             rx,
-            LifecyclePromptCacheObservationSubscriberConfig::default(),
             cache.clone(),
             Some(sink.clone()),
             noop_metrics(),
@@ -263,7 +242,6 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let handle = spawn_lifecycle_prompt_cache_observation_subscriber(
             rx,
-            LifecyclePromptCacheObservationSubscriberConfig::default(),
             cache.clone(),
             Some(sink.clone()),
             noop_metrics(),

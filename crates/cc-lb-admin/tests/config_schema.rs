@@ -10,7 +10,7 @@ async fn authorized_schema_returns_schema_and_checklist() {
 
     assert_eq!(status, StatusCode::OK);
     assert!(json.get("schema").is_some());
-    assert!(json["coverage_checklist"].as_array().unwrap().len() >= 16);
+    assert!(json["coverage_checklist"].as_array().unwrap().len() >= 13);
 }
 
 #[tokio::test]

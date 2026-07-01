@@ -11,31 +11,15 @@ fn backend_kind_mismatch_sqlite_stamped_as_postgres() {
     let storage_path = dir.path().join("backend-kind-mismatch.sqlite");
     stamp_sqlite_as_postgres(&storage_path).unwrap();
 
-    let config_path = dir.path().join("cc-lb.toml");
-    std::fs::write(
-        &config_path,
-        format!(
-            r#"
-[listener]
-proxy_addr = "127.0.0.1:0"
-admin_addr = "127.0.0.1:0"
-metrics_addr = "127.0.0.1:0"
-
-[storage]
-kind = "sqlite"
-path = "{}"
-
-[aead]
-key_env = "CC_LB_AEAD_KEY"
-"#,
-            storage_path.display()
-        ),
-    )
-    .unwrap();
-
     let output = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
-        .args(["serve", "--config"])
-        .arg(&config_path)
+        .arg("serve")
+        .env("CC_LB_LISTENER__PROXY_ADDR", "127.0.0.1:0")
+        .env("CC_LB_LISTENER__ADMIN_ADDR", "127.0.0.1:0")
+        .env("CC_LB_LISTENER__METRICS_ADDR", "127.0.0.1:0")
+        .env("CC_LB_STORAGE__KIND", "sqlite")
+        .env("CC_LB_STORAGE__PATH", storage_path.display().to_string())
+        .env("CC_LB_DATA_DIR", dir.path().display().to_string())
+        .env("CC_LB_AEAD__KEY_ENV", "CC_LB_AEAD_KEY")
         .env(
             "CC_LB_AEAD_KEY",
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",

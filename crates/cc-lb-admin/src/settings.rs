@@ -1,7 +1,4 @@
 use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::path::Path;
 
 use cc_lb_config::Config;
 use cc_lb_storage_api::{
@@ -17,38 +14,21 @@ const MAX_DIFF_CHANGES: usize = 500;
 const INVALID_DRAFT_TTL_SECS: u64 = 24 * 60 * 60;
 
 pub const COVERAGE_CHECKLIST: &[&str] = &[
-    "listener",
-    "tls",
     "body",
     "timeouts",
     "downstream_auth",
     "api_keys",
-    "storage",
     "scheduler",
-    "aead",
     "observability",
-    "admin",
     "oauth",
+    "subscription_quota",
     "runtime",
     "circuit_breaker",
     "bulkhead",
-    "dns",
-    "egress",
-    "subscription_quota",
     "prompt_cache_shadow",
+    "event_bus",
+    "cluster",
     "limit_reservation_ttl",
-    "lifecycle_hook_adapter",
-    "lifecycle_pricing_subscriber",
-    "lifecycle_cache_observation_subscriber",
-    "lifecycle_rate_limit_header_subscriber",
-    "lifecycle_subscription_quota_subscriber",
-    "lifecycle_limit_rejection_audit_subscriber",
-    "lifecycle_api_key_metrics_subscriber",
-    "lifecycle_cache_hit_miss_subscriber",
-    "lifecycle_routing_tier_subscriber",
-    "lifecycle_prompt_cache_drift_subscriber",
-    "lifecycle_prompt_cache_observation_subscriber",
-    "lifecycle_limit_reconcile_subscriber",
 ];
 
 #[derive(Debug, Error)]
@@ -63,8 +43,6 @@ pub enum SettingsError {
     UnvalidatedRevision,
     #[error("validation failed: {detail}")]
     ValidationFailed { detail: String },
-    #[error("config path missing")]
-    ConfigPathMissing,
     #[error("config watcher missing")]
     ConfigWatcherMissing,
     #[error("apply write failed: {detail}")]
@@ -179,7 +157,7 @@ pub fn current_config_response(
 }
 
 pub fn schema_response() -> Result<ConfigSchemaResponse, SettingsError> {
-    let mut schema = serde_json::to_value(schemars::schema_for!(cc_lb_config::Config))?;
+    let mut schema = serde_json::to_value(Config::runtime_overlay_schema())?;
     crate::management::extend_config_schema(&mut schema);
     strip_schema_defaults(&mut schema);
     Ok(ConfigSchemaResponse {
@@ -250,6 +228,56 @@ pub async fn put_draft(
     })
 }
 
+#[allow(dead_code)]
+pub(crate) async fn apply_draft_principal_change<T, E, F>(
+    storage: &dyn Storage,
+    current: &dyn CurrentConfig,
+    saved_at_unix_secs: u64,
+    mut transform: F,
+) -> Result<Result<(u64, T), E>, SettingsError>
+where
+    F: FnMut(&mut Value) -> Result<T, E>,
+{
+    let state = storage.get_config_draft().await?;
+    let expected_revision = state.revision;
+    let mut draft = match state.draft {
+        Some(draft) => draft,
+        None => serde_json::to_value(&*current.current_config())?,
+    };
+
+    let Some(draft_object) = draft.as_object_mut() else {
+        return Err(SettingsError::ValidationFailed {
+            detail: "draft_root_must_be_object".to_owned(),
+        });
+    };
+    let principals = draft_object
+        .entry("principals".to_owned())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !principals.is_object() {
+        return Err(SettingsError::ValidationFailed {
+            detail: "draft_principals_must_be_object".to_owned(),
+        });
+    }
+
+    let outcome = match transform(principals) {
+        Ok(outcome) => outcome,
+        Err(error) => return Ok(Err(error)),
+    };
+    let revision = storage
+        .put_config_draft(
+            ConfigDraftState {
+                draft: Some(draft),
+                revision: 0,
+                last_validated_revision: None,
+                last_validation_error: None,
+                saved_at_unix_secs: Some(saved_at_unix_secs),
+            },
+            expected_revision,
+        )
+        .await?;
+    Ok(Ok((revision, outcome)))
+}
+
 pub async fn validate_draft(
     storage: &dyn Storage,
     request: ValidateConfigDraftRequest,
@@ -293,7 +321,6 @@ pub async fn validate_draft(
 
 pub async fn apply_config(
     storage: &dyn Storage,
-    config_path: Option<&Path>,
     config_watcher: Option<&dyn ConfigReloader>,
     request: ApplyConfigRequest,
     applied_at_unix_secs: u64,
@@ -312,38 +339,32 @@ pub async fn apply_config(
         .draft
         .clone()
         .ok_or(SettingsError::UnvalidatedRevision)?;
-    let config = deserialize_and_validate_config(draft)
+    let config = deserialize_and_validate_config(draft.clone())
         .map_err(|detail| SettingsError::ValidationFailed { detail })?;
-    let config_toml =
-        toml::to_string_pretty(&config).map_err(|source| SettingsError::ApplyWriteFailed {
-            detail: source.to_string(),
-        })?;
-    let roundtrip: Config =
-        toml::from_str(&config_toml).map_err(|source| SettingsError::ValidationFailed {
-            detail: source.to_string(),
-        })?;
-    roundtrip
-        .validate()
-        .map_err(|source| SettingsError::ValidationFailed {
-            detail: source.to_string(),
-        })?;
 
-    let config_path = config_path.ok_or(SettingsError::ConfigPathMissing)?;
-    write_config_file(config_path, &config_toml).map_err(|source| {
-        SettingsError::ApplyWriteFailed {
-            detail: source.to_string(),
-        }
-    })?;
+    let mut runtime_overlay = draft;
+    cc_lb_config::strip_boot_only_keys_for_seed(&mut runtime_overlay);
+    storage
+        .put_effective_config(
+            request.expected_revision,
+            runtime_overlay,
+            applied_at_unix_secs,
+        )
+        .await?;
 
     let config_watcher = config_watcher.ok_or(SettingsError::ConfigWatcherMissing)?;
     config_watcher
         .reload_now()
         .map_err(|detail| SettingsError::ReloadFailed { detail })?;
 
+    let config_history_blob =
+        serde_json::to_string(&config).map_err(|source| SettingsError::ApplyWriteFailed {
+            detail: source.to_string(),
+        })?;
     storage
         .append_config_history(
             request.expected_revision,
-            config_toml,
+            config_history_blob,
             applied_at_unix_secs,
             history_summary(&config),
         )
@@ -464,10 +485,14 @@ fn invalid_draft_expired(state: &ConfigDraftState, now_unix_secs: u64) -> bool {
             .is_some_and(|saved_at| now_unix_secs.saturating_sub(saved_at) > INVALID_DRAFT_TTL_SECS)
 }
 
-fn deserialize_and_validate_config(value: Value) -> Result<Config, String> {
+fn deserialize_and_validate_config(mut value: Value) -> Result<Config, String> {
+    if let Value::Object(object) = &mut value {
+        object.remove("effective_revision_unix_secs");
+    }
+    cc_lb_config::strip_boot_only_keys_for_seed(&mut value);
     reject_unknown_top_level_keys(&value)?;
     let config: Config = serde_json::from_value(value).map_err(|source| source.to_string())?;
-    config.validate().map_err(|source| source.to_string())?;
+    cc_lb_config::validate_runtime_overlay(&config).map_err(|source| source.to_string())?;
     Ok(config)
 }
 
@@ -476,40 +501,21 @@ fn reject_unknown_top_level_keys(value: &Value) -> Result<(), String> {
         return Err("config draft must be a JSON object".to_owned());
     };
     let allowed = [
-        "listener",
-        "tls",
         "body",
         "timeouts",
         "downstream_auth",
         "api_keys",
-        "storage",
         "scheduler",
-        "aead",
         "observability",
-        "admin",
         "oauth",
         "runtime",
         "circuit_breaker",
         "bulkhead",
-        "dns",
-        "egress",
         "subscription_quota",
         "prompt_cache_shadow",
-        "lifecycle_hook_adapter",
-        "lifecycle_pricing_subscriber",
-        "lifecycle_cache_observation_subscriber",
-        "limit_reservation_ttl",
-        "lifecycle_limit_reconcile_subscriber",
-        "lifecycle_rate_limit_header_subscriber",
-        "lifecycle_subscription_quota_subscriber",
-        "lifecycle_limit_rejection_audit_subscriber",
-        "lifecycle_api_key_metrics_subscriber",
-        "lifecycle_cache_hit_miss_subscriber",
-        "lifecycle_routing_tier_subscriber",
-        "lifecycle_prompt_cache_drift_subscriber",
-        "lifecycle_prompt_cache_observation_subscriber",
         "event_bus",
         "cluster",
+        "limit_reservation_ttl",
     ];
     let allowed: BTreeSet<&str> = allowed.into_iter().collect();
     let unknown: Vec<&str> = object
@@ -529,10 +535,7 @@ fn reject_unknown_top_level_keys(value: &Value) -> Result<(), String> {
 
 fn history_summary(config: &Config) -> HistorySummary {
     HistorySummary {
-        upstreams: 0,
-        principals: 0,
-        plugin_count: 0,
-        tls_enabled: config.tls.is_some() || config.listener.tls.is_some(),
+        tls_enabled: config.listener.tls.is_some(),
     }
 }
 
@@ -545,16 +548,11 @@ fn history_item(entry: HistoryEntry) -> ConfigHistoryItem {
 }
 
 fn history_config_json(entry: &HistoryEntry) -> Result<Value, SettingsError> {
-    let config: Config =
-        toml::from_str(&entry.config_toml).map_err(|source| SettingsError::ValidationFailed {
+    serde_json::from_str(entry.config_toml.trim()).map_err(|source| {
+        SettingsError::ValidationFailed {
             detail: source.to_string(),
-        })?;
-    config
-        .validate()
-        .map_err(|source| SettingsError::ValidationFailed {
-            detail: source.to_string(),
-        })?;
-    Ok(serde_json::to_value(config)?)
+        }
+    })
 }
 
 fn collect_diff(
@@ -652,29 +650,4 @@ fn is_secret_like_key(key: &str) -> bool {
         || lower.ends_with("_api_key")
         || lower == "aead_master_key"
         || lower == "oauth_aead_key_env"
-}
-
-fn write_config_file(path: &Path, contents: &str) -> Result<(), std::io::Error> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let temp_path = parent.join(temp_file_name(
-        path.file_name().unwrap_or_else(|| OsStr::new("config")),
-    ));
-    fs::write(&temp_path, contents)?;
-    match fs::rename(&temp_path, path) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = fs::remove_file(&temp_path);
-            Err(error)
-        }
-    }
-}
-
-fn temp_file_name(file_name: &OsStr) -> OsString {
-    let mut temp = OsString::from(".");
-    temp.push(file_name);
-    temp.push(format!(".{}.tmp", std::process::id()));
-    temp
 }

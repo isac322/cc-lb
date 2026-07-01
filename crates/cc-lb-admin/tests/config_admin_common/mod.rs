@@ -77,7 +77,7 @@ pub fn config_with_requests(_default_requests_per_window: u64) -> Config {
 pub fn config_value(default_requests_per_window: u64) -> Value {
     let mut value =
         serde_json::to_value(config_with_requests(default_requests_per_window)).unwrap();
-    value["timeouts"]["idle_secs"] = json!(default_requests_per_window);
+    value["timeouts"]["upstream_total_secs"] = json!(default_requests_per_window);
     value
 }
 
@@ -108,6 +108,7 @@ pub fn test_state_with_clock(
         audit_sink: None,
         dynamic_view,
         config: Arc::new(config),
+        config_reloader: None,
         scheduler: None,
         admin_token: Some(TOKEN.to_owned()),
         lazy_refresher: None,
@@ -159,6 +160,7 @@ pub async fn apply_state_with_clock(
         audit_sink: None,
         dynamic_view,
         config: reloader,
+        config_reloader: None,
         scheduler: None,
         admin_token: Some(TOKEN.to_owned()),
         lazy_refresher: None,
@@ -294,10 +296,6 @@ pub fn put_body(draft: Value, expected_revision: u64) -> Value {
 
 pub fn expected_revision_body(expected_revision: u64) -> Value {
     json!({ "expected_revision": expected_revision })
-}
-
-pub fn write_config(path: &Path, config: &Config) {
-    std::fs::write(path, toml::to_string_pretty(config).unwrap()).unwrap();
 }
 
 pub struct TestReloader {

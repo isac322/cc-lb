@@ -3,11 +3,10 @@ use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use axum::Json;
 use axum::Router;
@@ -23,13 +22,13 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DownstreamAuthMode, EventBusTransport, TlsConfig};
 use cc_lb_engine::{
     BreakerRegistry, BreakerRuntimeConfig, BulkheadDispatch, BulkheadRegistry,
-    BulkheadRuntimeConfig, CircuitBreakerDispatch, ClockHandle, DynamicView, DynamicViewBuilder,
-    DynamicViewHolder, HopByHopStripLayer, Lifecycle, LifecycleConfig, SubscriptionQuotaSink,
+    BulkheadRuntimeConfig, CircuitBreakerDispatch, ClockHandle, DynamicView, DynamicViewHolder,
+    HopByHopStripLayer, Lifecycle, LifecycleConfig, SubscriptionQuotaSink,
     SubscriptionQuotaWriterConfig, UpstreamDispatch, UpstreamRateLimitSink,
     anthropic_error_response,
     api_keys::{
         builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
-        limit_engine::LimitEngine, principal_view::PrincipalView,
+        limit_engine::LimitEngine,
     },
     cache_keepalive::AnthropicKeepaliveDispatcher,
     make_default_dispatcher, spawn_audit_writer, start_subscription_quota_writer,
@@ -76,7 +75,7 @@ use crate::prompt_cache_observation_sink::{
 };
 use crate::reconcile::Reconciler;
 use crate::refresh::{LazyRefreshClaimGuard, LazyRefresher};
-use crate::reload::{ConfigWatcher, summarize_restart_required};
+use crate::reload::ConfigWatcher;
 use crate::replica;
 use crate::signal;
 use crate::state_machine::{ServerState, ServerStateHandle};
@@ -84,9 +83,8 @@ use crate::storage_factory;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 use crate::tls::{ReloadableListener, TlsState};
 use cc_lb_admin::{
-    AdminPorts, AdminState, ConfigDraftError, CurrentConfig, DynamicViewRebinder,
-    WarmupDialectDispatchError, WarmupDialectDispatchErrorKind, WarmupDialectDispatchOutcome,
-    WarmupDialectDispatcher,
+    AdminPorts, AdminState, CurrentConfig, DynamicViewRebinder, WarmupDialectDispatchError,
+    WarmupDialectDispatchErrorKind, WarmupDialectDispatchOutcome, WarmupDialectDispatcher,
 };
 
 const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_millis(500);
@@ -186,9 +184,13 @@ pub enum ServeError {
     #[error(transparent)]
     Config(#[from] cc_lb_config::ConfigError),
     #[error(transparent)]
+    BootEnv(#[from] cc_lb_config::BootEnvError),
+    #[error(transparent)]
     Preflight(#[from] crate::preflight::PreflightError),
     #[error(transparent)]
     Observability(#[from] cc_lb_observability::InitError),
+    #[error(transparent)]
+    Storage(#[from] cc_lb_storage_api::StorageError),
     #[error(transparent)]
     Build(#[from] BuildError),
 }
@@ -365,40 +367,66 @@ impl App {
     }
 }
 
-pub async fn run_serve(
-    config_path: &Path,
-    data_dir: Option<&Path>,
-    strict_preflight: bool,
-    _skip_handshake_if_fresh: Option<bool>,
-    _force_handshake: Option<bool>,
-    clock: ClockHandle,
-) -> Result<(), ServeError> {
-    let mut config = Config::load(config_path)?;
-    if let Some(data_dir) = data_dir {
-        config.runtime.data_dir = Some(data_dir.to_path_buf());
-    }
+pub async fn run_serve(strict_preflight: bool, clock: ClockHandle) -> Result<(), ServeError> {
+    let boot = cc_lb_config::BootEnv::from_env()?;
+    let runtime_overlay = load_or_seed_runtime_overlay(&boot, clock.clone()).await?;
+    let mut config = Config::compose(&boot, runtime_overlay)?;
     cc_lb_observability::install_panic_hook(cc_lb_observability::RedactionPolicy::new(
         config.observability.user_prompt_redaction,
     ));
     let guard = init_observability(&mut config)?;
-    let app = match build_app_with_path_inner(
-        config,
-        Some(config_path),
-        Some(StartupPreflight { strict_preflight }),
-        clock,
-    )
-    .await
-    {
-        Ok(app) => app,
-        Err(error @ BuildError::SchedulerFactory(_)) => {
-            cc_lb_scheduler::scheduler_metrics::set_scheduler_init_failure(true);
-            guard.flush_metrics();
-            return Err(error.into());
-        }
-        Err(error) => return Err(error.into()),
-    };
+    let app =
+        match build_app_with_path_inner(config, Some(StartupPreflight { strict_preflight }), clock)
+            .await
+        {
+            Ok(app) => app,
+            Err(error @ BuildError::SchedulerFactory(_)) => {
+                cc_lb_scheduler::scheduler_metrics::set_scheduler_init_failure(true);
+                guard.flush_metrics();
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
     app.start().await?;
     Ok(())
+}
+
+async fn load_or_seed_runtime_overlay(
+    boot: &cc_lb_config::BootEnv,
+    clock: ClockHandle,
+) -> Result<Option<serde_json::Value>, ServeError> {
+    let placeholder_key = [0_u8; 32];
+    let placeholder_aead = Arc::new(AeadService::from_master_key(placeholder_key));
+    let opened = crate::storage_factory::open_storage(
+        boot.storage(),
+        placeholder_aead,
+        placeholder_key,
+        clock.clone(),
+    )
+    .await
+    .map_err(BuildError::StorageFactory)?;
+    let backend_kind = match boot.storage() {
+        cc_lb_config::StorageConfig::Sqlite { .. } => BackendKind::Sqlite,
+        cc_lb_config::StorageConfig::Postgres { .. } => BackendKind::Postgres,
+    };
+    opened.storage.initialize(backend_kind).await?;
+    match opened.storage.get_effective_config().await? {
+        Some(effective) => Ok(Some(effective.config)),
+        None => {
+            let mut overlay = serde_json::to_value(Config::default()).map_err(|error| {
+                BuildError::Bootstrap(crate::bootstrap::BootstrapError::Storage(format!(
+                    "failed to serialize default config: {error}"
+                )))
+            })?;
+            cc_lb_config::strip_boot_only_keys_for_seed(&mut overlay);
+            let applied_at_unix_secs = cc_lb_engine::unix_secs(clock.now());
+            opened
+                .storage
+                .put_effective_config(0, overlay.clone(), applied_at_unix_secs)
+                .await?;
+            Ok(Some(overlay))
+        }
+    }
 }
 
 fn print_preflight_report(report: &preflight::PreflightReport) {
@@ -429,7 +457,7 @@ struct StartupPreflight {
 }
 
 pub async fn build_app(config: Config, clock: ClockHandle) -> Result<App, BuildError> {
-    build_app_with_path(config, None, clock).await
+    build_app_with_path(config, clock).await
 }
 
 pub async fn build_app_for_testing(
@@ -463,7 +491,6 @@ pub async fn build_app_for_testing(
     .await?;
     build_app_with_storage_inner(
         config,
-        None,
         managed_store,
         storage,
         aead,
@@ -561,7 +588,7 @@ pub async fn build_app_for_testing_postgres(
     let key = [0u8; 32];
     let aead = Arc::new(AeadService::from_master_key(key));
     let config = build_app_for_testing_postgres_config(database_url);
-    build_app_with_storage(config, None, managed_store, init_storage, aead, clock).await
+    build_app_with_storage(config, managed_store, init_storage, aead, clock).await
 }
 
 #[cfg(feature = "postgres")]
@@ -647,17 +674,12 @@ fn build_app_for_testing_postgres_config(database_url: &str) -> Config {
     config
 }
 
-pub async fn build_app_with_path(
-    config: Config,
-    config_path: Option<&Path>,
-    clock: ClockHandle,
-) -> Result<App, BuildError> {
-    build_app_with_path_inner(config, config_path, None, clock).await
+pub async fn build_app_with_path(config: Config, clock: ClockHandle) -> Result<App, BuildError> {
+    build_app_with_path_inner(config, None, clock).await
 }
 
 async fn build_app_with_path_inner(
     config: Config,
-    config_path: Option<&Path>,
     startup_preflight: Option<StartupPreflight>,
     clock: ClockHandle,
 ) -> Result<App, BuildError> {
@@ -672,7 +694,6 @@ async fn build_app_with_path_inner(
     ) = open_storage(&config, clock.clone()).await?;
     build_app_with_storage_inner(
         config,
-        config_path,
         managed_store,
         storage,
         aead,
@@ -715,7 +736,6 @@ pub fn resolve_data_dir(
 
 pub async fn build_app_with_storage(
     config: Config,
-    config_path: Option<&Path>,
     managed_store: Arc<dyn ManagedKeyStore>,
     storage: Arc<dyn Storage>,
     aead: Arc<AeadService>,
@@ -729,7 +749,6 @@ pub async fn build_app_with_storage(
     .await?;
     build_app_with_storage_inner(
         config,
-        config_path,
         managed_store,
         storage,
         aead,
@@ -745,7 +764,6 @@ pub async fn build_app_with_storage(
 #[allow(clippy::too_many_arguments)]
 async fn build_app_with_storage_inner(
     config: Config,
-    config_path: Option<&Path>,
     managed_store: Arc<dyn ManagedKeyStore>,
     storage: Arc<dyn Storage>,
     aead: Arc<AeadService>,
@@ -830,16 +848,7 @@ async fn build_app_with_storage_inner(
     let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
     let storage_for_dynamic = storage.clone();
     let env_token = std::env::var("CC_LB_BOOTSTRAP_ADMIN_TOKEN").ok();
-    bootstrap::apply_bootstrap(
-        &config,
-        storage.as_ref(),
-        storage.as_ref(),
-        storage.as_ref(),
-        env_token,
-        &data_dir,
-        &*clock,
-    )
-    .await?;
+    bootstrap::apply_bootstrap(&config, storage.as_ref(), env_token, &data_dir, &*clock).await?;
     ensure_wasm_cache_dirs(&data_dir)?;
 
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
@@ -1028,92 +1037,46 @@ async fn build_app_with_storage_inner(
     let lifecycle_assembler_rx = Some(in_memory_bus.attach_lifecycle_assembler(
         cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY,
     ));
-    let lifecycle_hook_adapter_rx = if config.lifecycle_hook_adapter.enabled {
-        Some(in_memory_bus.attach_lifecycle_hook_adapter(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY,
+    let lifecycle_hook_adapter_rx = Some(in_memory_bus.attach_lifecycle_hook_adapter(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY,
+    ));
+    let lifecycle_pricing_rx = Some(
+        in_memory_bus
+            .attach_lifecycle_pricing(cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PRICING_CAPACITY),
+    );
+    let lifecycle_limit_reconcile_rx = Some(in_memory_bus.attach_lifecycle_limit_reconcile(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_LIMIT_RECONCILE_CAPACITY,
+    ));
+    let lifecycle_cache_obs_rx = Some(in_memory_bus.attach_lifecycle_cache_observation(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_CACHE_OBS_CAPACITY,
+    ));
+    let lifecycle_rate_limit_header_rx = Some(in_memory_bus.attach_lifecycle_rate_limit_header(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
+    ));
+    let lifecycle_subscription_quota_rx = Some(in_memory_bus.attach_lifecycle_subscription_quota(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_SUBSCRIPTION_QUOTA_CAPACITY,
+    ));
+    let lifecycle_limit_rejection_audit_rx = if audit_sink.is_some() {
+        Some(in_memory_bus.attach_lifecycle_limit_rejection_audit(
+            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_LIMIT_REJECTION_AUDIT_CAPACITY,
         ))
     } else {
         None
     };
-    let lifecycle_pricing_rx =
-        if config.lifecycle_pricing_subscriber.enabled {
-            Some(in_memory_bus.attach_lifecycle_pricing(
-                cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PRICING_CAPACITY,
-            ))
-        } else {
-            None
-        };
-    let lifecycle_limit_reconcile_rx = if config.lifecycle_limit_reconcile_subscriber.enabled {
-        Some(in_memory_bus.attach_lifecycle_limit_reconcile(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_LIMIT_RECONCILE_CAPACITY,
-        ))
-    } else {
-        None
-    };
-    let lifecycle_cache_obs_rx = if config.lifecycle_cache_observation_subscriber.enabled {
-        Some(in_memory_bus.attach_lifecycle_cache_observation(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_CACHE_OBS_CAPACITY,
-        ))
-    } else {
-        None
-    };
-    let lifecycle_rate_limit_header_rx = if config.lifecycle_rate_limit_header_subscriber.enabled {
-        Some(in_memory_bus.attach_lifecycle_rate_limit_header(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
-        ))
-    } else {
-        None
-    };
-    let lifecycle_subscription_quota_rx = if config.lifecycle_subscription_quota_subscriber.enabled
-    {
-        Some(in_memory_bus.attach_lifecycle_subscription_quota(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_SUBSCRIPTION_QUOTA_CAPACITY,
-        ))
-    } else {
-        None
-    };
-    let lifecycle_limit_rejection_audit_rx =
-        if config.lifecycle_limit_rejection_audit_subscriber.enabled && audit_sink.is_some() {
-            Some(in_memory_bus.attach_lifecycle_limit_rejection_audit(
-                cc_lb_control::event_bus::DEFAULT_LIFECYCLE_LIMIT_REJECTION_AUDIT_CAPACITY,
-            ))
-        } else {
-            None
-        };
-    let lifecycle_api_key_metrics_rx = if config.lifecycle_api_key_metrics_subscriber.enabled {
-        Some(in_memory_bus.attach_lifecycle_api_key_metrics(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_API_KEY_METRICS_CAPACITY,
-        ))
-    } else {
-        None
-    };
-    let lifecycle_cache_hit_miss_rx = if config.lifecycle_cache_hit_miss_subscriber.enabled {
-        Some(in_memory_bus.attach_lifecycle_cache_hit_miss(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_CACHE_HIT_MISS_CAPACITY,
-        ))
-    } else {
-        None
-    };
-    let lifecycle_routing_tier_rx = if config.lifecycle_routing_tier_subscriber.enabled {
-        Some(in_memory_bus.attach_lifecycle_routing_tier(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ROUTING_TIER_CAPACITY,
-        ))
-    } else {
-        None
-    };
-    let lifecycle_prompt_cache_drift_rx = if config.lifecycle_prompt_cache_drift_subscriber.enabled
-    {
-        Some(in_memory_bus.attach_lifecycle_prompt_cache_drift(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_DRIFT_CAPACITY,
-        ))
-    } else {
-        None
-    };
+    let lifecycle_api_key_metrics_rx = Some(in_memory_bus.attach_lifecycle_api_key_metrics(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_API_KEY_METRICS_CAPACITY,
+    ));
+    let lifecycle_cache_hit_miss_rx = Some(in_memory_bus.attach_lifecycle_cache_hit_miss(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_CACHE_HIT_MISS_CAPACITY,
+    ));
+    let lifecycle_routing_tier_rx = Some(in_memory_bus.attach_lifecycle_routing_tier(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ROUTING_TIER_CAPACITY,
+    ));
+    let lifecycle_prompt_cache_drift_rx = Some(in_memory_bus.attach_lifecycle_prompt_cache_drift(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_DRIFT_CAPACITY,
+    ));
     let lifecycle_prompt_cache_observation_rx =
-        if config.lifecycle_prompt_cache_observation_subscriber.enabled
-            && config.prompt_cache_shadow.enabled
-            && prompt_cache_observation_cache.is_some()
-        {
+        if config.prompt_cache_shadow.enabled && prompt_cache_observation_cache.is_some() {
             Some(in_memory_bus.attach_lifecycle_prompt_cache_observation(
                 cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY,
             ))
@@ -1282,7 +1245,6 @@ async fn build_app_with_storage_inner(
                 let cache: Arc<dyn PromptCacheObservationCacheLike> = cache;
                 cc_lb_engine::spawn_lifecycle_prompt_cache_observation_subscriber(
                     rx,
-                    config.lifecycle_prompt_cache_observation_subscriber.clone(),
                     cache,
                     prompt_cache_observation_sink.clone(),
                     Arc::clone(&metrics_hook),
@@ -1410,9 +1372,11 @@ async fn build_app_with_storage_inner(
         config: Arc::new(config.clone()),
         clock: clock.clone(),
     });
-    let config_watcher = config_path.map(|path| {
+    let config_watcher = {
+        let boot = Arc::new(cc_lb_config::BootEnv::from_config(&config));
         let watcher = Arc::new(ConfigWatcher::new_with_principal_view(
-            path,
+            boot,
+            storage.clone(),
             config.clone(),
             Arc::clone(&runtime),
             Some(dynamic_view.clone()),
@@ -1420,11 +1384,11 @@ async fn build_app_with_storage_inner(
         ));
         watcher.set_dynamic_view_rebinder(admin_rebinder.clone());
         watcher
-    });
+    };
     let signals = signal::install(
         drain_controller.clone(),
         Duration::from_secs(config.timeouts.drain_secs),
-        sighup_handler(reload_tls_state, config_watcher.clone()),
+        sighup_handler(reload_tls_state),
     );
     {
         let logger_slot = lifecycle_event_logger_slot.clone();
@@ -1669,14 +1633,10 @@ async fn build_app_with_storage_inner(
         clock: clock.clone(),
     };
 
-    let admin_config: Arc<dyn CurrentConfig> = match &config_watcher {
-        Some(watcher) => watcher.clone(),
-        None => Arc::new(InMemoryCurrentConfig::new(
-            config.clone(),
-            dynamic_view.clone(),
-            Some(admin_rebinder.clone()),
-        )),
-    };
+    let watcher_current_config: Arc<ConfigWatcher> = Arc::clone(&config_watcher);
+    let admin_config: Arc<dyn CurrentConfig> = watcher_current_config;
+    let watcher_reloader: Arc<ConfigWatcher> = Arc::clone(&config_watcher);
+    let config_reloader: Arc<dyn cc_lb_admin::ConfigReloader> = watcher_reloader;
     let admin_state = AdminState {
         storage: Some(storage.clone()),
         key_store: Some(key_store),
@@ -1706,6 +1666,7 @@ async fn build_app_with_storage_inner(
         audit_sink: audit_sink.clone(),
         dynamic_view: dynamic_view.clone(),
         config: admin_config,
+        config_reloader: Some(config_reloader),
         scheduler: Some(cc_lb_scheduler::admin::SchedulerAdminHandle::new(
             scheduler_lazy_handle.clone(),
         )),
@@ -1719,7 +1680,7 @@ async fn build_app_with_storage_inner(
         storage_tail: storage_tail_tx,
         clock: clock.clone(),
     };
-    let reload_task = config_watcher.clone().map(spawn_reload_watcher);
+    let reload_task: Option<JoinHandle<()>> = None;
 
     server_state.transition_to_ready();
 
@@ -2006,37 +1967,16 @@ fn build_tls_state(config: &Config) -> Result<Option<Arc<TlsState>>, BuildError>
 }
 
 fn active_tls_config(config: &Config) -> Option<(&'static str, &TlsConfig)> {
-    config
-        .listener
-        .tls
-        .as_ref()
-        .map(|tls| ("listener", tls))
-        .or_else(|| config.tls.as_ref().map(|tls| ("legacy", tls)))
+    config.listener.tls.as_ref().map(|tls| ("listener", tls))
 }
 
-fn sighup_handler(
-    tls_state: Option<Arc<TlsState>>,
-    config_watcher: Option<Arc<ConfigWatcher>>,
-) -> Option<signal::SighupHandler> {
-    if tls_state.is_none() && config_watcher.is_none() {
-        return None;
-    }
+fn sighup_handler(tls_state: Option<Arc<TlsState>>) -> Option<signal::SighupHandler> {
+    let tls_state = tls_state?;
     Some(Arc::new(move || {
-        if let Some(tls_state) = &tls_state
-            && let Err(error) = tls_state.reload()
-        {
+        if let Err(error) = tls_state.reload() {
             tracing::warn!(error = %error, "TLS reload failed");
         }
-        if let Some(config_watcher) = &config_watcher
-            && let Err(error) = config_watcher.reload_now()
-        {
-            tracing::warn!(error = %error, "configuration reload failed");
-        }
     }))
-}
-
-fn spawn_reload_watcher(config_watcher: Arc<ConfigWatcher>) -> JoinHandle<()> {
-    config_watcher.spawn_file_watcher()
 }
 
 #[cfg(feature = "postgres")]
@@ -2044,85 +1984,6 @@ fn load_cluster_token(config: &Config) -> Result<String, BuildError> {
     std::env::var(&config.cluster.token_env).map_err(|_| BuildError::ClusterTokenMissing {
         env: config.cluster.token_env.clone(),
     })
-}
-
-struct InMemoryCurrentConfig {
-    process_start_config: Arc<Config>,
-    current: ArcSwap<Config>,
-    draft: Mutex<Option<Config>>,
-    dynamic_view: Arc<DynamicViewHolder>,
-    dynamic_view_rebinder: Option<Arc<dyn DynamicViewRebinder>>,
-}
-
-impl InMemoryCurrentConfig {
-    fn new(
-        config: Config,
-        dynamic_view: Arc<DynamicViewHolder>,
-        dynamic_view_rebinder: Option<Arc<dyn DynamicViewRebinder>>,
-    ) -> Self {
-        let process_start_config = Arc::new(config.clone());
-        Self {
-            process_start_config,
-            current: ArcSwap::from_pointee(config),
-            draft: Mutex::new(None),
-            dynamic_view,
-            dynamic_view_rebinder,
-        }
-    }
-}
-
-impl CurrentConfig for InMemoryCurrentConfig {
-    fn current_config(&self) -> Arc<Config> {
-        self.current.load_full()
-    }
-
-    fn restart_required_changes(&self) -> Vec<cc_lb_config::RestartRequiredField> {
-        summarize_restart_required(&self.process_start_config, &self.current_config())
-    }
-
-    fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {
-        self.dynamic_view_rebinder.clone()
-    }
-
-    fn put_draft_config(&self, config: Config) -> Result<(), ConfigDraftError> {
-        config
-            .validate()
-            .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
-        let mut draft = self
-            .draft
-            .lock()
-            .map_err(|_| ConfigDraftError::Invalid("config draft lock poisoned".to_owned()))?;
-        *draft = Some(config);
-        Ok(())
-    }
-
-    fn apply_draft_config(&self) -> Result<Arc<Config>, ConfigDraftError> {
-        let config = self
-            .draft
-            .lock()
-            .map_err(|_| ConfigDraftError::Invalid("config draft lock poisoned".to_owned()))?
-            .take()
-            .ok_or(ConfigDraftError::MissingDraft)?;
-        config
-            .validate()
-            .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
-        let principal_view = Arc::new(PrincipalView::from_db(
-            &[],
-            std::collections::HashMap::new(),
-        ));
-        let current_view = self.dynamic_view.load();
-        // `.build()` bumps generation +1, so CAS on strictly-newer never
-        // rejects on the happy path. If a concurrent reconcile committed
-        // a fresher view we accept it and skip the redundant swap.
-        self.dynamic_view.try_store_if_newer(
-            DynamicViewBuilder::from_view(&current_view)
-                .principal_view(principal_view)
-                .build(),
-        );
-        let config = Arc::new(config);
-        self.current.store(config.clone());
-        Ok(config)
-    }
 }
 
 #[derive(Clone)]
@@ -2755,11 +2616,10 @@ async fn await_or_abort<T>(mut task: JoinHandle<T>, timeout: Duration) {
 }
 
 fn init_observability(config: &mut Config) -> Result<TracingGuard, BuildError> {
-    config.observability.prometheus_endpoint = Some(config.listener.metrics_addr.to_string());
     cc_lb_observability::init(&ObservabilityConfig {
         tracing_level: config.observability.tracing_level.clone(),
         otlp_endpoint: config.observability.otlp_endpoint.clone(),
-        prometheus_endpoint: config.observability.prometheus_endpoint.clone(),
+        prometheus_endpoint: Some(config.listener.metrics_addr.to_string()),
         log_redaction: config.observability.log_redaction,
         user_prompt_redaction: config.observability.user_prompt_redaction,
         hook_channel_capacity: cc_lb_observability::DEFAULT_HOOK_CHANNEL_CAPACITY,

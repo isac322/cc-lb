@@ -235,82 +235,55 @@ print(values[0])
 PY
 }
 
-write_config() {
-  local path=$1
-  local proxy_port=$2
-  local admin_port=$3
-  local metrics_port=$4
-  local data_dir=$5
-  cat > "$path" <<TOML
-[listener]
-proxy_addr = "127.0.0.1:$proxy_port"
-admin_addr = "127.0.0.1:$admin_port"
-metrics_addr = "127.0.0.1:$metrics_port"
-
-[body]
-messages_cap_bytes = 33554432
-files_cap_bytes = 104857600
-
-[timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
-upstream_total_secs = 30
-drain_secs = 5
-
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "$PRINCIPAL_NAME"
-upstream_kind = "anthropic_o_auth"
-
-[storage]
-kind = "postgres"
-url = "$POSTGRES_URL"
-
-[storage.pool]
-max_connections = 8
-acquire_timeout_secs = 10
-statement_timeout_secs = 25
-sslmode = "disable"
-
-[aead]
-key_env = "CC_LB_MASTER_KEY"
-
-[oauth.anthropic]
-client_id = "fake-client"
-auth_url = "http://127.0.0.1:$FAKE_PORT/oauth/authorize"
-token_url = "http://127.0.0.1:$FAKE_PORT/oauth/token"
-redirect_uri = "http://127.0.0.1:$admin_port/oauth/callback"
-scopes = ["messages", "files"]
-
-[runtime]
-data_dir = "$data_dir"
-
-[observability]
-tracing_level = "info"
-log_redaction = true
-user_prompt_redaction = false
-
-[admin]
-token_env = "CC_LB_ADMIN_TOKEN"
-
-[circuit_breaker]
-failures_to_open = 5
-window_secs = 10
-half_open_after_secs = 30
-
-[bulkhead]
-max_conns_per_upstream = 50
-semaphore_per_upstream = 100
-
-[dns]
-cache_ttl_floor_secs = 30
-cache_ttl_ceiling_secs = 300
-
-[egress]
-TOML
+apply_runtime_config() {
+  local admin_port=$1
+  local redirect_admin_port=$2
+  local draft_body
+  draft_body=$(python3 -c "
+import json
+print(json.dumps({
+  'draft': {
+    'downstream_auth': {
+      'mode': 'none',
+      'none_mode': {
+        'principal_id': '$PRINCIPAL_NAME',
+        'upstream_kind': 'anthropic_o_auth',
+      },
+    },
+    'oauth': {
+      'anthropic': {
+        'client_id': 'fake-client',
+        'auth_url': 'http://127.0.0.1:$FAKE_PORT/oauth/authorize',
+        'token_url': 'http://127.0.0.1:$FAKE_PORT/oauth/token',
+        'redirect_uri': 'http://127.0.0.1:$redirect_admin_port/oauth/callback',
+        'scopes': ['messages', 'files'],
+      },
+    },
+  },
+  'expected_revision': 0,
+}))
+")
+  draft_code=$(curl -sS -o "$TMP_DIR/admin-draft.json" -w '%{http_code}' -X PUT \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H 'content-type: application/json' \
+    --data "$draft_body" \
+    "http://127.0.0.1:$admin_port/admin/config/draft") || draft_code=000
+  if [ "$draft_code" != "200" ]; then
+    cat "$TMP_DIR/admin-draft.json" >&2 || true
+    fail "save config draft expected 200, got $draft_code"
+  fi
+  rev=$(python3 -c "import json,sys; print(json.load(open('$TMP_DIR/admin-draft.json'))['revision'])")
+  for endpoint in draft/validate apply; do
+    code=$(curl -sS -o "$TMP_DIR/admin-${endpoint//\//-}.json" -w '%{http_code}' -X POST \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H 'content-type: application/json' \
+      --data "{\"expected_revision\":$rev}" \
+      "http://127.0.0.1:$admin_port/admin/config/$endpoint") || code=000
+    if [ "$code" != "200" ]; then
+      cat "$TMP_DIR/admin-${endpoint//\//-}.json" >&2 || true
+      fail "config $endpoint expected 200, got $code"
+    fi
+  done
 }
 
 start_fake_anthropic() {
@@ -336,22 +309,40 @@ PY
 }
 
 start_replica_a() {
+  CC_LB_LISTENER__PROXY_ADDR="127.0.0.1:$PROXY_A_PORT" \
+  CC_LB_LISTENER__ADMIN_ADDR="127.0.0.1:$ADMIN_A_PORT" \
+  CC_LB_LISTENER__METRICS_ADDR="127.0.0.1:$METRICS_A_PORT" \
+  CC_LB_STORAGE__KIND=postgres \
+  CC_LB_STORAGE__URL="$POSTGRES_URL" \
+  CC_LB_STORAGE__POOL__MAX_CONNECTIONS=8 \
+  CC_LB_STORAGE__POOL__ACQUIRE_TIMEOUT_SECS=10 \
+  CC_LB_STORAGE__POOL__STATEMENT_TIMEOUT_SECS=25 \
+  CC_LB_STORAGE__POOL__SSLMODE=disable \
+  CC_LB_DATA_DIR="$TMP_DIR/A-data" \
   CC_LB_MASTER_KEY="$MASTER_KEY" \
   CC_LB_ADMIN_TOKEN="$ADMIN_TOKEN" \
   CC_LB_BOOTSTRAP_ADMIN_TOKEN="$ADMIN_TOKEN" \
-  CC_LB_DATA_DIR="$TMP_DIR/A-data" \
   RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
-  cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$TMP_DIR/A.toml" --data-dir "$TMP_DIR/A-data" \
+  cargo run -q -p cc-lb-server --features postgres,sqlite -- serve \
     > "$TMP_DIR/A.log" 2>&1 &
   A_PID=$!
 }
 
 start_replica_b() {
+  CC_LB_LISTENER__PROXY_ADDR="127.0.0.1:$PROXY_B_PORT" \
+  CC_LB_LISTENER__ADMIN_ADDR="127.0.0.1:$ADMIN_B_PORT" \
+  CC_LB_LISTENER__METRICS_ADDR="127.0.0.1:$METRICS_B_PORT" \
+  CC_LB_STORAGE__KIND=postgres \
+  CC_LB_STORAGE__URL="$POSTGRES_URL" \
+  CC_LB_STORAGE__POOL__MAX_CONNECTIONS=8 \
+  CC_LB_STORAGE__POOL__ACQUIRE_TIMEOUT_SECS=10 \
+  CC_LB_STORAGE__POOL__STATEMENT_TIMEOUT_SECS=25 \
+  CC_LB_STORAGE__POOL__SSLMODE=disable \
+  CC_LB_DATA_DIR="$TMP_DIR/B-data" \
   CC_LB_MASTER_KEY="$MASTER_KEY" \
   CC_LB_ADMIN_TOKEN="$ADMIN_TOKEN" \
-  CC_LB_DATA_DIR="$TMP_DIR/B-data" \
   RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
-  cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$TMP_DIR/B.toml" --data-dir "$TMP_DIR/B-data" \
+  cargo run -q -p cc-lb-server --features postgres,sqlite -- serve \
     > "$TMP_DIR/B.log" 2>&1 &
   B_PID=$!
 }
@@ -469,8 +460,6 @@ psql_exec 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cc-lb-multi-replica.XXXXXX")
 mkdir -p "$TMP_DIR/A-data" "$TMP_DIR/B-data"
-write_config "$TMP_DIR/A.toml" "$PROXY_A_PORT" "$ADMIN_A_PORT" "$METRICS_A_PORT" "$TMP_DIR/A-data"
-write_config "$TMP_DIR/B.toml" "$PROXY_B_PORT" "$ADMIN_B_PORT" "$METRICS_B_PORT" "$TMP_DIR/B-data"
 
 start_fake_anthropic
 start_replica_a
@@ -485,6 +474,8 @@ if ! wait_for_healthz "$PROXY_B_PORT" "replica B"; then
   cat "$TMP_DIR/B.log" >&2 || true
   fail "replica B did not become healthy"
 fi
+
+apply_runtime_config "$ADMIN_A_PORT" "$ADMIN_A_PORT"
 
 create_principal
 upstream_id=$(create_oauth_upstream)

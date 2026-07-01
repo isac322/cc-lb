@@ -85,7 +85,6 @@ async fn build_failing_app(
     let storage: Arc<dyn StorageTrait> = main_storage;
     match build_app_with_storage(
         config,
-        None,
         managed_store,
         storage,
         Arc::new(AeadService::from_master_key([0; 32])),

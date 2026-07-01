@@ -1,12 +1,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use cc_lb_config::{
-    AnthropicOAuthConfig, Config, PostgresPoolConfig, StorageConfig, TlsConfig,
-    WasmtimeAllocationStrategy,
-};
+use cc_lb_config::{Config, PostgresPoolConfig, StorageConfig, TlsConfig};
 use cc_lb_server::reload::summarize_restart_required;
-use url::Url;
 
 #[test]
 fn listener_proxy_addr_change_returns_entry() {
@@ -60,51 +56,57 @@ fn aead_key_env_change_returns_entry() {
 }
 
 #[test]
-fn oauth_anthropic_client_id_change_returns_entry() {
-    let mut current = Config::default();
+fn subscription_quota_scheduler_snapshot_fields_return_entries() {
+    let current = Config::default();
     let mut new_config = current.clone();
-    current.oauth.anthropic = Some(anthropic_oauth("old-client"));
-    new_config.oauth.anthropic = Some(anthropic_oauth("new-client"));
+    new_config.subscription_quota.writer_channel_capacity = current
+        .subscription_quota
+        .writer_channel_capacity
+        .wrapping_add(1);
+    new_config.subscription_quota.writer_batch_max_records = current
+        .subscription_quota
+        .writer_batch_max_records
+        .wrapping_add(1);
+    new_config.subscription_quota.writer_flush_ms =
+        current.subscription_quota.writer_flush_ms.wrapping_add(1);
+    new_config.subscription_quota.routing_max_staleness_secs = current
+        .subscription_quota
+        .routing_max_staleness_secs
+        .wrapping_add(1);
 
     let changes = summarize_restart_required(&current, &new_config);
 
-    assert_field(&changes, "oauth.anthropic.client_id");
+    assert_field(&changes, "subscription_quota.writer_channel_capacity");
+    assert_field(&changes, "subscription_quota.writer_batch_max_records");
+    assert_field(&changes, "subscription_quota.writer_flush_ms");
+    assert_field(&changes, "subscription_quota.routing_max_staleness_secs");
 }
 
 #[test]
-fn wasmtime_runtime_knob_change_returns_entry() {
+fn timeouts_upstream_total_change_returns_entry() {
     let current = Config::default();
     let mut new_config = current.clone();
-    new_config.runtime.wasmtime.memory_reservation_bytes = Some(512 * 1024 * 1024);
+    new_config.timeouts.upstream_total_secs = current.timeouts.upstream_total_secs + 60;
 
     let changes = summarize_restart_required(&current, &new_config);
 
-    assert_field(&changes, "runtime.wasmtime.memory_reservation_bytes");
+    assert_field(&changes, "timeouts.upstream_total_secs");
 }
 
 #[test]
-fn wasmtime_allocation_strategy_change_returns_entry() {
+fn circuit_breaker_change_returns_entry() {
     let current = Config::default();
     let mut new_config = current.clone();
-    new_config.runtime.wasmtime.allocation_strategy = WasmtimeAllocationStrategy::Pooling;
+    new_config.circuit_breaker.failures_to_open =
+        current.circuit_breaker.failures_to_open.wrapping_add(3);
 
     let changes = summarize_restart_required(&current, &new_config);
 
-    assert_field(&changes, "runtime.wasmtime.allocation_strategy");
+    assert_field(&changes, "circuit_breaker.failures_to_open");
 }
 
 fn socket(value: &str) -> SocketAddr {
     value.parse().expect("valid socket address")
-}
-
-fn anthropic_oauth(client_id: &str) -> AnthropicOAuthConfig {
-    AnthropicOAuthConfig {
-        client_id: client_id.to_owned(),
-        auth_url: Url::parse("https://example.test/oauth/authorize").unwrap(),
-        token_url: Url::parse("https://example.test/oauth/token").unwrap(),
-        redirect_uri: Url::parse("https://example.test/oauth/callback").unwrap(),
-        scopes: vec!["messages".to_owned()],
-    }
 }
 
 fn assert_field(changes: &[cc_lb_config::RestartRequiredField], field: &str) {

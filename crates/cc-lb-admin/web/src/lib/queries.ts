@@ -620,6 +620,21 @@ export function useConfigCurrent() {
     queryFn: () => getJson<Record<string, unknown>>('/admin/config/current'),
   });
 }
+export function useBootEnv() {
+  return useQuery({
+    queryKey: ['config', 'boot-env'],
+    queryFn: async () => {
+      try {
+        return await getJson<Record<string, unknown>>('/admin/config/boot-env');
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) {
+          return undefined;
+        }
+        throw e;
+      }
+    },
+  });
+}
 export function useConfigSchema() {
   return useQuery({
     queryKey: qk.configSchema,
@@ -1353,16 +1368,6 @@ export function useSaveDraft() {
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.configDraft }),
   });
 }
-export function useReloadConfig() {
-  return useMutation({
-    mutationFn: () =>
-      postJson<{ status: string; reloading: boolean }, Record<string, never>>(
-        '/admin/config/reload',
-        {},
-      ),
-  });
-}
-
 export function useStartOauthDraft() {
   return useMutation({
     mutationFn: () => startOauthDraft(),

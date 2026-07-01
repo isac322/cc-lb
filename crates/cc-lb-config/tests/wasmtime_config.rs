@@ -16,9 +16,10 @@
 //!     wasm32 memory cap of 4 GiB; 0 pages is nonsensical).
 
 use cc_lb_config::{Config, WasmtimeAllocationStrategy};
+use serde_json::{Value, json};
 
-fn parse(toml_str: &str) -> Config {
-    toml::from_str::<Config>(toml_str).expect("parse succeeds")
+fn parse(value: Value) -> Config {
+    serde_json::from_value::<Config>(value).expect("parse succeeds")
 }
 
 #[test]
@@ -36,23 +37,17 @@ fn default_config_uses_ondemand_without_memory_overrides() {
 
 #[test]
 fn wasmtime_memory_max_pages_parses_from_toml() {
-    let cfg = parse(
-        r#"
-[runtime.wasmtime]
-memory_max_pages = 2048
-"#,
-    );
+    let cfg = parse(json!({
+        "runtime": { "wasmtime": { "memory_max_pages": 2048 } }
+    }));
     assert_eq!(cfg.runtime.wasmtime.memory_max_pages, Some(2048));
 }
 
 #[test]
 fn wasmtime_allocation_strategy_ondemand_alias_parses_from_toml() {
-    let cfg = parse(
-        r#"
-[runtime.wasmtime]
-allocation_strategy = "on_demand"
-"#,
-    );
+    let cfg = parse(json!({
+        "runtime": { "wasmtime": { "allocation_strategy": "on_demand" } }
+    }));
 
     assert_eq!(
         cfg.runtime.wasmtime.allocation_strategy,
@@ -62,16 +57,17 @@ allocation_strategy = "on_demand"
 
 #[test]
 fn wasmtime_memory_pool_and_reservation_knobs_parse_from_toml() {
-    let cfg = parse(
-        r#"
-[runtime.wasmtime]
-allocation_strategy = "pooling"
-pool_total_memories = 8
-pool_total_core_instances = 12
-memory_reservation_bytes = 268435456
-memory_guard_bytes = 67108864
-"#,
-    );
+    let cfg = parse(json!({
+        "runtime": {
+            "wasmtime": {
+                "allocation_strategy": "pooling",
+                "pool_total_memories": 8,
+                "pool_total_core_instances": 12,
+                "memory_reservation_bytes": 268435456,
+                "memory_guard_bytes": 67108864
+            }
+        }
+    }));
 
     assert_eq!(
         cfg.runtime.wasmtime.allocation_strategy,
@@ -88,28 +84,22 @@ memory_guard_bytes = 67108864
 
 #[test]
 fn wasmtime_invalid_allocation_strategy_is_rejected_by_deserialize() {
-    let err = toml::from_str::<Config>(
-        r#"
-[runtime.wasmtime]
-allocation_strategy = "prewarm_everything"
-"#,
-    )
+    let err = serde_json::from_value::<Config>(json!({
+        "runtime": { "wasmtime": { "allocation_strategy": "prewarm_everything" } }
+    }))
     .expect_err("unknown allocation strategy must be rejected");
 
     assert!(
-        err.to_string().contains("allocation_strategy"),
-        "error mentions the offending field: {err}",
+        err.to_string().contains("prewarm_everything"),
+        "error names the rejected allocation strategy value: {err}",
     );
 }
 
 #[test]
 fn wasmtime_pool_zero_is_rejected_by_validation() {
-    let cfg = parse(
-        r#"
-[runtime.wasmtime]
-pool_total_memories = 0
-"#,
-    );
+    let cfg = parse(json!({
+        "runtime": { "wasmtime": { "pool_total_memories": 0 } }
+    }));
     let err = cfg
         .validate()
         .expect_err("zero pooled memories must be rejected");
@@ -121,13 +111,14 @@ pool_total_memories = 0
 
 #[test]
 fn wasmtime_memory_reservation_below_max_memory_is_rejected_by_validation() {
-    let cfg = parse(
-        r#"
-[runtime.wasmtime]
-memory_max_pages = 2048
-memory_reservation_bytes = 67108864
-"#,
-    );
+    let cfg = parse(json!({
+        "runtime": {
+            "wasmtime": {
+                "memory_max_pages": 2048,
+                "memory_reservation_bytes": 67108864
+            }
+        }
+    }));
     let err = cfg
         .validate()
         .expect_err("reservation below max memory must be rejected");
@@ -139,13 +130,14 @@ memory_reservation_bytes = 67108864
 
 #[test]
 fn wasmtime_effective_default_reservation_below_max_memory_is_rejected_by_validation() {
-    let cfg = parse(
-        r#"
-[runtime.wasmtime]
-allocation_strategy = "pooling"
-memory_max_pages = 8192
-"#,
-    );
+    let cfg = parse(json!({
+        "runtime": {
+            "wasmtime": {
+                "allocation_strategy": "pooling",
+                "memory_max_pages": 8192
+            }
+        }
+    }));
     let err = cfg
         .validate()
         .expect_err("default reservation below max memory must be rejected");
@@ -157,14 +149,15 @@ memory_max_pages = 8192
 
 #[test]
 fn wasmtime_effective_default_reservation_accepts_matching_override() {
-    let cfg = parse(
-        r#"
-[runtime.wasmtime]
-allocation_strategy = "pooling"
-memory_max_pages = 8192
-memory_reservation_bytes = 536870912
-"#,
-    );
+    let cfg = parse(json!({
+        "runtime": {
+            "wasmtime": {
+                "allocation_strategy": "pooling",
+                "memory_max_pages": 8192,
+                "memory_reservation_bytes": 536870912
+            }
+        }
+    }));
 
     cfg.validate()
         .expect("reservation matching 8192 64KiB pages is valid");
@@ -172,12 +165,9 @@ memory_reservation_bytes = 536870912
 
 #[test]
 fn wasmtime_memory_guard_below_floor_is_rejected_by_validation() {
-    let cfg = parse(
-        r#"
-[runtime.wasmtime]
-memory_guard_bytes = 65536
-"#,
-    );
+    let cfg = parse(json!({
+        "runtime": { "wasmtime": { "memory_guard_bytes": 65536 } }
+    }));
     let err = cfg.validate().expect_err("tiny guard must be rejected");
     assert!(
         err.to_string().contains("memory_guard_bytes"),
@@ -187,12 +177,9 @@ memory_guard_bytes = 65536
 
 #[test]
 fn wasmtime_memory_max_pages_zero_is_rejected_by_validation() {
-    let cfg = parse(
-        r#"
-[runtime.wasmtime]
-memory_max_pages = 0
-"#,
-    );
+    let cfg = parse(json!({
+        "runtime": { "wasmtime": { "memory_max_pages": 0 } }
+    }));
     let err = cfg.validate().expect_err("zero pages must be rejected");
     assert!(
         err.to_string().contains("memory_max_pages"),
@@ -202,12 +189,9 @@ memory_max_pages = 0
 
 #[test]
 fn wasmtime_memory_max_pages_above_wasm32_ceiling_is_rejected() {
-    let cfg = parse(
-        r#"
-[runtime.wasmtime]
-memory_max_pages = 65537
-"#,
-    );
+    let cfg = parse(json!({
+        "runtime": { "wasmtime": { "memory_max_pages": 65537 } }
+    }));
     let err = cfg
         .validate()
         .expect_err("above 4 GiB (65_536 pages) must be rejected");

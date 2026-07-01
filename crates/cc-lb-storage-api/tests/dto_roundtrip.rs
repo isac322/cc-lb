@@ -192,12 +192,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         saved_at_unix_secs: Some(1_716_000_004),
     });
 
-    let summary = HistorySummary {
-        upstreams: 2,
-        principals: 3,
-        plugin_count: 1,
-        tls_enabled: true,
-    };
+    let summary = HistorySummary { tls_enabled: true };
     assert_json_roundtrip(summary.clone());
     assert_json_roundtrip(HistoryEntry {
         revision: 8,

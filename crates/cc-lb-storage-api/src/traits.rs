@@ -304,6 +304,15 @@ pub trait ConfigStore: Send + Sync {
         error: Option<String>,
     ) -> StorageResult<()>;
 
+    async fn get_effective_config(&self) -> StorageResult<Option<EffectiveConfig>>;
+
+    async fn put_effective_config(
+        &self,
+        revision: u64,
+        config_json: serde_json::Value,
+        applied_at_unix_secs: u64,
+    ) -> StorageResult<()>;
+
     async fn append_config_history(
         &self,
         revision: u64,

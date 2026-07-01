@@ -5,12 +5,13 @@ use cc_lb_storage_api::upstream::{
     UpstreamKind, UpstreamStatusUpdate, UpstreamWarmupDialectPlugin,
 };
 use cc_lb_storage_api::{
-    StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
-    validate_identifier,
+    ChangeChannel, StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore,
+    UpstreamUpdate, validate_identifier,
 };
 use sqlx::{Row, Sqlite, SqlitePool, Transaction, sqlite::SqliteRow};
 use uuid::Uuid;
 
+use crate::adapter::notifier::publish_change;
 use crate::{SqliteStorage, map_sqlx_error};
 
 macro_rules! split_upstream_columns {
@@ -158,7 +159,9 @@ impl UpstreamStore for SqliteStorage {
         if row.is_none() {
             return Err(conflict("stale upstream revision"));
         }
-        tx.commit().await.map_err(map_sqlx_error)
+        tx.commit().await.map_err(map_sqlx_error)?;
+        publish_change(ChangeChannel::Upstream, id.to_string(), self.clock().now());
+        Ok(())
     }
 
     async fn hard_delete(&self, id: Uuid) -> StorageResult<()> {
@@ -168,7 +171,9 @@ impl UpstreamStore for SqliteStorage {
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
-        tx.commit().await.map_err(map_sqlx_error)
+        tx.commit().await.map_err(map_sqlx_error)?;
+        publish_change(ChangeChannel::Upstream, id.to_string(), self.clock().now());
+        Ok(())
     }
 
     async fn clear_warmup_dialect_plugin(
@@ -189,7 +194,11 @@ impl UpstreamStore for SqliteStorage {
         if row.is_none() {
             return Ok(None);
         }
-        get_split_by_id(self.pool(), id).await
+        let record = get_split_by_id(self.pool(), id).await?;
+        if record.is_some() {
+            publish_change(ChangeChannel::Upstream, id.to_string(), self.clock().now());
+        }
+        Ok(record)
     }
 }
 
@@ -235,9 +244,15 @@ async fn create_split(
     }
 
     tx.commit().await.map_err(map_sqlx_error)?;
-    get_split_by_id(storage.pool(), id)
+    let record = get_split_by_id(storage.pool(), id)
         .await?
-        .ok_or_else(|| conflict("upstream not found"))
+        .ok_or_else(|| conflict("upstream not found"))?;
+    publish_change(
+        ChangeChannel::Upstream,
+        record.id.to_string(),
+        storage.clock().now(),
+    );
+    Ok(record)
 }
 
 async fn get_split_by_name(pool: &SqlitePool, name: &str) -> StorageResult<Option<UpstreamRecord>> {
@@ -312,21 +327,17 @@ async fn update_split(
         || update.warmup_dialect_plugin.is_some();
     let api_key_ciphertext = update.api_key_ciphertext.take();
     let oauth_token_generation = update.oauth_token_generation.take();
-    // Spec, api-key, and generation updates share one transaction so a partial
-    // update can never commit independently.
-    let mut tx = storage.begin_immediate().await?;
     if has_spec_update {
-        update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
+        update_split_spec(storage, id, expected_revision, update).await?;
     } else {
-        ensure_split_spec_revision_in_tx(&mut tx, id, expected_revision).await?;
+        ensure_split_spec_revision(storage.pool(), id, expected_revision).await?;
     }
     if let Some(ciphertext) = api_key_ciphertext {
-        update_split_api_key_secret_in_tx(&mut tx, id, Some(ciphertext)).await?;
+        update_split_api_key_secret(storage, id, Some(ciphertext)).await?;
     }
     if let Some(generation) = oauth_token_generation {
-        update_split_oauth_token_generation_in_tx(&mut tx, id, generation).await?;
+        update_split_oauth_token_generation(storage, id, generation).await?;
     }
-    tx.commit().await.map_err(map_sqlx_error)?;
     get_split_by_id(storage.pool(), id)
         .await?
         .ok_or_else(|| conflict("upstream not found"))
@@ -342,19 +353,6 @@ async fn update_split_spec(
         validate_identifier("upstream.name", name)?;
     }
     let mut tx = storage.begin_immediate().await?;
-    update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
-    tx.commit().await.map_err(map_sqlx_error)?;
-    get_split_by_id(storage.pool(), id)
-        .await?
-        .ok_or_else(|| conflict("upstream not found"))
-}
-
-async fn update_split_spec_in_tx(
-    tx: &mut Transaction<'static, Sqlite>,
-    id: Uuid,
-    expected_revision: u64,
-    update: UpstreamUpdate,
-) -> StorageResult<()> {
     let warmup_dialect_plugin = json_string(update.warmup_dialect_plugin.as_ref())?;
     let row = sqlx::query(
         "UPDATE upstream_spec_v1
@@ -375,13 +373,22 @@ async fn update_split_spec_in_tx(
     .bind(warmup_dialect_plugin)
     .bind(id.to_string())
     .bind(u64_to_i64(expected_revision, "upstream spec revision")?)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(map_sqlite_error)?;
     if row.is_none() {
         return Err(conflict("stale upstream revision"));
     }
-    Ok(())
+    tx.commit().await.map_err(map_sqlx_error)?;
+    let record = get_split_by_id(storage.pool(), id)
+        .await?
+        .ok_or_else(|| conflict("upstream not found"))?;
+    publish_change(
+        ChangeChannel::Upstream,
+        record.id.to_string(),
+        storage.clock().now(),
+    );
+    Ok(record)
 }
 
 async fn update_split_api_key_secret(
@@ -390,19 +397,7 @@ async fn update_split_api_key_secret(
     api_key_ciphertext: Option<Vec<u8>>,
 ) -> StorageResult<UpstreamRecord> {
     let mut tx = storage.begin_immediate().await?;
-    update_split_api_key_secret_in_tx(&mut tx, id, api_key_ciphertext).await?;
-    tx.commit().await.map_err(map_sqlx_error)?;
-    get_split_by_id(storage.pool(), id)
-        .await?
-        .ok_or_else(|| conflict("upstream not found"))
-}
-
-async fn update_split_api_key_secret_in_tx(
-    tx: &mut Transaction<'static, Sqlite>,
-    id: Uuid,
-    api_key_ciphertext: Option<Vec<u8>>,
-) -> StorageResult<()> {
-    ensure_split_spec_active_in_tx(tx, id).await?;
+    ensure_split_spec_active_in_tx(&mut tx, id).await?;
     sqlx::query(
         "INSERT INTO upstream_api_key_secret_v1 (upstream_id, api_key_ciphertext, secret_revision, created_at, updated_at)
          VALUES (?, ?, 1, unixepoch(), unixepoch())
@@ -413,10 +408,13 @@ async fn update_split_api_key_secret_in_tx(
     )
     .bind(id.to_string())
     .bind(api_key_ciphertext)
-    .execute(&mut **tx)
+    .execute(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
-    Ok(())
+    tx.commit().await.map_err(map_sqlx_error)?;
+    get_split_by_id(storage.pool(), id)
+        .await?
+        .ok_or_else(|| conflict("upstream not found"))
 }
 
 async fn update_split_oauth_token(
@@ -451,12 +449,13 @@ async fn update_split_oauth_token(
         .ok_or_else(|| conflict("upstream not found"))
 }
 
-async fn update_split_oauth_token_generation_in_tx(
-    tx: &mut Transaction<'static, Sqlite>,
+async fn update_split_oauth_token_generation(
+    storage: &SqliteStorage,
     id: Uuid,
     generation: u64,
 ) -> StorageResult<()> {
-    ensure_split_spec_active_in_tx(tx, id).await?;
+    let mut tx = storage.begin_immediate().await?;
+    ensure_split_spec_active_in_tx(&mut tx, id).await?;
     sqlx::query(
         "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, token_revision, oauth_token_generation, refreshed_at, created_at, updated_at)
          VALUES (?, NULL, 1, ?, NULL, unixepoch(), unixepoch())
@@ -466,10 +465,10 @@ async fn update_split_oauth_token_generation_in_tx(
     )
     .bind(id.to_string())
     .bind(u64_to_i64(generation, "oauth token generation")?)
-    .execute(&mut **tx)
+    .execute(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
-    Ok(())
+    tx.commit().await.map_err(map_sqlx_error)
 }
 
 async fn complete_split_refresh(
@@ -524,6 +523,27 @@ async fn read_split_oauth_token_generation(
     generation
         .map(|value| i64_to_u64(value, "oauth token generation"))
         .transpose()
+}
+
+async fn ensure_split_spec_revision(
+    pool: &SqlitePool,
+    id: Uuid,
+    expected_revision: u64,
+) -> StorageResult<()> {
+    let current: Option<i64> = sqlx::query_scalar(
+        "SELECT spec_revision FROM upstream_spec_v1 WHERE id = ? AND deleted_at IS NULL",
+    )
+    .bind(id.to_string())
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx_error)?;
+    match current {
+        Some(current) if i64_to_u64(current, "upstream spec revision")? == expected_revision => {
+            Ok(())
+        }
+        Some(_) => Err(conflict("stale upstream revision")),
+        None => Err(conflict("upstream not found")),
+    }
 }
 
 async fn ensure_split_spec_revision_in_tx(

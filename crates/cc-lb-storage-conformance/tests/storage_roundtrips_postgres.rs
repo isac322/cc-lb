@@ -21,9 +21,9 @@ use cc_lb_storage_api::{
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
-        anthropic_compatibility_kv_store, organization_metadata_store, plan_tier_store,
-        plan_tier_store_backfill, plugin_registry_store, price_catalog, principal_store,
-        prompt_cache_observation_store, request_event_list, storage_roundtrips,
+        anthropic_compatibility_kv_store, effective_config, organization_metadata_store,
+        plan_tier_store, plan_tier_store_backfill, plugin_registry_store, price_catalog,
+        principal_store, prompt_cache_observation_store, request_event_list, storage_roundtrips,
         storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
         upstream_rate_limit_store, upstream_subscription_metadata_store,
         upstream_subscription_quota_store, warmup_attempts_store,
@@ -164,6 +164,11 @@ impl price_catalog::PriceCatalogCorruptionBackend for PostgresConformanceBackend
 #[test]
 fn storage_roundtrips_postgres() {
     run_postgres_scenario("storage_roundtrips", storage_roundtrips::run_all);
+}
+
+#[test]
+fn effective_config_postgres() {
+    run_postgres_scenario("effective_config", effective_config::run_all);
 }
 
 #[test]

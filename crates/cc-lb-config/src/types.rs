@@ -45,8 +45,6 @@ pub const DEFAULT_PARTIAL_RETENTION_MAX_ENTRIES: usize = 10_000;
 #[serde(default)]
 pub struct Config {
     pub listener: ListenerConfig,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tls: Option<TlsConfig>,
     pub body: BodyConfig,
     pub timeouts: TimeoutsConfig,
     pub downstream_auth: DownstreamAuthConfig,
@@ -67,37 +65,10 @@ pub struct Config {
     pub runtime: RuntimeConfig,
     pub circuit_breaker: CircuitBreakerConfig,
     pub bulkhead: BulkheadConfig,
-    pub dns: DnsConfig,
-    pub egress: EgressConfig,
     #[serde(default)]
     pub prompt_cache_shadow: PromptCacheShadowConfig,
     #[serde(default)]
-    pub lifecycle_hook_adapter: LifecycleHookAdapterConfig,
-    #[serde(default)]
-    pub lifecycle_pricing_subscriber: LifecyclePricingSubscriberConfig,
-    #[serde(default)]
-    pub lifecycle_cache_observation_subscriber: LifecycleCacheObservationSubscriberConfig,
-    #[serde(default)]
-    pub lifecycle_rate_limit_header_subscriber: LifecycleRateLimitHeaderSubscriberConfig,
-    #[serde(default)]
-    pub lifecycle_subscription_quota_subscriber: LifecycleSubscriptionQuotaSubscriberConfig,
-    #[serde(default)]
-    pub lifecycle_limit_rejection_audit_subscriber: LifecycleLimitRejectionAuditSubscriberConfig,
-    #[serde(default)]
-    pub lifecycle_api_key_metrics_subscriber: LifecycleApiKeyMetricsSubscriberConfig,
-    #[serde(default)]
-    pub lifecycle_cache_hit_miss_subscriber: LifecycleCacheHitMissSubscriberConfig,
-    #[serde(default)]
-    pub lifecycle_routing_tier_subscriber: LifecycleRoutingTierSubscriberConfig,
-    #[serde(default)]
-    pub lifecycle_prompt_cache_drift_subscriber: LifecyclePromptCacheDriftSubscriberConfig,
-    #[serde(default)]
-    pub lifecycle_prompt_cache_observation_subscriber:
-        LifecyclePromptCacheObservationSubscriberConfig,
-    #[serde(default)]
     pub limit_reservation_ttl: LimitReservationTtlConfig,
-    #[serde(default)]
-    pub lifecycle_limit_reconcile_subscriber: LifecycleLimitReconcileSubscriberConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -118,8 +89,6 @@ pub struct ListenerConfig {
     #[serde(default = "default_metrics_addr")]
     pub metrics_addr: SocketAddr,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub unix_socket: Option<PathBuf>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tls: Option<TlsConfig>,
 }
 
@@ -129,7 +98,6 @@ impl Default for ListenerConfig {
             proxy_addr: default_proxy_addr(),
             admin_addr: default_admin_addr(),
             metrics_addr: default_metrics_addr(),
-            unix_socket: None,
             tls: None,
         }
     }
@@ -163,7 +131,6 @@ pub struct BodyConfig {
     pub messages_cap_bytes: u64,
     #[serde(default = "default_files_cap_bytes")]
     pub files_cap_bytes: u64,
-    pub per_route_overrides: HashMap<String, u64>,
 }
 
 impl Default for BodyConfig {
@@ -171,7 +138,6 @@ impl Default for BodyConfig {
         Self {
             messages_cap_bytes: DEFAULT_MESSAGES_CAP_BYTES,
             files_cap_bytes: DEFAULT_FILES_CAP_BYTES,
-            per_route_overrides: HashMap::new(),
         }
     }
 }
@@ -179,12 +145,6 @@ impl Default for BodyConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct TimeoutsConfig {
-    #[serde(default = "default_request_header_secs")]
-    pub request_header_secs: u64,
-    #[serde(default = "default_request_body_chunk_secs")]
-    pub request_body_chunk_secs: u64,
-    #[serde(default = "default_idle_secs")]
-    pub idle_secs: u64,
     #[serde(default = "default_upstream_total_secs")]
     pub upstream_total_secs: u64,
     #[serde(default = "default_drain_secs")]
@@ -194,9 +154,6 @@ pub struct TimeoutsConfig {
 impl Default for TimeoutsConfig {
     fn default() -> Self {
         Self {
-            request_header_secs: 10,
-            request_body_chunk_secs: 30,
-            idle_secs: 300,
             upstream_total_secs: 600,
             drain_secs: 60,
         }
@@ -320,8 +277,6 @@ pub struct ClusterConfig {
     pub instance_url: Option<String>,
     #[serde(default = "default_cluster_token_env")]
     pub token_env: String,
-    #[serde(default = "default_true")]
-    pub token_env_optional: bool,
 }
 
 impl Default for ClusterConfig {
@@ -329,7 +284,6 @@ impl Default for ClusterConfig {
         Self {
             instance_url: None,
             token_env: DEFAULT_CLUSTER_TOKEN_ENV.to_owned(),
-            token_env_optional: true,
         }
     }
 }
@@ -466,15 +420,11 @@ impl Default for PostgresPoolConfig {
 pub struct SchedulerConfig {
     #[serde(default)]
     pub separate_pool: SchedulerPoolConfig,
-    #[serde(default)]
-    pub retry_classes: SchedulerRetryClasses,
     #[serde(
         default = "default_scheduler_recurring_jobs",
         serialize_with = "serialize_recurring_jobs"
     )]
     pub recurring_jobs: HashMap<String, RecurringJobConfig>,
-    #[serde(default)]
-    pub idempotency: SchedulerIdempotencyConfig,
     #[serde(default = "default_scheduler_dlq_retention_days")]
     pub dlq_retention_days: u32,
     #[serde(default = "default_scheduler_entity_concurrency")]
@@ -483,25 +433,17 @@ pub struct SchedulerConfig {
     pub singleton_concurrency: usize,
     #[serde(default = "default_scheduler_keepalive_concurrency")]
     pub keepalive_concurrency: usize,
-    #[serde(default)]
-    pub staleness: SchedulerStalenessConfig,
-    #[serde(default)]
-    pub pgbouncer_transaction_mode: bool,
 }
 
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
             separate_pool: SchedulerPoolConfig::default(),
-            retry_classes: SchedulerRetryClasses::default(),
             recurring_jobs: default_scheduler_recurring_jobs(),
-            idempotency: SchedulerIdempotencyConfig::default(),
             dlq_retention_days: 30,
             entity_concurrency: 8,
             singleton_concurrency: 2,
             keepalive_concurrency: 4,
-            staleness: SchedulerStalenessConfig::default(),
-            pgbouncer_transaction_mode: false,
         }
     }
 }
@@ -538,48 +480,6 @@ impl Default for SchedulerPoolConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-pub struct SchedulerRetryClasses {
-    #[serde(default = "default_scheduler_retry_probe")]
-    pub probe: SchedulerRetryConfig,
-    #[serde(default = "default_scheduler_retry_adaptive")]
-    pub adaptive: SchedulerRetryConfig,
-    #[serde(default = "default_scheduler_retry_maintenance")]
-    pub maintenance: SchedulerRetryConfig,
-}
-
-impl Default for SchedulerRetryClasses {
-    fn default() -> Self {
-        Self {
-            probe: default_scheduler_retry_probe(),
-            adaptive: default_scheduler_retry_adaptive(),
-            maintenance: default_scheduler_retry_maintenance(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct SchedulerRetryConfig {
-    #[serde(default = "default_scheduler_retry_max_attempts")]
-    pub max_attempts: u32,
-    #[serde(default = "default_scheduler_retry_base_secs")]
-    pub base_secs: u64,
-    #[serde(default = "default_scheduler_retry_max_secs")]
-    pub max_secs: u64,
-}
-
-impl Default for SchedulerRetryConfig {
-    fn default() -> Self {
-        Self {
-            max_attempts: 3,
-            base_secs: 1,
-            max_secs: 5,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
 pub struct RecurringJobConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -595,34 +495,6 @@ impl Default for RecurringJobConfig {
             enabled: true,
             interval_secs: 3600,
             jitter_secs: 30,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct SchedulerIdempotencyConfig {
-    #[serde(default = "default_scheduler_claim_ttl_secs")]
-    pub claim_ttl_secs: u64,
-}
-
-impl Default for SchedulerIdempotencyConfig {
-    fn default() -> Self {
-        Self { claim_ttl_secs: 60 }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct SchedulerStalenessConfig {
-    #[serde(default = "default_scheduler_warmup_effect_retention_days")]
-    pub warmup_effect_retention_days: u32,
-}
-
-impl Default for SchedulerStalenessConfig {
-    fn default() -> Self {
-        Self {
-            warmup_effect_retention_days: 30,
         }
     }
 }
@@ -726,149 +598,6 @@ impl Default for PromptCacheShadowConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecycleHookAdapterConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for LifecycleHookAdapterConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecyclePricingSubscriberConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for LifecyclePricingSubscriberConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecycleCacheObservationSubscriberConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for LifecycleCacheObservationSubscriberConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecycleRateLimitHeaderSubscriberConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for LifecycleRateLimitHeaderSubscriberConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecycleSubscriptionQuotaSubscriberConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for LifecycleSubscriptionQuotaSubscriberConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecycleLimitRejectionAuditSubscriberConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for LifecycleLimitRejectionAuditSubscriberConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecycleApiKeyMetricsSubscriberConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for LifecycleApiKeyMetricsSubscriberConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecycleCacheHitMissSubscriberConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for LifecycleCacheHitMissSubscriberConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecycleRoutingTierSubscriberConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for LifecycleRoutingTierSubscriberConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecyclePromptCacheDriftSubscriberConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for LifecyclePromptCacheDriftSubscriberConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecyclePromptCacheObservationSubscriberConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for LifecyclePromptCacheObservationSubscriberConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
 /// Background TTL sweeper for stale limit reservations. The LimitEngine
 /// periodically walks its reservation map and full-refunds any reservation
 /// older than `ttl_secs`; the sweeper runs unconditionally because the
@@ -897,28 +626,6 @@ fn default_limit_reservation_ttl_secs() -> u64 {
 
 fn default_limit_reservation_tick_secs() -> u64 {
     30
-}
-
-/// Post-response limit reservation reconciliation subscriber.
-///
-/// Default: `enabled=true` — subscriber reconciles reservations after the
-/// response lifecycle terminates. Set `enabled=false` to opt out entirely;
-/// reservations then reconcile only via TTL refund.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecycleLimitReconcileSubscriberConfig {
-    #[serde(default = "default_true_bool")]
-    pub enabled: bool,
-}
-
-impl Default for LifecycleLimitReconcileSubscriberConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-fn default_true_bool() -> bool {
-    true
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1024,8 +731,6 @@ pub struct ObservabilityConfig {
     pub tracing_level: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub otlp_endpoint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prometheus_endpoint: Option<String>,
     #[serde(default = "default_true")]
     pub log_redaction: bool,
     pub user_prompt_redaction: bool,
@@ -1036,7 +741,6 @@ impl Default for ObservabilityConfig {
         Self {
             tracing_level: default_tracing_level(),
             otlp_endpoint: None,
-            prometheus_endpoint: None,
             log_redaction: true,
             user_prompt_redaction: false,
         }
@@ -1100,65 +804,6 @@ impl Default for BulkheadConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct DnsConfig {
-    #[serde(default = "default_dns_cache_ttl_floor_secs")]
-    pub cache_ttl_floor_secs: u64,
-    #[serde(default = "default_dns_cache_ttl_ceiling_secs")]
-    pub cache_ttl_ceiling_secs: u64,
-}
-
-impl Default for DnsConfig {
-    fn default() -> Self {
-        Self {
-            cache_ttl_floor_secs: 30,
-            cache_ttl_ceiling_secs: 300,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(default)]
-pub struct EgressConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allowed_hosts: Option<Vec<String>>,
-}
-
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct ConfigOverrides {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub listener: Option<ListenerOverrides>,
-}
-
-impl ConfigOverrides {
-    pub fn from_listener(listener: ListenerOverrides) -> Self {
-        if listener.is_empty() {
-            Self::default()
-        } else {
-            Self {
-                listener: Some(listener),
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct ListenerOverrides {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub proxy_addr: Option<SocketAddr>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub admin_addr: Option<SocketAddr>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metrics_addr: Option<SocketAddr>,
-}
-
-impl ListenerOverrides {
-    fn is_empty(&self) -> bool {
-        self.proxy_addr.is_none() && self.admin_addr.is_none() && self.metrics_addr.is_none()
-    }
-}
-
 fn default_proxy_addr() -> SocketAddr {
     SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 8080)
 }
@@ -1205,18 +850,6 @@ fn default_partial_retention_max_entries() -> usize {
 
 fn default_cluster_token_env() -> String {
     DEFAULT_CLUSTER_TOKEN_ENV.to_owned()
-}
-
-fn default_request_header_secs() -> u64 {
-    TimeoutsConfig::default().request_header_secs
-}
-
-fn default_request_body_chunk_secs() -> u64 {
-    TimeoutsConfig::default().request_body_chunk_secs
-}
-
-fn default_idle_secs() -> u64 {
-    TimeoutsConfig::default().idle_secs
 }
 
 fn default_upstream_total_secs() -> u64 {
@@ -1339,52 +972,12 @@ fn recurring_job_config(interval_secs: u64, jitter_secs: u64) -> RecurringJobCon
     }
 }
 
-fn default_scheduler_retry_probe() -> SchedulerRetryConfig {
-    SchedulerRetryConfig {
-        max_attempts: 3,
-        base_secs: 1,
-        max_secs: 5,
-    }
-}
-
-fn default_scheduler_retry_adaptive() -> SchedulerRetryConfig {
-    SchedulerRetryConfig {
-        max_attempts: 5,
-        base_secs: 30,
-        max_secs: 600,
-    }
-}
-
-fn default_scheduler_retry_maintenance() -> SchedulerRetryConfig {
-    SchedulerRetryConfig {
-        max_attempts: 1,
-        base_secs: 60,
-        max_secs: 60,
-    }
-}
-
-fn default_scheduler_retry_max_attempts() -> u32 {
-    SchedulerRetryConfig::default().max_attempts
-}
-
-fn default_scheduler_retry_base_secs() -> u64 {
-    SchedulerRetryConfig::default().base_secs
-}
-
-fn default_scheduler_retry_max_secs() -> u64 {
-    SchedulerRetryConfig::default().max_secs
-}
-
 fn default_recurring_job_interval_secs() -> u64 {
     RecurringJobConfig::default().interval_secs
 }
 
 fn default_recurring_job_jitter_secs() -> u64 {
     RecurringJobConfig::default().jitter_secs
-}
-
-fn default_scheduler_claim_ttl_secs() -> u64 {
-    SchedulerIdempotencyConfig::default().claim_ttl_secs
 }
 
 fn default_scheduler_dlq_retention_days() -> u32 {
@@ -1401,10 +994,6 @@ fn default_scheduler_singleton_concurrency() -> usize {
 
 fn default_scheduler_keepalive_concurrency() -> usize {
     SchedulerConfig::default().keepalive_concurrency
-}
-
-fn default_scheduler_warmup_effect_retention_days() -> u32 {
-    SchedulerStalenessConfig::default().warmup_effect_retention_days
 }
 
 fn default_tracing_level() -> String {
@@ -1452,14 +1041,6 @@ fn default_semaphore_per_upstream() -> u32 {
     BulkheadConfig::default().semaphore_per_upstream
 }
 
-fn default_dns_cache_ttl_floor_secs() -> u64 {
-    DnsConfig::default().cache_ttl_floor_secs
-}
-
-fn default_dns_cache_ttl_ceiling_secs() -> u64 {
-    DnsConfig::default().cache_ttl_ceiling_secs
-}
-
 fn default_subscription_quota_writer_batch_max_records() -> u32 {
     SubscriptionQuotaConfig::default().writer_batch_max_records
 }
@@ -1491,25 +1072,23 @@ fn default_prompt_cache_shadow_max_live_entries_per_partition() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Config, ConfigOverrides};
-    use std::fs;
+    use crate::Config;
+    use serde_json::json;
 
-    fn load_config(toml: &str) -> Result<Config, crate::ConfigError> {
-        let temp_file = tempfile::NamedTempFile::new().expect("create temp config");
-        fs::write(temp_file.path(), toml).expect("write temp config");
-        Config::load_with_overrides(temp_file.path(), ConfigOverrides::default())
+    fn load_config(value: serde_json::Value) -> Result<Config, crate::ConfigError> {
+        let mut config: Config = serde_json::from_value(value)
+            .map_err(|source| figment::Error::from(source.to_string()))?;
+        config.resolve_runtime_values();
+        config.validate()?;
+        Ok(config)
     }
 
     #[test]
     fn valid_api_key_mode_deserializes() {
-        let config = load_config(
-            r#"
-[downstream_auth]
-mode = "api_key"
-
-[api_keys]
-"#,
-        )
+        let config = load_config(json!({
+            "downstream_auth": { "mode": "api_key" },
+            "api_keys": {}
+        }))
         .expect("config should load");
 
         assert_eq!(config.downstream_auth.mode, DownstreamAuthMode::ApiKey);
@@ -1518,18 +1097,16 @@ mode = "api_key"
 
     #[test]
     fn valid_none_mode_deserializes() {
-        let config = load_config(
-            r#"
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "anon"
-upstream_kind = "anthropic_key"
-
-[api_keys]
-"#,
-        )
+        let config = load_config(json!({
+            "downstream_auth": {
+                "mode": "none",
+                "none_mode": {
+                    "principal_id": "anon",
+                    "upstream_kind": "anthropic_key"
+                }
+            },
+            "api_keys": {}
+        }))
         .expect("config should load");
 
         assert_eq!(config.downstream_auth.mode, DownstreamAuthMode::None);
@@ -1558,26 +1135,24 @@ upstream_kind = "anthropic_key"
             DEFAULT_PG_NOTIFY_CHANNEL
         );
 
-        let config = load_config(
-            r#"
-[storage]
-kind = "postgres"
-url = "postgres://localhost/cc_lb"
-
-[event_bus]
-broadcast_capacity = 8192
-transport = "pg_notify"
-storage_tail_poll_interval_ms = 125
-pg_notify_channel = "cc_lb_events_partial_custom"
-partial_retention_ttl_secs = 60
-partial_retention_max_entries = 256
-
-[cluster]
-instance_url = "http://127.0.0.1:9090"
-
-[api_keys]
-"#,
-        )
+        let config = load_config(json!({
+            "storage": {
+                "kind": "postgres",
+                "url": "postgres://localhost/cc_lb"
+            },
+            "event_bus": {
+                "broadcast_capacity": 8192,
+                "transport": "pg_notify",
+                "storage_tail_poll_interval_ms": 125,
+                "pg_notify_channel": "cc_lb_events_partial_custom",
+                "partial_retention_ttl_secs": 60,
+                "partial_retention_max_entries": 256
+            },
+            "cluster": {
+                "instance_url": "http://127.0.0.1:9090"
+            },
+            "api_keys": {}
+        }))
         .expect("config should load");
 
         assert_eq!(config.event_bus.broadcast_capacity, 8192);
@@ -1593,17 +1168,15 @@ instance_url = "http://127.0.0.1:9090"
 
     #[test]
     fn pg_notify_requires_postgres_and_instance_url() {
-        let sqlite_error = load_config(
-            r#"
-[event_bus]
-transport = "pg_notify"
-
-[cluster]
-instance_url = "http://127.0.0.1:9090"
-
-[api_keys]
-"#,
-        )
+        let sqlite_error = load_config(json!({
+            "event_bus": {
+                "transport": "pg_notify"
+            },
+            "cluster": {
+                "instance_url": "http://127.0.0.1:9090"
+            },
+            "api_keys": {}
+        }))
         .expect_err("sqlite pg_notify should fail validation");
         assert!(
             sqlite_error
@@ -1611,32 +1184,26 @@ instance_url = "http://127.0.0.1:9090"
                 .contains("requires postgres storage")
         );
 
-        let missing_url = load_config(
-            r#"
-[storage]
-kind = "postgres"
-url = "postgres://localhost/cc_lb"
-
-[event_bus]
-transport = "pg_notify"
-
-[api_keys]
-"#,
-        )
+        let missing_url = load_config(json!({
+            "storage": {
+                "kind": "postgres",
+                "url": "postgres://localhost/cc_lb"
+            },
+            "event_bus": {
+                "transport": "pg_notify"
+            },
+            "api_keys": {}
+        }))
         .expect_err("pg_notify without instance_url should fail validation");
         assert!(missing_url.to_string().contains("cluster.instance_url"));
     }
 
     #[test]
     fn none_mode_missing_fails_validation() {
-        let error = load_config(
-            r#"
-[downstream_auth]
-mode = "none"
-
-[api_keys]
-"#,
-        )
+        let error = load_config(json!({
+            "downstream_auth": { "mode": "none" },
+            "api_keys": {}
+        }))
         .expect_err("config should fail validation");
 
         assert!(
@@ -1648,18 +1215,16 @@ mode = "none"
 
     #[test]
     fn api_key_mode_rejects_none_mode() {
-        let error = load_config(
-            r#"
-[downstream_auth]
-mode = "api_key"
-
-[downstream_auth.none_mode]
-principal_id = "anon"
-upstream_kind = "anthropic_key"
-
-[api_keys]
-"#,
-        )
+        let error = load_config(json!({
+            "downstream_auth": {
+                "mode": "api_key",
+                "none_mode": {
+                    "principal_id": "anon",
+                    "upstream_kind": "anthropic_key"
+                }
+            },
+            "api_keys": {}
+        }))
         .expect_err("config should fail validation");
 
         assert!(
@@ -1667,36 +1232,5 @@ upstream_kind = "anthropic_key"
                 .to_string()
                 .contains("downstream_auth.none_mode must be set iff mode=none")
         );
-    }
-
-    fn legacy_removed_message() -> String {
-        let legacy_plugin_section = ["authn", "_", "plugin"].concat();
-        [
-            "v2 removed `plugins.",
-            &legacy_plugin_section,
-            "` / `principals.*.quotas`; use `downstream_auth.mode` + `principals.*.default_limits` (sk-cclb-* API keys)",
-        ]
-        .concat()
-    }
-
-    #[test]
-    fn legacy_plugin_rejected() {
-        let legacy_plugin_section = ["authn", "_", "plugin"].concat();
-        let config_toml = format!(
-            "[plugins.{}]\nname = \"legacy\"\n\n[api_keys]\n",
-            legacy_plugin_section
-        );
-        let error = load_config(&config_toml).expect_err("legacy plugin should fail");
-
-        assert!(error.to_string().contains(&legacy_removed_message()));
-    }
-
-    #[test]
-    fn legacy_principal_quotas_rejected() {
-        let legacy_header = ["[", "principals", ".u1.quotas]"].concat();
-        let config_toml = format!("\n{legacy_header}\ndefault_window_secs = 60\n\n[api_keys]\n");
-        let error = load_config(&config_toml).expect_err("legacy quotas should fail");
-
-        assert!(error.to_string().contains(&legacy_removed_message()));
     }
 }

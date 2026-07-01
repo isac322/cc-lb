@@ -1,0 +1,474 @@
+{
+  "schema": {
+    "$defs": {
+      "AnthropicOAuthConfig": {
+        "properties": {
+          "auth_url": {
+            "format": "uri",
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "redirect_uri": {
+            "format": "uri",
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "token_url": {
+            "format": "uri",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ApiKeysConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "price_catalog": {
+            "$ref": "#/$defs/PriceCatalogConfig"
+          },
+          "usage_retention_days": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "BodyConfig": {
+        "properties": {
+          "files_cap_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "messages_cap_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "BulkheadConfig": {
+        "properties": {
+          "max_conns_per_upstream": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "semaphore_per_upstream": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "CircuitBreakerConfig": {
+        "properties": {
+          "failures_to_open": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "half_open_after_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "window_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "DownstreamAuthConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "$ref": "#/$defs/DownstreamAuthMode"
+          },
+          "none_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/NoneModeConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "DownstreamAuthMode": {
+        "enum": ["none", "api_key"],
+        "type": "string"
+      },
+      "Duration": {
+        "properties": {
+          "nanos": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": ["secs", "nanos"],
+        "type": "object"
+      },
+      "NoneModeConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "principal_id": {
+            "type": "string"
+          },
+          "upstream_kind": {
+            "$ref": "#/$defs/NoneModeUpstreamKind"
+          }
+        },
+        "type": "object"
+      },
+      "NoneModeUpstreamKind": {
+        "enum": ["anthropic_key", "anthropic_o_auth"],
+        "type": "string"
+      },
+      "OAuthConfig": {
+        "properties": {
+          "anthropic": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AnthropicOAuthConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ObservabilityConfig": {
+        "properties": {
+          "log_redaction": {
+            "type": "boolean"
+          },
+          "otlp_endpoint": {
+            "type": ["string", "null"]
+          },
+          "tracing_level": {
+            "type": "string"
+          },
+          "user_prompt_redaction": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "PostgresPoolConfig": {
+        "properties": {
+          "acquire_timeout_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "idle_timeout_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_connections": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min_connections": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sslmode": {
+            "type": "string"
+          },
+          "statement_timeout_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "PriceCatalogConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "cache_path": {
+            "type": "string"
+          },
+          "refresh_interval": {
+            "$ref": "#/$defs/Duration"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "PromptCacheShadowConfig": {
+        "description": "Prompt cache shadow mode configuration.\n\nControls the prompt cache observation cache behavior. When `enabled=false`, the cache layer\nis not constructed and observation flow is gated off at the lifecycle level for byte-equivalent\npre-T22 behavior (no observation enqueue, no snapshot, no sweeper). When `enabled=true`,\nthe full cache pipeline activates: observations from successful responses are decoded,\nupserted into the in-memory cache, and enqueued for persistent storage; `build_candidates`\nsnapshots cache state per upstream to compute cache scores.\n\nConfiguration keys and defaults:\n- `enabled` (default: false) - gate all observation flow and sweeper spawn\n- `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed\n- `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence\n- `warm_set_cap` (default: 32) - max snapshot entries per upstream/model",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "grace_margin_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "refresh_debounce_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "warm_set_cap": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "RecurringJobConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "interval_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "jitter_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "RuntimeConfig": {
+        "properties": {
+          "startup_handshake": {
+            "$ref": "#/$defs/StartupHandshakeConfig"
+          }
+        },
+        "type": "object"
+      },
+      "SchedulerConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "dlq_retention_days": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "entity_concurrency": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "leader_lock_key": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "recurring_jobs": {
+            "additionalProperties": {
+              "$ref": "#/$defs/RecurringJobConfig"
+            },
+            "type": "object"
+          },
+          "separate_pool": {
+            "$ref": "#/$defs/SchedulerPoolConfig"
+          },
+          "singleton_concurrency": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SchedulerPoolConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "acquire_timeout_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "idle_timeout_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_connections": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min_connections": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sslmode": {
+            "type": "string"
+          },
+          "statement_timeout_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "StartupHandshakeConfig": {
+        "properties": {
+          "force": {
+            "type": "boolean"
+          },
+          "skip_if_fresh": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "SubscriptionQuotaConfig": {
+        "properties": {
+          "dedup_elapsed_override_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "gc_batch_size": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "retention_days": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "routing_max_staleness_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "writer_batch_max_records": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "writer_channel_capacity": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "writer_flush_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "TimeoutsConfig": {
+        "properties": {
+          "drain_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "upstream_total_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "api_keys": {
+        "$ref": "#/$defs/ApiKeysConfig"
+      },
+      "body": {
+        "$ref": "#/$defs/BodyConfig"
+      },
+      "bulkhead": {
+        "$ref": "#/$defs/BulkheadConfig"
+      },
+      "circuit_breaker": {
+        "$ref": "#/$defs/CircuitBreakerConfig"
+      },
+      "downstream_auth": {
+        "$ref": "#/$defs/DownstreamAuthConfig"
+      },
+      "oauth": {
+        "$ref": "#/$defs/OAuthConfig"
+      },
+      "observability": {
+        "$ref": "#/$defs/ObservabilityConfig"
+      },
+      "prompt_cache_shadow": {
+        "$ref": "#/$defs/PromptCacheShadowConfig"
+      },
+      "runtime": {
+        "$ref": "#/$defs/RuntimeConfig"
+      },
+      "scheduler": {
+        "$ref": "#/$defs/SchedulerConfig"
+      },
+      "subscription_quota": {
+        "$ref": "#/$defs/SubscriptionQuotaConfig"
+      },
+      "timeouts": {
+        "$ref": "#/$defs/TimeoutsConfig"
+      }
+    },
+    "title": "Config",
+    "type": "object"
+  },
+  "coverage_checklist": [
+    "body",
+    "timeouts",
+    "downstream_auth",
+    "api_keys",
+    "scheduler",
+    "observability",
+    "oauth",
+    "subscription_quota",
+    "runtime",
+    "circuit_breaker",
+    "bulkhead",
+    "prompt_cache_shadow"
+  ]
+}

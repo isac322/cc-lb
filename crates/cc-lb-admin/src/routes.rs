@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     Json, Router,
     body::Body,
@@ -62,6 +64,8 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/v1/config/current", get(get_config))
         .route("/admin/config/schema", get(get_config_schema))
         .route("/admin/v1/config/schema", get(get_config_schema))
+        .route("/admin/config/boot-env", get(get_boot_env))
+        .route("/admin/v1/config/boot-env", get(get_boot_env))
         .route(
             "/admin/config/draft",
             get(get_config_draft).put(put_config_draft),
@@ -388,9 +392,27 @@ async fn put_config_draft(
     }
 }
 
-async fn apply_config_draft(State(state): State<AdminState>) -> axum::response::Response {
-    match state.config.apply_draft_config() {
-        Ok(_config) => {
+async fn apply_config_draft(
+    State(state): State<AdminState>,
+    Json(request): Json<crate::settings::ApplyConfigRequest>,
+) -> axum::response::Response {
+    let storage = match config_storage(&state) {
+        Ok(storage) => storage,
+        Err(error) => return settings_error_response(error, false),
+    };
+    let reloader: Arc<dyn crate::ConfigReloader> = match state.config_reloader.clone() {
+        Some(reloader) => reloader,
+        None => {
+            return settings_error_response(
+                crate::settings::SettingsError::ConfigWatcherMissing,
+                false,
+            );
+        }
+    };
+    let reloader_ref: &dyn crate::ConfigReloader = reloader.as_ref();
+    let applied_at = cc_lb_clock::unix_secs(state.clock.now());
+    match crate::settings::apply_config(storage, Some(reloader_ref), request, applied_at).await {
+        Ok(response) => {
             emit_admin_action(
                 &state,
                 "config_apply_runtime",
@@ -398,26 +420,16 @@ async fn apply_config_draft(State(state): State<AdminState>) -> axum::response::
                 None,
                 200,
             );
-            Json(json!({
-                "status": "applied",
-            }))
-            .into_response()
+            Json(response).into_response()
         }
-        Err(error) => config_draft_error_response(error),
+        Err(error) => settings_error_response(error, false),
     }
 }
 
-fn config_draft_error_response(error: crate::ConfigDraftError) -> axum::response::Response {
-    let status = match error {
-        crate::ConfigDraftError::Unavailable => StatusCode::NOT_IMPLEMENTED,
-        crate::ConfigDraftError::MissingDraft => StatusCode::NOT_FOUND,
-        crate::ConfigDraftError::Invalid(_) => StatusCode::BAD_REQUEST,
-    };
-    (
-        status,
-        Json(json!({ "error": { "message": error.to_string() } })),
-    )
-        .into_response()
+async fn get_boot_env(State(state): State<AdminState>) -> axum::response::Response {
+    let config = state.config.current_config();
+    let boot = cc_lb_config::BootEnv::from_config(&config);
+    Json(boot.dashboard_view()).into_response()
 }
 
 async fn get_config_schema() -> axum::response::Response {
@@ -547,9 +559,7 @@ fn settings_error_response(
             Json(json!({ "error": "validation_failed", "detail": detail })),
         )
             .into_response(),
-        crate::settings::SettingsError::ConfigPathMissing => {
-            dashboard_error(StatusCode::SERVICE_UNAVAILABLE, "config_path_missing")
-        }
+
         crate::settings::SettingsError::ConfigWatcherMissing => {
             dashboard_error(StatusCode::SERVICE_UNAVAILABLE, "config_watcher_missing")
         }
@@ -591,17 +601,18 @@ fn dashboard_error(status: StatusCode, error: &str) -> axum::response::Response 
     (status, Json(json!({ "error": error }))).into_response()
 }
 
-async fn reload_config(State(_state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
-    #[cfg(unix)]
-    {
-        if let Err(e) =
-            nix::sys::signal::kill(nix::unistd::Pid::this(), nix::sys::signal::Signal::SIGHUP)
-        {
-            tracing::error!("failed to send SIGHUP: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+async fn reload_config(State(state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
+    let Some(reloader) = state.config_reloader.clone() else {
+        tracing::warn!("config reload requested but no reloader registered");
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    match reloader.reload_now() {
+        Ok(()) => Ok(Json(json!({ "status": "ok", "reloading": true }))),
+        Err(detail) => {
+            tracing::error!(error = %detail, "config reload failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
-    Ok(Json(json!({ "status": "ok", "reloading": true })))
 }
 
 fn emit_admin_action(

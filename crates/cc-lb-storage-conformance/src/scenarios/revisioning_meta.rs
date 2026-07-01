@@ -347,9 +347,6 @@ where
 
 fn history_summary(seed: u64) -> HistorySummary {
     HistorySummary {
-        upstreams: seed as usize,
-        principals: (seed + 1) as usize,
-        plugin_count: (seed + 2) as usize,
         tls_enabled: seed.is_multiple_of(2),
     }
 }

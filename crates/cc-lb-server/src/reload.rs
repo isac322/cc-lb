@@ -1,26 +1,22 @@
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use cc_lb_admin::{DynamicViewRebinder, LastReloadStatus, ReloadOutcome};
-use cc_lb_config::{
-    Config, ConfigError, RestartRequiredField, StorageConfig, WasmtimeAllocationStrategy,
-};
+use cc_lb_config::{BootEnv, Config, ConfigError, RestartRequiredField, StorageConfig};
 use cc_lb_engine::DynamicViewHolder;
 use cc_lb_engine::clock::{ClockHandle, unix_secs};
-use notify::{Event, RecursiveMode, Watcher};
+use cc_lb_storage_api::Storage;
 use thiserror::Error;
-use tokio::sync::{broadcast, mpsc};
-use tokio::task::JoinHandle;
+use tokio::sync::broadcast;
 
-const DEBOUNCE: Duration = Duration::from_millis(500);
 const BROADCAST_CAPACITY: usize = 16;
 
 pub struct ConfigWatcher {
-    path: PathBuf,
+    boot: Arc<BootEnv>,
+    storage: Arc<dyn Storage>,
     process_start_config: Arc<Config>,
     current: ArcSwap<Config>,
     reload_tx: broadcast::Sender<Arc<Config>>,
@@ -33,16 +29,18 @@ pub struct ConfigWatcher {
 
 impl ConfigWatcher {
     pub fn new(
-        path: impl AsRef<Path>,
+        boot: Arc<BootEnv>,
+        storage: Arc<dyn Storage>,
         initial_config: Config,
         _runtime: Arc<WasmtimeRuntime>,
         clock: ClockHandle,
     ) -> Self {
-        Self::new_with_principal_view(path, initial_config, _runtime, None, clock)
+        Self::new_with_principal_view(boot, storage, initial_config, _runtime, None, clock)
     }
 
     pub fn new_with_principal_view(
-        path: impl AsRef<Path>,
+        boot: Arc<BootEnv>,
+        storage: Arc<dyn Storage>,
         initial_config: Config,
         _runtime: Arc<WasmtimeRuntime>,
         dynamic_view: Option<Arc<DynamicViewHolder>>,
@@ -51,7 +49,8 @@ impl ConfigWatcher {
         let (reload_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let process_start_config = Arc::new(initial_config.clone());
         Self {
-            path: path.as_ref().to_path_buf(),
+            boot,
+            storage,
             process_start_config,
             current: ArcSwap::from_pointee(initial_config),
             reload_tx,
@@ -85,40 +84,28 @@ impl ConfigWatcher {
         self.reloads_attempted.load(Ordering::Acquire)
     }
 
-    pub fn spawn_file_watcher(self: &Arc<Self>) -> JoinHandle<()> {
-        let watcher = Arc::clone(self);
-        tokio::spawn(async move {
-            watcher.watch_file_changes().await;
-        })
-    }
-
-    pub async fn watch_file_changes(self: Arc<Self>) {
-        if let Err(source) = self.run_file_watch().await {
-            tracing::warn!(
-                path = %self.path.display(),
-                error = %source,
-                "configuration file watch stopped"
-            );
-        }
-    }
-
     pub fn reload_now(&self) -> Result<Arc<Config>, ReloadError> {
-        self.reload_from_path(false)
-    }
+        let overlay = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.storage.get_effective_config())
+        })
+        .map_err(|source| {
+            self.record_attempt();
+            self.record_failure(source.to_string(), None, None);
+            ReloadError::Storage(source.to_string())
+        })?;
 
-    fn reload_from_path(&self, skip_unchanged: bool) -> Result<Arc<Config>, ReloadError> {
-        let config_path = self.config_path_string();
-        let new_config = match Config::load(&self.path) {
+        let overlay_value = overlay.map(|effective| effective.config);
+        let new_config = match Config::compose(&self.boot, overlay_value) {
             Ok(config) => config,
             Err(source) => {
                 self.record_attempt();
-                self.record_failure(source.to_string(), None, None, config_path);
+                self.record_failure(source.to_string(), None, None);
                 return Err(ReloadError::Config(source));
             }
         };
 
         let current_config = self.current_config();
-        if skip_unchanged && *current_config == new_config {
+        if *current_config == new_config {
             return Ok(current_config);
         }
 
@@ -141,77 +128,28 @@ impl ConfigWatcher {
         }
         self.current.store(Arc::clone(&new_config));
         metrics::counter!("cc_lb_config_reload_total", "outcome" => "success").increment(1);
-        self.record_success(config_path);
+        self.record_success();
         let _receivers = self.reload_tx.send(Arc::clone(&new_config));
-        tracing::info!(path = %self.path.display(), "configuration reload accepted");
+        tracing::info!("configuration reload accepted");
         Ok(new_config)
-    }
-
-    async fn run_file_watch(&self) -> Result<(), FileWatchError> {
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        let mut watcher = notify::recommended_watcher(move |event| {
-            let _sent = event_tx.send(event);
-        })?;
-        let watch_dir = watch_dir_for(&self.path);
-        watcher.watch(&watch_dir, RecursiveMode::NonRecursive)?;
-
-        while let Some(event) = event_rx.recv().await {
-            if event_matches_config(&self.path, event) {
-                self.debounce_and_reload(&mut event_rx).await;
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn debounce_and_reload(
-        &self,
-        event_rx: &mut mpsc::UnboundedReceiver<notify::Result<Event>>,
-    ) {
-        let deadline = tokio::time::sleep_until(tokio::time::Instant::now() + DEBOUNCE);
-        tokio::pin!(deadline);
-
-        loop {
-            tokio::select! {
-                _ = &mut deadline => break,
-                event = event_rx.recv() => {
-                    let Some(event) = event else {
-                        return;
-                    };
-                    if event_matches_config(&self.path, event) {
-                        deadline.as_mut().reset(tokio::time::Instant::now() + DEBOUNCE);
-                    }
-                }
-            }
-        }
-
-        let _result = self.reload_from_path(true);
     }
 
     fn record_attempt(&self) {
         self.reloads_attempted.fetch_add(1, Ordering::AcqRel);
     }
 
-    fn record_success(&self, config_path: Option<String>) {
+    fn record_success(&self) {
         self.last_reload_status
             .store(Arc::new(Some(LastReloadStatus {
                 timestamp_unix_secs: unix_secs(self.clock.now()),
                 outcome: ReloadOutcome::Success,
-                config_path,
             })));
     }
 
-    fn record_failure(
-        &self,
-        reason: String,
-        principal: Option<String>,
-        plugin: Option<String>,
-        config_path: Option<String>,
-    ) {
+    fn record_failure(&self, reason: String, principal: Option<String>, plugin: Option<String>) {
         metrics::counter!("cc_lb_config_reload_total", "outcome" => "failure").increment(1);
         metrics::counter!("cc_lb_config_reload_failed_total").increment(1);
         tracing::warn!(
-            path = %self.path.display(),
             error = %reason,
             principal = principal.as_deref(),
             plugin = plugin.as_deref(),
@@ -225,12 +163,7 @@ impl ConfigWatcher {
                     principal,
                     plugin,
                 },
-                config_path,
             })));
-    }
-
-    fn config_path_string(&self) -> Option<String> {
-        Some(self.path.display().to_string())
     }
 }
 
@@ -239,16 +172,21 @@ impl cc_lb_admin::CurrentConfig for ConfigWatcher {
         ConfigWatcher::current_config(self)
     }
 
-    fn last_reload_status(&self) -> Option<LastReloadStatus> {
-        self.last_reload_status.load().as_ref().clone()
-    }
-
     fn restart_required_changes(&self) -> Vec<RestartRequiredField> {
         summarize_restart_required(&self.process_start_config, &self.current_config())
     }
 
-    fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {
-        self.dynamic_view_rebinder.lock().ok()?.clone()
+    fn last_reload_status(&self) -> Option<LastReloadStatus> {
+        let guard = self.last_reload_status.load();
+        guard.as_ref().clone()
+    }
+}
+
+impl cc_lb_admin::ConfigReloader for ConfigWatcher {
+    fn reload_now(&self) -> Result<(), String> {
+        ConfigWatcher::reload_now(self)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -256,389 +194,365 @@ impl cc_lb_admin::CurrentConfig for ConfigWatcher {
 pub enum ReloadError {
     #[error(transparent)]
     Config(#[from] ConfigError),
+    #[error("storage read failed: {0}")]
+    Storage(String),
 }
 
-#[derive(Debug, Error)]
-enum FileWatchError {
-    #[error(transparent)]
-    Notify(#[from] notify::Error),
-}
-
-pub fn summarize_restart_required(
-    current: &Config,
-    new_config: &Config,
-) -> Vec<RestartRequiredField> {
+/// Diff a current vs a candidate `Config` and return every field that is
+/// captured at process startup and therefore requires a restart to take
+/// effect. The list is intentionally conservative: any field that is read
+/// once at `run_serve()` boot and never re-read through `current_config()`
+/// must appear here so the dashboard can warn operators honestly.
+pub fn summarize_restart_required(current: &Config, new: &Config) -> Vec<RestartRequiredField> {
     let mut changes = Vec::new();
-    push_changed(
+
+    // ----- Boot-only (env-bound; should never differ via dashboard, but keep
+    // for defence-in-depth in case BootEnv reconstruction differs.) -----
+    push_if_changed(
         &mut changes,
         "listener.proxy_addr",
-        current.listener.proxy_addr.to_string(),
-        new_config.listener.proxy_addr.to_string(),
-        "socket binding changes require a process restart",
+        &current.listener.proxy_addr,
+        &new.listener.proxy_addr,
+        "rebinding the proxy socket requires a process restart",
     );
-    push_changed(
+    push_if_changed(
         &mut changes,
         "listener.admin_addr",
-        current.listener.admin_addr.to_string(),
-        new_config.listener.admin_addr.to_string(),
-        "socket binding changes require a process restart",
+        &current.listener.admin_addr,
+        &new.listener.admin_addr,
+        "rebinding the admin socket requires a process restart",
     );
-    push_changed(
+    push_if_changed(
         &mut changes,
         "listener.metrics_addr",
-        current.listener.metrics_addr.to_string(),
-        new_config.listener.metrics_addr.to_string(),
-        "socket binding changes require a process restart",
+        &current.listener.metrics_addr,
+        &new.listener.metrics_addr,
+        "rebinding the metrics socket requires a process restart",
     );
-    push_changed(
+    push_if_changed_str(
         &mut changes,
-        "listener.tls.cert_path",
-        path_option_string(
-            current
-                .listener
-                .tls
-                .as_ref()
-                .and_then(|tls| tls.cert_path.as_ref()),
-        ),
-        path_option_string(
-            new_config
-                .listener
-                .tls
-                .as_ref()
-                .and_then(|tls| tls.cert_path.as_ref()),
-        ),
-        "listener TLS certificate changes require a process restart",
+        "storage.kind",
+        storage_kind(&current.storage),
+        storage_kind(&new.storage),
+        "switching storage backends requires a process restart",
     );
-    push_changed(
-        &mut changes,
-        "listener.tls.key_path",
-        path_option_string(
-            current
-                .listener
-                .tls
-                .as_ref()
-                .and_then(|tls| tls.key_path.as_ref()),
-        ),
-        path_option_string(
-            new_config
-                .listener
-                .tls
-                .as_ref()
-                .and_then(|tls| tls.key_path.as_ref()),
-        ),
-        "listener TLS key changes require a process restart",
-    );
-    push_changed(
-        &mut changes,
-        "tls.cert_path",
-        path_option_string(current.tls.as_ref().and_then(|tls| tls.cert_path.as_ref())),
-        path_option_string(
-            new_config
-                .tls
-                .as_ref()
-                .and_then(|tls| tls.cert_path.as_ref()),
-        ),
-        "TLS certificate changes require a process restart",
-    );
-    push_changed(
-        &mut changes,
-        "tls.key_path",
-        path_option_string(current.tls.as_ref().and_then(|tls| tls.key_path.as_ref())),
-        path_option_string(
-            new_config
-                .tls
-                .as_ref()
-                .and_then(|tls| tls.key_path.as_ref()),
-        ),
-        "TLS key changes require a process restart",
-    );
-    summarize_storage_restart_required(&mut changes, &current.storage, &new_config.storage);
-    push_changed(
+    push_if_changed(
         &mut changes,
         "aead.key_env",
-        current.aead.key_env.clone(),
-        new_config.aead.key_env.clone(),
-        "storage encryption key environment changes require a process restart",
+        &current.aead.key_env,
+        &new.aead.key_env,
+        "rotating the AEAD master key env requires a restart",
     );
-    summarize_wasmtime_restart_required(&mut changes, current, new_config);
-    summarize_oauth_restart_required(&mut changes, current, new_config);
-    summarize_lifecycle_subscriber_restart_required(&mut changes, current, new_config);
+    let current_tls_cert = current
+        .listener
+        .tls
+        .as_ref()
+        .and_then(|tls| tls.cert_path.as_ref());
+    let new_tls_cert = new
+        .listener
+        .tls
+        .as_ref()
+        .and_then(|tls| tls.cert_path.as_ref());
+    push_if_changed_opt_path(
+        &mut changes,
+        "listener.tls.cert_path",
+        current_tls_cert,
+        new_tls_cert,
+        "TLS cert path is loaded at startup",
+    );
+
+    // ----- Runtime fields captured at startup (snapshot semantics). -----
+    // Body caps are baked into `LifecycleConfig` at `build_app_with_path_inner`.
+    push_if_changed(
+        &mut changes,
+        "body.messages_cap_bytes",
+        &current.body.messages_cap_bytes,
+        &new.body.messages_cap_bytes,
+        "body cap is baked into the lifecycle pipeline at startup",
+    );
+    push_if_changed(
+        &mut changes,
+        "body.files_cap_bytes",
+        &current.body.files_cap_bytes,
+        &new.body.files_cap_bytes,
+        "body cap is baked into the lifecycle pipeline at startup",
+    );
+
+    // Downstream auth: BuiltinAuthn is constructed once at startup.
+    push_if_changed_debug(
+        &mut changes,
+        "downstream_auth.mode",
+        &current.downstream_auth.mode,
+        &new.downstream_auth.mode,
+        "BuiltinAuthn is constructed once at startup",
+    );
+    push_if_changed_debug(
+        &mut changes,
+        "downstream_auth.none_mode",
+        &current.downstream_auth.none_mode,
+        &new.downstream_auth.none_mode,
+        "BuiltinAuthn is constructed once at startup",
+    );
+
+    // OAuth: LazyRefresher and NotifyListener snapshot oauth.anthropic at boot.
+    push_if_changed_debug(
+        &mut changes,
+        "oauth.anthropic",
+        &current.oauth.anthropic,
+        &new.oauth.anthropic,
+        "OAuth refresher captures these at startup",
+    );
+
+    // Timeouts: drain and upstream_total are wired into shutdown/router at boot.
+    push_if_changed(
+        &mut changes,
+        "timeouts.drain_secs",
+        &current.timeouts.drain_secs,
+        &new.timeouts.drain_secs,
+        "drain timeout is wired into the shutdown signal at startup",
+    );
+    push_if_changed(
+        &mut changes,
+        "timeouts.upstream_total_secs",
+        &current.timeouts.upstream_total_secs,
+        &new.timeouts.upstream_total_secs,
+        "upstream total timeout is wired into the proxy router at startup",
+    );
+
+    // Observability: tracing subscriber and metrics exporters bound at startup.
+    push_if_changed(
+        &mut changes,
+        "observability.tracing_level",
+        &current.observability.tracing_level,
+        &new.observability.tracing_level,
+        "tracing subscriber is installed at startup",
+    );
+    push_if_changed_opt(
+        &mut changes,
+        "observability.otlp_endpoint",
+        current.observability.otlp_endpoint.as_ref(),
+        new.observability.otlp_endpoint.as_ref(),
+        "OTLP exporter is installed at startup",
+    );
+    push_if_changed(
+        &mut changes,
+        "observability.log_redaction",
+        &current.observability.log_redaction,
+        &new.observability.log_redaction,
+        "log redaction policy is installed at startup",
+    );
+    push_if_changed(
+        &mut changes,
+        "observability.user_prompt_redaction",
+        &current.observability.user_prompt_redaction,
+        &new.observability.user_prompt_redaction,
+        "prompt redaction policy is installed at startup",
+    );
+
+    // Circuit breaker / bulkhead: configured at dispatcher build time.
+    push_if_changed(
+        &mut changes,
+        "circuit_breaker.failures_to_open",
+        &current.circuit_breaker.failures_to_open,
+        &new.circuit_breaker.failures_to_open,
+        "circuit breaker is built at startup",
+    );
+    push_if_changed(
+        &mut changes,
+        "circuit_breaker.window_secs",
+        &current.circuit_breaker.window_secs,
+        &new.circuit_breaker.window_secs,
+        "circuit breaker is built at startup",
+    );
+    push_if_changed(
+        &mut changes,
+        "circuit_breaker.half_open_after_secs",
+        &current.circuit_breaker.half_open_after_secs,
+        &new.circuit_breaker.half_open_after_secs,
+        "circuit breaker is built at startup",
+    );
+    push_if_changed(
+        &mut changes,
+        "bulkhead.max_conns_per_upstream",
+        &current.bulkhead.max_conns_per_upstream,
+        &new.bulkhead.max_conns_per_upstream,
+        "bulkhead limits are built at startup",
+    );
+    push_if_changed(
+        &mut changes,
+        "bulkhead.semaphore_per_upstream",
+        &current.bulkhead.semaphore_per_upstream,
+        &new.bulkhead.semaphore_per_upstream,
+        "bulkhead limits are built at startup",
+    );
+
+    // Subscription quota: writer + cache are built at startup.
+    push_if_changed(
+        &mut changes,
+        "subscription_quota.writer_channel_capacity",
+        &current.subscription_quota.writer_channel_capacity,
+        &new.subscription_quota.writer_channel_capacity,
+        "subscription quota writer channel is sized at startup",
+    );
+    push_if_changed(
+        &mut changes,
+        "subscription_quota.writer_batch_max_records",
+        &current.subscription_quota.writer_batch_max_records,
+        &new.subscription_quota.writer_batch_max_records,
+        "subscription quota writer batch is configured at startup",
+    );
+    push_if_changed(
+        &mut changes,
+        "subscription_quota.writer_flush_ms",
+        &current.subscription_quota.writer_flush_ms,
+        &new.subscription_quota.writer_flush_ms,
+        "subscription quota writer flush is configured at startup",
+    );
+    push_if_changed(
+        &mut changes,
+        "subscription_quota.routing_max_staleness_secs",
+        &current.subscription_quota.routing_max_staleness_secs,
+        &new.subscription_quota.routing_max_staleness_secs,
+        "subscription quota cache staleness is configured at startup",
+    );
+    // Prompt-cache shadow: built into LifecycleConfig.
+    push_if_changed_debug(
+        &mut changes,
+        "prompt_cache_shadow",
+        &current.prompt_cache_shadow,
+        &new.prompt_cache_shadow,
+        "prompt cache shadow pipeline is built at startup",
+    );
+
+    // Scheduler: built once at startup.
+    push_if_changed_debug(
+        &mut changes,
+        "scheduler",
+        &current.scheduler,
+        &new.scheduler,
+        "scheduler workers are built at startup",
+    );
+
+    // API keys / price catalog: refresher task started at startup.
+    push_if_changed_debug(
+        &mut changes,
+        "api_keys",
+        &current.api_keys,
+        &new.api_keys,
+        "API key catalog refresher is started at startup",
+    );
+
+    macro_rules! push_startup_snapshot {
+        ($field:ident) => {
+            push_if_changed_debug(
+                &mut changes,
+                stringify!($field),
+                &current.$field,
+                &new.$field,
+                "component wiring is captured at startup",
+            );
+        };
+    }
+    push_startup_snapshot!(event_bus);
+    push_startup_snapshot!(cluster);
+    push_startup_snapshot!(limit_reservation_ttl);
+
     changes
 }
 
-fn summarize_wasmtime_restart_required(
-    changes: &mut Vec<RestartRequiredField>,
-    current: &Config,
-    new_config: &Config,
-) {
-    let current = &current.runtime.wasmtime;
-    let new_config = &new_config.runtime.wasmtime;
-    push_changed(
-        changes,
-        "runtime.wasmtime.allocation_strategy",
-        allocation_strategy_string(current.allocation_strategy).to_owned(),
-        allocation_strategy_string(new_config.allocation_strategy).to_owned(),
-        "wasmtime engine allocation strategy changes require a process restart",
-    );
-    push_changed(
-        changes,
-        "runtime.wasmtime.memory_max_pages",
-        option_u32_string(current.memory_max_pages),
-        option_u32_string(new_config.memory_max_pages),
-        "wasmtime engine memory changes require a process restart",
-    );
-    push_changed(
-        changes,
-        "runtime.wasmtime.memory_reservation_bytes",
-        option_u64_string(current.memory_reservation_bytes),
-        option_u64_string(new_config.memory_reservation_bytes),
-        "wasmtime engine memory changes require a process restart",
-    );
-    push_changed(
-        changes,
-        "runtime.wasmtime.memory_guard_bytes",
-        option_u64_string(current.memory_guard_bytes),
-        option_u64_string(new_config.memory_guard_bytes),
-        "wasmtime engine memory changes require a process restart",
-    );
-    push_changed(
-        changes,
-        "runtime.wasmtime.pool_total_memories",
-        option_u32_string(current.pool_total_memories),
-        option_u32_string(new_config.pool_total_memories),
-        "wasmtime engine pool changes require a process restart",
-    );
-    push_changed(
-        changes,
-        "runtime.wasmtime.pool_total_core_instances",
-        option_u32_string(current.pool_total_core_instances),
-        option_u32_string(new_config.pool_total_core_instances),
-        "wasmtime engine pool changes require a process restart",
-    );
-}
-
-fn summarize_lifecycle_subscriber_restart_required(
-    changes: &mut Vec<RestartRequiredField>,
-    current: &Config,
-    new_config: &Config,
-) {
-    const REASON: &str =
-        "lifecycle subscriber wiring is bound at startup; toggling requires a process restart";
-
-    let entries: &[(&str, bool, bool)] = &[
-        (
-            "prompt_cache_shadow.enabled",
-            current.prompt_cache_shadow.enabled,
-            new_config.prompt_cache_shadow.enabled,
-        ),
-        (
-            "lifecycle_hook_adapter.enabled",
-            current.lifecycle_hook_adapter.enabled,
-            new_config.lifecycle_hook_adapter.enabled,
-        ),
-        (
-            "lifecycle_pricing_subscriber.enabled",
-            current.lifecycle_pricing_subscriber.enabled,
-            new_config.lifecycle_pricing_subscriber.enabled,
-        ),
-        (
-            "lifecycle_cache_observation_subscriber.enabled",
-            current.lifecycle_cache_observation_subscriber.enabled,
-            new_config.lifecycle_cache_observation_subscriber.enabled,
-        ),
-        (
-            "lifecycle_rate_limit_header_subscriber.enabled",
-            current.lifecycle_rate_limit_header_subscriber.enabled,
-            new_config.lifecycle_rate_limit_header_subscriber.enabled,
-        ),
-        (
-            "lifecycle_subscription_quota_subscriber.enabled",
-            current.lifecycle_subscription_quota_subscriber.enabled,
-            new_config.lifecycle_subscription_quota_subscriber.enabled,
-        ),
-        (
-            "lifecycle_limit_rejection_audit_subscriber.enabled",
-            current.lifecycle_limit_rejection_audit_subscriber.enabled,
-            new_config
-                .lifecycle_limit_rejection_audit_subscriber
-                .enabled,
-        ),
-        (
-            "lifecycle_api_key_metrics_subscriber.enabled",
-            current.lifecycle_api_key_metrics_subscriber.enabled,
-            new_config.lifecycle_api_key_metrics_subscriber.enabled,
-        ),
-        (
-            "lifecycle_cache_hit_miss_subscriber.enabled",
-            current.lifecycle_cache_hit_miss_subscriber.enabled,
-            new_config.lifecycle_cache_hit_miss_subscriber.enabled,
-        ),
-        (
-            "lifecycle_routing_tier_subscriber.enabled",
-            current.lifecycle_routing_tier_subscriber.enabled,
-            new_config.lifecycle_routing_tier_subscriber.enabled,
-        ),
-        (
-            "lifecycle_prompt_cache_drift_subscriber.enabled",
-            current.lifecycle_prompt_cache_drift_subscriber.enabled,
-            new_config.lifecycle_prompt_cache_drift_subscriber.enabled,
-        ),
-        (
-            "lifecycle_prompt_cache_observation_subscriber.enabled",
-            current
-                .lifecycle_prompt_cache_observation_subscriber
-                .enabled,
-            new_config
-                .lifecycle_prompt_cache_observation_subscriber
-                .enabled,
-        ),
-        (
-            "lifecycle_limit_reconcile_subscriber.enabled",
-            current.lifecycle_limit_reconcile_subscriber.enabled,
-            new_config.lifecycle_limit_reconcile_subscriber.enabled,
-        ),
-    ];
-
-    for (field, current_value, new_value) in entries {
-        push_changed(
-            changes,
-            field,
-            current_value.to_string(),
-            new_value.to_string(),
-            REASON,
-        );
-    }
-}
-
-fn summarize_storage_restart_required(
-    changes: &mut Vec<RestartRequiredField>,
-    current: &StorageConfig,
-    new_config: &StorageConfig,
-) {
-    match (current, new_config) {
-        (
-            StorageConfig::Postgres {
-                url: current_url,
-                pool: current_pool,
-            },
-            StorageConfig::Postgres {
-                url: new_url,
-                pool: new_pool,
-            },
-        ) => {
-            push_changed(
-                changes,
-                "storage.url",
-                current_url.clone(),
-                new_url.clone(),
-                "storage backend changes require a process restart",
-            );
-            push_changed(
-                changes,
-                "storage.pool",
-                format!("{current_pool:?}"),
-                format!("{new_pool:?}"),
-                "storage pool changes require a process restart",
-            );
-        }
-        (StorageConfig::Sqlite { path: current }, StorageConfig::Sqlite { path: new_config }) => {
-            push_changed(
-                changes,
-                "storage.path",
-                current.display().to_string(),
-                new_config.display().to_string(),
-                "storage backend changes require a process restart",
-            );
-        }
-        _ => push_changed(
-            changes,
-            "storage.kind",
-            storage_kind(current).to_owned(),
-            storage_kind(new_config).to_owned(),
-            "storage backend changes require a process restart",
-        ),
-    }
-}
-
-fn summarize_oauth_restart_required(
-    changes: &mut Vec<RestartRequiredField>,
-    current: &Config,
-    new_config: &Config,
-) {
-    let current = current.oauth.anthropic.as_ref();
-    let new_config = new_config.oauth.anthropic.as_ref();
-    push_changed(
-        changes,
-        "oauth.anthropic.client_id",
-        current
-            .map(|oauth| oauth.client_id.clone())
-            .unwrap_or_default(),
-        new_config
-            .map(|oauth| oauth.client_id.clone())
-            .unwrap_or_default(),
-        "Anthropic OAuth client changes require a process restart",
-    );
-    push_changed(
-        changes,
-        "oauth.anthropic.auth_url",
-        current
-            .map(|oauth| oauth.auth_url.to_string())
-            .unwrap_or_default(),
-        new_config
-            .map(|oauth| oauth.auth_url.to_string())
-            .unwrap_or_default(),
-        "Anthropic OAuth endpoint changes require a process restart",
-    );
-    push_changed(
-        changes,
-        "oauth.anthropic.token_url",
-        current
-            .map(|oauth| oauth.token_url.to_string())
-            .unwrap_or_default(),
-        new_config
-            .map(|oauth| oauth.token_url.to_string())
-            .unwrap_or_default(),
-        "Anthropic OAuth endpoint changes require a process restart",
-    );
-    push_changed(
-        changes,
-        "oauth.anthropic.redirect_uri",
-        current
-            .map(|oauth| oauth.redirect_uri.to_string())
-            .unwrap_or_default(),
-        new_config
-            .map(|oauth| oauth.redirect_uri.to_string())
-            .unwrap_or_default(),
-        "Anthropic OAuth redirect changes require a process restart",
-    );
-    push_changed(
-        changes,
-        "oauth.anthropic.scopes",
-        current
-            .map(|oauth| oauth.scopes.join(","))
-            .unwrap_or_default(),
-        new_config
-            .map(|oauth| oauth.scopes.join(","))
-            .unwrap_or_default(),
-        "Anthropic OAuth scope changes require a process restart",
-    );
-}
-
-fn push_changed(
+fn push_if_changed<T>(
     changes: &mut Vec<RestartRequiredField>,
     field: &str,
-    current: String,
-    new: String,
+    current: &T,
+    new: &T,
+    reason: &str,
+) where
+    T: PartialEq + std::fmt::Display,
+{
+    if current != new {
+        changes.push(RestartRequiredField {
+            field: field.to_owned(),
+            current: current.to_string(),
+            new: new.to_string(),
+            reason: reason.to_owned(),
+        });
+    }
+}
+
+fn push_if_changed_debug<T>(
+    changes: &mut Vec<RestartRequiredField>,
+    field: &str,
+    current: &T,
+    new: &T,
+    reason: &str,
+) where
+    T: PartialEq + std::fmt::Debug,
+{
+    if current != new {
+        changes.push(RestartRequiredField {
+            field: field.to_owned(),
+            current: format!("{current:?}"),
+            new: format!("{new:?}"),
+            reason: reason.to_owned(),
+        });
+    }
+}
+
+fn push_if_changed_str(
+    changes: &mut Vec<RestartRequiredField>,
+    field: &str,
+    current: &str,
+    new: &str,
     reason: &str,
 ) {
     if current != new {
         changes.push(RestartRequiredField {
             field: field.to_owned(),
-            current,
-            new,
+            current: current.to_owned(),
+            new: new.to_owned(),
             reason: reason.to_owned(),
         });
     }
+}
+
+fn push_if_changed_opt<T>(
+    changes: &mut Vec<RestartRequiredField>,
+    field: &str,
+    current: Option<&T>,
+    new: Option<&T>,
+    reason: &str,
+) where
+    T: PartialEq + std::fmt::Display,
+{
+    if current != new {
+        changes.push(RestartRequiredField {
+            field: field.to_owned(),
+            current: option_display(current),
+            new: option_display(new),
+            reason: reason.to_owned(),
+        });
+    }
+}
+
+fn push_if_changed_opt_path(
+    changes: &mut Vec<RestartRequiredField>,
+    field: &str,
+    current: Option<&PathBuf>,
+    new: Option<&PathBuf>,
+    reason: &str,
+) {
+    if current.map(|p| p.as_path()) != new.map(|p| p.as_path()) {
+        changes.push(RestartRequiredField {
+            field: field.to_owned(),
+            current: path_option_string(current),
+            new: path_option_string(new),
+            reason: reason.to_owned(),
+        });
+    }
+}
+
+fn option_display<T: std::fmt::Display>(value: Option<&T>) -> String {
+    value.map(|v| v.to_string()).unwrap_or_default()
 }
 
 fn path_option_string(path: Option<&PathBuf>) -> String {
@@ -646,49 +560,9 @@ fn path_option_string(path: Option<&PathBuf>) -> String {
         .unwrap_or_default()
 }
 
-fn option_u32_string(value: Option<u32>) -> String {
-    value.map(|value| value.to_string()).unwrap_or_default()
-}
-
-fn option_u64_string(value: Option<u64>) -> String {
-    value.map(|value| value.to_string()).unwrap_or_default()
-}
-
-fn allocation_strategy_string(value: WasmtimeAllocationStrategy) -> &'static str {
-    match value {
-        WasmtimeAllocationStrategy::OnDemand => "ondemand",
-        WasmtimeAllocationStrategy::Pooling => "pooling",
-    }
-}
-
 fn storage_kind(storage: &StorageConfig) -> &'static str {
     match storage {
         StorageConfig::Postgres { .. } => "postgres",
         StorageConfig::Sqlite { .. } => "sqlite",
     }
-}
-
-fn event_matches_config(path: &Path, event: notify::Result<Event>) -> bool {
-    let Ok(event) = event else {
-        return false;
-    };
-
-    if event.paths.is_empty() {
-        return false;
-    }
-
-    let target_file_name = path.file_name();
-    event.paths.iter().any(|event_path| {
-        event_path == path
-            || event_path
-                .file_name()
-                .is_some_and(|name| Some(name) == target_file_name)
-    })
-}
-
-fn watch_dir_for(path: &Path) -> PathBuf {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
 }

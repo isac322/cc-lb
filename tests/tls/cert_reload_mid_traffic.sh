@@ -186,70 +186,29 @@ wait_served_fingerprint() {
   fail "served fingerprint did not become $expected last=$last"
 }
 
-render_config() {
-  config_path=$1
-  cat > "$config_path" <<TOML
-[listener]
-proxy_addr = "127.0.0.1:$proxy_port"
-admin_addr = "127.0.0.1:$admin_port"
-metrics_addr = "127.0.0.1:$metrics_port"
-
-[listener.tls]
-cert_path = "$active_cert"
-key_path = "$active_key"
-reload_on_sighup = true
-
-[body]
-messages_cap_bytes = 33554432
-files_cap_bytes = 104857600
-
-[timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
-upstream_total_secs = 30
-drain_secs = 5
-
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "api-key"
-upstream_kind = "anthropic_key"
-
-
-[storage]
-oauth_aead_key_env = "CC_LB_MASTER_KEY"
-
-[observability]
-tracing_level = "info"
-log_redaction = true
-user_prompt_redaction = false
-
-[quotas]
-default_window_secs = 60
-default_requests_per_window = 100000
-default_input_tokens = 100000000
-default_output_tokens = 100000000
-
-[admin]
-token_env = "CC_LB_ADMIN_TOKEN"
-
-[circuit_breaker]
-failures_to_open = 5
-window_secs = 10
-half_open_after_secs = 30
-
-[bulkhead]
-max_conns_per_upstream = 100
-semaphore_per_upstream = 200
-
-[dns]
-cache_ttl_floor_secs = 30
-cache_ttl_ceiling_secs = 300
-
-[egress]
-TOML
+apply_downstream_none_mode() {
+  draft_body='{"draft":{"downstream_auth":{"mode":"none","none_mode":{"principal_id":"api-key","upstream_kind":"anthropic_key"}}},"expected_revision":0}'
+  draft_code=$(curl -sS -o "$TMP_DIR/admin-draft.json" -w '%{http_code}' -X PUT \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H 'content-type: application/json' \
+    --data "$draft_body" \
+    "http://127.0.0.1:$admin_port/admin/config/draft") || draft_code=000
+  if [ "$draft_code" != "200" ]; then
+    cat "$TMP_DIR/admin-draft.json" >&2 || true
+    fail "save config draft expected 200, got $draft_code"
+  fi
+  rev=$(python3 -c "import json,sys; print(json.load(open('$TMP_DIR/admin-draft.json'))['revision'])")
+  for endpoint in draft/validate apply; do
+    code=$(curl -sS -o "$TMP_DIR/admin-${endpoint//\//-}.json" -w '%{http_code}' -X POST \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H 'content-type: application/json' \
+      --data "{\"expected_revision\":$rev}" \
+      "http://127.0.0.1:$admin_port/admin/config/$endpoint") || code=000
+    if [ "$code" != "200" ]; then
+      cat "$TMP_DIR/admin-${endpoint//\//-}.json" >&2 || true
+      fail "config $endpoint expected 200, got $code"
+    fi
+  done
 }
 
 mkdir -p "$SCRIPT_DIR/.tmp" "$(dirname -- "$EVIDENCE_PATH")"
@@ -268,8 +227,7 @@ cp "$ROOT_DIR/crates/cc-lb-server/tests/fixtures/tls/cert-a.pem" "$active_cert"
 cp "$ROOT_DIR/crates/cc-lb-server/tests/fixtures/tls/key-a.pem" "$active_key"
 cert_b="$ROOT_DIR/crates/cc-lb-server/tests/fixtures/tls/cert-b.pem"
 key_b="$ROOT_DIR/crates/cc-lb-server/tests/fixtures/tls/key-b.pem"
-config_path="$TMP_DIR/cc-lb.toml"
-render_config "$config_path"
+
 
 old_fp=$(cert_fingerprint "$active_cert")
 new_fp=$(cert_fingerprint "$cert_b")
@@ -284,15 +242,24 @@ log "new_cert fingerprint=$new_fp serial=$new_serial subject=$new_subject"
 FAKE_PID=$!
 wait_http "$fake_port" "/v1/models" "fake-anthropic"
 
+CC_LB_LISTENER__PROXY_ADDR="127.0.0.1:$proxy_port" \
+CC_LB_LISTENER__ADMIN_ADDR="127.0.0.1:$admin_port" \
+CC_LB_LISTENER__METRICS_ADDR="127.0.0.1:$metrics_port" \
+CC_LB_TLS__CERT_PATH="$active_cert" \
+CC_LB_TLS__KEY_PATH="$active_key" \
+CC_LB_STORAGE__KIND=sqlite \
+CC_LB_STORAGE__PATH="$TMP_DIR/cc-lb.sqlite" \
+CC_LB_DATA_DIR="$TMP_DIR" \
 CC_LB_ADMIN_TOKEN=admin-token \
 CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
 RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
-"$ROOT_DIR/target/debug/cc-lb" serve --config "$config_path" > "$TMP_DIR/cc-lb.log" 2>&1 &
+"$ROOT_DIR/target/debug/cc-lb" serve > "$TMP_DIR/cc-lb.log" 2>&1 &
 PROXY_PID=$!
 
 wait_command "cc-lb-admin" curl --fail --silent --show-error "http://127.0.0.1:$admin_port/admin/health"
 wait_command "cc-lb-proxy-tls" curl --fail --silent --show-error --cacert "$active_cert" --resolve "localhost:$proxy_port:127.0.0.1" "https://localhost:$proxy_port/healthz"
 wait_command "cc-lb-metrics" curl --fail --silent --show-error "http://127.0.0.1:$metrics_port/metrics"
+apply_downstream_none_mode
 seed_runtime
 log "plain_http_admin=true plain_http_metrics=true proxy_tls_health=true"
 

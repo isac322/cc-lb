@@ -385,12 +385,7 @@ fn validate_sqlite_path(path: &Path) -> Result<(), PreflightError> {
 }
 
 fn active_tls_config(config: &Config) -> Option<(&'static str, &TlsConfig)> {
-    config
-        .listener
-        .tls
-        .as_ref()
-        .map(|tls| ("listener", tls))
-        .or_else(|| config.tls.as_ref().map(|tls| ("legacy", tls)))
+    config.listener.tls.as_ref().map(|tls| ("listener", tls))
 }
 
 fn verify_tls(tls_config: &TlsConfig) -> Result<(), PreflightError> {

@@ -132,7 +132,6 @@ async fn build_running_app(database_url: &str, label: &'static str) -> TestResul
     ));
     let app = build_app_with_storage(
         test_config(database_url, label),
-        None,
         managed_store,
         storage.clone(),
         Arc::new(AeadService::from_master_key([0; 32])),

@@ -30,8 +30,7 @@
       "$ref": "#/$defs/BodyConfig",
       "default": {
         "files_cap_bytes": 104857600,
-        "messages_cap_bytes": 33554432,
-        "per_route_overrides": {}
+        "messages_cap_bytes": 33554432
       }
     },
     "bulkhead": {
@@ -52,15 +51,7 @@
     "cluster": {
       "$ref": "#/$defs/ClusterConfig",
       "default": {
-        "token_env": "CC_LB_CLUSTER_TOKEN",
-        "token_env_optional": true
-      }
-    },
-    "dns": {
-      "$ref": "#/$defs/DnsConfig",
-      "default": {
-        "cache_ttl_ceiling_secs": 300,
-        "cache_ttl_floor_secs": 30
+        "token_env": "CC_LB_CLUSTER_TOKEN"
       }
     },
     "downstream_auth": {
@@ -68,10 +59,6 @@
       "default": {
         "mode": "api_key"
       }
-    },
-    "egress": {
-      "$ref": "#/$defs/EgressConfig",
-      "default": {}
     },
     "event_bus": {
       "$ref": "#/$defs/EventBusConfig",
@@ -82,78 +69,6 @@
         "pg_notify_channel": "cc_lb_events_partial",
         "storage_tail_poll_interval_ms": 250,
         "transport": "in_memory"
-      }
-    },
-    "lifecycle_api_key_metrics_subscriber": {
-      "$ref": "#/$defs/LifecycleApiKeyMetricsSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_cache_hit_miss_subscriber": {
-      "$ref": "#/$defs/LifecycleCacheHitMissSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_cache_observation_subscriber": {
-      "$ref": "#/$defs/LifecycleCacheObservationSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_hook_adapter": {
-      "$ref": "#/$defs/LifecycleHookAdapterConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_limit_reconcile_subscriber": {
-      "$ref": "#/$defs/LifecycleLimitReconcileSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_limit_rejection_audit_subscriber": {
-      "$ref": "#/$defs/LifecycleLimitRejectionAuditSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_pricing_subscriber": {
-      "$ref": "#/$defs/LifecyclePricingSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_prompt_cache_drift_subscriber": {
-      "$ref": "#/$defs/LifecyclePromptCacheDriftSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_prompt_cache_observation_subscriber": {
-      "$ref": "#/$defs/LifecyclePromptCacheObservationSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_rate_limit_header_subscriber": {
-      "$ref": "#/$defs/LifecycleRateLimitHeaderSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_routing_tier_subscriber": {
-      "$ref": "#/$defs/LifecycleRoutingTierSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_subscription_quota_subscriber": {
-      "$ref": "#/$defs/LifecycleSubscriptionQuotaSubscriberConfig",
-      "default": {
-        "enabled": true
       }
     },
     "limit_reservation_ttl": {
@@ -214,11 +129,7 @@
       "default": {
         "dlq_retention_days": 30,
         "entity_concurrency": 8,
-        "idempotency": {
-          "claim_ttl_secs": 60
-        },
         "keepalive_concurrency": 4,
-        "pgbouncer_transaction_mode": false,
         "recurring_jobs": {
           "anthropic_compat_refresh": {
             "enabled": true,
@@ -271,23 +182,6 @@
             "jitter_secs": 30
           }
         },
-        "retry_classes": {
-          "adaptive": {
-            "base_secs": 30,
-            "max_attempts": 5,
-            "max_secs": 600
-          },
-          "maintenance": {
-            "base_secs": 60,
-            "max_attempts": 1,
-            "max_secs": 60
-          },
-          "probe": {
-            "base_secs": 1,
-            "max_attempts": 3,
-            "max_secs": 5
-          }
-        },
         "separate_pool": {
           "acquire_timeout_secs": 5,
           "idle_timeout_secs": 600,
@@ -296,10 +190,7 @@
           "sslmode": "prefer",
           "statement_timeout_secs": 30
         },
-        "singleton_concurrency": 2,
-        "staleness": {
-          "warmup_effect_retention_days": 30
-        }
+        "singleton_concurrency": 2
       }
     },
     "storage": {
@@ -322,21 +213,8 @@
       "$ref": "#/$defs/TimeoutsConfig",
       "default": {
         "drain_secs": 60,
-        "idle_secs": 300,
-        "request_body_chunk_secs": 30,
-        "request_header_secs": 10,
         "upstream_total_secs": 600
       }
-    },
-    "tls": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/TlsConfig"
-        },
-        {
-          "type": "null"
-        }
-      ]
     }
   },
   "$defs": {
@@ -423,15 +301,6 @@
           "format": "uint64",
           "default": 33554432,
           "minimum": 0
-        },
-        "per_route_overrides": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          },
-          "default": {}
         }
       }
     },
@@ -487,30 +356,9 @@
         "token_env": {
           "type": "string",
           "default": "CC_LB_CLUSTER_TOKEN"
-        },
-        "token_env_optional": {
-          "type": "boolean",
-          "default": true
         }
       },
       "additionalProperties": false
-    },
-    "DnsConfig": {
-      "type": "object",
-      "properties": {
-        "cache_ttl_ceiling_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 300,
-          "minimum": 0
-        },
-        "cache_ttl_floor_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 30,
-          "minimum": 0
-        }
-      }
     },
     "DownstreamAuthConfig": {
       "type": "object",
@@ -558,20 +406,6 @@
         "nanos"
       ]
     },
-    "EgressConfig": {
-      "type": "object",
-      "properties": {
-        "allowed_hosts": {
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "type": "string"
-          }
-        }
-      }
-    },
     "EventBusConfig": {
       "type": "object",
       "properties": {
@@ -617,115 +451,6 @@
         "pg_notify"
       ]
     },
-    "LifecycleApiKeyMetricsSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleCacheHitMissSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleCacheObservationSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleHookAdapterConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleLimitReconcileSubscriberConfig": {
-      "description": "Post-response limit reservation reconciliation subscriber.\n\nDefault: `enabled=true` — subscriber reconciles reservations after the\nresponse lifecycle terminates. Set `enabled=false` to opt out entirely;\nreservations then reconcile only via TTL refund.",
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleLimitRejectionAuditSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecyclePricingSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecyclePromptCacheDriftSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecyclePromptCacheObservationSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleRateLimitHeaderSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleRoutingTierSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleSubscriptionQuotaSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
     "LimitReservationTtlConfig": {
       "description": "Background TTL sweeper for stale limit reservations. The LimitEngine\nperiodically walks its reservation map and full-refunds any reservation\nolder than `ttl_secs`; the sweeper runs unconditionally because the\nsubscriber path is authoritative.",
       "type": "object",
@@ -767,12 +492,6 @@
             {
               "type": "null"
             }
-          ]
-        },
-        "unix_socket": {
-          "type": [
-            "string",
-            "null"
           ]
         }
       }
@@ -821,12 +540,6 @@
           "default": true
         },
         "otlp_endpoint": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "prometheus_endpoint": {
           "type": [
             "string",
             "null"
@@ -1038,21 +751,11 @@
           "default": 8,
           "minimum": 0
         },
-        "idempotency": {
-          "$ref": "#/$defs/SchedulerIdempotencyConfig",
-          "default": {
-            "claim_ttl_secs": 60
-          }
-        },
         "keepalive_concurrency": {
           "type": "integer",
           "format": "uint",
           "default": 4,
           "minimum": 0
-        },
-        "pgbouncer_transaction_mode": {
-          "type": "boolean",
-          "default": false
         },
         "recurring_jobs": {
           "type": "object",
@@ -1112,26 +815,6 @@
             }
           }
         },
-        "retry_classes": {
-          "$ref": "#/$defs/SchedulerRetryClasses",
-          "default": {
-            "adaptive": {
-              "base_secs": 30,
-              "max_attempts": 5,
-              "max_secs": 600
-            },
-            "maintenance": {
-              "base_secs": 60,
-              "max_attempts": 1,
-              "max_secs": 60
-            },
-            "probe": {
-              "base_secs": 1,
-              "max_attempts": 3,
-              "max_secs": 5
-            }
-          }
-        },
         "separate_pool": {
           "$ref": "#/$defs/SchedulerPoolConfig",
           "default": {
@@ -1147,24 +830,6 @@
           "type": "integer",
           "format": "uint",
           "default": 2,
-          "minimum": 0
-        },
-        "staleness": {
-          "$ref": "#/$defs/SchedulerStalenessConfig",
-          "default": {
-            "warmup_effect_retention_days": 30
-          }
-        }
-      },
-      "additionalProperties": false
-    },
-    "SchedulerIdempotencyConfig": {
-      "type": "object",
-      "properties": {
-        "claim_ttl_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 60,
           "minimum": 0
         }
       },
@@ -1204,72 +869,6 @@
         "statement_timeout_secs": {
           "type": "integer",
           "format": "uint64",
-          "default": 30,
-          "minimum": 0
-        }
-      },
-      "additionalProperties": false
-    },
-    "SchedulerRetryClasses": {
-      "type": "object",
-      "properties": {
-        "adaptive": {
-          "$ref": "#/$defs/SchedulerRetryConfig",
-          "default": {
-            "base_secs": 30,
-            "max_attempts": 5,
-            "max_secs": 600
-          }
-        },
-        "maintenance": {
-          "$ref": "#/$defs/SchedulerRetryConfig",
-          "default": {
-            "base_secs": 60,
-            "max_attempts": 1,
-            "max_secs": 60
-          }
-        },
-        "probe": {
-          "$ref": "#/$defs/SchedulerRetryConfig",
-          "default": {
-            "base_secs": 1,
-            "max_attempts": 3,
-            "max_secs": 5
-          }
-        }
-      },
-      "additionalProperties": false
-    },
-    "SchedulerRetryConfig": {
-      "type": "object",
-      "properties": {
-        "base_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 1,
-          "minimum": 0
-        },
-        "max_attempts": {
-          "type": "integer",
-          "format": "uint32",
-          "default": 3,
-          "minimum": 0
-        },
-        "max_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 5,
-          "minimum": 0
-        }
-      },
-      "additionalProperties": false
-    },
-    "SchedulerStalenessConfig": {
-      "type": "object",
-      "properties": {
-        "warmup_effect_retention_days": {
-          "type": "integer",
-          "format": "uint32",
           "default": 30,
           "minimum": 0
         }
@@ -1369,24 +968,6 @@
           "type": "integer",
           "format": "uint64",
           "default": 60,
-          "minimum": 0
-        },
-        "idle_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 300,
-          "minimum": 0
-        },
-        "request_body_chunk_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 30,
-          "minimum": 0
-        },
-        "request_header_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 10,
           "minimum": 0
         },
         "upstream_total_secs": {

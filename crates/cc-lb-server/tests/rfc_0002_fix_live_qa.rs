@@ -360,17 +360,7 @@ async fn live_qa_3_unknown_route_and_method_not_allowed_do_not_write_row() {
 /// leaving the row with NULL cost/cache and only partial usage.
 #[tokio::test]
 async fn live_qa_6b_assembler_populates_cost_cache_usage_fields() {
-    let extra = r#"
-[lifecycle_cache_observation_subscriber]
-enabled = true
-
-[lifecycle_hook_adapter]
-enabled = false
-
-[lifecycle_pricing_subscriber]
-enabled = true
-"#;
-    let server = common::spawn_test_server_with_extra_config(extra).await;
+    let server = common::spawn_test_server_with_extra_config("").await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
 
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
@@ -412,17 +402,7 @@ enabled = true
 /// stream_* timings) are None on non-stream and would hide divergences.
 #[tokio::test]
 async fn live_qa_6c_assembler_populates_stream_fields() {
-    let extra = r#"
-[lifecycle_cache_observation_subscriber]
-enabled = true
-
-[lifecycle_hook_adapter]
-enabled = false
-
-[lifecycle_pricing_subscriber]
-enabled = true
-"#;
-    let server = common::spawn_test_server_with_extra_config(extra).await;
+    let server = common::spawn_test_server_with_extra_config("").await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 

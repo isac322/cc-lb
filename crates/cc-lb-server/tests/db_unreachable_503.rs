@@ -230,7 +230,6 @@ async fn build_api_key_app_for_testing_postgres(
     .await?;
     let app = build_app_with_storage(
         test_config(database_url),
-        None,
         managed_store,
         storage,
         Arc::new(AeadService::from_master_key([0; 32])),

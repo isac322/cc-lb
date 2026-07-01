@@ -21,6 +21,7 @@ fn test_state() -> AdminState {
         audit_sink: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(config),
+        config_reloader: None,
         scheduler: None,
         admin_token: Some("test-token".to_owned()),
         lazy_refresher: None,

@@ -4,11 +4,26 @@ cc-lb is a Rust workspace for an Anthropic-compatible multi-principal reverse pr
 
 ## Quick start
 
-1. Set the admin bootstrap token: `export CC_LB_BOOTSTRAP_ADMIN_TOKEN=$(uuidgen)`
-2. Optionally seed initial state via `bootstrap.toml` in your data_dir
-3. Run `cc-lb-server serve --config cc-lb.toml`
-4. Open the dashboard at `http://localhost:<admin_port>/`
-5. Add upstreams, principals, and plugin chains via the dashboard
+cc-lb no longer reads a TOML config file. Boot-critical values come from
+environment variables; everything else is edited from the dashboard.
+
+1. Export the boot env contract:
+   ```
+   export CC_LB_LISTENER__PROXY_ADDR=127.0.0.1:8080
+   export CC_LB_LISTENER__ADMIN_ADDR=127.0.0.1:8081
+   export CC_LB_LISTENER__METRICS_ADDR=127.0.0.1:9090
+   export CC_LB_STORAGE__KIND=sqlite
+   export CC_LB_STORAGE__PATH=$HOME/.local/share/cc-lb/storage.sqlite
+   export CC_LB_DATA_DIR=$HOME/.local/share/cc-lb
+   export CC_LB_MASTER_KEY=$(openssl rand -hex 32)
+   export CC_LB_BOOTSTRAP_ADMIN_TOKEN=$(uuidgen)
+   ```
+2. Run `cc-lb-server serve` — the bootstrap admin principal is auto-seeded
+   from `CC_LB_BOOTSTRAP_ADMIN_TOKEN` on first boot. No file-based seeding.
+3. Open the dashboard at `http://localhost:8081/` and use the **Config** page
+   to edit every runtime setting (timeouts, body caps, circuit breaker, etc.).
+4. Add upstreams, principals, and plugin chains via the dashboard or the
+   `/admin/v1/*` REST API using the bootstrap admin bearer token.
 
 See [docs/runtime-management.md](docs/runtime-management.md) for the full API and architecture.
 

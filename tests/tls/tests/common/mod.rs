@@ -94,9 +94,8 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
     let proxy_addr = free_addr();
     let admin_addr = free_addr();
     let metrics_addr = free_addr();
-    let config_path = dir.path().join("cc-lb.toml");
-    write_config(
-        &config_path,
+    let config = build_tls_test_config(
+        dir.path(),
         proxy_addr,
         admin_addr,
         metrics_addr,
@@ -104,11 +103,8 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
         &cert_path,
         &key_path,
     );
-    let config = Config::load(&config_path).expect("load config");
     let clock: cc_lb_engine::ClockHandle = std::sync::Arc::new(cc_lb_engine::SystemClock);
-    let app = build_app_with_path(config, Some(&config_path), clock)
-        .await
-        .expect("build app");
+    let app = build_app_with_path(config, clock).await.expect("build app");
     let signals = app.signal_handle();
     let server = tokio::spawn(async move { app.start().await });
 
@@ -307,13 +303,11 @@ impl StreamingTlsResponse {
             assert!(Instant::now() < deadline, "stream did not contain {needle}");
 
             let mut buffer = [0_u8; 4096];
-            let Ok(read_result) =
+            let read =
                 tokio::time::timeout(Duration::from_millis(500), self.stream.read(&mut buffer))
                     .await
-            else {
-                continue;
-            };
-            let read = read_result.expect("stream read");
+                    .expect("stream read timed out")
+                    .expect("stream read");
             assert!(read > 0, "stream ended before {needle}");
             self.bytes.extend_from_slice(&buffer[..read]);
         }
@@ -563,15 +557,15 @@ fn free_addr() -> SocketAddr {
     listener.local_addr().expect("free addr")
 }
 
-fn write_config(
-    path: &Path,
+fn build_tls_test_config(
+    data_dir: &Path,
     proxy_addr: SocketAddr,
     admin_addr: SocketAddr,
     metrics_addr: SocketAddr,
     _upstream_addr: SocketAddr,
     cert_path: &Path,
     key_path: &Path,
-) {
+) -> Config {
     unsafe {
         std::env::set_var(
             "CC_LB_MASTER_KEY",
@@ -579,39 +573,25 @@ fn write_config(
         );
         std::env::set_var("CC_LB_ADMIN_TOKEN", "admin-token");
     }
-    let storage_path = path.with_file_name("cc-lb.sqlite");
-    let storage_path = storage_path.display();
-    let config = format!(
-        r#"[listener]
-proxy_addr = "{proxy_addr}"
-admin_addr = "{admin_addr}"
-metrics_addr = "{metrics_addr}"
-
-[listener.tls]
-cert_path = "{}"
-key_path = "{}"
-reload_on_sighup = true
-
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "api-key"
-upstream_kind = "anthropic_key"
-
-
-[storage]
-kind = "sqlite"
-path = "{storage_path}"
-
-[aead]
-key_env = "CC_LB_MASTER_KEY"
-
-[admin]
-token_env = "CC_LB_ADMIN_TOKEN"
-"#,
-        cert_path.display(),
-        key_path.display()
-    );
-    fs::write(path, config).expect("write config");
+    let mut config = Config::default();
+    config.listener.proxy_addr = proxy_addr;
+    config.listener.admin_addr = admin_addr;
+    config.listener.metrics_addr = metrics_addr;
+    config.listener.tls = Some(cc_lb_config::TlsConfig {
+        cert_path: Some(cert_path.to_path_buf()),
+        key_path: Some(key_path.to_path_buf()),
+        reload_on_sighup: true,
+    });
+    config.storage = cc_lb_config::StorageConfig::Sqlite {
+        path: data_dir.join("cc-lb.sqlite"),
+    };
+    config.aead.key_env = "CC_LB_MASTER_KEY".to_owned();
+    config.admin.token_env = "CC_LB_ADMIN_TOKEN".to_owned();
+    config.downstream_auth.mode = cc_lb_config::DownstreamAuthMode::None;
+    config.downstream_auth.none_mode = Some(cc_lb_config::NoneModeConfig {
+        principal_id: "api-key".to_owned(),
+        upstream_kind: cc_lb_config::NoneModeUpstreamKind::AnthropicKey,
+    });
+    config.runtime.data_dir = Some(data_dir.to_path_buf());
+    config
 }

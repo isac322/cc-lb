@@ -131,65 +131,29 @@ seed_runtime() {
   fi
 }
 
-render_config() {
-  config_path=$1
-  cat > "$config_path" <<TOML
-[listener]
-proxy_addr = "127.0.0.1:$proxy_port"
-admin_addr = "127.0.0.1:$admin_port"
-metrics_addr = "127.0.0.1:$metrics_port"
-
-[body]
-messages_cap_bytes = 33554432
-files_cap_bytes = 104857600
-
-[timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
-upstream_total_secs = 30
-drain_secs = 5
-
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "api-key"
-upstream_kind = "anthropic_key"
-
-
-[storage]
-oauth_aead_key_env = "CC_LB_MASTER_KEY"
-
-[observability]
-tracing_level = "warn"
-log_redaction = true
-user_prompt_redaction = false
-
-[quotas]
-default_window_secs = 60
-default_requests_per_window = 10000000
-default_input_tokens = 100000000
-default_output_tokens = 100000000
-
-[admin]
-token_env = "CC_LB_ADMIN_TOKEN"
-
-[circuit_breaker]
-failures_to_open = 5
-window_secs = 10
-half_open_after_secs = 30
-
-[bulkhead]
-max_conns_per_upstream = 100
-semaphore_per_upstream = 200
-
-[dns]
-cache_ttl_floor_secs = 30
-cache_ttl_ceiling_secs = 300
-
-[egress]
-TOML
+apply_downstream_none_mode() {
+  draft_body='{"draft":{"downstream_auth":{"mode":"none","none_mode":{"principal_id":"api-key","upstream_kind":"anthropic_key"}}},"expected_revision":0}'
+  draft_code=$(curl -sS -o "$TMP_DIR/admin-draft.json" -w '%{http_code}' -X PUT \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H 'content-type: application/json' \
+    --data "$draft_body" \
+    "http://127.0.0.1:$admin_port/admin/config/draft") || draft_code=000
+  if [ "$draft_code" != "200" ]; then
+    cat "$TMP_DIR/admin-draft.json" >&2 || true
+    fail "save config draft expected 200, got $draft_code"
+  fi
+  rev=$(python3 -c "import json,sys; print(json.load(open('$TMP_DIR/admin-draft.json'))['revision'])")
+  for endpoint in draft/validate apply; do
+    code=$(curl -sS -o "$TMP_DIR/admin-${endpoint//\//-}.json" -w '%{http_code}' -X POST \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H 'content-type: application/json' \
+      --data "{\"expected_revision\":$rev}" \
+      "http://127.0.0.1:$admin_port/admin/config/$endpoint") || code=000
+    if [ "$code" != "200" ]; then
+      cat "$TMP_DIR/admin-${endpoint//\//-}.json" >&2 || true
+      fail "config $endpoint expected 200, got $code"
+    fi
+  done
 }
 
 rss_kib() {
@@ -236,20 +200,24 @@ fake_port=$(free_port)
 proxy_port=$(free_port)
 admin_port=$(free_port)
 metrics_port=$(free_port)
-config_path="$TMP_DIR/cc-lb.toml"
-render_config "$config_path"
-
 "$ROOT_DIR/target/release/fake-anthropic" --port "$fake_port" > "$TMP_DIR/fake-anthropic.log" 2>&1 &
 FAKE_PID=$!
 wait_http "$fake_port" "/v1/models" "fake-anthropic"
 
+CC_LB_LISTENER__PROXY_ADDR="127.0.0.1:$proxy_port" \
+CC_LB_LISTENER__ADMIN_ADDR="127.0.0.1:$admin_port" \
+CC_LB_LISTENER__METRICS_ADDR="127.0.0.1:$metrics_port" \
+CC_LB_STORAGE__KIND=sqlite \
+CC_LB_STORAGE__PATH="$TMP_DIR/cc-lb.sqlite" \
+CC_LB_DATA_DIR="$TMP_DIR" \
 CC_LB_ADMIN_TOKEN=admin-token \
 CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
 RUST_LOG=warn,hyper=warn,hyper_util=warn,axum=warn \
-"$ROOT_DIR/target/release/cc-lb" serve --config "$config_path" > "$TMP_DIR/cc-lb.log" 2>&1 &
+"$ROOT_DIR/target/release/cc-lb" serve > "$TMP_DIR/cc-lb.log" 2>&1 &
 PROXY_PID=$!
 wait_http "$proxy_port" "/healthz" "cc-lb"
 wait_http "$admin_port" "/admin/health" "cc-lb-admin"
+apply_downstream_none_mode
 seed_runtime
 
 printf 'unix_time,rss_kib\n' > "$CSV_PATH"

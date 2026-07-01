@@ -112,6 +112,7 @@ pub struct AdminState {
     pub audit_sink: Option<Arc<AuditWriterSink>>,
     pub dynamic_view: Arc<DynamicViewHolder>,
     pub config: Arc<dyn CurrentConfig>,
+    pub config_reloader: Option<Arc<dyn ConfigReloader>>,
     pub scheduler: Option<cc_lb_scheduler::admin::SchedulerAdminHandle>,
     pub admin_token: Option<String>,
     pub start_time: std::time::Instant,
@@ -134,7 +135,6 @@ pub enum ConfigDraftError {
 pub struct LastReloadStatus {
     pub timestamp_unix_secs: u64,
     pub outcome: ReloadOutcome,
-    pub config_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

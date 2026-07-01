@@ -197,7 +197,6 @@ async fn build_running_app(
     seed_test_principal(storage.as_ref()).await?;
     let mut app = build_app_with_storage(
         test_config(&database_url),
-        None,
         managed_store,
         storage,
         Arc::new(AeadService::from_master_key([0; 32])),

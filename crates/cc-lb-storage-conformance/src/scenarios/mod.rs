@@ -2,6 +2,7 @@ pub mod aead;
 pub mod anthropic_compatibility_kv_store;
 pub mod append_ordering;
 pub mod atomicity;
+pub mod effective_config;
 pub mod managed_keys;
 pub mod organization_metadata_store;
 pub mod plan_tier_store;

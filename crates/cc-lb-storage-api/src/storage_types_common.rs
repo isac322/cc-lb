@@ -125,11 +125,15 @@ pub struct ConfigDraftState {
     pub saved_at_unix_secs: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectiveConfig {
+    pub revision: u64,
+    pub config: Value,
+    pub applied_at_unix_secs: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistorySummary {
-    pub upstreams: usize,
-    pub principals: usize,
-    pub plugin_count: usize,
     pub tls_enabled: bool,
 }
 

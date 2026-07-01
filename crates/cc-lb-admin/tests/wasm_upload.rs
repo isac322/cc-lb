@@ -689,6 +689,7 @@ async fn build_admin_state(
         audit_sink: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&cc_lb_config::Config::default()),
         config: Arc::new(cc_lb_config::Config::default()),
+        config_reloader: None,
         scheduler: None,
         admin_token: Some("test-token".to_owned()),
         start_time: std::time::Instant::now(),

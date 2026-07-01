@@ -492,6 +492,21 @@ impl ConfigStore for MemoryStorage {
     async fn get_config_history(&self, _revision: u64) -> StorageResult<Option<HistoryEntry>> {
         unsupported()
     }
+
+    async fn get_effective_config(
+        &self,
+    ) -> StorageResult<Option<cc_lb_storage_api::EffectiveConfig>> {
+        unsupported()
+    }
+
+    async fn put_effective_config(
+        &self,
+        _revision: u64,
+        _config_json: serde_json::Value,
+        _applied_at_unix_secs: u64,
+    ) -> StorageResult<()> {
+        unsupported()
+    }
 }
 
 #[async_trait]

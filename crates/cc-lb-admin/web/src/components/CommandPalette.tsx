@@ -107,6 +107,10 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                   <Power className="w-4 h-4 text-text-faint" />
                   Go to Status
                 </Command.Item>
+                <Command.Item onSelect={() => go('/config')}>
+                  <Settings className="w-4 h-4 text-text-faint" />
+                  Go to Config
+                </Command.Item>
                 <Command.Item onSelect={() => go('/settings')}>
                   <Settings className="w-4 h-4 text-text-faint" />
                   Go to Settings

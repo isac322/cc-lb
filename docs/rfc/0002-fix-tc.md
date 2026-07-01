@@ -7,7 +7,7 @@ Consensus of 3 independent test-design agents (behavior verification, regression
 - **TC-STATIC-1** · No compile references to `LifecycleContext::update_usage`, `set_prebuilt_event`, `attach_cache_metadata`. `rg` returns 0 code hits under `crates/`.
 - **TC-STATIC-2** · No `RequestEvent {` literals in handler success paths (`crates/cc-lb-engine/src/lifecycle.rs`).
 - **TC-STATIC-3** · `TerminalState` struct field list excludes `usage`, `prebuilt_event`, `cache_state`, `cache_control_block_count`, `cache_breakpoints`, `cache_prefix_hash`.
-- **TC-STATIC-4** · Default config values: `lifecycle_limit_reconcile_subscriber.enabled = true`; TTL sweeper spawns regardless of config gate.
+- **TC-STATIC-4** · Limit reconcile subscriber is internal startup wiring; TTL sweeper spawns without a config gate.
 - **TC-STATIC-5** · `terminal_observer` module renamed to `lifecycle_context`; grep returns 0 production hits (docs/tests may keep the term).
 
 ## Unit tests
@@ -15,7 +15,7 @@ Consensus of 3 independent test-design agents (behavior verification, regression
 - **TC-U-M2-1** · Assembler receives only `RequestTerminated` (no partial) → writes minimal assembler row with `error_code=terminal_without_partial`, `request_id=req_unknown_shadow`, all usage/cache fields NULL.
 - **TC-U-M2-2** · Partial with no usage + `RequestTerminated(Success)` → assembler row with status=200, no usage.
 - **TC-U-M1-1** · `LifecycleEvent::UpstreamResponseStarted` carries `HeaderSnapshot` with sanitized subset (content-type, x-request-id, rate-limit headers). No `authorization` header included.
-- **TC-U-H5-1** · Fresh config parse: `lifecycle_limit_reconcile_subscriber.{enabled}` = `(true)`.
+- **TC-U-H5-1** · Fresh config parse excludes lifecycle subscriber toggles; subscribers are wired internally.
 - **TC-U-H5-2** · `LimitReconcileSubscriber` receives `LimitDecision::Reserved { reservation_id: "" }` + terminate → no panic; increments `empty_reservation_id` outcome counter.
 - **TC-U-M4-1** · `RequestEventWriterSource` semantics: given all 9 permutations of `(source ∈ {Legacy, Both, Shadow}) × (old_flag ∈ {true, false, unset})`, only `source` decides.
 

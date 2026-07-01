@@ -66,7 +66,6 @@ async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestR
     });
     let app = build_app_with_storage(
         config,
-        None,
         managed_store,
         storage,
         Arc::new(AeadService::from_master_key([0; 32])),

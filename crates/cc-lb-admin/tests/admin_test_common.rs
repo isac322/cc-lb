@@ -131,6 +131,7 @@ pub async fn spawn_admin_server_with_clock(clock: ClockHandle) -> SpawnedAdminSe
         audit_sink: Some(Arc::new(audit_sink)),
         dynamic_view: dynamic_view.clone(),
         config: Arc::new(config),
+        config_reloader: None,
         scheduler: None,
         admin_token: Some("test-token".to_owned()),
         start_time: std::time::Instant::now(),

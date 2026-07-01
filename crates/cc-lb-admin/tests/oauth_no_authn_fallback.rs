@@ -23,6 +23,7 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         audit_sink: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(Config::default()),
+        config_reloader: None,
         scheduler: None,
         admin_token: Some("test-token".to_string()),
         lazy_refresher: None,

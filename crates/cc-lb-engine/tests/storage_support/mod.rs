@@ -13,6 +13,7 @@ pub struct TestStorage {
     request_events: Mutex<Vec<storage_api::RequestEvent>>,
     request_event_cursor: AtomicU64,
     config_draft: Mutex<storage_api::ConfigDraftState>,
+    effective_config: Mutex<Option<storage_api::EffectiveConfig>>,
     killswitch_enabled: Mutex<bool>,
 }
 
@@ -287,6 +288,26 @@ impl storage_api::ConfigStore for TestStorage {
         let mut draft = lock_or_storage_error(&self.config_draft)?;
         draft.last_validated_revision = Some(revision);
         draft.last_validation_error = error;
+        Ok(())
+    }
+
+    async fn get_effective_config(
+        &self,
+    ) -> storage_api::StorageResult<Option<storage_api::EffectiveConfig>> {
+        Ok(lock_or_storage_error(&self.effective_config)?.clone())
+    }
+
+    async fn put_effective_config(
+        &self,
+        revision: u64,
+        config: serde_json::Value,
+        applied_at_unix_secs: u64,
+    ) -> storage_api::StorageResult<()> {
+        *lock_or_storage_error(&self.effective_config)? = Some(storage_api::EffectiveConfig {
+            revision,
+            config,
+            applied_at_unix_secs,
+        });
         Ok(())
     }
 

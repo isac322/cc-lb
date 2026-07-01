@@ -242,6 +242,17 @@
 </head>
 <body data-theme="dark">
 
+<div style="background:#ffefcc;color:#3a2a00;padding:14px 18px;border-bottom:2px solid #d29922;font:14px/1.5 system-ui;">
+  <strong>⚠️ Deprecated examples below.</strong> As of the env-only release,
+  cc-lb no longer reads any <code>cc-lb.toml</code> file. The <code>--config</code>
+  flag and the <code>cc-lb config validate</code> subcommand were removed.
+  Boot-critical values come from <code>CC_LB_*</code> environment variables;
+  every other knob is edited on the dashboard <code>/config</code> page.
+  Code blocks below that still show <code>--config</code> or <code>config validate</code>
+  reflect older versions and will not run on the current binary.
+  See <a href="./refactor-runtime-config.md">refactor-runtime-config.md</a> for the new contract.
+</div>
+
 <div class="topbar">
   <div class="brand">
     <h1>cc-lb</h1>
@@ -419,15 +430,7 @@ curl -s -X POST &quot;http://127.0.0.1:9090/admin/v1/principals/$principal_id/pl
   -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
   -H &quot;content-type: application/json&quot; \
   -d &#39;{&quot;slot&quot;:&quot;observability_hook&quot;,&quot;wasm_registry_id&quot;:&quot;00000000-0000-0000-0000-000000000000&quot;,&quot;config&quot;:{}}&#39;</code></pre><button class="copy">복사</button></div>
-        <p><code>bootstrap.toml</code>로 초기 시드가 필요하면 <code>data_dir</code> 아래에 아래 형식으로 두면 됩니다. 이 배열-of-tables 형식은 bootstrap seeder에서만 사용합니다.</p>
-        <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>&#91;&#91;upstreams&#93;&#93;
-name = &quot;anthropic&quot;
-kind = &quot;custom&quot;
-base_url = &quot;https://api.anthropic.com&quot;
-
-&#91;&#91;principals&#93;&#93;
-name = &quot;api-key&quot;
-kind = &quot;machine&quot;</code></pre><button class="copy">복사</button></div>
+        <p><strong>참고:</strong> 이전에 존재했던 <code>bootstrap.toml</code> 파일 기반 시딩은 제거됐습니다. 첫 부팅 admin principal 은 <code>CC_LB_BOOTSTRAP_ADMIN_TOKEN</code> 환경변수로만 시드되고, 나머지 upstream/principal/plugin-chain 은 위 <code>/admin/v1/*</code> REST API 또는 대시보드에서 생성합니다.</p>
       </li>
 
       <li>
@@ -879,8 +882,10 @@ Description=cc-lb Anthropic-compatible reverse proxy
 After=network-online.target
 
 [Service]
-EnvironmentFile=/etc/cc-lb/env       # CC_LB_MASTER_KEY, CC_LB_ADMIN_TOKEN
-ExecStart=/usr/local/bin/cc-lb serve --config /etc/cc-lb/prod.toml
+# CC_LB_LISTENER__*, CC_LB_STORAGE__*, CC_LB_DATA_DIR, CC_LB_MASTER_KEY,
+# CC_LB_BOOTSTRAP_ADMIN_TOKEN, optionally CC_LB_TLS__CERT_PATH/KEY_PATH
+EnvironmentFile=/etc/cc-lb/env
+ExecStart=/usr/local/bin/cc-lb serve
 ExecReload=/bin/kill -HUP $MAINPID
 KillSignal=SIGTERM
 TimeoutStopSec=90s

@@ -184,7 +184,6 @@ async fn build_postgres_app(
     ));
     Ok(build_app_with_storage(
         test_config(database_url, upstream_addr)?,
-        None,
         managed_store,
         storage,
         Arc::new(AeadService::from_master_key([0; 32])),

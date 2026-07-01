@@ -74,7 +74,6 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
     });
     let app = build_app_with_storage(
         config,
-        None,
         managed_store,
         storage.clone(),
         Arc::new(AeadService::from_master_key(key)),

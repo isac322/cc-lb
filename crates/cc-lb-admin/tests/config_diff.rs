@@ -24,6 +24,7 @@ fn test_state() -> AdminState {
         audit_sink: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(config),
+        config_reloader: None,
         scheduler: None,
         admin_token: Some("test-token".to_owned()),
         lazy_refresher: None,
@@ -49,14 +50,9 @@ async fn config_diff_route_returns_history_difference() {
         storage
             .append_config_history(
                 revision,
-                toml::to_string_pretty(config).unwrap(),
+                serde_json::to_string(config).unwrap(),
                 1000 + revision,
-                HistorySummary {
-                    upstreams: 0,
-                    principals: 0,
-                    plugin_count: 0,
-                    tls_enabled: false,
-                },
+                HistorySummary { tls_enabled: false },
             )
             .await
             .unwrap();

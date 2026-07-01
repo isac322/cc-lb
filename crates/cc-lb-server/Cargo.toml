@@ -86,7 +86,6 @@ hyper = { workspace = true, features = ["client", "http1", "http2"] }
 hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 metrics.workspace = true
-notify.workspace = true
 oauth2.workspace = true
 parking_lot = "0.12"
 nix = { version = "0.31.3", features = ["resource"] }

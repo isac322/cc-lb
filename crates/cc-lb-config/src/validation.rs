@@ -3,10 +3,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
-mod legacy;
 mod wasmtime;
-
-pub use legacy::{migrate_legacy_storage_toml, validate_raw_toml};
 
 use crate::{
     Config, ConfigError, DEFAULT_SQLITE_PATH, DownstreamAuthMode, EventBusTransport, StorageConfig,
@@ -32,8 +29,8 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_downstream_auth(config)?;
     validate_tls(config)?;
     validate_storage(config)?;
-    validate_event_bus(config)?;
     validate_oauth(config)?;
+    validate_event_bus(config)?;
     wasmtime::validate_wasmtime_runtime(config)?;
     Ok(())
 }
@@ -62,12 +59,15 @@ fn validate_event_bus(config: &Config) -> Result<(), ValidationError> {
     Ok(())
 }
 
+pub fn validate_runtime_overlay(config: &Config) -> Result<(), ConfigError> {
+    validate_downstream_auth(config)?;
+    validate_oauth(config)?;
+    Ok(())
+}
+
 fn validate_tls(config: &Config) -> Result<(), ValidationError> {
     if let Some(tls) = &config.listener.tls {
         validate_tls_section("listener.tls", tls)?;
-    }
-    if let Some(tls) = &config.tls {
-        validate_tls_section("tls", tls)?;
     }
     Ok(())
 }

@@ -21,7 +21,6 @@ file_ldd_log="$evidence_dir/task-50-file-ldd.txt"
 nm_log="$evidence_dir/task-50-nm.txt"
 size_log="$evidence_dir/task-50-size.txt"
 version_log="$evidence_dir/task-50-version.txt"
-config_log="$evidence_dir/task-50-config-validate.log"
 build_log="$evidence_dir/task-50-musl-static-build.log"
 temp_dir="$(mktemp -d)"
 
@@ -40,7 +39,6 @@ file_failed=0
 ldd_failed=0
 nm_failed=0
 version_failed=0
-config_failed=0
 size_failed=0
 
 run_step() {
@@ -125,17 +123,7 @@ if ! grep -Eq '^cc-lb [0-9]+\.[0-9]+\.[0-9]+ \(([0-9a-fA-F]{7,}|unknown)\)$' "$v
     version_failed=1
 fi
 
-if ! CC_LB_MASTER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
-CC_LB_ADMIN_TOKEN=test capture_step "$config_log" overwrite "config validate" "$binary_path" config validate --config "$root_dir/examples/cc-lb.toml"; then
-    config_failed=1
-fi
-
-if [[ ! -s "$config_log" ]]; then
-    printf 'ERROR: config validate produced no evidence output.\n' | tee -a "$verify_log" >&2
-    config_failed=1
-fi
-
-if (( build_failed || file_failed || ldd_failed || nm_failed || version_failed || config_failed || size_failed )); then
+if (( build_failed || file_failed || ldd_failed || nm_failed || version_failed || size_failed )); then
     if (( build_failed )); then
         printf 'ERROR: fresh musl build is blocked in this environment; see build log above.\n' | tee -a "$verify_log" >&2
     fi

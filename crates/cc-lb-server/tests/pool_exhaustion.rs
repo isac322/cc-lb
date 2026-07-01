@@ -117,21 +117,16 @@ async fn spawn_postgres_test_server(postgres_url: &str) -> PostgresTestServer {
     let proxy_addr = common::free_addr();
     let admin_addr = common::free_addr();
     let metrics_addr = common::free_addr();
-    let config_dir = tempfile::tempdir().expect("temp config dir");
-    let config_path = config_dir.path().join("cc-lb.toml");
-    write_postgres_config(
-        &config_path,
-        postgres_url,
-        proxy_addr,
-        admin_addr,
-        metrics_addr,
-        fake_addr,
-    );
-
+    let config_dir = tempfile::tempdir().expect("temp data dir");
+    let _ = fake_addr;
     let child = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
         .arg("serve")
-        .arg("--config")
-        .arg(&config_path)
+        .env("CC_LB_LISTENER__PROXY_ADDR", proxy_addr.to_string())
+        .env("CC_LB_LISTENER__ADMIN_ADDR", admin_addr.to_string())
+        .env("CC_LB_LISTENER__METRICS_ADDR", metrics_addr.to_string())
+        .env("CC_LB_STORAGE__KIND", "postgres")
+        .env("CC_LB_STORAGE__URL", postgres_url)
+        .env("CC_LB_DATA_DIR", config_dir.path().display().to_string())
         .env("CC_LB_MASTER_KEY", MASTER_KEY_HEX)
         .env_remove("CC_LB_OAUTH_CLIENT_ID")
         .stdout(Stdio::null())
@@ -149,26 +144,6 @@ async fn spawn_postgres_test_server(postgres_url: &str) -> PostgresTestServer {
         _config_dir: config_dir,
         _process: process,
     }
-}
-
-fn write_postgres_config(
-    path: &std::path::Path,
-    postgres_url: &str,
-    proxy_addr: SocketAddr,
-    admin_addr: SocketAddr,
-    metrics_addr: SocketAddr,
-    upstream_addr: SocketAddr,
-) {
-    let config = include_str!("../../../tests/fixtures/postgres-pool-1.toml")
-        .replace("will_be_replaced_at_runtime", postgres_url)
-        .replace("PROXY_ADDR_PLACEHOLDER", &proxy_addr.to_string())
-        .replace("ADMIN_ADDR_PLACEHOLDER", &admin_addr.to_string())
-        .replace("METRICS_ADDR_PLACEHOLDER", &metrics_addr.to_string())
-        .replace(
-            "UPSTREAM_BASE_URL_PLACEHOLDER",
-            &format!("http://{upstream_addr}"),
-        );
-    std::fs::write(path, config).expect("write postgres pool config");
 }
 
 async fn seed_oauth_credentials(postgres_url: &str) {

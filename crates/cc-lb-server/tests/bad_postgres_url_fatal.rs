@@ -5,31 +5,20 @@ use std::process::Command;
 #[test]
 fn bad_postgres_url_fatal() {
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("cc-lb.toml");
-    std::fs::write(
-        &config_path,
-        r#"
-[storage]
-kind = "postgres"
-url = "postgres://user:secret@127.0.0.2:65499/testdb"
-
-[listener]
-proxy_addr = "127.0.0.1:0"
-admin_addr = "127.0.0.1:0"
-metrics_addr = "127.0.0.1:0"
-
-[storage.pool]
-acquire_timeout_secs = 3
-
-[aead]
-key_env = "CC_LB_AEAD_KEY"
-"#,
-    )
-    .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
-        .args(["serve", "--config"])
-        .arg(&config_path)
+        .arg("serve")
+        .env("CC_LB_LISTENER__PROXY_ADDR", "127.0.0.1:0")
+        .env("CC_LB_LISTENER__ADMIN_ADDR", "127.0.0.1:0")
+        .env("CC_LB_LISTENER__METRICS_ADDR", "127.0.0.1:0")
+        .env("CC_LB_STORAGE__KIND", "postgres")
+        .env(
+            "CC_LB_STORAGE__URL",
+            "postgres://user:secret@127.0.0.2:65499/testdb",
+        )
+        .env("CC_LB_STORAGE__POOL__ACQUIRE_TIMEOUT_SECS", "3")
+        .env("CC_LB_DATA_DIR", dir.path().display().to_string())
+        .env("CC_LB_AEAD__KEY_ENV", "CC_LB_AEAD_KEY")
         .env(
             "CC_LB_AEAD_KEY",
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",

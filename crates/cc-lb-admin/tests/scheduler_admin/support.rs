@@ -33,6 +33,7 @@ pub fn app_with_scheduler(scheduler: SchedulerAdminHandle) -> axum::Router {
         audit_sink: None,
         dynamic_view: crate::admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(config),
+        config_reloader: None,
         scheduler: Some(scheduler),
         admin_token: Some("test-token".to_owned()),
         start_time: std::time::Instant::now(),

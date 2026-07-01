@@ -573,9 +573,6 @@ export interface ConfigDraftResponse {
 }
 
 interface HistorySummary {
-  upstreams: number;
-  principals: number;
-  plugin_count: number;
   tls_enabled: boolean;
 }
 

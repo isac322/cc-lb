@@ -1,35 +1,27 @@
 #![forbid(unsafe_code)]
 
-#[cfg(not(loom))]
-mod hot_reload;
+mod source;
 mod types;
 mod validation;
 
-use std::env;
-use std::path::Path;
+pub use source::{BootEnv, BootEnvError, strip_boot_only_keys_for_seed};
 
-use figment::Figment;
-use figment::providers::{Env, Format, Serialized, Toml};
+use std::env;
+
 use thiserror::Error;
-#[cfg(not(loom))]
-use tokio::sync::mpsc;
-#[cfg(not(loom))]
-use tokio::task::JoinHandle;
 
 pub use types::{
     AdminConfig, AnthropicOAuthConfig, ApiKeysConfig, BodyConfig, BulkheadConfig,
-    CircuitBreakerConfig, ClusterConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV,
-    DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
-    DEFAULT_SQLITE_PATH, DnsConfig, DownstreamAuthConfig, DownstreamAuthMode, EgressConfig,
-    EventBusConfig, EventBusTransport, LifecyclePromptCacheObservationSubscriberConfig,
-    ListenerConfig, ListenerOverrides, NoneModeConfig, NoneModeUpstreamKind, ObservabilityConfig,
-    PluginFailurePolicy, PluginWireBounds, PostgresPoolConfig, PriceCatalogConfig,
-    PromptCacheShadowConfig, RecurringJobConfig, RestartRequiredField, RuntimeConfig,
-    SchedulerConfig, SchedulerIdempotencyConfig, SchedulerPoolConfig, SchedulerRetryClasses,
-    SchedulerRetryConfig, SchedulerStalenessConfig, ShapeOriginPolicy, StorageConfig,
+    CircuitBreakerConfig, ClusterConfig, Config, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_FILES_CAP_BYTES,
+    DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_SQLITE_PATH,
+    DownstreamAuthConfig, DownstreamAuthMode, EventBusConfig, EventBusTransport,
+    LimitReservationTtlConfig, ListenerConfig, NoneModeConfig, NoneModeUpstreamKind,
+    ObservabilityConfig, PluginFailurePolicy, PluginWireBounds, PostgresPoolConfig,
+    PriceCatalogConfig, PromptCacheShadowConfig, RecurringJobConfig, RestartRequiredField,
+    RuntimeConfig, SchedulerConfig, SchedulerPoolConfig, ShapeOriginPolicy, StorageConfig,
     SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig, WasmtimeAllocationStrategy, WasmtimeConfig,
 };
-pub use validation::{ValidationError, validate_postgres_url};
+pub use validation::{ValidationError, validate_postgres_url, validate_runtime_overlay};
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -50,52 +42,15 @@ impl From<figment::Error> for ConfigError {
 }
 
 impl Config {
-    pub fn load(toml_path: &Path) -> Result<Self, ConfigError> {
-        Self::load_with_overrides(toml_path, ConfigOverrides::default())
-    }
-
-    pub fn load_with_overrides(
-        toml_path: &Path,
-        cli_overrides: ConfigOverrides,
-    ) -> Result<Self, ConfigError> {
-        let raw_toml = std::fs::read_to_string(toml_path).ok();
-        let migrated_toml = match raw_toml.as_deref() {
-            Some(raw) => {
-                validation::validate_raw_toml(raw)?;
-                Some(validation::migrate_legacy_storage_toml(raw)?)
-            }
-            None => None,
-        };
-
-        let mut figment = Figment::from(Serialized::defaults(Config::default()));
-        figment = match migrated_toml.as_deref() {
-            Some(migrated) => figment.merge(Toml::string(migrated)),
-            None => figment.merge(Toml::file_exact(toml_path)),
-        };
-        let mut config: Config = figment
-            .merge(Env::prefixed("CC_LB_").split("__"))
-            .merge(Serialized::defaults(cli_overrides))
-            .extract()?;
-
-        config.resolve_runtime_values();
-        config.validate()?;
-        Ok(config)
-    }
-
     pub fn validate(&self) -> Result<(), ConfigError> {
         validation::validate_config(self)
-    }
-
-    #[cfg(not(loom))]
-    pub fn watch_for_reload(path: &Path, tx: mpsc::Sender<Config>) -> JoinHandle<()> {
-        hot_reload::watch_for_reload(path, tx)
     }
 
     pub fn json_schema() -> schemars::Schema {
         schemars::schema_for!(Config)
     }
 
-    fn resolve_runtime_values(&mut self) {
+    pub(crate) fn resolve_runtime_values(&mut self) {
         self.admin.token = if self.admin.token_env.trim().is_empty() {
             None
         } else {

@@ -1,10 +1,18 @@
 # Runtime Management
 
+> **As of the env-only release, cc-lb no longer reads any `cc-lb.toml` file.**
+> The `--config` CLI flag and the `cc-lb config validate` subcommand are removed.
+> Boot-critical values come from `CC_LB_*` environment variables (listener
+> addresses, storage connection, AEAD/admin token env names, data dir), and
+> every other knob is edited from the dashboard `/config` page. See
+> [docs/refactor-runtime-config.md](./refactor-runtime-config.md) for the full
+> classification and env contract.
+
 This document describes the architecture, API, and operations of the database-backed runtime management system in cc-lb.
 
 ## Overview
 
-This system transitions cc-lb from static TOML configuration files to a dynamic, database-backed runtime management model. You no longer define upstreams, principals, or plugin chains in `cc-lb.toml`. Instead, all runtime configurations are stored in the database and managed dynamically. This change allows you to add, update, or delete resources on the fly without restarting the proxy. You can perform these operations through the web dashboard or directly via the admin v1 REST API.
+cc-lb uses a database-backed runtime management model. Upstreams, principals, plugin chains, and the runtime config overlay all live in the database and are managed dynamically. You can add, update, or delete resources on the fly without restarting the proxy. Perform these operations through the web dashboard (`/config` for the runtime overlay, dedicated pages for upstreams/principals/plugin chains) or directly via the admin v1 REST API.
 
 ## Architecture
 
@@ -14,22 +22,17 @@ In multi-replica deployments, replicas synchronize their local views using Postg
 
 ## Bootstrap
 
-When starting a fresh deployment, you can bootstrap the initial admin principal and seed resources. The server checks the `CC_LB_BOOTSTRAP_ADMIN_TOKEN` environment variable on startup. If present, it automatically seeds the admin principal with this token.
+When starting a fresh deployment, the only one-shot seeding step is the admin
+principal. The server checks the `CC_LB_BOOTSTRAP_ADMIN_TOKEN` environment
+variable on startup; if present, it seeds the admin principal once and is
+idempotent on subsequent boots.
 
-You can also place a `bootstrap.toml` file in your data directory to seed initial upstreams, principals, and plugin chains. The server processes this file once on startup, applies the resources to the database, and renames the file to `bootstrap.toml.consumed-<timestamp>` to prevent re-processing.
-
-An example `bootstrap.toml` file:
-
-```toml
-[[ upstreams ]]
-name = "primary-api"
-kind = "anthropic_api_key"
-api_key_env = "ANTHROPIC_API_KEY"
-
-[[ principals ]]
-name = "default-user"
-kind = "user"
-```
+All other runtime resources (upstreams, principals, plugin chains) are
+managed via the admin v1 REST API or the dashboard after the first admin
+bearer token is established. The legacy `bootstrap.toml` resource-seeding
+file is no longer read; operators that previously relied on it should issue
+the equivalent `POST /admin/v1/upstreams`, `POST /admin/v1/principals`, and
+`PUT /admin/v1/principals/{id}/plugin-chain` calls instead.
 
 ## Admin v1 REST API
 
@@ -334,28 +337,42 @@ In multi-replica deployments, replicas coordinate configuration updates and back
 
 ## Restart-Required Matrix
 
-Some configuration changes in `cc-lb.toml` cannot be applied via hot-reload and require a process restart.
+A few values are boot-only and must be set via `CC_LB_*` environment variables before the process starts. They cannot be changed through the dashboard and require a process restart to take effect.
 
-| Field | Hot | RestartRequired | Reason |
-|---|---|---|---|
-| `listener.proxy_addr` | No | Yes | Socket bindings are fixed at process start |
-| `listener.admin_addr` | No | Yes | Socket bindings are fixed at process start |
-| `listener.metrics_addr` | No | Yes | Socket bindings are fixed at process start |
-| `listener.tls.cert_path` | No | Yes | Listener TLS certificate changes require a process restart |
-| `listener.tls.key_path` | No | Yes | Listener TLS key changes require a process restart |
-| `tls.cert_path` | No | Yes | TLS certificate changes require a process restart |
-| `tls.key_path` | No | Yes | TLS key changes require a process restart |
-| `storage.path` | No | Yes | Storage backend changes require a process restart |
-| `storage.url` | No | Yes | Storage backend changes require a process restart |
-| `storage.pool` | No | Yes | Storage pool changes require a process restart |
-| `aead.key_env` | No | Yes | Storage encryption key environment changes require a process restart |
-| `oauth.anthropic.client_id` | No | Yes | Anthropic OAuth client changes require a process restart |
-| `oauth.anthropic.auth_url` | No | Yes | Anthropic OAuth endpoint changes require a process restart |
-| `oauth.anthropic.token_url` | No | Yes | Anthropic OAuth endpoint changes require a process restart |
-| `oauth.anthropic.redirect_uri` | No | Yes | Anthropic OAuth redirect changes require a process restart |
-| `oauth.anthropic.scopes` | No | Yes | Anthropic OAuth scope changes require a process restart |
+| Boot-env var | Reason |
+|---|---|
+| `CC_LB_LISTENER__PROXY_ADDR` | Proxy socket binding is fixed at process start |
+| `CC_LB_LISTENER__ADMIN_ADDR` | Admin socket binding is fixed at process start |
+| `CC_LB_LISTENER__METRICS_ADDR` | Metrics socket binding is fixed at process start |
+| `CC_LB_LISTENER__UNIX_SOCKET` | Unix socket path is bound at process start |
+| `CC_LB_TLS__CERT_PATH` / `CC_LB_TLS__KEY_PATH` | TLS material is loaded at process start |
+| `CC_LB_STORAGE__KIND` / `CC_LB_STORAGE__PATH` / `CC_LB_STORAGE__URL` / `CC_LB_STORAGE__POOL__*` | Storage backend is opened at process start |
+| `CC_LB_AEAD__KEY_ENV` | AEAD master-key env-var name is consumed before storage open |
+| `CC_LB_ADMIN__TOKEN_ENV` | Admin token env-var name is consumed before the admin listener accepts requests |
+| `CC_LB_DATA_DIR` | Data directory is resolved before storage open |
 
-All upstreams, principals, and plugin chains are fully dynamic (Hot: Yes, RestartRequired: No) because they are stored in the database and loaded dynamically.
+Upstreams, principals, and plugin chains are fully dynamic resources stored under the `DynamicView` snapshot and reloaded via `LISTEN/NOTIFY` plus the 60-second reconciler — they take effect immediately and have no restart-required semantics.
+
+The runtime config overlay edited from `/config` persists immediately to storage, but most of its fields are snapshotted into request-handling components at startup and therefore require a process restart to fully rebind. The authoritative classifier is `summarize_restart_required` in [crates/cc-lb-server/src/reload.rs](../crates/cc-lb-server/src/reload.rs); the dashboard mirrors the same set in [crates/cc-lb-admin/web/src/routes/config.tsx](../crates/cc-lb-admin/web/src/routes/config.tsx) so operators see a "restart required" badge while editing.
+
+Runtime field groups that persist immediately but require a restart to take effect:
+
+| Field group | Reason |
+|---|---|
+| `body.*` (caps) | baked into the lifecycle pipeline at startup |
+| `timeouts.*` | wired into the listener / router / drain at startup |
+| `downstream_auth.*` | `BuiltinAuthn` is constructed once at startup |
+| `oauth.anthropic.*` | OAuth refresher captures these at startup |
+| `observability.*` | tracing subscriber + exporters installed at startup |
+| `circuit_breaker.*`, `bulkhead.*` | resilience layer built at startup |
+| `subscription_quota.*` (writer, dedup, routing, retention, gc batch, enabled flag) | writer + cache built at startup; scheduler captures GC params on boot |
+| `prompt_cache_shadow.*` | observation pipeline built at startup |
+| `scheduler.*` | scheduler workers built at startup |
+| `api_keys.*` | API key catalog refresher started at startup |
+| `dns.*`, `egress.*` | DNS resolver / egress allow-list bound at startup |
+| `runtime.startup_handshake.*` | only consulted on boot |
+
+After applying any of the above, run `systemctl restart cc-lb` (or your platform equivalent) to rebind. The dashboard surfaces a banner enumerating which fields have drifted from the running config.
 
 ## Audit and Redaction Guarantees
 
@@ -382,7 +399,7 @@ This section lists common failures and their diagnosis steps.
 
 - **Symptom**: OAuth tokens are not refreshed, and requests fail with expired token errors.
 - **Diagnosis**: Check the `/metrics` endpoint for `cclb_oauth_refresh_total{outcome="..."}` to see the error categorization.
-- **Workaround**: Verify that the network can reach the OAuth provider and that the client credentials in `cc-lb.toml` are correct. The lazy refresh mechanism will automatically retry on signing failures.
+- **Workaround**: Verify that the network can reach the OAuth provider and that the OAuth client credentials configured in `/config` (`oauth.anthropic.*`) are correct. The lazy refresh mechanism will automatically retry on signing failures.
 
 ### Replica B doesn't see new upstream after 5s
 

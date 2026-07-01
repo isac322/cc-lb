@@ -3,41 +3,11 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
 pub type Result<T> = std::result::Result<T, ManagementError>;
 
-pub(crate) fn extend_config_schema(schema: &mut Value) {
-    let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
-        return;
-    };
-
-    properties.insert(
-        "principals".to_owned(),
-        json!({
-            "type": "object",
-            "additionalProperties": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" },
-                    "kind": {
-                        "type": "string",
-                        "enum": ["machine", "human", "admin"]
-                    },
-                    "allowed_models": {
-                        "type": "array",
-                        "items": { "type": "string" }
-                    },
-                    "allowed_upstreams": {
-                        "type": "array",
-                        "items": { "type": "string", "format": "uuid" }
-                    },
-                    "default_limits": { "type": "array" }
-                }
-            }
-        }),
-    );
-}
+pub(crate) fn extend_config_schema(_schema: &mut Value) {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ManagementError {

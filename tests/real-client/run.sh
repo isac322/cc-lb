@@ -117,30 +117,6 @@ sys.exit(1)
 PY
 }
 
-render_config() {
-  template=$1
-  output=$2
-  python3 - "$template" "$output" "$proxy_port" "$admin_port" "$metrics_port" "$fake_port" "$TMP_DIR" <<'PY'
-from pathlib import Path
-import sys
-src, dst, proxy, admin, metrics, fake, tmp = sys.argv[1:]
-text = Path(src).read_text()
-replacements = {
-    '__PROXY_ADDR__': f'127.0.0.1:{proxy}',
-    '__ADMIN_ADDR__': f'127.0.0.1:{admin}',
-    '__METRICS_ADDR__': f'127.0.0.1:{metrics}',
-    '__FAKE_URL__': f'http://127.0.0.1:{fake}',
-    '__REGION__': 'us-east-1',
-    '__VERTEX_REGION__': 'us-central1',
-    '__PROJECT__': 'fake-project',
-    '__SQLITE_PATH__': str(Path(tmp) / 'cc-lb.sqlite'),
-}
-for old, new in replacements.items():
-    text = text.replace(old, new)
-Path(dst).write_text(text)
-PY
-}
-
 detect_skip_reason() {
   stderr_file=$1
   if grep -Eiq 'tty|required.*interactive|interactive.*required|browser|oauth|login|required.*auth|terms|ToS|subscription|not logged in|permission denied' "$stderr_file"; then
@@ -169,10 +145,53 @@ print(' '.join(str(p) for p in ports))
 PY
 )
 EOF
-config_path="$TMP_DIR/cc-lb.toml"
 gcp_credentials="$TMP_DIR/gcp-adc.json"
 stdout_file="$TMP_DIR/client.stdout"
 stderr_file="$TMP_DIR/client.stderr"
+sqlite_path="$TMP_DIR/cc-lb.sqlite"
+# Pre-seed runtime overlay so downstream_auth.mode=none takes effect at the
+# very first server boot. BuiltinAuthn is constructed once at startup, so a
+# later /admin/config/apply only logs "restart required" warnings without
+# rebinding the authn pipeline. The effective_config_v1 table shape mirrors
+# crates/cc-lb-storage-sqlite/migrations/0062_effective_config.sql; the
+# server's sqlx migrator runs CREATE TABLE IF NOT EXISTS, so this manual
+# pre-creation is idempotent.
+python3 - "$sqlite_path" <<'PY'
+import json
+import sqlite3
+import sys
+import time
+
+path = sys.argv[1]
+conn = sqlite3.connect(path)
+try:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS effective_config_v1 (
+            id TEXT PRIMARY KEY CHECK (id = 'singleton'),
+            revision INTEGER NOT NULL,
+            config TEXT NOT NULL,
+            applied_at INTEGER NOT NULL
+        )
+        """
+    )
+    overlay = {
+        "downstream_auth": {
+            "mode": "none",
+            "none_mode": {
+                "principal_id": "api-key",
+                "upstream_kind": "anthropic_key",
+            },
+        }
+    }
+    conn.execute(
+        "INSERT OR REPLACE INTO effective_config_v1 (id, revision, config, applied_at) VALUES (?, ?, ?, ?)",
+        ("singleton", 1, json.dumps(overlay), int(time.time())),
+    )
+    conn.commit()
+finally:
+    conn.close()
+PY
 mkdir -p "$TMP_DIR/home" "$TMP_DIR/xdg-config" "$TMP_DIR/xdg-data" "$TMP_DIR/pi-agent"
 cat > "$TMP_DIR/pi-agent/models.json" <<JSON
 {"providers":{"anthropic":{"baseUrl":"http://127.0.0.1:$proxy_port","apiKey":"ANTHROPIC_API_KEY","api":"anthropic-messages","compat":{"supportsEagerToolInputStreaming":false}}}}
@@ -181,7 +200,6 @@ JSON
 cat > "$gcp_credentials" <<'JSON'
 {"type":"authorized_user","client_id":"fake-client","client_secret":"fake-secret","refresh_token":"fake-refresh"}
 JSON
-render_config "$SCRIPT_DIR/configs/$client-$upstream.toml" "$config_path"
 
 fake_bin="${FAKE_BIN:-$ROOT_DIR/target/debug/$fake_package}"
 if [ -x "$fake_bin" ]; then
@@ -197,26 +215,26 @@ if ! wait_port "$fake_port" "$fake_package"; then
 fi
 
 cc_lb_bin="${CC_LB_BIN:-$ROOT_DIR/target/debug/cc-lb}"
+common_env=(
+  "CC_LB_LISTENER__PROXY_ADDR=127.0.0.1:$proxy_port"
+  "CC_LB_LISTENER__ADMIN_ADDR=127.0.0.1:$admin_port"
+  "CC_LB_LISTENER__METRICS_ADDR=127.0.0.1:$metrics_port"
+  "CC_LB_STORAGE__KIND=sqlite"
+  "CC_LB_STORAGE__PATH=$sqlite_path"
+  "CC_LB_DATA_DIR=$TMP_DIR"
+  "CC_LB_ADMIN_TOKEN=admin-token"
+  "CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000"
+  "AWS_ACCESS_KEY_ID=AKIATEST"
+  "AWS_SECRET_ACCESS_KEY=SECRETTEST"
+  "AWS_REGION=us-east-1"
+  "GOOGLE_APPLICATION_CREDENTIALS=$gcp_credentials"
+  "CC_LB_GCP_ACCESS_TOKEN=ya29.test"
+  "RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn"
+)
 if [ -x "$cc_lb_bin" ]; then
-  CC_LB_ADMIN_TOKEN=admin-token \
-  CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
-  AWS_ACCESS_KEY_ID=AKIATEST \
-  AWS_SECRET_ACCESS_KEY=SECRETTEST \
-  AWS_REGION=us-east-1 \
-  GOOGLE_APPLICATION_CREDENTIALS="$gcp_credentials" \
-  CC_LB_GCP_ACCESS_TOKEN=ya29.test \
-  RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
-  "$cc_lb_bin" serve --config "$config_path" > "$TMP_DIR/proxy.log" 2>&1 &
+  env "${common_env[@]}" "$cc_lb_bin" serve > "$TMP_DIR/proxy.log" 2>&1 &
 else
-  CC_LB_ADMIN_TOKEN=admin-token \
-  CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
-  AWS_ACCESS_KEY_ID=AKIATEST \
-  AWS_SECRET_ACCESS_KEY=SECRETTEST \
-  AWS_REGION=us-east-1 \
-  GOOGLE_APPLICATION_CREDENTIALS="$gcp_credentials" \
-  CC_LB_GCP_ACCESS_TOKEN=ya29.test \
-  RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
-  cargo run -q -p cc-lb-server -- serve --config "$config_path" > "$TMP_DIR/proxy.log" 2>&1 &
+  env "${common_env[@]}" cargo run -q -p cc-lb-server -- serve > "$TMP_DIR/proxy.log" 2>&1 &
 fi
 PROXY_PID=$!
 if ! wait_port "$proxy_port" cc-lb; then
@@ -230,10 +248,8 @@ if ! wait_port "$admin_port" cc-lb-admin; then
   fail "cc-lb-admin did not start"
 fi
 
-# The test config sets downstream_auth.mode = "none" with principal_id =
-# "api-key" and upstream_kind = "anthropic_key". The principal and the
-# routing-target upstream named "real_client" must exist in the dynamic
-# store before cc-lb can route the request.
+# The principal "api-key" and the upstream "real_client" must exist in the
+# dynamic store before cc-lb can route the request.
 # Master b82e211 (feat: runtime-dynamic-mgmt) replaced the previous
 # [upstreams.*] / [principals.*] TOML blocks with admin-API registration, so
 # every test harness must seed them at startup.

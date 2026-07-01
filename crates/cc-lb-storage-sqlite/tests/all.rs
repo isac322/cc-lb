@@ -1,3 +1,5 @@
+#[path = "effective_config.rs"]
+mod effective_config;
 #[path = "price_catalog_retention.rs"]
 mod price_catalog_retention;
 #[path = "principal_terminal_strategy.rs"]

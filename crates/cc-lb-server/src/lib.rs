@@ -36,7 +36,6 @@ pub mod state_machine;
 pub mod storage_factory;
 pub mod subscription_quota_cache;
 pub mod tls;
-pub mod validate;
 pub mod version;
 pub mod warmup;
 pub mod wasm_host;

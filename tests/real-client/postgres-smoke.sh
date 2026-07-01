@@ -31,71 +31,32 @@ PY
 )
 EOF
 
-config_path="$TMP_DIR/cc-lb.toml"
-cat > "$config_path" <<TOML
-[listener]
-proxy_addr = "127.0.0.1:$proxy_port"
-admin_addr = "127.0.0.1:$admin_port"
-metrics_addr = "127.0.0.1:$metrics_port"
-
-[body]
-messages_cap_bytes = 33554432
-files_cap_bytes = 104857600
-
-[timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
-upstream_total_secs = 30
-drain_secs = 5
-
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "api-key"
-upstream_kind = "anthropic_key"
-
-[storage]
-kind = "postgres"
-url = "$CI_POSTGRES_URL"
-
-[storage.pool]
-acquire_timeout_secs = 10
-statement_timeout_secs = 25
-
-[aead]
-key_env = "CC_LB_MASTER_KEY"
-
-[observability]
-tracing_level = "info"
-log_redaction = true
-user_prompt_redaction = false
-
-[quotas]
-default_window_secs = 60
-default_requests_per_window = 1000
-default_input_tokens = 1000000
-default_output_tokens = 1000000
-
-[admin]
-token_env = "CC_LB_ADMIN_TOKEN"
-
-[circuit_breaker]
-failures_to_open = 5
-window_secs = 10
-half_open_after_secs = 30
-
-[bulkhead]
-max_conns_per_upstream = 50
-semaphore_per_upstream = 100
-
-[dns]
-cache_ttl_floor_secs = 30
-cache_ttl_ceiling_secs = 300
-
-[egress]
-TOML
+apply_downstream_none_mode() {
+  draft_body='{"draft":{"downstream_auth":{"mode":"none","none_mode":{"principal_id":"api-key","upstream_kind":"anthropic_key"}}},"expected_revision":0}'
+  draft_code=$(curl -sS -o "$TMP_DIR/admin-draft.json" -w '%{http_code}' -X PUT \
+    -H 'Authorization: Bearer test' \
+    -H 'content-type: application/json' \
+    --data "$draft_body" \
+    "http://127.0.0.1:$admin_port/admin/config/draft") || draft_code=000
+  if [ "$draft_code" != "200" ]; then
+    cat "$TMP_DIR/admin-draft.json" >&2 || true
+    echo "FAIL: save config draft expected 200, got $draft_code" >&2
+    exit 1
+  fi
+  rev=$(python3 -c "import json,sys; print(json.load(open('$TMP_DIR/admin-draft.json'))['revision'])")
+  for endpoint in draft/validate apply; do
+    code=$(curl -sS -o "$TMP_DIR/admin-${endpoint//\//-}.json" -w '%{http_code}' -X POST \
+      -H 'Authorization: Bearer test' \
+      -H 'content-type: application/json' \
+      --data "{\"expected_revision\":$rev}" \
+      "http://127.0.0.1:$admin_port/admin/config/$endpoint") || code=000
+    if [ "$code" != "200" ]; then
+      cat "$TMP_DIR/admin-${endpoint//\//-}.json" >&2 || true
+      echo "FAIL: config $endpoint expected 200, got $code" >&2
+      exit 1
+    fi
+  done
+}
 
 wait_port() {
   python3 - "$1" "$2" <<'PY'
@@ -168,10 +129,18 @@ cargo run -q -p fake-anthropic -- --port "$fake_port" > "$TMP_DIR/fake.log" 2>&1
 FAKE_PID=$!
 wait_port "$fake_port" fake-anthropic
 
-echo "===> step 2: spawn cc-lb-server with [storage] kind=postgres"
+echo "===> step 2: spawn cc-lb-server with CC_LB_STORAGE__KIND=postgres"
+CC_LB_LISTENER__PROXY_ADDR="127.0.0.1:$proxy_port" \
+CC_LB_LISTENER__ADMIN_ADDR="127.0.0.1:$admin_port" \
+CC_LB_LISTENER__METRICS_ADDR="127.0.0.1:$metrics_port" \
+CC_LB_STORAGE__KIND=postgres \
+CC_LB_STORAGE__URL="$CI_POSTGRES_URL" \
+CC_LB_STORAGE__POOL__ACQUIRE_TIMEOUT_SECS=10 \
+CC_LB_STORAGE__POOL__STATEMENT_TIMEOUT_SECS=25 \
+CC_LB_DATA_DIR="$TMP_DIR" \
 CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
 CC_LB_ADMIN_TOKEN=test \
-cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$config_path" \
+cargo run -q -p cc-lb-server --features postgres,sqlite -- serve \
   > "$TMP_DIR/proxy.log" 2>&1 &
 PROXY_PID=$!
 if ! wait_port "$proxy_port" cc-lb; then
@@ -179,6 +148,7 @@ if ! wait_port "$proxy_port" cc-lb; then
   exit 1
 fi
 wait_port "$admin_port" cc-lb-admin
+apply_downstream_none_mode
 seed_runtime
 
 echo "===> step 3: send /v1/messages through postgres-backed proxy"
@@ -226,9 +196,17 @@ new_kind=$(psql "$CI_POSTGRES_URL" -tAc "SELECT value FROM meta WHERE key = 'bac
 echo "===> step 7: restart cc-lb against tampered DB - expect fatal exit (BackendKindMismatch)"
 mismatch_log="$TMP_DIR/proxy-mismatch.log"
 set +e
+CC_LB_LISTENER__PROXY_ADDR="127.0.0.1:$proxy_port" \
+CC_LB_LISTENER__ADMIN_ADDR="127.0.0.1:$admin_port" \
+CC_LB_LISTENER__METRICS_ADDR="127.0.0.1:$metrics_port" \
+CC_LB_STORAGE__KIND=postgres \
+CC_LB_STORAGE__URL="$CI_POSTGRES_URL" \
+CC_LB_STORAGE__POOL__ACQUIRE_TIMEOUT_SECS=10 \
+CC_LB_STORAGE__POOL__STATEMENT_TIMEOUT_SECS=25 \
+CC_LB_DATA_DIR="$TMP_DIR" \
 CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
 CC_LB_ADMIN_TOKEN=test \
-timeout 30 cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$config_path" \
+timeout 30 cargo run -q -p cc-lb-server --features postgres,sqlite -- serve \
   > "$mismatch_log" 2>&1
 exit_code=$?
 set -e
