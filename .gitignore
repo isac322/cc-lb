@@ -356,3 +356,6 @@ mockup/
 
 # Sisyphus / OMO orchestrator local artifacts
 .omo/
+
+# cc-lb-admin runtime cache (mirrors cc-lb-server/data/ above)
+crates/cc-lb-admin/data/

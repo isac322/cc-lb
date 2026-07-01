@@ -3,9 +3,9 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_CACHE_AFFINITY_SHA256,
-    BUILTIN_CACHE_AFFINITY_WIRE_VERSION, PluginChainConflictReason, PluginChainEntryInput,
-    PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, PrincipalStore, StorageError,
-    WasmBlob, WasmRegistryEntryInput,
+    PluginChainConflictReason, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
+    PluginSlot, PrincipalStore, StorageError, WasmBlob, WasmRegistryEntryInput,
+    default_wire_version,
     principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind},
     sparse_order,
 };
@@ -299,7 +299,7 @@ pub async fn registry_by_id_returns_seeded_builtin_cache_affinity_on_storage<
         "builtin uploader is nil"
     );
     ensure!(
-        entry.wire_version == BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+        entry.wire_version == default_wire_version(),
         "builtin wire version matches"
     );
     ensure!(entry.is_builtin, "builtin flag is persisted");
@@ -335,7 +335,7 @@ pub async fn insert_chain_entry_with_builtin_cache_affinity_succeeds_on_storage<
             sse_per_event: false,
             batched_events_per_flush: 1,
             batched_flush_ms: 100,
-            wire_version: Some(BUILTIN_CACHE_AFFINITY_WIRE_VERSION),
+            wire_version: Some(default_wire_version()),
         })
         .await?;
 
@@ -344,7 +344,7 @@ pub async fn insert_chain_entry_with_builtin_cache_affinity_succeeds_on_storage<
         "chain entry references builtin cache-affinity"
     );
     ensure!(
-        inserted.wire_version == Some(BUILTIN_CACHE_AFFINITY_WIRE_VERSION),
+        inserted.wire_version == Some(default_wire_version()),
         "chain entry preserves builtin wire version"
     );
     let listed = storage
@@ -1503,6 +1503,7 @@ fn blob(seed: u8, bytes: Vec<u8>) -> WasmBlob {
 
 fn entry(name: &str) -> WasmRegistryEntryInput {
     WasmRegistryEntryInput {
+        schema_hash: None,
         name: name.to_owned(),
         original_filename: format!("{name}.wasm"),
         label: None,

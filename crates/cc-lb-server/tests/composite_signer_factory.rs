@@ -8,7 +8,7 @@ use cc_lb_plugin_api::{
     Principal, PrincipalKind, RequestContext, ShapedRequest, SignerError, SignerFactory, Upstream,
     UpstreamDialect, shape_request, sign_request,
 };
-use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -230,10 +230,7 @@ async fn router_choice_selects_matching_oauth_upstream() {
     fixture
         .create_oauth_upstream_with_access_token("oauth-bob", "sk-ant-oat01-bob-token")
         .await;
-    let runtime = ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        std::sync::Arc::new(cc_lb_core::SystemClock),
-    );
+    let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture._stores.as_ref(),
         fixture._oauth_cfg.as_ref(),
@@ -275,10 +272,7 @@ async fn router_choice_selects_matching_oauth_upstream() {
 async fn empty_router_choice_errors() {
     let fixture = Fixture::new().await;
     fixture.create_oauth_upstream("oauth-only").await;
-    let runtime = ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        std::sync::Arc::new(cc_lb_core::SystemClock),
-    );
+    let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture._stores.as_ref(),
         fixture._oauth_cfg.as_ref(),

@@ -4,10 +4,12 @@ use std::sync::Arc;
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
 use cc_lb_plugin_api::{
-    PluginManifest, Principal, PrincipalKind, RequestContext, RuntimeError, SignerFactory,
+    PluginManifest, Principal, PrincipalKind, RequestContext, RuntimeError, SignerFactory, SlotKey,
     Upstream, shape_request, sign_request,
 };
-use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_runtime_wasmtime::{
+    RegisterOptions, WasmtimeRuntime, WasmtimeRuntimeError, WasmtimeUpstreamDialect,
+};
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh, LazyRefreshHandle,
 };
@@ -28,7 +30,7 @@ pub struct WarmupDispatchOutcome {
 }
 
 pub struct WarmupDialectDispatchParams<'a> {
-    pub runtime: &'a ExtismRuntime,
+    pub runtime: &'a WasmtimeRuntime,
     pub stores: &'a Stores,
     pub data_dir: &'a Path,
     pub aead: Arc<AeadService>,
@@ -58,6 +60,8 @@ pub enum WarmupDispatchError {
     Materialize(String),
     #[error("plugin instantiate failed: {0}")]
     Instantiate(#[from] RuntimeError),
+    #[error("wasmtime plugin register failed: {0}")]
+    Register(#[from] WasmtimeRuntimeError),
     #[error("warmup body serialize failed: {0}")]
     BodySerialize(#[from] serde_json::Error),
     #[error("shape failed: {0}")]
@@ -109,6 +113,7 @@ pub async fn dispatch_warmup_with_dialect(
         .await
         .map_err(|error| WarmupDispatchError::Materialize(error.to_string()))?;
     let manifest = PluginManifest {
+        pure: true,
         name: registry_entry.name,
         artifact: wasm_path.to_string_lossy().into_owned(),
         wire_version: plugin_ref.wire_version,
@@ -121,11 +126,20 @@ pub async fn dispatch_warmup_with_dialect(
     };
 
     let synth_name = format!("__warmup__{}", params.upstream.id);
-    let (dialect, staged) =
-        params
-            .runtime
-            .instantiate_dialect_for_principal(&synth_name, &manifest.name, &manifest)?;
-    params.runtime.commit_staged(vec![staged])?;
+    let slot_key = SlotKey::new(synth_name.clone(), manifest.name.clone());
+    let wasm_bytes = tokio::fs::read(&manifest.artifact)
+        .await
+        .map_err(|error| WarmupDispatchError::Materialize(error.to_string()))?;
+    let slot = params.runtime.register_shape_with(
+        slot_key.clone(),
+        manifest.name.clone(),
+        &wasm_bytes,
+        RegisterOptions {
+            pure: manifest.pure,
+        },
+    )?;
+    let dialect: Arc<dyn cc_lb_plugin_api::UpstreamDialect> =
+        Arc::new(WasmtimeUpstreamDialect::new(slot, slot_key));
 
     let body_json = json!({
         "model": WARMUP_MODEL,

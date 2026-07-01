@@ -13,7 +13,7 @@ use cc_lb_config::{
 };
 use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_core::{DynamicViewHolder, Lifecycle, LifecycleConfig};
-use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult,
@@ -45,10 +45,7 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
     fixture
         .create_principal("oauth-principal", vec![target_id])
         .await;
-    let runtime = ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        std::sync::Arc::new(cc_lb_core::SystemClock),
-    );
+    let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
         fixture.oauth_cfg.as_ref(),

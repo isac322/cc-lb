@@ -27,7 +27,7 @@ fn describes_all_required_metrics() {
             "cc_lb_config_reload_failed_total",
             "cc_lb_tls_reload_total",
             "cc_lb_sse_events_total",
-            "cc_lb_extism_call_duration_seconds",
+            "cc_lb_plugin_call_duration_seconds",
             "cc_lb_tokens_total",
             "cc_lb_virtual_cost_usd_total",
             "cclb_api_key_requests_total",

@@ -1,22 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, ensure};
 use cc_lb_storage_api::{
     AugmentedMetadata, PluginBlobRepo, PluginRegistryRecord, PluginRegistryRepo,
     PluginRegistryStatus,
-};
-use proptest::{
-    collection::{btree_map, btree_set},
-    prelude::*,
-    strategy::ValueTree,
-    string::string_regex,
-    test_runner::{Config, TestRunner},
 };
 use serde_json::json;
 
 const BASE_TS: i64 = 1_900_000_000;
 const CC_LB_PLUGIN_MAGIC: [u8; 8] = [0xCC, 0x1B, 0x70, 0x10, 0x00, 0x01, 0x00, 0x00];
-const AUGMENTED_METADATA_MAX_BYTES: usize = 256 * 1024;
 
 pub async fn plugin_registry_roundtrip(
     registry: &impl PluginRegistryRepo,
@@ -28,9 +20,6 @@ pub async fn plugin_registry_roundtrip(
     delete_then_get_returns_none(registry, blobs).await?;
     count_accurate(registry, blobs).await?;
     shutdown_marker_lifecycle(registry, blobs).await?;
-    large_augmented_metadata(registry, blobs).await?;
-    bteemap_key_order_preserved(registry, blobs).await?;
-    property_roundtrip_arbitrary_records(registry, blobs).await?;
     Ok(())
 }
 
@@ -185,213 +174,6 @@ pub async fn shutdown_marker_lifecycle(
     Ok(())
 }
 
-pub async fn large_augmented_metadata(
-    registry: &impl PluginRegistryRepo,
-    _blobs: &impl PluginBlobRepo,
-) -> Result<()> {
-    let metadata = large_metadata_at_boundary("large-metadata", "1.0.0")?;
-    let record = record_with_metadata(
-        61,
-        "large-metadata",
-        "1.0.0",
-        1,
-        metadata,
-        PluginRegistryStatus::Active,
-    );
-
-    let serialized_size = serde_json::to_vec(&record.augmented_metadata)?.len();
-    ensure!(
-        serialized_size == AUGMENTED_METADATA_MAX_BYTES,
-        "augmented metadata is exactly the 256KB boundary"
-    );
-
-    registry.upsert_record(&record).await?;
-    let fetched = registry.get_by_sha256(&record.sha256).await?;
-    ensure!(
-        fetched == Some(record.clone()),
-        "large metadata round-trips"
-    );
-
-    registry.delete_by_sha256(&record.sha256).await?;
-    Ok(())
-}
-
-pub async fn bteemap_key_order_preserved(
-    registry: &impl PluginRegistryRepo,
-    _blobs: &impl PluginBlobRepo,
-) -> Result<()> {
-    let metadata = metadata_from_parts(
-        "key-order",
-        "1.0.0",
-        1,
-        functions(&[("route", 1), ("build_signer", 1), ("observe", 1)]),
-        BTreeSet::new(),
-        BASE_TS,
-        true,
-        BASE_TS + 1,
-        BASE_TS + 600,
-    )?;
-    let record = record_with_metadata(
-        71,
-        "key-order",
-        "1.0.0",
-        1,
-        metadata,
-        PluginRegistryStatus::Active,
-    );
-
-    registry.upsert_record(&record).await?;
-    let fetched = registry
-        .get_by_sha256(&record.sha256)
-        .await?
-        .context("record should exist")?;
-    let keys = fetched
-        .augmented_metadata
-        .negotiated_functions
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    ensure!(
-        keys == ["build_signer", "observe", "route"],
-        "chosen_versions BTreeMap key order is preserved"
-    );
-
-    registry.delete_by_sha256(&record.sha256).await?;
-    Ok(())
-}
-
-pub async fn property_roundtrip_arbitrary_records(
-    registry: &impl PluginRegistryRepo,
-    _blobs: &impl PluginBlobRepo,
-) -> Result<()> {
-    let mut runner = TestRunner::new(Config {
-        cases: 32,
-        ..Config::default()
-    });
-    let strategy = plugin_registry_record_strategy();
-
-    for _ in 0..runner.config().cases {
-        let record = strategy
-            .new_tree(&mut runner)
-            .map_err(|error| anyhow!("failed to generate plugin registry record: {error}"))?
-            .current();
-
-        registry.upsert_record(&record).await?;
-        let fetched = registry.get_by_sha256(&record.sha256).await?;
-        ensure!(
-            fetched == Some(record.clone()),
-            "arbitrary PluginRegistryRecord round-trips unchanged"
-        );
-        registry.delete_by_sha256(&record.sha256).await?;
-    }
-
-    Ok(())
-}
-
-fn plugin_registry_record_strategy() -> impl Strategy<Value = PluginRegistryRecord> {
-    (
-        any::<[u8; 32]>(),
-        plugin_name_strategy(),
-        plugin_version_strategy(),
-        1u32..=8,
-        function_map_strategy(),
-        capability_set_strategy(),
-        any::<[u8; 32]>(),
-        1u32..=4,
-        timing_strategy(),
-        status_strategy(),
-    )
-        .prop_map(
-            |(
-                sha256,
-                plugin_name,
-                plugin_version,
-                abi_envelope,
-                negotiated_functions,
-                negotiated_capabilities,
-                host_offer_hash,
-                handshake_schema_version,
-                (last_handshake_at, self_check_passed, self_check_completed_at, expires_at),
-                status,
-            )| {
-                let augmented_metadata = metadata_from_parts(
-                    &plugin_name,
-                    &plugin_version,
-                    abi_envelope,
-                    negotiated_functions,
-                    negotiated_capabilities,
-                    last_handshake_at,
-                    self_check_passed,
-                    self_check_completed_at,
-                    expires_at,
-                )
-                .expect("generated metadata is valid");
-
-                PluginRegistryRecord {
-                    sha256,
-                    plugin_name,
-                    plugin_version,
-                    abi_envelope,
-                    augmented_metadata,
-                    host_offer_hash,
-                    handshake_schema_version,
-                    last_handshake_at,
-                    status,
-                }
-            },
-        )
-}
-
-fn status_strategy() -> impl Strategy<Value = PluginRegistryStatus> {
-    prop_oneof![
-        Just(PluginRegistryStatus::Active),
-        Just(PluginRegistryStatus::Disabled),
-    ]
-}
-
-fn plugin_name_strategy() -> impl Strategy<Value = String> {
-    string_regex("[a-z][a-z0-9_-]{0,31}").expect("valid plugin name regex")
-}
-
-fn plugin_version_strategy() -> impl Strategy<Value = String> {
-    string_regex("[0-9]{1,2}\\.[0-9]{1,2}\\.[0-9]{1,2}").expect("valid version regex")
-}
-
-fn function_name_strategy() -> impl Strategy<Value = String> {
-    string_regex("[a-z][a-z0-9_]{0,20}").expect("valid function name regex")
-}
-
-fn capability_strategy() -> impl Strategy<Value = String> {
-    string_regex("[a-z][a-z0-9_:/.-]{0,24}").expect("valid capability regex")
-}
-
-fn function_map_strategy() -> impl Strategy<Value = BTreeMap<String, u32>> {
-    btree_map(function_name_strategy(), 1u32..=8, 1..=8)
-}
-
-fn capability_set_strategy() -> impl Strategy<Value = BTreeSet<String>> {
-    btree_set(capability_strategy(), 0..=8)
-}
-
-fn timing_strategy() -> impl Strategy<Value = (i64, bool, i64, i64)> {
-    (
-        BASE_TS..BASE_TS + 1_000_000,
-        any::<bool>(),
-        0i64..=600,
-        1i64..=86_400,
-    )
-        .prop_map(
-            |(last_handshake_at, self_check_passed, self_check_delay, ttl_seconds)| {
-                (
-                    last_handshake_at,
-                    self_check_passed,
-                    last_handshake_at + self_check_delay,
-                    last_handshake_at + ttl_seconds,
-                )
-            },
-        )
-}
-
 fn record(
     seed: u8,
     plugin_name: &str,
@@ -468,39 +250,6 @@ fn metadata_from_parts(
         "expires_at": expires_at,
     }))
     .context("build augmented metadata")
-}
-
-fn large_metadata_at_boundary(
-    plugin_name: &str,
-    plugin_version: &str,
-) -> Result<AugmentedMetadata> {
-    let mut metadata = metadata_from_parts(
-        plugin_name,
-        plugin_version,
-        1,
-        functions(&[("route", 1)]),
-        capabilities(&[""]),
-        BASE_TS,
-        true,
-        BASE_TS + 1,
-        BASE_TS + 600,
-    )?;
-
-    let base_size = serde_json::to_vec(&metadata)?.len();
-    ensure!(
-        base_size <= AUGMENTED_METADATA_MAX_BYTES,
-        "base metadata exceeds boundary"
-    );
-
-    let filler_len = AUGMENTED_METADATA_MAX_BYTES - base_size;
-    metadata.negotiated_capabilities = capabilities(&[&"a".repeat(filler_len)]);
-
-    let final_size = serde_json::to_vec(&metadata)?.len();
-    ensure!(
-        final_size == AUGMENTED_METADATA_MAX_BYTES,
-        "filler reaches exact boundary"
-    );
-    Ok(metadata)
 }
 
 fn functions(entries: &[(&str, u32)]) -> BTreeMap<String, u32> {

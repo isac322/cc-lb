@@ -258,7 +258,7 @@ Response:
 
 - **Size Limit**: The upload is limited to 32 MiB per blob.
 - **Magic Bytes**: The server performs a magic-bytes check to verify that the uploaded file starts with `\0asm`.
-- **Extism Validation**: The server instantiates the plugin using Extism to validate that it compiles and runs correctly.
+- **Wasmtime Validation**: The server inspects the plugin with wasmtime (`inspect_wasm`) to verify required exports (`cc_lb_alloc`, `cc_lb_free`, `memory`, and the per-slot hook), reject disallowed host imports, and confirm the embedded BLAKE3 schema hash matches the slot's wire contract.
 - **SHA-256 Deduplication**: The server computes the SHA-256 hash of the bytes to deduplicate uploads. If the blob already exists, the server updates the registry metadata without duplicating the file on disk.
 - **Reference Counting**: The server tracks references to each plugin blob. If you attempt to delete a registry entry that is currently referenced by a principal's plugin chain, the delete operation is blocked with a `referenced_by` conflict error.
 

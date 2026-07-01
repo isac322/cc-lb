@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -12,12 +12,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use cc_lb_core::{AuditEntry, AuditPayload};
-use cc_lb_runtime_extism::handshake::{build_offer, execute_handshake, slot_set_from_handshake};
+use cc_lb_runtime_wasmtime::{ModuleInspection, SlotKind, WasmtimeRuntimeError, inspect_wasm};
 use cc_lb_storage_api::{
     MAX_WASM_BLOB_BYTES, PluginSlot, StorageError, WasmBlob, WasmRegistryEntryInput,
     default_wire_version,
 };
-use extism::{Manifest, Plugin, Wasm};
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -54,11 +53,10 @@ struct UploadParts {
     bytes: Option<Vec<u8>>,
     name: Option<String>,
     original_filename: Option<String>,
-}
-
-struct HandshakeMetadata {
-    slots: Vec<PluginSlot>,
-    wire_version: u8,
+    /// Required: which slot kind the plugin targets — `filter`,
+    /// `shape`, or `observe`. Maps to [`SlotKind`] for wasmtime
+    /// load-time inspection and to [`PluginSlot`] for the registry.
+    slot_kind: Option<String>,
 }
 
 pub fn router() -> Router<AdminState> {
@@ -173,7 +171,16 @@ async fn upload_wasm_inner(
         ))
     })?;
     validate_wasm_bytes(&bytes).map_err(Box::new)?;
-    validate_extism(&bytes).map_err(Box::new)?;
+    let slot_kind_str = parts.slot_kind.ok_or_else(|| {
+        Box::new(json_error(
+            StatusCode::BAD_REQUEST,
+            "missing_part",
+            "missing multipart part: slot_kind (must be one of filter, shape, observe)",
+        ))
+    })?;
+    let (slot_kind, plugin_slot) = parse_slot_kind(&slot_kind_str).map_err(Box::new)?;
+    let inspection = inspect_with_wasmtime(&bytes, slot_kind).await?;
+    let inspected_schema_hash = inspection.primary_schema_hash();
 
     let sha256 = tokio::task::spawn_blocking({
         let bytes = bytes.clone();
@@ -197,10 +204,7 @@ async fn upload_wasm_inner(
         Some(entry) if !entry.supported_slots.is_empty() => {
             (entry.supported_slots.clone(), entry.wire_version)
         }
-        _ => {
-            let metadata = derive_handshake_metadata(&bytes).await?;
-            (metadata.slots, metadata.wire_version)
-        }
+        _ => (vec![plugin_slot], default_wire_version()),
     };
     let admin_id = admin_id_from_headers(headers);
     let uploaded_at_unix_secs = cc_lb_core::clock::unix_secs(state.clock.now());
@@ -211,6 +215,7 @@ async fn upload_wasm_inner(
         parse_validated_at_unix_secs: uploaded_at_unix_secs,
     };
     let entry_input = WasmRegistryEntryInput {
+        schema_hash: Some(inspected_schema_hash),
         name,
         original_filename: original_filename.clone(),
         label: None,
@@ -303,6 +308,15 @@ async fn read_upload_parts(mut multipart: Multipart) -> Result<UploadParts, Box<
             }
             "original_filename" => {
                 parts.original_filename = Some(field.text().await.map_err(|error| {
+                    Box::new(json_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_multipart",
+                        error.to_string(),
+                    ))
+                })?);
+            }
+            "slot_kind" => {
+                parts.slot_kind = Some(field.text().await.map_err(|error| {
                     Box::new(json_error(
                         StatusCode::BAD_REQUEST,
                         "invalid_multipart",
@@ -419,95 +433,47 @@ fn validate_wasm_bytes(bytes: &[u8]) -> Result<(), Response> {
 }
 
 #[allow(clippy::result_large_err)]
-fn validate_extism(bytes: &[u8]) -> Result<(), Response> {
-    let manifest = Manifest::new([Wasm::data(bytes.to_vec())]);
-    let plugin = Plugin::new(&manifest, [], true).map_err(|error| {
-        let mut message = error.to_string();
-        if message.len() > 500 {
-            message.truncate(500);
-        }
-        json_error(StatusCode::BAD_REQUEST, "invalid_wasm", message)
-    })?;
-    reject_removed_router_wire(&plugin)
+fn parse_slot_kind(value: &str) -> Result<(SlotKind, PluginSlot), Response> {
+    match value {
+        "filter" => Ok((SlotKind::Filter, PluginSlot::Router)),
+        "shape" => Ok((SlotKind::Shape, PluginSlot::Shape)),
+        "observe" => Ok((SlotKind::Observe, PluginSlot::ObservabilityHook)),
+        other => Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_slot_kind",
+            format!("slot_kind must be one of filter|shape|observe, got `{other}`"),
+        )),
+    }
 }
 
-async fn derive_handshake_metadata(bytes: &[u8]) -> Result<HandshakeMetadata, Box<Response>> {
+async fn inspect_with_wasmtime(
+    bytes: &[u8],
+    slot_kind: SlotKind,
+) -> Result<ModuleInspection, Box<Response>> {
     let bytes = bytes.to_vec();
-    let accept = tokio::task::spawn_blocking(move || {
-        let mut offer = build_offer(&BTreeSet::new());
-        extend_offer_versions(&mut offer.function_versions, "filter", &[1, 2, 3]);
-        extend_offer_versions(&mut offer.function_versions, "shape", &[1, 2]);
-        execute_handshake(&bytes, &offer)
-    })
-    .await
-    .map_err(|error| {
-        tracing::error!(%error, "wasm handshake worker failed");
-        Box::new(json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "handshake_worker_failed",
-            "handshake worker panicked",
-        ))
-    })?
-    .map_err(|error| {
+    let inspection = tokio::task::spawn_blocking(move || inspect_wasm(slot_kind, &bytes))
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "wasm inspect worker failed");
+            Box::new(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "inspect_worker_failed",
+                "wasm inspect worker panicked",
+            ))
+        })?;
+    inspection.map_err(|error| {
+        let (status, code) = match &error {
+            WasmtimeRuntimeError::ModuleRejected { .. } => {
+                (StatusCode::BAD_REQUEST, "invalid_wasm")
+            }
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, "inspect_failed"),
+        };
         let mut message = error.to_string();
         if message.len() > 500 {
             message.truncate(500);
         }
-        Box::new(json_error(
-            StatusCode::BAD_REQUEST,
-            "handshake_failed",
-            message,
-        ))
-    })?;
-
-    let slots = slot_set_from_handshake(&accept.implemented_functions);
-    if slots.is_empty() {
-        return Err(Box::new(json_error(
-            StatusCode::BAD_REQUEST,
-            "no_supported_slot",
-            "plugin does not export any of: filter, shape, observe",
-        )));
-    }
-    let wire_version = match accept.chosen_versions.values().copied().max() {
-        Some(version) => u8::try_from(version).map_err(|_| {
-            Box::new(json_error(
-                StatusCode::BAD_REQUEST,
-                "unsupported_wire_version",
-                format!("chosen wire version {version} exceeds registry maximum"),
-            ))
-        })?,
-        None => default_wire_version(),
-    };
-    Ok(HandshakeMetadata {
-        slots,
-        wire_version,
+        Box::new(json_error(status, code, message))
     })
-}
-
-fn extend_offer_versions(
-    function_versions: &mut BTreeMap<String, Vec<u32>>,
-    function: &str,
-    versions: &[u32],
-) {
-    let entry = function_versions.entry(function.to_owned()).or_default();
-    for version in versions {
-        if !entry.contains(version) {
-            entry.push(*version);
-        }
-    }
-    entry.sort_unstable();
-}
-
-#[allow(clippy::result_large_err)]
-fn reject_removed_router_wire(plugin: &Plugin) -> Result<(), Response> {
-    if plugin.function_exists("route") {
-        return Err(json_error(
-            StatusCode::BAD_REQUEST,
-            "unsupported_wire_version",
-            "router wire v1/v2 plugins are no longer supported; use wire v3 filter plugins",
-        ));
-    }
-    Ok(())
 }
 
 async fn materialize_cache(state: &AdminState, sha256_hex: &str, bytes: &[u8]) -> io::Result<()> {

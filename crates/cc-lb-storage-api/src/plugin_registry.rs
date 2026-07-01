@@ -6,9 +6,8 @@ use uuid::Uuid;
 use crate::StorageResult;
 
 pub use cc_lb_plugin_api::{
-    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
-    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME,
-    BUILTIN_SUBSCRIPTION_PREFERENCE_WIRE_VERSION, PluginSlot,
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, PluginSlot, default_pure,
 };
 
 pub const BUILTIN_PLUGIN_KIND_FILTER: &str = "filter";
@@ -52,6 +51,11 @@ pub struct WasmRegistryEntryInput {
     /// that did not supply this metadata.
     #[serde(default)]
     pub supported_slots: Vec<PluginSlot>,
+    /// 32-byte BLAKE3 schema hash from `cc_lb.schema.<kind>.v1` custom
+    /// section (set by the admin upload after `inspect_wasm`). `None`
+    /// preserves legacy uploads that pre-date the wasmtime ABI.
+    #[serde(default)]
+    pub schema_hash: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +91,9 @@ pub struct WasmRegistryEntry {
     /// entry has not yet been backfilled by `run_startup_handshake`.
     #[serde(default)]
     pub supported_slots: Vec<PluginSlot>,
+    /// See [`WasmRegistryEntryInput::schema_hash`].
+    #[serde(default)]
+    pub schema_hash: Option<[u8; 32]>,
 }
 
 impl WasmRegistryEntry {
@@ -102,10 +109,11 @@ impl WasmRegistryEntry {
             refcount,
             revision: 0,
             kind: BUILTIN_PLUGIN_KIND_FILTER.to_owned(),
-            wire_version: BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+            wire_version: default_wire_version(),
             is_builtin: true,
             metadata: Some(builtin_metadata_for_cache_affinity()),
             supported_slots: vec![PluginSlot::Router],
+            schema_hash: None,
         }
     }
 
@@ -125,10 +133,11 @@ impl WasmRegistryEntry {
             refcount,
             revision: 0,
             kind: BUILTIN_PLUGIN_KIND_FILTER.to_owned(),
-            wire_version: BUILTIN_SUBSCRIPTION_PREFERENCE_WIRE_VERSION,
+            wire_version: default_wire_version(),
             is_builtin: true,
             metadata: Some(builtin_metadata_for_subscription_preference()),
             supported_slots: vec![PluginSlot::Router],
+            schema_hash: None,
         }
     }
 }

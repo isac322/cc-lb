@@ -6,7 +6,7 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_core::DynamicViewHolder;
 use cc_lb_core::clock::ClockHandle;
-use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{PluginSlot, StorageResult};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -19,7 +19,7 @@ pub struct Reconciler {
     pub stores: Arc<Stores>,
     pub holder: Arc<DynamicViewHolder>,
     pub oauth_cfg: Arc<AnthropicOAuthConfig>,
-    pub runtime: Arc<ExtismRuntime>,
+    pub runtime: Arc<WasmtimeRuntime>,
     pub aead: Arc<AeadService>,
     pub lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     pub cancel: CancellationToken,
@@ -36,7 +36,7 @@ impl Reconciler {
         stores: Arc<Stores>,
         holder: Arc<DynamicViewHolder>,
         oauth_cfg: Arc<AnthropicOAuthConfig>,
-        runtime: Arc<ExtismRuntime>,
+        runtime: Arc<WasmtimeRuntime>,
         aead: Arc<AeadService>,
         lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
         cancel: CancellationToken,

@@ -63,6 +63,7 @@ async fn run_warmup_dialect_guard(url: &str) -> Result<()> {
         parse_validated_at_unix_secs: 1_800_000_000,
     };
     let entry = WasmRegistryEntryInput {
+        schema_hash: None,
         name: "warmup-dialect-test".to_owned(),
         original_filename: "warmup-dialect-test.wasm".to_owned(),
         label: None,

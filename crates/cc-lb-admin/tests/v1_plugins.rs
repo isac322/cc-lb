@@ -9,7 +9,7 @@ use cc_lb_core::spawn_audit_writer;
 use cc_lb_storage_api::{
     AuditStore, BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
     PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
-    PrincipalStore, WasmBlob, WasmRegistryEntryInput, sparse_order,
+    PrincipalStore, WasmBlob, WasmRegistryEntryInput, default_wire_version, sparse_order,
 };
 use config_admin_common::{TOKEN, app, authed_json, temp_storage, test_state};
 use http_body_util::BodyExt;
@@ -50,7 +50,7 @@ async fn registry_list_exposes_builtin_cache_affinity() {
         .expect("builtin cache-affinity entry is listed");
     assert_eq!(builtin["name"], "cache-affinity");
     assert_eq!(builtin["kind"], "filter");
-    assert_eq!(builtin["wire_version"], 3);
+    assert_eq!(builtin["wire_version"], default_wire_version());
     assert_eq!(builtin["is_builtin"], true);
     assert_eq!(
         builtin["metadata"]["purpose"],
@@ -84,7 +84,10 @@ async fn registry_list_exposes_builtin_cache_affinity() {
         .expect("builtin subscription-preference entry is listed");
     assert_eq!(subscription_preference["name"], "subscription-preference");
     assert_eq!(subscription_preference["kind"], "filter");
-    assert_eq!(subscription_preference["wire_version"], 3);
+    assert_eq!(
+        subscription_preference["wire_version"],
+        default_wire_version()
+    );
     assert_eq!(subscription_preference["is_builtin"], true);
     let uploaded_entry = body["entries"]
         .as_array()
@@ -378,7 +381,7 @@ async fn chain_insert_accepts_builtin_cache_affinity_registry_id() {
         Some(json!({
             "slot": "Router",
             "wasm_registry_id": BUILTIN_CACHE_AFFINITY_ID,
-            "wire_version": 3
+            "wire_version": default_wire_version()
         })),
     )
     .await;
@@ -389,7 +392,7 @@ async fn chain_insert_accepts_builtin_cache_affinity_registry_id() {
         body["wasm_registry_id"],
         BUILTIN_CACHE_AFFINITY_ID.to_string()
     );
-    assert_eq!(body["wire_version"], 3);
+    assert_eq!(body["wire_version"], default_wire_version());
 
     let (status, _, chain, _) = authed_json(
         app,
@@ -421,7 +424,7 @@ async fn chain_insert_accepts_builtin_subscription_preference_registry_id() {
         Some(json!({
             "slot": "Router",
             "wasm_registry_id": BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
-            "wire_version": 3
+            "wire_version": default_wire_version()
         })),
     )
     .await;
@@ -432,7 +435,7 @@ async fn chain_insert_accepts_builtin_subscription_preference_registry_id() {
         body["wasm_registry_id"],
         BUILTIN_SUBSCRIPTION_PREFERENCE_ID.to_string()
     );
-    assert_eq!(body["wire_version"], 3);
+    assert_eq!(body["wire_version"], default_wire_version());
 
     let (status, _, chain, _) = authed_json(
         app,
@@ -1088,6 +1091,7 @@ async fn seed_registry_raw(
                 parse_validated_at_unix_secs: 1_800_000_000,
             },
             WasmRegistryEntryInput {
+                schema_hash: None,
                 name: name.to_owned(),
                 original_filename: format!("{name}.wasm"),
                 label: None,

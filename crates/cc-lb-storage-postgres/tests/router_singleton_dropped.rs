@@ -60,6 +60,7 @@ async fn run_test(url: &str) -> Result<()> {
                 parse_validated_at_unix_secs: 1_800_000_000,
             },
             WasmRegistryEntryInput {
+                schema_hash: None,
                 name: "test-plugin".to_owned(),
                 original_filename: "test.wasm".to_owned(),
                 label: None,

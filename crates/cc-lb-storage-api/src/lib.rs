@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 pub use anthropic_compatibility_kv::*;
-pub use cc_lb_plugin_wire::augmented_metadata::AugmentedMetadata;
+
 pub use error::{PluginChainConflictReason, StorageError, StorageResult};
 pub use organization_metadata::*;
 pub use plugin_registry::*;
@@ -53,6 +53,13 @@ pub enum PluginRegistryStatus {
     Active,
     Disabled,
 }
+
+/// Opaque JSON blob retained as legacy metadata column on the plugin
+/// registry table. The wasmtime upload path (`schema_hash` +
+/// `supported_slots`) is the only writer today; the field is kept
+/// as a passthrough `serde_json::Value` so historical rows still
+/// deserialize.
+pub type AugmentedMetadata = serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginRegistryRecord {

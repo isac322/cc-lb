@@ -32,7 +32,7 @@ use cc_lb_core::{
     RequestEventBus,
     api_keys::{key_store::KeyStore, limit_engine::LimitEngine},
 };
-use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{Storage, UpstreamRecord};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -66,7 +66,7 @@ pub struct WarmupDialectDispatchOutcome {
 pub trait WarmupDialectDispatcher: Send + Sync {
     async fn dispatch_warmup_with_dialect(
         &self,
-        runtime: &ExtismRuntime,
+        runtime: &Arc<WasmtimeRuntime>,
         data_dir: &Path,
         upstream: &UpstreamRecord,
     ) -> Result<WarmupDialectDispatchOutcome, WarmupDialectDispatchError>;
@@ -89,7 +89,7 @@ pub struct AdminState {
     pub lifecycle: Option<Arc<Lifecycle>>,
     pub subscription_metadata_hook: Option<MetadataHookHandle>,
     pub lazy_refresher: Option<Arc<dyn LazyRefreshHandle>>,
-    pub runtime: Option<Arc<ExtismRuntime>>,
+    pub runtime: Option<Arc<WasmtimeRuntime>>,
     pub data_dir: Option<PathBuf>,
     pub warmup_dialect_dispatcher: Option<Arc<dyn WarmupDialectDispatcher>>,
     pub audit_sink: Option<Arc<AuditWriterSink>>,

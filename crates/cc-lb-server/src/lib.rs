@@ -6,7 +6,6 @@
 // 2: startup validation/preflight/storage kind fatal errors
 
 pub(crate) mod admin_compression;
-pub(crate) mod admin_plugins;
 pub(crate) mod admin_security;
 pub mod app;
 pub mod bootstrap;
@@ -28,7 +27,6 @@ pub(crate) mod revision_hash;
 pub(crate) mod scheduler_dispatch;
 pub mod scheduler_factory;
 pub mod signal;
-pub mod startup_handshake;
 pub mod state_machine;
 pub mod storage_factory;
 pub mod subscription_quota_cache;

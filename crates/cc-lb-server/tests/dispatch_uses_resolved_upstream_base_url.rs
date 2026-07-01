@@ -28,7 +28,7 @@ use cc_lb_core::{
     UpstreamDispatch,
 };
 use cc_lb_plugin_api::SignedRequest;
-use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::SubscriptionQuotaCache;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
@@ -128,10 +128,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         redirect_uri: Url::parse("http://unused.invalid/callback").expect("redirect url"),
         scopes: vec!["messages".to_owned()],
     });
-    let runtime = ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        std::sync::Arc::new(cc_lb_core::SystemClock),
-    );
+    let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let config = cc_lb_config::Config::default();
     let view = build_dynamic_view(
         stores.as_ref(),
