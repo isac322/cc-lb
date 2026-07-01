@@ -933,6 +933,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-lb-plugin-conformance"
+version = "0.2.0"
+dependencies = [
+ "blake3",
+ "cc-lb-plugin-api",
+ "cc-lb-plugin-types",
+ "cc-lb-runtime-wasmtime",
+ "rkyv",
+]
+
+[[package]]
 name = "cc-lb-plugin-types"
 version = "0.2.0"
 dependencies = [
