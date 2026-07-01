@@ -31,8 +31,5 @@ pub enum WasmtimeRuntimeError {
     // does not expose its `kind` publicly); `limit` mirrors the
     // configured pool ceiling when known, otherwise 0.
     #[error("pooling allocator saturated: {resource} limit reached ({limit})")]
-    PoolSaturated {
-        resource: &'static str,
-        limit: u32,
-    },
+    PoolSaturated { resource: &'static str, limit: u32 },
 }
