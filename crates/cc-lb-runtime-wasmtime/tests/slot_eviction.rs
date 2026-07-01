@@ -6,7 +6,7 @@
 //! core-instance slot occupied for the process lifetime, so:
 //!
 //!   * `WasmtimeRuntime::slot_count()` only grew.
-//!   * After enough hot-swap cycles, `pool_total_memories` / 
+//!   * After enough hot-swap cycles, `pool_total_memories` /
 //!     `pool_total_core_instances` (64 / 64 by default) hit the hard
 //!     ceiling and further `register_*` failed.
 //!
@@ -87,7 +87,10 @@ fn evict_slot_drops_registration_and_returns_true() {
     let removed = rt.evict_slot(&key);
     assert!(removed, "evict_slot returns true on live key");
 
-    assert!(rt.get_slot(&key).is_none(), "get_slot returns None post-evict");
+    assert!(
+        rt.get_slot(&key).is_none(),
+        "get_slot returns None post-evict"
+    );
     assert_eq!(rt.slot_count(), 0, "slot_count decrements to zero");
 }
 
