@@ -785,6 +785,17 @@ pub struct RuntimeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<PathBuf>,
     pub startup_handshake: StartupHandshakeConfig,
+    #[serde(default)]
+    pub wasmtime: WasmtimeConfig,
+}
+
+// Optional overrides for the wasmtime plugin runtime hot engine.
+// `None` means "use compile-time defaults from cc-lb-runtime-wasmtime".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct WasmtimeConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_max_pages: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

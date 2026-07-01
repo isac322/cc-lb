@@ -18,6 +18,29 @@ use crate::engine::HostState;
 use crate::error::WasmtimeRuntimeError;
 use crate::inspect::{ModuleInspection, SlotKind, inspect_wasm};
 
+// Bumpable on validation-policy change (import allowlist, schema-hash
+// algorithm, per-hook export shape). `register()` mixes this into
+// `PluginCell::content_hash`, so bumping it forces every registered
+// plugin to recompile on next reconcile even when the wasm bytes are
+// byte-identical — guarantees a policy tightening cannot be silently
+// carried by a stale short-circuited slot.
+pub(crate) const VALIDATION_POLICY_VERSION: u32 = 1;
+
+pub(crate) fn compute_content_hash(
+    wasm_bytes: &[u8],
+    pure: bool,
+    fuel_per_call: u64,
+    memory_max_pages: u32,
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&VALIDATION_POLICY_VERSION.to_le_bytes());
+    hasher.update(&[u8::from(pure)]);
+    hasher.update(&fuel_per_call.to_le_bytes());
+    hasher.update(&memory_max_pages.to_le_bytes());
+    hasher.update(wasm_bytes);
+    *hasher.finalize().as_bytes()
+}
+
 /// Compile raw `.wasm` bytes into an [`InstancePre`] bound to `engine`,
 /// returning the load-time [`ModuleInspection`] alongside it.
 ///

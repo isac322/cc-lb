@@ -1013,6 +1013,8 @@ dependencies = [
  "cc-lb-plugin-api",
  "cc-lb-plugin-types",
  "http",
+ "metrics",
+ "metrics-exporter-prometheus",
  "parking_lot",
  "rkyv",
  "serde_json",

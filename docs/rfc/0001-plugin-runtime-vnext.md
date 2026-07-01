@@ -355,7 +355,7 @@ Under cc-lb's pre-launch state and first-party trusted plugin assumption, baking
 - The Extism-PDK-dependent parts of `crates/cc-lb-pdk`.
 - Bundled plugin build artifacts — the source logic is kept, rebuilt with the new PDK:
   - `plugins/router/cache-aware`
-  - `plugins/shape/subscription-launderer`
+  - `plugins/shape/subscription-launderer` (moved out-of-tree during migration)
   - `plugins/observe/*`
   - In each plugin's `Cargo.toml`, swap the `extism-pdk` dependency for `cc-lb-pdk-wasmtime`, and replace `#[plugin_fn]` with `#[cc_lb_pdk::plugin(<variant>)]`.
 
@@ -386,7 +386,7 @@ Under cc-lb's pre-launch state and first-party trusted plugin assumption, baking
 - `cc-lb-core/src/lifecycle.rs::execute_filter_pipeline`: call-site identical. Traps handled by the existing branch.
 - `cc-lb-server/src/dynamic_view_builder.rs::build_principal_chains`: only the runtime call goes through `WasmtimeRuntime` (trait identical).
 - `cc-lb-server/src/reconcile.rs`, `reload.rs`, `tls.rs`: unchanged.
-- `Cargo.toml`: add `wasmtime = "47"` dependency; once the transition is complete, remove `extism = ...`.
+- `Cargo.toml`: add `wasmtime = "46"` dependency; once the transition is complete, remove `extism = ...`.
 
 ## Drawbacks
 

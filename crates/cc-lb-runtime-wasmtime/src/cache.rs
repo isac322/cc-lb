@@ -27,6 +27,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use cc_lb_plugin_api::SlotKey;
 use wasmtime::{Instance, Memory, Store, TypedFunc};
@@ -34,6 +35,20 @@ use wasmtime::{Instance, Memory, Store, TypedFunc};
 use crate::cell::PluginCell;
 use crate::engine::HostState;
 use crate::error::WasmtimeRuntimeError;
+
+// RFC-0001 gap-analysis #5. Label values for the `phase` dimension
+// on `cc_lb_plugin_trap_total`. Kept bounded so cardinality stays
+// small; extend only when a new failure mode is genuinely distinct.
+fn trap_phase_label(err: &WasmtimeRuntimeError) -> &'static str {
+    match err {
+        WasmtimeRuntimeError::GuestTrap { phase, .. } => phase,
+        WasmtimeRuntimeError::ModuleRejected { .. } => "reject",
+        WasmtimeRuntimeError::InstantiateFailed(_) => "instantiate",
+        WasmtimeRuntimeError::ModuleCompile(_) => "compile",
+        WasmtimeRuntimeError::EngineInit(_) => "engine_init",
+        WasmtimeRuntimeError::PoolSaturated { .. } => "pool_saturated",
+    }
+}
 
 /// Default archive alignment for rkyv 0.8 root types.
 pub const DEFAULT_ALIGN: u32 = 16;
@@ -85,17 +100,26 @@ fn build_worker_instance(cell: &PluginCell) -> Result<WorkerInstance, WasmtimeRu
     let engine = cell.instance_pre.module().engine();
     let mut store = Store::new(engine, HostState);
 
-    store
-        .set_fuel(cell.fuel_per_call)
-        .map_err(|e| WasmtimeRuntimeError::GuestTrap {
-            phase: "set_fuel(instantiate)",
-            source: anyhow::Error::from(e),
-        })?;
+    // RFC-0001 gap-analysis item #13: the pre-instantiate `set_fuel`
+    // was redundant because `execute_call` sets the budget again per
+    // call. Dropped here so per-call fuel is set exactly at the
+    // measurement boundary — see the `set_fuel` inside `execute_call`.
 
-    let instance: Instance = cell
-        .instance_pre
-        .instantiate(&mut store)
-        .map_err(|e| WasmtimeRuntimeError::InstantiateFailed(anyhow::Error::from(e)))?;
+    let instance: Instance = cell.instance_pre.instantiate(&mut store).map_err(|e| {
+        // Distinguish pool-exhaustion from generic instantiate failure so
+        // request-path callers can react (backpressure, 503) without
+        // stringy downcasting on the anyhow chain — see RFC-0001 #6.
+        if e.downcast_ref::<wasmtime::PoolConcurrencyLimitError>()
+            .is_some()
+        {
+            WasmtimeRuntimeError::PoolSaturated {
+                resource: "core-instances",
+                limit: 0,
+            }
+        } else {
+            WasmtimeRuntimeError::InstantiateFailed(anyhow::Error::from(e))
+        }
+    })?;
 
     let memory = instance.get_memory(&mut store, "memory").ok_or_else(|| {
         WasmtimeRuntimeError::ModuleRejected {
@@ -159,6 +183,18 @@ impl HookFn {
             HookFn::Shape => "cc_lb_shape",
             HookFn::NormalizeError => "cc_lb_normalize_error",
             HookFn::Observe => "cc_lb_observe",
+        }
+    }
+
+    // Short label used as the `hook` dimension on RFC-0001 plugin
+    // metrics. Kept distinct from `export_name` so metric label
+    // vocabulary doesn't drift when guest export names change.
+    fn metric_label(self) -> &'static str {
+        match self {
+            HookFn::Filter => "filter",
+            HookFn::Shape => "shape",
+            HookFn::NormalizeError => "normalize_error",
+            HookFn::Observe => "observe",
         }
     }
 }
@@ -330,6 +366,54 @@ fn execute_call(
     input: &[u8],
     hook: HookFn,
 ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
+    let start = Instant::now();
+    let plugin = Arc::clone(&cell.plugin_name);
+    let hook_label = hook.metric_label();
+    let budget = cell.fuel_per_call;
+
+    let result = execute_call_inner(entry, cell, input, hook);
+
+    metrics::histogram!(
+        "cc_lb_plugin_call_duration_seconds",
+        "plugin" => plugin.to_string(),
+        "hook" => hook_label,
+    )
+    .record(start.elapsed().as_secs_f64());
+
+    match &result {
+        Ok((_, remaining_fuel)) => {
+            let ratio = if budget > 0 {
+                (budget.saturating_sub(*remaining_fuel) as f64) / (budget as f64)
+            } else {
+                0.0
+            };
+            metrics::histogram!(
+                "cc_lb_plugin_fuel_consumed_ratio",
+                "plugin" => plugin.to_string(),
+                "hook" => hook_label,
+            )
+            .record(ratio.clamp(0.0, 1.0));
+        }
+        Err(err) => {
+            metrics::counter!(
+                "cc_lb_plugin_trap_total",
+                "plugin" => plugin.to_string(),
+                "hook" => hook_label,
+                "phase" => trap_phase_label(err),
+            )
+            .increment(1);
+        }
+    }
+
+    result.map(|(bytes, _)| bytes)
+}
+
+fn execute_call_inner(
+    entry: &mut WorkerInstance,
+    cell: &PluginCell,
+    input: &[u8],
+    hook: HookFn,
+) -> Result<(Vec<u8>, u64), WasmtimeRuntimeError> {
     let WorkerInstance::Ready {
         store,
         memory,
@@ -457,5 +541,10 @@ fn execute_call(
         bytes
     };
 
-    Ok(out_bytes)
+    // Snapshot remaining fuel AFTER free — the metric wrapper
+    // computes consumption against `cell.fuel_per_call`. Guaranteed
+    // present because the immediately preceding set_fuel succeeded.
+    let remaining_fuel = store.get_fuel().unwrap_or(0);
+
+    Ok((out_bytes, remaining_fuel))
 }
