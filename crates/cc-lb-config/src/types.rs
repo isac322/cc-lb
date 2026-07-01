@@ -70,6 +70,8 @@ pub struct Config {
     pub lifecycle_pricing_subscriber: LifecyclePricingSubscriberConfig,
     #[serde(default)]
     pub request_event_writer_source: RequestEventWriterSource,
+    #[serde(default)]
+    pub limit_reservation_ttl: LimitReservationTtlConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -685,6 +687,41 @@ pub struct LifecycleHookAdapterConfig {
 pub struct LifecyclePricingSubscriberConfig {
     #[serde(default)]
     pub enabled: bool,
+}
+
+/// RFC-0002 Phase 7 background TTL sweeper for stale limit reservations.
+///
+/// When enabled, the LimitEngine periodically walks its reservation map and
+/// full-refunds any reservation older than `ttl_secs`. This is opt-in in
+/// Phase 7 and enabled unconditionally in Phase 8 once the subscriber path
+/// is authoritative.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LimitReservationTtlConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_limit_reservation_ttl_secs")]
+    pub ttl_secs: u64,
+    #[serde(default = "default_limit_reservation_tick_secs")]
+    pub tick_secs: u64,
+}
+
+impl Default for LimitReservationTtlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ttl_secs: default_limit_reservation_ttl_secs(),
+            tick_secs: default_limit_reservation_tick_secs(),
+        }
+    }
+}
+
+fn default_limit_reservation_ttl_secs() -> u64 {
+    300
+}
+
+fn default_limit_reservation_tick_secs() -> u64 {
+    30
 }
 
 /// RFC-0002 Phase 6 writer cutover switch.

@@ -84,6 +84,14 @@
         "enabled": false
       }
     },
+    "limit_reservation_ttl": {
+      "$ref": "#/$defs/LimitReservationTtlConfig",
+      "default": {
+        "enabled": false,
+        "tick_secs": 30,
+        "ttl_secs": 300
+      }
+    },
     "listener": {
       "$ref": "#/$defs/ListenerConfig",
       "default": {
@@ -502,6 +510,28 @@
         "enabled": {
           "type": "boolean",
           "default": false
+        }
+      }
+    },
+    "LimitReservationTtlConfig": {
+      "description": "RFC-0002 Phase 7 background TTL sweeper for stale limit reservations.\n\nWhen enabled, the LimitEngine periodically walks its reservation map and\nfull-refunds any reservation older than `ttl_secs`. This is opt-in in\nPhase 7 and enabled unconditionally in Phase 8 once the subscriber path\nis authoritative.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "tick_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
+        "ttl_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
         }
       }
     },

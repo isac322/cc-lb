@@ -1433,7 +1433,7 @@ impl Lifecycle {
                     reservation_id: limit
                         .reservation
                         .as_ref()
-                        .map(|r| format!("{}-{}", r.principal_id, r.key_id))
+                        .map(|r| r.id().to_owned())
                         .unwrap_or_default(),
                     amount: limit.request.max_tokens as u64,
                 }
