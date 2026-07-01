@@ -1,0 +1,30 @@
+[package]
+name = "cc-lb-runtime-wasmtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Wasmtime-based PluginRuntime implementation for cc-lb (Phase 0 skeleton)."
+repository = "https://github.com/isac322/cc-lb"
+
+[dependencies]
+cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+cc-lb-plugin-types = { path = "../cc-lb-plugin-types", features = ["std"] }
+wasmtime.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+arc-swap.workspace = true
+parking_lot = "0.12"
+rkyv = { workspace = true, features = ["std", "bytecheck"] }
+blake3 = { workspace = true, features = ["std"] }
+wasmparser.workspace = true
+serde_json.workspace = true
+uuid = { version = "1", features = ["v4"] }
+http.workspace = true
+bytes.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+wat = "1"

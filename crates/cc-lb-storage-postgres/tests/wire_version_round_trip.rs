@@ -43,6 +43,7 @@ async fn run_test(url: &str) -> Result<()> {
             parse_validated_at_unix_secs: 1_800_000_000,
         };
         let input = WasmRegistryEntryInput {
+            schema_hash: None,
             name: "wire-version-plugin".to_owned(),
             original_filename: "wire-version-plugin.wasm".to_owned(),
             label: Some("Wire version plugin".to_owned()),

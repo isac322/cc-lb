@@ -27,7 +27,10 @@ use cc_lb_plugin_api::{
     Principal, RateLimitObservation, RequestContext, RouteDecision, RouteError, RouterPlugin,
     Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate,
 };
-use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
+use cc_lb_runtime_wasmtime::{
+    RegisterOptions, WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeRuntime,
+    WasmtimeUpstreamDialect,
+};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, AuditStore, PluginRegistryRepo, PluginRegistryStore, PluginSlot,
@@ -75,6 +78,69 @@ pub enum RebindError {
     Io(#[from] io::Error),
     #[error(transparent)]
     Plugin(#[from] cc_lb_plugin_api::RuntimeError),
+    #[error(transparent)]
+    PluginRuntime(#[from] cc_lb_runtime_wasmtime::WasmtimeRuntimeError),
+}
+
+async fn register_filter_slot(
+    runtime: &Arc<WasmtimeRuntime>,
+    slot_key: &cc_lb_plugin_api::SlotKey,
+    manifest: &PluginManifest,
+) -> Result<Arc<cc_lb_runtime_wasmtime::PluginSlot>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
+    let wasm = read_wasm_for_manifest(manifest).await?;
+    runtime.register_filter_with(
+        slot_key.clone(),
+        manifest.name.clone(),
+        &wasm,
+        RegisterOptions {
+            pure: manifest.pure,
+        },
+    )
+}
+
+async fn register_shape_slot(
+    runtime: &Arc<WasmtimeRuntime>,
+    slot_key: &cc_lb_plugin_api::SlotKey,
+    manifest: &PluginManifest,
+) -> Result<Arc<cc_lb_runtime_wasmtime::PluginSlot>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
+    let wasm = read_wasm_for_manifest(manifest).await?;
+    runtime.register_shape_with(
+        slot_key.clone(),
+        manifest.name.clone(),
+        &wasm,
+        RegisterOptions {
+            pure: manifest.pure,
+        },
+    )
+}
+
+async fn register_observe_slot(
+    runtime: &Arc<WasmtimeRuntime>,
+    slot_key: &cc_lb_plugin_api::SlotKey,
+    manifest: &PluginManifest,
+) -> Result<Arc<cc_lb_runtime_wasmtime::PluginSlot>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
+    let wasm = read_wasm_for_manifest(manifest).await?;
+    runtime.register_observe_with(
+        slot_key.clone(),
+        manifest.name.clone(),
+        &wasm,
+        RegisterOptions {
+            pure: manifest.pure,
+        },
+    )
+}
+
+async fn read_wasm_for_manifest(
+    manifest: &PluginManifest,
+) -> Result<Vec<u8>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
+    tokio::fs::read(&manifest.artifact).await.map_err(|source| {
+        cc_lb_runtime_wasmtime::WasmtimeRuntimeError::ModuleRejected {
+            reason: format!(
+                "failed to read plugin wasm at `{}`: {source}",
+                manifest.artifact
+            ),
+        }
+    })
 }
 
 pub async fn bridged_metadata(
@@ -171,7 +237,7 @@ pub async fn build_dynamic_view(
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     current_generation: u64,
-    runtime: &ExtismRuntime,
+    runtime: &Arc<WasmtimeRuntime>,
     data_dir: &Path,
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
     subscription_quota_routing_max_staleness_secs: u64,
@@ -243,9 +309,7 @@ pub async fn build_dynamic_view(
         updated_at_unix_secs: unix_secs(clock.now()),
     }));
     let principals = list_principals(stores).await?;
-    let mut staged = Vec::new();
-    let principal_chains =
-        build_principal_chains(stores, runtime, data_dir, &principals, &mut staged).await?;
+    let principal_chains = build_principal_chains(stores, runtime, data_dir, &principals).await?;
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
     let now = unix_secs(clock.now());
     let statuses = apply_upstreams(stores, &upstreams, oauth_anthropic, now).await?;
@@ -264,8 +328,6 @@ pub async fn build_dynamic_view(
         applied_at_unix_secs: unix_secs(clock.now()),
         revision_hash,
     });
-
-    runtime.commit_staged(staged)?;
 
     let mut builder = DynamicViewBuilder::new(current_generation)
         .signer_factory(signer_factory)
@@ -373,10 +435,9 @@ fn registry_entry_unsupported_slot(registry_entry: &WasmRegistryEntry, slot: Plu
 
 async fn build_principal_chains(
     stores: &Stores,
-    runtime: &ExtismRuntime,
+    runtime: &Arc<WasmtimeRuntime>,
     data_dir: &Path,
     principals: &[PrincipalRecord],
-    staged: &mut Vec<StagedSlot>,
 ) -> Result<HashMap<String, PrincipalRoutingArtifacts>, RebindError> {
     let registry = list_registry_by_id(stores).await?;
     let mut chains = HashMap::new();
@@ -401,7 +462,6 @@ async fn build_principal_chains(
             principal,
             router_entries,
             &registry,
-            staged,
         )
         .await?;
 
@@ -434,6 +494,7 @@ async fn build_principal_chains(
             }
             let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
             let manifest = PluginManifest {
+                pure: true,
                 name: registry_entry.name,
                 artifact: wasm_path.to_string_lossy().into_owned(),
                 wire_version: entry.wire_version,
@@ -444,10 +505,12 @@ async fn build_principal_chains(
                 )
                 .await,
             };
-            match runtime.instantiate_observability_for(&principal.name, &manifest.name, &manifest)
-            {
-                Ok((handle, slot)) => {
-                    staged.push(slot);
+            let slot_key =
+                cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
+            match register_observe_slot(runtime, &slot_key, &manifest).await {
+                Ok(slot) => {
+                    let handle: Arc<dyn cc_lb_plugin_api::ObservabilityHook> =
+                        Arc::new(WasmtimeObservabilityHookPlugin::new(slot, slot_key));
                     hooks.push(handle);
                 }
                 Err(error) => {
@@ -481,6 +544,7 @@ async fn build_principal_chains(
                 })?;
             let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
             let manifest = PluginManifest {
+                pure: true,
                 name: registry_entry.name,
                 artifact: wasm_path.to_string_lossy().into_owned(),
                 wire_version: entry.wire_version,
@@ -491,13 +555,12 @@ async fn build_principal_chains(
                 )
                 .await,
             };
-            match runtime.instantiate_dialect_for_principal(
-                &principal.name,
-                &manifest.name,
-                &manifest,
-            ) {
-                Ok((handle, slot)) => {
-                    staged.push(slot);
+            let slot_key =
+                cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
+            match register_shape_slot(runtime, &slot_key, &manifest).await {
+                Ok(slot) => {
+                    let handle: Arc<dyn cc_lb_plugin_api::UpstreamDialect> =
+                        Arc::new(WasmtimeUpstreamDialect::new(slot, slot_key));
                     DialectCache::Explicit(handle)
                 }
                 Err(error) => {
@@ -569,6 +632,7 @@ async fn manifest_for_chain_entry(
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "plugin registry sha not found"))?;
     let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
     Ok(PluginManifest {
+        pure: true,
         name: registry_entry.name,
         artifact: wasm_path.to_string_lossy().into_owned(),
         wire_version: entry.wire_version,
@@ -580,12 +644,11 @@ async fn manifest_for_chain_entry(
 
 async fn build_router_pipeline(
     stores: &Stores,
-    runtime: &ExtismRuntime,
+    runtime: &Arc<WasmtimeRuntime>,
     data_dir: &Path,
     principal: &PrincipalRecord,
     mut router_entries: Vec<cc_lb_storage_api::PluginChainEntry>,
     registry: &HashMap<Uuid, cc_lb_storage_api::WasmRegistryEntry>,
-    staged: &mut Vec<StagedSlot>,
 ) -> Result<Option<Arc<RouterPipelineCache>>, RebindError> {
     if router_entries.is_empty() {
         return Ok(None);
@@ -604,7 +667,6 @@ async fn build_router_pipeline(
 
     router_entries.sort_by_key(|entry| entry.order);
     let mut filters: Vec<Arc<dyn FilterPlugin>> = Vec::with_capacity(router_entries.len());
-    let mut router_staged = Vec::with_capacity(router_entries.len());
     for entry in router_entries {
         let Some(registry_entry) = registry.get(&entry.wasm_registry_id) else {
             let error = io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found");
@@ -650,10 +712,17 @@ async fn build_router_pipeline(
                 })));
             }
         };
-        match runtime.instantiate_filter_for(&principal.name, entry.id, &manifest.name, &manifest) {
-            Ok((handle, slot)) => {
+        let slot_key =
+            cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
+        match register_filter_slot(runtime, &slot_key, &manifest).await {
+            Ok(slot) => {
+                let handle: Arc<dyn FilterPlugin> = Arc::new(WasmtimeFilterPlugin::new(
+                    slot,
+                    slot_key,
+                    entry.id,
+                    manifest.name.clone(),
+                ));
                 filters.push(handle);
-                router_staged.push(slot);
             }
             Err(error) => {
                 tracing::error!(
@@ -674,7 +743,6 @@ async fn build_router_pipeline(
         }
     }
 
-    staged.extend(router_staged);
     Ok(Some(Arc::new(RouterPipelineCache {
         user_filters: filters,
         terminal: principal.router_terminal_strategy.clone(),
@@ -1059,7 +1127,7 @@ mod tests {
 
     async fn build_view(
         stores: &Stores,
-        runtime: &ExtismRuntime,
+        runtime: &Arc<WasmtimeRuntime>,
         data_dir: &Path,
     ) -> Arc<DynamicView> {
         let mut config = cc_lb_config::Config::default();
@@ -1069,7 +1137,7 @@ mod tests {
 
     async fn build_view_with_config(
         stores: &Stores,
-        runtime: &ExtismRuntime,
+        runtime: &Arc<WasmtimeRuntime>,
         data_dir: &Path,
         config: cc_lb_config::Config,
     ) -> Arc<DynamicView> {
@@ -1117,10 +1185,7 @@ mod tests {
             prompt_record(upstream.id, "hash-c", 1_700_000_003),
         ]));
         let stores = stores(storage, prompt_store);
-        let runtime = ExtismRuntime::with_config(
-            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-            Arc::new(cc_lb_core::SystemClock),
-        );
+        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
 
         let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
         let clock = TestClock::new_at_secs(1_700_000_000);
@@ -1160,10 +1225,7 @@ mod tests {
         let upstream = create_upstream(&storage, "sink-wiring-upstream").await;
         let prompt_store = Arc::new(FakePromptCacheObservationStore::new(Vec::new()));
         let stores = stores(storage, prompt_store.clone());
-        let runtime = ExtismRuntime::with_config(
-            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-            Arc::new(cc_lb_core::SystemClock),
-        );
+        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
 
         let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
         let sink = dynamic_view
@@ -1207,10 +1269,7 @@ mod tests {
                 Duration::from_secs(30),
             )),
         );
-        let runtime = ExtismRuntime::with_config(
-            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-            Arc::new(cc_lb_core::SystemClock),
-        );
+        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
         let started = tokio::time::Instant::now();
 
         let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
@@ -1236,10 +1295,7 @@ mod tests {
             storage,
             Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
         );
-        let runtime = ExtismRuntime::with_config(
-            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-            Arc::new(cc_lb_core::SystemClock),
-        );
+        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
         let mut config = cc_lb_config::Config::default();
         config.prompt_cache_shadow.enabled = false;
 
@@ -1259,10 +1315,7 @@ mod tests {
             storage,
             Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
         );
-        let runtime = ExtismRuntime::with_config(
-            cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-            Arc::new(cc_lb_core::SystemClock),
-        );
+        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
         let mut config = cc_lb_config::Config::default();
         config.prompt_cache_shadow.enabled = true;
         config.prompt_cache_shadow.grace_margin_secs = 99;

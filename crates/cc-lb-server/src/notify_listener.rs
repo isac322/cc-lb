@@ -6,7 +6,7 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_core::DynamicViewHolder;
 use cc_lb_core::clock::ClockHandle;
-use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{ChangeChannel, ChangeEvent, RuntimeChangeNotifier};
 use tokio::sync::broadcast;
 use tokio::time::sleep;
@@ -21,7 +21,7 @@ pub struct NotifyListener {
     holder: Arc<DynamicViewHolder>,
     stores: Arc<Stores>,
     oauth_cfg: Arc<AnthropicOAuthConfig>,
-    runtime: Arc<ExtismRuntime>,
+    runtime: Arc<WasmtimeRuntime>,
     aead: Arc<AeadService>,
     data_dir: PathBuf,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
@@ -37,7 +37,7 @@ pub struct NotifyListenerParams {
     pub holder: Arc<DynamicViewHolder>,
     pub stores: Arc<Stores>,
     pub oauth_cfg: Arc<AnthropicOAuthConfig>,
-    pub runtime: Arc<ExtismRuntime>,
+    pub runtime: Arc<WasmtimeRuntime>,
     pub aead: Arc<AeadService>,
     pub data_dir: PathBuf,
     pub lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,

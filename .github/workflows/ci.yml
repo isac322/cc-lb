@@ -132,10 +132,6 @@ jobs:
 
       - name: Clean coverage artifacts
         run: cargo llvm-cov clean --workspace
-      - name: Build Extism echo fixture
-        run: cargo build -p extism-echo-plugin --target wasm32-unknown-unknown --release
-      - name: Build handshake spike fixture
-        run: cargo build -p plugin-handshake-spike --target wasm32-unknown-unknown --release
 
       - name: Run tests with coverage instrumentation
         run: |
@@ -149,15 +145,6 @@ jobs:
           cargo llvm-cov nextest \
             --workspace \
             --exclude cc-lb-loadgen \
-            --exclude cc-lb-plugin-conformance \
-            --exclude cc-lb-plugin-lifecycle-tests \
-            --exclude plugin-handshake-spike \
-            --exclude plugin-handshake-spike-host-check \
-            --exclude plugin-api-key \
-            --exclude plugin-oauth-anthropic-pro \
-            --exclude plugin-internal-key-mapping \
-            --exclude extism-pdk \
-            --exclude extism-pdk-macros \
             --all-features \
             --no-report \
             -E 'not test(/principal_store_postgres/)'
@@ -178,7 +165,6 @@ jobs:
           cargo llvm-cov report --package cc-lb-config                --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov report --package cc-lb-observability         --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov report --package cc-lb-plugin-api            --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov report --package cc-lb-runtime-extism        --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov report --package cc-lb-signer-anthropic-key  --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov report --package cc-lb-signer-anthropic-oauth --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov report --package cc-lb-server                --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'

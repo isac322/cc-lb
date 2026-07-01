@@ -1,10 +1,9 @@
-use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -36,8 +35,7 @@ use cc_lb_core::{
     start_upstream_rate_limit_writer,
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
-use cc_lb_runtime_extism::ExtismRuntime;
-use cc_lb_runtime_extism::registry::PluginRegistry;
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     BackendKind, ManagedKeyStore, MetaStore, PluginBlobRepo, PluginRegistryRepo,
@@ -68,10 +66,6 @@ use crate::refresh::{LazyRefreshClaimGuard, LazyRefresher};
 use crate::reload::{ConfigWatcher, summarize_restart_required};
 use crate::replica;
 use crate::signal;
-use crate::startup_handshake::{
-    LegacyBridgeReport, StartupHandshakeOpts, StartupHandshakeReport, bridge_legacy_wasm_registry,
-    run_startup_handshake_with_slot_store,
-};
 use crate::state_machine::{ServerState, ServerStateHandle};
 use crate::storage_factory;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
@@ -152,8 +146,8 @@ pub enum BuildError {
     Tls(#[from] crate::tls::TlsError),
     #[error(transparent)]
     Rebind(#[from] crate::dynamic_view_builder::RebindError),
-    #[error("startup plugin re-handshake failed: {0}")]
-    StartupHandshake(String),
+    #[error("wasmtime plugin runtime init failed: {0}")]
+    WasmtimeRuntimeInit(#[source] cc_lb_runtime_wasmtime::WasmtimeRuntimeError),
     #[error("storage is required")]
     StorageRequired,
     #[error("storage master key env {env} is missing")]
@@ -279,8 +273,8 @@ pub async fn run_serve(
     config_path: &Path,
     data_dir: Option<&Path>,
     strict_preflight: bool,
-    skip_handshake_if_fresh: Option<bool>,
-    force_handshake: Option<bool>,
+    _skip_handshake_if_fresh: Option<bool>,
+    _force_handshake: Option<bool>,
     clock: ClockHandle,
 ) -> Result<(), ServeError> {
     let mut config = Config::load(config_path)?;
@@ -291,16 +285,10 @@ pub async fn run_serve(
         config.observability.user_prompt_redaction,
     ));
     let guard = init_observability(&mut config)?;
-    let startup_opts = startup_handshake_opts_from_flags(
-        skip_handshake_if_fresh,
-        force_handshake,
-        &config.runtime.startup_handshake,
-    );
     let app = match build_app_with_path_inner(
         config,
         Some(config_path),
         Some(StartupPreflight { strict_preflight }),
-        startup_opts,
         clock,
     )
     .await
@@ -342,18 +330,6 @@ fn print_preflight_report(report: &preflight::PreflightReport) {
 #[derive(Clone, Copy)]
 struct StartupPreflight {
     strict_preflight: bool,
-}
-
-fn startup_handshake_opts_from_flags(
-    skip_handshake_if_fresh: Option<bool>,
-    force_handshake: Option<bool>,
-    config: &cc_lb_config::StartupHandshakeConfig,
-) -> StartupHandshakeOpts {
-    StartupHandshakeOpts {
-        skip_if_fresh: skip_handshake_if_fresh.unwrap_or(config.skip_if_fresh),
-        force: force_handshake.unwrap_or(config.force),
-        ..StartupHandshakeOpts::default()
-    }
 }
 
 pub async fn build_app(config: Config, clock: ClockHandle) -> Result<App, BuildError> {
@@ -398,7 +374,6 @@ pub async fn build_app_for_testing(
         aead,
         Some((plugin_registry_repo, plugin_blob_repo)),
         None,
-        StartupHandshakeOpts::default(),
         opened_scheduler,
         None,
         clock,
@@ -580,21 +555,13 @@ pub async fn build_app_with_path(
     config_path: Option<&Path>,
     clock: ClockHandle,
 ) -> Result<App, BuildError> {
-    build_app_with_path_inner(
-        config,
-        config_path,
-        None,
-        StartupHandshakeOpts::default(),
-        clock,
-    )
-    .await
+    build_app_with_path_inner(config, config_path, None, clock).await
 }
 
 async fn build_app_with_path_inner(
     config: Config,
     config_path: Option<&Path>,
     startup_preflight: Option<StartupPreflight>,
-    startup_handshake_opts: StartupHandshakeOpts,
     clock: ClockHandle,
 ) -> Result<App, BuildError> {
     config.validate()?;
@@ -615,7 +582,6 @@ async fn build_app_with_path_inner(
         aead,
         Some((plugin_registry_repo, plugin_blob_repo)),
         startup_preflight,
-        startup_handshake_opts,
         opened_scheduler,
         Some(lazy_refresh_claim_guard),
         clock,
@@ -673,7 +639,6 @@ pub async fn build_app_with_storage(
         aead,
         None,
         None,
-        StartupHandshakeOpts::default(),
         opened_scheduler,
         None,
         clock,
@@ -690,7 +655,6 @@ async fn build_app_with_storage_inner(
     aead: Arc<AeadService>,
     plugin_repos: Option<(Arc<dyn PluginRegistryRepo>, Arc<dyn PluginBlobRepo>)>,
     startup_preflight: Option<StartupPreflight>,
-    startup_handshake_opts: StartupHandshakeOpts,
     opened_scheduler: crate::scheduler_factory::OpenedScheduler,
     lazy_refresh_claim_guard: Option<Arc<dyn LazyRefreshClaimGuard>>,
     clock: ClockHandle,
@@ -734,10 +698,8 @@ async fn build_app_with_storage_inner(
         }),
         clock.clone(),
     ));
-    let runtime = Arc::new(ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        clock.clone(),
-    ));
+    let runtime =
+        Arc::new(WasmtimeRuntime::with_defaults().map_err(BuildError::WasmtimeRuntimeInit)?);
     let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
     let storage_for_dynamic = storage.clone();
     let env_token = std::env::var("CC_LB_BOOTSTRAP_ADMIN_TOKEN").ok();
@@ -781,7 +743,7 @@ async fn build_app_with_storage_inner(
         }
     };
 
-    let (plugin_registry_repo, plugin_blob_repo) = match plugin_repos {
+    let (plugin_registry_repo, _plugin_blob_repo) = match plugin_repos {
         Some(repos) => repos,
         None => (
             storage.clone() as Arc<dyn PluginRegistryRepo>,
@@ -821,44 +783,7 @@ async fn build_app_with_storage_inner(
             std::process::exit(1);
         }
     }
-    let (startup_shutdown, startup_shutdown_triggered, startup_shutdown_task) =
-        spawn_startup_shutdown_signal();
-    let plugin_registry = PluginRegistry::new(
-        plugin_registry_repo.clone(),
-        plugin_blob_repo.clone(),
-        cc_lb_runtime_extism::handshake::build_offer(&BTreeSet::new()),
-        clock.clone(),
-    )
-    .map_err(|error| BuildError::StartupHandshake(error.to_string()))?;
-    let startup_report = run_startup_handshake_with_slot_store(
-        &plugin_registry,
-        plugin_registry_repo.as_ref(),
-        storage.clone(),
-        startup_handshake_opts,
-        startup_shutdown,
-        &*clock,
-    )
-    .await;
-    startup_shutdown_task.abort();
-    let _ = startup_shutdown_task.await;
-    log_startup_handshake_report(&startup_report);
-    if startup_shutdown_triggered.load(Ordering::SeqCst) {
-        return Err(BuildError::StartupHandshake(
-            "startup interrupted by shutdown signal".to_owned(),
-        ));
-    }
-    backfill_supported_slots(storage.as_ref()).await;
-    backfill_wire_version(storage.as_ref()).await;
-    if let Some((_, error)) = startup_report
-        .errors
-        .iter()
-        .find(|(sha256, _)| *sha256 == [0; 32])
-    {
-        return Err(BuildError::StartupHandshake(error.to_string()));
-    }
-    let legacy_bridge_report =
-        bridge_legacy_wasm_registry(&plugin_registry, storage_for_dynamic.as_ref()).await;
-    log_legacy_bridge_report(&legacy_bridge_report);
+
     let oauth_anthropic = config.oauth.anthropic.clone().unwrap_or_default();
     let oauth_cfg = Arc::new(oauth_anthropic.clone());
     let refresh_cancel = CancellationToken::new();
@@ -1137,7 +1062,7 @@ async fn build_app_with_storage_inner(
 
     Ok(App {
         router: app_router(state, config.timeouts.upstream_total_secs),
-        admin_router: admin_router(admin_state, server_state.clone(), plugin_registry),
+        admin_router: admin_router(admin_state, server_state.clone()),
         proxy_addr: config.listener.proxy_addr,
         admin_addr: config.listener.admin_addr,
         reload_task,
@@ -1199,7 +1124,7 @@ impl cc_lb_core::MetadataRefreshEnqueue for ServerMetadataRefreshEnqueue {
 impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
     async fn dispatch_warmup_with_dialect(
         &self,
-        runtime: &ExtismRuntime,
+        runtime: &Arc<WasmtimeRuntime>,
         data_dir: &Path,
         upstream: &cc_lb_storage_api::UpstreamRecord,
     ) -> Result<WarmupDialectDispatchOutcome, WarmupDialectDispatchError> {
@@ -1249,6 +1174,7 @@ fn map_warmup_dialect_error(
         | crate::warmup::dialect::WarmupDispatchError::RegistryUnsupportedSlot { .. }
         | crate::warmup::dialect::WarmupDispatchError::Materialize(_)
         | crate::warmup::dialect::WarmupDispatchError::Instantiate(_)
+        | crate::warmup::dialect::WarmupDispatchError::Register(_)
         | crate::warmup::dialect::WarmupDispatchError::BodySerialize(_)
         | crate::warmup::dialect::WarmupDispatchError::Shape(_)
         | crate::warmup::dialect::WarmupDispatchError::Signer(_)
@@ -1263,7 +1189,7 @@ fn map_warmup_dialect_error(
 struct ServerDynamicViewRebinder {
     stores: Arc<DynamicStores>,
     oauth_cfg: Arc<cc_lb_config::AnthropicOAuthConfig>,
-    runtime: Arc<ExtismRuntime>,
+    runtime: Arc<WasmtimeRuntime>,
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     data_dir: PathBuf,
@@ -1296,283 +1222,11 @@ impl DynamicViewRebinder for ServerDynamicViewRebinder {
     }
 }
 
-fn log_startup_handshake_report(report: &StartupHandshakeReport) {
-    tracing::info!(
-        processed = report.processed,
-        skipped_fresh = report.skipped_fresh,
-        re_handshaked = report.re_handshaked,
-        disabled = report.disabled,
-        errors = report.errors.len(),
-        "startup plugin re-handshake completed",
-    );
-    for (sha256, error) in &report.errors {
-        if *sha256 == [0; 32] {
-            continue;
-        }
-        tracing::warn!(
-            sha256 = %hex_sha256_bytes(sha256),
-            error = %error,
-            "startup plugin re-handshake disabled or skipped a plugin",
-        );
-    }
-}
-
-pub async fn backfill_supported_slots(storage: &dyn Storage) {
-    use cc_lb_runtime_extism::handshake::{
-        build_offer, execute_handshake, slot_set_from_handshake,
-    };
-    use cc_lb_storage_api::{
-        BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginSlot,
-    };
-
-    let entries = match storage.list_registry(None, usize::MAX).await {
-        Ok(entries) => entries,
-        Err(error) => {
-            tracing::warn!(%error, "supported_slots backfill: list_registry failed");
-            return;
-        }
-    };
-    let host_caps = std::collections::BTreeSet::new();
-    let offer = build_offer(&host_caps);
-    let mut updated = 0_usize;
-    let mut failed = 0_usize;
-    for entry in entries {
-        if !entry.supported_slots.is_empty() {
-            continue;
-        }
-        if entry.id == BUILTIN_CACHE_AFFINITY_ID || entry.id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
-            if let Err(error) = storage
-                .update_supported_slots(entry.id, vec![PluginSlot::Router])
-                .await
-            {
-                tracing::warn!(%error, "supported_slots backfill: cache-affinity builtin update failed");
-                failed += 1;
-            } else {
-                updated += 1;
-            }
-            continue;
-        }
-        if entry.is_builtin {
-            continue;
-        }
-        let bytes = match storage.get_blob_bytes(entry.sha256).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
-                tracing::warn!(
-                    sha256 = %hex_sha256_bytes(&entry.sha256),
-                    "supported_slots backfill: blob missing",
-                );
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "supported_slots backfill: get_blob failed");
-                failed += 1;
-                continue;
-            }
-        };
-        let offer_for_task = offer.clone();
-        let bytes_for_task = bytes;
-        let outcome = tokio::task::spawn_blocking(move || {
-            execute_handshake(&bytes_for_task, &offer_for_task)
-                .map(|accept| slot_set_from_handshake(&accept.implemented_functions))
-        })
-        .await;
-        let slots = match outcome {
-            Ok(Ok(slots)) => slots,
-            Ok(Err(error)) => {
-                tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "supported_slots backfill: handshake failed");
-                failed += 1;
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "supported_slots backfill: handshake worker panicked");
-                failed += 1;
-                continue;
-            }
-        };
-        if slots.is_empty() {
-            continue;
-        }
-        if let Err(error) = storage.update_supported_slots(entry.id, slots).await {
-            tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "supported_slots backfill: update failed");
-            failed += 1;
-            continue;
-        }
-        updated += 1;
-    }
-    if updated > 0 || failed > 0 {
-        tracing::info!(updated, failed, "supported_slots backfill completed",);
-    }
-}
-
-pub async fn backfill_wire_version(storage: &dyn Storage) {
-    use cc_lb_runtime_extism::handshake::{build_offer, execute_handshake};
-    use cc_lb_storage_api::{
-        BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, default_wire_version,
-    };
-
-    let entries = match storage.list_registry(None, usize::MAX).await {
-        Ok(entries) => entries,
-        Err(error) => {
-            tracing::warn!(%error, "wire_version backfill: list_registry failed");
-            return;
-        }
-    };
-    let host_caps = BTreeSet::new();
-    let mut offer = build_offer(&host_caps);
-    extend_offer_versions(&mut offer.function_versions, "filter", &[1, 2, 3]);
-    extend_offer_versions(&mut offer.function_versions, "shape", &[1, 2]);
-    let mut updated = 0_usize;
-    let mut failed = 0_usize;
-    for entry in entries {
-        if entry.id == BUILTIN_CACHE_AFFINITY_ID || entry.id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
-            continue;
-        }
-        if entry.is_builtin {
-            continue;
-        }
-        if entry.wire_version != default_wire_version() {
-            continue;
-        }
-
-        let bytes = match storage.get_blob_bytes(entry.sha256).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
-                tracing::warn!(
-                    sha256 = %hex_sha256_bytes(&entry.sha256),
-                    "wire_version backfill: blob missing",
-                );
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "wire_version backfill: get_blob failed");
-                failed += 1;
-                continue;
-            }
-        };
-        let offer_for_task = offer.clone();
-        let bytes_for_task = bytes.clone();
-        let outcome = tokio::task::spawn_blocking(move || {
-            execute_handshake(&bytes_for_task, &offer_for_task)
-        })
-        .await;
-        let fresh = match outcome {
-            Ok(Ok(accept)) => match accept.chosen_versions.values().copied().max() {
-                Some(fresh) => match u8::try_from(fresh) {
-                    Ok(fresh) => fresh,
-                    Err(error) => {
-                        tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), fresh, "wire_version backfill: chosen wire version out of range");
-                        failed += 1;
-                        continue;
-                    }
-                },
-                None => {
-                    tracing::warn!(sha256 = %hex_sha256_bytes(&entry.sha256), "wire_version backfill: handshake returned no chosen wire versions");
-                    failed += 1;
-                    continue;
-                }
-            },
-            Ok(Err(error)) => {
-                tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "wire_version backfill: handshake failed");
-                failed += 1;
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "wire_version backfill: handshake worker panicked");
-                failed += 1;
-                continue;
-            }
-        };
-
-        if let Err(error) = storage.update_wire_version(entry.id, fresh).await {
-            tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "wire_version backfill: update failed");
-            failed += 1;
-            continue;
-        }
-        updated += 1;
-    }
-    if updated > 0 || failed > 0 {
-        tracing::info!(updated, failed, "wire_version backfill completed",);
-    }
-}
-
-fn extend_offer_versions(
-    function_versions: &mut std::collections::BTreeMap<String, Vec<u32>>,
-    function: &str,
-    versions: &[u32],
-) {
-    let entry = function_versions.entry(function.to_owned()).or_default();
-    for version in versions {
-        if !entry.contains(version) {
-            entry.push(*version);
-        }
-    }
-    entry.sort_unstable();
-}
-
-fn log_legacy_bridge_report(report: &LegacyBridgeReport) {
-    tracing::info!(
-        scanned = report.scanned,
-        already_present = report.already_present,
-        bridged = report.bridged,
-        orphan = report.orphan,
-        failed = report.failed.len(),
-        "startup legacy wasm registry bridge completed",
-    );
-    for (sha256, error) in &report.failed {
-        tracing::warn!(
-            sha256 = %hex_sha256_bytes(sha256),
-            error = %error,
-            "legacy wasm bridge skipped a plugin",
-        );
-    }
-}
-
-fn spawn_startup_shutdown_signal() -> (watch::Receiver<bool>, Arc<AtomicBool>, JoinHandle<()>) {
-    let (tx, rx) = watch::channel(false);
-    let triggered = Arc::new(AtomicBool::new(false));
-    let task_triggered = triggered.clone();
-    let task = tokio::spawn(async move {
-        wait_for_startup_shutdown_signal().await;
-        task_triggered.store(true, Ordering::SeqCst);
-        let _ = tx.send(true);
-    });
-    (rx, triggered, task)
-}
-
-#[cfg(unix)]
-async fn wait_for_startup_shutdown_signal() {
-    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-        Ok(mut sigterm) => {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {},
-                _ = sigterm.recv() => {},
-            }
-        }
-        Err(_) => {
-            let _ = tokio::signal::ctrl_c().await;
-        }
-    }
-}
-
-#[cfg(not(unix))]
-async fn wait_for_startup_shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
-}
-
-fn hex_sha256_bytes(sha256: &[u8; 32]) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in sha256 {
-        let _ = write!(&mut output, "{byte:02x}");
-    }
-    output
-}
-
 struct ReconcilerParams {
     stores: Arc<DynamicStores>,
     holder: Arc<DynamicViewHolder>,
     oauth_cfg: Arc<cc_lb_config::AnthropicOAuthConfig>,
-    runtime: Arc<ExtismRuntime>,
+    runtime: Arc<WasmtimeRuntime>,
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     cancel: CancellationToken,
@@ -1903,14 +1557,9 @@ struct AdminServerStateBody {
     state: ServerState,
 }
 
-fn admin_router(
-    admin_state: AdminState,
-    server_state: Arc<ServerStateHandle>,
-    plugin_registry: PluginRegistry,
-) -> Router {
-    let admin_token = admin_state.admin_token.clone();
+fn admin_router(admin_state: AdminState, server_state: Arc<ServerStateHandle>) -> Router {
+    let _ = admin_state.admin_token.clone();
     let admin_router = cc_lb_admin::router(admin_state)
-        .merge(crate::admin_plugins::router(admin_token, plugin_registry))
         .merge(server_state_router(server_state))
         // Admin surface only — proxy_router stays uncompressed to keep SSE
         // bodies streaming and skip CPU on the hot data plane. ETagged
@@ -2374,36 +2023,6 @@ mod tests {
         assert_admin_state(router.clone(), "starting").await;
         state.transition_to_ready();
         assert_admin_state(router, "ready").await;
-    }
-
-    #[test]
-    fn omitted_cli_uses_config_defaults_for_startup_handshake() {
-        let cfg = cc_lb_config::StartupHandshakeConfig::default();
-        let opts = startup_handshake_opts_from_flags(None, None, &cfg);
-        assert!(opts.skip_if_fresh);
-        assert!(!opts.force);
-    }
-
-    #[test]
-    fn config_can_disable_skip_if_fresh() {
-        let cfg = cc_lb_config::StartupHandshakeConfig {
-            skip_if_fresh: false,
-            force: true,
-        };
-        let opts = startup_handshake_opts_from_flags(None, None, &cfg);
-        assert!(!opts.skip_if_fresh);
-        assert!(opts.force);
-    }
-
-    #[test]
-    fn cli_overrides_config_for_startup_handshake() {
-        let cfg = cc_lb_config::StartupHandshakeConfig {
-            skip_if_fresh: false,
-            force: true,
-        };
-        let opts = startup_handshake_opts_from_flags(Some(true), Some(false), &cfg);
-        assert!(opts.skip_if_fresh);
-        assert!(!opts.force);
     }
 
     #[test]

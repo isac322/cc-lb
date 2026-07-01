@@ -73,6 +73,38 @@ impl PluginSlot {
     }
 }
 
+/// Sentinel principal id used by [`SlotKey`] for proxy-wide global plugin slots.
+pub const GLOBAL_PRINCIPAL: &str = "__global__";
+
+/// Composite key identifying a plugin slot per principal × plugin name.
+///
+/// Used as the trait-level identity for [`crate::FilterPlugin`] via
+/// `FilterPlugin::slot_key` and as the runtime-side cache lookup key
+/// for the wasmtime per-worker `WorkerInstance` map.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub struct SlotKey {
+    /// Principal id this slot is bound to, or [`GLOBAL_PRINCIPAL`] for
+    /// proxy-wide globals.
+    pub principal: String,
+    /// Stable plugin name.
+    pub plugin: String,
+}
+
+impl SlotKey {
+    /// Build a per-principal slot key.
+    pub fn new(principal: impl Into<String>, plugin: impl Into<String>) -> Self {
+        Self {
+            principal: principal.into(),
+            plugin: plugin.into(),
+        }
+    }
+
+    /// Build a proxy-wide global slot key.
+    pub fn global(plugin: impl Into<String>) -> Self {
+        Self::new(GLOBAL_PRINCIPAL, plugin)
+    }
+}
+
 /// Upstream backends supported by the proxy routing contract.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -641,6 +673,19 @@ pub struct PluginManifest {
     /// Runtime-specific metadata not interpreted by the core API contract.
     #[serde(default)]
     pub metadata: BTreeMap<String, serde_json::Value>,
+    /// Pure-mode dispatch: every hook call builds a fresh wasm `Store`
+    /// (no thread_local cache, no version-compare). Default `true` —
+    /// stateless plugins (the common case) benefit from full isolation
+    /// per call. Opt out only for plugins that genuinely need to keep
+    /// mutable state across calls in the same worker.
+    #[serde(default = "default_pure")]
+    pub pure: bool,
+}
+
+/// `serde` default for [`PluginManifest::pure`]. Omitted manifests are
+/// treated as pure to match the cc-lb-server-side default expectation.
+pub fn default_pure() -> bool {
+    true
 }
 
 // Routing trace cap constants

@@ -397,6 +397,7 @@ async fn concurrent_upload_returns_existed_once_on_fixture(
         parse_validated_at_unix_secs: 1_800_000_000,
     };
     let input = WasmRegistryEntryInput {
+        schema_hash: None,
         name: "plugin-concurrent-upload".to_owned(),
         original_filename: "plugin-concurrent-upload.wasm".to_owned(),
         label: None,

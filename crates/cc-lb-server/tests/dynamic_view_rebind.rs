@@ -4,7 +4,7 @@ use cc_lb_aead::AeadService;
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::{ApplyStatus, DynamicView};
-use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate,
@@ -88,7 +88,7 @@ async fn create_api_key_upstream(
 async fn build(
     stores: &Stores,
     current_generation: u64,
-    runtime: &ExtismRuntime,
+    runtime: &Arc<WasmtimeRuntime>,
     data_dir: &std::path::Path,
 ) -> Arc<DynamicView> {
     build_dynamic_view(
@@ -112,10 +112,7 @@ async fn build(
 async fn principals_delete_rebuild_removes_deleted_and_increments_generation() {
     let (dir, storage) = storage_fixture().await;
     let stores = stores(storage.clone());
-    let runtime = ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        std::sync::Arc::new(cc_lb_core::SystemClock),
-    );
+    let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let principal_a = create_principal(&storage, "principal-a").await;
     create_principal(&storage, "principal-b").await;
 
@@ -150,10 +147,7 @@ async fn principals_delete_rebuild_removes_deleted_and_increments_generation() {
 async fn corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active() {
     let (dir, storage) = storage_fixture().await;
     let stores = stores(storage.clone());
-    let runtime = ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        std::sync::Arc::new(cc_lb_core::SystemClock),
-    );
+    let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     create_principal(&storage, "principal-a").await;
     create_api_key_upstream(&storage, "healthy").await;
     let corrupt = UpstreamStore::create(

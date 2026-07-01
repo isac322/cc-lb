@@ -137,6 +137,7 @@ fn builtin_subscription_preference_entry_synthesizes_metadata() {
 
 fn uploaded_entry(metadata: Option<PluginMetadata>) -> WasmRegistryEntry {
     WasmRegistryEntry {
+        schema_hash: None,
         id: Uuid::new_v4(),
         sha256: [1; 32],
         name: "uploaded".to_owned(),

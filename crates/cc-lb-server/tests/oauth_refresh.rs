@@ -15,7 +15,7 @@ use cc_lb_core::{Clock, ClockHandle, DynamicViewHolder, Lifecycle, LifecycleConf
 use cc_lb_plugin_api::{
     RequestContext, ShapedRequest, Upstream, UpstreamDialect, shape_request, sign_request,
 };
-use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::{
@@ -257,10 +257,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         cancel,
         apalis_handle: fixture.scheduler_backend.clone(),
     }));
-    let runtime = ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        fixture.clock.clone(),
-    );
+    let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
         fixture.oauth_cfg.as_ref(),

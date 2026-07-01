@@ -255,6 +255,7 @@ async fn seed_registry(storage: &SqliteStorage, seed: u8, name: &str) -> WasmReg
                 parse_validated_at_unix_secs: 1_800_000_000,
             },
             WasmRegistryEntryInput {
+                schema_hash: None,
                 name: name.to_owned(),
                 original_filename: format!("{name}.wasm"),
                 label: None,

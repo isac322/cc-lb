@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens};
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::DynamicViewHolder;
-use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::notify_listener::{NotifyListener, NotifyListenerParams};
 use cc_lb_storage_api::BackendKind;
@@ -209,7 +209,7 @@ struct Fixture {
     stores: Arc<Stores>,
     oauth: Arc<AnthropicOAuthConfig>,
     aead: Arc<AeadService>,
-    runtime: Arc<ExtismRuntime>,
+    runtime: Arc<WasmtimeRuntime>,
     holder: Arc<DynamicViewHolder>,
 }
 
@@ -237,10 +237,7 @@ async fn fixture() -> Fixture {
     });
     let oauth = Arc::new(AnthropicOAuthConfig::default());
     let aead = Arc::new(AeadService::from_master_key([24; 32]));
-    let runtime = Arc::new(ExtismRuntime::with_config(
-        cc_lb_runtime_extism::ExtismRuntimeConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
-    ));
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let initial = build_dynamic_view(
         &stores,
         &oauth,
