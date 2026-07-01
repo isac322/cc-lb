@@ -10,6 +10,10 @@ publish = false
 name = "managed_api_key_full_flow"
 path = "managed_api_key_full_flow.rs"
 
+[[test]]
+name = "terminal_observation"
+path = "terminal_observation.rs"
+
 [dev-dependencies]
 cc-lb-config = { path = "../../crates/cc-lb-config" }
 cc-lb-core = { path = "../../crates/cc-lb-core" }
@@ -20,7 +24,9 @@ cc-lb-storage-sqlite = { path = "../../crates/cc-lb-storage-sqlite" }
 http.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
+sqlx = { workspace = true, features = ["runtime-tokio", "sqlite"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 url.workspace = true
+uuid.workspace = true
 wiremock = "0.6"
