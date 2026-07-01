@@ -69,7 +69,7 @@ fn a3_keeps_exhausted_oauth_when_no_api_key_exists() {
         1,
         vec![fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build()],
     );
-    let output = filter_for_model(&[oauth.clone()], MODEL_AGNOSTIC);
+    let output = filter_for_model(std::slice::from_ref(&oauth), MODEL_AGNOSTIC);
 
     assert_eq!(output.kept_upstream_ids, vec![oauth.upstream_id]);
     assert_eq!(output.reason, NO_API_KEY_REASON);
@@ -102,14 +102,18 @@ fn a6_only_one_upstream_id_returned_when_selecting_from_tier() {
     let better = oauth_with(
         "better",
         1,
-        vec![fresh(WINDOW_FIVE_HOUR).util(0.1).status("allowed").build(),
-             fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build()],
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.1).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+        ],
     );
     let worse = oauth_with(
         "worse",
         2,
-        vec![fresh(WINDOW_FIVE_HOUR).util(0.6).status("allowed").build(),
-             fresh(WINDOW_SEVEN_DAY).util(0.7).status("allowed").build()],
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.6).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.7).status("allowed").build(),
+        ],
     );
     let api_key = api_key("api-key", 3);
     let output = filter_for_model(&[better.clone(), worse, api_key], MODEL_AGNOSTIC);
@@ -479,12 +483,14 @@ fn e1_stale_rejected_with_future_reset_still_blocks() {
         ..oauth_with(
             "dead",
             1,
-            vec![stale(WINDOW_SEVEN_DAY)
-                .util(1.0)
-                .status("rejected")
-                .reset_at(reset_secs)
-                .observed_millis(observed_millis)
-                .build()],
+            vec![
+                stale(WINDOW_SEVEN_DAY)
+                    .util(1.0)
+                    .status("rejected")
+                    .reset_at(reset_secs)
+                    .observed_millis(observed_millis)
+                    .build(),
+            ],
         )
     };
     let key = api_key("k", 2);
@@ -505,12 +511,14 @@ fn e2_stale_rejected_with_expired_reset_downgrades_to_unknown() {
         ..oauth_with(
             "alive",
             1,
-            vec![stale(WINDOW_SEVEN_DAY)
-                .util(1.0)
-                .status("rejected")
-                .reset_at(reset_secs)
-                .observed_millis(observed_millis)
-                .build()],
+            vec![
+                stale(WINDOW_SEVEN_DAY)
+                    .util(1.0)
+                    .status("rejected")
+                    .reset_at(reset_secs)
+                    .observed_millis(observed_millis)
+                    .build(),
+            ],
         )
     };
     let alive_id = alive.upstream_id;
@@ -547,11 +555,13 @@ fn e4_imminent_reset_does_not_unblock_currently_rejected() {
         ..oauth_with(
             "reject-soon-reset",
             1,
-            vec![fresh(WINDOW_SEVEN_DAY)
-                .util(1.0)
-                .status("rejected")
-                .reset_at(reset_in_30s)
-                .build()],
+            vec![
+                fresh(WINDOW_SEVEN_DAY)
+                    .util(1.0)
+                    .status("rejected")
+                    .reset_at(reset_in_30s)
+                    .build(),
+            ],
         )
     };
     let healthy = UpstreamCandidate {
@@ -877,7 +887,12 @@ fn i1_production_bug_case_selects_from_base_healthy_candidates() {
     );
 
     let output = filter_for_model(
-        &[bear_max.clone(), runbear.clone(), isac_personal.clone(), bh322yoo.clone()],
+        &[
+            bear_max.clone(),
+            runbear.clone(),
+            isac_personal.clone(),
+            bh322yoo.clone(),
+        ],
         MODEL_AGNOSTIC,
     );
 

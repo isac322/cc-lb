@@ -176,8 +176,7 @@ fn evaluate(
     }
 
     // Classify every OAuth candidate into a tier bucket.
-    let mut buckets: [Vec<Assessment<'_>>; 4] =
-        [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    let mut buckets: [Vec<Assessment<'_>>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
     for (index, candidate) in candidates.iter().enumerate() {
         if candidate.kind != UpstreamKind::AnthropicOauth {
             continue;
@@ -302,7 +301,11 @@ fn assess_candidate<'a>(
     let base_proven_blocked = hard_negative_count > 0 || overage.base_exhausted_hint;
 
     let tier = if base_proven_blocked {
-        if overage.ok { Tier::Overage } else { return None }
+        if overage.ok {
+            Tier::Overage
+        } else {
+            return None;
+        }
     } else if positive_count == total && total > 0 {
         Tier::KnownBase
     } else if positive_count > 0 {
@@ -330,11 +333,11 @@ fn assess_candidate<'a>(
 /// - Fresh + status="rejected" → HardNegative
 /// - Fresh + status="allowed"/"allowed_warning" → CurrentPositive
 /// - Fresh + no known status → utilization decides:
-///     util ≥ 1 → HardNegative, util < 1 → CurrentPositive, util=None → Unknown
+///   util ≥ 1 → HardNegative, util < 1 → CurrentPositive, util=None → Unknown
 /// - Stale + status="rejected":
-///     resets_at > now → HardNegative (rejection still live)
-///     resets_at ≤ now → Unknown (rejection expired, allow recovery)
-///     resets_at=None → HardNegative if config, else Unknown
+///   resets_at > now → HardNegative (rejection still live)
+///   resets_at ≤ now → Unknown (rejection expired, allow recovery)
+///   resets_at=None → HardNegative if config, else Unknown
 /// - Stale + anything else → Unknown
 fn classify_base_snapshot(
     snapshot: Option<&SubscriptionQuotaCandidateSnapshot>,
@@ -445,8 +448,7 @@ fn assess_overage(candidate: &UpstreamCandidate, config: &FilterConfig) -> Overa
         // demonstrates overage is currently servicing traffic.
         positive_count += 1;
     }
-    if extra_usage_enabled == Some(true)
-        && extra_usage_remaining.map(|r| r > 0.0).unwrap_or(false)
+    if extra_usage_enabled == Some(true) && extra_usage_remaining.map(|r| r > 0.0).unwrap_or(false)
     {
         positive_count += 1;
     }
@@ -456,8 +458,7 @@ fn assess_overage(candidate: &UpstreamCandidate, config: &FilterConfig) -> Overa
     // (an expired 4-hour-old header rejection should not permanently kill
     // overage routing).
     let overage_status_blocked = is_overage_fresh && overage_status == Some("rejected");
-    let overage_util_blocked = is_overage_fresh
-        && overage_util.map(|u| u >= 1.0).unwrap_or(false);
+    let overage_util_blocked = is_overage_fresh && overage_util.map(|u| u >= 1.0).unwrap_or(false);
     let extra_usage_disabled = extra_usage_enabled == Some(false);
     let extra_usage_exhausted = extra_usage_enabled == Some(true)
         && extra_usage_remaining.map(|r| r <= 0.0).unwrap_or(false);
@@ -526,8 +527,8 @@ fn pick_within_tier<'a, 'b>(
     debug_assert!(!bucket.is_empty());
     let mut best_index = 0usize;
     let mut best_key = tiebreak_key(&bucket[0], ctx, config);
-    for i in 1..bucket.len() {
-        let key = tiebreak_key(&bucket[i], ctx, config);
+    for (i, assessment) in bucket.iter().enumerate().skip(1) {
+        let key = tiebreak_key(assessment, ctx, config);
         if compare_tiebreak_key(&key, &best_key) == Ordering::Less {
             best_index = i;
             best_key = key;
