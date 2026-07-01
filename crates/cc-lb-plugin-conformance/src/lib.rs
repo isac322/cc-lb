@@ -2,14 +2,33 @@
 //!
 //! Plugin authors add this crate as a dev-dependency and get a
 //! production-equivalent host loader + round-trip harness with no
-//! per-plugin boilerplate. The harness owns the admission invariants,
-//! so when cc-lb tightens an invariant every plugin re-runs the new
-//! rule on rebuild.
+//! per-plugin boilerplate.
+//!
+//! # Design
+//!
+//! Two layers.
+//!
+//! [`ConformanceSuite`] is an immutable builder that pins the wasm bytes,
+//! slot kind, plugin name, and engine budget. Its [`ConformanceSuite::run`]
+//! and [`ConformanceSuite::session`] are the entry points.
+//!
+//! [`PluginSession`] wraps a live [`WasmtimeRuntime`] with the plugin
+//! already registered against a fresh slot. Every `call_*` on the session
+//! reuses that registration — no per-call rebuild — so plugin authors can
+//! write dozens of semantic tests without a linear runtime-init cost.
+//!
+//! The suite does not duplicate host admission checks: `register_*`
+//! internally runs [`cc_lb_runtime_wasmtime::inspect_wasm`], so
+//! successfully constructing a [`PluginSession`] IS the static admission
+//! proof. Plugin-specific semantic assertions (scrub correctness, URL
+//! policy, header filtering, billing header presence) stay in the
+//! plugin's own test suite — the harness does not know what the plugin
+//! is supposed to do, only how the boundary works.
 //!
 //! # Usage
 //!
 //! ```ignore
-//! use cc_lb_plugin_conformance::ConformanceSuite;
+//! use cc_lb_plugin_conformance::prelude::*;
 //!
 //! fn wasm() -> Vec<u8> {
 //!     std::fs::read(
@@ -21,18 +40,33 @@
 //! }
 //!
 //! #[test]
-//! fn conformance() {
+//! fn admits_and_registers() {
 //!     ConformanceSuite::for_shape(&wasm())
 //!         .with_plugin_name("my-plugin")
 //!         .run();
 //! }
-//! ```
 //!
-//! For custom semantic tests, drop down to `call_shape` /
-//! `call_normalize_error` / `call_filter` / `call_observe` directly
-//! and assert on the decoded response.
+//! #[test]
+//! fn shape_semantics() {
+//!     let session = ConformanceSuite::for_shape(&wasm()).session();
+//!     let response = session.call_shape(ShapeRequest {
+//!         request_id: "t-1".into(),
+//!         method: "POST".into(),
+//!         path: "/v1/messages".into(),
+//!         query: None,
+//!         headers: vec![hdr("content-type", "application/json")],
+//!         body: br#"{"model":"claude-3"}"#.to_vec(),
+//!         principal: synth_principal(),
+//!         upstream: Upstream::AnthropicDirect { base_url: None },
+//!     });
+//!     assert_eq!(response.method, "POST");
+//! }
+//! ```
 
 #![deny(unsafe_code)]
+
+pub mod fixtures;
+pub mod prelude;
 
 use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_types::{
@@ -44,11 +78,12 @@ use cc_lb_runtime_wasmtime::{HotEngineConfig, SlotKind, WasmtimeRuntime, inspect
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 
-/// Fluent builder that owns the compiled wasm + the resource budget the
-/// admission and round-trip helpers use.
+use crate::fixtures::observe_event_samples;
+
+/// Fluent builder pinning the wasm bytes + slot kind + engine budget.
 ///
-/// [`Self::run`] fires the full built-in suite; individual `call_*` and
-/// `assert_*` methods let plugin authors compose their own tests on top.
+/// [`Self::run`] fires the minimal registration smoke. For real work,
+/// call [`Self::session`] and drive the returned [`PluginSession`].
 pub struct ConformanceSuite<'a> {
     wasm: &'a [u8],
     kind: SlotKind,
@@ -65,7 +100,7 @@ impl<'a> ConformanceSuite<'a> {
     /// Build a suite for a Shape-slot plugin.
     ///
     /// Shape plugins export both `cc_lb_shape` and `cc_lb_normalize_error`
-    /// per RFC-0001; both are exercised by [`Self::run`].
+    /// per RFC-0001.
     pub fn for_shape(wasm: &'a [u8]) -> Self {
         Self::with_kind(wasm, SlotKind::Shape)
     }
@@ -104,35 +139,23 @@ impl<'a> ConformanceSuite<'a> {
         self
     }
 
-    /// Static admission: no host imports, required exports present,
-    /// per-hook `cc_lb.schema.*.v1` custom section BLAKE3 matches the
-    /// expected wire tag. Uses [`SlotKind::required_schemas`] so new
-    /// admission invariants added to cc-lb propagate here on bump.
+    /// Optional standalone admission gate — parses the wasm through
+    /// [`inspect_wasm`] and panics on rejection. NOT called by
+    /// [`Self::run`] because [`Self::session`] already invokes
+    /// `inspect_wasm` transitively via `register_*`. Kept public so
+    /// authors can assert admission WITHOUT paying for full engine
+    /// setup (fast pre-flight in a `build.rs`, etc.).
     pub fn assert_static_admission(&self) {
-        let inspection = inspect_wasm(self.kind, self.wasm)
+        inspect_wasm(self.kind, self.wasm)
             .unwrap_or_else(|e| panic!("inspect_wasm rejected plugin: {e}"));
-
-        for (section_name, wire_tag) in self.kind.required_schemas() {
-            let hash = inspection
-                .schema_hashes
-                .iter()
-                .find(|(name, _)| name == section_name)
-                .map(|(_, hash)| hash)
-                .unwrap_or_else(|| panic!("missing schema section {section_name}"));
-            let want = blake3::hash(wire_tag);
-            assert_eq!(
-                hash,
-                want.as_bytes(),
-                "schema hash mismatch for {section_name}: guest emitted {} but host expects {}",
-                hex(hash),
-                hex(want.as_bytes())
-            );
-        }
     }
 
-    /// Register the plugin in a fresh [`WasmtimeRuntime`] and return the
-    /// runtime + slot key so callers can drive further `call_*` traffic.
-    pub fn register(&self) -> (WasmtimeRuntime, SlotKey) {
+    /// Build a fresh [`WasmtimeRuntime`], register the plugin under
+    /// [`Self::plugin_name`], and return the live session.
+    ///
+    /// A successful `session()` return IS the static admission proof —
+    /// `register_*` invokes `inspect_wasm` before instantiate.
+    pub fn session(&self) -> PluginSession {
         let runtime = WasmtimeRuntime::new(self.engine_config.clone())
             .expect("wasmtime engine build must succeed");
         let slot_key = SlotKey::global(self.plugin_name.clone());
@@ -150,21 +173,61 @@ impl<'a> ConformanceSuite<'a> {
                 .map(|_| ())
                 .expect("register_observe must accept a conforming plugin"),
         }
-        (runtime, slot_key)
+        PluginSession {
+            runtime,
+            slot_key,
+            kind: self.kind,
+        }
+    }
+
+    /// Minimal built-in conformance smoke: build a session (which
+    /// covers static admission via `inspect_wasm` + instantiate). Drop
+    /// the session immediately. Suitable as the single
+    /// `#[test] fn conformance()` most plugins need.
+    pub fn run(&self) {
+        let _ = self.session();
+    }
+}
+
+/// A live plugin session — the runtime holds the compiled module and
+/// the slot is registered. Every `call_*` reuses this registration, so
+/// N-request tests pay one instantiate cost instead of N.
+pub struct PluginSession {
+    runtime: WasmtimeRuntime,
+    slot_key: SlotKey,
+    kind: SlotKind,
+}
+
+impl PluginSession {
+    /// The slot kind this session was built for.
+    pub fn kind(&self) -> SlotKind {
+        self.kind
+    }
+
+    /// The `SlotKey` the plugin is registered under.
+    pub fn slot_key(&self) -> &SlotKey {
+        &self.slot_key
+    }
+
+    /// Underlying [`WasmtimeRuntime`] — escape hatch for advanced
+    /// tests that want to poke at hot-swap, pure vs stateful mode,
+    /// version bumps, etc.
+    pub fn runtime(&self) -> &WasmtimeRuntime {
+        &self.runtime
     }
 
     /// Round-trip a [`FilterRequest`] through the guest boundary.
-    /// Panics if the slot kind is not Filter.
+    /// Panics if this session is not Filter-kind.
     pub fn call_filter(&self, request: FilterRequest) -> FilterResponse {
         assert!(
             matches!(self.kind, SlotKind::Filter),
             "call_filter requires SlotKind::Filter, got {:?}",
             self.kind
         );
-        let (runtime, slot_key) = self.register();
         let in_bytes = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode FilterRequest");
-        let out_bytes = runtime
-            .call_filter(&slot_key, in_bytes.as_slice())
+        let out_bytes = self
+            .runtime
+            .call_filter(&self.slot_key, in_bytes.as_slice())
             .expect("guest cc_lb_filter must complete without trap");
         let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
         aligned.extend_from_slice(&out_bytes);
@@ -175,17 +238,17 @@ impl<'a> ConformanceSuite<'a> {
     }
 
     /// Round-trip a [`ShapeRequest`] through the guest boundary.
-    /// Panics if the slot kind is not Shape.
+    /// Panics if this session is not Shape-kind.
     pub fn call_shape(&self, request: ShapeRequest) -> ShapeResponse {
         assert!(
             matches!(self.kind, SlotKind::Shape),
             "call_shape requires SlotKind::Shape, got {:?}",
             self.kind
         );
-        let (runtime, slot_key) = self.register();
         let in_bytes = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode ShapeRequest");
-        let out_bytes = runtime
-            .call_shape(&slot_key, in_bytes.as_slice())
+        let out_bytes = self
+            .runtime
+            .call_shape(&self.slot_key, in_bytes.as_slice())
             .expect("guest cc_lb_shape must complete without trap");
         let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
         aligned.extend_from_slice(&out_bytes);
@@ -195,61 +258,55 @@ impl<'a> ConformanceSuite<'a> {
             .expect("rkyv deserialize ShapeResponse")
     }
 
-    /// Round-trip a [`NormalizeErrorRequest`] through the guest boundary.
-    /// Only valid for Shape kind. Returns `None` when the plugin returns
-    /// an empty normalized body (pass-through convention).
-    pub fn call_normalize_error(
-        &self,
-        request: NormalizeErrorRequest,
-    ) -> Option<NormalizeErrorResponse> {
+    /// Round-trip a [`NormalizeErrorRequest`] through the guest
+    /// boundary. Returns the raw [`NormalizeErrorResponse`]; whether
+    /// `normalized.is_none()` counts as pass-through is a plugin
+    /// contract the caller asserts on, not this harness.
+    /// Panics if this session is not Shape-kind.
+    pub fn call_normalize_error(&self, request: NormalizeErrorRequest) -> NormalizeErrorResponse {
         assert!(
             matches!(self.kind, SlotKind::Shape),
             "call_normalize_error requires SlotKind::Shape, got {:?}",
             self.kind
         );
-        let (runtime, slot_key) = self.register();
         let in_bytes =
             rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode NormalizeErrorRequest");
-        let out_bytes = runtime
-            .call_normalize_error(&slot_key, in_bytes.as_slice())
+        let out_bytes = self
+            .runtime
+            .call_normalize_error(&self.slot_key, in_bytes.as_slice())
             .expect("guest cc_lb_normalize_error must complete without trap");
         let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
         aligned.extend_from_slice(&out_bytes);
         let archived = rkyv::access::<ArchivedNormalizeErrorResponse, RkyvError>(&aligned)
             .expect("rkyv access NormalizeErrorResponse");
-        let response = rkyv::deserialize::<NormalizeErrorResponse, RkyvError>(archived)
-            .expect("rkyv deserialize NormalizeErrorResponse");
-        if response.normalized.is_none() {
-            None
-        } else {
-            Some(response)
-        }
+        rkyv::deserialize::<NormalizeErrorResponse, RkyvError>(archived)
+            .expect("rkyv deserialize NormalizeErrorResponse")
     }
 
     /// Send an [`ObserveEvent`] through the guest boundary. Observe
-    /// hooks are side-effect-only; the return type is `()`. Panics if
-    /// the slot kind is not Observe.
+    /// hooks are side-effect-only; return type is `()`. Panics if this
+    /// session is not Observe-kind.
     pub fn call_observe(&self, event: ObserveEvent) {
         assert!(
             matches!(self.kind, SlotKind::Observe),
             "call_observe requires SlotKind::Observe, got {:?}",
             self.kind
         );
-        let (runtime, slot_key) = self.register();
         let in_bytes = rkyv::to_bytes::<RkyvError>(&event).expect("rkyv encode ObserveEvent");
-        runtime
-            .call_observe(&slot_key, in_bytes.as_slice())
+        self.runtime
+            .call_observe(&self.slot_key, in_bytes.as_slice())
             .expect("guest cc_lb_observe must complete without trap");
     }
 
-    /// Run the full built-in conformance suite. Currently:
-    /// - [`Self::assert_static_admission`]
-    /// - Load + register via a fresh [`WasmtimeRuntime`] so plugin
-    ///   instantiation errors surface here rather than at production
-    ///   admit time.
-    pub fn run(&self) {
-        self.assert_static_admission();
-        let _ = self.register();
+    /// Send one of every [`ObserveEvent`] variant, using
+    /// [`observe_event_samples`], and assert no variant traps. Cheap
+    /// coverage insurance for observe plugins because a missing match
+    /// arm in the guest would only surface when production emits that
+    /// specific event kind. Panics if this session is not Observe-kind.
+    pub fn exercise_observe_variants(&self) {
+        for event in observe_event_samples() {
+            self.call_observe(event);
+        }
     }
 }
 
@@ -265,13 +322,4 @@ pub fn conformance_engine_config() -> HotEngineConfig {
         pool_total_memories: 64,
         pool_total_core_instances: 64,
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(out, "{b:02x}");
-    }
-    out
 }
