@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_types::{FilterRequest, Header, Principal, UpstreamCandidate};
-use cc_lb_runtime_wasmtime::{RegisterOptions, WasmtimeRuntime};
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use rkyv::rancor::Error;
 
@@ -77,13 +77,8 @@ fn successful_filter_call_emits_three_metric_families() {
 
     metrics::with_local_recorder(&recorder, || {
         let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-        rt.register_filter_with(
-            key.clone(),
-            plugin_name,
-            &wasm,
-            RegisterOptions { pure: true },
-        )
-        .expect("register");
+        rt.register_filter(key.clone(), plugin_name, &wasm)
+            .expect("register");
         let req = tiny_filter_request();
         let in_bytes = rkyv::to_bytes::<Error>(&req).expect("encode");
         let _out = rt.call_filter(&key, in_bytes.as_slice()).expect("call");
@@ -132,13 +127,8 @@ fn fuel_exhaustion_emits_trap_counter() {
             ..cc_lb_runtime_wasmtime::HotEngineConfig::default()
         };
         let rt = Arc::new(WasmtimeRuntime::new(cfg).expect("engine"));
-        rt.register_filter_with(
-            key.clone(),
-            plugin_name,
-            &wasm,
-            RegisterOptions { pure: true },
-        )
-        .expect("register");
+        rt.register_filter(key.clone(), plugin_name, &wasm)
+            .expect("register");
         let req = tiny_filter_request();
         let in_bytes = rkyv::to_bytes::<Error>(&req).expect("encode");
         let result = rt.call_filter(&key, in_bytes.as_slice());

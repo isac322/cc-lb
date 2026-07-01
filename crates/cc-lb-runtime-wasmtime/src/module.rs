@@ -28,13 +28,11 @@ pub(crate) const VALIDATION_POLICY_VERSION: u32 = 1;
 
 pub(crate) fn compute_content_hash(
     wasm_bytes: &[u8],
-    pure: bool,
     fuel_per_call: u64,
     memory_max_pages: u32,
 ) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&VALIDATION_POLICY_VERSION.to_le_bytes());
-    hasher.update(&[u8::from(pure)]);
     hasher.update(&fuel_per_call.to_le_bytes());
     hasher.update(&memory_max_pages.to_le_bytes());
     hasher.update(wasm_bytes);

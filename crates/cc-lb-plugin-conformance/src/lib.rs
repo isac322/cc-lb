@@ -74,9 +74,7 @@ use cc_lb_plugin_types::{
     FilterResponse, NormalizeErrorRequest, NormalizeErrorResponse, ObserveEvent, ShapeRequest,
     ShapeResponse,
 };
-use cc_lb_runtime_wasmtime::{
-    HotEngineConfig, RegisterOptions, SlotKind, WasmtimeRuntime, inspect_wasm,
-};
+use cc_lb_runtime_wasmtime::{HotEngineConfig, SlotKind, WasmtimeRuntime, inspect_wasm};
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 
@@ -91,7 +89,6 @@ pub struct ConformanceSuite<'a> {
     kind: SlotKind,
     plugin_name: String,
     engine_config: HotEngineConfig,
-    register_options: RegisterOptions,
 }
 
 impl<'a> ConformanceSuite<'a> {
@@ -124,33 +121,7 @@ impl<'a> ConformanceSuite<'a> {
             kind,
             plugin_name: format!("conformance-{label}"),
             engine_config: conformance_engine_config(),
-            register_options: RegisterOptions::default(),
         }
-    }
-
-    /// Override the [`RegisterOptions`] used at slot registration.
-    /// See [`Self::pure`] / [`Self::stateful`] for the two common cases.
-    pub fn with_register_options(mut self, opts: RegisterOptions) -> Self {
-        self.register_options = opts;
-        self
-    }
-
-    /// Register the plugin in pure dispatch mode — fresh `Store` per
-    /// call, no thread_local worker cache. Recommended for plugins
-    /// declared `pure = true` in their `PluginManifest`.
-    pub fn pure(mut self) -> Self {
-        self.register_options.pure = true;
-        self
-    }
-
-    /// Register the plugin in stateful dispatch mode — thread_local
-    /// worker cache with ArcSwap hot-swap. Required for plugins that
-    /// accumulate legitimate cross-call state; also the mode where
-    /// stateful-only allocator or ArcSwap bugs surface, so plugins that
-    /// support both modes should have a conformance test in each.
-    pub fn stateful(mut self) -> Self {
-        self.register_options.pure = false;
-        self
     }
 
     /// Override the plugin name the suite uses when registering the slot.
@@ -190,30 +161,15 @@ impl<'a> ConformanceSuite<'a> {
         let slot_key = SlotKey::global(self.plugin_name.clone());
         match self.kind {
             SlotKind::Filter => runtime
-                .register_filter_with(
-                    slot_key.clone(),
-                    self.plugin_name.clone(),
-                    self.wasm,
-                    self.register_options,
-                )
+                .register_filter(slot_key.clone(), self.plugin_name.clone(), self.wasm)
                 .map(|_| ())
                 .expect("register_filter must accept a conforming plugin"),
             SlotKind::Shape => runtime
-                .register_shape_with(
-                    slot_key.clone(),
-                    self.plugin_name.clone(),
-                    self.wasm,
-                    self.register_options,
-                )
+                .register_shape(slot_key.clone(), self.plugin_name.clone(), self.wasm)
                 .map(|_| ())
                 .expect("register_shape must accept a conforming plugin"),
             SlotKind::Observe => runtime
-                .register_observe_with(
-                    slot_key.clone(),
-                    self.plugin_name.clone(),
-                    self.wasm,
-                    self.register_options,
-                )
+                .register_observe(slot_key.clone(), self.plugin_name.clone(), self.wasm)
                 .map(|_| ())
                 .expect("register_observe must accept a conforming plugin"),
         }
