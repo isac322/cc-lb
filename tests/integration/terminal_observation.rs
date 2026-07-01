@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use http::{HeaderMap, StatusCode};
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 
 use cc_lb_config::{Config, DownstreamAuthMode, NoneModeConfig, StorageConfig};
 use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
@@ -342,29 +344,12 @@ async fn terminal_success_non_stream() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-// Under wiremock the response is delivered with Content-Length + full body in
-// one shot, and the downstream client (TestClient::read_to_end) frequently
-// closes the TCP connection before cc-lb reaches the tail `finish()` call
-// inside the async_stream closure — so the observer's Drop fires with
-// `terminal_dropped` even though the client received the full response.
-// Real Anthropic uses Transfer-Encoding: chunked and never triggers this
-// race in production (verified manually against a live cc-lb deployment on
-// commit 3aea034a: id 1254 recorded NULL error_code, status=200).
-// The proper fix is a TCP-level mock harness (planned in a follow-up PR).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "wiremock Content-Length responses vs client early-close race in async_stream tail; needs TCP-level mock"]
 async fn terminal_success_stream() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     ensure_env();
 
-    let upstream = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_raw(happy_sse_stream(), "text/event-stream"),
-        )
-        .mount(&upstream)
-        .await;
+    let upstream = ChunkedSseMock::start(happy_sse_stream()).await?;
     let litellm = start_price_mock().await;
 
     let sqlite_path = dir.path().join("term-obs.sqlite");
@@ -388,6 +373,7 @@ async fn terminal_success_stream() -> Result<(), Box<dyn std::error::Error>> {
     assert!(row.event_id.is_some());
 
     server.shutdown().await;
+    upstream.stop().await;
     Ok(())
 }
 
@@ -1004,4 +990,127 @@ async fn sqlite_storage(path: &Path) -> Result<Arc<SqliteStorage>, Box<dyn std::
 fn free_addr() -> SocketAddr {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port");
     listener.local_addr().expect("free addr")
+}
+
+/// TCP-level mock that reproduces Anthropic's chunked SSE streaming shape.
+/// `wiremock::set_body_raw` collapses this into a single Content-Length blob
+/// which races with cc-lb's async_stream tail `finish()` — see PR #241.
+struct ChunkedSseMock {
+    addr: SocketAddr,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl ChunkedSseMock {
+    async fn start(sse_body: String) -> std::io::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(chunked_sse_accept_loop(listener, shutdown_rx, sse_body));
+        Ok(Self {
+            addr,
+            shutdown_tx: Some(shutdown_tx),
+            task: Some(task),
+        })
+    }
+
+    fn uri(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    async fn stop(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for ChunkedSseMock {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+async fn chunked_sse_accept_loop(
+    listener: TcpListener,
+    mut shutdown: oneshot::Receiver<()>,
+    sse_body: String,
+) {
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return,
+            accept = listener.accept() => {
+                let Ok((socket, _)) = accept else { return };
+                let body = sse_body.clone();
+                tokio::spawn(chunked_sse_handle(socket, body));
+            }
+        }
+    }
+}
+
+async fn chunked_sse_handle(mut socket: tokio::net::TcpStream, sse_body: String) {
+    if drain_http_request(&mut socket).await.is_err() {
+        return;
+    }
+    let head = "HTTP/1.1 200 OK\r\n\
+                Content-Type: text/event-stream\r\n\
+                Transfer-Encoding: chunked\r\n\
+                Connection: close\r\n\
+                \r\n";
+    if socket.write_all(head.as_bytes()).await.is_err() {
+        return;
+    }
+    for frame in sse_body.split_inclusive("\n\n") {
+        let framed = format!("{:x}\r\n{}\r\n", frame.len(), frame);
+        if socket.write_all(framed.as_bytes()).await.is_err() {
+            return;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    let _ = socket.write_all(b"0\r\n\r\n").await;
+    let _ = socket.shutdown().await;
+}
+
+async fn drain_http_request(socket: &mut tokio::net::TcpStream) -> std::io::Result<()> {
+    let mut buf = [0u8; 4096];
+    let mut acc: Vec<u8> = Vec::new();
+    let mut content_length: Option<usize> = None;
+    loop {
+        let n = socket.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        acc.extend_from_slice(&buf[..n]);
+        if let Some(header_end) = acc.windows(4).position(|w| w == b"\r\n\r\n") {
+            if content_length.is_none() {
+                let head = std::str::from_utf8(&acc[..header_end]).unwrap_or_default();
+                for line in head.split("\r\n") {
+                    if let Some(rest) = strip_header_prefix(line, "content-length") {
+                        content_length = rest.trim().parse::<usize>().ok();
+                        break;
+                    }
+                }
+            }
+            let body_start = header_end + 4;
+            let body_end = body_start + content_length.unwrap_or(0);
+            if acc.len() >= body_end {
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn strip_header_prefix<'a>(line: &'a str, name_lower: &str) -> Option<&'a str> {
+    let colon = line.find(':')?;
+    let (name, rest) = line.split_at(colon);
+    if name.trim().eq_ignore_ascii_case(name_lower) {
+        Some(&rest[1..])
+    } else {
+        None
+    }
 }
