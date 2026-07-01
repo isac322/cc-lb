@@ -64,6 +64,12 @@ pub struct Config {
     pub prompt_cache_shadow: PromptCacheShadowConfig,
     #[serde(default)]
     pub lifecycle_shadow_writer: LifecycleShadowWriterConfig,
+    #[serde(default)]
+    pub lifecycle_hook_adapter: LifecycleHookAdapterConfig,
+    #[serde(default)]
+    pub lifecycle_pricing_subscriber: LifecyclePricingSubscriberConfig,
+    #[serde(default)]
+    pub request_event_writer_source: RequestEventWriterSource,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -665,6 +671,50 @@ impl Default for PromptCacheShadowConfig {
 pub struct LifecycleShadowWriterConfig {
     #[serde(default)]
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecycleHookAdapterConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecyclePricingSubscriberConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// RFC-0002 Phase 6 writer cutover switch.
+///
+/// - `Legacy` (default): only the pre-RFC-0002 writer persists rows. The
+///   Phase-3 shadow-writer feature flag is ignored.
+/// - `Both`: both writers persist rows. Rows carry distinct `event_id`s and
+///   the shadow row also carries `shadow_event_id` pointing at the legacy
+///   row's `event_id`. Diff via the comparison SQL in
+///   `docs/runbook/lifecycle-shadow.md`.
+/// - `Shadow`: only the assembler writer persists rows. Legacy path is
+///   detached from storage. Do not use until the comparison diff is empty
+///   for the target soak period.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestEventWriterSource {
+    #[default]
+    Legacy,
+    Both,
+    Shadow,
+}
+
+impl RequestEventWriterSource {
+    pub fn legacy_writer_enabled(self) -> bool {
+        matches!(self, Self::Legacy | Self::Both)
+    }
+
+    pub fn shadow_writer_enabled(self) -> bool {
+        matches!(self, Self::Shadow | Self::Both)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -37,6 +37,8 @@ pub mod lifecycle;
 #[cfg(not(loom))]
 pub mod lifecycle_event_assembler;
 pub mod lifecycle_event_logger;
+pub mod lifecycle_hook_adapter;
+pub mod lifecycle_pricing_subscriber;
 #[cfg(not(loom))]
 pub mod limit_state_writer;
 #[cfg(not(loom))]
@@ -110,9 +112,10 @@ pub use error_normalizer::{ErrorNormalizer, NormalizerError, UpstreamKind};
 #[cfg(not(loom))]
 pub use event_bus::{
     BusError, BusReceiver, DEFAULT_BROADCAST_CAPACITY, DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY,
-    DEFAULT_LIFECYCLE_BROADCAST_CAPACITY, DEFAULT_LIFECYCLE_WRITER_CAPACITY,
-    DEFAULT_WRITER_CAPACITY, InMemoryBus, LifecycleBusReceiver, RequestEventBus, RequestEventPhase,
-    RequestEventUpdate, new_in_memory_bus, record_dashboard_sse_lagged,
+    DEFAULT_LIFECYCLE_BROADCAST_CAPACITY, DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY,
+    DEFAULT_LIFECYCLE_PRICING_CAPACITY, DEFAULT_LIFECYCLE_WRITER_CAPACITY, DEFAULT_WRITER_CAPACITY,
+    InMemoryBus, LifecycleBusReceiver, RequestEventBus, RequestEventPhase, RequestEventUpdate,
+    new_in_memory_bus, record_dashboard_sse_lagged,
 };
 #[cfg(not(loom))]
 pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop};
@@ -126,6 +129,12 @@ pub use lifecycle::{
 #[cfg(not(loom))]
 pub use lifecycle_event_assembler::{RequestEventAssemblerHandle, spawn_request_event_assembler};
 pub use lifecycle_event_logger::{LifecycleEventLoggerHandle, spawn_lifecycle_event_logger};
+pub use lifecycle_hook_adapter::{
+    ObservabilityHookAdapterHandle, spawn_observability_hook_adapter,
+};
+pub use lifecycle_pricing_subscriber::{
+    PricingSubscriberHandle, spawn_lifecycle_pricing_subscriber,
+};
 #[cfg(not(loom))]
 pub use limit_state_writer::{
     PrincipalLimitStateEnqueueError, PrincipalLimitStateSink, start_principal_limit_state_writer,

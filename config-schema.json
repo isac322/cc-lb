@@ -66,6 +66,18 @@
       "$ref": "#/$defs/EgressConfig",
       "default": {}
     },
+    "lifecycle_hook_adapter": {
+      "$ref": "#/$defs/LifecycleHookAdapterConfig",
+      "default": {
+        "enabled": false
+      }
+    },
+    "lifecycle_pricing_subscriber": {
+      "$ref": "#/$defs/LifecyclePricingSubscriberConfig",
+      "default": {
+        "enabled": false
+      }
+    },
     "lifecycle_shadow_writer": {
       "$ref": "#/$defs/LifecycleShadowWriterConfig",
       "default": {
@@ -100,6 +112,10 @@
         "refresh_debounce_secs": 60,
         "warm_set_cap": 32
       }
+    },
+    "request_event_writer_source": {
+      "$ref": "#/$defs/RequestEventWriterSource",
+      "default": "legacy"
     },
     "runtime": {
       "$ref": "#/$defs/RuntimeConfig",
@@ -462,6 +478,24 @@
         }
       }
     },
+    "LifecycleHookAdapterConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "LifecyclePricingSubscriberConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
     "LifecycleShadowWriterConfig": {
       "type": "object",
       "properties": {
@@ -675,6 +709,15 @@
         }
       },
       "additionalProperties": false
+    },
+    "RequestEventWriterSource": {
+      "description": "RFC-0002 Phase 6 writer cutover switch.\n\n- `Legacy` (default): only the pre-RFC-0002 writer persists rows. The\n  Phase-3 shadow-writer feature flag is ignored.\n- `Both`: both writers persist rows. Rows carry distinct `event_id`s and\n  the shadow row also carries `shadow_event_id` pointing at the legacy\n  row's `event_id`. Diff via the comparison SQL in\n  `docs/runbook/lifecycle-shadow.md`.\n- `Shadow`: only the assembler writer persists rows. Legacy path is\n  detached from storage. Do not use until the comparison diff is empty\n  for the target soak period.",
+      "type": "string",
+      "enum": [
+        "legacy",
+        "both",
+        "shadow"
+      ]
     },
     "RuntimeConfig": {
       "type": "object",

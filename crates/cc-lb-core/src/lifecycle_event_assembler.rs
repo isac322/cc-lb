@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cc_lb_lifecycle::{
-    AuthInfo, EventId, LifecycleEvent, ParseInfo, RouteInfo, TerminationReason, UsageSnapshot,
+    AuthInfo, CostBreakdown, EventId, LifecycleEvent, ParseInfo, RouteInfo, TerminationReason,
+    UsageSnapshot,
 };
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use tokio::sync::{mpsc, oneshot};
@@ -70,6 +71,11 @@ struct Partial {
     stream_success: Option<u64>,
     stream_error_type: Option<String>,
     stream_error_message: Option<String>,
+    cost: Option<CostBreakdown>,
+    cache_read_input_tokens_override: Option<u64>,
+    cache_creation_input_tokens_override: Option<u64>,
+    cache_creation_input_tokens_5m_override: Option<u64>,
+    cache_creation_input_tokens_1h_override: Option<u64>,
 }
 
 impl Partial {
@@ -242,6 +248,21 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             }
         },
         LifecycleEvent::RequestTerminated { .. } => {}
+        LifecycleEvent::Priced { cost, .. } => {
+            partial.cost = Some(cost);
+        }
+        LifecycleEvent::CacheObserved {
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+            cache_creation_input_tokens_5m,
+            cache_creation_input_tokens_1h,
+            ..
+        } => {
+            partial.cache_read_input_tokens_override = Some(cache_read_input_tokens);
+            partial.cache_creation_input_tokens_override = Some(cache_creation_input_tokens);
+            partial.cache_creation_input_tokens_5m_override = Some(cache_creation_input_tokens_5m);
+            partial.cache_creation_input_tokens_1h_override = Some(cache_creation_input_tokens_1h);
+        }
         _ => {}
     }
 }
@@ -288,6 +309,7 @@ fn finalize(
         .unwrap_or_default();
     let model = route_model.or_else(|| partial.parse.as_ref().and_then(|p| p.model.clone()));
 
+    let cost = partial.cost.clone().unwrap_or_default();
     RequestEvent {
         ts: ts_ms / 1_000,
         ts_ms: Some(ts_ms),
@@ -307,16 +329,34 @@ fn finalize(
         upstream_error_message: partial.stream_error_message.clone(),
         input_tokens: partial.usage_seen.then_some(partial.usage.input_tokens),
         output_tokens: partial.usage_seen.then_some(partial.usage.output_tokens),
-        cache_creation_input_tokens: partial
-            .usage_seen
-            .then_some(partial.usage.cache_creation_input_tokens),
-        cache_creation_input_tokens_5m: (partial.usage.cache_creation_input_tokens_5m > 0)
-            .then_some(partial.usage.cache_creation_input_tokens_5m),
-        cache_creation_input_tokens_1h: (partial.usage.cache_creation_input_tokens_1h > 0)
-            .then_some(partial.usage.cache_creation_input_tokens_1h),
-        cache_read_input_tokens: partial
-            .usage_seen
-            .then_some(partial.usage.cache_read_input_tokens),
+        cache_creation_input_tokens: partial.cache_creation_input_tokens_override.or_else(|| {
+            partial
+                .usage_seen
+                .then_some(partial.usage.cache_creation_input_tokens)
+        }),
+        cache_creation_input_tokens_5m: partial.cache_creation_input_tokens_5m_override.or_else(
+            || {
+                (partial.usage.cache_creation_input_tokens_5m > 0)
+                    .then_some(partial.usage.cache_creation_input_tokens_5m)
+            },
+        ),
+        cache_creation_input_tokens_1h: partial.cache_creation_input_tokens_1h_override.or_else(
+            || {
+                (partial.usage.cache_creation_input_tokens_1h > 0)
+                    .then_some(partial.usage.cache_creation_input_tokens_1h)
+            },
+        ),
+        cache_read_input_tokens: partial.cache_read_input_tokens_override.or_else(|| {
+            partial
+                .usage_seen
+                .then_some(partial.usage.cache_read_input_tokens)
+        }),
+        cost_usd_micros: cost.total_micros,
+        cost_input_micros: cost.input_micros,
+        cost_output_micros: cost.output_micros,
+        cost_cache_creation_5m_micros: cost.cache_creation_5m_micros,
+        cost_cache_creation_1h_micros: cost.cache_creation_1h_micros,
+        cost_cache_read_micros: cost.cache_read_micros,
         thinking_tokens: (partial.usage.thinking_tokens > 0)
             .then_some(partial.usage.thinking_tokens),
         web_search_requests: (partial.usage.web_search_requests > 0)

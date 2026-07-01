@@ -838,7 +838,7 @@ async fn build_app_with_storage_inner(
         clock.clone(),
     )
     .await?;
-    let dynamic_view_holder = Arc::new(DynamicViewHolder::new(initial_view));
+    let dynamic_view_holder = Arc::new(DynamicViewHolder::new(initial_view.clone()));
     let notify_cancel = CancellationToken::new();
     let notifier: Arc<dyn RuntimeChangeNotifier> = storage_for_dynamic.clone();
     let notifier_task = {
@@ -871,33 +871,64 @@ async fn build_app_with_storage_inner(
         notify_listener.run().await;
     }));
     let in_memory_bus = cc_lb_core::InMemoryBus::new();
-    let request_event_writer_rx = in_memory_bus.attach_writer(cc_lb_core::DEFAULT_WRITER_CAPACITY);
+    let writer_source = config.request_event_writer_source;
+    let request_event_writer_rx = if writer_source.legacy_writer_enabled() {
+        Some(in_memory_bus.attach_writer(cc_lb_core::DEFAULT_WRITER_CAPACITY))
+    } else {
+        None
+    };
     let lifecycle_event_logger_rx =
         in_memory_bus.attach_lifecycle_writer(cc_lb_core::DEFAULT_LIFECYCLE_WRITER_CAPACITY);
-    let lifecycle_assembler_rx = if config.lifecycle_shadow_writer.enabled {
+    let lifecycle_assembler_rx =
+        if writer_source.shadow_writer_enabled() || config.lifecycle_shadow_writer.enabled {
+            Some(
+                in_memory_bus
+                    .attach_lifecycle_assembler(cc_lb_core::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY),
+            )
+        } else {
+            None
+        };
+    let lifecycle_hook_adapter_rx = if config.lifecycle_hook_adapter.enabled {
         Some(
             in_memory_bus
-                .attach_lifecycle_assembler(cc_lb_core::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY),
+                .attach_lifecycle_hook_adapter(cc_lb_core::DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY),
         )
     } else {
         None
     };
+    let lifecycle_pricing_rx = if config.lifecycle_pricing_subscriber.enabled {
+        Some(in_memory_bus.attach_lifecycle_pricing(cc_lb_core::DEFAULT_LIFECYCLE_PRICING_CAPACITY))
+    } else {
+        None
+    };
     let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(in_memory_bus);
-    let request_event_writer_handle =
-        cc_lb_core::spawn_request_event_writer(storage.clone(), request_event_writer_rx);
+    let request_event_writer_handle = request_event_writer_rx
+        .map(|rx| cc_lb_core::spawn_request_event_writer(storage.clone(), rx));
     let lifecycle_event_logger_handle =
         cc_lb_core::spawn_lifecycle_event_logger(lifecycle_event_logger_rx);
     let lifecycle_event_assembler_handle = lifecycle_assembler_rx
         .map(|rx| cc_lb_core::spawn_request_event_assembler(rx, storage.clone()));
+    let lifecycle_hook_adapter_handle = lifecycle_hook_adapter_rx.map(|rx| {
+        let hooks = initial_view.global_observability_hooks.to_vec();
+        cc_lb_core::spawn_observability_hook_adapter(rx, hooks)
+    });
+    let lifecycle_pricing_subscriber_handle = lifecycle_pricing_rx
+        .map(|rx| cc_lb_core::spawn_lifecycle_pricing_subscriber(rx, event_bus.clone()));
     let request_event_writer_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_core::RequestEventWriterHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(Some(request_event_writer_handle)));
+    > = Arc::new(tokio::sync::Mutex::new(request_event_writer_handle));
     let lifecycle_event_logger_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_core::LifecycleEventLoggerHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(lifecycle_event_logger_handle)));
     let lifecycle_event_assembler_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_core::RequestEventAssemblerHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(lifecycle_event_assembler_handle));
+    let lifecycle_hook_adapter_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::ObservabilityHookAdapterHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(lifecycle_hook_adapter_handle));
+    let lifecycle_pricing_subscriber_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::PricingSubscriberHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(lifecycle_pricing_subscriber_handle));
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
         dynamic_view_holder.clone(),
@@ -996,6 +1027,30 @@ async fn build_app_with_storage_inner(
             let assembler_slot = assembler_slot.clone();
             async move {
                 let mut guard = assembler_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let hook_adapter_slot = lifecycle_hook_adapter_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let hook_adapter_slot = hook_adapter_slot.clone();
+            async move {
+                let mut guard = hook_adapter_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let pricing_slot = lifecycle_pricing_subscriber_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let pricing_slot = pricing_slot.clone();
+            async move {
+                let mut guard = pricing_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }
