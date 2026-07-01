@@ -25,6 +25,8 @@ uuid = { version = "1", features = ["v4"] }
 http.workspace = true
 bytes.workspace = true
 url.workspace = true
+metrics.workspace = true
 
 [dev-dependencies]
 wat = "1"
+metrics-exporter-prometheus.workspace = true
