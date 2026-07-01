@@ -26,6 +26,22 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_tls(config)?;
     validate_storage(config)?;
     validate_oauth(config)?;
+    validate_wasmtime_runtime(config)?;
+    Ok(())
+}
+
+fn validate_wasmtime_runtime(config: &Config) -> Result<(), ValidationError> {
+    if let Some(pages) = config.runtime.wasmtime.memory_max_pages {
+        // wasm32 spec: memory grows in 64 KiB pages up to 4 GiB (65_536
+        // pages). Zero is nonsensical; anything above the ceiling is a
+        // typo waiting to become an engine-build panic.
+        if pages == 0 || pages > 65_536 {
+            return Err(ValidationError::new(
+                "runtime.wasmtime.memory_max_pages",
+                format!("must be in range 1..=65536 (got {pages})"),
+            ));
+        }
+    }
     Ok(())
 }
 

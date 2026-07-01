@@ -28,12 +28,26 @@ pub struct PluginCell {
     pub schema_hash: [u8; 32],
     pub fuel_per_call: u64,
     pub memory_max_pages: u32,
+    /// Stable label used as the `plugin` dimension on every RFC-0001
+    /// plugin metric. Owned by the cell so `execute_call` can emit
+    /// without threading slot / registration state through every
+    /// hook function signature.
+    pub plugin_name: Arc<str>,
     /// Dispatch mode lifted from [`cc_lb_plugin_api::PluginManifest::pure`].
     /// `true` means every call builds a fresh `Store` and tears it down
     /// (no thread_local cache, no version-compare). `false` keeps the
     /// stateful per-worker cache path for plugins that genuinely need
     /// to retain mutable state across calls in the same worker.
     pub pure: bool,
+    /// Content-identity hash covering every input that affects
+    /// runtime behaviour: wasm bytes, `pure` dispatch mode,
+    /// per-call fuel budget, per-instance memory ceiling, plus a
+    /// bumpable [`crate::VALIDATION_POLICY_VERSION`] constant so
+    /// tightening validation rules force a recompile even when the
+    /// wasm + knobs are unchanged. `register()` short-circuits when
+    /// this hash matches, so it MUST NOT elide any input the
+    /// runtime actually uses.
+    pub content_hash: [u8; 32],
 }
 
 impl std::fmt::Debug for PluginCell {
@@ -41,6 +55,7 @@ impl std::fmt::Debug for PluginCell {
         f.debug_struct("PluginCell")
             .field("version_id", &self.version_id)
             .field("schema_hash_hex", &format_hex(&self.schema_hash))
+            .field("content_hash_hex", &format_hex(&self.content_hash))
             .field("fuel_per_call", &self.fuel_per_call)
             .field("memory_max_pages", &self.memory_max_pages)
             .field("pure", &self.pure)

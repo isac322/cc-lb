@@ -122,19 +122,23 @@ fn re_register_swaps_to_new_version() {
         .expect("v1 register");
     let v1_version = v1.current.load().version_id;
 
+    // RFC-0001 gap-analysis #2: byte-identical re-register short-circuits
+    // (no version bump). To exercise hot-swap machinery we must change a
+    // content-affecting knob — flipping `pure` toggles the dispatch mode
+    // and forces PluginCell rebuild via content_hash mismatch.
     let v2 = runtime
         .register_filter_with(
             slot.clone(),
             "cache-aware-wasmtime",
             &wasm,
-            RegisterOptions { pure: false },
+            RegisterOptions { pure: true },
         )
         .expect("v2 register");
     let v2_version = v2.current.load().version_id;
 
     assert!(
         v2_version > v1_version,
-        "re-register must bump version_id ({v1_version} -> {v2_version})"
+        "re-register with changed opts must bump version_id ({v1_version} -> {v2_version})"
     );
 
     let resp = call(&runtime, &slot, &request(Some(1), &[("a", 10), ("b", 100)]));

@@ -56,10 +56,11 @@ pub struct HotEngineConfig {
 impl Default for HotEngineConfig {
     fn default() -> Self {
         Self {
-            // 1024 pages = 64 MiB per plugin instance. Sized to fit large
-            // Anthropic-shape requests (5+ MB tool schemas from OpenCode /
-            // Claude Code) with headroom for scrub-time string clones.
-            memory_max_pages: 1024,
+            // 2048 pages = 128 MiB per plugin instance. Sized to survive
+            // the 100 MiB /v1/files body cap (DEFAULT_FILES_CAP_BYTES in
+            // cc-lb-core::lifecycle) plus rkyv envelope + per-hook
+            // scratch clones; see RFC-0001 gap-analysis item #3.
+            memory_max_pages: 2048,
             // 1B fuel covers regex + serde_json parsing on multi-MB tool
             // schemas. Empirically 10M was insufficient for a 26 KiB
             // OpenCode system prompt, 200M for a 5 MB tools-heavy request.
@@ -106,4 +107,21 @@ pub fn build_hot_engine(cfg: &HotEngineConfig) -> Result<Engine, WasmtimeRuntime
     wcfg.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
 
     Engine::new(&wcfg).map_err(|e| WasmtimeRuntimeError::EngineInit(anyhow::Error::from(e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // RFC-0001 gap-analysis #3: 100 MiB /v1/files body + rkyv envelope
+    // + scratch => 128 MiB (2048 pages) is the safe floor. 1600 has no
+    // margin. Keep this pinned so a future bump justifies the delta.
+    #[test]
+    fn default_memory_max_pages_covers_files_body_cap_with_margin() {
+        let cfg = HotEngineConfig::default();
+        assert_eq!(
+            cfg.memory_max_pages, 2048,
+            "default must accommodate 100 MiB /v1/files body with rkyv envelope + scratch margin",
+        );
+    }
 }
