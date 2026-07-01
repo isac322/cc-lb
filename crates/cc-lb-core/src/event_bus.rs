@@ -25,6 +25,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use cc_lb_lifecycle::LifecycleEvent;
 use cc_lb_storage_api::RequestEvent;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
@@ -37,6 +38,17 @@ pub const DEFAULT_BROADCAST_CAPACITY: usize = 1024;
 /// At typical 30 RPS this absorbs ~136 seconds of burst before drop-newest
 /// engages.
 pub const DEFAULT_WRITER_CAPACITY: usize = 4096;
+
+/// Default capacity for the lifecycle-event broadcast channel.
+///
+/// The lifecycle stream fires up to ~10 events per request during Phase 2
+/// shadow mode; this absorbs bursts up to ~200 in-flight requests before
+/// slow ephemeral consumers observe `Lagged(n)`.
+pub const DEFAULT_LIFECYCLE_BROADCAST_CAPACITY: usize = 2048;
+
+/// Default capacity for the durable lifecycle-writer mpsc channel used by
+/// [`LifecycleEventLogger`](crate::lifecycle_event_logger::LifecycleEventLogger).
+pub const DEFAULT_LIFECYCLE_WRITER_CAPACITY: usize = 4096;
 
 /// Errors surfaced by [`RequestEventBus`] implementations.
 #[derive(Debug, thiserror::Error)]
@@ -102,6 +114,15 @@ pub enum BusReceiver {
     Remote(mpsc::Receiver<RequestEventUpdate>),
 }
 
+/// Receiver side of [`RequestEventBus::subscribe_lifecycle`].
+///
+/// `None` is returned by trait implementations that do not opt into the
+/// RFC-0002 shadow lifecycle stream (e.g. test doubles).
+pub enum LifecycleBusReceiver {
+    None,
+    InMemory(broadcast::Receiver<LifecycleEvent>),
+}
+
 /// Transport-agnostic event sink used by `Lifecycle` (producer), the DB writer
 /// task (durable consumer via [`InMemoryBus::attach_writer`]), and the admin
 /// SSE handler (ephemeral consumer via [`subscribe`](RequestEventBus::subscribe)).
@@ -116,6 +137,16 @@ pub trait RequestEventBus: Send + Sync + 'static {
     ///
     /// Slow consumers may observe `Lagged(n)`.
     fn subscribe(&self) -> BusReceiver;
+
+    /// Publish a Phase-2 shadow lifecycle event. Default impl is a no-op so
+    /// existing test doubles compile unchanged.
+    fn publish_lifecycle(&self, _event: LifecycleEvent) {}
+
+    /// Subscribe to the Phase-2 shadow lifecycle stream. Default returns
+    /// `LifecycleBusReceiver::None`.
+    fn subscribe_lifecycle(&self) -> LifecycleBusReceiver {
+        LifecycleBusReceiver::None
+    }
 }
 
 /// Default single-process implementation.
@@ -131,6 +162,8 @@ pub struct InMemoryBus {
 struct InMemoryBusInner {
     broadcast_tx: broadcast::Sender<RequestEventUpdate>,
     writer_tx: Mutex<Option<mpsc::Sender<RequestEventUpdate>>>,
+    lifecycle_broadcast_tx: broadcast::Sender<LifecycleEvent>,
+    lifecycle_writer_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
 }
 
 impl InMemoryBus {
@@ -143,10 +176,13 @@ impl InMemoryBus {
     pub fn with_capacity(capacity: usize) -> Self {
         let bounded_capacity = capacity.max(1);
         let (broadcast_tx, _) = broadcast::channel(bounded_capacity);
+        let (lifecycle_broadcast_tx, _) = broadcast::channel(DEFAULT_LIFECYCLE_BROADCAST_CAPACITY);
         Self {
             inner: Arc::new(InMemoryBusInner {
                 broadcast_tx,
                 writer_tx: Mutex::new(None),
+                lifecycle_broadcast_tx,
+                lifecycle_writer_tx: Mutex::new(None),
             }),
         }
     }
@@ -164,6 +200,21 @@ impl InMemoryBus {
             .writer_tx
             .lock()
             .expect("event bus writer mutex poisoned");
+        *guard = Some(tx);
+        rx
+    }
+
+    /// Attach the durable Phase-2 lifecycle-writer consumer
+    /// (`LifecycleEventLogger`).
+    ///
+    /// Semantics mirror [`Self::attach_writer`].
+    pub fn attach_lifecycle_writer(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        let mut guard = self
+            .inner
+            .lifecycle_writer_tx
+            .lock()
+            .expect("event bus lifecycle writer mutex poisoned");
         *guard = Some(tx);
         rx
     }
@@ -216,6 +267,39 @@ impl RequestEventBus for InMemoryBus {
 
     fn subscribe(&self) -> BusReceiver {
         BusReceiver::InMemory(self.inner.broadcast_tx.subscribe())
+    }
+
+    fn publish_lifecycle(&self, event: LifecycleEvent) {
+        let _ = self.inner.lifecycle_broadcast_tx.send(event.clone());
+
+        let writer_tx = {
+            let guard = self
+                .inner
+                .lifecycle_writer_tx
+                .lock()
+                .expect("event bus lifecycle writer mutex poisoned");
+            guard.clone()
+        };
+        if let Some(tx) = writer_tx {
+            match tx.try_send(event) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(dropped)) => {
+                    cc_lb_observability::increment_dropped_events_by("lifecycle_writer_full", 1);
+                    tracing::warn!(
+                        kind = dropped.kind(),
+                        event_id = %dropped.event_id(),
+                        "lifecycle writer mpsc full; dropping event (subscriber metric may lag)",
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::debug!("lifecycle writer mpsc closed");
+                }
+            }
+        }
+    }
+
+    fn subscribe_lifecycle(&self) -> LifecycleBusReceiver {
+        LifecycleBusReceiver::InMemory(self.inner.lifecycle_broadcast_tx.subscribe())
     }
 }
 
@@ -309,5 +393,52 @@ mod tests {
         let before = cc_lb_observability::dropped_events_total();
         record_dashboard_sse_lagged(3);
         assert_eq!(cc_lb_observability::dropped_events_total() - before, 3);
+    }
+
+    fn sample_lifecycle_event(request_id: &str) -> LifecycleEvent {
+        LifecycleEvent::RequestStarted {
+            event_id: format!("evt-{request_id}"),
+            request_id: request_id.to_owned(),
+            ts_ms: 1_700_000_000_000,
+            stream: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_lifecycle_fans_out_to_broadcast_and_writer() {
+        let bus = InMemoryBus::new();
+        let LifecycleBusReceiver::InMemory(mut rx_sse) = bus.subscribe_lifecycle() else {
+            panic!("InMemoryBus should yield InMemory lifecycle receiver");
+        };
+        let mut rx_writer = bus.attach_lifecycle_writer(8);
+
+        bus.publish_lifecycle(sample_lifecycle_event("req-1"));
+        bus.publish_lifecycle(sample_lifecycle_event("req-2"));
+
+        let sse_a = rx_sse.recv().await.expect("sse a");
+        let sse_b = rx_sse.recv().await.expect("sse b");
+        assert_eq!(sse_a.event_id(), "evt-req-1");
+        assert_eq!(sse_b.event_id(), "evt-req-2");
+
+        let wrt_a = rx_writer.recv().await.expect("writer a");
+        let wrt_b = rx_writer.recv().await.expect("writer b");
+        assert_eq!(wrt_a.event_id(), "evt-req-1");
+        assert_eq!(wrt_b.event_id(), "evt-req-2");
+    }
+
+    #[tokio::test]
+    async fn publish_lifecycle_with_no_subscribers_is_noop() {
+        let bus = InMemoryBus::new();
+        bus.publish_lifecycle(sample_lifecycle_event("orphan"));
+    }
+
+    #[tokio::test]
+    async fn publish_lifecycle_writer_full_drops_newest() {
+        let bus = InMemoryBus::new();
+        let _rx = bus.attach_lifecycle_writer(1);
+        let before = cc_lb_observability::dropped_events_total();
+        bus.publish_lifecycle(sample_lifecycle_event("a"));
+        bus.publish_lifecycle(sample_lifecycle_event("b"));
+        assert!(cc_lb_observability::dropped_events_total() > before);
     }
 }

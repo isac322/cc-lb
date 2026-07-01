@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_plugin_api::{InternalError, RoutingTrace};
 use cc_lb_storage_api::{
     RequestCacheBreakpoint, RequestCacheState, RequestEvent, RequestEventUpstream,
@@ -237,6 +238,7 @@ impl LifecycleContext {
             return;
         }
         let event = self.inner.make_request_event(None);
+        self.inner.emit_terminated(&event);
         self.inner.bus.publish(RequestEventUpdate::final_(event));
     }
 
@@ -245,6 +247,33 @@ impl LifecycleContext {
     pub fn terminate_tower_timeout(&self) {
         self.set_terminal(StatusCode::GATEWAY_TIMEOUT, error_codes::TOWER_TIMEOUT);
         self.finish();
+    }
+
+    /// Publish the Phase-2 shadow `RequestStarted` lifecycle event.
+    ///
+    /// Should be called exactly once at handler entry, after the request has
+    /// been parsed enough to know whether the client asked for a streaming
+    /// response. Legacy telemetry path is unaffected.
+    pub(crate) fn emit_request_started(&self, stream: bool) {
+        let request_id = self.lock_state().request_id.clone();
+        self.inner
+            .bus
+            .publish_lifecycle(LifecycleEvent::RequestStarted {
+                event_id: self.inner.event_id.clone(),
+                request_id,
+                ts_ms: self.inner.started_unix_ms,
+                stream,
+            });
+    }
+
+    /// Publish an arbitrary Phase-2 shadow lifecycle event on the advisory bus.
+    ///
+    /// Call sites construct the event with `event_id: self.event_id().to_owned()`.
+    /// This is fire-and-forget: overflow drops the event and increments the
+    /// bus-side drop counter. Legacy telemetry path is unaffected regardless
+    /// of whether the event is delivered.
+    pub(crate) fn emit_lifecycle(&self, event: LifecycleEvent) {
+        self.inner.bus.publish_lifecycle(event);
     }
 
     /// Snapshot current state and broadcast as a `Partial` update for live
@@ -331,6 +360,24 @@ impl Inner {
     }
 }
 
+impl Inner {
+    fn emit_terminated(&self, event: &RequestEvent) {
+        let reason = match event.error_code.as_deref() {
+            None => TerminationReason::Success,
+            Some(code) if code == error_codes::TERMINAL_DROPPED => TerminationReason::Dropped,
+            Some(code) => TerminationReason::ErrorCode(code.to_owned()),
+        };
+        let duration_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        self.bus
+            .publish_lifecycle(LifecycleEvent::RequestTerminated {
+                event_id: self.event_id.clone(),
+                reason,
+                client_status: event.status,
+                duration_ms,
+            });
+    }
+}
+
 impl Drop for Inner {
     fn drop(&mut self) {
         if self.finalized.load(Ordering::Acquire) {
@@ -344,6 +391,7 @@ impl Drop for Inner {
             return;
         }
         let event = self.make_request_event(Some(error_codes::TERMINAL_DROPPED));
+        self.emit_terminated(&event);
         self.bus.publish(RequestEventUpdate::final_(event));
     }
 }

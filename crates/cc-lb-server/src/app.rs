@@ -872,12 +872,19 @@ async fn build_app_with_storage_inner(
     }));
     let in_memory_bus = cc_lb_core::InMemoryBus::new();
     let request_event_writer_rx = in_memory_bus.attach_writer(cc_lb_core::DEFAULT_WRITER_CAPACITY);
+    let lifecycle_event_logger_rx =
+        in_memory_bus.attach_lifecycle_writer(cc_lb_core::DEFAULT_LIFECYCLE_WRITER_CAPACITY);
     let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(in_memory_bus);
     let request_event_writer_handle =
         cc_lb_core::spawn_request_event_writer(storage.clone(), request_event_writer_rx);
+    let lifecycle_event_logger_handle =
+        cc_lb_core::spawn_lifecycle_event_logger(lifecycle_event_logger_rx);
     let request_event_writer_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_core::RequestEventWriterHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(request_event_writer_handle)));
+    let lifecycle_event_logger_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::LifecycleEventLoggerHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(Some(lifecycle_event_logger_handle)));
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
         dynamic_view_holder.clone(),
@@ -952,6 +959,18 @@ async fn build_app_with_storage_inner(
             let writer_slot = writer_slot.clone();
             async move {
                 let mut guard = writer_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let logger_slot = lifecycle_event_logger_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let logger_slot = logger_slot.clone();
+            async move {
+                let mut guard = logger_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }

@@ -802,6 +802,7 @@ dependencies = [
  "cc-lb-aead",
  "cc-lb-clock",
  "cc-lb-config",
+ "cc-lb-lifecycle",
  "cc-lb-observability",
  "cc-lb-plugin-api",
  "cc-lb-pricing",
@@ -850,6 +851,15 @@ dependencies = [
  "cc-lb-plugin-api",
  "http",
  "url",
+]
+
+[[package]]
+name = "cc-lb-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
