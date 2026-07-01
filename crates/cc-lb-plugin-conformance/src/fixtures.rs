@@ -7,7 +7,9 @@
 //! author actually re-types every time is header construction, a
 //! synthetic principal, and the six-variant observe sample.
 
-use cc_lb_plugin_types::{Header, ObserveEvent, Principal, Upstream};
+use cc_lb_plugin_types::{
+    FilterRequest, Header, NormalizeErrorRequest, ObserveEvent, Principal, ShapeRequest, Upstream,
+};
 
 /// Build a `Header` from `(name, value)`. Value can be `&str`, `&[u8]`,
 /// `String`, or anything that dereferences to bytes.
@@ -65,4 +67,50 @@ pub fn observe_event_samples() -> Vec<ObserveEvent> {
             source: "conformance".to_string(),
         },
     ]
+}
+
+/// Protocol-valid minimal `ShapeRequest` — POST /v1/messages, JSON
+/// content-type header, small JSON body, [`synth_principal`],
+/// `AnthropicDirect { base_url: None }`. Returned owned + mutable so
+/// authors can tweak individual fields before passing to
+/// `PluginSession::call_shape`.
+pub fn sample_shape_request() -> ShapeRequest {
+    ShapeRequest {
+        request_id: "conformance-req-1".to_string(),
+        method: "POST".to_string(),
+        path: "/v1/messages".to_string(),
+        query: None,
+        headers: vec![hdr("content-type", "application/json")],
+        body: br#"{"model":"claude-3-haiku-20240307","messages":[]}"#.to_vec(),
+        principal: synth_principal(),
+        upstream: Upstream::AnthropicDirect { base_url: None },
+    }
+}
+
+/// Protocol-valid minimal `FilterRequest` — POST /v1/messages, JSON
+/// content-type header, small JSON body, [`synth_principal`], no
+/// candidates. Returned owned + mutable so authors can push
+/// `UpstreamCandidate`s before dispatch.
+pub fn sample_filter_request() -> FilterRequest {
+    FilterRequest {
+        request_id: "conformance-req-1".to_string(),
+        method: "POST".to_string(),
+        path: "/v1/messages".to_string(),
+        query: None,
+        headers: vec![hdr("content-type", "application/json")],
+        body: br#"{"model":"claude-3-haiku-20240307","messages":[]}"#.to_vec(),
+        principal: synth_principal(),
+        candidates: Vec::new(),
+    }
+}
+
+/// Protocol-valid minimal `NormalizeErrorRequest` — HTTP 500 with a
+/// short synthetic error body. Plugins that want richer error shapes
+/// can construct their own; this one exists so the harness can push a
+/// non-empty payload through `cc_lb_normalize_error` for the ABI smoke.
+pub fn sample_normalize_error_request() -> NormalizeErrorRequest {
+    NormalizeErrorRequest {
+        status: 500,
+        body: br#"{"error":{"type":"internal_error","message":"synthetic"}}"#.to_vec(),
+    }
 }

@@ -74,7 +74,9 @@ use cc_lb_plugin_types::{
     FilterResponse, NormalizeErrorRequest, NormalizeErrorResponse, ObserveEvent, ShapeRequest,
     ShapeResponse,
 };
-use cc_lb_runtime_wasmtime::{HotEngineConfig, SlotKind, WasmtimeRuntime, inspect_wasm};
+use cc_lb_runtime_wasmtime::{
+    HotEngineConfig, RegisterOptions, SlotKind, WasmtimeRuntime, inspect_wasm,
+};
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 
@@ -89,6 +91,7 @@ pub struct ConformanceSuite<'a> {
     kind: SlotKind,
     plugin_name: String,
     engine_config: HotEngineConfig,
+    register_options: RegisterOptions,
 }
 
 impl<'a> ConformanceSuite<'a> {
@@ -121,7 +124,33 @@ impl<'a> ConformanceSuite<'a> {
             kind,
             plugin_name: format!("conformance-{label}"),
             engine_config: conformance_engine_config(),
+            register_options: RegisterOptions::default(),
         }
+    }
+
+    /// Override the [`RegisterOptions`] used at slot registration.
+    /// See [`Self::pure`] / [`Self::stateful`] for the two common cases.
+    pub fn with_register_options(mut self, opts: RegisterOptions) -> Self {
+        self.register_options = opts;
+        self
+    }
+
+    /// Register the plugin in pure dispatch mode — fresh `Store` per
+    /// call, no thread_local worker cache. Recommended for plugins
+    /// declared `pure = true` in their `PluginManifest`.
+    pub fn pure(mut self) -> Self {
+        self.register_options.pure = true;
+        self
+    }
+
+    /// Register the plugin in stateful dispatch mode — thread_local
+    /// worker cache with ArcSwap hot-swap. Required for plugins that
+    /// accumulate legitimate cross-call state; also the mode where
+    /// stateful-only allocator or ArcSwap bugs surface, so plugins that
+    /// support both modes should have a conformance test in each.
+    pub fn stateful(mut self) -> Self {
+        self.register_options.pure = false;
+        self
     }
 
     /// Override the plugin name the suite uses when registering the slot.
@@ -161,15 +190,30 @@ impl<'a> ConformanceSuite<'a> {
         let slot_key = SlotKey::global(self.plugin_name.clone());
         match self.kind {
             SlotKind::Filter => runtime
-                .register_filter(slot_key.clone(), self.plugin_name.clone(), self.wasm)
+                .register_filter_with(
+                    slot_key.clone(),
+                    self.plugin_name.clone(),
+                    self.wasm,
+                    self.register_options,
+                )
                 .map(|_| ())
                 .expect("register_filter must accept a conforming plugin"),
             SlotKind::Shape => runtime
-                .register_shape(slot_key.clone(), self.plugin_name.clone(), self.wasm)
+                .register_shape_with(
+                    slot_key.clone(),
+                    self.plugin_name.clone(),
+                    self.wasm,
+                    self.register_options,
+                )
                 .map(|_| ())
                 .expect("register_shape must accept a conforming plugin"),
             SlotKind::Observe => runtime
-                .register_observe(slot_key.clone(), self.plugin_name.clone(), self.wasm)
+                .register_observe_with(
+                    slot_key.clone(),
+                    self.plugin_name.clone(),
+                    self.wasm,
+                    self.register_options,
+                )
                 .map(|_| ())
                 .expect("register_observe must accept a conforming plugin"),
         }
@@ -180,12 +224,37 @@ impl<'a> ConformanceSuite<'a> {
         }
     }
 
-    /// Minimal built-in conformance smoke: build a session (which
-    /// covers static admission via `inspect_wasm` + instantiate). Drop
-    /// the session immediately. Suitable as the single
-    /// `#[test] fn conformance()` most plugins need.
+    /// Built-in conformance smoke: build a session (covers static
+    /// admission via `inspect_wasm` + wasm compile + `InstancePre`),
+    /// then push one minimal-valid payload through every hook the slot
+    /// exports. A plugin whose `cc_lb_shape` traps or returns
+    /// un-decodable bytes cannot pass this — registration alone would
+    /// have missed it.
+    ///
+    /// Coverage:
+    /// - `Filter` → `call_filter(sample_filter_request())`
+    /// - `Shape` → `call_shape(sample_shape_request())` +
+    ///   `call_normalize_error(sample_normalize_error_request())`
+    /// - `Observe` → [`PluginSession::exercise_observe_variants`]
+    ///
+    /// Assertions are boundary-only: hooks must not trap and responses
+    /// (where hooks return one) must rkyv-decode as the expected type.
+    /// Plugin-specific semantics (URL policy, header filtering, scrub
+    /// correctness) are the plugin author's responsibility to test.
     pub fn run(&self) {
-        let _ = self.session();
+        let session = self.session();
+        match self.kind {
+            SlotKind::Filter => {
+                let _ = session.call_filter(fixtures::sample_filter_request());
+            }
+            SlotKind::Shape => {
+                let _ = session.call_shape(fixtures::sample_shape_request());
+                let _ = session.call_normalize_error(fixtures::sample_normalize_error_request());
+            }
+            SlotKind::Observe => {
+                session.exercise_observe_variants();
+            }
+        }
     }
 }
 
