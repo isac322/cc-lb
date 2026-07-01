@@ -19,7 +19,7 @@
 //! ## Publish semantics
 //!
 //! [`RequestEventBus::publish`] is **synchronous and non-blocking**. The proxy
-//! hot path and the `TerminalObserver` `Drop` fallback both call it without
+//! hot path and the `LifecycleContext` `Drop` fallback both call it without
 //! `.await`. Failures (no receivers, writer mpsc full) increment metrics and
 //! `tracing::warn!` but never block the producer.
 
@@ -52,6 +52,7 @@ pub const DEFAULT_LIFECYCLE_WRITER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_PRICING_CAPACITY: usize = 4096;
+pub const DEFAULT_LIFECYCLE_LIMIT_RECONCILE_CAPACITY: usize = 4096;
 
 /// Errors surfaced by [`RequestEventBus`] implementations.
 #[derive(Debug, thiserror::Error)]
@@ -170,6 +171,7 @@ struct InMemoryBusInner {
     lifecycle_assembler_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_hook_adapter_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_pricing_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
+    lifecycle_limit_reconcile_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
 }
 
 impl InMemoryBus {
@@ -192,6 +194,7 @@ impl InMemoryBus {
                 lifecycle_assembler_tx: Mutex::new(None),
                 lifecycle_hook_adapter_tx: Mutex::new(None),
                 lifecycle_pricing_tx: Mutex::new(None),
+                lifecycle_limit_reconcile_tx: Mutex::new(None),
             }),
         }
     }
@@ -257,6 +260,20 @@ impl InMemoryBus {
             .lifecycle_pricing_tx
             .lock()
             .expect("event bus lifecycle pricing mutex poisoned");
+        *guard = Some(tx);
+        rx
+    }
+
+    pub fn attach_lifecycle_limit_reconcile(
+        &self,
+        capacity: usize,
+    ) -> mpsc::Receiver<LifecycleEvent> {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        let mut guard = self
+            .inner
+            .lifecycle_limit_reconcile_tx
+            .lock()
+            .expect("event bus lifecycle limit reconcile mutex poisoned");
         *guard = Some(tx);
         rx
     }
@@ -346,6 +363,14 @@ impl RequestEventBus for InMemoryBus {
                 .expect("event bus lifecycle pricing mutex poisoned");
             guard.clone()
         };
+        let limit_reconcile_tx = {
+            let guard = self
+                .inner
+                .lifecycle_limit_reconcile_tx
+                .lock()
+                .expect("event bus lifecycle limit reconcile mutex poisoned");
+            guard.clone()
+        };
         if let Some(tx) = writer_tx {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
@@ -398,7 +423,7 @@ impl RequestEventBus for InMemoryBus {
             }
         }
         if let Some(tx) = pricing_tx {
-            match tx.try_send(event) {
+            match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
                     cc_lb_observability::increment_dropped_events_by("lifecycle_pricing_full", 1);
@@ -410,6 +435,25 @@ impl RequestEventBus for InMemoryBus {
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     tracing::debug!("lifecycle pricing subscriber mpsc closed");
+                }
+            }
+        }
+        if let Some(tx) = limit_reconcile_tx {
+            match tx.try_send(event) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(dropped)) => {
+                    cc_lb_observability::increment_dropped_events_by(
+                        "lifecycle_limit_reconcile_full",
+                        1,
+                    );
+                    tracing::warn!(
+                        kind = dropped.kind(),
+                        event_id = %dropped.event_id(),
+                        "lifecycle limit reconcile subscriber mpsc full; dropping event (reservation may not reconcile)",
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::debug!("lifecycle limit reconcile subscriber mpsc closed");
                 }
             }
         }

@@ -534,6 +534,8 @@ fn reject_unknown_top_level_keys(value: &Value) -> Result<(), String> {
         "lifecycle_hook_adapter",
         "lifecycle_pricing_subscriber",
         "request_event_writer_source",
+        "limit_reservation_ttl",
+        "lifecycle_limit_reconcile_subscriber",
     ];
     let allowed: BTreeSet<&str> = allowed.into_iter().collect();
     let unknown: Vec<&str> = object

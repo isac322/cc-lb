@@ -72,6 +72,13 @@
         "enabled": false
       }
     },
+    "lifecycle_limit_reconcile_subscriber": {
+      "$ref": "#/$defs/LifecycleLimitReconcileSubscriberConfig",
+      "default": {
+        "enabled": false,
+        "shadow": false
+      }
+    },
     "lifecycle_pricing_subscriber": {
       "$ref": "#/$defs/LifecyclePricingSubscriberConfig",
       "default": {
@@ -82,6 +89,14 @@
       "$ref": "#/$defs/LifecycleShadowWriterConfig",
       "default": {
         "enabled": false
+      }
+    },
+    "limit_reservation_ttl": {
+      "$ref": "#/$defs/LimitReservationTtlConfig",
+      "default": {
+        "enabled": false,
+        "tick_secs": 30,
+        "ttl_secs": 300
       }
     },
     "listener": {
@@ -487,6 +502,20 @@
         }
       }
     },
+    "LifecycleLimitReconcileSubscriberConfig": {
+      "description": "RFC-0002 Phase 8 shadow subscriber for limit reservation reconciliation.\n\n- `enabled=false` (default): subscriber is not spawned; handler inline\n  reconciles as before.\n- `enabled=true, shadow=true`: subscriber runs and increments a\n  `would_reconcile` counter but does NOT touch the LimitEngine; handler\n  inline reconcile remains authoritative.\n- `enabled=true, shadow=false`: subscriber calls\n  `LimitEngine::reconcile_by_id`; the handler MUST also disable inline\n  reconcile (see the surrounding rollout notes) to avoid double-counting.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "shadow": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
     "LifecyclePricingSubscriberConfig": {
       "type": "object",
       "properties": {
@@ -502,6 +531,28 @@
         "enabled": {
           "type": "boolean",
           "default": false
+        }
+      }
+    },
+    "LimitReservationTtlConfig": {
+      "description": "RFC-0002 Phase 7 background TTL sweeper for stale limit reservations.\n\nWhen enabled, the LimitEngine periodically walks its reservation map and\nfull-refunds any reservation older than `ttl_secs`. This is opt-in in\nPhase 7 and enabled unconditionally in Phase 8 once the subscriber path\nis authoritative.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "tick_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
+        "ttl_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
         }
       }
     },
