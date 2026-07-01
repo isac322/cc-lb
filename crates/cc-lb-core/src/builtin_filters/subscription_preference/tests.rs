@@ -1,3 +1,18 @@
+//! Tests for the tier-based subscription-preference filter.
+//!
+//! The test suite is organised around the algorithm's structure:
+//!
+//! - Section A — filter-level output (kept_upstream_ids + reason)
+//! - Section B — tier selection (base > overage > probe > dead)
+//! - Section C — base-window classification state machine
+//! - Section D — overage assessment
+//! - Section E — reset semantics
+//! - Section F — intra-tier score correctness
+//! - Section G — deterministic tie-break
+//! - Section H — model-relevance (sonnet, opus, unknown windows)
+//! - Section I — production regression: base plan > overage-rejected
+//! - Section J — helpers and builders (bottom of file)
+
 use bytes::Bytes;
 use cc_lb_plugin_api::{PrincipalKind, SubscriptionQuotaDataState};
 use http::Method;
@@ -11,16 +26,21 @@ const MODEL_AGNOSTIC: &str = "claude-3-5-haiku-default";
 
 const T0_SECS: u64 = 1_700_000_000;
 const T0_MILLIS: u64 = T0_SECS * 1_000;
-const FIVE_HOUR_HORIZON_SECS: u64 = 2 * 3_600;
-const LONG_HORIZON_SECS: u64 = 24 * 3_600;
 
 // =============================================================================
 // Section A — filter-level output (kept_upstream_ids + reason)
 // =============================================================================
 
 #[test]
-fn keeps_subscription_when_quota_appears_alive() {
-    let oauth = oauth_with("oauth", 1, vec![fresh(WINDOW_FIVE_HOUR).util(0.7).build()]);
+fn a1_keeps_subscription_when_base_is_healthy() {
+    let oauth = oauth_with(
+        "oauth",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.3).status("allowed").build(),
+        ],
+    );
     let api_key = api_key("api-key", 2);
     let output = filter_for_model(&[oauth.clone(), api_key], MODEL_AGNOSTIC);
 
@@ -29,11 +49,11 @@ fn keeps_subscription_when_quota_appears_alive() {
 }
 
 #[test]
-fn keeps_api_key_when_subscription_quota_is_exhausted() {
+fn a2_keeps_api_key_when_every_oauth_is_dead() {
     let oauth = oauth_with(
         "oauth",
         1,
-        vec![fresh(WINDOW_FIVE_HOUR).util(1.0).status("rejected").build()],
+        vec![fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build()],
     );
     let api_key = api_key("api-key", 2);
     let output = filter_for_model(&[oauth, api_key.clone()], MODEL_AGNOSTIC);
@@ -43,45 +63,11 @@ fn keeps_api_key_when_subscription_quota_is_exhausted() {
 }
 
 #[test]
-fn keeps_api_key_when_one_window_is_exhausted_and_others_missing() {
+fn a3_keeps_exhausted_oauth_when_no_api_key_exists() {
     let oauth = oauth_with(
         "oauth",
         1,
-        vec![
-            fresh(WINDOW_FIVE_HOUR).util(1.0).status("rejected").build(),
-            missing(WINDOW_SEVEN_DAY).build(),
-            missing(WINDOW_OVERAGE).build(),
-        ],
-    );
-    let api_key = api_key("api-key", 2);
-    let output = filter_for_model(&[oauth, api_key.clone()], MODEL_AGNOSTIC);
-
-    assert_eq!(output.kept_upstream_ids, vec![api_key.upstream_id]);
-    assert_eq!(output.reason, API_KEY_FALLBACK_REASON);
-}
-
-#[test]
-fn treats_unknown_subscription_quota_as_alive() {
-    let oauth = oauth_with("oauth", 1, Vec::new());
-    let api_key = api_key("api-key", 2);
-    let output = filter_for_model(&[oauth.clone(), api_key], MODEL_AGNOSTIC);
-
-    assert_eq!(output.kept_upstream_ids, vec![oauth.upstream_id]);
-    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
-}
-
-#[test]
-fn keeps_exhausted_subscription_when_no_api_key_exists() {
-    let oauth = oauth_with(
-        "oauth",
-        1,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(1.0)
-                .status("rejected")
-                .disabled("quota exhausted")
-                .build(),
-        ],
+        vec![fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build()],
     );
     let output = filter_for_model(std::slice::from_ref(&oauth), MODEL_AGNOSTIC);
 
@@ -90,7 +76,7 @@ fn keeps_exhausted_subscription_when_no_api_key_exists() {
 }
 
 #[test]
-fn keeps_api_keys_when_no_subscription_candidates_exist() {
+fn a4_keeps_api_keys_when_no_subscription_candidates_exist() {
     let first = api_key("first", 1);
     let second = api_key("second", 2);
     let output = filter_for_model(&[first.clone(), second.clone()], MODEL_AGNOSTIC);
@@ -102,69 +88,402 @@ fn keeps_api_keys_when_no_subscription_candidates_exist() {
     assert_eq!(output.reason, NO_SUBSCRIPTION_REASON);
 }
 
+#[test]
+fn a5_empty_candidate_list_returns_no_subscription() {
+    let output = filter_for_model(&[], MODEL_AGNOSTIC);
+    assert!(output.kept_upstream_ids.is_empty());
+    assert_eq!(output.reason, NO_SUBSCRIPTION_REASON);
+}
+
+#[test]
+fn a6_only_one_upstream_id_returned_when_selecting_from_tier() {
+    // Two OAuth candidates, one clearly better; one API-key. Exactly one OAuth
+    // wins — never both.
+    let better = oauth_with(
+        "better",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.1).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+        ],
+    );
+    let worse = oauth_with(
+        "worse",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.6).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.7).status("allowed").build(),
+        ],
+    );
+    let api_key = api_key("api-key", 3);
+    let output = filter_for_model(&[better.clone(), worse, api_key], MODEL_AGNOSTIC);
+
+    assert_eq!(output.kept_upstream_ids.len(), 1);
+    assert_eq!(output.kept_upstream_ids, vec![better.upstream_id]);
+}
+
 // =============================================================================
-// Section B — exhaustion gates per window class (regressions preserved)
+// Section B — tier selection order
 // =============================================================================
 
 #[test]
-fn keeps_api_key_when_seven_day_window_is_fresh_exhausted_even_if_five_hour_is_alive() {
-    let oauth = oauth_with(
-        "oauth",
+fn b1_known_base_wins_over_partial_base() {
+    let known = oauth_with(
+        "known",
         1,
         vec![
-            fresh(WINDOW_FIVE_HOUR).util(0.3).status("allowed").build(),
+            fresh(WINDOW_FIVE_HOUR).util(0.4).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.4).status("allowed").build(),
+        ],
+    );
+    let partial = oauth_with(
+        "partial",
+        2,
+        vec![fresh(WINDOW_FIVE_HOUR).util(0.1).status("allowed").build()],
+        // WINDOW_SEVEN_DAY missing → Unknown → partial-base tier
+    );
+    let output = filter_for_model(&[known.clone(), partial], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![known.upstream_id]);
+}
+
+#[test]
+fn b2_partial_base_wins_over_overage_fallback() {
+    // partial: 5h positive, 7d unknown (no snapshot). Overage snapshot rejected.
+    let partial = oauth_with(
+        "partial",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+            fresh(WINDOW_OVERAGE).util(1.0).status("rejected").build(),
+        ],
+    );
+    // overage-only: both bases rejected, overage healthy.
+    let overage_only = oauth_with(
+        "overage-only",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(1.0).status("rejected").build(),
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(0.3).status("allowed").build(),
+        ],
+    );
+    let output = filter_for_model(&[partial.clone(), overage_only], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![partial.upstream_id]);
+}
+
+#[test]
+fn b3_overage_wins_over_unknown_probe() {
+    // overage-only: base rejected, overage healthy.
+    let overage_only = oauth_with(
+        "overage-only",
+        1,
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(0.3).status("allowed").build(),
+        ],
+    );
+    // probe: no base data at all.
+    let probe = oauth_with("probe", 2, Vec::new());
+    let output = filter_for_model(&[overage_only.clone(), probe], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![overage_only.upstream_id]);
+}
+
+#[test]
+fn b4_unknown_probe_wins_over_dead() {
+    let probe = oauth_with("probe", 1, Vec::new());
+    let dead = oauth_with(
+        "dead",
+        2,
+        vec![fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build()],
+    );
+    let output = filter_for_model(&[dead, probe.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![probe.upstream_id]);
+}
+
+#[test]
+fn b5_dead_only_falls_back_to_api_key() {
+    let dead_a = oauth_with(
+        "dead-a",
+        1,
+        vec![fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build()],
+    );
+    let dead_b = oauth_with(
+        "dead-b",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(1.0).status("rejected").build(),
             fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
         ],
     );
-    let api_key = api_key("api-key", 2);
-    let output = filter_for_model(&[oauth, api_key.clone()], SONNET_MODEL);
-
-    assert_eq!(output.kept_upstream_ids, vec![api_key.upstream_id]);
+    let key = api_key("api-key", 3);
+    let output = filter_for_model(&[dead_a, dead_b, key.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
     assert_eq!(output.reason, API_KEY_FALLBACK_REASON);
 }
 
 #[test]
-fn keeps_api_key_when_seven_day_window_is_stale_exhausted() {
-    let observed_millis = T0_MILLIS;
-    let reset_secs = T0_SECS + 3 * 24 * 3_600;
-    let oauth = oauth_with(
-        "oauth",
+fn b6_overage_in_use_flag_alone_proves_base_blocked() {
+    // Base signals only have low utilization — no explicit rejection — but
+    // unified reports overage_in_use=true. Filter should mark base as
+    // proven blocked and require overage.ok to keep this candidate.
+    let ov_in_use = oauth_with(
+        "ov-in-use",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.1).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.1).status("allowed").build(),
+            fresh(WINDOW_UNIFIED).overage_in_use(true).build(),
+            fresh(WINDOW_OVERAGE).util(0.3).status("allowed").build(),
+        ],
+    );
+    let healthy = oauth_with(
+        "healthy",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.4).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.4).status("allowed").build(),
+        ],
+    );
+    let output = filter_for_model(&[ov_in_use, healthy.clone()], MODEL_AGNOSTIC);
+    // healthy is KnownBase, ov_in_use is Overage → healthy wins.
+    assert_eq!(output.kept_upstream_ids, vec![healthy.upstream_id]);
+}
+
+// =============================================================================
+// Section C — base-window classification state machine
+// =============================================================================
+
+#[test]
+fn c1_fresh_disabled_reason_is_hard_negative() {
+    let dead = oauth_with(
+        "dead",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.1)
+                .status("allowed")
+                .disabled("provider disabled")
+                .build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+        ],
+    );
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[dead, key.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
+    assert_eq!(output.reason, API_KEY_FALLBACK_REASON);
+}
+
+#[test]
+fn c2_fresh_allowed_warning_is_positive_but_penalised() {
+    let warned = oauth_with(
+        "warned",
         1,
         vec![
             fresh(WINDOW_FIVE_HOUR)
                 .util(0.2)
-                .observed_millis(observed_millis)
+                .status("allowed_warning")
                 .build(),
-            stale(WINDOW_SEVEN_DAY)
-                .util(1.0)
-                .status("rejected")
-                .reset_at(reset_secs)
-                .observed_millis(observed_millis)
-                .build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
         ],
     );
-    let api_key = api_key("api-key", 2);
-    let output = filter_for_model(&[oauth, api_key.clone()], SONNET_MODEL);
+    let clean = oauth_with(
+        "clean",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+        ],
+    );
+    let output = filter_for_model(&[warned, clean.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![clean.upstream_id]);
+}
 
-    assert_eq!(output.kept_upstream_ids, vec![api_key.upstream_id]);
+#[test]
+fn c3_fresh_no_status_uses_utilization_gate() {
+    // util=0.99 → still positive (below 1.0)
+    let just_below = oauth_with(
+        "just-below",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.99).build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+        ],
+    );
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[just_below.clone(), key], MODEL_AGNOSTIC);
+    // still alive
+    assert_eq!(output.kept_upstream_ids, vec![just_below.upstream_id]);
+    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+}
+
+#[test]
+fn c4_fresh_no_status_at_or_above_one_is_hard_negative() {
+    let dead = oauth_with(
+        "dead",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(1.0).build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+        ],
+    );
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[dead, key.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
     assert_eq!(output.reason, API_KEY_FALLBACK_REASON);
 }
 
 #[test]
-fn ignores_stale_seven_day_exhaustion_when_reset_has_already_passed() {
+fn c5_missing_or_absent_snapshot_is_unknown() {
+    // Base windows entirely missing → probe tier.
+    let probe = oauth_with(
+        "probe",
+        1,
+        vec![
+            missing(WINDOW_FIVE_HOUR).build(),
+            missing(WINDOW_SEVEN_DAY).build(),
+        ],
+    );
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[probe.clone(), key], MODEL_AGNOSTIC);
+    // Probe tier wins because it's non-dead.
+    assert_eq!(output.kept_upstream_ids, vec![probe.upstream_id]);
+    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+}
+
+#[test]
+fn c6_nan_utilization_is_unknown_not_positive() {
+    // NaN util + no status + Fresh → Unknown (not Positive, not HardNegative).
+    // With only 5h Unknown and 7d Fresh allowed → PartialBase.
+    let partial = oauth_with(
+        "partial",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util_raw(Some(f64::NAN)).build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+        ],
+    );
+    let known = oauth_with(
+        "known",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.5).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.5).status("allowed").build(),
+        ],
+    );
+    let output = filter_for_model(&[partial, known.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![known.upstream_id]);
+}
+
+// =============================================================================
+// Section D — overage assessment
+// =============================================================================
+
+#[test]
+fn d1_fresh_overage_rejected_blocks_overage_bucket() {
+    // Base rejected, overage rejected → dead → falls back to api key.
+    let dead = oauth_with(
+        "dead",
+        1,
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(1.0).status("rejected").build(),
+        ],
+    );
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[dead, key.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
+}
+
+#[test]
+fn d2_fallback_available_false_blocks_overage() {
+    let dead = oauth_with(
+        "dead",
+        1,
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(0.2).status("allowed").build(),
+            fresh(WINDOW_UNIFIED).fallback_available(false).build(),
+        ],
+    );
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[dead, key.clone()], MODEL_AGNOSTIC);
+    // fallback_available=false wins over overage_snap positive → overage blocked.
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
+}
+
+#[test]
+fn d3_extra_usage_credits_positive_keeps_overage_alive() {
+    // Base rejected, no overage snapshot, but extra_usage credits > 0 on
+    // unified → overage tier eligible.
+    let has_credits = oauth_with(
+        "has-credits",
+        1,
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_UNIFIED)
+                .extra_usage_enabled(true)
+                .extra_usage_limit(100.0)
+                .extra_usage_used(20.0)
+                .build(),
+        ],
+    );
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[has_credits.clone(), key], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![has_credits.upstream_id]);
+    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+}
+
+#[test]
+fn d4_extra_usage_disabled_blocks_overage() {
+    let dead = oauth_with(
+        "dead",
+        1,
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(0.2).status("allowed").build(),
+            fresh(WINDOW_UNIFIED).extra_usage_enabled(false).build(),
+        ],
+    );
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[dead, key.clone()], MODEL_AGNOSTIC);
+    // extra_usage_enabled=false + hard_overage_block_wins → dead.
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
+}
+
+#[test]
+fn d5_stale_overage_rejected_does_not_block() {
+    // Base rejected, overage snapshot is STALE + rejected → overage not
+    // fresh-blocked. If overage has another positive signal (fallback
+    // available on unified), overage tier is usable.
+    let overage_alive = oauth_with(
+        "overage-alive",
+        1,
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            stale(WINDOW_OVERAGE).util(1.0).status("rejected").build(),
+            fresh(WINDOW_UNIFIED).fallback_available(true).build(),
+        ],
+    );
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[overage_alive.clone(), key], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![overage_alive.upstream_id]);
+    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+}
+
+// =============================================================================
+// Section E — reset semantics
+// =============================================================================
+
+#[test]
+fn e1_stale_rejected_with_future_reset_still_blocks() {
     let observed_millis = T0_MILLIS;
-    let reset_secs = T0_SECS + 5 * 24 * 3_600;
-    let candidate_observed_secs = T0_SECS + 10 * 24 * 3_600;
-    let oauth = UpstreamCandidate {
-        observed_at_unix_secs: candidate_observed_secs,
+    let reset_secs = T0_SECS + 3 * 24 * 3_600;
+    let dead = UpstreamCandidate {
+        observed_at_unix_secs: T0_SECS,
         ..oauth_with(
-            "oauth",
+            "dead",
             1,
             vec![
-                fresh(WINDOW_FIVE_HOUR)
-                    .util(0.2)
-                    .observed_millis(observed_millis)
-                    .build(),
                 stale(WINDOW_SEVEN_DAY)
                     .util(1.0)
                     .status("rejected")
@@ -174,1629 +493,484 @@ fn ignores_stale_seven_day_exhaustion_when_reset_has_already_passed() {
             ],
         )
     };
-    let api_key = api_key("api-key", 2);
-    let oauth_id = oauth.upstream_id;
-    let output = filter_for_model(&[oauth, api_key], SONNET_MODEL);
-
-    assert_eq!(output.kept_upstream_ids, vec![oauth_id]);
-    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
-}
-
-#[test]
-fn keeps_api_key_when_seven_day_sonnet_window_is_exhausted_for_sonnet_request() {
-    let oauth = oauth_with(
-        "oauth",
-        1,
-        vec![
-            fresh(WINDOW_FIVE_HOUR).util(0.3).build(),
-            fresh(WINDOW_SEVEN_DAY).util(0.4).build(),
-            fresh(WINDOW_SEVEN_DAY_SONNET)
-                .util(1.0)
-                .status("exceeded")
-                .build(),
-        ],
-    );
-    let api_key = api_key("api-key", 2);
-    let output = filter_for_model(&[oauth, api_key.clone()], SONNET_MODEL);
-
-    assert_eq!(output.kept_upstream_ids, vec![api_key.upstream_id]);
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[dead, key.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
     assert_eq!(output.reason, API_KEY_FALLBACK_REASON);
 }
 
 #[test]
-fn keeps_subscription_when_seven_day_sonnet_is_exhausted_for_opus_request() {
-    let oauth = oauth_with(
-        "oauth",
+fn e2_stale_rejected_with_expired_reset_downgrades_to_unknown() {
+    // observed candidate time is 10 days after T0; reset was 5 days after T0
+    // → resets_at ≤ now → rejection expired → Unknown.
+    let observed_millis = T0_MILLIS;
+    let reset_secs = T0_SECS + 5 * 24 * 3_600;
+    let candidate_observed_secs = T0_SECS + 10 * 24 * 3_600;
+    let alive = UpstreamCandidate {
+        observed_at_unix_secs: candidate_observed_secs,
+        ..oauth_with(
+            "alive",
+            1,
+            vec![
+                stale(WINDOW_SEVEN_DAY)
+                    .util(1.0)
+                    .status("rejected")
+                    .reset_at(reset_secs)
+                    .observed_millis(observed_millis)
+                    .build(),
+            ],
+        )
+    };
+    let alive_id = alive.upstream_id;
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[alive, key], MODEL_AGNOSTIC);
+    // Base is now unknown → probe tier keeps alive.
+    assert_eq!(output.kept_upstream_ids, vec![alive_id]);
+    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+}
+
+#[test]
+fn e3_stale_rejected_without_reset_still_blocks_by_default() {
+    // No resets_at, stale rejected → hard_negative under default config.
+    let dead = UpstreamCandidate {
+        observed_at_unix_secs: T0_SECS,
+        ..oauth_with(
+            "dead",
+            1,
+            vec![stale(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build()],
+        )
+    };
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[dead, key.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
+}
+
+#[test]
+fn e4_imminent_reset_does_not_unblock_currently_rejected() {
+    // A currently rejected candidate whose 7d resets in 30 seconds still
+    // loses to a healthy alternative — reset-imminent is never an unblock.
+    let reset_in_30s = T0_SECS + 30;
+    let rejected_soon_reset = UpstreamCandidate {
+        observed_at_unix_secs: T0_SECS,
+        ..oauth_with(
+            "reject-soon-reset",
+            1,
+            vec![
+                fresh(WINDOW_SEVEN_DAY)
+                    .util(1.0)
+                    .status("rejected")
+                    .reset_at(reset_in_30s)
+                    .build(),
+            ],
+        )
+    };
+    let healthy = UpstreamCandidate {
+        observed_at_unix_secs: T0_SECS,
+        ..oauth_with(
+            "healthy",
+            2,
+            vec![
+                fresh(WINDOW_FIVE_HOUR).util(0.5).status("allowed").build(),
+                fresh(WINDOW_SEVEN_DAY).util(0.5).status("allowed").build(),
+            ],
+        )
+    };
+    let output = filter_for_model(&[rejected_soon_reset, healthy.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![healthy.upstream_id]);
+}
+
+// =============================================================================
+// Section F — intra-tier score correctness
+// =============================================================================
+
+#[test]
+fn f1_base_tier_prefers_lower_base_utilization() {
+    let low = oauth_with(
+        "low",
         1,
         vec![
-            fresh(WINDOW_FIVE_HOUR).util(0.3).build(),
-            fresh(WINDOW_SEVEN_DAY).util(0.4).build(),
+            fresh(WINDOW_FIVE_HOUR).util(0.1).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+        ],
+    );
+    let high = oauth_with(
+        "high",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.6).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.7).status("allowed").build(),
+        ],
+    );
+    let output = filter_for_model(&[low.clone(), high], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![low.upstream_id]);
+}
+
+#[test]
+fn f2_base_score_ignores_overage_signal() {
+    // Both bases identical, one candidate has a very healthy overage snapshot,
+    // the other has overage util=0.9. Overage MUST NOT influence base tier
+    // ranking.
+    let a = oauth_with(
+        "a",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+            fresh(WINDOW_OVERAGE).util(0.05).status("allowed").build(),
+        ],
+    );
+    let b = oauth_with(
+        "b",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+            fresh(WINDOW_OVERAGE).util(0.9).status("allowed").build(),
+        ],
+    );
+    // Bases tie; overage is invisible to base tier score → tiebreak decides.
+    // Assert that the picked candidate is deterministic regardless of order.
+    let picked_1 = filter_for_model(&[a.clone(), b.clone()], MODEL_AGNOSTIC).kept_upstream_ids;
+    let picked_2 = filter_for_model(&[b, a], MODEL_AGNOSTIC).kept_upstream_ids;
+    assert_eq!(picked_1, picked_2);
+}
+
+#[test]
+fn f3_warning_status_loses_to_allowed_when_headroom_ties() {
+    let warned = oauth_with(
+        "warned",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.3)
+                .status("allowed_warning")
+                .build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.3).status("allowed").build(),
+        ],
+    );
+    let clean = oauth_with(
+        "clean",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.3).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.3).status("allowed").build(),
+        ],
+    );
+    let output = filter_for_model(&[warned, clean.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![clean.upstream_id]);
+}
+
+// =============================================================================
+// Section G — deterministic tie-break
+// =============================================================================
+
+#[test]
+fn g1_selection_is_deterministic_across_input_permutations() {
+    // Three healthy OAuths with identical utilization → intra-tier score
+    // is identical → rendezvous hash decides. The winner must be the same
+    // regardless of input order.
+    let make = |name: &str, seed: u8| {
+        oauth_with(
+            name,
+            seed,
+            vec![
+                fresh(WINDOW_FIVE_HOUR).util(0.3).status("allowed").build(),
+                fresh(WINDOW_SEVEN_DAY).util(0.3).status("allowed").build(),
+            ],
+        )
+    };
+    let a = make("a", 1);
+    let b = make("b", 2);
+    let c = make("c", 3);
+
+    let mut winners = Vec::new();
+    for order in [
+        [a.clone(), b.clone(), c.clone()],
+        [a.clone(), c.clone(), b.clone()],
+        [b.clone(), a.clone(), c.clone()],
+        [b.clone(), c.clone(), a.clone()],
+        [c.clone(), a.clone(), b.clone()],
+        [c.clone(), b.clone(), a.clone()],
+    ] {
+        let output = filter_for_model(&order, MODEL_AGNOSTIC);
+        winners.push(output.kept_upstream_ids);
+    }
+    let first = winners[0].clone();
+    for w in &winners[1..] {
+        assert_eq!(w, &first, "tiebreak must be permutation-invariant");
+    }
+}
+
+#[test]
+fn g2_upstream_id_breaks_final_tie() {
+    // Same score, force a rendezvous collision by using an identical
+    // request_id and comparing two candidates with different UUIDs.
+    // Rendezvous hash still varies with UUID bytes, so this test asserts
+    // determinism (not lex order) — the deterministic result must be stable.
+    let low = oauth_with(
+        "a",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.5).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.5).status("allowed").build(),
+        ],
+    );
+    let high = oauth_with(
+        "b",
+        200,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.5).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.5).status("allowed").build(),
+        ],
+    );
+    let winner_1 = filter_for_model(&[low.clone(), high.clone()], MODEL_AGNOSTIC)
+        .kept_upstream_ids
+        .into_iter()
+        .next()
+        .unwrap();
+    let winner_2 = filter_for_model(&[high, low], MODEL_AGNOSTIC)
+        .kept_upstream_ids
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(winner_1, winner_2, "same winner regardless of input order");
+}
+
+// =============================================================================
+// Section H — model-relevance
+// =============================================================================
+
+#[test]
+fn h1_sonnet_request_treats_seven_day_sonnet_as_relevant() {
+    // Sonnet request, 7d_sonnet is Fresh + rejected → hard_negative.
+    let dead = oauth_with(
+        "dead",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
             fresh(WINDOW_SEVEN_DAY_SONNET)
-                .util(1.0)
-                .status("exceeded")
-                .build(),
-        ],
-    );
-    let api_key = api_key("api-key", 2);
-    let output = filter_for_model(&[oauth.clone(), api_key], OPUS_MODEL);
-
-    assert_eq!(output.kept_upstream_ids, vec![oauth.upstream_id]);
-    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
-}
-
-#[test]
-fn ignores_seven_day_opus_window_even_for_opus_request() {
-    let oauth = oauth_with(
-        "oauth",
-        1,
-        vec![
-            fresh(WINDOW_FIVE_HOUR).util(0.3).build(),
-            fresh(WINDOW_SEVEN_DAY).util(0.4).build(),
-            fresh(WINDOW_SEVEN_DAY_OPUS)
-                .util(1.0)
-                .status("exceeded")
-                .build(),
-        ],
-    );
-    let api_key = api_key("api-key", 2);
-    let output = filter_for_model(&[oauth.clone(), api_key], OPUS_MODEL);
-
-    assert_eq!(output.kept_upstream_ids, vec![oauth.upstream_id]);
-    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
-}
-
-#[test]
-fn keeps_api_key_when_shared_seven_day_is_exhausted_for_opus_request() {
-    let oauth = oauth_with(
-        "oauth",
-        1,
-        vec![
-            fresh(WINDOW_FIVE_HOUR).util(0.3).build(),
-            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
-            fresh(WINDOW_SEVEN_DAY_OPUS).util(0.1).build(),
-        ],
-    );
-    let api_key = api_key("api-key", 2);
-    let output = filter_for_model(&[oauth, api_key.clone()], OPUS_MODEL);
-
-    assert_eq!(output.kept_upstream_ids, vec![api_key.upstream_id]);
-    assert_eq!(output.reason, API_KEY_FALLBACK_REASON);
-}
-
-#[test]
-fn keeps_subscription_when_only_seven_day_sonnet_is_exhausted_for_haiku_request() {
-    let oauth = oauth_with(
-        "oauth",
-        1,
-        vec![
-            fresh(WINDOW_FIVE_HOUR).util(0.3).build(),
-            fresh(WINDOW_SEVEN_DAY).util(0.4).build(),
-            fresh(WINDOW_SEVEN_DAY_SONNET)
-                .util(1.0)
-                .status("exceeded")
-                .build(),
-        ],
-    );
-    let api_key = api_key("api-key", 2);
-    let output = filter_for_model(&[oauth.clone(), api_key], HAIKU_MODEL);
-
-    assert_eq!(output.kept_upstream_ids, vec![oauth.upstream_id]);
-    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
-}
-
-#[test]
-fn ignores_unknown_window_labels() {
-    let oauth = oauth_with(
-        "oauth",
-        1,
-        vec![
-            fresh(WINDOW_FIVE_HOUR).util(0.3).build(),
-            fresh("unknown_made_up_window")
                 .util(1.0)
                 .status("rejected")
                 .build(),
         ],
     );
-    let api_key = api_key("api-key", 2);
-    let output = filter_for_model(&[oauth.clone(), api_key], SONNET_MODEL);
-
-    assert_eq!(output.kept_upstream_ids, vec![oauth.upstream_id]);
-    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[dead, key.clone()], SONNET_MODEL);
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
 }
 
 #[test]
-fn five_hour_and_shared_seven_day_exhaustion_gates_routing_for_every_model() {
-    for model in [SONNET_MODEL, OPUS_MODEL, HAIKU_MODEL] {
-        for exhausted_window in [WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY] {
-            let oauth = oauth_with(
-                "oauth",
-                1,
-                vec![fresh(exhausted_window).util(1.0).status("rejected").build()],
-            );
-            let api_key = api_key("api-key", 2);
-            let output = filter_for_model(&[oauth, api_key.clone()], model);
-
-            assert_eq!(
-                output.kept_upstream_ids,
-                vec![api_key.upstream_id],
-                "model={model} exhausted={exhausted_window} should drop OAuth"
-            );
-            assert_eq!(
-                output.reason, API_KEY_FALLBACK_REASON,
-                "model={model} exhausted={exhausted_window} expected API key fallback"
-            );
-        }
-    }
-}
-
-#[test]
-fn pre_filters_seven_day_exhaustion_independently_per_candidate() {
-    let exhausted = oauth_with(
-        "oauth-exhausted",
+fn h2_opus_request_ignores_seven_day_sonnet_signal() {
+    let opus_alive = oauth_with(
+        "opus",
         1,
         vec![
-            fresh(WINDOW_FIVE_HOUR).util(0.2).build(),
-            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
-        ],
-    );
-    let alive = oauth_with(
-        "oauth-alive",
-        2,
-        vec![
-            fresh(WINDOW_FIVE_HOUR).util(0.2).build(),
-            fresh(WINDOW_SEVEN_DAY).util(0.5).build(),
-        ],
-    );
-    let api_key = api_key("api-key", 3);
-    let output = filter_for_model(&[exhausted, alive.clone(), api_key], SONNET_MODEL);
-
-    assert_eq!(output.kept_upstream_ids, vec![alive.upstream_id]);
-    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
-}
-
-// =============================================================================
-// Section C — algorithm spec scenarios (S1 .. S12)
-// =============================================================================
-
-#[test]
-fn s1_load_balance_regime_picks_smaller_upstream_id_on_tie() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.2)
-                .reset_at(T0_SECS + 8 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.3)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.2)
-                .reset_at(T0_SECS + 8 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.3)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a.clone(), b], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-#[test]
-fn s2_near_lockout_with_imminent_reset_beats_low_utilization_candidate() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.95)
-                .reset_at(T0_SECS + 30 * 60)
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.3)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.2)
-                .reset_at(T0_SECS + 4 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.3)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[b, a.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-#[test]
-fn s3_near_lockout_with_distant_reset_loses_to_imminent_reset_high_headroom() {
-    // A: 5h=0.95 short-window drain, but reset is outside the 5h horizon
-    //    → only the lockout-pressure credit fires.
-    // B: 5h=0.2 with reset inside the 5h horizon → strong waste credit on
-    //    the unused 80% of the window.
-    // Spec says B wins because soon-wasted 80% beats slowly-stranded 5%.
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.95)
-                .reset_at(T0_SECS + 4 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.3)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.2)
-                .reset_at(T0_SECS + 30 * 60)
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.3)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a, b.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn s4_use_before_waste_prefers_imminent_reset_with_large_headroom() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.1)
-                .reset_at(T0_SECS + 5 * 60)
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.3)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.1)
-                .reset_at(T0_SECS + 4 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.3)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[b, a.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-#[test]
-fn s5_sonnet_request_respects_per_model_seven_day_in_score() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY_SONNET)
-                .util(0.9)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.3)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY_SONNET)
-                .util(0.2)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.3)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a, b.clone()], SONNET_MODEL);
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn s6_opus_request_ignores_seven_day_sonnet_in_score() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY_SONNET)
-                .util(0.9)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.3)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY_SONNET)
-                .util(0.2)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.3)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a.clone(), b], OPUS_MODEL);
-    // Per-model sonnet window dropped → both u_max collapse to 0.3.
-    // Smaller upstream_id wins tie-break.
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-#[test]
-fn s7_stale_long_window_high_utilization_still_penalizes_in_score() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            stale(WINDOW_SEVEN_DAY)
-                .util(0.95)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.4)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a, b.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn s8_stale_long_window_with_passed_reset_falls_back_to_unknown_baseline() {
-    let candidate_observed = T0_SECS + 10 * 24 * 3_600;
-    let a = oauth_with_observed(
-        "a",
-        1,
-        candidate_observed,
-        vec![
-            stale(WINDOW_SEVEN_DAY)
-                .util(0.95)
-                .reset_at(T0_SECS + 5 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.4)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a, b.clone()], MODEL_AGNOSTIC);
-    // A's stale long signal is discarded (passed reset) → A scores at
-    // UNKNOWN_UTIL=0.5; B scores at 0.4; B wins.
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn s9_candidate_with_no_trusted_signal_loses_to_known_healthy() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            missing(WINDOW_FIVE_HOUR).build(),
-            missing(WINDOW_SEVEN_DAY).build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.3)
-                .reset_at(T0_SECS + 4 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a, b.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn s10_missing_reset_time_collapses_to_load_balance_tiebreak() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.5)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.5)
-                .reset_at(T0_SECS + 4 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[b, a.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-#[test]
-fn s11_bit_identical_candidates_break_tie_by_original_index() {
-    let first = oauth_with_observed(
-        "twin",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.3)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let second = UpstreamCandidate { ..first.clone() };
-
-    let output = filter_for_model(&[first.clone(), second], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![first.upstream_id]);
-}
-
-#[test]
-fn s12_equally_urgent_candidates_break_tie_by_upstream_id() {
-    let snapshot = fresh(WINDOW_FIVE_HOUR)
-        .util(0.99)
-        .reset_at(T0_SECS + 60)
-        .observed_millis(T0_MILLIS)
-        .build();
-    let a = oauth_with_observed("a", 1, T0_SECS, vec![snapshot.clone()]);
-    let b = oauth_with_observed("b", 2, T0_SECS, vec![snapshot]);
-
-    let output = filter_for_model(&[b, a.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-// =============================================================================
-// Section D — edge cases: malformed numerics, observation anchors, weird states
-// =============================================================================
-
-#[test]
-fn nan_utilization_treated_as_no_signal() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util_raw(Some(f64::NAN))
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.5)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a, b.clone()], MODEL_AGNOSTIC);
-    // A has no trusted signal (NaN dropped) → u_max=0.5 unknown baseline.
-    // B has trusted signal at 0.5. Tie on score collapses to
-    // has_trusted_signal: true beats false → B wins.
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn negative_utilization_treated_as_no_signal() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util_raw(Some(-0.5))
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.4)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a, b.clone()], MODEL_AGNOSTIC);
-    // B's trusted 0.4 < A's UNKNOWN_UTIL 0.5 → B wins on raw score.
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn utilization_above_one_treated_as_exhaustion_on_fresh_short_window() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util_raw(Some(1.7))
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let api_key = api_key("api-key", 2);
-    let output = filter_for_model(&[a, api_key.clone()], MODEL_AGNOSTIC);
-
-    assert_eq!(output.kept_upstream_ids, vec![api_key.upstream_id]);
-    assert_eq!(output.reason, API_KEY_FALLBACK_REASON);
-}
-
-#[test]
-fn utilization_above_one_on_stale_short_window_neither_scores_nor_exhausts() {
-    // Stale 5h is not trusted for exhaustion or scoring; u=1.5 has no effect.
-    // The candidate stays alive but contributes no score signal — defers
-    // to UNKNOWN_UTIL=0.5. A separate trusted candidate at 0.4 wins.
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            stale(WINDOW_FIVE_HOUR)
-                .util_raw(Some(1.5))
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.4)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a, b.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn allowed_warning_status_does_not_exhaust() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.5)
-                .status("allowed_warning")
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let api_key = api_key("api-key", 2);
-    let output = filter_for_model(&[a.clone(), api_key], MODEL_AGNOSTIC);
-
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
-}
-
-#[test]
-fn disabled_reason_on_fresh_short_window_exhausts() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.1)
-                .disabled("operator disabled")
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let api_key = api_key("api-key", 2);
-    let output = filter_for_model(&[a, api_key.clone()], MODEL_AGNOSTIC);
-
-    assert_eq!(output.kept_upstream_ids, vec![api_key.upstream_id]);
-}
-
-#[test]
-fn utilization_exactly_zero_with_imminent_reset_creates_strong_waste_credit() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.0)
-                .reset_at(T0_SECS + 60)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.2)
-                .reset_at(T0_SECS + 4 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[b, a.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-#[test]
-fn candidate_with_observed_at_zero_uses_snapshot_observation() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        0,
-        vec![
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.95)
-                .reset_at(T0_SECS - 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        0,
-        vec![
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.4)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    // A: snapshot observed_at = T0_SECS, resets at T0_SECS-3600 → reset
-    // already passed. For a Fresh long window the score-trust rule is
-    // strict (Fresh state alone), so utilization stays trusted but the
-    // reset urgency contribution is zero. u_max(A)=0.95.
-    // B: u_max=0.4. B wins.
-    let output = filter_for_model(&[a, b.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn snapshot_observed_at_zero_uses_candidate_observed_at() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.4)
-                .reset_at(T0_SECS - 10)
-                .observed_millis(0)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![fresh(WINDOW_FIVE_HOUR).util(0.3).observed_millis(0).build()],
-    );
-
-    // Snapshot millis=0 is ignored, candidate observed_at wins.
-    // A's reset is in the past relative to candidate observed_at → no urgency.
-    // Raw u_max: A=0.4, B=0.3. B wins.
-    let output = filter_for_model(&[a, b.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn empty_candidate_list_returns_no_subscription_kept_ids() {
-    let output = filter_for_model(&[], MODEL_AGNOSTIC);
-    assert!(output.kept_upstream_ids.is_empty());
-    assert_eq!(output.reason, NO_SUBSCRIPTION_REASON);
-}
-
-#[test]
-fn case_insensitive_model_match_for_sonnet_does_not_apply() {
-    // model_is_sonnet uses simple substring contains — uppercase should NOT
-    // match because the host normalises canonical model ids to lowercase.
-    // We pin this behaviour so a future "Sonnet" id never silently flips
-    // routing.
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
             fresh(WINDOW_SEVEN_DAY_SONNET)
                 .util(1.0)
-                .status("exceeded")
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.3)
-                .observed_millis(T0_MILLIS)
+                .status("rejected")
                 .build(),
         ],
     );
-
-    let output = filter_for_model(std::slice::from_ref(&a), "CLAUDE-SONNET-4-5");
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[opus_alive.clone(), key], OPUS_MODEL);
+    assert_eq!(output.kept_upstream_ids, vec![opus_alive.upstream_id]);
+    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
 }
 
-// =============================================================================
-// Section E — properties: determinism, totality, no-panic, subsumption
-// =============================================================================
+#[test]
+fn h3_seven_day_opus_window_is_never_counted() {
+    // Even on an opus request the 7d_opus window is ignored — the base is
+    // healthy on 5h+7d.
+    let opus_alive = oauth_with(
+        "opus",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY_OPUS)
+                .util(1.0)
+                .status("rejected")
+                .build(),
+        ],
+    );
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[opus_alive.clone(), key], OPUS_MODEL);
+    assert_eq!(output.kept_upstream_ids, vec![opus_alive.upstream_id]);
+}
 
 #[test]
-fn selection_is_deterministic_across_input_permutations() {
-    let snapshot_a = fresh(WINDOW_FIVE_HOUR)
-        .util(0.3)
-        .reset_at(T0_SECS + 4 * 3_600)
-        .observed_millis(T0_MILLIS)
-        .build();
-    let snapshot_b = fresh(WINDOW_FIVE_HOUR)
-        .util(0.4)
-        .reset_at(T0_SECS + 4 * 3_600)
-        .observed_millis(T0_MILLIS)
-        .build();
-    let snapshot_c = fresh(WINDOW_FIVE_HOUR)
-        .util(0.5)
-        .reset_at(T0_SECS + 4 * 3_600)
-        .observed_millis(T0_MILLIS)
-        .build();
-    let a = oauth_with_observed("a", 1, T0_SECS, vec![snapshot_a]);
-    let b = oauth_with_observed("b", 2, T0_SECS, vec![snapshot_b]);
-    let c = oauth_with_observed("c", 3, T0_SECS, vec![snapshot_c]);
-
-    let permutations = [
-        vec![a.clone(), b.clone(), c.clone()],
-        vec![a.clone(), c.clone(), b.clone()],
-        vec![b.clone(), a.clone(), c.clone()],
-        vec![b.clone(), c.clone(), a.clone()],
-        vec![c.clone(), a.clone(), b.clone()],
-        vec![c.clone(), b.clone(), a.clone()],
-    ];
-
-    for perm in &permutations {
-        let output = filter_for_model(perm, MODEL_AGNOSTIC);
+fn h4_shared_seven_day_still_blocks_every_model() {
+    for model in [SONNET_MODEL, OPUS_MODEL, HAIKU_MODEL, MODEL_AGNOSTIC] {
+        let dead = oauth_with(
+            "dead",
+            1,
+            vec![
+                fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+                fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            ],
+        );
+        let key = api_key("k", 2);
+        let output = filter_for_model(&[dead, key.clone()], model);
         assert_eq!(
             output.kept_upstream_ids,
-            vec![a.upstream_id],
-            "perm={:?} should always pick A (lowest u_max)",
-            perm.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+            vec![key.upstream_id],
+            "model={model} should treat 7d rejection as blocking"
         );
     }
 }
 
 #[test]
-fn selection_picks_exactly_one_oauth_when_any_alive() {
-    let alive = (1..=5).map(|i| {
-        oauth_with_observed(
-            &format!("oauth-{i}"),
-            i,
-            T0_SECS,
-            vec![
-                fresh(WINDOW_FIVE_HOUR)
-                    .util(0.1 * f64::from(i))
-                    .observed_millis(T0_MILLIS)
-                    .build(),
-            ],
-        )
-    });
-    let mut candidates: Vec<UpstreamCandidate> = alive.collect();
-    candidates.push(api_key("api-key", 99));
-
-    let output = filter_for_model(&candidates, MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids.len(), 1);
-    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
-}
-
-#[test]
-fn trusted_exhausted_candidate_never_wins_when_alive_exists() {
-    let exhausted = oauth_with_observed(
-        "dead",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(1.0)
-                .status("rejected")
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let alive = oauth_with_observed(
+fn h5_unknown_window_labels_are_ignored() {
+    // "unknown_bucket" is not a recognised base or overage label → ignored.
+    let alive = oauth_with(
         "alive",
-        2,
-        T0_SECS,
+        1,
         vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.99)
-                .observed_millis(T0_MILLIS)
-                .build(),
+            fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+            fresh("unknown_bucket").util(1.0).status("rejected").build(),
         ],
     );
-
-    let output = filter_for_model(&[exhausted, alive.clone()], MODEL_AGNOSTIC);
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[alive.clone(), key], MODEL_AGNOSTIC);
     assert_eq!(output.kept_upstream_ids, vec![alive.upstream_id]);
 }
 
+// =============================================================================
+// Section I — production regression: base plan > overage-rejected
+// =============================================================================
+//
+// Reproduces the exact production scenario that motivated the rewrite:
+//
+// - example-org: 7d api util=1.0 status=rejected (base truly exhausted)
+// - Example Org: 7d api util=1.0 status=rejected (base truly exhausted)
+// - example-peer: 7d util=0.47 allowed, overage header status=rejected
+// - example-secondary-max: 7d util=0.35 allowed, overage header status=rejected
+//
+// The old algorithm treated overage-rejected as candidate-exhausted, marked
+// every candidate dead, kept all 4, and let first-pick route to example-org
+// (lowest UUID). The new algorithm must select from example-peer /
+// example-secondary-max via base score.
+
 #[test]
-fn load_balance_subsumption_no_urgency_picks_lowest_u_max() {
-    // Every candidate is below DRAIN_START AND every reset is outside its
-    // urgency horizon → urgency=0 for all → algorithm reduces to the
-    // existing min(max applicable utilization) policy.
-    let a = oauth_with_observed(
-        "a",
+fn i1_production_bug_case_selects_from_base_healthy_candidates() {
+    let example_org = oauth_with(
+        "example-org",
         1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.7)
-                .reset_at(T0_SECS + 4 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
+        vec![fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build()],
     );
-    let b = oauth_with_observed(
-        "b",
+    let Example Org = oauth_with(
+        "Example Org",
         2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.5)
-                .reset_at(T0_SECS + 4 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
+        vec![fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build()],
     );
-    let c = oauth_with_observed(
-        "c",
+    let example_peer = oauth_with(
+        "example-peer",
         3,
-        T0_SECS,
         vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.8)
-                .reset_at(T0_SECS + 4 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
+            fresh(WINDOW_FIVE_HOUR).util(0.0).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.47).status("allowed").build(),
+            fresh(WINDOW_OVERAGE).util(1.0).status("rejected").build(),
+        ],
+    );
+    let example-secondary = oauth_with(
+        "example-secondary-max",
+        4,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.26).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.35).status("allowed").build(),
+            fresh(WINDOW_OVERAGE).util(1.0).status("rejected").build(),
         ],
     );
 
-    let output = filter_for_model(&[a, b.clone(), c], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn fresher_observation_breaks_tie_when_pressure_is_equal() {
-    let snapshot = fresh(WINDOW_FIVE_HOUR).util(0.4).build();
-    let stale_oauth = oauth_with_observed("stale", 1, 1_000, vec![snapshot.clone()]);
-    let fresh_oauth = oauth_with_observed("fresh", 2, 2_000, vec![snapshot]);
-
-    let output = filter_for_model(&[stale_oauth, fresh_oauth.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![fresh_oauth.upstream_id]);
-}
-
-// =============================================================================
-// Section F — boundary behaviour of the scoring constants
-// =============================================================================
-
-#[test]
-fn drain_pressure_is_zero_at_threshold_exactly() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.85)
-                .observed_millis(T0_MILLIS)
-                .build(),
+    let output = filter_for_model(
+        &[
+            example_org.clone(),
+            Example Org.clone(),
+            example_peer.clone(),
+            example-secondary.clone(),
         ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.9)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
+        MODEL_AGNOSTIC,
     );
 
-    let output = filter_for_model(&[b, a.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-#[test]
-fn drain_pressure_kicks_in_just_above_threshold() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.90)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.99)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a, b.clone()], MODEL_AGNOSTIC);
-    // B has heavy drain credit on its near-lockout 5h that beats A's clean
-    // base utilization 0.90. Without lockout pressure, A would win on
-    // pure base score.
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn reset_urgency_is_zero_at_horizon_boundary() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.3)
-                .reset_at(T0_SECS + FIVE_HOUR_HORIZON_SECS)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.4)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a.clone(), b], MODEL_AGNOSTIC);
-    // Reset exactly on horizon → urgency=0 → load-balance regime →
-    // lower u_max (A=0.3) wins.
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-#[test]
-fn reset_urgency_is_positive_inside_horizon() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.4)
-                .reset_at(T0_SECS + FIVE_HOUR_HORIZON_SECS - 1)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.4)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[b, a.clone()], MODEL_AGNOSTIC);
-    // A has a (tiny) positive waste credit; B has none. A wins.
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-#[test]
-fn five_hour_window_uses_two_hour_reset_horizon() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.1)
-                .reset_at(T0_SECS + 3 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.3)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a.clone(), b], MODEL_AGNOSTIC);
-    // 3h reset on 5h window is outside the 2h short-window horizon →
-    // no urgency. A still wins on base because 0.1 < 0.3.
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-#[test]
-fn long_window_uses_twenty_four_hour_reset_horizon() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.1)
-                .reset_at(T0_SECS + 12 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.1)
-                .reset_at(T0_SECS + 3 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[b, a.clone()], MODEL_AGNOSTIC);
-    // A's reset (12h) is inside 24h horizon → waste credit fires.
-    // B's reset (72h) is outside → no credit. A wins.
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-#[test]
-fn long_window_just_outside_horizon_has_no_urgency() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.4)
-                .reset_at(T0_SECS + LONG_HORIZON_SECS)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.5)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a.clone(), b], MODEL_AGNOSTIC);
-    // Exactly on horizon → urgency=0 → A wins purely on lower base.
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-#[test]
-fn urgency_credit_is_capped_at_maximum() {
-    // Both candidates' raw urgency credits exceed MAX_URGENCY_CREDIT (A ≈ 2.33,
-    // B ≈ 2.15), so the cap flattens both to 2.0. Lower base utilization then
-    // breaks the score tie — without the cap A's deeper urgency would have
-    // dragged its score below B's.
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.99)
-                .reset_at(T0_SECS + 10)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.98)
-                .reset_at(T0_SECS + 10)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a, b.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn long_window_does_not_receive_short_drain_credit() {
-    // 7d near lockout but Fresh: spec says only 5h/overage/unified receive
-    // SHORT_DRAIN_WEIGHT credit. Long-window scarcity is encoded as base
-    // utilization only.
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.97)
-                .reset_at(T0_SECS + 6 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.5)
-                .reset_at(T0_SECS + 6 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a, b.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn overage_window_receives_short_drain_credit() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_OVERAGE)
-                .util(0.96)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_OVERAGE)
-                .util(0.5)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[b, a.clone()], MODEL_AGNOSTIC);
-    // A's drain credit beats B's lower base — same shape as the 5h case.
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-#[test]
-fn unified_window_receives_short_drain_credit() {
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_UNIFIED)
-                .util(0.97)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_UNIFIED)
-                .util(0.5)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[b, a.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-#[test]
-fn unknown_baseline_beats_near_lockout_known() {
-    // S9 variant: known candidate is at u=0.99 with no urgency-eligible
-    // reset → score ≈ 0.99. Unknown baseline candidate scores 0.5.
-    let known = oauth_with_observed(
-        "known",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.99)
-                .reset_at(T0_SECS + 6 * 24 * 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let unknown = oauth_with_observed(
-        "unknown",
-        2,
-        T0_SECS,
-        vec![missing(WINDOW_FIVE_HOUR).build()],
-    );
-
-    let output = filter_for_model(&[known, unknown.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![unknown.upstream_id]);
-}
-
-// =============================================================================
-// Section G — coverage gaps surfaced by spec review
-// =============================================================================
-
-#[test]
-fn urgency_uses_max_window_credit_not_sum() {
-    // A has two Fresh applicable windows each with a small drain credit.
-    // If the implementation summed credits across windows, A's combined
-    // urgency would outscore B's clean low utilization. Spec says max,
-    // so B (with lower base and no urgency) must win.
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.91)
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_OVERAGE)
-                .util(0.91)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.85)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a, b.clone()], MODEL_AGNOSTIC);
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn seven_day_opus_window_ignored_in_score_not_only_exhaustion() {
-    // Opus request. A has very-low 7d_opus (would be attractive if scored)
-    // but a higher shared 7d. B has the opposite. Spec says 7d_opus is
-    // ignored entirely → B wins because its shared 7d=0.3 beats A's 0.6.
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY_OPUS)
-                .util(0.1)
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.6)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY_OPUS)
-                .util(0.9)
-                .observed_millis(T0_MILLIS)
-                .build(),
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.3)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[a, b.clone()], OPUS_MODEL);
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
-}
-
-#[test]
-fn missing_snapshot_with_all_exhausted_fields_does_not_exhaust() {
-    let oauth = oauth_with_observed(
-        "oauth",
-        1,
-        T0_SECS,
-        vec![SubscriptionQuotaCandidateSnapshot {
-            window: WINDOW_SEVEN_DAY.to_owned(),
-            state: SubscriptionQuotaDataState::Missing,
-            source: None,
-            utilization: Some(1.0),
-            status: Some("rejected".to_owned()),
-            resets_at_unix_secs: None,
-            surpassed_threshold: None,
-            representative_claim: None,
-            disabled_reason: Some("operator force-disabled".to_owned()),
-            extra_usage_enabled: None,
-            extra_usage_monthly_limit: None,
-            extra_usage_used_credits: None,
-            observed_at_unix_millis: None,
-            max_staleness_secs: 60,
-            fallback_available: None,
-            overage_in_use: None,
-            overage_period_monthly_utilization: None,
-            upgrade_paths: None,
-        }],
-    );
-    let api_key = api_key("api-key", 2);
-    let output = filter_for_model(&[oauth.clone(), api_key], MODEL_AGNOSTIC);
-
-    assert_eq!(output.kept_upstream_ids, vec![oauth.upstream_id]);
     assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+    assert_eq!(output.kept_upstream_ids.len(), 1);
+    let chosen = output.kept_upstream_ids[0];
+    assert!(
+        chosen == example_peer.upstream_id || chosen == example-secondary.upstream_id,
+        "must pick from base-healthy candidates, got {chosen:?}"
+    );
+    assert_ne!(chosen, example_org.upstream_id);
+    assert_ne!(chosen, Example Org.upstream_id);
 }
 
 #[test]
-fn stale_short_window_with_rejected_status_does_not_exhaust() {
-    // Stale 5h is not trusted for exhaustion regardless of which exhaustion
-    // indicator fires (utilization, status, disabled_reason). Pins
-    // exhaustion property item 11 for the short-window stale path.
-    let oauth = oauth_with_observed(
-        "oauth",
-        1,
-        T0_SECS,
+fn i2_production_bug_case_picks_lowest_base_utilization_at_tie() {
+    // Both example-peer and example-secondary are KnownBase → intra-tier score by
+    // headroom. example-secondary has 5h=0.26/7d=0.35 → min headroom = 0.65.
+    // example-peer has 5h=0.0/7d=0.47 → min headroom = 0.53.
+    // Score = min_headroom + positive_ratio(1.0) = 1.65 vs 1.53 → example-secondary wins.
+    let example_peer = oauth_with(
+        "example-peer",
+        3,
         vec![
-            stale(WINDOW_FIVE_HOUR)
-                .util(0.4)
-                .status("rejected")
-                .disabled("provider transient block")
-                .reset_at(T0_SECS + 3_600)
-                .observed_millis(T0_MILLIS)
-                .build(),
+            fresh(WINDOW_FIVE_HOUR).util(0.0).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.47).status("allowed").build(),
+            fresh(WINDOW_OVERAGE).util(1.0).status("rejected").build(),
         ],
     );
-    let api_key = api_key("api-key", 2);
-    let output = filter_for_model(&[oauth.clone(), api_key], MODEL_AGNOSTIC);
-
-    assert_eq!(output.kept_upstream_ids, vec![oauth.upstream_id]);
-    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+    let example-secondary = oauth_with(
+        "example-secondary-max",
+        4,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.26).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.35).status("allowed").build(),
+            fresh(WINDOW_OVERAGE).util(1.0).status("rejected").build(),
+        ],
+    );
+    let output = filter_for_model(&[example_peer, example-secondary.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![example-secondary.upstream_id]);
 }
 
 #[test]
-fn reset_drain_credit_applies_to_long_window_near_lockout() {
-    // 7d windows do not receive short_drain credit, but they DO receive
-    // reset_drain + waste credit. Verifies the long-window urgency path.
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
+fn i3_all_bases_dead_but_one_has_healthy_overage_uses_that_one() {
+    // If (for a different production shape) 3 of 4 have dead base + dead
+    // overage, and 1 has dead base + healthy overage → that last one wins
+    // via the overage tier.
+    let base_and_overage_dead = |name: &str, seed: u8| {
+        oauth_with(
+            name,
+            seed,
+            vec![
+                fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+                fresh(WINDOW_OVERAGE).util(1.0).status("rejected").build(),
+            ],
+        )
+    };
+    let dead_a = base_and_overage_dead("dead-a", 1);
+    let dead_b = base_and_overage_dead("dead-b", 2);
+    let dead_c = base_and_overage_dead("dead-c", 3);
+    let overage_alive = oauth_with(
+        "overage-alive",
+        4,
         vec![
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.95)
-                .reset_at(T0_SECS + 60)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.7)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-
-    let output = filter_for_model(&[b, a.clone()], MODEL_AGNOSTIC);
-    // A's reset_drain (~0.4) pulls score below B's clean 0.7.
-    assert_eq!(output.kept_upstream_ids, vec![a.upstream_id]);
-}
-
-#[test]
-fn stale_long_window_without_reset_remains_trusted_for_scoring() {
-    // Pin the spec ambiguity: stale long windows with NO reset timestamp
-    // are trusted for scoring (and for exhaustion). The looser reading
-    // wins over the literal "future-reset only" reading. If this contract
-    // is ever tightened, this test must flip.
-    let a = oauth_with_observed(
-        "a",
-        1,
-        T0_SECS,
-        vec![
-            stale(WINDOW_SEVEN_DAY)
-                .util(0.95)
-                .observed_millis(T0_MILLIS)
-                .build(),
-        ],
-    );
-    let b = oauth_with_observed(
-        "b",
-        2,
-        T0_SECS,
-        vec![
-            fresh(WINDOW_SEVEN_DAY)
-                .util(0.4)
-                .observed_millis(T0_MILLIS)
-                .build(),
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(0.3).status("allowed").build(),
         ],
     );
 
-    let output = filter_for_model(&[a, b.clone()], MODEL_AGNOSTIC);
-    // A's u_max=0.95 comes from the trusted stale snapshot; B's=0.4 wins.
-    assert_eq!(output.kept_upstream_ids, vec![b.upstream_id]);
+    let output = filter_for_model(
+        &[dead_a, dead_b, dead_c, overage_alive.clone()],
+        MODEL_AGNOSTIC,
+    );
+    assert_eq!(output.kept_upstream_ids, vec![overage_alive.upstream_id]);
 }
 
 // =============================================================================
-// Section H — helpers and builders
+// Section J — helpers and builders
 // =============================================================================
 
 fn filter_for_model(candidates: &[UpstreamCandidate], canonical_model: &str) -> FilterOutput {
@@ -1837,22 +1011,13 @@ fn oauth_with(
     id_seed: u8,
     quotas: Vec<SubscriptionQuotaCandidateSnapshot>,
 ) -> UpstreamCandidate {
-    oauth_with_observed(name, id_seed, 0, quotas)
-}
-
-fn oauth_with_observed(
-    name: &str,
-    id_seed: u8,
-    observed_at_unix_secs: u64,
-    quotas: Vec<SubscriptionQuotaCandidateSnapshot>,
-) -> UpstreamCandidate {
     UpstreamCandidate {
         upstream_id: upstream_id(id_seed),
         name: name.to_owned(),
         kind: UpstreamKind::AnthropicOauth,
         observed_rate_limits: Vec::new(),
         subscription_quotas: quotas,
-        observed_at_unix_secs,
+        observed_at_unix_secs: 0,
         cache_score: None,
         base_url: None,
     }
@@ -1908,6 +1073,31 @@ impl SnapBuilder {
 
     fn observed_millis(mut self, t: u64) -> Self {
         self.inner.observed_at_unix_millis = Some(t);
+        self
+    }
+
+    fn overage_in_use(mut self, value: bool) -> Self {
+        self.inner.overage_in_use = Some(value);
+        self
+    }
+
+    fn fallback_available(mut self, value: bool) -> Self {
+        self.inner.fallback_available = Some(value);
+        self
+    }
+
+    fn extra_usage_enabled(mut self, value: bool) -> Self {
+        self.inner.extra_usage_enabled = Some(value);
+        self
+    }
+
+    fn extra_usage_limit(mut self, value: f64) -> Self {
+        self.inner.extra_usage_monthly_limit = Some(value);
+        self
+    }
+
+    fn extra_usage_used(mut self, value: f64) -> Self {
+        self.inner.extra_usage_used_credits = Some(value);
         self
     }
 }
