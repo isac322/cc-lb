@@ -36,6 +36,7 @@ cc-lb-runtime-wasmtime    = { path = "crates/cc-lb-runtime-wasmtime",    version
 cc-lb-plugin-types        = { path = "crates/cc-lb-plugin-types",        version = "0.2.0" }
 cc-lb-pdk-wasmtime        = { path = "crates/cc-lb-pdk-wasmtime",        version = "0.1.0" }
 cc-lb-pdk-wasmtime-macros = { path = "crates/cc-lb-pdk-wasmtime-macros", version = "0.1.0" }
+cc-lb-plugin-conformance  = { path = "crates/cc-lb-plugin-conformance",  version = "0.2.0" }
 
 # External wasmtime/rkyv ecosystem — wired up by cc-lb-runtime-wasmtime in Phase 1+.
 # Phase 0 declares them here so member crates can opt in via `<name>.workspace = true`
