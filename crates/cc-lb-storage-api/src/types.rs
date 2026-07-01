@@ -190,6 +190,48 @@ pub struct RequestEvent {
     pub routing_trace: Option<cc_lb_plugin_api::RoutingTrace>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub internal_errors: Vec<cc_lb_plugin_api::InternalError>,
+    /// Application-generated unique row identifier (UUID v7).
+    ///
+    /// Used as the DB uniqueness key in `request_events_v1`. Distinct from
+    /// [`request_id`](Self::request_id), which is a client-visible correlation
+    /// header forwarded to/from Anthropic and exposed to PDK plugins, and
+    /// therefore intentionally NOT guaranteed unique.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    /// Output tokens spent on extended-thinking content (subset of
+    /// [`output_tokens`](Self::output_tokens)).
+    /// Source: `usage.output_tokens_details.thinking_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_tokens: Option<u64>,
+    /// Anthropic web search tool invocations (billed separately from tokens).
+    /// Source: `usage.server_tool_use.web_search_requests`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search_requests: Option<u64>,
+    /// Anthropic web fetch tool invocations (billed separately from tokens).
+    /// Source: `usage.server_tool_use.web_fetch_requests`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_fetch_requests: Option<u64>,
+    /// Service tier reported by Anthropic
+    /// (`standard` / `priority` / `batch`). Source: `usage.service_tier`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    /// Geographic region of inference. Source: `usage.inference_geo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_geo: Option<String>,
+    /// Upstream stream `error` event type (e.g. `overloaded_error`).
+    /// Set when Anthropic emits a mid-stream `event: error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_error_type: Option<String>,
+    /// Upstream stream `error` event message (sanitized + truncated to a
+    /// safe length).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_error_message: Option<String>,
+    /// Opaque preservation of the beta `usage.iterations[]` array (server-side
+    /// fallback `fallback-credit-2026-06-01`). Stored only in `payload`; no
+    /// top-level column. Per-iteration model + token breakdown is preserved
+    /// verbatim for forward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<Value>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -738,6 +780,54 @@ mod tests {
         assert_eq!(decoded.connection_reused, None);
         assert_eq!(decoded.limit_reconcile_ms, None);
         assert_eq!(decoded.observability_post_ms, None);
+    }
+
+    #[test]
+    fn request_event_serde_round_trips_terminal_observation_fields() {
+        let iterations = serde_json::json!([
+            {
+                "type": "message",
+                "input_tokens": 100,
+                "output_tokens": 200,
+                "model": "claude-x"
+            }
+        ]);
+        let original = RequestEvent {
+            request_id: "req_t1".to_owned(),
+            event_id: Some("0193f76b-1ab2-7a4d-8a3c-44ab3c5e1f0a".to_owned()),
+            thinking_tokens: Some(64),
+            web_search_requests: Some(3),
+            web_fetch_requests: Some(1),
+            service_tier: Some("priority".to_owned()),
+            inference_geo: Some("us-east".to_owned()),
+            upstream_error_type: Some("overloaded_error".to_owned()),
+            upstream_error_message: Some("upstream overloaded; retry".to_owned()),
+            iterations: Some(iterations.clone()),
+            ..Default::default()
+        };
+
+        let bytes = serde_json::to_vec(&original).expect("serialize");
+        let parsed: RequestEvent = serde_json::from_slice(&bytes).expect("deserialize");
+        assert_eq!(parsed, original);
+
+        // Legacy payload without any of the new fields still deserializes with None.
+        let legacy = serde_json::json!({
+            "ts": 1_700_000_000u64,
+            "request_id": "req_legacy",
+            "status": 200u16,
+            "duration_ms": 100u64,
+        });
+        let parsed_legacy: RequestEvent =
+            serde_json::from_value(legacy).expect("deserialize legacy");
+        assert_eq!(parsed_legacy.event_id, None);
+        assert_eq!(parsed_legacy.thinking_tokens, None);
+        assert_eq!(parsed_legacy.web_search_requests, None);
+        assert_eq!(parsed_legacy.web_fetch_requests, None);
+        assert_eq!(parsed_legacy.service_tier, None);
+        assert_eq!(parsed_legacy.inference_geo, None);
+        assert_eq!(parsed_legacy.upstream_error_type, None);
+        assert_eq!(parsed_legacy.upstream_error_message, None);
+        assert_eq!(parsed_legacy.iterations, None);
     }
 
     #[test]

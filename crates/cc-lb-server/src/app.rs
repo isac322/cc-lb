@@ -942,7 +942,14 @@ async fn build_app_with_storage_inner(
     let notify_listener_task = Some(tokio::spawn(async move {
         notify_listener.run().await;
     }));
-    let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(cc_lb_core::InMemoryBus::new());
+    let in_memory_bus = cc_lb_core::InMemoryBus::new();
+    let request_event_writer_rx = in_memory_bus.attach_writer(cc_lb_core::DEFAULT_WRITER_CAPACITY);
+    let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(in_memory_bus);
+    let request_event_writer_handle =
+        cc_lb_core::spawn_request_event_writer(storage.clone(), request_event_writer_rx);
+    let request_event_writer_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::RequestEventWriterHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(Some(request_event_writer_handle)));
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
         dynamic_view_holder.clone(),
@@ -1007,6 +1014,18 @@ async fn build_app_with_storage_inner(
             async move {
                 if let Err(error) = leader_election.close().await {
                     tracing::warn!(error = %error, "scheduler leader connection close failed");
+                }
+            }
+        });
+    }
+    {
+        let writer_slot = request_event_writer_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let writer_slot = writer_slot.clone();
+            async move {
+                let mut guard = writer_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
                 }
             }
         });

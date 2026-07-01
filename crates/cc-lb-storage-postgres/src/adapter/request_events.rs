@@ -22,8 +22,13 @@ impl RequestEventStore for PostgresStorage {
              (ts, principal_id, upstream_id, key_id, model, upstream_name, cache_state, thread_id, message_id, \
               message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, \
                input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, \
+               event_id, error_code, upstream_error_type, upstream_error_message, \
+               thinking_tokens, web_search_requests, web_fetch_requests, \
+               service_tier, inference_geo, \
+               cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, \
                payload, created_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NOW())",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,NOW()) \
+             ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING",
         )
         .bind(unix_secs_to_datetime(event.ts, "request event ts")?)
         .bind(event.principal_id.as_deref())
@@ -76,6 +81,42 @@ impl RequestEventStore for PostgresStorage {
             event
                 .cache_read_input_tokens
                 .map(|value| u64_to_i64(value, "request event cache_read_input_tokens"))
+                .transpose()?,
+        )
+        .bind(event.event_id.as_deref())
+        .bind(event.error_code.as_deref())
+        .bind(event.upstream_error_type.as_deref())
+        .bind(event.upstream_error_message.as_deref())
+        .bind(
+            event
+                .thinking_tokens
+                .map(|value| u64_to_i64(value, "request event thinking_tokens"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .web_search_requests
+                .map(|value| u64_to_i64(value, "request event web_search_requests"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .web_fetch_requests
+                .map(|value| u64_to_i64(value, "request event web_fetch_requests"))
+                .transpose()?,
+        )
+        .bind(event.service_tier.as_deref())
+        .bind(event.inference_geo.as_deref())
+        .bind(
+            event
+                .cache_creation_input_tokens_5m
+                .map(|value| u64_to_i64(value, "request event cache_creation_input_tokens_5m"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .cache_creation_input_tokens_1h
+                .map(|value| u64_to_i64(value, "request event cache_creation_input_tokens_1h"))
                 .transpose()?,
         )
         .bind(payload)

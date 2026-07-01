@@ -73,14 +73,14 @@ pub async fn handle_events_stream(
         match receiver {
             BusReceiver::InMemory(mut rx) => loop {
                 match rx.recv().await {
-                    Ok(event) => {
-                        if !apply_filters_to_event(&event, &filters) {
+                    Ok(update) => {
+                        if !apply_filters_to_event(&update.event, &filters) {
                             continue;
                         }
-                        let payload = match serde_json::to_string(&event) {
+                        let payload = match serde_json::to_string(&update) {
                             Ok(s) => s,
                             Err(error) => {
-                                tracing::warn!(%error, "request event serialize failed");
+                                tracing::warn!(%error, "request event update serialize failed");
                                 continue;
                             }
                         };
@@ -98,14 +98,14 @@ pub async fn handle_events_stream(
                 }
             },
             BusReceiver::Remote(mut rx) => {
-                while let Some(event) = rx.recv().await {
-                    if !apply_filters_to_event(&event, &filters) {
+                while let Some(update) = rx.recv().await {
+                    if !apply_filters_to_event(&update.event, &filters) {
                         continue;
                     }
-                    let payload = match serde_json::to_string(&event) {
+                    let payload = match serde_json::to_string(&update) {
                         Ok(s) => s,
                         Err(error) => {
-                            tracing::warn!(%error, "request event serialize failed");
+                            tracing::warn!(%error, "request event update serialize failed");
                             continue;
                         }
                     };
