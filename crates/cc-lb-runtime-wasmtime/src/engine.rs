@@ -56,9 +56,16 @@ pub struct HotEngineConfig {
 impl Default for HotEngineConfig {
     fn default() -> Self {
         Self {
-            memory_max_pages: 64,
-            fuel_per_call: 10_000_000,
-            max_wasm_stack: 512 * 1024,
+            // 1024 pages = 64 MiB per plugin instance. Sized to fit large
+            // Anthropic-shape requests (5+ MB tool schemas from OpenCode /
+            // Claude Code) with headroom for scrub-time string clones.
+            memory_max_pages: 1024,
+            // 1B fuel covers regex + serde_json parsing on multi-MB tool
+            // schemas. Empirically 10M was insufficient for a 26 KiB
+            // OpenCode system prompt, 200M for a 5 MB tools-heavy request.
+            fuel_per_call: 1_000_000_000,
+            // 1 MiB wasm stack — plenty for regex-automata state machines.
+            max_wasm_stack: 1024 * 1024,
             pool_total_memories: 64,
             pool_total_core_instances: 64,
         }
