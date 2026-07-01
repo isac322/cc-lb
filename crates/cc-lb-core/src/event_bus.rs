@@ -19,7 +19,7 @@
 //! ## Publish semantics
 //!
 //! [`RequestEventBus::publish`] is **synchronous and non-blocking**. The proxy
-//! hot path and the `TerminalObserver` `Drop` fallback both call it without
+//! hot path and the `LifecycleContext` `Drop` fallback both call it without
 //! `.await`. Failures (no receivers, writer mpsc full) increment metrics and
 //! `tracing::warn!` but never block the producer.
 

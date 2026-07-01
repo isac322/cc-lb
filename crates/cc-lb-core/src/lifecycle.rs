@@ -69,7 +69,7 @@ use crate::request_timing::{
 };
 use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
-use crate::terminal_observer::{TerminalObserver, error_codes};
+use crate::terminal_observer::{LifecycleContext, error_codes};
 use crate::upstream_rate_limit_events::UpstreamRateLimitSink;
 use crate::usage_decoder::{UsageDecoder, decode_full_body};
 use crate::usage_parser::{
@@ -995,12 +995,12 @@ impl Lifecycle {
         let view = self.dynamic_view.load();
         let principal_view = Arc::clone(&view.principal_view);
         let started = Instant::now();
-        let observer_from_ext = req.extensions().get::<TerminalObserver>().cloned();
+        let observer_from_ext = req.extensions().get::<LifecycleContext>().cloned();
         let (mut ctx, body_too_large) = self.parse(req);
-        let observer: Option<TerminalObserver> = observer_from_ext.or_else(|| {
+        let observer: Option<LifecycleContext> = observer_from_ext.or_else(|| {
             self.event_bus
                 .as_ref()
-                .map(|bus| TerminalObserver::new(ctx.request_id.clone(), bus.clone(), &self.clock))
+                .map(|bus| LifecycleContext::new(ctx.request_id.clone(), bus.clone(), &self.clock))
         });
         if let Some(o) = observer.as_ref() {
             let stream = serde_json::from_slice::<Value>(&ctx.body_bytes)
@@ -1750,7 +1750,7 @@ impl Lifecycle {
         stream_hooks: StreamHooks,
         event_ctx: RequestEventContext,
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
-        observer: Option<TerminalObserver>,
+        observer: Option<LifecycleContext>,
     ) -> Response<Body> {
         let mut active_limit = active_limit;
         if active_limit
@@ -1995,7 +1995,7 @@ impl Lifecycle {
     #[allow(clippy::too_many_arguments)]
     async fn emit_routing_failure_event(
         &self,
-        observer: Option<&TerminalObserver>,
+        observer: Option<&LifecycleContext>,
         ctx: &RequestContext,
         authn_success: &AuthnSuccess,
         principal: &Principal,
@@ -2249,7 +2249,7 @@ impl Lifecycle {
         metric_context: ApiKeyMetricContext,
         event_ctx: RequestEventContext,
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
-        observer: Option<TerminalObserver>,
+        observer: Option<LifecycleContext>,
     ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);

@@ -13,7 +13,7 @@
 //!    `attach_principal`, `attach_route`, `attach_model`, etc. to populate
 //!    state.
 //! 3. The SSE parser calls `update_usage` to refresh token counters mid-flight.
-//! 4. On normal completion the lifecycle calls [`TerminalObserver::finish`]
+//! 4. On normal completion the lifecycle calls [`LifecycleContext::finish`]
 //!    which:
 //!      1. atomically CAS-es `finalized: false → true`,
 //!      2. snapshots state,
@@ -79,8 +79,6 @@ pub(crate) mod error_codes {
 pub struct LifecycleContext {
     inner: Arc<Inner>,
 }
-
-pub(crate) type TerminalObserver = LifecycleContext;
 
 struct Inner {
     event_id: String,
@@ -174,6 +172,10 @@ impl LifecycleContext {
         self.lock_state().model = Some(model);
     }
 
+    // TODO(rfc-0002-phase-9-cutover): remove once the assembler subscriber
+    // (Phase 3) becomes the authoritative writer and legacy state on the
+    // observer is no longer read by `make_request_event`. Subscribers own
+    // usage state via `LifecycleEvent::UsageObserved` after cutover.
     pub(crate) fn update_usage(&self, usage: &UsageCounts) {
         self.lock_state().usage = usage.clone();
     }
@@ -207,10 +209,17 @@ impl LifecycleContext {
     /// that already construct the entire event inline with timing/cost/stream
     /// metric fields). `make_request_event` will return this verbatim with
     /// `event_id` forced to the observer's value.
+    ///
+    // TODO(rfc-0002-phase-9-cutover): remove once the assembler subscriber
+    // owns the entire success-path row assembly. Currently retained so the
+    // legacy writer path stays byte-identical during Phase 6 shadow rollout.
     pub(crate) fn set_prebuilt_event(&self, event: RequestEvent) {
         self.lock_state().prebuilt_event = Some(event);
     }
 
+    // TODO(rfc-0002-phase-9-cutover): remove once cache observations flow
+    // exclusively through `LifecycleEvent::CacheObserved` and the assembler
+    // subscriber owns cache-state assembly on the shadow row.
     #[allow(dead_code)]
     pub(crate) fn attach_cache_metadata(
         &self,
@@ -407,7 +416,7 @@ mod tests {
         let bus = Arc::new(InMemoryBus::new());
         let mut rx = bus.attach_writer(8);
         let clock: ClockHandle = Arc::new(SystemClock);
-        let observer = TerminalObserver::new(
+        let observer = LifecycleContext::new(
             "req_finish".to_owned(),
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
@@ -435,7 +444,7 @@ mod tests {
         let mut rx = bus.attach_writer(8);
         let clock: ClockHandle = Arc::new(SystemClock);
         {
-            let observer = TerminalObserver::new(
+            let observer = LifecycleContext::new(
                 "req_drop".to_owned(),
                 bus.clone() as Arc<dyn RequestEventBus>,
                 &clock,
@@ -457,7 +466,7 @@ mod tests {
         let mut rx = bus.attach_writer(8);
         let clock: ClockHandle = Arc::new(SystemClock);
         {
-            let observer = TerminalObserver::new(
+            let observer = LifecycleContext::new(
                 "req_norace".to_owned(),
                 bus.clone() as Arc<dyn RequestEventBus>,
                 &clock,
@@ -484,7 +493,7 @@ mod tests {
         let bus = Arc::new(InMemoryBus::new());
         let mut rx = bus.attach_writer(8);
         let clock: ClockHandle = Arc::new(SystemClock);
-        let observer = TerminalObserver::new(
+        let observer = LifecycleContext::new(
             "req_usage".to_owned(),
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
@@ -512,7 +521,7 @@ mod tests {
         let bus = Arc::new(InMemoryBus::new());
         let mut rx = bus.attach_writer(8);
         let clock: ClockHandle = Arc::new(SystemClock);
-        let observer = TerminalObserver::new(
+        let observer = LifecycleContext::new(
             "req_partial".to_owned(),
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
@@ -553,7 +562,7 @@ mod tests {
         let bus = Arc::new(InMemoryBus::new());
         let mut rx = bus.attach_writer(8);
         let clock: ClockHandle = Arc::new(SystemClock);
-        let observer = TerminalObserver::new(
+        let observer = LifecycleContext::new(
             "req_partial_after_final".to_owned(),
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
@@ -575,7 +584,7 @@ mod tests {
         let bus = Arc::new(InMemoryBus::new());
         let mut rx = bus.attach_writer(8);
         let clock: ClockHandle = Arc::new(SystemClock);
-        let observer = TerminalObserver::new(
+        let observer = LifecycleContext::new(
             "req_shared".to_owned(),
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
