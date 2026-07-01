@@ -78,8 +78,8 @@ struct LimitEngineInner {
 
 pub struct Reservation {
     engine: Weak<LimitEngineInner>,
-    key_id: String,
-    principal_id: String,
+    pub(crate) key_id: String,
+    pub(crate) principal_id: String,
     effective_limits: Vec<Limit>,
     reserved: Vec<ReservedAmount>,
     concurrent_guards: Vec<KeyConcurrencyGuard>,

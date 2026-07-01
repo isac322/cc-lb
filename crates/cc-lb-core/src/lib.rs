@@ -35,6 +35,8 @@ pub mod instrumented_connector;
 #[cfg(not(loom))]
 pub mod lifecycle;
 #[cfg(not(loom))]
+pub mod lifecycle_event_logger;
+#[cfg(not(loom))]
 pub mod limit_state_writer;
 #[cfg(not(loom))]
 pub mod model_resolution;
@@ -106,7 +108,8 @@ pub use error_format::{anthropic_error_body, anthropic_error_response};
 pub use error_normalizer::{ErrorNormalizer, NormalizerError, UpstreamKind};
 #[cfg(not(loom))]
 pub use event_bus::{
-    BusError, BusReceiver, DEFAULT_BROADCAST_CAPACITY, DEFAULT_WRITER_CAPACITY, InMemoryBus,
+    BusError, BusReceiver, DEFAULT_BROADCAST_CAPACITY, DEFAULT_LIFECYCLE_BROADCAST_CAPACITY,
+    DEFAULT_LIFECYCLE_WRITER_CAPACITY, DEFAULT_WRITER_CAPACITY, InMemoryBus, LifecycleBusReceiver,
     RequestEventBus, RequestEventPhase, RequestEventUpdate, new_in_memory_bus,
     record_dashboard_sse_lagged,
 };
@@ -119,6 +122,8 @@ pub use lifecycle::{
     SubscriptionQuotaCacheLike, UpstreamDispatch, build_candidates, observe_rate_limits,
     observe_subscription_quota_headers, parse_request_cache_breakpoints,
 };
+#[cfg(not(loom))]
+pub use lifecycle_event_logger::{LifecycleEventLoggerHandle, spawn_lifecycle_event_logger};
 #[cfg(not(loom))]
 pub use limit_state_writer::{
     PrincipalLimitStateEnqueueError, PrincipalLimitStateSink, start_principal_limit_state_writer,

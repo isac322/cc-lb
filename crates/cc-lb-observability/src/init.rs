@@ -334,6 +334,11 @@ pub fn register_metrics() {
         "TLS certificate reload attempts by outcome."
     );
     metrics::describe_counter!(
+        "cc_lb_lifecycle_events_total",
+        Unit::Count,
+        "Total lifecycle events emitted by event kind."
+    );
+    metrics::describe_counter!(
         "cc_lb_sse_events_total",
         Unit::Count,
         "SSE events relayed by upstream and event type."
