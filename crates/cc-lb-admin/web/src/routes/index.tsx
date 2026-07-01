@@ -786,8 +786,23 @@ function OverviewPage() {
       onConnect: () => setStreamStatus('live'),
       onEvent: (data) => {
         try {
-          const parsed = JSON.parse(data) as RequestEvent;
-          setLiveEvents((prev) => [parsed, ...prev].slice(0, 50));
+          const parsed = JSON.parse(data) as {
+            phase: 'partial' | 'final';
+            event: RequestEvent;
+          };
+          const evt = parsed.event;
+          const key = evt.event_id ?? evt.request_id;
+          setLiveEvents((prev) => {
+            const idx = prev.findIndex(
+              (e) => (e.event_id ?? e.request_id) === key,
+            );
+            if (idx >= 0) {
+              const next = [...prev];
+              next[idx] = evt;
+              return next;
+            }
+            return [evt, ...prev].slice(0, 50);
+          });
         } catch {}
       },
       onError: () => setStreamStatus('down'),

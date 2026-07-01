@@ -349,10 +349,16 @@ export interface DashboardUsageResponse {
   observed: boolean;
 }
 
+export interface RequestEventUpdate {
+  phase: 'partial' | 'final';
+  event: RequestEvent;
+}
+
 export interface RequestEvent {
   ts: number | null;
   ts_ms?: number | null;
   request_id: string;
+  event_id?: string;
   principal_id?: string;
   key_id?: string;
   principal_kind?: string;
@@ -360,6 +366,13 @@ export interface RequestEvent {
   upstream_name?: string;
   model?: string;
   status: number;
+  upstream_error_type?: string;
+  upstream_error_message?: string;
+  thinking_tokens?: number;
+  web_search_requests?: number;
+  web_fetch_requests?: number;
+  service_tier?: string;
+  inference_geo?: string;
   input_tokens?: number;
   output_tokens?: number;
   cache_creation_input_tokens?: number;
