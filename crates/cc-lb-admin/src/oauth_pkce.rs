@@ -4,6 +4,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_core::Clock;
+use cc_lb_oauth_protocol::{
+    ExistingTokenParts, parse_token_endpoint_response, refreshed_token_parts,
+};
 use cc_lb_storage_api::OAuthCredentials;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderValue, Request, StatusCode};
@@ -359,28 +362,23 @@ fn parse_token_response(
     body: Bytes,
     now_epoch_secs: u64,
 ) -> Result<OAuthCredentials, OAuthTokenError> {
-    #[derive(Debug, Deserialize)]
-    struct TokenEndpointJson {
-        access_token: String,
-        refresh_token: Option<String>,
-        expires_in: u64,
-        scope: Option<String>,
-    }
-
-    let parsed: TokenEndpointJson =
-        serde_json::from_slice(&body).map_err(|source| OAuthTokenError::Json {
-            reason: source.to_string(),
-        })?;
-    let scopes = parsed
-        .scope
-        .map(|scope| scope.split_whitespace().map(str::to_owned).collect())
-        .unwrap_or_default();
+    let parsed = parse_token_endpoint_response(&body).map_err(|source| OAuthTokenError::Json {
+        reason: source.to_string(),
+    })?;
+    let refreshed = refreshed_token_parts(
+        ExistingTokenParts {
+            refresh_token: String::new(),
+            scopes: Vec::new(),
+        },
+        parsed,
+        now_epoch_secs,
+    );
 
     Ok(OAuthCredentials {
-        access_token: parsed.access_token,
-        refresh_token: parsed.refresh_token.unwrap_or_default(),
-        expires_at: now_epoch_secs.saturating_add(parsed.expires_in),
-        scopes,
+        access_token: refreshed.access_token,
+        refresh_token: refreshed.refresh_token,
+        expires_at: refreshed.expires_at_unix_secs,
+        scopes: refreshed.scopes,
     })
 }
 

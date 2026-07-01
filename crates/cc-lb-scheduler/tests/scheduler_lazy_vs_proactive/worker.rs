@@ -6,6 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use apalis::prelude::Data;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
+use cc_lb_oauth_protocol::{
+    ExistingTokenParts, TokenEndpointResponse, parse_token_endpoint_response,
+    refresh_token_form_body, refreshed_token_parts,
+};
 use cc_lb_scheduler::error::{Result, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::{
@@ -14,7 +18,6 @@ use cc_lb_scheduler::jobs::oauth_refresh::{
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerBackend};
 use cc_lb_storage_api::UpstreamRecord;
-use serde::Deserialize;
 use url::Url;
 use uuid::Uuid;
 
@@ -132,19 +135,22 @@ async fn refresh_tokens(
         previous.refresh_token.as_str(),
     )
     .await?;
-    let scopes = response
-        .scope
-        .as_deref()
-        .map(|scope| scope.split_whitespace().map(ToOwned::to_owned).collect())
-        .unwrap_or(previous.scopes);
-    let expires_at_unix_secs = now_secs().saturating_add(response.expires_in);
+    let refreshed = refreshed_token_parts(
+        ExistingTokenParts {
+            refresh_token: previous.refresh_token,
+            scopes: previous.scopes,
+        },
+        response,
+        now_secs(),
+    );
+    let expires_at_unix_secs = refreshed.expires_at_unix_secs;
     let encrypted_tokens = EncryptedOAuthTokens::encrypt(
         aead.as_ref(),
         &OAuthTokenBundle {
-            access_token: response.access_token,
-            refresh_token: response.refresh_token.unwrap_or(previous.refresh_token),
+            access_token: refreshed.access_token,
+            refresh_token: refreshed.refresh_token,
             expires_at_unix_secs,
-            scopes,
+            scopes: refreshed.scopes,
         },
         upstream.id.as_bytes(),
     )
@@ -155,26 +161,12 @@ async fn refresh_tokens(
     })
 }
 
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: Option<String>,
-    expires_in: u64,
-    scope: Option<String>,
-}
-
 async fn request_refresh(
     token_url: &Url,
     client_id: &str,
     refresh_token: &str,
-) -> Result<TokenResponse> {
-    let body = {
-        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        serializer.append_pair("grant_type", "refresh_token");
-        serializer.append_pair("client_id", client_id);
-        serializer.append_pair("refresh_token", refresh_token);
-        serializer.finish()
-    };
+) -> Result<TokenEndpointResponse> {
+    let body = refresh_token_form_body(client_id, refresh_token);
     let response = raw_http(
         "POST",
         token_url.as_str(),
@@ -189,5 +181,6 @@ async fn request_refresh(
             response.status
         )));
     }
-    serde_json::from_slice(&response.body).map_err(|error| SchedulerError::Job(error.to_string()))
+    parse_token_endpoint_response(&response.body)
+        .map_err(|error| SchedulerError::Job(error.to_string()))
 }

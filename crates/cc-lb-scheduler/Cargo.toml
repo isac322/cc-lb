@@ -65,6 +65,7 @@ required-features = ["postgres"]
 async-trait = { workspace = true }
 axum.workspace = true
 base64.workspace = true
+cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-server = { path = "../cc-lb-server", default-features = false }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }

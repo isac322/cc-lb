@@ -1,5 +1,6 @@
 use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_core::clock::unix_secs;
+use cc_lb_oauth_protocol::{ExistingTokenParts, refreshed_token_parts};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::{
@@ -54,16 +55,19 @@ impl SchedulerDispatch {
             &bundle.refresh_token,
         )
         .await?;
-        let scopes = response
-            .scope
-            .as_deref()
-            .map(|scope| scope.split_whitespace().map(str::to_owned).collect())
-            .unwrap_or(bundle.scopes);
+        let refreshed = refreshed_token_parts(
+            ExistingTokenParts {
+                refresh_token: bundle.refresh_token,
+                scopes: bundle.scopes,
+            },
+            response,
+            unix_secs(self.clock.now()),
+        );
         let updated = OAuthTokenBundle {
-            access_token: response.access_token,
-            refresh_token: response.refresh_token.unwrap_or(bundle.refresh_token),
-            expires_at_unix_secs: unix_secs(self.clock.now()).saturating_add(response.expires_in),
-            scopes,
+            access_token: refreshed.access_token,
+            refresh_token: refreshed.refresh_token,
+            expires_at_unix_secs: refreshed.expires_at_unix_secs,
+            scopes: refreshed.scopes,
         };
         let encrypted_tokens =
             EncryptedOAuthTokens::encrypt(self.aead.as_ref(), &updated, upstream.id.as_bytes())
