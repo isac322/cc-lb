@@ -62,6 +62,8 @@ pub struct Config {
     pub egress: EgressConfig,
     #[serde(default)]
     pub prompt_cache_shadow: PromptCacheShadowConfig,
+    #[serde(default)]
+    pub lifecycle_shadow_writer: LifecycleShadowWriterConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -656,6 +658,13 @@ impl Default for PromptCacheShadowConfig {
             warm_set_cap: 32,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecycleShadowWriterConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

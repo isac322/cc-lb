@@ -66,6 +66,12 @@
       "$ref": "#/$defs/EgressConfig",
       "default": {}
     },
+    "lifecycle_shadow_writer": {
+      "$ref": "#/$defs/LifecycleShadowWriterConfig",
+      "default": {
+        "enabled": false
+      }
+    },
     "listener": {
       "$ref": "#/$defs/ListenerConfig",
       "default": {
@@ -453,6 +459,15 @@
           "items": {
             "type": "string"
           }
+        }
+      }
+    },
+    "LifecycleShadowWriterConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
         }
       }
     },

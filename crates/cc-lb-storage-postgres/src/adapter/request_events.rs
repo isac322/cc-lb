@@ -26,8 +26,8 @@ impl RequestEventStore for PostgresStorage {
                thinking_tokens, web_search_requests, web_fetch_requests, \
                service_tier, inference_geo, \
                cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, \
-               payload, created_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,NOW()) \
+               shadow_event_id, payload, created_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,NOW()) \
              ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING",
         )
         .bind(unix_secs_to_datetime(event.ts, "request event ts")?)
@@ -119,6 +119,7 @@ impl RequestEventStore for PostgresStorage {
                 .map(|value| u64_to_i64(value, "request event cache_creation_input_tokens_1h"))
                 .transpose()?,
         )
+        .bind(event.shadow_event_id.as_deref())
         .bind(payload)
         .execute(&self.pool)
         .await
