@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.1.3...cc-lb-plugin-conformance-v0.1.4) - 2026-07-01
+
+### Other
+
+- freshen dependencies and pinned tools to latest ([#205](https://github.com/isac322/cc-lb/pull/205))
+- inject Clock trait for all wall-clock reads workspace-wide ([#183](https://github.com/isac322/cc-lb/pull/183))
+
 ## [0.1.3](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.1.2...cc-lb-plugin-conformance-v0.1.3) - 2026-06-26
 
 ### Other
