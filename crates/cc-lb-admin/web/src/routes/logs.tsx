@@ -110,7 +110,13 @@ function LogsPage() {
   }, [tailing]);
 
   const rows = useMemo(() => {
-    const historical = recent.data?.pages.flatMap((p) => p.events) ?? [];
+    // While filters change, `recent.data` still holds the previous filter's
+    // pages (queryClient default `placeholderData: keepPreviousData`). Treat
+    // that as empty so we don't show the old filter's rows under the new
+    // filter's subtitle.
+    const historical = recent.isPlaceholderData
+      ? []
+      : (recent.data?.pages.flatMap((p) => p.events) ?? []);
     const seen = new Set<string>();
     const out: RequestEvent[] = [];
     for (const ev of liveRows) {
@@ -128,7 +134,7 @@ function LogsPage() {
     return out.sort(
       (a, b) => (eventTime(b)?.getTime() ?? 0) - (eventTime(a)?.getTime() ?? 0),
     );
-  }, [liveRows, recent.data]);
+  }, [liveRows, recent.data, recent.isPlaceholderData]);
 
   const recentLiveIds = useMemo(
     () => new Set(liveRows.slice(0, 20).map((e) => e.request_id)),
@@ -298,6 +304,10 @@ function LogsPage() {
               events={rows}
               principalNameMap={principalNameMap}
               upstreamNameMap={upstreamNameMap}
+              loading={
+                (recent.isPending || recent.isPlaceholderData) &&
+                liveRows.length === 0
+              }
               liveFlashIds={tailing ? recentLiveIds : undefined}
               onRowClick={setSelected}
               columns={{ cost: true, tokens: true }}
