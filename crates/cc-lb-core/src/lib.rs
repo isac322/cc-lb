@@ -38,6 +38,7 @@ pub mod lifecycle;
 pub mod lifecycle_event_assembler;
 pub mod lifecycle_event_logger;
 pub mod lifecycle_hook_adapter;
+pub mod lifecycle_limit_reconcile_subscriber;
 pub mod lifecycle_pricing_subscriber;
 #[cfg(not(loom))]
 pub mod limit_state_writer;
@@ -131,6 +132,9 @@ pub use lifecycle_event_assembler::{RequestEventAssemblerHandle, spawn_request_e
 pub use lifecycle_event_logger::{LifecycleEventLoggerHandle, spawn_lifecycle_event_logger};
 pub use lifecycle_hook_adapter::{
     ObservabilityHookAdapterHandle, spawn_observability_hook_adapter,
+};
+pub use lifecycle_limit_reconcile_subscriber::{
+    LimitReconcileMode, LimitReconcileSubscriberHandle, spawn_lifecycle_limit_reconcile_subscriber,
 };
 pub use lifecycle_pricing_subscriber::{
     PricingSubscriberHandle, spawn_lifecycle_pricing_subscriber,

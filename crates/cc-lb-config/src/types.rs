@@ -72,6 +72,8 @@ pub struct Config {
     pub request_event_writer_source: RequestEventWriterSource,
     #[serde(default)]
     pub limit_reservation_ttl: LimitReservationTtlConfig,
+    #[serde(default)]
+    pub lifecycle_limit_reconcile_subscriber: LifecycleLimitReconcileSubscriberConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -722,6 +724,29 @@ fn default_limit_reservation_ttl_secs() -> u64 {
 
 fn default_limit_reservation_tick_secs() -> u64 {
     30
+}
+
+/// RFC-0002 Phase 8 shadow subscriber for limit reservation reconciliation.
+///
+/// - `enabled=false` (default): subscriber is not spawned; handler inline
+///   reconciles as before.
+/// - `enabled=true, shadow=true`: subscriber runs and increments a
+///   `would_reconcile` counter but does NOT touch the LimitEngine; handler
+///   inline reconcile remains authoritative.
+/// - `enabled=true, shadow=false`: subscriber calls
+///   `LimitEngine::reconcile_by_id`; the handler MUST also disable inline
+///   reconcile (see the surrounding rollout notes) to avoid double-counting.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecycleLimitReconcileSubscriberConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_true_bool")]
+    pub shadow: bool,
+}
+
+fn default_true_bool() -> bool {
+    true
 }
 
 /// RFC-0002 Phase 6 writer cutover switch.

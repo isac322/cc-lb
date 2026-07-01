@@ -89,8 +89,6 @@ struct LimitEngineInner {
 pub struct Reservation {
     engine: Weak<LimitEngineInner>,
     pub(crate) id: ReservationId,
-    pub(crate) key_id: String,
-    pub(crate) principal_id: String,
 }
 
 impl Reservation {
@@ -357,8 +355,6 @@ impl LimitEngine {
         Ok(Reservation {
             engine: Arc::downgrade(&self.inner),
             id,
-            key_id,
-            principal_id: principal_id.to_owned(),
         })
     }
 
@@ -1131,7 +1127,9 @@ mod tests {
         assert!(requests.observed);
     }
 
-    fn engine_with_output_token_limit(cap: i64) -> (Arc<LimitEngine>, PrincipalView, StoredApiKeyRecord) {
+    fn engine_with_output_token_limit(
+        cap: i64,
+    ) -> (Arc<LimitEngine>, PrincipalView, StoredApiKeyRecord) {
         let engine = LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
             Arc::new(crate::clock::SystemClock),
@@ -1190,7 +1188,10 @@ mod tests {
             40,
             "reserved 100, actual output 40 → 60 refunded → 40 remaining",
         );
-        assert!(!engine.reconcile_by_id(&id, 0, 0, 0), "second call is idempotent no-op");
+        assert!(
+            !engine.reconcile_by_id(&id, 0, 0, 0),
+            "second call is idempotent no-op"
+        );
     }
 
     #[test]
