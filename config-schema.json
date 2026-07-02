@@ -103,6 +103,12 @@
         "enabled": false
       }
     },
+    "lifecycle_subscription_quota_subscriber": {
+      "$ref": "#/$defs/LifecycleSubscriptionQuotaSubscriberConfig",
+      "default": {
+        "enabled": false
+      }
+    },
     "limit_reservation_ttl": {
       "$ref": "#/$defs/LimitReservationTtlConfig",
       "default": {
@@ -567,6 +573,15 @@
       }
     },
     "LifecycleShadowWriterConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "LifecycleSubscriptionQuotaSubscriberConfig": {
       "type": "object",
       "properties": {
         "enabled": {

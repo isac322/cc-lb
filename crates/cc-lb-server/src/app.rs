@@ -970,6 +970,14 @@ async fn build_app_with_storage_inner(
     } else {
         None
     };
+    let lifecycle_subscription_quota_rx = if config.lifecycle_subscription_quota_subscriber.enabled
+    {
+        Some(in_memory_bus.attach_lifecycle_subscription_quota(
+            cc_lb_core::event_bus::DEFAULT_LIFECYCLE_SUBSCRIPTION_QUOTA_CAPACITY,
+        ))
+    } else {
+        None
+    };
     let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(in_memory_bus);
     let request_event_writer_handle = request_event_writer_rx
         .map(|rx| cc_lb_core::spawn_request_event_writer(storage.clone(), rx));
@@ -1000,6 +1008,16 @@ async fn build_app_with_storage_inner(
             Some(upstream_rate_limit_sink.clone()),
         )
     });
+    let lifecycle_subscription_quota_subscriber_handle =
+        lifecycle_subscription_quota_rx.map(|rx| {
+            let cache: Arc<dyn cc_lb_core::SubscriptionQuotaCacheLike> =
+                subscription_quota_cache.clone();
+            cc_lb_core::spawn_lifecycle_subscription_quota_subscriber(
+                rx,
+                Some(cache),
+                Some(subscription_quota_sink.clone()),
+            )
+        });
     let request_event_writer_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_core::RequestEventWriterHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(request_event_writer_handle));
@@ -1029,6 +1047,11 @@ async fn build_app_with_storage_inner(
         tokio::sync::Mutex<Option<cc_lb_core::RateLimitHeaderSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(
         lifecycle_rate_limit_header_subscriber_handle,
+    ));
+    let lifecycle_subscription_quota_subscriber_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::SubscriptionQuotaSubscriberHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(
+        lifecycle_subscription_quota_subscriber_handle,
     ));
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
@@ -1190,6 +1213,18 @@ async fn build_app_with_storage_inner(
             let rate_limit_header_slot = rate_limit_header_slot.clone();
             async move {
                 let mut guard = rate_limit_header_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let subscription_quota_slot = lifecycle_subscription_quota_subscriber_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let subscription_quota_slot = subscription_quota_slot.clone();
+            async move {
+                let mut guard = subscription_quota_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }

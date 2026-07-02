@@ -72,6 +72,8 @@ pub struct Config {
     #[serde(default)]
     pub lifecycle_rate_limit_header_subscriber: LifecycleRateLimitHeaderSubscriberConfig,
     #[serde(default)]
+    pub lifecycle_subscription_quota_subscriber: LifecycleSubscriptionQuotaSubscriberConfig,
+    #[serde(default)]
     pub request_event_writer_source: RequestEventWriterSource,
     #[serde(default)]
     pub limit_reservation_ttl: LimitReservationTtlConfig,
@@ -679,6 +681,13 @@ pub struct LifecycleCacheObservationSubscriberConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LifecycleRateLimitHeaderSubscriberConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecycleSubscriptionQuotaSubscriberConfig {
     #[serde(default)]
     pub enabled: bool,
 }
