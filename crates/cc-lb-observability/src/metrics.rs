@@ -2,7 +2,7 @@ use metrics::Unit;
 
 use crate::{MetricDefinition, MetricKind};
 
-pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 21] = [
+pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 20] = [
     MetricDefinition {
         name: "cclb_api_key_requests_total",
         kind: MetricKind::Counter,
@@ -102,11 +102,6 @@ pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 21] = [
         name: "cc_lb_dropped_events_total",
         kind: MetricKind::Counter,
         description: "Total events dropped from a bounded channel or queue by reason.",
-    },
-    MetricDefinition {
-        name: "cc_lb_lifecycle_shadow_field_drift_total",
-        kind: MetricKind::Counter,
-        description: "Total per-field mismatches detected between legacy and shadow RequestEvent writers during rollout.",
     },
 ];
 
@@ -210,11 +205,6 @@ pub(crate) fn register_prometheus14_metrics() {
         "cc_lb_dropped_events_total",
         Unit::Count,
         "Total events dropped from a bounded channel or queue by reason."
-    );
-    metrics::describe_counter!(
-        "cc_lb_lifecycle_shadow_field_drift_total",
-        Unit::Count,
-        "Total per-field mismatches detected between legacy and shadow RequestEvent writers during rollout."
     );
 }
 
@@ -367,11 +357,6 @@ pub(crate) fn touch_prometheus14_metric_handles() {
     metrics::counter!(
         "cc_lb_dropped_events_total",
         "reason" => "unknown"
-    )
-    .increment(0);
-    metrics::counter!(
-        "cc_lb_lifecycle_shadow_field_drift_total",
-        "field" => "unknown"
     )
     .increment(0);
 }

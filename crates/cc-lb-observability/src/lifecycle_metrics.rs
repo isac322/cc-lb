@@ -1,7 +1,6 @@
 //! RFC-0002 lifecycle-pipeline observability primitives.
 
 pub const LIFECYCLE_BUS_DROPPED_METRIC: &str = "cc_lb_dropped_events_total";
-pub const LIFECYCLE_SHADOW_FIELD_DRIFT_METRIC: &str = "cc_lb_lifecycle_shadow_field_drift_total";
 
 pub mod lifecycle_bus_channel {
     pub const WRITER: &str = "lifecycle_writer_full";
@@ -21,8 +20,4 @@ pub mod lifecycle_bus_channel {
 
 pub fn inc_lifecycle_bus_dropped(channel: &'static str) {
     crate::increment_dropped_events_by(channel, 1);
-}
-
-pub fn inc_lifecycle_shadow_field_drift(field: &'static str) {
-    metrics::counter!(LIFECYCLE_SHADOW_FIELD_DRIFT_METRIC, "field" => field).increment(1);
 }

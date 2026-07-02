@@ -82,8 +82,6 @@ pub struct Config {
     #[serde(default)]
     pub lifecycle_prompt_cache_drift_subscriber: LifecyclePromptCacheDriftSubscriberConfig,
     #[serde(default)]
-    pub request_event_writer_source: RequestEventWriterSource,
-    #[serde(default)]
     pub limit_reservation_ttl: LimitReservationTtlConfig,
     #[serde(default)]
     pub lifecycle_limit_reconcile_subscriber: LifecycleLimitReconcileSubscriberConfig,
@@ -825,34 +823,6 @@ impl Default for LifecycleLimitReconcileSubscriberConfig {
 
 fn default_true_bool() -> bool {
     true
-}
-
-/// RFC-0002 Phase 6 writer cutover switch.
-///
-/// - `Shadow` (default): only the assembler writer persists rows.
-/// - `Both`: both writers persist rows. Rows carry distinct `event_id`s and
-///   the shadow row also carries `shadow_event_id` pointing at the legacy
-///   row's `event_id`. Diff via the comparison SQL in
-///   `docs/runbook/lifecycle-shadow.md`.
-/// - `Legacy`: only the pre-RFC-0002 writer persists rows. Preserved as an
-///   emergency rollback switch until Phase 13 removes the legacy path.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum RequestEventWriterSource {
-    Legacy,
-    Both,
-    #[default]
-    Shadow,
-}
-
-impl RequestEventWriterSource {
-    pub fn legacy_writer_enabled(self) -> bool {
-        matches!(self, Self::Legacy | Self::Both)
-    }
-
-    pub fn shadow_writer_enabled(self) -> bool {
-        matches!(self, Self::Shadow | Self::Both)
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

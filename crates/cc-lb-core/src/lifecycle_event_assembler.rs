@@ -46,40 +46,14 @@ impl RequestEventAssemblerHandle {
     }
 }
 
-/// Which rows the assembler produces per `RequestTerminated`.
-///
-/// - `LegacyOnly`: one row with `shadow_event_id=NULL`, `event_id=<lifecycle event_id>`.
-///   Backwards-compat with the pre-Phase-9 writer.
-/// - `ShadowOnly`: one row with `shadow_event_id=<lifecycle event_id>`,
-///   `event_id=<new UUID>`. The RFC-0002 authoritative post-cutover shape.
-/// - `Both`: writes BOTH rows above so diffing legacy vs shadow is trivial.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AssemblerMode {
-    LegacyOnly,
-    ShadowOnly,
-    Both,
-}
-
-impl AssemblerMode {
-    fn writes_legacy(self) -> bool {
-        matches!(self, Self::LegacyOnly | Self::Both)
-    }
-
-    fn writes_shadow(self) -> bool {
-        matches!(self, Self::ShadowOnly | Self::Both)
-    }
-}
-
 pub fn spawn_request_event_assembler(
     rx: mpsc::Receiver<LifecycleEvent>,
     storage: Arc<dyn RequestEventStore>,
-    mode: AssemblerMode,
     bus: Option<Arc<dyn RequestEventBus>>,
 ) -> RequestEventAssemblerHandle {
     spawn_with_config(
         rx,
         storage,
-        mode,
         bus,
         DEFAULT_ASSEMBLER_MAP_CAP,
         DEFAULT_ASSEMBLER_TTL,
@@ -89,21 +63,12 @@ pub fn spawn_request_event_assembler(
 pub fn spawn_with_config(
     rx: mpsc::Receiver<LifecycleEvent>,
     storage: Arc<dyn RequestEventStore>,
-    mode: AssemblerMode,
     bus: Option<Arc<dyn RequestEventBus>>,
     map_cap: usize,
     ttl: Duration,
 ) -> RequestEventAssemblerHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(assembler_loop(
-        rx,
-        storage,
-        mode,
-        bus,
-        map_cap,
-        ttl,
-        shutdown_rx,
-    ));
+    let join = tokio::spawn(assembler_loop(rx, storage, bus, map_cap, ttl, shutdown_rx));
     RequestEventAssemblerHandle { shutdown_tx, join }
 }
 
@@ -204,7 +169,6 @@ impl Partial {
 async fn assembler_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     storage: Arc<dyn RequestEventStore>,
-    mode: AssemblerMode,
     bus: Option<Arc<dyn RequestEventBus>>,
     map_cap: usize,
     ttl: Duration,
@@ -223,12 +187,12 @@ async fn assembler_loop(
             biased;
             event = rx.recv() => {
                 match event {
-                    Some(event) => handle_event(&*storage, bus.as_deref(), &mut partials, mode, map_cap, event).await,
+                    Some(event) => handle_event(&*storage, bus.as_deref(), &mut partials, map_cap, event).await,
                     None => break,
                 }
             }
             _ = finalization_tick.tick() => {
-                flush_expired_terminations(&*storage, bus.as_deref(), &mut partials, mode).await;
+                flush_expired_terminations(&*storage, bus.as_deref(), &mut partials).await;
             }
             _ = sweeper.tick() => sweep_orphans(&mut partials, ttl),
             _ = &mut shutdown => break,
@@ -236,24 +200,15 @@ async fn assembler_loop(
     }
 
     while let Ok(event) = rx.try_recv() {
-        handle_event(
-            &*storage,
-            bus.as_deref(),
-            &mut partials,
-            mode,
-            map_cap,
-            event,
-        )
-        .await;
+        handle_event(&*storage, bus.as_deref(), &mut partials, map_cap, event).await;
     }
-    force_flush_terminations(&*storage, bus.as_deref(), &mut partials, mode).await;
+    force_flush_terminations(&*storage, bus.as_deref(), &mut partials).await;
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn write_finalized_rows(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
-    mode: AssemblerMode,
     event_id: &EventId,
     partial: &Partial,
     reason: &TerminationReason,
@@ -261,53 +216,33 @@ async fn write_finalized_rows(
     duration_ms: u64,
     is_orphan: bool,
 ) {
-    let base_row = finalize_base(partial, reason, client_status, duration_ms, is_orphan);
-    let mut rows: Vec<RequestEvent> = Vec::new();
-    if mode.writes_legacy() {
-        let mut legacy = base_row.clone();
-        legacy.event_id = Some(event_id.clone());
-        legacy.shadow_event_id = None;
-        rows.push(legacy);
-    }
-    if mode.writes_shadow() {
-        let mut shadow = base_row;
-        shadow.event_id = Some(Uuid::now_v7().to_string());
-        shadow.shadow_event_id = Some(event_id.clone());
-        rows.push(shadow);
-    }
-    let mut wrote = 0u64;
-    for row in &rows {
-        match storage.append_request_event(row).await {
-            Ok(()) => {
-                wrote += 1;
-                if let Some(bus) = bus
-                    && row.shadow_event_id.is_some()
-                {
-                    bus.publish(RequestEventUpdate::final_(row.clone()));
-                }
+    let mut row = finalize_base(partial, reason, client_status, duration_ms, is_orphan);
+    row.event_id = Some(Uuid::now_v7().to_string());
+    row.shadow_event_id = Some(event_id.clone());
+    match storage.append_request_event(&row).await {
+        Ok(()) => {
+            if let Some(bus) = bus {
+                bus.publish(RequestEventUpdate::final_(row));
             }
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    shadow_event_id = %event_id,
-                    row_shape = if row.shadow_event_id.is_some() { "shadow" } else { "legacy" },
-                    "lifecycle event assembler: failed to persist row",
-                );
-                cc_lb_observability::increment_dropped_events_by(
-                    "lifecycle_assembler_storage_error",
-                    1,
-                );
-            }
+            let outcome = if is_orphan {
+                "written_orphan"
+            } else {
+                "written"
+            };
+            metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => outcome)
+                .increment(1);
         }
-    }
-    if wrote > 0 {
-        let outcome = if is_orphan {
-            "written_orphan"
-        } else {
-            "written"
-        };
-        metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => outcome)
-            .increment(wrote);
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                shadow_event_id = %event_id,
+                "lifecycle event assembler: failed to persist row",
+            );
+            cc_lb_observability::increment_dropped_events_by(
+                "lifecycle_assembler_storage_error",
+                1,
+            );
+        }
     }
 }
 
@@ -315,7 +250,6 @@ async fn flush_expired_terminations(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
     partials: &mut HashMap<EventId, Partial>,
-    mode: AssemblerMode,
 ) {
     let now = Instant::now();
     let expired: Vec<EventId> = partials
@@ -341,7 +275,6 @@ async fn flush_expired_terminations(
             write_finalized_rows(
                 storage,
                 bus,
-                mode,
                 &event_id,
                 &partial,
                 &term.reason,
@@ -358,7 +291,6 @@ async fn force_flush_terminations(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
     partials: &mut HashMap<EventId, Partial>,
-    mode: AssemblerMode,
 ) {
     let pending: Vec<EventId> = partials
         .iter()
@@ -373,7 +305,6 @@ async fn force_flush_terminations(
             write_finalized_rows(
                 storage,
                 bus,
-                mode,
                 &event_id,
                 &partial,
                 &term.reason,
@@ -390,7 +321,6 @@ async fn handle_event(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
     partials: &mut HashMap<EventId, Partial>,
-    mode: AssemblerMode,
     map_cap: usize,
     event: LifecycleEvent,
 ) {
@@ -428,7 +358,6 @@ async fn handle_event(
             write_finalized_rows(
                 storage,
                 bus,
-                mode,
                 &event_id,
                 &partial,
                 reason,
@@ -463,7 +392,6 @@ async fn handle_event(
             write_finalized_rows(
                 storage,
                 bus,
-                mode,
                 &event_id,
                 &partial,
                 &termination.reason,
@@ -499,7 +427,6 @@ async fn handle_event(
         write_finalized_rows(
             storage,
             bus,
-            mode,
             &event_id,
             &partial,
             &term.reason,
@@ -901,8 +828,7 @@ mod tests {
     async fn success_terminated_persists_row_with_shadow_event_id() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle =
-            spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly, None);
+        let handle = spawn_request_event_assembler(rx, store.clone(), None);
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-1"),
@@ -953,8 +879,7 @@ mod tests {
     async fn stream_error_terminated_carries_error_type_and_message() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle =
-            spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly, None);
+        let handle = spawn_request_event_assembler(rx, store.clone(), None);
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-2"),
@@ -1003,8 +928,7 @@ mod tests {
     async fn parse_failed_terminated_still_persists_error_code() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle =
-            spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly, None);
+        let handle = spawn_request_event_assembler(rx, store.clone(), None);
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-3"),
@@ -1047,8 +971,7 @@ mod tests {
     async fn terminated_without_partial_writes_orphan_row() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle =
-            spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly, None);
+        let handle = spawn_request_event_assembler(rx, store.clone(), None);
 
         tx.send(LifecycleEvent::RequestTerminated {
             event_id: eid("orphan-terminated"),
@@ -1096,56 +1019,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn both_mode_persists_legacy_and_shadow_rows_from_same_terminate() {
-        let (tx, rx) = mpsc::channel(16);
-        let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), AssemblerMode::Both, None);
-
-        tx.send(LifecycleEvent::RequestStarted {
-            event_id: eid("legacy-both-1"),
-            request_id: "req-both-1".into(),
-            ts_ms: 1_730_000_000_000,
-            stream: false,
-        })
-        .await
-        .unwrap();
-        tx.send(LifecycleEvent::RequestTerminated {
-            event_id: eid("legacy-both-1"),
-            reason: TerminationReason::Success,
-            client_status: 200,
-            duration_ms: 7,
-            first_body_chunk_ms: None,
-            internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
-            proxy_setup_ms: None,
-            upstream_body_ms: None,
-        })
-        .await
-        .unwrap();
-        drop(tx);
-        handle.shutdown().await;
-
-        let rows = store.rows.lock().unwrap();
-        assert_eq!(
-            rows.len(),
-            2,
-            "Both mode must persist both legacy and shadow rows"
-        );
-        let legacy = rows
-            .iter()
-            .find(|r| r.shadow_event_id.is_none())
-            .expect("legacy row");
-        let shadow = rows
-            .iter()
-            .find(|r| r.shadow_event_id.as_deref() == Some("legacy-both-1"))
-            .expect("shadow row");
-        assert_eq!(legacy.event_id.as_deref(), Some("legacy-both-1"));
-        assert_ne!(shadow.event_id.as_deref(), Some("legacy-both-1"));
-        assert!(shadow.event_id.is_some());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn shadow_row_write_republishes_to_bus_for_admin_sse() {
         use crate::event_bus::{InMemoryBus, RequestEventPhase};
 
@@ -1158,7 +1031,6 @@ mod tests {
         let handle = spawn_request_event_assembler(
             rx,
             store.clone(),
-            AssemblerMode::ShadowOnly,
             Some(bus.clone() as Arc<dyn RequestEventBus>),
         );
 

@@ -130,10 +130,9 @@ fn write_config_with_extra(
     let data_dir = path.parent().expect("config path has parent");
     let storage_path = storage_path.display();
     let data_dir = data_dir.display();
-    // Extra TOML goes at the top so bare top-level keys (e.g.
-    // `request_event_writer_source = "both"`) attach to the root table
-    // instead of the last-declared section (which would happen if extra_toml
-    // were appended after e.g. `[egress]`).
+    // Extra TOML goes at the top so bare top-level keys attach to the root
+    // table instead of the last-declared section (which would happen if
+    // extra_toml were appended after e.g. `[egress]`).
     let extra_prefix = if extra_toml.is_empty() {
         String::new()
     } else {

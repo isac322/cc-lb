@@ -170,10 +170,6 @@
         "warm_set_cap": 32
       }
     },
-    "request_event_writer_source": {
-      "$ref": "#/$defs/RequestEventWriterSource",
-      "default": "shadow"
-    },
     "runtime": {
       "$ref": "#/$defs/RuntimeConfig",
       "default": {
@@ -920,15 +916,6 @@
         }
       },
       "additionalProperties": false
-    },
-    "RequestEventWriterSource": {
-      "description": "RFC-0002 Phase 6 writer cutover switch.\n\n- `Shadow` (default): only the assembler writer persists rows.\n- `Both`: both writers persist rows. Rows carry distinct `event_id`s and\n  the shadow row also carries `shadow_event_id` pointing at the legacy\n  row's `event_id`. Diff via the comparison SQL in\n  `docs/runbook/lifecycle-shadow.md`.\n- `Legacy`: only the pre-RFC-0002 writer persists rows. Preserved as an\n  emergency rollback switch until Phase 13 removes the legacy path.",
-      "type": "string",
-      "enum": [
-        "legacy",
-        "both",
-        "shadow"
-      ]
     },
     "RuntimeConfig": {
       "type": "object",

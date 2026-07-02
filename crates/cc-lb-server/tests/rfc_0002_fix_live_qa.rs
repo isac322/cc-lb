@@ -211,8 +211,6 @@ async fn live_qa_3_unknown_route_and_method_not_allowed_do_not_write_row() {
 #[tokio::test]
 async fn live_qa_6b_shadow_assembler_populates_cost_cache_usage_fields() {
     let extra = r#"
-request_event_writer_source = "shadow"
-
 [lifecycle_cache_observation_subscriber]
 enabled = true
 
@@ -265,8 +263,6 @@ enabled = true
 #[tokio::test]
 async fn live_qa_6c_shadow_assembler_populates_stream_fields() {
     let extra = r#"
-request_event_writer_source = "shadow"
-
 [lifecycle_cache_observation_subscriber]
 enabled = true
 

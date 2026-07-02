@@ -56,8 +56,6 @@ pub mod model_resolution;
 #[allow(dead_code)]
 mod rate_limit_headers;
 #[cfg(not(loom))]
-pub mod request_event_writer;
-#[cfg(not(loom))]
 pub mod request_timing;
 #[cfg(not(loom))]
 mod sse_error_frame;
@@ -123,8 +121,8 @@ pub use error_normalizer::{ErrorNormalizer, NormalizerError, UpstreamKind};
 pub use event_bus::{
     BusError, BusReceiver, DEFAULT_BROADCAST_CAPACITY, DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY,
     DEFAULT_LIFECYCLE_BROADCAST_CAPACITY, DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY,
-    DEFAULT_LIFECYCLE_PRICING_CAPACITY, DEFAULT_LIFECYCLE_WRITER_CAPACITY, DEFAULT_WRITER_CAPACITY,
-    InMemoryBus, LifecycleBusReceiver, RequestEventBus, RequestEventPhase, RequestEventUpdate,
+    DEFAULT_LIFECYCLE_PRICING_CAPACITY, DEFAULT_LIFECYCLE_WRITER_CAPACITY, InMemoryBus,
+    LifecycleBusReceiver, RequestEventBus, RequestEventPhase, RequestEventUpdate,
     new_in_memory_bus, record_dashboard_sse_lagged,
 };
 #[cfg(not(loom))]
@@ -179,8 +177,6 @@ pub use rate_limit_headers::{
     UnifiedQuotaObservation, clamp_utilization_fraction, parse_anthropic_unified_headers,
     percent_to_utilization_fraction,
 };
-#[cfg(not(loom))]
-pub use request_event_writer::{RequestEventWriterHandle, spawn_request_event_writer};
 #[cfg(not(loom))]
 pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
 #[cfg(not(loom))]

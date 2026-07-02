@@ -14,10 +14,8 @@
 //!
 //! ## Shutdown protocol
 //!
-//! Mirrors
-//! [`RequestEventWriterHandle::shutdown`](crate::request_event_writer::RequestEventWriterHandle::shutdown):
-//! signal, drain, await. Late lifecycle events after shutdown are lost;
-//! this is acceptable because the legacy path already persisted the row.
+//! Signal, drain, await. Late lifecycle events after shutdown are lost;
+//! this is acceptable because the assembler already persisted the row.
 
 use cc_lb_lifecycle::LifecycleEvent;
 use tokio::sync::{mpsc, oneshot};

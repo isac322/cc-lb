@@ -1,27 +1,18 @@
-//! Cross-component bus for `RequestEvent` lifecycle updates.
+//! Cross-component bus for `RequestEvent` lifecycle updates delivered to
+//! admin SSE subscribers.
 //!
 //! Every payload is a [`RequestEventUpdate`] tagged with
 //! [`RequestEventPhase::Partial`] (mid-flight snapshot for live UI updates) or
-//! [`RequestEventPhase::Final`] (one-shot terminal snapshot that the durable
-//! consumer persists to `request_events_v1`).
+//! [`RequestEventPhase::Final`] (one-shot terminal snapshot). The RFC-0002
+//! `lifecycle_event_assembler` publishes finalized shadow rows on this bus so
+//! the admin dashboard receives the same row that was persisted.
 //!
-//! ## Two consumer roles
+//! Subscribers obtained via [`RequestEventBus::subscribe`] are backed by
+//! `tokio::sync::broadcast`. Slow consumers receive `RecvError::Lagged(n)` and
+//! emit a `resync_required` UI signal instead of back-pressuring the producer.
 //!
-//! - **Durable consumer** (at most one per bus): the DB writer task. Receives
-//!   updates via [`InMemoryBus::attach_writer`] — a dedicated bounded mpsc so
-//!   the writer's pace cannot be affected by slow ephemeral consumers.
-//! - **Ephemeral consumers** (many): admin SSE subscribers powering the live
-//!   dashboard. Obtained via [`RequestEventBus::subscribe`] and backed by
-//!   `tokio::sync::broadcast`. Slow consumers receive `RecvError::Lagged(n)`
-//!   and emit a `resync_required` UI signal instead of back-pressuring the
-//!   producer.
-//!
-//! ## Publish semantics
-//!
-//! [`RequestEventBus::publish`] is **synchronous and non-blocking**. The proxy
-//! hot path and the `LifecycleContext` `Drop` fallback both call it without
-//! `.await`. Failures (no receivers, writer mpsc full) increment metrics and
-//! `tracing::warn!` but never block the producer.
+//! [`RequestEventBus::publish`] is synchronous and non-blocking; a
+//! `SendError` from no live receivers is silently swallowed.
 
 use std::sync::{Arc, Mutex};
 
@@ -32,12 +23,6 @@ use tokio::sync::{broadcast, mpsc};
 
 /// Default capacity for the broadcast channel powering admin SSE subscribers.
 pub const DEFAULT_BROADCAST_CAPACITY: usize = 1024;
-
-/// Default capacity for the durable DB-writer mpsc channel.
-///
-/// At typical 30 RPS this absorbs ~136 seconds of burst before drop-newest
-/// engages.
-pub const DEFAULT_WRITER_CAPACITY: usize = 4096;
 
 /// Default capacity for the lifecycle-event broadcast channel.
 ///
@@ -134,9 +119,9 @@ pub enum LifecycleBusReceiver {
     InMemory(broadcast::Receiver<LifecycleEvent>),
 }
 
-/// Transport-agnostic event sink used by `Lifecycle` (producer), the DB writer
-/// task (durable consumer via [`InMemoryBus::attach_writer`]), and the admin
-/// SSE handler (ephemeral consumer via [`subscribe`](RequestEventBus::subscribe)).
+/// Transport-agnostic event sink used by the `lifecycle_event_assembler`
+/// (producer) and the admin SSE handler (ephemeral consumer via
+/// [`subscribe`](RequestEventBus::subscribe)).
 pub trait RequestEventBus: Send + Sync + 'static {
     /// Publish an event update. **Synchronous, non-blocking.**
     ///
@@ -172,7 +157,6 @@ pub struct InMemoryBus {
 
 struct InMemoryBusInner {
     broadcast_tx: broadcast::Sender<RequestEventUpdate>,
-    writer_tx: Mutex<Option<mpsc::Sender<RequestEventUpdate>>>,
     lifecycle_broadcast_tx: broadcast::Sender<LifecycleEvent>,
     lifecycle_writer_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_assembler_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
@@ -202,7 +186,6 @@ impl InMemoryBus {
         Self {
             inner: Arc::new(InMemoryBusInner {
                 broadcast_tx,
-                writer_tx: Mutex::new(None),
                 lifecycle_broadcast_tx,
                 lifecycle_writer_tx: Mutex::new(None),
                 lifecycle_assembler_tx: Mutex::new(None),
@@ -220,27 +203,9 @@ impl InMemoryBus {
         }
     }
 
-    /// Attach the durable DB-writer consumer.
-    ///
-    /// Returns the receiver to be moved into the writer task. Only one writer
-    /// may be attached; subsequent calls replace the previous sender (the
-    /// previous receiver still sees its already-buffered items but no new
-    /// publishes).
-    pub fn attach_writer(&self, capacity: usize) -> mpsc::Receiver<RequestEventUpdate> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        let mut guard = self
-            .inner
-            .writer_tx
-            .lock()
-            .expect("event bus writer mutex poisoned");
-        *guard = Some(tx);
-        rx
-    }
-
     /// Attach the durable Phase-2 lifecycle-writer consumer
-    /// (`LifecycleEventLogger`).
-    ///
-    /// Semantics mirror [`Self::attach_writer`].
+    /// (`LifecycleEventLogger`). Only one may be attached; subsequent calls
+    /// replace the previous sender.
     pub fn attach_lifecycle_writer(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
         let (tx, rx) = mpsc::channel(capacity.max(1));
         let mut guard = self
@@ -406,41 +371,7 @@ impl Default for InMemoryBus {
 
 impl RequestEventBus for InMemoryBus {
     fn publish(&self, update: RequestEventUpdate) {
-        // Broadcast to ephemeral SSE consumers (best-effort, drop-oldest on
-        // lag with `Lagged(n)` signal). `SendError` is returned only when
-        // there are no live receivers — fine, swallow.
-        let _ = self.inner.broadcast_tx.send(update.clone());
-
-        // Try-send to durable writer (drop-newest on full + warn metric).
-        // Lock held briefly (just to clone the Sender handle).
-        let writer_tx = {
-            let guard = self
-                .inner
-                .writer_tx
-                .lock()
-                .expect("event bus writer mutex poisoned");
-            guard.clone()
-        };
-        if let Some(tx) = writer_tx {
-            match tx.try_send(update) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    cc_lb_observability::increment_dropped_events_by(
-                        "request_event_writer_full",
-                        1,
-                    );
-                    tracing::warn!(
-                        request_id = %dropped.event.request_id,
-                        phase = dropped.phase.as_str(),
-                        "request event writer mpsc full; dropping event (DB row may be missing)",
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    // Writer task exited; expected during shutdown.
-                    tracing::debug!("request event writer mpsc closed");
-                }
-            }
-        }
+        let _ = self.inner.broadcast_tx.send(update);
     }
 
     fn subscribe(&self) -> BusReceiver {
@@ -797,12 +728,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_fans_out_to_broadcast_and_writer() {
+    async fn publish_delivers_to_sse_subscribers() {
         let bus = InMemoryBus::new();
         let BusReceiver::InMemory(mut rx_sse) = bus.subscribe() else {
             panic!("InMemoryBus should yield InMemory receiver");
         };
-        let mut rx_writer = bus.attach_writer(8);
 
         bus.publish(RequestEventUpdate::partial(sample_event("req-1")));
         bus.publish(RequestEventUpdate::final_(sample_event("req-2")));
@@ -813,26 +743,12 @@ mod tests {
         assert_eq!(sse_a.event.request_id, "req-1");
         assert_eq!(sse_b.phase, RequestEventPhase::Final);
         assert_eq!(sse_b.event.request_id, "req-2");
-
-        let wrt_a = rx_writer.recv().await.expect("writer partial");
-        let wrt_b = rx_writer.recv().await.expect("writer final");
-        assert_eq!(wrt_a.event.request_id, "req-1");
-        assert_eq!(wrt_b.event.request_id, "req-2");
     }
 
     #[tokio::test]
     async fn publish_with_no_subscribers_is_noop() {
         let bus = InMemoryBus::new();
         bus.publish(RequestEventUpdate::final_(sample_event("orphan")));
-    }
-
-    #[tokio::test]
-    async fn writer_full_drops_newest_silently() {
-        let bus = InMemoryBus::new();
-        let _rx = bus.attach_writer(1);
-        bus.publish(RequestEventUpdate::final_(sample_event("a")));
-        // Second publish observes mpsc-full and increments the dropped metric.
-        bus.publish(RequestEventUpdate::final_(sample_event("b")));
     }
 
     #[tokio::test]
