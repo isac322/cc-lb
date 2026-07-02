@@ -35,6 +35,7 @@ pub mod instrumented_connector;
 #[cfg(not(loom))]
 pub mod lifecycle;
 #[cfg(not(loom))]
+pub mod lifecycle_cache_observation_subscriber;
 pub mod lifecycle_event_assembler;
 pub mod lifecycle_event_logger;
 pub mod lifecycle_hook_adapter;
@@ -128,6 +129,9 @@ pub use lifecycle::{
     observe_subscription_quota_headers, parse_request_cache_breakpoints,
 };
 #[cfg(not(loom))]
+pub use lifecycle_cache_observation_subscriber::{
+    CacheObservationSubscriberHandle, spawn_lifecycle_cache_observation_subscriber,
+};
 pub use lifecycle_event_assembler::{RequestEventAssemblerHandle, spawn_request_event_assembler};
 pub use lifecycle_event_logger::{LifecycleEventLoggerHandle, spawn_lifecycle_event_logger};
 pub use lifecycle_hook_adapter::{

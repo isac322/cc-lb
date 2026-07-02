@@ -46,6 +46,7 @@ pub(crate) struct UsageCounts {
 }
 
 impl UsageCounts {
+    #[allow(dead_code)]
     pub(crate) fn apply_extras_to(&self, event: &mut RequestEvent) {
         if !self.present {
             return;

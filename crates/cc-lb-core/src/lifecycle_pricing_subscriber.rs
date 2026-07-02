@@ -290,6 +290,7 @@ mod tests {
                 model: Some("claude-sonnet-4-5-20250929".into()),
                 stream: false,
                 body_bytes: 100,
+                ..ParseInfo::default()
             }),
         })
         .await
