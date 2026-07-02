@@ -1,7 +1,12 @@
 [package]
 name = "cc-lb-plugin-api"
+<<<<<<< Updated upstream
 # Plugin trio (see crates/cc-lb-pdk/Cargo.toml for policy).
 version = "0.2.1"
+=======
+# Public crates.io surface — sole published crate after the Extism removal sweep.
+version = "0.4.0"
+>>>>>>> Stashed changes
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
