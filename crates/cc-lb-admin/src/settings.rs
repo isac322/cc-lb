@@ -235,56 +235,6 @@ pub async fn put_draft(
     })
 }
 
-#[allow(dead_code)]
-pub(crate) async fn apply_draft_principal_change<T, E, F>(
-    storage: &dyn Storage,
-    current: &dyn CurrentConfig,
-    saved_at_unix_secs: u64,
-    mut transform: F,
-) -> Result<Result<(u64, T), E>, SettingsError>
-where
-    F: FnMut(&mut Value) -> Result<T, E>,
-{
-    let state = storage.get_config_draft().await?;
-    let expected_revision = state.revision;
-    let mut draft = match state.draft {
-        Some(draft) => draft,
-        None => serde_json::to_value(&*current.current_config())?,
-    };
-
-    let Some(draft_object) = draft.as_object_mut() else {
-        return Err(SettingsError::ValidationFailed {
-            detail: "draft_root_must_be_object".to_owned(),
-        });
-    };
-    let principals = draft_object
-        .entry("principals".to_owned())
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    if !principals.is_object() {
-        return Err(SettingsError::ValidationFailed {
-            detail: "draft_principals_must_be_object".to_owned(),
-        });
-    }
-
-    let outcome = match transform(principals) {
-        Ok(outcome) => outcome,
-        Err(error) => return Ok(Err(error)),
-    };
-    let revision = storage
-        .put_config_draft(
-            ConfigDraftState {
-                draft: Some(draft),
-                revision: 0,
-                last_validated_revision: None,
-                last_validation_error: None,
-                saved_at_unix_secs: Some(saved_at_unix_secs),
-            },
-            expected_revision,
-        )
-        .await?;
-    Ok(Ok((revision, outcome)))
-}
-
 pub async fn validate_draft(
     storage: &dyn Storage,
     request: ValidateConfigDraftRequest,
