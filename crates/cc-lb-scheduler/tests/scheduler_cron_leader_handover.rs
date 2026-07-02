@@ -202,7 +202,7 @@ mod postgres {
             &entity_queue_config(),
         );
         tokio::spawn(async move {
-            ApalisWorkerBuilder::new(ADAPTIVE_QUEUE)
+            ApalisWorkerBuilder::new(format!("{ADAPTIVE_QUEUE}-{replica}"))
                 .backend(storage)
                 .data(EntityState {
                     replica,

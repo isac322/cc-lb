@@ -98,7 +98,6 @@ impl PostgresLeaderElection {
     }
 
     pub async fn heartbeat(&self) -> Result<(), LeaderError> {
-        self.ensure_connected().await?;
         let mut guard = self.connection.lock().await;
         let connection = guard.as_mut().ok_or(LeaderError::NotConnected)?;
         sqlx::query_scalar::<_, i32>("SELECT 1")

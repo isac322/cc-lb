@@ -339,10 +339,10 @@ impl LazyRefresher {
     ) -> Result<(), LazyRefreshError> {
         let deadline = tokio::time::Instant::now() + self.contention.wait_timeout;
         loop {
-            let Some(upstream) = self
+            let Some(current_generation) = self
                 .stores
                 .upstreams
-                .get_by_id(upstream_id)
+                .read_oauth_token_generation(upstream_id)
                 .await
                 .map_err(lazy_error)?
             else {
@@ -350,7 +350,7 @@ impl LazyRefresher {
                     reason: "oauth upstream not found".to_owned(),
                 });
             };
-            if upstream.oauth_token_generation > starting_generation {
+            if current_generation > starting_generation {
                 return Ok(());
             }
 
@@ -362,13 +362,13 @@ impl LazyRefresher {
                     .map_err(lazy_error)?;
                 if !matches!(task_state, LazyRefreshTaskState::Active) {
                     // The worker may have committed complete_refresh AND marked the task
-                    // terminal between our upstream read above and this task_state read.
-                    // Re-read the upstream so we observe its post-commit state before
+                    // terminal between our generation read above and this task_state read.
+                    // Re-read the generation so we observe its post-commit state before
                     // concluding that the job completed without advancing the generation.
-                    let Some(post_terminal) = self
+                    let Some(post_terminal_generation) = self
                         .stores
                         .upstreams
-                        .get_by_id(upstream_id)
+                        .read_oauth_token_generation(upstream_id)
                         .await
                         .map_err(lazy_error)?
                     else {
@@ -376,7 +376,7 @@ impl LazyRefresher {
                             reason: "oauth upstream not found".to_owned(),
                         });
                     };
-                    if post_terminal.oauth_token_generation > starting_generation {
+                    if post_terminal_generation > starting_generation {
                         return Ok(());
                     }
                     return match task_state {
@@ -1241,6 +1241,19 @@ mod tests {
             _holder: &str,
         ) -> StorageResult<bool> {
             Ok(true)
+        }
+
+        async fn task_state(&self, _idempotency_key: &str) -> StorageResult<LazyRefreshTaskState> {
+            if self
+                .completed_generation
+                .lock()
+                .expect("completed lock")
+                .is_some()
+            {
+                Ok(LazyRefreshTaskState::Done)
+            } else {
+                Ok(LazyRefreshTaskState::Active)
+            }
         }
     }
 

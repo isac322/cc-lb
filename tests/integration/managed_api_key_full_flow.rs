@@ -259,6 +259,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     );
     seed_runtime_state(&none_storage_path, upstream.uri(), "anon").await?;
     let none_server = StartedServer::start(none_config).await?;
+    wait_for_price_catalog().await?;
     let none_response = send_message(&client, &none_server.proxy_url, None).await?;
     assert_eq!(
         none_response.status(),
