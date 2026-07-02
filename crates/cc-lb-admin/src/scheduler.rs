@@ -27,7 +27,6 @@ pub fn router() -> Router<AdminState> {
 #[derive(Debug, Serialize)]
 struct SchedulerStatusResponse {
     schedule_version: &'static str,
-    leader_status: &'static str,
     recurring_jobs: Vec<SchedulerRecurringJobStatus>,
     pool_in_use: u32,
     pool_idle: u32,
@@ -55,7 +54,6 @@ async fn status(State(state): State<AdminState>) -> Response {
     match scheduler.status(&config.scheduler).await {
         Ok(snapshot) => Json(SchedulerStatusResponse {
             schedule_version: SCHEDULE_VERSION,
-            leader_status: snapshot.leader_status,
             recurring_jobs: snapshot.recurring_jobs,
             pool_in_use: snapshot.pool_in_use,
             pool_idle: snapshot.pool_idle,

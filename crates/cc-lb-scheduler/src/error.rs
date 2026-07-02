@@ -12,9 +12,6 @@ pub enum SchedulerError {
 
     #[error("scheduler task conflict: {0}")]
     Conflict(String),
-
-    #[error("leader election error: {0}")]
-    LeaderElection(String),
 }
 
 impl SchedulerError {

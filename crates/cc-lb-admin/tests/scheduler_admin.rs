@@ -17,7 +17,6 @@ async fn scheduler_admin_sqlite_status_and_failures() -> Result<(), Box<dyn std:
     let (status, status_body) =
         support::authed_json(app.clone(), "GET", "/admin/scheduler/status", &[]).await?;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(status_body["leader_status"], "single");
     assert_eq!(
         status_body["schedule_version"].as_str().unwrap_or(""),
         "unknown"
@@ -65,13 +64,9 @@ async fn scheduler_admin_postgres_status_and_failures() -> Result<(), Box<dyn st
     let result = async {
         support::seed_postgres_failed_warmup(&fixture.pool).await?;
         let app = support::app_with_scheduler(fixture.handle.clone());
-        let (status, body) =
+        let (status, _body) =
             support::authed_json(app.clone(), "GET", "/admin/scheduler/status", &[]).await?;
         assert_eq!(status, StatusCode::OK);
-        assert!(matches!(
-            body["leader_status"].as_str(),
-            Some("single" | "follower" | "leader")
-        ));
         let (failures_status, failures_body) = support::authed_json(
             app.clone(),
             "GET",

@@ -192,8 +192,6 @@ fn assert_required_metric_names(rendered: &str) {
         scheduler_metrics::JOBS_TOTAL,
         scheduler_metrics::JOB_DURATION_SECONDS,
         scheduler_metrics::FAILURES_TOTAL,
-        scheduler_metrics::LEADER_ACQUIRED_TOTAL,
-        scheduler_metrics::LEADER_LOST_TOTAL,
         scheduler_metrics::INIT_FAILURE,
         scheduler_metrics::LAZY_REFRESH_TIMEOUT_TOTAL,
         scheduler_metrics::PRUNE_ROWS_REMOVED_TOTAL,

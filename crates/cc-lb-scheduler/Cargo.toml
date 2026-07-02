@@ -57,10 +57,6 @@ uuid = { workspace = true }
 name = "spike_uniqueness_postgres"
 required-features = ["postgres"]
 
-[[test]]
-name = "spike_cron_leader"
-required-features = ["postgres"]
-
 [dev-dependencies]
 async-trait = { workspace = true }
 axum.workspace = true

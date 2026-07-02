@@ -16,7 +16,6 @@ fn scheduler_toml_round_trips_overrides() {
     let config: Config = toml::from_str(
         r#"
 [scheduler]
-leader_lock_key = 42
 dlq_retention_days = 7
 entity_concurrency = 4
 singleton_concurrency = 1
@@ -63,7 +62,6 @@ warmup_effect_retention_days = 14
     let reparsed: Config = toml::from_str(&serialized).unwrap();
 
     assert_eq!(reparsed.scheduler, config.scheduler);
-    assert_eq!(reparsed.scheduler.leader_lock_key, 42);
     assert_eq!(reparsed.scheduler.separate_pool.max_connections, 3);
     assert_eq!(reparsed.scheduler.retry_classes.adaptive.max_attempts, 6);
     assert_eq!(

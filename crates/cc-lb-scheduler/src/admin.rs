@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use cc_lb_config::SchedulerConfig;
 use serde::Serialize;
@@ -7,7 +6,6 @@ use sqlx::Row as _;
 use uuid::Uuid;
 
 use crate::error::{Result, SchedulerError};
-use crate::leader_election::{LeaderElection, LeaderState};
 use crate::worker::{
     ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, CronJob, SchedulerBackend, SchedulerPushTask,
 };
@@ -15,12 +13,10 @@ use crate::worker::{
 #[derive(Clone, Debug)]
 pub struct SchedulerAdminHandle {
     backend: SchedulerBackend,
-    leader: Arc<LeaderElection>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SchedulerStatusSnapshot {
-    pub leader_status: &'static str,
     pub recurring_jobs: Vec<SchedulerRecurringJobStatus>,
     pub pool_in_use: u32,
     pub pool_idle: u32,
@@ -51,8 +47,8 @@ struct RecurringRuntime {
 }
 
 impl SchedulerAdminHandle {
-    pub const fn new(backend: SchedulerBackend, leader: Arc<LeaderElection>) -> Self {
-        Self { backend, leader }
+    pub const fn new(backend: SchedulerBackend) -> Self {
+        Self { backend }
     }
 
     pub async fn push_adaptive_task(&self, task: SchedulerPushTask<AdaptiveJob>) -> Result<()> {
@@ -102,7 +98,6 @@ impl SchedulerAdminHandle {
             .collect();
 
         Ok(SchedulerStatusSnapshot {
-            leader_status: self.leader.current_state().as_str(),
             recurring_jobs,
             pool_in_use,
             pool_idle,
@@ -386,10 +381,4 @@ fn usize_to_u32(value: usize) -> u32 {
 
 fn i64_to_u64(value: i64, field: &str) -> Result<u64> {
     u64::try_from(value).map_err(|_| SchedulerError::Job(format!("{field} is negative")))
-}
-
-impl From<LeaderState> for &'static str {
-    fn from(value: LeaderState) -> Self {
-        value.as_str()
-    }
 }

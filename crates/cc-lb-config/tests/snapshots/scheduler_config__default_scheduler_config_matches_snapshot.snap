@@ -11,7 +11,6 @@ expression: "SchedulerConfig::default()"
     "statement_timeout_secs": 30,
     "sslmode": "prefer"
   },
-  "leader_lock_key": 224417894236161,
   "retry_classes": {
     "probe": {
       "max_attempts": 3,

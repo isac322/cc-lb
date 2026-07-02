@@ -34,7 +34,6 @@ pub const DEFAULT_FILES_CAP_BYTES: u64 = 100 * 1024 * 1024;
 pub const DEFAULT_OAUTH_AEAD_KEY_ENV: &str = "CC_LB_MASTER_KEY";
 pub const DEFAULT_ADMIN_TOKEN_ENV: &str = "CC_LB_ADMIN_TOKEN";
 pub const DEFAULT_SQLITE_PATH: &str = "/var/lib/cc-lb/storage.sqlite";
-pub const DEFAULT_SCHEDULER_LEADER_LOCK_KEY: i64 = 0xCC1B_5CDE_0001_i64;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -401,8 +400,6 @@ impl Default for PostgresPoolConfig {
 pub struct SchedulerConfig {
     #[serde(default)]
     pub separate_pool: SchedulerPoolConfig,
-    #[serde(default = "default_scheduler_leader_lock_key")]
-    pub leader_lock_key: i64,
     #[serde(default)]
     pub retry_classes: SchedulerRetryClasses,
     #[serde(
@@ -428,7 +425,6 @@ impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
             separate_pool: SchedulerPoolConfig::default(),
-            leader_lock_key: DEFAULT_SCHEDULER_LEADER_LOCK_KEY,
             retry_classes: SchedulerRetryClasses::default(),
             recurring_jobs: default_scheduler_recurring_jobs(),
             idempotency: SchedulerIdempotencyConfig::default(),
@@ -1111,10 +1107,6 @@ fn default_scheduler_pool_max_connections() -> u32 {
 
 fn default_scheduler_pool_min_connections() -> u32 {
     SchedulerPoolConfig::default().min_connections
-}
-
-fn default_scheduler_leader_lock_key() -> i64 {
-    DEFAULT_SCHEDULER_LEADER_LOCK_KEY
 }
 
 fn default_scheduler_recurring_jobs() -> HashMap<String, RecurringJobConfig> {

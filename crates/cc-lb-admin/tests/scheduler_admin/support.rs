@@ -96,10 +96,7 @@ pub async fn sqlite_fixture()
     });
     Ok(RouteFixture {
         pool,
-        handle: SchedulerAdminHandle::new(
-            backend,
-            Arc::new(cc_lb_scheduler::leader_election::LeaderElection::sqlite()),
-        ),
+        handle: SchedulerAdminHandle::new(backend),
     })
 }
 
@@ -205,10 +202,7 @@ pub async fn postgres_fixture() -> Result<
         db,
         RouteFixture {
             pool,
-            handle: SchedulerAdminHandle::new(
-                backend,
-                Arc::new(cc_lb_scheduler::leader_election::LeaderElection::sqlite()),
-            ),
+            handle: SchedulerAdminHandle::new(backend),
         },
     )))
 }

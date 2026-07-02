@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use cc_lb_config::{SchedulerConfig, StorageConfig};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -16,35 +14,11 @@ pub use cc_lb_scheduler::worker::SqliteSchedulerStorage;
 #[derive(Debug)]
 pub struct OpenedScheduler {
     pub backend: SchedulerBackend,
-    pub leader_connection: Option<LeaderConnectionHandle>,
 }
 
 impl OpenedScheduler {
     pub fn lazy_handle(&self) -> SchedulerBackend {
         self.backend.clone()
-    }
-
-    pub async fn probe_leader(&self) -> Result<(), SchedulerFactoryError> {
-        #[cfg(not(feature = "postgres"))]
-        {
-            let _ = self;
-            Ok(())
-        }
-        #[cfg(feature = "postgres")]
-        {
-            let Some(leader) = &self.leader_connection else {
-                return Ok(());
-            };
-            let acquired = leader
-                .election
-                .try_acquire()
-                .await
-                .map_err(leader_lock_error)?;
-            if acquired {
-                leader.election.release().await.map_err(leader_lock_error)?;
-            }
-            Ok(())
-        }
     }
 
     pub async fn spawn(
@@ -54,56 +28,13 @@ impl OpenedScheduler {
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerFactoryError> {
         self.backend
-            .spawn(config, ctx, self.leader_election(), cancel)
+            .spawn(config, ctx, cancel)
             .await
             .map_err(|error| SchedulerFactoryError::StartupFailed {
                 message: error.to_string(),
             })
     }
-
-    pub fn leader_election(&self) -> Arc<cc_lb_scheduler::leader_election::LeaderElection> {
-        #[cfg(not(feature = "postgres"))]
-        {
-            let _ = self;
-            Arc::new(cc_lb_scheduler::leader_election::LeaderElection::sqlite())
-        }
-        #[cfg(feature = "postgres")]
-        {
-            self.leader_connection
-                .as_ref()
-                .map(|connection| connection.election.clone())
-                .unwrap_or_else(|| {
-                    Arc::new(cc_lb_scheduler::leader_election::LeaderElection::sqlite())
-                })
-        }
-    }
-
-    pub fn leader_shutdown_election(
-        &self,
-    ) -> Option<Arc<cc_lb_scheduler::leader_election::LeaderElection>> {
-        #[cfg(not(feature = "postgres"))]
-        {
-            let _ = self;
-            None
-        }
-        #[cfg(feature = "postgres")]
-        {
-            self.leader_connection
-                .as_ref()
-                .map(|connection| connection.election.clone())
-        }
-    }
 }
-
-#[cfg(feature = "postgres")]
-#[derive(Clone, Debug)]
-pub struct LeaderConnectionHandle {
-    pub election: Arc<cc_lb_scheduler::leader_election::LeaderElection>,
-}
-
-#[cfg(not(feature = "postgres"))]
-#[derive(Clone, Debug)]
-pub struct LeaderConnectionHandle;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SchedulerFactoryError {
@@ -113,8 +44,6 @@ pub enum SchedulerFactoryError {
     ConnectionFailed { message: String },
     #[error("scheduler migration failed: {message}")]
     MigrationFailed { message: String },
-    #[error("scheduler leader connection failed: {message}")]
-    LeaderConnectionFailed { message: String },
     #[error("scheduler startup failed: {message}")]
     StartupFailed { message: String },
 }
@@ -165,7 +94,6 @@ async fn open_sqlite(
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(5));
-    // Force pool=1 to serialize heartbeat vs job-write inside the scheduler pool (incident 2026-06-22).
     let configured_max = scheduler.separate_pool.max_connections;
     if configured_max != 1 {
         tracing::warn!(
@@ -199,7 +127,6 @@ async fn open_sqlite(
             storage,
             clock,
         }),
-        leader_connection: None,
     })
 }
 
@@ -228,7 +155,6 @@ async fn open_postgres(
     use std::str::FromStr as _;
     use std::time::Duration;
 
-    use scheduler_sqlx::Connection as _;
     use scheduler_sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     let ssl_mode = parse_ssl_mode(&scheduler.separate_pool.sslmode)?;
@@ -261,47 +187,13 @@ async fn open_postgres(
         .connect_with(connect_options.clone())
         .await
         .map_err(|error| connection_error_with_host(url, error))?;
-    // Pin apalis's sqlx migration tracker to `cc_lb_scheduler._sqlx_migrations`
-    // so it cannot collide with the main storage's `public._sqlx_migrations`,
-    // which already records versions 1..N from `cc-lb-storage-postgres`.
-    // Without isolation, a second cc-lb-server instance opening the same DB
-    // would see the main migrations as "previously applied" and apalis
-    // `setup` would abort with `migration 1 was previously applied but is
-    // missing in the resolved migrations`. The pool's `after_connect` pins
-    // the session search_path to `cc_lb_scheduler, apalis, public` so the
-    // migration tracker lands in `cc_lb_scheduler`; apalis migration #1
-    // creates the `apalis` schema that holds the actual job tables.
-    //
-    // Concurrent boots also need a session-scoped `pg_advisory_lock` held
-    // across the migration run to serialize schema/type creation across
-    // instances. Without the lock the simultaneous `CREATE SCHEMA apalis` /
-    // `CREATE TYPE` statements from apalis migration #1 race on
-    // `pg_type_typname_nsp_index`. A transaction-scoped lock would release
-    // before sqlx's `Migrator::run` starts its own transactions, so we
-    // hold a dedicated connection for the full setup window.
     run_postgres_scheduler_setup(&connect_options, &pool).await?;
-    let leader = scheduler_sqlx::PgConnection::connect_with(&connect_options)
-        .await
-        .map_err(|error| SchedulerFactoryError::LeaderConnectionFailed {
-            message: host_only(url) + ": " + &error.to_string(),
-        })?;
-    let election = cc_lb_scheduler::leader_election::LeaderElection::from_postgres_connection(
-        url.to_owned(),
-        leader,
-        scheduler.leader_lock_key,
-    );
-    // NOTE: use `new_with_notify`; apalis-postgres' polling fetcher ignores
-    // Config::poll_strategy and uses a 1s..5min exponential backoff that
-    // stalls sparse queues and starves follower replicas under bursty pushes.
     let storage = apalis_postgres::PostgresStorage::new_with_notify(
         &pool,
         &apalis_postgres::Config::new(cc_lb_scheduler::worker::ADAPTIVE_QUEUE),
     );
     Ok(OpenedScheduler {
         backend: SchedulerBackend::Postgres(PostgresSchedulerStorage { pool, storage }),
-        leader_connection: Some(LeaderConnectionHandle {
-            election: Arc::new(election),
-        }),
     })
 }
 
@@ -347,15 +239,6 @@ async fn run_postgres_scheduler_setup(
     })
     .await
     .map_err(migration_error)?
-}
-
-#[cfg(feature = "postgres")]
-fn leader_lock_error(
-    error: cc_lb_scheduler::leader_election::LeaderError,
-) -> SchedulerFactoryError {
-    SchedulerFactoryError::LeaderConnectionFailed {
-        message: error.to_string(),
-    }
 }
 
 #[cfg(feature = "sqlite")]
