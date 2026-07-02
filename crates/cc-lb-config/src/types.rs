@@ -69,6 +69,8 @@ pub struct Config {
     #[serde(default)]
     pub lifecycle_pricing_subscriber: LifecyclePricingSubscriberConfig,
     #[serde(default)]
+    pub lifecycle_cache_observation_subscriber: LifecycleCacheObservationSubscriberConfig,
+    #[serde(default)]
     pub request_event_writer_source: RequestEventWriterSource,
     #[serde(default)]
     pub limit_reservation_ttl: LimitReservationTtlConfig,
@@ -691,6 +693,13 @@ pub struct LifecyclePricingSubscriberConfig {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecycleCacheObservationSubscriberConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 /// RFC-0002 Phase 7 background TTL sweeper for stale limit reservations.
 ///
 /// When enabled, the LimitEngine periodically walks its reservation map and
@@ -726,23 +735,28 @@ fn default_limit_reservation_tick_secs() -> u64 {
     30
 }
 
-/// RFC-0002 Phase 8 shadow subscriber for limit reservation reconciliation.
+/// RFC-0002 Phase 8 subscriber for post-response limit reservation reconciliation.
 ///
-/// - `enabled=false` (default): subscriber is not spawned; handler inline
-///   reconciles as before.
-/// - `enabled=true, shadow=true`: subscriber runs and increments a
-///   `would_reconcile` counter but does NOT touch the LimitEngine; handler
-///   inline reconcile remains authoritative.
-/// - `enabled=true, shadow=false`: subscriber calls
-///   `LimitEngine::reconcile_by_id`; the handler MUST also disable inline
-///   reconcile (see the surrounding rollout notes) to avoid double-counting.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Default: `enabled=true, shadow=false` — subscriber is authoritative; the
+/// handler no longer reconciles inline. Set `shadow=true` to compare against a
+/// legacy path (kept for debugging only). Set `enabled=false` to opt out
+/// entirely; reservations then reconcile only via TTL refund.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LifecycleLimitReconcileSubscriberConfig {
-    #[serde(default)]
-    pub enabled: bool,
     #[serde(default = "default_true_bool")]
+    pub enabled: bool,
+    #[serde(default)]
     pub shadow: bool,
+}
+
+impl Default for LifecycleLimitReconcileSubscriberConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            shadow: false,
+        }
+    }
 }
 
 fn default_true_bool() -> bool {

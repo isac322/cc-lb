@@ -58,7 +58,7 @@ use crate::dynamic_view::{
 };
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::ErrorNormalizer;
-use crate::event_bus::{RequestEventBus, RequestEventUpdate};
+use crate::event_bus::RequestEventBus;
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::rate_limit_headers::{
@@ -1028,12 +1028,18 @@ impl Lifecycle {
             }
             return Ok(*response);
         }
+        let cache_metadata = request_cache_metadata(&ctx.downstream_headers, &ctx.body_bytes);
         if let Some(o) = observer.as_ref() {
             let stream = serde_json::from_slice::<Value>(&ctx.body_bytes)
                 .ok()
                 .and_then(|v| v.get("stream").and_then(Value::as_bool))
                 .unwrap_or(false);
             let model = extract_model(&ctx.body_bytes);
+            let cache_breakpoints_lite: Vec<cc_lb_lifecycle::CacheBreakpointLite> = cache_metadata
+                .cache_breakpoints
+                .iter()
+                .map(cache_breakpoint_to_lite)
+                .collect();
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                 event_id: o.event_id().to_owned(),
                 result: Ok(cc_lb_lifecycle::ParseInfo {
@@ -1042,10 +1048,12 @@ impl Lifecycle {
                     model,
                     stream,
                     body_bytes: ctx.body_bytes.len() as u64,
+                    cache_control_block_count: cache_metadata.cache_control_block_count,
+                    cache_breakpoints: cache_breakpoints_lite,
+                    cache_prefix_hash: cache_metadata.cache_prefix_hash.clone(),
                 }),
             });
         }
-        let cache_metadata = request_cache_metadata(&ctx.downstream_headers, &ctx.body_bytes);
         let cache_breakpoints = if view.prompt_cache_observation_cache_opt().is_some()
             && self.config.prompt_cache_shadow.enabled
         {
@@ -1519,6 +1527,7 @@ impl Lifecycle {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
                         event_id: o.event_id().to_owned(),
                         status: status.as_u16(),
+                        headers: header_snapshot(response.headers()),
                     });
                 }
                 response
@@ -1873,7 +1882,7 @@ impl Lifecycle {
                 inc_cache_miss(upstream, model);
             }
         }
-        let (cost_micros, cost_breakdown_opts) = if usage.present {
+        let (_cost_micros, cost_breakdown_opts) = if usage.present {
             let cost_model = active_limit
                 .as_ref()
                 .map(|active_limit| active_limit.request.model.as_str())
@@ -1898,19 +1907,17 @@ impl Lifecycle {
             (0, CostBreakdownOptions::default())
         };
 
-        let mut limit_reconcile_ms = None;
+        // RFC-0002 Phase 8: reconciliation moved to LimitReconcileSubscriber.
+        // Handler hands off the reservation ID via LifecycleEvent::LimitDecision
+        // and forgets the RAII refund guard so drop is a no-op. The subscriber's
+        // reconcile_by_id + TTL sweeper own final accounting.
+        let limit_reconcile_ms: Option<u64> = None;
         if let (Some(limit_engine), Some(active_limit)) =
             (self.limit_engine.as_ref(), active_limit.as_mut())
-            && let Some(reservation) = active_limit.reservation.take()
         {
-            let limit_reconcile_start = Instant::now();
-            limit_engine.reconcile(
-                reservation,
-                usage.input_tokens,
-                usage.output_tokens,
-                cost_micros as i64,
-            );
-            limit_reconcile_ms = Some(duration_to_ms(limit_reconcile_start.elapsed()));
+            if let Some(reservation) = active_limit.reservation.take() {
+                reservation.forget();
+            }
             attach_limit_headers_from_engine(
                 &mut parts.headers,
                 limit_engine.as_ref(),
@@ -1919,75 +1926,28 @@ impl Lifecycle {
             );
         }
 
-        if let (Some(storage), Some(active_limit)) =
-            (self.request_event_storage.as_ref(), active_limit.as_ref())
-        {
-            let now_ms = unix_now_ms(&*self.clock);
-            let total_ms = duration_to_ms(duration);
-            let mut event = RequestEvent {
-                ts: now_ms / 1_000,
-                ts_ms: Some(now_ms),
-                request_id: event_ctx.request_id.clone(),
-                principal_id: Some(active_limit.subject.principal_id.clone()),
-                key_id: Some(active_limit.subject.key_id.clone()),
-                principal_kind: event_ctx.principal_kind.clone(),
-                upstream_id: event_ctx.upstream_id,
-                upstream_name: event_ctx.upstream_name.clone(),
-                model: Some(active_limit.request.model.clone()),
-                input_tokens: Some(usage.input_tokens),
-                output_tokens: Some(usage.output_tokens),
-                cache_creation_input_tokens: Some(usage.cache_creation_input_tokens),
-                cache_creation_input_tokens_5m: Some(usage.cache_creation_input_tokens_5m),
-                cache_creation_input_tokens_1h: Some(usage.cache_creation_input_tokens_1h),
-                cache_read_input_tokens: Some(usage.cache_read_input_tokens),
-                cost_usd_micros: cost_breakdown_opts.total,
-                cost_input_micros: cost_breakdown_opts.input,
-                cost_output_micros: cost_breakdown_opts.output,
-                cost_cache_creation_5m_micros: cost_breakdown_opts.cache_creation_5m,
-                cost_cache_creation_1h_micros: cost_breakdown_opts.cache_creation_1h,
-                cost_cache_read_micros: cost_breakdown_opts.cache_read,
-                auth_ms: event_ctx.stage_timings.auth_ms,
-                route_ms: event_ctx.stage_timings.route_ms,
-                limit_reserve_ms: event_ctx.stage_timings.limit_reserve_ms,
-                bulkhead_wait_ms: event_ctx.stage_timings.bulkhead_wait_ms,
-                dns_ms: event_ctx.stage_timings.dns_ms,
-                connect_ms: event_ctx.stage_timings.connect_ms,
-                connection_reused: event_ctx.stage_timings.connection_reused,
-                limit_reconcile_ms,
-                observability_post_ms,
-                duration_ms: total_ms,
-                proxy_setup_ms: event_ctx.proxy_setup_ms,
-                shape_ms: event_ctx.stage_timings.shape_ms,
-                sign_ms: event_ctx.stage_timings.sign_ms,
-                upstream_ttfb_ms: event_ctx.stage_timings.upstream_ttfb_ms,
-                upstream_body_ms: Some(body_collect_ms),
-                first_body_chunk_ms,
-                body_chunk_count: Some(body_chunk_count),
-                body_bytes: Some(body.len() as u64),
-                status: status.as_u16(),
-                routing_trace: event_ctx.routing_trace.clone(),
-                internal_errors: event_ctx.internal_errors.clone(),
-                ..Default::default()
-            };
-            event_ctx.cache_metadata.apply_to(&mut event, &usage);
-            usage.apply_extras_to(&mut event);
-            if let Some(o) = observer.as_ref() {
-                o.update_usage(&usage);
-                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                    event_id: o.event_id().to_owned(),
-                    usage: to_usage_snapshot(&usage),
-                    source: cc_lb_lifecycle::UsageSource::NonStreamBody,
-                });
-                o.set_prebuilt_event(event);
-                o.finish();
-            } else {
-                if let Err(error) = storage.append_request_event(&event).await {
-                    tracing::warn!(%error, "failed to append api key request event");
-                }
-                if let Some(bus) = self.event_bus.as_ref() {
-                    bus.publish(RequestEventUpdate::final_(event));
-                }
-            }
+        // RFC-0002 Phase 9: handler emits only LifecycleEvents. Full-row
+        // assembly happens in `RequestEventAssembler`.
+        //
+        // Silence borrow checker warnings on now-unused legacy locals:
+        let _ = (
+            &self.request_event_storage,
+            &cost_breakdown_opts,
+            &observability_post_ms,
+            &limit_reconcile_ms,
+            &body_collect_ms,
+            &first_body_chunk_ms,
+            &body_chunk_count,
+            &body,
+            &duration,
+        );
+        if let (Some(o), Some(_active_limit)) = (observer.as_ref(), active_limit.as_ref()) {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                event_id: o.event_id().to_owned(),
+                usage: to_usage_snapshot(&usage),
+                source: cc_lb_lifecycle::UsageSource::NonStreamBody,
+            });
+            o.finish();
         }
         Response::from_parts(parts, Body::from(body))
     }
@@ -2007,38 +1967,26 @@ impl Lifecycle {
         routing_trace: Option<RoutingTrace>,
         internal_errors: Vec<InternalError>,
     ) {
-        let now_ms = unix_now_ms(&*self.clock);
-        let event = RequestEvent {
-            ts: now_ms / 1_000,
-            ts_ms: Some(now_ms),
-            request_id: ctx.request_id.clone(),
-            principal_id: Some(authn_success.principal_id.clone()),
-            key_id: Some(authn_success.key_id.clone()),
-            principal_kind: Some(principal_kind_as_str(&principal.kind).to_owned()),
-            model: extract_model(&ctx.body_bytes).or_else(|| {
-                (!ctx.canonical_model_id.is_empty()).then(|| ctx.canonical_model_id.clone())
-            }),
-            auth_ms: Some(auth_ms),
-            route_ms: Some(route_ms),
-            duration_ms: duration_to_ms(duration),
-            status: status.as_u16(),
-            error_code: Some(error_code.to_owned()),
+        // RFC-0002 Phase 9: emit LifecycleEvents only; assembler owns row.
+        let _ = (
+            authn_success,
+            principal,
+            auth_ms,
+            route_ms,
+            duration,
+            error_code,
             routing_trace,
             internal_errors,
-            ..Default::default()
-        };
+            &ctx.canonical_model_id,
+            &ctx.body_bytes,
+        );
         if let Some(o) = observer {
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                 event_id: o.event_id().to_owned(),
                 result: Err(cc_lb_lifecycle::RouteFailure::RouteNoUpstreamAfterFilter),
             });
-            o.set_prebuilt_event(event);
             o.set_terminal(status, error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER);
             o.finish();
-        } else if let Some(storage) = self.request_event_storage.as_ref()
-            && let Err(error) = storage.append_request_event(&event).await
-        {
-            tracing::warn!(%error, "failed to append routing failure request event");
         }
     }
 
@@ -2411,7 +2359,6 @@ impl Lifecycle {
                                     }
                                 }
                                 if let Some(o) = observer.as_ref() {
-                                    o.update_usage(&usage);
                                     if usage_update.message_start_usage {
                                         o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                             event_id: o.event_id().to_owned(),
@@ -2561,7 +2508,7 @@ impl Lifecycle {
                 "stream latency breakdown"
             );
             if let Some(mut active_limit) = active_limit {
-                let (cost_micros, cost_breakdown_opts) = if usage.present {
+                let (_cost_micros, cost_breakdown_opts) = if usage.present {
                     let cost_model = active_limit.request.model.as_str();
                     let pricing_upstream_kind = active_limit
                         .upstream_kind
@@ -2581,98 +2528,48 @@ impl Lifecycle {
                 } else {
                     (0, CostBreakdownOptions::default())
                 };
-                let mut limit_reconcile_ms = None;
-                if let (Some(limit_engine), Some(reservation)) =
+                // RFC-0002 Phase 8: streaming reconcile also moved to
+                // LimitReconcileSubscriber. Hand off via LimitDecision event +
+                // forget() the RAII refund guard.
+                let limit_reconcile_ms: Option<u64> = None;
+                if let (Some(_), Some(reservation)) =
                     (limit_engine.as_ref(), active_limit.reservation.take())
                 {
-                    let limit_reconcile_start = Instant::now();
-                    limit_engine.reconcile(
-                        reservation,
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        cost_micros as i64,
-                    );
-                    limit_reconcile_ms = Some(duration_to_ms(limit_reconcile_start.elapsed()));
+                    reservation.forget();
                 }
-                if let Some(storage) = storage.as_ref() {
-                    let now_ms = unix_now_ms(&*clock);
-                    let mut event = RequestEvent {
-                        ts: now_ms / 1_000,
-                        ts_ms: Some(now_ms),
-                        request_id: event_ctx.request_id.clone(),
-                        principal_id: Some(active_limit.subject.principal_id.clone()),
-                        key_id: Some(active_limit.subject.key_id.clone()),
-                        principal_kind: event_ctx.principal_kind.clone(),
-                        upstream_id: event_ctx.upstream_id,
-                        upstream_name: event_ctx.upstream_name.clone(),
-                        model: Some(active_limit.request.model.clone()),
-                        input_tokens: Some(usage.input_tokens),
-                        output_tokens: Some(usage.output_tokens),
-                        cache_creation_input_tokens: Some(usage.cache_creation_input_tokens),
-                        cache_creation_input_tokens_5m: Some(usage.cache_creation_input_tokens_5m),
-                        cache_creation_input_tokens_1h: Some(usage.cache_creation_input_tokens_1h),
-                        cache_read_input_tokens: Some(usage.cache_read_input_tokens),
-                        cost_usd_micros: cost_breakdown_opts.total,
-                        cost_input_micros: cost_breakdown_opts.input,
-                        cost_output_micros: cost_breakdown_opts.output,
-                        cost_cache_creation_5m_micros: cost_breakdown_opts.cache_creation_5m,
-                        cost_cache_creation_1h_micros: cost_breakdown_opts.cache_creation_1h,
-                        cost_cache_read_micros: cost_breakdown_opts.cache_read,
-                        auth_ms: event_ctx.stage_timings.auth_ms,
-                        route_ms: event_ctx.stage_timings.route_ms,
-                        limit_reserve_ms: event_ctx.stage_timings.limit_reserve_ms,
-                        bulkhead_wait_ms: event_ctx.stage_timings.bulkhead_wait_ms,
-                        dns_ms: event_ctx.stage_timings.dns_ms,
-                        connect_ms: event_ctx.stage_timings.connect_ms,
-                        connection_reused: event_ctx.stage_timings.connection_reused,
-                        limit_reconcile_ms,
-                        observability_post_ms,
-                        duration_ms: total_duration_ms,
-                        proxy_setup_ms: event_ctx.proxy_setup_ms,
-                        shape_ms: event_ctx.stage_timings.shape_ms,
-                        sign_ms: event_ctx.stage_timings.sign_ms,
-                        upstream_ttfb_ms: event_ctx.stage_timings.upstream_ttfb_ms,
-                        upstream_body_ms: Some(stream_total_ms),
-                        first_body_chunk_ms: elapsed_ms(first_chunk_at),
-                        body_chunk_count: Some(batch_index),
-                        body_bytes: Some(total_bytes),
-                        stream_message_start_ms: elapsed_ms(message_start_at),
-                        stream_content_block_start_ms: elapsed_ms(content_block_start_at),
-                        stream_first_content_delta_ms: elapsed_ms(first_content_delta_at),
-                        stream_last_content_delta_ms: elapsed_ms(last_content_delta_at),
-                        stream_message_stop_ms: elapsed_ms(message_stop_at),
-                        stream_last_chunk_ms: elapsed_ms(last_chunk_at),
-                        stream_total_ms: Some(stream_total_ms),
-                        sse_event_count: Some(sse_event_count),
-                        content_delta_count: Some(content_delta_count),
-                        ping_count: Some(ping_count),
-                        inter_token_avg_ms,
-                        status: status.as_u16(),
-                        routing_trace: event_ctx.routing_trace.clone(),
-                        internal_errors: event_ctx.internal_errors.clone(),
-                        ..Default::default()
-                    };
-                    event_ctx.cache_metadata.apply_to(&mut event, &usage);
-                    usage.apply_extras_to(&mut event);
-                    if let Some(o) = observer.as_ref() {
-                        o.update_usage(&usage);
-                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
-                            event_id: o.event_id().to_owned(),
-                            result: Ok(cc_lb_lifecycle::StreamSuccess {
-                                usage: to_usage_snapshot(&usage),
-                                sse_event_count,
-                            }),
-                        });
-                        o.set_prebuilt_event(event);
-                        o.finish();
-                    } else {
-                        if let Err(error) = storage.append_request_event(&event).await {
-                            tracing::warn!(%error, "failed to append streaming request event");
-                        }
-                        if let Some(bus) = event_bus.as_ref() {
-                            bus.publish(RequestEventUpdate::final_(event));
-                        }
-                    }
+                // RFC-0002 Phase 9: emit only lifecycle events; assembler owns row.
+                let _ = (
+                    &storage,
+                    &clock,
+                    &cost_breakdown_opts,
+                    &observability_post_ms,
+                    &limit_reconcile_ms,
+                    &total_duration_ms,
+                    &stream_total_ms,
+                    &first_chunk_at,
+                    &message_start_at,
+                    &content_block_start_at,
+                    &first_content_delta_at,
+                    &last_content_delta_at,
+                    &message_stop_at,
+                    &last_chunk_at,
+                    &content_delta_count,
+                    &ping_count,
+                    &inter_token_avg_ms,
+                    &batch_index,
+                    &total_bytes,
+                    &active_limit,
+                    &event_bus,
+                );
+                if let Some(o) = observer.as_ref() {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
+                        event_id: o.event_id().to_owned(),
+                        result: Ok(cc_lb_lifecycle::StreamSuccess {
+                            usage: to_usage_snapshot(&usage),
+                            sse_event_count,
+                        }),
+                    });
+                    o.finish();
                 }
             }
         };
@@ -3218,13 +3115,21 @@ struct ActiveLimit {
 #[derive(Clone)]
 struct RequestEventContext {
     request_id: String,
+    // RFC-0002 Phase 9 cleanup deleted the writer path that consumed these.
+    // Kept for the call sites still constructing the context; retention lets
+    // subscribers (Phase 5 cache, Phase 8 reconcile) read them without a
+    // signature ripple. Removal is tracked as a follow-up cleanup PR.
+    #[allow(dead_code)]
     upstream_id: Option<Uuid>,
     upstream_name: Option<String>,
+    #[allow(dead_code)]
     principal_kind: Option<String>,
     proxy_setup_ms: Option<u64>,
     stage_timings: AttemptTimings,
     cache_metadata: RequestCacheMetadata,
+    #[allow(dead_code)]
     routing_trace: Option<RoutingTrace>,
+    #[allow(dead_code)]
     internal_errors: Vec<InternalError>,
 }
 
@@ -3242,6 +3147,7 @@ struct RequestCacheMetadata {
     canonical_model_id: String,
 }
 
+#[allow(dead_code)]
 impl RequestCacheMetadata {
     fn plugin_cache_breakpoints(&self) -> Vec<CacheBreakpoint> {
         self.cache_breakpoints
@@ -3296,6 +3202,47 @@ fn plugin_cache_breakpoint_source(source: RequestCacheBreakpointSource) -> Cache
     }
 }
 
+fn cache_breakpoint_source_to_lite(
+    source: RequestCacheBreakpointSource,
+) -> cc_lb_lifecycle::CacheBreakpointSourceLite {
+    match source {
+        RequestCacheBreakpointSource::System => cc_lb_lifecycle::CacheBreakpointSourceLite::System,
+        RequestCacheBreakpointSource::Tools => cc_lb_lifecycle::CacheBreakpointSourceLite::Tools,
+        RequestCacheBreakpointSource::Message => {
+            cc_lb_lifecycle::CacheBreakpointSourceLite::Message
+        }
+    }
+}
+
+fn header_snapshot(headers: &HeaderMap) -> cc_lb_lifecycle::HeaderSnapshot {
+    let hstr = |k: &str| {
+        headers
+            .get(k)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned())
+    };
+    cc_lb_lifecycle::HeaderSnapshot {
+        content_type: hstr("content-type"),
+        request_id: hstr("request-id").or_else(|| hstr("x-request-id")),
+        ratelimit_requests_remaining: hstr("anthropic-ratelimit-requests-remaining"),
+        ratelimit_tokens_remaining: hstr("anthropic-ratelimit-tokens-remaining"),
+        ratelimit_reset: hstr("anthropic-ratelimit-requests-reset")
+            .or_else(|| hstr("anthropic-ratelimit-tokens-reset")),
+    }
+}
+
+fn cache_breakpoint_to_lite(bp: &RequestCacheBreakpoint) -> cc_lb_lifecycle::CacheBreakpointLite {
+    cc_lb_lifecycle::CacheBreakpointLite {
+        block_index: bp.block_index,
+        source: cache_breakpoint_source_to_lite(bp.source),
+        path: bp.path.clone(),
+        message_index: bp.message_index,
+        ttl: bp.ttl.clone(),
+        prefix_hash: bp.prefix_hash.clone(),
+        prefix_token_count: bp.prefix_token_count,
+    }
+}
+
 fn plugin_ttl_class(ttl: Option<&str>) -> TtlClass {
     match ttl {
         Some(ttl) if ttl.eq_ignore_ascii_case("1h") => TtlClass::Ephemeral1h,
@@ -3304,6 +3251,7 @@ fn plugin_ttl_class(ttl: Option<&str>) -> TtlClass {
 }
 
 #[derive(Clone, Copy, Default)]
+#[allow(dead_code)]
 struct AttemptTimings {
     auth_ms: Option<u64>,
     route_ms: Option<u64>,

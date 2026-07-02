@@ -33,12 +33,17 @@ pub struct TestServer {
     pub proxy_addr: SocketAddr,
     pub admin_addr: SocketAddr,
     pub metrics_addr: SocketAddr,
+    pub sqlite_path: PathBuf,
     pub _fake: JoinHandle<Result<(), std::io::Error>>,
     pub _config_dir: TempDir,
     pub _process: TestProcess,
 }
 
 pub async fn spawn_test_server() -> TestServer {
+    spawn_test_server_with_extra_config("").await
+}
+
+pub async fn spawn_test_server_with_extra_config(extra_toml: &str) -> TestServer {
     let fake_listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind fake listener");
@@ -52,8 +57,15 @@ pub async fn spawn_test_server() -> TestServer {
     let metrics_addr = free_addr();
     let config_dir = tempfile::tempdir().expect("temp config dir");
     let config_path = config_dir.path().join("cc-lb.toml");
-    write_config(&config_path, proxy_addr, admin_addr, metrics_addr);
-    seed_storage(&config_path.with_file_name("cc-lb.sqlite"), fake_addr).await;
+    let sqlite_path = config_path.with_file_name("cc-lb.sqlite");
+    write_config_with_extra(
+        &config_path,
+        proxy_addr,
+        admin_addr,
+        metrics_addr,
+        extra_toml,
+    );
+    seed_storage(&sqlite_path, fake_addr).await;
 
     let child = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
         .arg("serve")
@@ -77,6 +89,7 @@ pub async fn spawn_test_server() -> TestServer {
         proxy_addr,
         admin_addr,
         metrics_addr,
+        sqlite_path,
         _fake: fake,
         _config_dir: config_dir,
         _process: process,
@@ -94,12 +107,31 @@ fn write_config(
     admin_addr: SocketAddr,
     metrics_addr: SocketAddr,
 ) {
+    write_config_with_extra(path, proxy_addr, admin_addr, metrics_addr, "")
+}
+
+fn write_config_with_extra(
+    path: &Path,
+    proxy_addr: SocketAddr,
+    admin_addr: SocketAddr,
+    metrics_addr: SocketAddr,
+    extra_toml: &str,
+) {
     let storage_path = path.with_file_name("cc-lb.sqlite");
     let data_dir = path.parent().expect("config path has parent");
     let storage_path = storage_path.display();
     let data_dir = data_dir.display();
+    // Extra TOML goes at the top so bare top-level keys (e.g.
+    // `request_event_writer_source = "both"`) attach to the root table
+    // instead of the last-declared section (which would happen if extra_toml
+    // were appended after e.g. `[egress]`).
+    let extra_prefix = if extra_toml.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", extra_toml.trim())
+    };
     let config = format!(
-        r#"
+        r#"{extra_prefix}
 [listener]
 proxy_addr = "{proxy_addr}"
 admin_addr = "{admin_addr}"

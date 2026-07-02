@@ -89,6 +89,7 @@ struct LimitEngineInner {
 pub struct Reservation {
     engine: Weak<LimitEngineInner>,
     pub(crate) id: ReservationId,
+    forgotten: bool,
 }
 
 impl Reservation {
@@ -96,6 +97,17 @@ impl Reservation {
     /// [`LimitEngine::reconcile_by_id`] and [`LimitEngine::refund_by_id`].
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Suppress the RAII refund on drop.
+    ///
+    /// After Phase 8 the handler hands `id` off to the reconcile subscriber
+    /// via `LifecycleEvent::LimitDecision::Reserved` and no longer holds the
+    /// reservation to completion. Without this suppressor, dropping the
+    /// handle would race the subscriber and full-refund. The TTL sweeper is
+    /// the safety net when neither the subscriber nor `forget` ever runs.
+    pub fn forget(mut self) {
+        self.forgotten = true;
     }
 }
 
@@ -355,6 +367,7 @@ impl LimitEngine {
         Ok(Reservation {
             engine: Arc::downgrade(&self.inner),
             id,
+            forgotten: false,
         })
     }
 
@@ -741,6 +754,10 @@ impl Drop for Reservation {
     fn drop(&mut self) {
         // RAII refund: if the engine still holds our record (nobody called
         // reconcile_by_id / refund_by_id / TTL sweeper), refund in full.
+        // Skipped when `forget()` was called (Phase 8 subscriber ownership).
+        if self.forgotten {
+            return;
+        }
         let Some(engine) = self.engine.upgrade() else {
             return;
         };

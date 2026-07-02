@@ -533,6 +533,7 @@ fn reject_unknown_top_level_keys(value: &Value) -> Result<(), String> {
         "lifecycle_shadow_writer",
         "lifecycle_hook_adapter",
         "lifecycle_pricing_subscriber",
+        "lifecycle_cache_observation_subscriber",
         "request_event_writer_source",
         "limit_reservation_ttl",
         "lifecycle_limit_reconcile_subscriber",

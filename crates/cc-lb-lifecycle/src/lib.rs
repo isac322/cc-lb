@@ -107,7 +107,12 @@ pub enum LifecycleEvent {
         upstream_id: Uuid,
     },
     /// Upstream returned response headers (may be pre-body).
-    UpstreamResponseStarted { event_id: EventId, status: u16 },
+    UpstreamResponseStarted {
+        event_id: EventId,
+        status: u16,
+        #[serde(default, skip_serializing_if = "HeaderSnapshot::is_empty")]
+        headers: HeaderSnapshot,
+    },
     /// Usage counts were observed from an SSE frame or non-stream body.
     UsageObserved {
         event_id: EventId,
@@ -134,16 +139,13 @@ pub enum LifecycleEvent {
         event_id: EventId,
         cost: CostBreakdown,
     },
-    /// Emitted by the Phase-5 cache observation subscriber when prompt cache
-    /// state can be inferred from the completed stream / non-stream body.
-    /// Advisory: the assembler merges the cache breakpoints + prefix into
-    /// the shadow row.
+    /// Emitted by the Phase-5 cache observation subscriber when the final
+    /// prompt-cache state can be derived from the usage counters plus
+    /// parse-time cache metadata. Advisory: the assembler merges this into
+    /// the shadow row's `cache_state` column.
     CacheObserved {
         event_id: EventId,
-        cache_read_input_tokens: u64,
-        cache_creation_input_tokens: u64,
-        cache_creation_input_tokens_5m: u64,
-        cache_creation_input_tokens_1h: u64,
+        cache_state: RequestCacheStateLite,
     },
 }
 
@@ -185,6 +187,34 @@ impl LifecycleEvent {
     }
 }
 
+/// Sanitized subset of upstream response headers carried by
+/// `LifecycleEvent::UpstreamResponseStarted` (RFC-0002 §237-241).
+/// Only compact, non-sensitive header slots are included; producers MUST
+/// NOT copy `Authorization` or similar credential-bearing headers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HeaderSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ratelimit_requests_remaining: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ratelimit_tokens_remaining: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ratelimit_reset: Option<String>,
+}
+
+impl HeaderSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.content_type.is_none()
+            && self.request_id.is_none()
+            && self.ratelimit_requests_remaining.is_none()
+            && self.ratelimit_tokens_remaining.is_none()
+            && self.ratelimit_reset.is_none()
+    }
+}
+
 /// Cost breakdown in micro-USD, produced by the pricing subscriber.
 ///
 /// Field semantics mirror `RequestEvent.cost_*_micros` for direct assembler
@@ -204,7 +234,7 @@ pub struct CostBreakdown {
 // ---------------------------------------------------------------------------
 
 /// Information extracted by the body parser.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ParseInfo {
     pub path: String,
     /// `messages`, `models`, etc.
@@ -215,6 +245,69 @@ pub struct ParseInfo {
     pub stream: bool,
     /// Byte length of the raw request body.
     pub body_bytes: u64,
+    /// Number of `cache_control` blocks observed in the request body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control_block_count: Option<u64>,
+    /// Per-block cache breakpoint metadata, ordered by input block index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cache_breakpoints: Vec<CacheBreakpointLite>,
+    /// Deterministic hash of the request prefix up to the last cache breakpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_prefix_hash: Option<String>,
+}
+
+/// Snake-case string mirror of `cc_lb_storage_api::types::RequestCacheState`.
+/// Duplicated in `cc-lb-lifecycle` so this crate stays free of `cc-lb-storage-api`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestCacheStateLite {
+    Hit,
+    Write,
+    Refresh,
+    Miss,
+    None,
+    Unknown,
+}
+
+impl RequestCacheStateLite {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Write => "write",
+            Self::Refresh => "refresh",
+            Self::Miss => "miss",
+            Self::None => "none",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Snake-case string mirror of `cc_lb_storage_api::types::RequestCacheBreakpointSource`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheBreakpointSourceLite {
+    System,
+    Tools,
+    Message,
+}
+
+/// Lightweight mirror of `cc_lb_storage_api::types::RequestCacheBreakpoint`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheBreakpointLite {
+    pub block_index: u64,
+    pub source: CacheBreakpointSourceLite,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+    pub prefix_hash: String,
+    #[serde(default, skip_serializing_if = "cache_breakpoint_token_count_is_zero")]
+    pub prefix_token_count: u64,
+}
+
+fn cache_breakpoint_token_count_is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Reason the body parser rejected the request.
@@ -451,6 +544,7 @@ mod tests {
             LifecycleEvent::UpstreamResponseStarted {
                 event_id: sample_event_id(),
                 status: 200,
+                headers: HeaderSnapshot::default(),
             }
             .kind(),
             LifecycleEvent::UsageObserved {
@@ -481,10 +575,7 @@ mod tests {
             .kind(),
             LifecycleEvent::CacheObserved {
                 event_id: sample_event_id(),
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-                cache_creation_input_tokens_5m: 0,
-                cache_creation_input_tokens_1h: 0,
+                cache_state: RequestCacheStateLite::Unknown,
             }
             .kind(),
         ];

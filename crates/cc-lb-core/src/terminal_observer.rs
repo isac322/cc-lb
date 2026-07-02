@@ -11,9 +11,9 @@
 //!    Anthropic and exposed to PDK plugins and therefore non-unique.
 //! 2. As each request phase completes, the lifecycle code calls
 //!    `attach_principal`, `attach_route`, `attach_model`, etc. to populate
-//!    state.
-//! 3. The SSE parser calls `update_usage` to refresh token counters mid-flight.
-//! 4. On normal completion the lifecycle calls [`LifecycleContext::finish`]
+//!    IDENTITY state. Post-Phase-9 the observer no longer tracks usage/cache;
+//!    those fields live on `LifecycleEvent`s owned by the assembler subscriber.
+//! 3. On normal completion the lifecycle calls [`LifecycleContext::finish`]
 //!    which:
 //!      1. atomically CAS-es `finalized: false → true`,
 //!      2. snapshots state,
@@ -40,15 +40,12 @@ use std::time::Instant;
 
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_plugin_api::{InternalError, RoutingTrace};
-use cc_lb_storage_api::{
-    RequestCacheBreakpoint, RequestCacheState, RequestEvent, RequestEventUpstream,
-};
+use cc_lb_storage_api::{RequestEvent, RequestEventUpstream};
 use http::StatusCode;
 use uuid::Uuid;
 
 use crate::clock::{ClockHandle, unix_millis};
 use crate::event_bus::{RequestEventBus, RequestEventUpdate};
-use crate::usage_parser::UsageCounts;
 
 /// Outcome category catalog. Every terminal call site must use one of these
 /// constants. `terminal_dropped` is reserved for the `Drop` fallback path.
@@ -105,16 +102,6 @@ struct TerminalState {
     upstream_error_message: Option<String>,
     routing_trace: Option<RoutingTrace>,
     internal_errors: Vec<InternalError>,
-    usage: UsageCounts,
-    cache_state: Option<RequestCacheState>,
-    cache_control_block_count: Option<u64>,
-    cache_breakpoints: Vec<RequestCacheBreakpoint>,
-    cache_prefix_hash: Option<String>,
-    /// Set by success paths (non-stream complete, stream complete) that build
-    /// the full event with all timing/cost/streaming metric fields inline.
-    /// When present, `make_request_event` returns this as-is with `event_id`
-    /// forced to the observer's, rather than synthesizing from state.
-    prebuilt_event: Option<RequestEvent>,
 }
 
 impl LifecycleContext {
@@ -172,14 +159,6 @@ impl LifecycleContext {
         self.lock_state().model = Some(model);
     }
 
-    // TODO(rfc-0002-phase-9-cutover): remove once the assembler subscriber
-    // (Phase 3) becomes the authoritative writer and legacy state on the
-    // observer is no longer read by `make_request_event`. Subscribers own
-    // usage state via `LifecycleEvent::UsageObserved` after cutover.
-    pub(crate) fn update_usage(&self, usage: &UsageCounts) {
-        self.lock_state().usage = usage.clone();
-    }
-
     #[allow(dead_code)]
     pub(crate) fn record_internal_error(&self, error: InternalError) {
         self.lock_state().internal_errors.push(error);
@@ -203,36 +182,6 @@ impl LifecycleContext {
         let mut state = self.lock_state();
         state.upstream_error_type = error_type;
         state.upstream_error_message = error_message;
-    }
-
-    /// Replace the synthesized event with a fully-built one (success paths
-    /// that already construct the entire event inline with timing/cost/stream
-    /// metric fields). `make_request_event` will return this verbatim with
-    /// `event_id` forced to the observer's value.
-    ///
-    // TODO(rfc-0002-phase-9-cutover): remove once the assembler subscriber
-    // owns the entire success-path row assembly. Currently retained so the
-    // legacy writer path stays byte-identical during Phase 6 shadow rollout.
-    pub(crate) fn set_prebuilt_event(&self, event: RequestEvent) {
-        self.lock_state().prebuilt_event = Some(event);
-    }
-
-    // TODO(rfc-0002-phase-9-cutover): remove once cache observations flow
-    // exclusively through `LifecycleEvent::CacheObserved` and the assembler
-    // subscriber owns cache-state assembly on the shadow row.
-    #[allow(dead_code)]
-    pub(crate) fn attach_cache_metadata(
-        &self,
-        cache_state: Option<RequestCacheState>,
-        cache_control_block_count: Option<u64>,
-        cache_breakpoints: Vec<RequestCacheBreakpoint>,
-        cache_prefix_hash: Option<String>,
-    ) {
-        let mut state = self.lock_state();
-        state.cache_state = cache_state;
-        state.cache_control_block_count = cache_control_block_count;
-        state.cache_breakpoints = cache_breakpoints;
-        state.cache_prefix_hash = cache_prefix_hash;
     }
 
     /// Synchronous publish of the terminal event. Returns silently if another
@@ -306,23 +255,17 @@ impl LifecycleContext {
 }
 
 impl Inner {
+    /// RFC-0002 Phase 9: the observer only synthesises a MINIMAL RequestEvent
+    /// carrying identity + termination fields. Full-fidelity fields (usage,
+    /// cost, cache, streaming metrics) are owned by the assembler subscriber
+    /// which builds them from LifecycleEvents.
     fn make_request_event(&self, fallback_error_code: Option<&'static str>) -> RequestEvent {
         let state = self
             .state
             .lock()
             .expect("terminal observer state mutex poisoned");
-        if let Some(mut event) = state.prebuilt_event.clone() {
-            event.event_id = Some(self.event_id.clone());
-            if event.error_code.is_none() {
-                event.error_code = state
-                    .error_code
-                    .or(fallback_error_code)
-                    .map(|s| s.to_owned());
-            }
-            return event;
-        }
         let duration_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        let mut event = RequestEvent {
+        RequestEvent {
             ts: self.started_unix_ms / 1_000,
             ts_ms: Some(self.started_unix_ms),
             event_id: Some(self.event_id.clone()),
@@ -344,28 +287,8 @@ impl Inner {
             upstream_error_message: state.upstream_error_message.clone(),
             routing_trace: state.routing_trace.clone(),
             internal_errors: state.internal_errors.clone(),
-            cache_state: state.cache_state,
-            cache_control_block_count: state.cache_control_block_count,
-            cache_breakpoints: state.cache_breakpoints.clone(),
-            cache_prefix_hash: state.cache_prefix_hash.clone(),
-            input_tokens: state.usage.present.then_some(state.usage.input_tokens),
-            output_tokens: state.usage.present.then_some(state.usage.output_tokens),
-            cache_creation_input_tokens: state
-                .usage
-                .present
-                .then_some(state.usage.cache_creation_input_tokens),
-            cache_creation_input_tokens_5m: (state.usage.cache_creation_input_tokens_5m > 0)
-                .then_some(state.usage.cache_creation_input_tokens_5m),
-            cache_creation_input_tokens_1h: (state.usage.cache_creation_input_tokens_1h > 0)
-                .then_some(state.usage.cache_creation_input_tokens_1h),
-            cache_read_input_tokens: state
-                .usage
-                .present
-                .then_some(state.usage.cache_read_input_tokens),
             ..Default::default()
-        };
-        state.usage.apply_extras_to(&mut event);
-        event
+        }
     }
 }
 
@@ -489,34 +412,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_usage_is_reflected_in_final() {
-        let bus = Arc::new(InMemoryBus::new());
-        let mut rx = bus.attach_writer(8);
-        let clock: ClockHandle = Arc::new(SystemClock);
-        let observer = LifecycleContext::new(
-            "req_usage".to_owned(),
-            bus.clone() as Arc<dyn RequestEventBus>,
-            &clock,
-        );
-
-        let usage = UsageCounts {
-            present: true,
-            input_tokens: 42,
-            output_tokens: 100,
-            thinking_tokens: 16,
-            ..UsageCounts::default()
-        };
-        observer.update_usage(&usage);
-        observer.set_terminal(StatusCode::OK, error_codes::UPSTREAM_4XX);
-        observer.finish();
-
-        let update = rx.recv().await.expect("update delivered");
-        assert_eq!(update.event.input_tokens, Some(42));
-        assert_eq!(update.event.output_tokens, Some(100));
-        assert_eq!(update.event.thinking_tokens, Some(16));
-    }
-
-    #[tokio::test]
     async fn publish_partial_snapshot_emits_partial_without_finalizing() {
         let bus = Arc::new(InMemoryBus::new());
         let mut rx = bus.attach_writer(8);
@@ -526,29 +421,15 @@ mod tests {
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
         );
-        observer.update_usage(&UsageCounts {
-            present: true,
-            input_tokens: 5,
-            output_tokens: 12,
-            ..UsageCounts::default()
-        });
         observer.publish_partial_snapshot();
-        observer.update_usage(&UsageCounts {
-            present: true,
-            input_tokens: 5,
-            output_tokens: 42,
-            ..UsageCounts::default()
-        });
         observer.publish_partial_snapshot();
         observer.set_terminal(StatusCode::OK, error_codes::UPSTREAM_4XX);
         observer.finish();
 
         let first = rx.recv().await.expect("first partial");
         assert_eq!(first.phase, RequestEventPhase::Partial);
-        assert_eq!(first.event.output_tokens, Some(12));
         let second = rx.recv().await.expect("second partial");
         assert_eq!(second.phase, RequestEventPhase::Partial);
-        assert_eq!(second.event.output_tokens, Some(42));
         let final_ev = rx.recv().await.expect("final");
         assert_eq!(final_ev.phase, RequestEventPhase::Final);
         assert_eq!(
