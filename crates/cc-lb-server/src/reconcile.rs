@@ -115,8 +115,17 @@ impl Reconciler {
         .await
         {
             Ok(view) => {
-                self.holder.store(view);
-                metrics::counter!("cclb_reconcile_total", "outcome" => "changed").increment(1);
+                // Reconcile is a background rebuilder that can race with
+                // admin-triggered rebinds. If our view is stale relative
+                // to whatever the admin path just published, drop it —
+                // resurrecting a deleted slot via an old generation is
+                // the concrete failure mode Sprint 2 fixes.
+                if self.holder.try_store_if_newer(view) {
+                    metrics::counter!("cclb_reconcile_total", "outcome" => "changed").increment(1);
+                } else {
+                    metrics::counter!("cclb_reconcile_total", "outcome" => "stale").increment(1);
+                    tracing::debug!("reconcile view rejected: newer generation already resident");
+                }
             }
             Err(error) => {
                 tracing::warn!(error = %error, "dynamic reconciliation rebuild failed");
