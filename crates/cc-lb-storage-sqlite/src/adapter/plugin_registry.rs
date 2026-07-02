@@ -6,8 +6,7 @@ use cc_lb_storage_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256, MAX_WASM_BLOB_BYTES, PluginBlobRepo,
     PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
     PluginRegistryStore, PluginSlot, RepoError, StorageError, StorageResult, WasmBlob,
-    WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, sparse_order,
-    validate_identifier,
+    WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
 };
 use serde_json::Value;
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
@@ -908,5 +907,3 @@ fn slots_from_json(value: &str) -> StorageResult<Vec<PluginSlot>> {
         .filter_map(|slot| PluginSlot::parse(&slot))
         .collect())
 }
-
-
