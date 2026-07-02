@@ -32,12 +32,6 @@ use crate::error::WasmtimeRuntimeError;
 use cc_lb_plugin_types::schema as wire_schema;
 use wasmparser::{ExternalKind, Parser, Payload};
 
-/// Re-exported filter wire-schema tag — kept for callers that used the
-/// Phase 1 single-hook constant. New callers should use
-/// [`cc_lb_plugin_types::schema::WIRE_SCHEMA_TAG_FILTER`] directly or
-/// route through [`SlotKind`].
-pub const WIRE_SCHEMA_TAG: &[u8] = wire_schema::WIRE_SCHEMA_TAG_FILTER;
-
 const PLUGIN_META_SECTION: &str = "cc_lb.plugin.v1";
 const REQUIRED_MEMORY_EXPORT: &str = "memory";
 const ALWAYS_REQUIRED_FUNC_EXPORTS: &[&str] = &["cc_lb_alloc", "cc_lb_free"];

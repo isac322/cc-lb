@@ -1,12 +1,11 @@
-//! Wasmtime-based [`PluginRuntime`] implementation.
+//! Wasmtime-backed plugin runtime.
 //!
 //! Registers slots per hook kind via [`WasmtimeRuntime::register_filter`]
 //! / [`register_shape`][WasmtimeRuntime::register_shape] /
 //! [`register_observe`][WasmtimeRuntime::register_observe], returning
 //! the `Arc<PluginSlot>` callers store in their dynamic view.
 //!
-//! See `docs/rfc/0001-plugin-runtime-vnext.md` and
-//! `.omo/plans/extism-removal.md`.
+//! See `docs/rfc/0001-plugin-runtime-vnext.md`.
 #![deny(unsafe_code)]
 
 mod cache;
@@ -24,19 +23,14 @@ pub use cache::{
 pub use cell::{PluginCell, PluginSlot};
 pub use engine::{HostState, HotEngineConfig, build_hot_engine};
 pub use error::WasmtimeRuntimeError;
-pub use inspect::{ModuleInspection, SlotKind, WIRE_SCHEMA_TAG, inspect_wasm};
+pub use inspect::{ModuleInspection, SlotKind, inspect_wasm};
 pub use module::compile_module;
 pub use plugin::{WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeUpstreamDialect};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-#[allow(deprecated)]
-use cc_lb_plugin_api::RouterPlugin;
 use cc_lb_plugin_api::SlotKey;
-use cc_lb_plugin_api::{
-    ObservabilityHook, PluginManifest, PluginRuntime, RuntimeError, UpstreamDialect,
-};
 use parking_lot::RwLock;
 use wasmtime::{Engine, Linker};
 
@@ -363,36 +357,6 @@ impl WasmtimeRuntime {
         };
         metrics::gauge!("cc_lb_plugin_pool_memories_utilization_ratio").set(memories_util);
         metrics::gauge!("cc_lb_plugin_pool_core_instances_utilization_ratio").set(instances_util);
-    }
-}
-
-#[allow(deprecated)]
-impl PluginRuntime for WasmtimeRuntime {
-    fn instantiate_router(
-        &self,
-        _manifest: &PluginManifest,
-    ) -> Result<Arc<dyn RouterPlugin>, RuntimeError> {
-        unimplemented!("router wire deprecated; never implemented on wasmtime runtime")
-    }
-
-    fn instantiate_dialect(
-        &self,
-        _manifest: &PluginManifest,
-    ) -> Result<Arc<dyn UpstreamDialect>, RuntimeError> {
-        unimplemented!(
-            "Stage 3 wires manifest → register_shape → WasmtimeUpstreamDialect; \
-             callers should use register_shape + WasmtimeUpstreamDialect::new directly until then"
-        )
-    }
-
-    fn instantiate_observability(
-        &self,
-        _manifest: &PluginManifest,
-    ) -> Result<Arc<dyn ObservabilityHook>, RuntimeError> {
-        unimplemented!(
-            "Stage 3 wires manifest → register_observe → WasmtimeObservabilityHookPlugin; \
-             callers should use register_observe + WasmtimeObservabilityHookPlugin::new directly until then"
-        )
     }
 }
 

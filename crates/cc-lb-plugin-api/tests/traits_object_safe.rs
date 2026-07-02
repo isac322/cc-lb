@@ -1,14 +1,12 @@
-#![allow(deprecated)]
-
 use async_trait::async_trait;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, PluginManifest,
-    PluginRuntime, Principal, RequestContext, RetryDecision, RouteDecision, RouteError,
-    RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError,
-    SignerFactory, SigningCapability, Upstream, UpstreamCandidate, UpstreamDialect,
+    DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext,
+    RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest, ShapedRequestBuilder,
+    SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
+    UpstreamCandidate, UpstreamDialect,
 };
 use http::{HeaderMap, Method, StatusCode};
 
@@ -17,7 +15,6 @@ struct DummyDialect;
 struct DummySigner;
 struct DummyFactory;
 struct DummyObserve;
-struct DummyRuntime;
 
 impl RouterPlugin for DummyRouter {
     fn route(
@@ -83,36 +80,6 @@ impl ObservabilityHook for DummyObserve {
     }
 }
 
-impl PluginRuntime for DummyRuntime {
-    fn instantiate_router(
-        &self,
-        _manifest: &PluginManifest,
-    ) -> Result<Arc<dyn RouterPlugin>, cc_lb_plugin_api::RuntimeError> {
-        Ok(Arc::new(DummyRouter))
-    }
-
-    fn instantiate_dialect(
-        &self,
-        _manifest: &PluginManifest,
-    ) -> Result<Arc<dyn UpstreamDialect>, cc_lb_plugin_api::RuntimeError> {
-        Ok(Arc::new(DummyDialect))
-    }
-
-    fn instantiate_signer_factory(
-        &self,
-        _manifest: &PluginManifest,
-    ) -> Result<Arc<dyn SignerFactory>, cc_lb_plugin_api::RuntimeError> {
-        Ok(Arc::new(DummyFactory))
-    }
-
-    fn instantiate_observability(
-        &self,
-        _manifest: &PluginManifest,
-    ) -> Result<Arc<dyn ObservabilityHook>, cc_lb_plugin_api::RuntimeError> {
-        Ok(Arc::new(DummyObserve))
-    }
-}
-
 #[test]
 fn all_traits_are_object_safe() {
     let _: Box<dyn RouterPlugin> = Box::new(DummyRouter);
@@ -120,5 +87,4 @@ fn all_traits_are_object_safe() {
     let _: Box<dyn Signer> = Box::new(DummySigner);
     let _: Box<dyn SignerFactory> = Box::new(DummyFactory);
     let _: Box<dyn ObservabilityHook> = Box::new(DummyObserve);
-    let _: Box<dyn PluginRuntime> = Box::new(DummyRuntime);
 }

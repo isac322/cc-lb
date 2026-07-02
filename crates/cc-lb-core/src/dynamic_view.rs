@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwap;

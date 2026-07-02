@@ -7,14 +7,12 @@ use std::sync::Arc;
 use cc_lb_aead::AeadService;
 use cc_lb_config::StorageConfig;
 use cc_lb_storage_api::{
-    BackendKind, ManagedKeyStore, MetaStore, PluginBlobRepo, PluginRegistryRepo, Storage,
-    StorageResult,
+    BackendKind, ManagedKeyStore, MetaStore, PluginBlobRepo, Storage, StorageResult,
 };
 
 pub struct OpenedStorage {
     pub storage: Arc<dyn Storage>,
     pub managed_key_store: Arc<dyn ManagedKeyStore>,
-    pub plugin_registry_repo: Arc<dyn PluginRegistryRepo>,
     pub plugin_blob_repo: Arc<dyn PluginBlobRepo>,
 }
 
@@ -117,7 +115,6 @@ async fn open_sqlite(
     Ok(OpenedStorage {
         storage: storage.clone() as Arc<dyn Storage>,
         managed_key_store: storage.clone() as Arc<dyn ManagedKeyStore>,
-        plugin_registry_repo: storage.clone() as Arc<dyn PluginRegistryRepo>,
         plugin_blob_repo: storage as Arc<dyn PluginBlobRepo>,
     })
 }
@@ -184,9 +181,6 @@ async fn open_postgres(
             message: host_only(url) + ": " + &error.to_string(),
         })?;
 
-    let plugin_registry_repo = Arc::new(cc_lb_storage_postgres::PostgresPluginRegistryRepo::new(
-        pool.clone(),
-    )) as Arc<dyn PluginRegistryRepo>;
     let plugin_blob_repo = Arc::new(cc_lb_storage_postgres::PostgresPluginBlobRepo::new(
         pool.clone(),
     )) as Arc<dyn PluginBlobRepo>;
@@ -204,7 +198,6 @@ async fn open_postgres(
     Ok(OpenedStorage {
         storage,
         managed_key_store,
-        plugin_registry_repo,
         plugin_blob_repo,
     })
 }

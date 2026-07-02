@@ -45,7 +45,7 @@ async fn insert_chain_rejects_wire_version_above_registry_entry() {
 async fn insert_chain_accepts_wire_version_equal_to_registry_entry() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-wire-equal").await;
-    let entry = seed_registry_with_wire_version(&storage, 42, "wire-v3-plugin", 3).await;
+    let entry = seed_registry_with_wire_version(&storage, 42, "wire-v1-plugin-equal", 1).await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (status, _, body, _) = authed_json(
@@ -55,20 +55,20 @@ async fn insert_chain_accepts_wire_version_equal_to_registry_entry() {
         Some(json!({
             "slot": "Router",
             "wasm_registry_id": entry.id,
-            "wire_version": 3
+            "wire_version": 1
         })),
     )
     .await;
 
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(body["wire_version"], 3);
+    assert_eq!(body["wire_version"], 1);
 }
 
 #[tokio::test]
 async fn insert_chain_accepts_unspecified_wire_version() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-wire-unspecified").await;
-    let entry = seed_registry_with_wire_version(&storage, 43, "wire-default-plugin", 3).await;
+    let entry = seed_registry_with_wire_version(&storage, 43, "wire-default-plugin", 1).await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (status, _, body, _) = authed_json(

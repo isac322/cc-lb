@@ -9,4 +9,4 @@ pub use adapter::PostgresStorage;
 pub use adapter::managed_keys::PostgresManagedKeyStore;
 pub use cc_lb_storage_api::RuntimeChangeNotifier;
 pub use config::PostgresConfig;
-pub use plugin_registry::{PostgresPluginBlobRepo, PostgresPluginRegistryRepo};
+pub use plugin_registry::PostgresPluginBlobRepo;

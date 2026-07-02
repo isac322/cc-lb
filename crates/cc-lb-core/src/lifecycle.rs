@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fmt::Write as _;
