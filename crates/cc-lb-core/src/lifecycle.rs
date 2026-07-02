@@ -51,8 +51,7 @@ use crate::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuth
 use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as LimitReservation};
 use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
-use crate::audit_writer::{AuditEntry, AuditWriterSink};
-use crate::clock::{Clock, ClockHandle, unix_millis, unix_secs};
+use crate::clock::{Clock, ClockHandle, unix_millis};
 use crate::dynamic_view::{
     DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
 };
@@ -755,7 +754,6 @@ pub struct Lifecycle {
     config: LifecycleConfig,
     limit_engine: Option<Arc<LimitEngine>>,
     limit_subject_provider: Option<Arc<dyn LimitSubjectProvider>>,
-    audit_sink: Option<Arc<AuditWriterSink>>,
     request_event_storage: Option<Arc<dyn Storage>>,
     /// Live-tail bus for freshly-finalized `RequestEvent`s. When wired, every
     /// event appended to storage is also published here so admin dashboards
@@ -799,7 +797,6 @@ impl Lifecycle {
             config,
             limit_engine: None,
             limit_subject_provider: None,
-            audit_sink: None,
             request_event_storage: None,
             event_bus: None,
             upstream_rate_limit_sink: None,
@@ -823,7 +820,6 @@ impl Lifecycle {
             config,
             limit_engine: None,
             limit_subject_provider: None,
-            audit_sink: None,
             request_event_storage: None,
             event_bus: None,
             upstream_rate_limit_sink: None,
@@ -859,11 +855,6 @@ impl Lifecycle {
 
     pub fn event_bus(&self) -> Option<Arc<dyn crate::event_bus::RequestEventBus>> {
         self.event_bus.clone()
-    }
-
-    pub fn with_audit_sink(mut self, audit_sink: Arc<AuditWriterSink>) -> Self {
-        self.audit_sink = Some(audit_sink);
-        self
     }
 
     pub fn with_request_event_storage(mut self, storage: Arc<dyn Storage>) -> Self {
@@ -970,37 +961,6 @@ impl Lifecycle {
                 },
             }),
         )
-    }
-
-    fn enqueue_limit_audit(
-        &self,
-        ctx: &RequestContext,
-        subject: &LimitSubject,
-        request: &LimitRequest,
-        route: &cc_lb_plugin_api::RouteDecision,
-        limit_violation: &str,
-    ) {
-        let Some(audit_sink) = &self.audit_sink else {
-            return;
-        };
-        let _ = audit_sink.try_enqueue(AuditEntry {
-            ts: unix_secs(self.clock.now()),
-            request_id: ctx.request_id.clone(),
-            principal_id: subject.principal_id.clone(),
-            route: ctx.path.clone(),
-            upstream: audit_upstream_name(&route.upstream).to_owned(),
-            model: Some(request.model.clone()),
-            status: StatusCode::TOO_MANY_REQUESTS.as_u16(),
-            input_tokens: None,
-            output_tokens: None,
-            duration_ms: 0,
-            agent_label: None,
-            api_key_id: Some(subject.key_id.clone()),
-            cost_usd_micros: None,
-            limit_violation: Some(limit_violation.to_owned()),
-            admin_action: None,
-            actor: Some("system".to_owned()),
-        });
     }
 
     #[allow(clippy::explicit_auto_deref)]
@@ -1753,9 +1713,6 @@ impl Lifecycle {
             Err(reason) => {
                 record_limit_reject_metrics(&reason, &subject.key_id);
                 let limit_violation = limit_violation_name(&reason).map(|v| v.to_owned());
-                if let Some(violation) = limit_violation.as_deref() {
-                    self.enqueue_limit_audit(ctx, &subject, &limit_request, route, violation);
-                }
                 let retry_after_seconds = limit_retry_after_secs(reason.clone());
                 let reason_label = "limit_rejected".to_owned();
                 let mut response = limit_rejection_response(

@@ -100,7 +100,7 @@
     "lifecycle_limit_rejection_audit_subscriber": {
       "$ref": "#/$defs/LifecycleLimitRejectionAuditSubscriberConfig",
       "default": {
-        "enabled": false
+        "enabled": true
       }
     },
     "lifecycle_pricing_subscriber": {
@@ -601,7 +601,7 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },

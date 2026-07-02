@@ -1126,9 +1126,6 @@ async fn build_app_with_storage_inner(
         lifecycle_config,
         clock.clone(),
     );
-    if let Some(audit_sink) = audit_sink.clone() {
-        lifecycle = lifecycle.with_audit_sink(audit_sink);
-    }
     lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
     lifecycle = lifecycle.with_request_event_storage(storage.clone());
     lifecycle = lifecycle.with_event_bus(event_bus.clone());
