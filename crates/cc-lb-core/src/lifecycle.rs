@@ -23,7 +23,7 @@ use cc_lb_plugin_api::{
     UpstreamDialect, UpstreamError, UpstreamKind as CandidateUpstreamKind, shape_request,
     sign_request,
 };
-use cc_lb_pricing::{PricingStatus, global_catalog, virtual_cost_micros_full};
+use cc_lb_pricing::{PricingStatus, global_catalog};
 use cc_lb_storage_api::{
     PromptCacheObservationRecord, Storage, SubscriptionQuotaObservationRecord,
     SubscriptionQuotaSampleKind, SubscriptionQuotaSource, TtlClass as StorageTtlClass,
@@ -57,7 +57,7 @@ use crate::dynamic_view::{
 };
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::ErrorNormalizer;
-use crate::event_bus::{RequestEventBus, RequestEventUpdate};
+use crate::event_bus::RequestEventBus;
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::rate_limit_headers::{
@@ -1206,29 +1206,13 @@ impl Lifecycle {
             &pipeline_result.candidates,
         );
         if pipeline_result.candidates.is_empty() {
-            let route_ms = duration_to_ms(route_start.elapsed());
             let message = "no upstream candidates remain after routing filters";
             observe_error(hooks, "route_no_upstream_after_filter", message, "router");
-            let mut internal_errors = pipeline_result.internal_errors.clone();
-            internal_errors.push(InternalError {
-                stage: InternalErrorStage::Router,
-                kind: InternalErrorKind::ConfigError,
-                message: Some(message.to_owned()),
-            });
             self.emit_routing_failure_event(
                 observer.as_ref(),
-                &ctx,
-                &success,
-                &principal,
-                auth_ms,
-                route_ms,
-                started.elapsed(),
                 StatusCode::SERVICE_UNAVAILABLE,
-                "route_no_upstream_after_filter",
                 Some(pipeline_result.routing_trace(terminal_decision.clone())),
-                internal_errors,
-            )
-            .await;
+            );
             let response = anthropic_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "route_no_upstream_after_filter",
@@ -1358,7 +1342,6 @@ impl Lifecycle {
             );
             o.set_routing_trace(routing_trace_value);
         }
-        let pricing_context = PricingContext::new(&route.upstream, &ctx.body_bytes);
         let prompt_cache_observation_context = prompt_cache_observation_context(
             &view,
             resolved_upstream_id,
@@ -1600,7 +1583,6 @@ impl Lifecycle {
             .finish_success_response(
                 response,
                 active_limit.take(),
-                &pricing_context,
                 started.elapsed(),
                 status,
                 hooks,
@@ -1715,7 +1697,6 @@ impl Lifecycle {
         &self,
         response: Response<Body>,
         active_limit: Option<ActiveLimit>,
-        pricing_context: &PricingContext,
         duration: Duration,
         status: StatusCode,
         hooks: &[Arc<dyn ObservabilityHook>],
@@ -1737,7 +1718,6 @@ impl Lifecycle {
                 Instant::now() - duration,
                 stream_hooks,
                 active_limit.take(),
-                pricing_context.clone(),
                 event_ctx.clone(),
                 prompt_cache_observation_context,
                 observer,
@@ -1815,8 +1795,7 @@ impl Lifecycle {
                 PromptCacheUsage::from(&usage),
             );
         }
-        let observability_post_ms = if usage.present {
-            let observability_post_start = Instant::now();
+        if usage.present {
             observe_many(
                 hooks,
                 ObserveEvent::RequestFinished {
@@ -1828,35 +1807,7 @@ impl Lifecycle {
                     duration_ms: duration_to_ms(duration),
                 },
             );
-            Some(duration_to_ms(observability_post_start.elapsed()))
-        } else {
-            None
-        };
-        let (_cost_micros, cost_breakdown_opts) = if usage.present {
-            let cost_model = active_limit
-                .as_ref()
-                .map(|active_limit| active_limit.request.model.as_str())
-                .unwrap_or(pricing_context.model.as_str());
-            let pricing_upstream_kind = active_limit
-                .as_ref()
-                .and_then(|active_limit| active_limit.upstream_kind)
-                .or(pricing_context.pricing_upstream_kind);
-            let breakdown = virtual_cost_micros_full(
-                cost_model,
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.cache_creation_input_tokens_5m,
-                usage.cache_creation_input_tokens_1h,
-                usage.cache_read_input_tokens,
-                pricing_upstream_kind,
-            );
-            let cost_micros = breakdown.total_micros.max(0) as u64;
-            (cost_micros, cost_breakdown_to_event_options(&breakdown))
-        } else {
-            (0, CostBreakdownOptions::default())
-        };
-
-        let limit_reconcile_ms = None;
+        }
         if let (Some(limit_engine), Some(active_limit)) =
             (self.limit_engine.as_ref(), active_limit.as_mut())
             && let Some(reservation) = active_limit.reservation.take()
@@ -1870,138 +1821,50 @@ impl Lifecycle {
             );
         }
 
-        if let (Some(storage), Some(active_limit)) =
-            (self.request_event_storage.as_ref(), active_limit.as_ref())
-        {
-            let now_ms = unix_now_ms(&*self.clock);
-            let total_ms = duration_to_ms(duration);
-            let mut event = RequestEvent {
-                ts: now_ms / 1_000,
-                ts_ms: Some(now_ms),
-                request_id: event_ctx.request_id.clone(),
-                principal_id: Some(active_limit.subject.principal_id.clone()),
-                key_id: Some(active_limit.subject.key_id.clone()),
-                principal_kind: event_ctx.principal_kind.clone(),
-                upstream_id: event_ctx.upstream_id,
-                upstream_name: event_ctx.upstream_name.clone(),
-                model: Some(active_limit.request.model.clone()),
-                input_tokens: Some(usage.input_tokens),
-                output_tokens: Some(usage.output_tokens),
-                cache_creation_input_tokens: Some(usage.cache_creation_input_tokens),
-                cache_creation_input_tokens_5m: Some(usage.cache_creation_input_tokens_5m),
-                cache_creation_input_tokens_1h: Some(usage.cache_creation_input_tokens_1h),
-                cache_read_input_tokens: Some(usage.cache_read_input_tokens),
-                cost_usd_micros: cost_breakdown_opts.total,
-                cost_input_micros: cost_breakdown_opts.input,
-                cost_output_micros: cost_breakdown_opts.output,
-                cost_cache_creation_5m_micros: cost_breakdown_opts.cache_creation_5m,
-                cost_cache_creation_1h_micros: cost_breakdown_opts.cache_creation_1h,
-                cost_cache_read_micros: cost_breakdown_opts.cache_read,
-                auth_ms: event_ctx.stage_timings.auth_ms,
-                route_ms: event_ctx.stage_timings.route_ms,
-                limit_reserve_ms: event_ctx.stage_timings.limit_reserve_ms,
-                bulkhead_wait_ms: event_ctx.stage_timings.bulkhead_wait_ms,
-                dns_ms: event_ctx.stage_timings.dns_ms,
-                connect_ms: event_ctx.stage_timings.connect_ms,
-                connection_reused: event_ctx.stage_timings.connection_reused,
-                limit_reconcile_ms,
-                observability_post_ms,
-                duration_ms: total_ms,
-                proxy_setup_ms: event_ctx.proxy_setup_ms,
-                shape_ms: event_ctx.stage_timings.shape_ms,
-                sign_ms: event_ctx.stage_timings.sign_ms,
-                upstream_ttfb_ms: event_ctx.stage_timings.upstream_ttfb_ms,
-                upstream_body_ms: Some(body_collect_ms),
-                first_body_chunk_ms,
-                body_chunk_count: Some(body_chunk_count),
-                body_bytes: Some(body.len() as u64),
-                status: status.as_u16(),
-                routing_trace: event_ctx.routing_trace.clone(),
-                internal_errors: event_ctx.internal_errors.clone(),
-                ..Default::default()
-            };
-            event_ctx.cache_metadata.apply_to(&mut event, &usage);
-            usage.apply_extras_to(&mut event);
-            if let Some(o) = observer.as_ref() {
-                o.update_usage(&usage);
-                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
-                    event_id: o.event_id().to_owned(),
+        if let Some(o) = observer.as_ref() {
+            o.update_usage(&usage);
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
+                event_id: o.event_id().to_owned(),
+                usage: to_usage_snapshot(&usage),
+                source: cc_lb_lifecycle::UsageSource::NonStreamBody,
+            });
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
+                event_id: o.event_id().to_owned(),
+                result: Ok(cc_lb_lifecycle::StreamSuccess {
                     usage: to_usage_snapshot(&usage),
-                    source: cc_lb_lifecycle::UsageSource::NonStreamBody,
-                });
-                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
-                    event_id: o.event_id().to_owned(),
-                    result: Ok(cc_lb_lifecycle::StreamSuccess {
-                        usage: to_usage_snapshot(&usage),
-                        sse_event_count: 0,
-                        body_bytes: Some(body.len() as u64),
-                        body_chunk_count: Some(body_chunk_count),
-                        first_body_chunk_ms,
-                        ..Default::default()
-                    }),
-                });
-                o.set_prebuilt_event(event);
-                o.finish();
-            } else {
-                if let Err(error) = storage.append_request_event(&event).await {
-                    tracing::warn!(%error, "failed to append api key request event");
-                }
-                if let Some(bus) = self.event_bus.as_ref() {
-                    bus.publish(RequestEventUpdate::final_(event));
-                }
-            }
+                    sse_event_count: 0,
+                    body_bytes: Some(body.len() as u64),
+                    body_chunk_count: Some(body_chunk_count),
+                    first_body_chunk_ms,
+                    ..Default::default()
+                }),
+            });
+            o.set_termination_timings(
+                None,
+                None,
+                event_ctx.proxy_setup_ms,
+                Some(body_collect_ms),
+                first_body_chunk_ms,
+            );
+            o.finish();
         }
         Response::from_parts(parts, Body::from(body))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn emit_routing_failure_event(
+    fn emit_routing_failure_event(
         &self,
         observer: Option<&LifecycleContext>,
-        ctx: &RequestContext,
-        authn_success: &AuthnSuccess,
-        principal: &Principal,
-        auth_ms: u64,
-        route_ms: u64,
-        duration: Duration,
         status: StatusCode,
-        error_code: &str,
         routing_trace: Option<RoutingTrace>,
-        internal_errors: Vec<InternalError>,
     ) {
-        let now_ms = unix_now_ms(&*self.clock);
-        let event = RequestEvent {
-            ts: now_ms / 1_000,
-            ts_ms: Some(now_ms),
-            request_id: ctx.request_id.clone(),
-            principal_id: Some(authn_success.principal_id.clone()),
-            key_id: Some(authn_success.key_id.clone()),
-            principal_kind: Some(principal_kind_as_str(&principal.kind).to_owned()),
-            model: extract_model(&ctx.body_bytes).or_else(|| {
-                (!ctx.canonical_model_id.is_empty()).then(|| ctx.canonical_model_id.clone())
-            }),
-            auth_ms: Some(auth_ms),
-            route_ms: Some(route_ms),
-            duration_ms: duration_to_ms(duration),
-            status: status.as_u16(),
-            error_code: Some(error_code.to_owned()),
-            routing_trace,
-            internal_errors,
-            ..Default::default()
-        };
         if let Some(o) = observer {
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                 event_id: o.event_id().to_owned(),
                 result: Err(cc_lb_lifecycle::RouteFailure::RouteNoUpstreamAfterFilter),
-                routing_trace: event.routing_trace.clone(),
+                routing_trace,
             });
-            o.set_prebuilt_event(event);
             o.set_terminal(status, error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER);
             o.finish();
-        } else if let Some(storage) = self.request_event_storage.as_ref()
-            && let Err(error) = storage.append_request_event(&event).await
-        {
-            tracing::warn!(%error, "failed to append routing failure request event");
         }
     }
 
@@ -2184,7 +2047,6 @@ impl Lifecycle {
         started: Instant,
         hooks: StreamHooks,
         active_limit: Option<ActiveLimit>,
-        pricing_context: PricingContext,
         event_ctx: RequestEventContext,
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
         observer: Option<LifecycleContext>,
@@ -2200,11 +2062,8 @@ impl Lifecycle {
             );
         }
         let relay_start = Instant::now();
-        let storage = self.request_event_storage.clone();
-        let event_bus = self.event_bus.clone();
         let limit_engine = self.limit_engine.clone();
         let prompt_cache_shadow_enabled = self.config.prompt_cache_shadow.enabled;
-        let clock = Arc::clone(&self.clock);
         let stream = async_stream::stream! {
             let mut usage_decoder = usage_decoder;
             let mut batch_index = 0_u64;
@@ -2437,7 +2296,6 @@ impl Lifecycle {
                 (None, None)
             };
             let total_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-            let observability_post_start = Instant::now();
             observe_many(hooks.as_slice(), ObserveEvent::RequestFinished {
                 status,
                 input_tokens,
@@ -2448,7 +2306,6 @@ impl Lifecycle {
                 cache_read_input_tokens: usage.present.then_some(usage.cache_read_input_tokens),
                 duration_ms: total_duration_ms,
             });
-            let observability_post_ms = Some(duration_to_ms(observability_post_start.elapsed()));
             let elapsed_ms = |to: Option<Instant>| {
                 to.map(|t| duration_to_ms(t.saturating_duration_since(relay_start)))
             };
@@ -2478,125 +2335,41 @@ impl Lifecycle {
                 "stream latency breakdown"
             );
             if let Some(mut active_limit) = active_limit {
-                let (_cost_micros, cost_breakdown_opts) = if usage.present {
-                    let cost_model = active_limit.request.model.as_str();
-                    let pricing_upstream_kind = active_limit
-                        .upstream_kind
-                        .or(pricing_context.pricing_upstream_kind);
-                    let breakdown = virtual_cost_micros_full(
-                        cost_model,
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        usage.cache_creation_input_tokens_5m,
-                        usage.cache_creation_input_tokens_1h,
-                        usage.cache_read_input_tokens,
-                        pricing_upstream_kind,
-                    );
-                    let cost = breakdown.total_micros.max(0) as u64;
-                    (cost, cost_breakdown_to_event_options(&breakdown))
-                } else {
-                    (0, CostBreakdownOptions::default())
-                };
-                let limit_reconcile_ms = None;
                 if let (Some(_limit_engine), Some(reservation)) =
                     (limit_engine.as_ref(), active_limit.reservation.take())
                 {
                     reservation.forget();
                 }
-                if let Some(storage) = storage.as_ref() {
-                    let now_ms = unix_now_ms(&*clock);
-                    let mut event = RequestEvent {
-                        ts: now_ms / 1_000,
-                        ts_ms: Some(now_ms),
-                        request_id: event_ctx.request_id.clone(),
-                        principal_id: Some(active_limit.subject.principal_id.clone()),
-                        key_id: Some(active_limit.subject.key_id.clone()),
-                        principal_kind: event_ctx.principal_kind.clone(),
-                        upstream_id: event_ctx.upstream_id,
-                        upstream_name: event_ctx.upstream_name.clone(),
-                        model: Some(active_limit.request.model.clone()),
-                        input_tokens: Some(usage.input_tokens),
-                        output_tokens: Some(usage.output_tokens),
-                        cache_creation_input_tokens: Some(usage.cache_creation_input_tokens),
-                        cache_creation_input_tokens_5m: Some(usage.cache_creation_input_tokens_5m),
-                        cache_creation_input_tokens_1h: Some(usage.cache_creation_input_tokens_1h),
-                        cache_read_input_tokens: Some(usage.cache_read_input_tokens),
-                        cost_usd_micros: cost_breakdown_opts.total,
-                        cost_input_micros: cost_breakdown_opts.input,
-                        cost_output_micros: cost_breakdown_opts.output,
-                        cost_cache_creation_5m_micros: cost_breakdown_opts.cache_creation_5m,
-                        cost_cache_creation_1h_micros: cost_breakdown_opts.cache_creation_1h,
-                        cost_cache_read_micros: cost_breakdown_opts.cache_read,
-                        auth_ms: event_ctx.stage_timings.auth_ms,
-                        route_ms: event_ctx.stage_timings.route_ms,
-                        limit_reserve_ms: event_ctx.stage_timings.limit_reserve_ms,
-                        bulkhead_wait_ms: event_ctx.stage_timings.bulkhead_wait_ms,
-                        dns_ms: event_ctx.stage_timings.dns_ms,
-                        connect_ms: event_ctx.stage_timings.connect_ms,
-                        connection_reused: event_ctx.stage_timings.connection_reused,
-                        limit_reconcile_ms,
-                        observability_post_ms,
-                        duration_ms: total_duration_ms,
-                        proxy_setup_ms: event_ctx.proxy_setup_ms,
-                        shape_ms: event_ctx.stage_timings.shape_ms,
-                        sign_ms: event_ctx.stage_timings.sign_ms,
-                        upstream_ttfb_ms: event_ctx.stage_timings.upstream_ttfb_ms,
-                        upstream_body_ms: Some(stream_total_ms),
-                        first_body_chunk_ms: elapsed_ms(first_chunk_at),
-                        body_chunk_count: Some(batch_index),
-                        body_bytes: Some(total_bytes),
-                        stream_message_start_ms: elapsed_ms(message_start_at),
-                        stream_content_block_start_ms: elapsed_ms(content_block_start_at),
-                        stream_first_content_delta_ms: elapsed_ms(first_content_delta_at),
-                        stream_last_content_delta_ms: elapsed_ms(last_content_delta_at),
-                        stream_message_stop_ms: elapsed_ms(message_stop_at),
-                        stream_last_chunk_ms: elapsed_ms(last_chunk_at),
-                        stream_total_ms: Some(stream_total_ms),
-                        sse_event_count: Some(sse_event_count),
-                        content_delta_count: Some(content_delta_count),
-                        ping_count: Some(ping_count),
-                        inter_token_avg_ms,
-                        status: status.as_u16(),
-                        routing_trace: event_ctx.routing_trace.clone(),
-                        internal_errors: event_ctx.internal_errors.clone(),
-                        ..Default::default()
-                    };
-                    event_ctx.cache_metadata.apply_to(&mut event, &usage);
-                    usage.apply_extras_to(&mut event);
-                    if let Some(o) = observer.as_ref() {
-                        o.update_usage(&usage);
-                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
-                            event_id: o.event_id().to_owned(),
-                            result: Ok(cc_lb_lifecycle::StreamSuccess {
-                                usage: to_usage_snapshot(&usage),
-                                sse_event_count,
-                                body_bytes: Some(total_bytes),
-                                body_chunk_count: Some(batch_index),
-                                first_body_chunk_ms: elapsed_ms(first_chunk_at),
-                                stream_message_start_ms: elapsed_ms(message_start_at),
-                                stream_content_block_start_ms: elapsed_ms(content_block_start_at),
-                                stream_first_content_delta_ms: elapsed_ms(
-                                    first_content_delta_at,
-                                ),
-                                stream_last_content_delta_ms: elapsed_ms(last_content_delta_at),
-                                stream_message_stop_ms: elapsed_ms(message_stop_at),
-                                stream_last_chunk_ms: elapsed_ms(last_chunk_at),
-                                stream_total_ms: Some(stream_total_ms),
-                                content_delta_count: Some(content_delta_count),
-                                ping_count: Some(ping_count),
-                                inter_token_avg_ms,
-                            }),
-                        });
-                        o.set_prebuilt_event(event);
-                        o.finish();
-                    } else {
-                        if let Err(error) = storage.append_request_event(&event).await {
-                            tracing::warn!(%error, "failed to append streaming request event");
-                        }
-                        if let Some(bus) = event_bus.as_ref() {
-                            bus.publish(RequestEventUpdate::final_(event));
-                        }
-                    }
+                if let Some(o) = observer.as_ref() {
+                    o.update_usage(&usage);
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
+                        event_id: o.event_id().to_owned(),
+                        result: Ok(cc_lb_lifecycle::StreamSuccess {
+                            usage: to_usage_snapshot(&usage),
+                            sse_event_count,
+                            body_bytes: Some(total_bytes),
+                            body_chunk_count: Some(batch_index),
+                            first_body_chunk_ms: elapsed_ms(first_chunk_at),
+                            stream_message_start_ms: elapsed_ms(message_start_at),
+                            stream_content_block_start_ms: elapsed_ms(content_block_start_at),
+                            stream_first_content_delta_ms: elapsed_ms(first_content_delta_at),
+                            stream_last_content_delta_ms: elapsed_ms(last_content_delta_at),
+                            stream_message_stop_ms: elapsed_ms(message_stop_at),
+                            stream_last_chunk_ms: elapsed_ms(last_chunk_at),
+                            stream_total_ms: Some(stream_total_ms),
+                            content_delta_count: Some(content_delta_count),
+                            ping_count: Some(ping_count),
+                            inter_token_avg_ms,
+                        }),
+                    });
+                    o.set_termination_timings(
+                        None,
+                        None,
+                        event_ctx.proxy_setup_ms,
+                        Some(stream_total_ms),
+                        elapsed_ms(first_chunk_at),
+                    );
+                    o.finish();
                 }
             }
         };
@@ -3177,6 +2950,7 @@ impl LimitRequest {
     }
 }
 
+#[allow(dead_code)]
 struct ActiveLimit {
     subject: LimitSubject,
     request: LimitRequest,
@@ -3185,6 +2959,7 @@ struct ActiveLimit {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct RequestEventContext {
     request_id: String,
     upstream_id: Option<Uuid>,
@@ -3228,6 +3003,7 @@ impl RequestCacheMetadata {
             .collect()
     }
 
+    #[allow(dead_code)]
     fn apply_to(&self, event: &mut RequestEvent, usage: &UsageCounts) {
         event.thread_id = self.thread_id.clone();
         event.message_id = self.message_id.clone();
@@ -3240,6 +3016,7 @@ impl RequestCacheMetadata {
         event.cache_state = Some(self.cache_state(usage));
     }
 
+    #[allow(dead_code)]
     fn cache_state(&self, usage: &UsageCounts) -> RequestCacheState {
         match (
             usage.cache_read_input_tokens > 0,
@@ -3273,6 +3050,7 @@ fn plugin_ttl_class(ttl: Option<&str>) -> TtlClass {
 }
 
 #[derive(Clone, Copy, Default)]
+#[allow(dead_code)]
 struct AttemptTimings {
     auth_ms: Option<u64>,
     route_ms: Option<u64>,
@@ -3666,21 +3444,6 @@ pub(crate) fn cost_breakdown_to_event_options(
     }
 }
 
-#[derive(Clone)]
-struct PricingContext {
-    model: String,
-    pricing_upstream_kind: Option<cc_lb_pricing::UpstreamKind>,
-}
-
-impl PricingContext {
-    fn new(upstream: &Upstream, body: &Bytes) -> Self {
-        Self {
-            model: extract_model(body).unwrap_or_else(|| "unknown".to_owned()),
-            pricing_upstream_kind: pricing_upstream_kind(upstream),
-        }
-    }
-}
-
 fn unix_now_ms(clock: &dyn Clock) -> u64 {
     unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
 }
@@ -4024,58 +3787,10 @@ mod tests {
         upstream::{UpstreamKind as StorageRecordKind, UpstreamRecord},
     };
     use http::header::{HeaderName, HeaderValue};
-    use metrics::{
-        Counter, Gauge, Histogram, HistogramFn, Key, KeyName, Metadata, Recorder, SharedString,
-        Unit,
-    };
 
     use super::*;
 
     const TEST_MODEL: &str = "claude-sonnet-4-5-20250929";
-
-    #[derive(Clone, Default)]
-    struct DriftMetricRecorder {
-        values: Arc<Mutex<Vec<f64>>>,
-    }
-
-    struct DriftMetricHistogram {
-        values: Arc<Mutex<Vec<f64>>>,
-    }
-
-    impl HistogramFn for DriftMetricHistogram {
-        fn record(&self, value: f64) {
-            self.values.lock().expect("drift values lock").push(value);
-        }
-    }
-
-    impl Recorder for DriftMetricRecorder {
-        fn describe_counter(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {
-        }
-
-        fn describe_gauge(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {}
-
-        fn describe_histogram(
-            &self,
-            _key: KeyName,
-            _unit: Option<Unit>,
-            _description: SharedString,
-        ) {
-        }
-
-        fn register_counter(&self, _key: &Key, _metadata: &Metadata<'_>) -> Counter {
-            Counter::noop()
-        }
-
-        fn register_gauge(&self, _key: &Key, _metadata: &Metadata<'_>) -> Gauge {
-            Gauge::noop()
-        }
-
-        fn register_histogram(&self, _key: &Key, _metadata: &Metadata<'_>) -> Histogram {
-            Histogram::from_arc(Arc::new(DriftMetricHistogram {
-                values: Arc::clone(&self.values),
-            }))
-        }
-    }
 
     #[test]
     fn build_candidates_cache_score() {

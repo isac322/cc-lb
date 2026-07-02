@@ -110,11 +110,11 @@ struct TerminalState {
     cache_control_block_count: Option<u64>,
     cache_breakpoints: Vec<RequestCacheBreakpoint>,
     cache_prefix_hash: Option<String>,
-    /// Set by success paths (non-stream complete, stream complete) that build
-    /// the full event with all timing/cost/streaming metric fields inline.
-    /// When present, `make_request_event` returns this as-is with `event_id`
-    /// forced to the observer's, rather than synthesizing from state.
-    prebuilt_event: Option<RequestEvent>,
+    limit_reconcile_ms: Option<u64>,
+    observability_post_ms: Option<u64>,
+    proxy_setup_ms: Option<u64>,
+    upstream_body_ms: Option<u64>,
+    first_body_chunk_ms: Option<u64>,
 }
 
 impl LifecycleContext {
@@ -205,16 +205,20 @@ impl LifecycleContext {
         state.upstream_error_message = error_message;
     }
 
-    /// Replace the synthesized event with a fully-built one (success paths
-    /// that already construct the entire event inline with timing/cost/stream
-    /// metric fields). `make_request_event` will return this verbatim with
-    /// `event_id` forced to the observer's value.
-    ///
-    // TODO(rfc-0002-phase-9-cutover): remove once the assembler subscriber
-    // owns the entire success-path row assembly. Currently retained so the
-    // legacy writer path stays byte-identical during Phase 6 shadow rollout.
-    pub(crate) fn set_prebuilt_event(&self, event: RequestEvent) {
-        self.lock_state().prebuilt_event = Some(event);
+    pub(crate) fn set_termination_timings(
+        &self,
+        limit_reconcile_ms: Option<u64>,
+        observability_post_ms: Option<u64>,
+        proxy_setup_ms: Option<u64>,
+        upstream_body_ms: Option<u64>,
+        first_body_chunk_ms: Option<u64>,
+    ) {
+        let mut state = self.lock_state();
+        state.limit_reconcile_ms = limit_reconcile_ms;
+        state.observability_post_ms = observability_post_ms;
+        state.proxy_setup_ms = proxy_setup_ms;
+        state.upstream_body_ms = upstream_body_ms;
+        state.first_body_chunk_ms = first_body_chunk_ms;
     }
 
     // TODO(rfc-0002-phase-9-cutover): remove once cache observations flow
@@ -311,16 +315,6 @@ impl Inner {
             .state
             .lock()
             .expect("terminal observer state mutex poisoned");
-        if let Some(mut event) = state.prebuilt_event.clone() {
-            event.event_id = Some(self.event_id.clone());
-            if event.error_code.is_none() {
-                event.error_code = state
-                    .error_code
-                    .or(fallback_error_code)
-                    .map(|s| s.to_owned());
-            }
-            return event;
-        }
         let duration_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         let mut event = RequestEvent {
             ts: self.started_unix_ms / 1_000,
@@ -362,6 +356,11 @@ impl Inner {
                 .usage
                 .present
                 .then_some(state.usage.cache_read_input_tokens),
+            limit_reconcile_ms: state.limit_reconcile_ms,
+            observability_post_ms: state.observability_post_ms,
+            proxy_setup_ms: state.proxy_setup_ms,
+            upstream_body_ms: state.upstream_body_ms,
+            first_body_chunk_ms: state.first_body_chunk_ms,
             ..Default::default()
         };
         state.usage.apply_extras_to(&mut event);
