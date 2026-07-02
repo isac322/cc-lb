@@ -1646,15 +1646,6 @@ impl Lifecycle {
             }
         }
 
-        if response.status().is_success() || response.status() == StatusCode::TOO_MANY_REQUESTS {
-            let observed_at = self.clock.now();
-            self.record_subscription_quota_observations(
-                response.headers(),
-                resolved_upstream_id,
-                observed_at,
-            );
-        }
-
         if response.status().is_client_error() || response.status().is_server_error() {
             if response.status().is_client_error()
                 && self.config.prompt_cache_shadow.enabled
@@ -2126,6 +2117,8 @@ impl Lifecycle {
         );
     }
 
+    /// Admin fire-now warmup only. Main request path feeds
+    /// `lifecycle_subscription_quota_subscriber` via UpstreamResponseStarted events.
     pub fn record_subscription_quota_observations(
         &self,
         headers: &HeaderMap,

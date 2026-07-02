@@ -130,7 +130,7 @@
     "lifecycle_subscription_quota_subscriber": {
       "$ref": "#/$defs/LifecycleSubscriptionQuotaSubscriberConfig",
       "default": {
-        "enabled": false
+        "enabled": true
       }
     },
     "limit_reservation_ttl": {
@@ -646,7 +646,7 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },
