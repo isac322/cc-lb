@@ -44,9 +44,8 @@ fn scheduler_metrics_cover_worker_lifecycle() -> Result<(), Box<dyn Error>> {
         runtime.block_on(async {
             scheduler_metrics::touch_scheduler_metric_handles();
             let db = sqlite_test_db().await?;
-            let pool = db.pool.clone();
-            run_entity_jobs(&pool).await?;
-            run_singleton_jobs(&pool).await?;
+            run_entity_jobs(&db.pool).await?;
+            run_singleton_jobs(&db.pool).await?;
 
             let rendered = handle.render();
             assert_required_metric_names(&rendered);
