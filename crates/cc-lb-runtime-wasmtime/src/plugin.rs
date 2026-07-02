@@ -84,8 +84,8 @@ impl FilterPlugin for WasmtimeFilterPlugin {
             reason: format!("rkyv encode request: {e}"),
         })?;
 
-        let out_bytes = call_filter_hook(&self.slot_key, &self.cell, in_bytes.as_slice())
-            .map_err(runtime_error_to_filter)?;
+        let out_bytes =
+            call_filter_hook(&self.cell, in_bytes.as_slice()).map_err(runtime_error_to_filter)?;
 
         // rkyv::access enforces 16-byte alignment on the bytes; Vec<u8>
         // from Memory::data() carries no such guarantee. Copy through
@@ -250,14 +250,13 @@ fn per_candidate_reason_from_label(decision: &str, reason: &str) -> PerCandidate
 /// Snapshots the cell at construction time — see
 /// [`WasmtimeFilterPlugin`] for the atomic hot-swap rationale.
 pub struct WasmtimeUpstreamDialect {
-    slot_key: SlotKey,
     cell: Arc<PluginCell>,
 }
 
 impl WasmtimeUpstreamDialect {
-    pub fn new(slot: Arc<PluginSlot>, slot_key: SlotKey) -> Self {
+    pub fn new(slot: Arc<PluginSlot>) -> Self {
         let cell = slot.current.load_full();
-        Self { slot_key, cell }
+        Self { cell }
     }
 }
 
@@ -277,9 +276,8 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
             }
         })?;
 
-        let out_bytes =
-            crate::cache::call_shape_hook(&self.slot_key, &self.cell, in_bytes.as_slice())
-                .map_err(runtime_error_to_dialect)?;
+        let out_bytes = crate::cache::call_shape_hook(&self.cell, in_bytes.as_slice())
+            .map_err(runtime_error_to_dialect)?;
 
         let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
         aligned.extend_from_slice(&out_bytes);
@@ -310,12 +308,8 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
         };
 
         let in_bytes = rkyv::to_bytes::<RkyvError>(&request).ok()?;
-        let out_bytes = crate::cache::call_normalize_error_hook(
-            &self.slot_key,
-            &self.cell,
-            in_bytes.as_slice(),
-        )
-        .ok()?;
+        let out_bytes =
+            crate::cache::call_normalize_error_hook(&self.cell, in_bytes.as_slice()).ok()?;
 
         let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
         aligned.extend_from_slice(&out_bytes);
@@ -419,14 +413,13 @@ fn wire_to_host_shaped_request(
 /// slot. Snapshots the cell at construction time — see
 /// [`WasmtimeFilterPlugin`] for the atomic hot-swap rationale.
 pub struct WasmtimeObservabilityHookPlugin {
-    slot_key: SlotKey,
     cell: Arc<PluginCell>,
 }
 
 impl WasmtimeObservabilityHookPlugin {
-    pub fn new(slot: Arc<PluginSlot>, slot_key: SlotKey) -> Self {
+    pub fn new(slot: Arc<PluginSlot>) -> Self {
         let cell = slot.current.load_full();
-        Self { slot_key, cell }
+        Self { cell }
     }
 }
 
@@ -441,11 +434,11 @@ impl cc_lb_plugin_api::ObservabilityHook for WasmtimeObservabilityHookPlugin {
                 reason: format!("rkyv encode ObserveEvent: {e}"),
             }
         })?;
-        crate::cache::call_observe_hook(&self.slot_key, &self.cell, in_bytes.as_slice()).map_err(
-            |e| cc_lb_plugin_api::ObservabilityError::Dropped {
+        crate::cache::call_observe_hook(&self.cell, in_bytes.as_slice()).map_err(|e| {
+            cc_lb_plugin_api::ObservabilityError::Dropped {
                 reason: e.to_string(),
-            },
-        )?;
+            }
+        })?;
         Ok(())
     }
 }

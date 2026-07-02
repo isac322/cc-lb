@@ -7,9 +7,7 @@ use cc_lb_plugin_api::{
     PluginManifest, Principal, PrincipalKind, RequestContext, RuntimeError, SignerFactory, SlotKey,
     Upstream, shape_request, sign_request,
 };
-use cc_lb_runtime_wasmtime::{
-    RegisterOptions, WasmtimeRuntime, WasmtimeRuntimeError, WasmtimeUpstreamDialect,
-};
+use cc_lb_runtime_wasmtime::{WasmtimeRuntime, WasmtimeRuntimeError, WasmtimeUpstreamDialect};
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh, LazyRefreshHandle,
 };
@@ -126,20 +124,17 @@ pub async fn dispatch_warmup_with_dialect(
     };
 
     let synth_name = format!("__warmup__{}", params.upstream.id);
-    let slot_key = SlotKey::new(synth_name.clone(), manifest.name.clone());
+
     let wasm_bytes = tokio::fs::read(&manifest.artifact)
         .await
         .map_err(|error| WarmupDispatchError::Materialize(error.to_string()))?;
-    let slot = params.runtime.register_shape_with(
-        slot_key.clone(),
+    let slot = params.runtime.register_shape(
+        SlotKey::new(synth_name.clone(), manifest.name.clone()),
         manifest.name.clone(),
         &wasm_bytes,
-        RegisterOptions {
-            pure: manifest.pure,
-        },
     )?;
     let dialect: Arc<dyn cc_lb_plugin_api::UpstreamDialect> =
-        Arc::new(WasmtimeUpstreamDialect::new(slot, slot_key));
+        Arc::new(WasmtimeUpstreamDialect::new(slot));
 
     let body_json = json!({
         "model": WARMUP_MODEL,

@@ -3,20 +3,18 @@
 //! Builds on the W7 happy-path round-trip and exercises the
 //! host-side invariants the review consensus pinned in the RFC:
 //!
-//! * **Hot version swap**: re-registering the same slot increments
-//!   `version_id` and the next call uses the new `WorkerInstance`
-//!   (the W3 transactional rebuild path).
 //! * **Multi-slot independence**: two registered plugins do not
-//!   share per-worker state.
-//! * **Concurrent calls**: the `thread_local!` slot cache means
-//!   parallel callers each build their own worker without
-//!   contention.
+//!   collide in the runtime slot map or leak state through the
+//!   per-call fresh-`Store` dispatcher.
+//! * **Concurrent calls**: dispatching from multiple threads against
+//!   the same slot returns consistent results — each call gets its
+//!   own instantiate + `Store`.
 //! * **Large payload**: rkyv encode/decode + `Memory::write` /
 //!   `Memory::data` cope with payloads larger than a single wasm
 //!   page.
 //!
-//! All four scenarios reuse the `cache-aware-wasmtime` artifact
-//! produced for the W7 e2e test; no extra wasm fixtures are needed.
+//! All scenarios reuse the `cache-aware-wasmtime` artifact produced
+//! for the W7 e2e test; no extra wasm fixtures are needed.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,7 +24,7 @@ use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_types::{
     ArchivedFilterResponse, FilterRequest, FilterResponse, Header, Principal, UpstreamCandidate,
 };
-use cc_lb_runtime_wasmtime::{RegisterOptions, WasmtimeRuntime};
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use rkyv::rancor::Error;
 use rkyv::util::AlignedVec;
 
@@ -105,47 +103,6 @@ fn accepted_ids(resp: &FilterResponse) -> Vec<String> {
 }
 
 #[test]
-fn re_register_swaps_to_new_version() {
-    let Some(wasm) = load_wasm_or_skip() else {
-        return;
-    };
-    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-    let slot = SlotKey::global("hot-swap");
-
-    let v1 = runtime
-        .register_filter_with(
-            slot.clone(),
-            "cache-aware-wasmtime",
-            &wasm,
-            RegisterOptions { pure: false },
-        )
-        .expect("v1 register");
-    let v1_version = v1.current.load().version_id;
-
-    // RFC-0001 gap-analysis #2: byte-identical re-register short-circuits
-    // (no version bump). To exercise hot-swap machinery we must change a
-    // content-affecting knob — flipping `pure` toggles the dispatch mode
-    // and forces PluginCell rebuild via content_hash mismatch.
-    let v2 = runtime
-        .register_filter_with(
-            slot.clone(),
-            "cache-aware-wasmtime",
-            &wasm,
-            RegisterOptions { pure: true },
-        )
-        .expect("v2 register");
-    let v2_version = v2.current.load().version_id;
-
-    assert!(
-        v2_version > v1_version,
-        "re-register with changed opts must bump version_id ({v1_version} -> {v2_version})"
-    );
-
-    let resp = call(&runtime, &slot, &request(Some(1), &[("a", 10), ("b", 100)]));
-    assert_eq!(accepted_ids(&resp), vec!["b".to_owned()]);
-}
-
-#[test]
 fn multi_slot_independent() {
     let Some(wasm) = load_wasm_or_skip() else {
         return;
@@ -155,20 +112,10 @@ fn multi_slot_independent() {
     let slot_a = SlotKey::new("tenant-a", "cache-aware-wasmtime");
     let slot_b = SlotKey::new("tenant-b", "cache-aware-wasmtime");
     runtime
-        .register_filter_with(
-            slot_a.clone(),
-            "cache-aware-wasmtime",
-            &wasm,
-            RegisterOptions { pure: false },
-        )
+        .register_filter(slot_a.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register a");
     runtime
-        .register_filter_with(
-            slot_b.clone(),
-            "cache-aware-wasmtime",
-            &wasm,
-            RegisterOptions { pure: false },
-        )
+        .register_filter(slot_b.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register b");
     assert_eq!(runtime.slot_count(), 2);
 
@@ -195,12 +142,7 @@ fn concurrent_callers_each_build_their_own_worker() {
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
     let slot = SlotKey::global("concurrent");
     runtime
-        .register_filter_with(
-            slot.clone(),
-            "cache-aware-wasmtime",
-            &wasm,
-            RegisterOptions { pure: false },
-        )
+        .register_filter(slot.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register");
 
     let handles: Vec<_> = (0..8)
@@ -230,12 +172,7 @@ fn large_payload_round_trips() {
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
     let slot = SlotKey::global("large-payload");
     runtime
-        .register_filter_with(
-            slot.clone(),
-            "cache-aware-wasmtime",
-            &wasm,
-            RegisterOptions { pure: false },
-        )
+        .register_filter(slot.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register");
 
     // 256 candidates, each with a long upstream_id — well over one

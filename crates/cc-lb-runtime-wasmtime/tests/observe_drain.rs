@@ -51,11 +51,10 @@ fn load_wasm_or_skip() -> Option<Vec<u8>> {
 fn setup() -> Option<WasmtimeObservabilityHookPlugin> {
     let wasm_bytes = load_wasm_or_skip()?;
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
-    let slot_key = SlotKey::global("test-observe");
     let slot = runtime
-        .register_observe(slot_key.clone(), "test-observe", &wasm_bytes)
+        .register_observe(SlotKey::global("test-observe"), "test-observe", &wasm_bytes)
         .expect("register_observe OK");
-    Some(WasmtimeObservabilityHookPlugin::new(slot, slot_key))
+    Some(WasmtimeObservabilityHookPlugin::new(slot))
 }
 
 #[test]
@@ -88,10 +87,10 @@ fn observe_accepts_single_event_best_effort() {
 #[test]
 fn observe_drains_bounded_burst_without_error() {
     // Hammer the hook with a contiguous stream to exercise the
-    // per-call fuel reset + Store reuse path that
-    // `call_observe_hook` runs under. If the worker leaked memory or
-    // ran out of fuel mid-burst, the second pass would surface as a
-    // GuestTrap → ObservabilityError::Dropped on this test thread.
+    // per-call fresh-Store instantiation `call_observe_hook` runs
+    // under. If a per-call Store leaked memory or ran out of fuel
+    // mid-burst, the next iteration would surface as a GuestTrap →
+    // ObservabilityError::Dropped on this test thread.
     let Some(hook) = setup() else { return };
 
     let upstream = Upstream::AnthropicDirect { base_url: None };

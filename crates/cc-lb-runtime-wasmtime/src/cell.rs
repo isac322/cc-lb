@@ -33,16 +33,10 @@ pub struct PluginCell {
     /// without threading slot / registration state through every
     /// hook function signature.
     pub plugin_name: Arc<str>,
-    /// Dispatch mode lifted from [`cc_lb_plugin_api::PluginManifest::pure`].
-    /// `true` means every call builds a fresh `Store` and tears it down
-    /// (no thread_local cache, no version-compare). `false` keeps the
-    /// stateful per-worker cache path for plugins that genuinely need
-    /// to retain mutable state across calls in the same worker.
-    pub pure: bool,
     /// Content-identity hash covering every input that affects
-    /// runtime behaviour: wasm bytes, `pure` dispatch mode,
-    /// per-call fuel budget, per-instance memory ceiling, plus a
-    /// bumpable [`crate::VALIDATION_POLICY_VERSION`] constant so
+    /// runtime behaviour: wasm bytes, per-call fuel budget,
+    /// per-instance memory ceiling, plus a bumpable
+    /// [`crate::module::VALIDATION_POLICY_VERSION`] constant so
     /// tightening validation rules force a recompile even when the
     /// wasm + knobs are unchanged. `register()` short-circuits when
     /// this hash matches, so it MUST NOT elide any input the
@@ -58,7 +52,6 @@ impl std::fmt::Debug for PluginCell {
             .field("content_hash_hex", &format_hex(&self.content_hash))
             .field("fuel_per_call", &self.fuel_per_call)
             .field("memory_max_pages", &self.memory_max_pages)
-            .field("pure", &self.pure)
             .finish_non_exhaustive()
     }
 }

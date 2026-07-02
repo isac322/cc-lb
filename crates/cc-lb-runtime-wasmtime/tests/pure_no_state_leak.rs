@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_types::{FilterRequest, Header, Principal, UpstreamCandidate};
-use cc_lb_runtime_wasmtime::{RegisterOptions, WasmtimeRuntime};
+use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use rkyv::rancor::Error;
 
 const ITERATIONS: usize = 10;
@@ -98,13 +98,8 @@ fn pure_mode_does_not_accumulate_state() {
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
     let slot = SlotKey::global("pure-leak-probe");
     runtime
-        .register_filter_with(
-            slot.clone(),
-            "cache-aware-wasmtime",
-            &wasm,
-            RegisterOptions { pure: true },
-        )
-        .expect("register pure filter");
+        .register_filter(slot.clone(), "cache-aware-wasmtime", &wasm)
+        .expect("register filter");
     let req = request();
     let in_bytes = rkyv::to_bytes::<Error>(&req).expect("encode");
 

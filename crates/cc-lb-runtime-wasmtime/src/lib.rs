@@ -18,10 +18,7 @@ mod module;
 mod plugin;
 
 pub use cache::{
-    DEFAULT_ALIGN, call_filter_hook, call_filter_hook_pure, call_filter_hook_stateful,
-    call_normalize_error_hook, call_normalize_error_hook_pure, call_normalize_error_hook_stateful,
-    call_observe_hook, call_observe_hook_pure, call_observe_hook_stateful, call_shape_hook,
-    call_shape_hook_pure, call_shape_hook_stateful,
+    DEFAULT_ALIGN, call_filter_hook, call_normalize_error_hook, call_observe_hook, call_shape_hook,
 };
 pub use cell::{PluginCell, PluginSlot};
 pub use engine::{HostState, HotEngineConfig, build_hot_engine};
@@ -41,27 +38,6 @@ use cc_lb_plugin_api::{
 };
 use parking_lot::RwLock;
 use wasmtime::{Engine, Linker};
-
-/// Per-slot registration options.
-///
-/// `pure = true` (default) maps to the fresh-`Store`-per-call
-/// dispatch path. This value is the runtime materialisation of
-/// [`cc_lb_plugin_api::PluginManifest::pure`]; the Stage 3 server
-/// adapter bridges manifest → options at the
-/// `register_*_with` call site so [`PluginCell::pure`] reflects the
-/// manifest as of the most recent register.
-#[derive(Clone, Copy, Debug)]
-pub struct RegisterOptions {
-    pub pure: bool,
-}
-
-impl Default for RegisterOptions {
-    fn default() -> Self {
-        Self {
-            pure: cc_lb_plugin_api::default_pure(),
-        }
-    }
-}
 
 /// Wasmtime-backed plugin runtime.
 pub struct WasmtimeRuntime {
@@ -99,74 +75,35 @@ impl WasmtimeRuntime {
         &self.linker
     }
 
-    /// Register (or replace) a filter-hook slot using
-    /// [`RegisterOptions::default()`] (pure dispatch).
+    /// Register (or replace) a filter-hook slot.
     pub fn register_filter(
         &self,
         slot_key: SlotKey,
         name: impl Into<String>,
         wasm_bytes: &[u8],
     ) -> Result<Arc<PluginSlot>, WasmtimeRuntimeError> {
-        self.register_filter_with(slot_key, name, wasm_bytes, RegisterOptions::default())
+        self.register(SlotKind::Filter, slot_key, name, wasm_bytes)
     }
 
-    /// Like [`Self::register_filter`] with explicit
-    /// [`RegisterOptions`]. Use to opt out of pure dispatch.
-    pub fn register_filter_with(
-        &self,
-        slot_key: SlotKey,
-        name: impl Into<String>,
-        wasm_bytes: &[u8],
-        opts: RegisterOptions,
-    ) -> Result<Arc<PluginSlot>, WasmtimeRuntimeError> {
-        self.register(SlotKind::Filter, slot_key, name, wasm_bytes, opts)
-    }
-
-    /// Register (or replace) a shape-hook slot using
-    /// [`RegisterOptions::default()`] (pure dispatch). The plugin
-    /// module must export both `cc_lb_shape` and `cc_lb_normalize_error`.
+    /// Register (or replace) a shape-hook slot. The plugin module
+    /// must export both `cc_lb_shape` and `cc_lb_normalize_error`.
     pub fn register_shape(
         &self,
         slot_key: SlotKey,
         name: impl Into<String>,
         wasm_bytes: &[u8],
     ) -> Result<Arc<PluginSlot>, WasmtimeRuntimeError> {
-        self.register_shape_with(slot_key, name, wasm_bytes, RegisterOptions::default())
+        self.register(SlotKind::Shape, slot_key, name, wasm_bytes)
     }
 
-    /// Like [`Self::register_shape`] with explicit
-    /// [`RegisterOptions`].
-    pub fn register_shape_with(
-        &self,
-        slot_key: SlotKey,
-        name: impl Into<String>,
-        wasm_bytes: &[u8],
-        opts: RegisterOptions,
-    ) -> Result<Arc<PluginSlot>, WasmtimeRuntimeError> {
-        self.register(SlotKind::Shape, slot_key, name, wasm_bytes, opts)
-    }
-
-    /// Register (or replace) an observe-hook slot using
-    /// [`RegisterOptions::default()`] (pure dispatch).
+    /// Register (or replace) an observe-hook slot.
     pub fn register_observe(
         &self,
         slot_key: SlotKey,
         name: impl Into<String>,
         wasm_bytes: &[u8],
     ) -> Result<Arc<PluginSlot>, WasmtimeRuntimeError> {
-        self.register_observe_with(slot_key, name, wasm_bytes, RegisterOptions::default())
-    }
-
-    /// Like [`Self::register_observe`] with explicit
-    /// [`RegisterOptions`].
-    pub fn register_observe_with(
-        &self,
-        slot_key: SlotKey,
-        name: impl Into<String>,
-        wasm_bytes: &[u8],
-        opts: RegisterOptions,
-    ) -> Result<Arc<PluginSlot>, WasmtimeRuntimeError> {
-        self.register(SlotKind::Observe, slot_key, name, wasm_bytes, opts)
+        self.register(SlotKind::Observe, slot_key, name, wasm_bytes)
     }
 
     fn register(
@@ -175,11 +112,9 @@ impl WasmtimeRuntime {
         slot_key: SlotKey,
         name: impl Into<String>,
         wasm_bytes: &[u8],
-        opts: RegisterOptions,
     ) -> Result<Arc<PluginSlot>, WasmtimeRuntimeError> {
         let new_content_hash = module::compute_content_hash(
             wasm_bytes,
-            opts.pure,
             self.config.fuel_per_call,
             self.config.memory_max_pages,
         );
@@ -208,7 +143,6 @@ impl WasmtimeRuntime {
             schema_hash: inspection.primary_schema_hash(),
             fuel_per_call: self.config.fuel_per_call,
             memory_max_pages: self.config.memory_max_pages,
-            pure: opts.pure,
             content_hash: new_content_hash,
             plugin_name: Arc::clone(&plugin_name),
         };
@@ -239,7 +173,6 @@ impl WasmtimeRuntime {
                     schema_hash: new_cell.schema_hash,
                     fuel_per_call: new_cell.fuel_per_call,
                     memory_max_pages: new_cell.memory_max_pages,
-                    pure: new_cell.pure,
                     content_hash: new_cell.content_hash,
                     plugin_name: new_cell.plugin_name,
                 };
@@ -326,7 +259,7 @@ impl WasmtimeRuntime {
         run: F,
     ) -> Result<Vec<u8>, WasmtimeRuntimeError>
     where
-        F: FnOnce(&SlotKey, &Arc<PluginCell>) -> Result<Vec<u8>, WasmtimeRuntimeError>,
+        F: FnOnce(&Arc<PluginCell>) -> Result<Vec<u8>, WasmtimeRuntimeError>,
     {
         let slot = self
             .get_slot(slot_key)
@@ -342,7 +275,7 @@ impl WasmtimeRuntime {
             });
         }
         let cell = slot.current.load_full();
-        run(slot_key, &cell)
+        run(&cell)
     }
 
     /// Synchronous filter call. Round-trips one request through the
@@ -352,8 +285,8 @@ impl WasmtimeRuntime {
         slot_key: &SlotKey,
         input: &[u8],
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.dispatch(slot_key, SlotKind::Filter, |key, cell| {
-            call_filter_hook(key, cell, input)
+        self.dispatch(slot_key, SlotKind::Filter, |cell| {
+            call_filter_hook(cell, input)
         })
     }
 
@@ -364,8 +297,8 @@ impl WasmtimeRuntime {
         slot_key: &SlotKey,
         input: &[u8],
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.dispatch(slot_key, SlotKind::Shape, |key, cell| {
-            call_shape_hook(key, cell, input)
+        self.dispatch(slot_key, SlotKind::Shape, |cell| {
+            call_shape_hook(cell, input)
         })
     }
 
@@ -377,8 +310,8 @@ impl WasmtimeRuntime {
         slot_key: &SlotKey,
         input: &[u8],
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.dispatch(slot_key, SlotKind::Shape, |key, cell| {
-            call_normalize_error_hook(key, cell, input)
+        self.dispatch(slot_key, SlotKind::Shape, |cell| {
+            call_normalize_error_hook(cell, input)
         })
     }
 
@@ -389,8 +322,8 @@ impl WasmtimeRuntime {
         slot_key: &SlotKey,
         input: &[u8],
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.dispatch(slot_key, SlotKind::Observe, |key, cell| {
-            call_observe_hook(key, cell, input)
+        self.dispatch(slot_key, SlotKind::Observe, |cell| {
+            call_observe_hook(cell, input)
         })
     }
 
