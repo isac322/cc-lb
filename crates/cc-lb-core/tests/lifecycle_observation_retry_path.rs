@@ -16,14 +16,15 @@ use serde_json::json;
 use tokio::time::{Duration, timeout};
 
 use common::{
-    RecordingHook, TestAuthn, TestRouter, TestState, collect_body, lifecycle_with_parts,
-    messages_request,
+    RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState, collect_body,
+    lifecycle_with_parts, messages_request,
 };
 
 #[tokio::test]
 async fn unauthorized_refresh_observes_only_final_attempt() {
     let state = TestState::default();
     let (sink, mut receiver) = UpstreamRateLimitSink::with_capacity(16);
+    let test_bus = TestLifecycleBus::new().with_rate_limit_header_subscriber(sink);
     let lifecycle = lifecycle_with_parts(
         TestAuthn::new(state.clone()),
         Arc::new(TestRouter {
@@ -45,7 +46,7 @@ async fn unauthorized_refresh_observes_only_final_attempt() {
         vec![Arc::new(RecordingHook::default())],
         cc_lb_core::LifecycleConfig::default(),
     )
-    .with_upstream_rate_limit_sink(sink);
+    .with_event_bus(test_bus.bus_arc());
 
     let response = lifecycle
         .handle(messages_request(Bytes::from_static(

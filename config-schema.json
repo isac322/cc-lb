@@ -66,16 +66,28 @@
       "$ref": "#/$defs/EgressConfig",
       "default": {}
     },
+    "lifecycle_api_key_metrics_subscriber": {
+      "$ref": "#/$defs/LifecycleApiKeyMetricsSubscriberConfig",
+      "default": {
+        "enabled": true
+      }
+    },
+    "lifecycle_cache_hit_miss_subscriber": {
+      "$ref": "#/$defs/LifecycleCacheHitMissSubscriberConfig",
+      "default": {
+        "enabled": true
+      }
+    },
     "lifecycle_cache_observation_subscriber": {
       "$ref": "#/$defs/LifecycleCacheObservationSubscriberConfig",
       "default": {
-        "enabled": false
+        "enabled": true
       }
     },
     "lifecycle_hook_adapter": {
       "$ref": "#/$defs/LifecycleHookAdapterConfig",
       "default": {
-        "enabled": false
+        "enabled": true
       }
     },
     "lifecycle_limit_reconcile_subscriber": {
@@ -85,16 +97,40 @@
         "shadow": false
       }
     },
+    "lifecycle_limit_rejection_audit_subscriber": {
+      "$ref": "#/$defs/LifecycleLimitRejectionAuditSubscriberConfig",
+      "default": {
+        "enabled": true
+      }
+    },
     "lifecycle_pricing_subscriber": {
       "$ref": "#/$defs/LifecyclePricingSubscriberConfig",
       "default": {
-        "enabled": false
+        "enabled": true
       }
     },
-    "lifecycle_shadow_writer": {
-      "$ref": "#/$defs/LifecycleShadowWriterConfig",
+    "lifecycle_prompt_cache_drift_subscriber": {
+      "$ref": "#/$defs/LifecyclePromptCacheDriftSubscriberConfig",
       "default": {
-        "enabled": false
+        "enabled": true
+      }
+    },
+    "lifecycle_prompt_cache_observation_subscriber": {
+      "$ref": "#/$defs/LifecyclePromptCacheObservationSubscriberConfig",
+      "default": {
+        "enabled": true
+      }
+    },
+    "lifecycle_rate_limit_header_subscriber": {
+      "$ref": "#/$defs/LifecycleRateLimitHeaderSubscriberConfig",
+      "default": {
+        "enabled": true
+      }
+    },
+    "lifecycle_subscription_quota_subscriber": {
+      "$ref": "#/$defs/LifecycleSubscriptionQuotaSubscriberConfig",
+      "default": {
+        "enabled": true
       }
     },
     "limit_reservation_ttl": {
@@ -133,10 +169,6 @@
         "refresh_debounce_secs": 60,
         "warm_set_cap": 32
       }
-    },
-    "request_event_writer_source": {
-      "$ref": "#/$defs/RequestEventWriterSource",
-      "default": "legacy"
     },
     "runtime": {
       "$ref": "#/$defs/RuntimeConfig",
@@ -506,12 +538,30 @@
         }
       }
     },
+    "LifecycleApiKeyMetricsSubscriberConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "LifecycleCacheHitMissSubscriberConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
     "LifecycleCacheObservationSubscriberConfig": {
       "type": "object",
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },
@@ -520,7 +570,7 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },
@@ -538,21 +588,57 @@
         }
       }
     },
+    "LifecycleLimitRejectionAuditSubscriberConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
     "LifecyclePricingSubscriberConfig": {
       "type": "object",
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },
-    "LifecycleShadowWriterConfig": {
+    "LifecyclePromptCacheDriftSubscriberConfig": {
       "type": "object",
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": false
+          "default": true
+        }
+      }
+    },
+    "LifecyclePromptCacheObservationSubscriberConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "LifecycleRateLimitHeaderSubscriberConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "LifecycleSubscriptionQuotaSubscriberConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
         }
       }
     },
@@ -826,15 +912,6 @@
         }
       },
       "additionalProperties": false
-    },
-    "RequestEventWriterSource": {
-      "description": "RFC-0002 Phase 6 writer cutover switch.\n\n- `Legacy` (default): only the pre-RFC-0002 writer persists rows. The\n  Phase-3 shadow-writer feature flag is ignored.\n- `Both`: both writers persist rows. Rows carry distinct `event_id`s and\n  the shadow row also carries `shadow_event_id` pointing at the legacy\n  row's `event_id`. Diff via the comparison SQL in\n  `docs/runbook/lifecycle-shadow.md`.\n- `Shadow`: only the assembler writer persists rows. Legacy path is\n  detached from storage. Do not use until the comparison diff is empty\n  for the target soak period.",
-      "type": "string",
-      "enum": [
-        "legacy",
-        "both",
-        "shadow"
-      ]
     },
     "RuntimeConfig": {
       "type": "object",

@@ -5,16 +5,20 @@ use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
 use http_body_util::BodyExt;
+use tokio::time::{Duration, timeout};
 
 use common::{
-    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, lifecycle_with,
-    messages_request,
+    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestLifecycleBus, TestState,
+    lifecycle_with, messages_request,
 };
 
 #[tokio::test]
 async fn happy_sse_relays_incrementally_and_observes_chunks() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
+    let test_bus = TestLifecycleBus::new().with_hook_adapter(vec![
+        hook.clone() as Arc<dyn cc_lb_plugin_api::ObservabilityHook>
+    ]);
     let lifecycle = lifecycle_with(
         TestAuthn::new(state.clone()),
         MockDispatch {
@@ -22,7 +26,8 @@ async fn happy_sse_relays_incrementally_and_observes_chunks() {
             mode: DispatchMode::StreamingOk,
         },
         hook.clone(),
-    );
+    )
+    .with_event_bus(test_bus.bus_arc());
 
     let response = lifecycle
         .handle(messages_request(Bytes::from_static(
@@ -52,26 +57,30 @@ async fn happy_sse_relays_incrementally_and_observes_chunks() {
             .iter()
             .any(|event| matches!(event, cc_lb_plugin_api::ObserveEvent::Chunk { .. }))
     );
-    assert!(
-        hook.events
-            .lock()
-            .expect("events lock")
-            .iter()
-            .any(|event| matches!(
+    timeout(
+        Duration::from_secs(1),
+        hook.wait_for_event(|event| {
+            matches!(
                 event,
                 cc_lb_plugin_api::ObserveEvent::RequestFinished {
                     input_tokens: Some(7),
                     output_tokens: Some(42),
                     ..
                 }
-            ))
-    );
+            )
+        }),
+    )
+    .await
+    .expect("request-finished observation arrives");
 }
 
 #[tokio::test]
 async fn happy_non_streaming_observes_usage_tokens() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
+    let test_bus = TestLifecycleBus::new().with_hook_adapter(vec![
+        hook.clone() as Arc<dyn cc_lb_plugin_api::ObservabilityHook>
+    ]);
     let lifecycle = lifecycle_with(
         TestAuthn::new(state.clone()),
         MockDispatch {
@@ -79,7 +88,8 @@ async fn happy_non_streaming_observes_usage_tokens() {
             mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
         },
         hook.clone(),
-    );
+    )
+    .with_event_bus(test_bus.bus_arc());
 
     let response = lifecycle
         .handle(messages_request(Bytes::from_static(
@@ -97,18 +107,19 @@ async fn happy_non_streaming_observes_usage_tokens() {
         .to_bytes();
 
     assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
-    assert!(
-        hook.events
-            .lock()
-            .expect("events lock")
-            .iter()
-            .any(|event| matches!(
+    timeout(
+        Duration::from_secs(1),
+        hook.wait_for_event(|event| {
+            matches!(
                 event,
                 cc_lb_plugin_api::ObserveEvent::RequestFinished {
                     input_tokens: Some(1),
                     output_tokens: Some(1),
                     ..
                 }
-            ))
-    );
+            )
+        }),
+    )
+    .await
+    .expect("request-finished observation arrives");
 }

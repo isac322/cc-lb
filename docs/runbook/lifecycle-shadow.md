@@ -1,6 +1,12 @@
-# RFC-0002 Phase 3 — Lifecycle Shadow Writer Runbook
+# RFC-0002 Phase 3 — Lifecycle Shadow Writer Runbook (historical)
 
-## What Phase 3 does
+> **Historical.** The dual-write shadow mode this document describes was
+> removed in Phase 13. The assembler is now the only writer of
+> `request_events_v1`. For current operational guidance see
+> `docs/runbook/rfc-0002.md`. This file is kept for rollout audit
+> context.
+
+## What Phase 3 did
 
 When `features.lifecycle_shadow_writer.enabled = true`, cc-lb runs BOTH writer paths for every request:
 

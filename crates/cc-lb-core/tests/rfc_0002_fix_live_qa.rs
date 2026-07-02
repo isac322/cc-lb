@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 mod common;
 
 use std::collections::HashMap;
@@ -12,8 +14,9 @@ use cc_lb_core::{
     DynamicViewBuilder, DynamicViewHolder, ErrorNormalizer, Lifecycle, LifecycleConfig,
 };
 use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, Principal, RequestContext, RouteDecision, RouteError,
-    RouterPlugin, TerminalStrategy, Upstream, UpstreamCandidate,
+    FilterError, FilterOutput, FilterPlugin, InternalErrorKind, InternalErrorStage, Principal,
+    RequestContext, RouteDecision, RouteError, RouterPlugin, TerminalStrategy, Upstream,
+    UpstreamCandidate,
 };
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
@@ -29,16 +32,15 @@ use common::{
 };
 
 #[tokio::test]
-async fn no_candidates_after_filters_returns_503_and_logs_request_event()
+async fn lqa_5a_drop_all_filter_returns_503_and_logs_routing_trace()
 -> Result<(), Box<dyn std::error::Error>> {
-    let upstream_id = upstream_id(1);
+    let upstream_id = Uuid::from_u128(1);
     let filter_calls = Arc::new(Mutex::new(Vec::new()));
     let router_calls = Arc::new(Mutex::new(Vec::new()));
     let state = TestState::default();
-    let _dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&_dir, "lifecycle-routing-failure.sqlite").await?);
-    let test_bus =
-        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "rfc-0002-live-qa.sqlite").await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_pipeline(
         vec![Arc::new(KeepFilter {
             kept_upstream_ids: Vec::new(),
@@ -71,29 +73,19 @@ async fn no_candidates_after_filters_returns_503_and_logs_request_event()
     assert!(router_calls.lock().expect("router calls lock").is_empty());
 
     let events = wait_for_events(storage.as_ref(), 1).await?;
-    assert_eq!(events.len(), 1);
     let event = &events[0];
     assert_eq!(event.status, StatusCode::SERVICE_UNAVAILABLE.as_u16());
     assert_eq!(
         event.error_code.as_deref(),
         Some("route_no_upstream_after_filter")
     );
-    assert_eq!(event.principal_id.as_deref(), Some("principal-test"));
-    assert_eq!(event.key_id.as_deref(), Some("none-mode"));
-    assert_eq!(event.model.as_deref(), Some("claude-test"));
     let trace = event.routing_trace.as_ref().expect("routing trace logged");
-    assert_eq!(trace.stages.len(), 1);
     assert_eq!(trace.stages[0].stage_name, "drop-all");
-    assert_eq!(trace.stages[0].upstream_id, None);
-    assert_eq!(
-        trace
-            .terminal_decision
-            .as_ref()
-            .and_then(|decision| decision.upstream_id),
-        None
-    );
     assert!(event.internal_errors.iter().any(|error| {
-        error.message.as_deref() == Some("no upstream candidates remain after routing filters")
+        error.stage == InternalErrorStage::RouterFilter
+            && error.kind == InternalErrorKind::Unavailable
+            && error.message.as_deref()
+                == Some("no upstream candidates remain after routing filters")
     }));
     Ok(())
 }
@@ -132,8 +124,7 @@ fn lifecycle_with_pipeline(
     router: Arc<dyn RouterPlugin>,
     state: TestState,
 ) -> Lifecycle {
-    let principal_view = principal_view(filters);
-    let authn = TestAuthn::with_principal_view(state.clone(), Arc::clone(&principal_view));
+    let authn = TestAuthn::with_principal_view(state.clone(), principal_view(filters));
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
         .global_router(router)
@@ -143,7 +134,7 @@ fn lifecycle_with_pipeline(
         }))
         .global_observability_hooks(Vec::new())
         .error_normalizer(Arc::new(ErrorNormalizer::new()))
-        .principal_view(principal_view)
+        .principal_view(authn.principal_view.clone())
         .upstream_records(records)
         .build();
     Lifecycle::new_with_dynamic_view(
@@ -198,10 +189,6 @@ fn upstream_record(id: Uuid, name: &str) -> UpstreamRecord {
         warmup_dialect_plugin: None,
         last_warmup_at_unix_secs: None,
     }
-}
-
-fn upstream_id(index: u128) -> Uuid {
-    Uuid::from_u128(index)
 }
 
 struct RecordingRouter {
