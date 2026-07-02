@@ -18,6 +18,17 @@ pub const DEFAULT_ASSEMBLER_MAP_CAP: usize = 4096;
 pub const DEFAULT_ASSEMBLER_TTL: Duration = Duration::from_secs(300);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
+/// After receiving `RequestTerminated`, the assembler holds the partial for
+/// this grace period so that late `Priced` and `CacheObserved` events (emitted
+/// by their subscribers on separate tasks) can still merge into the row.
+/// See RFC-0002 synthesis analysis for the ordering rationale.
+const FINALIZATION_GRACE: Duration = Duration::from_millis(200);
+
+/// How often the finalization tick runs. Must be small compared to
+/// FINALIZATION_GRACE so terminated partials do not sit past their deadline
+/// waiting for the next tick.
+const FINALIZATION_TICK: Duration = Duration::from_millis(20);
+
 pub struct RequestEventAssemblerHandle {
     shutdown_tx: oneshot::Sender<()>,
     join: JoinHandle<()>,
@@ -106,6 +117,23 @@ struct Partial {
     cache_control_block_count: Option<u64>,
     cache_breakpoints: Vec<RequestCacheBreakpoint>,
     cache_prefix_hash: Option<String>,
+    termination: Option<TerminationInfo>,
+}
+
+struct TerminationInfo {
+    reason: TerminationReason,
+    client_status: u16,
+    duration_ms: u64,
+    deadline: Instant,
+    expects_priced: bool,
+    expects_cache: bool,
+}
+
+impl TerminationInfo {
+    fn is_ready(&self, partial: &Partial) -> bool {
+        (!self.expects_priced || partial.cost.is_some())
+            && (!self.expects_cache || partial.cache_state.is_some())
+    }
 }
 
 impl Partial {
@@ -137,6 +165,9 @@ async fn assembler_loop(
     let mut sweeper = tokio::time::interval(SWEEP_INTERVAL);
     sweeper.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     sweeper.tick().await;
+    let mut finalization_tick = tokio::time::interval(FINALIZATION_TICK);
+    finalization_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    finalization_tick.tick().await;
 
     loop {
         tokio::select! {
@@ -147,6 +178,9 @@ async fn assembler_loop(
                     None => break,
                 }
             }
+            _ = finalization_tick.tick() => {
+                flush_expired_terminations(&*storage, &mut partials, mode).await;
+            }
             _ = sweeper.tick() => sweep_orphans(&mut partials, ttl),
             _ = &mut shutdown => break,
         }
@@ -154,6 +188,132 @@ async fn assembler_loop(
 
     while let Ok(event) = rx.try_recv() {
         handle_event(&*storage, &mut partials, mode, map_cap, event).await;
+    }
+    force_flush_terminations(&*storage, &mut partials, mode).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn write_finalized_rows(
+    storage: &dyn RequestEventStore,
+    mode: AssemblerMode,
+    event_id: &EventId,
+    partial: &Partial,
+    reason: &TerminationReason,
+    client_status: u16,
+    duration_ms: u64,
+    is_orphan: bool,
+) {
+    let base_row = finalize_base(partial, reason, client_status, duration_ms, is_orphan);
+    let mut rows: Vec<RequestEvent> = Vec::new();
+    if mode.writes_legacy() {
+        let mut legacy = base_row.clone();
+        legacy.event_id = Some(event_id.clone());
+        legacy.shadow_event_id = None;
+        rows.push(legacy);
+    }
+    if mode.writes_shadow() {
+        let mut shadow = base_row;
+        shadow.event_id = Some(Uuid::now_v7().to_string());
+        shadow.shadow_event_id = Some(event_id.clone());
+        rows.push(shadow);
+    }
+    let mut wrote = 0u64;
+    for row in &rows {
+        match storage.append_request_event(row).await {
+            Ok(()) => wrote += 1,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    shadow_event_id = %event_id,
+                    row_shape = if row.shadow_event_id.is_some() { "shadow" } else { "legacy" },
+                    "lifecycle event assembler: failed to persist row",
+                );
+                cc_lb_observability::increment_dropped_events_by(
+                    "lifecycle_assembler_storage_error",
+                    1,
+                );
+            }
+        }
+    }
+    if wrote > 0 {
+        let outcome = if is_orphan {
+            "written_orphan"
+        } else {
+            "written"
+        };
+        metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => outcome)
+            .increment(wrote);
+    }
+}
+
+async fn flush_expired_terminations(
+    storage: &dyn RequestEventStore,
+    partials: &mut HashMap<EventId, Partial>,
+    mode: AssemblerMode,
+) {
+    let now = Instant::now();
+    let expired: Vec<EventId> = partials
+        .iter()
+        .filter_map(|(id, p)| {
+            p.termination
+                .as_ref()
+                .filter(|t| now >= t.deadline)
+                .map(|_| id.clone())
+        })
+        .collect();
+    for event_id in expired {
+        if let Some(partial) = partials.remove(&event_id) {
+            let term = partial
+                .termination
+                .as_ref()
+                .expect("expired implies termination present");
+            metrics::counter!(
+                "cc_lb_lifecycle_assembler_rows_total",
+                "outcome" => "written_after_grace"
+            )
+            .increment(1);
+            write_finalized_rows(
+                storage,
+                mode,
+                &event_id,
+                &partial,
+                &term.reason,
+                term.client_status,
+                term.duration_ms,
+                false,
+            )
+            .await;
+        }
+    }
+}
+
+async fn force_flush_terminations(
+    storage: &dyn RequestEventStore,
+    partials: &mut HashMap<EventId, Partial>,
+    mode: AssemblerMode,
+) {
+    let pending: Vec<EventId> = partials
+        .iter()
+        .filter_map(|(id, p)| p.termination.as_ref().map(|_| id.clone()))
+        .collect();
+    for event_id in pending {
+        if let Some(partial) = partials.remove(&event_id) {
+            let term = partial
+                .termination
+                .as_ref()
+                .expect("pending implies termination present");
+            write_finalized_rows(
+                storage,
+                mode,
+                &event_id,
+                &partial,
+                &term.reason,
+                term.client_status,
+                term.duration_ms,
+                false,
+            )
+            .await;
+        }
     }
 }
 
@@ -174,68 +334,88 @@ async fn handle_event(
         ..
     } = &event
     {
-        let (partial, is_orphan) = match partials.remove(&event_id) {
-            Some(p) => (p, false),
-            None => {
-                metrics::counter!(
-                    "cc_lb_lifecycle_assembler_rows_total",
-                    "outcome" => "terminated_without_partial"
-                )
-                .increment(1);
-                (Partial::orphan(), true)
-            }
+        let existing = partials.remove(&event_id);
+        let is_orphan = existing.is_none();
+        if is_orphan {
+            metrics::counter!(
+                "cc_lb_lifecycle_assembler_rows_total",
+                "outcome" => "terminated_without_partial"
+            )
+            .increment(1);
+            let partial = Partial::orphan();
+            write_finalized_rows(
+                storage,
+                mode,
+                &event_id,
+                &partial,
+                reason,
+                *client_status,
+                *duration_ms,
+                true,
+            )
+            .await;
+            return;
+        }
+        let mut partial = existing.expect("checked !is_orphan");
+        let expects_priced = partial.usage_seen && partial.cost.is_none();
+        let expects_cache =
+            partial.upstream_response_status.is_some() && partial.cache_state.is_none();
+        let termination = TerminationInfo {
+            reason: reason.clone(),
+            client_status: *client_status,
+            duration_ms: *duration_ms,
+            deadline: now + FINALIZATION_GRACE,
+            expects_priced,
+            expects_cache,
         };
-        // Legacy row (shadow_event_id = NULL) uses lifecycle event_id as row id.
-        // Shadow row (shadow_event_id = <lifecycle id>) uses a fresh UUID.
-        let base_row = finalize_base(&partial, reason, *client_status, *duration_ms, is_orphan);
-        let mut rows: Vec<RequestEvent> = Vec::new();
-        if mode.writes_legacy() {
-            let mut legacy = base_row.clone();
-            legacy.event_id = Some(event_id.clone());
-            legacy.shadow_event_id = None;
-            rows.push(legacy);
+        if termination.is_ready(&partial) {
+            write_finalized_rows(
+                storage,
+                mode,
+                &event_id,
+                &partial,
+                &termination.reason,
+                termination.client_status,
+                termination.duration_ms,
+                false,
+            )
+            .await;
+            return;
         }
-        if mode.writes_shadow() {
-            let mut shadow = base_row;
-            shadow.event_id = Some(Uuid::now_v7().to_string());
-            shadow.shadow_event_id = Some(event_id.clone());
-            rows.push(shadow);
-        }
-        let mut wrote = 0u64;
-        for row in &rows {
-            match storage.append_request_event(row).await {
-                Ok(()) => wrote += 1,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        shadow_event_id = %event_id,
-                        row_shape = if row.shadow_event_id.is_some() { "shadow" } else { "legacy" },
-                        "lifecycle event assembler: failed to persist row",
-                    );
-                    cc_lb_observability::increment_dropped_events_by(
-                        "lifecycle_assembler_storage_error",
-                        1,
-                    );
-                }
-            }
-        }
-        if wrote > 0 {
-            let outcome = if is_orphan {
-                "written_orphan"
-            } else {
-                "written"
-            };
-            metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => outcome)
-                .increment(wrote);
-        }
+        partial.termination = Some(termination);
+        partial.touch(now);
+        partials.insert(event_id, partial);
         return;
     }
 
     let partial = partials
-        .entry(event_id)
+        .entry(event_id.clone())
         .or_insert_with(|| Partial::new(now));
     partial.touch(now);
     merge(partial, event);
+
+    if partial
+        .termination
+        .as_ref()
+        .is_some_and(|t| t.is_ready(partial))
+        && let Some(partial) = partials.remove(&event_id)
+    {
+        let term = partial
+            .termination
+            .as_ref()
+            .expect("readiness implies termination present");
+        write_finalized_rows(
+            storage,
+            mode,
+            &event_id,
+            &partial,
+            &term.reason,
+            term.client_status,
+            term.duration_ms,
+            false,
+        )
+        .await;
+    }
 
     if partials.len() > map_cap {
         drop_oldest(partials);

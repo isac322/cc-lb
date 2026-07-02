@@ -35,14 +35,17 @@ async fn count_request_events(pool: &SqlitePool, where_clause: &str) -> i64 {
 }
 
 /// Poll the row count until it is stable for two consecutive reads separated
-/// by 100ms, or up to `deadline`. This absorbs the async lag between the
+/// by 300ms, or up to `deadline`. Absorbs the async lag between the
 /// `wait_for_status` handshake returning and the writer/assembler tasks
-/// draining their mpsc buffers on the `/v1/models` init request.
+/// draining their mpsc buffers on the `/v1/models` init request; the
+/// 300ms window must exceed the assembler's finalization grace (200ms)
+/// so late Priced/CacheObserved arrivals are counted before we treat the
+/// baseline as stable.
 async fn settled_row_count(pool: &SqlitePool, where_clause: &str) -> i64 {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     let mut previous = count_request_events(pool, where_clause).await;
     loop {
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(300)).await;
         let current = count_request_events(pool, where_clause).await;
         if current == previous {
             return current;
@@ -244,6 +247,123 @@ enabled = true
     assert!(
         !shadow_leaked,
         "admin recent-events must not leak shadow rows: got {events:?}"
+    );
+}
+
+// ============================================================================
+// LIVE-6b · Shadow parity — assembler ordering (Oracle B blocking bug)
+// ============================================================================
+/// Regression for the assembler-ordering issue documented in the RFC-0002
+/// synthesis analysis: when writer_source=both, the shadow row (written by
+/// the LifecycleEventAssembler) must carry the same cost, cache, and usage
+/// fields as the legacy row. If `Priced` / `CacheObserved` are consumed by
+/// their subscribers on separate async tasks, they can arrive at the
+/// assembler AFTER `RequestTerminated` and be dropped, leaving the shadow
+/// row with NULL cost/cache and only partial usage.
+#[tokio::test]
+async fn live_qa_6b_shadow_parity_cost_cache_usage_fields_match_legacy() {
+    let extra = r#"
+request_event_writer_source = "both"
+
+[lifecycle_cache_observation_subscriber]
+enabled = true
+
+[lifecycle_hook_adapter]
+enabled = false
+
+[lifecycle_pricing_subscriber]
+enabled = true
+"#;
+    let server = common::spawn_test_server_with_extra_config(extra).await;
+    let pool = open_sqlite_pool(&server.sqlite_path).await;
+
+    let baseline_legacy = settled_row_count(&pool, "shadow_event_id IS NULL").await;
+    let baseline_shadow = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+
+    let response = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#,
+        &[],
+    )
+    .await
+    .expect("post messages");
+    assert_eq!(response.status, 200);
+
+    wait_for_row_count(&pool, "shadow_event_id IS NULL", baseline_legacy + 1).await;
+    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline_shadow + 1).await;
+    // Give the assembler an additional beat to receive any late
+    // Priced/CacheObserved events. This is deliberately generous so a real
+    // ordering bug (missed field) — not a race with our poll — is what a
+    // failure reflects.
+    sleep(Duration::from_millis(500)).await;
+
+    let row_sql = r#"SELECT input_tokens, output_tokens, cache_read_input_tokens,
+                  cache_state,
+                  CAST(json_extract(payload, '$.cost_usd_micros') AS INTEGER) AS cost_usd_micros,
+                  CAST(json_extract(payload, '$.cost_input_micros') AS INTEGER) AS cost_input_micros,
+                  CAST(json_extract(payload, '$.cost_output_micros') AS INTEGER) AS cost_output_micros,
+                  CAST(json_extract(payload, '$.cost_cache_read_micros') AS INTEGER) AS cost_cache_read_micros
+             FROM request_events_v1
+            WHERE {clause}
+            ORDER BY id DESC LIMIT 1"#;
+    let legacy = sqlx::query(AssertSqlSafe(
+        row_sql.replace("{clause}", "shadow_event_id IS NULL"),
+    ))
+    .fetch_one(&pool)
+    .await
+    .expect("legacy row fetch");
+    let shadow = sqlx::query(AssertSqlSafe(
+        row_sql.replace("{clause}", "shadow_event_id IS NOT NULL"),
+    ))
+    .fetch_one(&pool)
+    .await
+    .expect("shadow row fetch");
+
+    let legacy_input: Option<i64> = legacy.try_get("input_tokens").ok();
+    let shadow_input: Option<i64> = shadow.try_get("input_tokens").ok();
+    let legacy_output: Option<i64> = legacy.try_get("output_tokens").ok();
+    let shadow_output: Option<i64> = shadow.try_get("output_tokens").ok();
+    let legacy_cost: Option<i64> = legacy.try_get("cost_usd_micros").ok();
+    let shadow_cost: Option<i64> = shadow.try_get("cost_usd_micros").ok();
+    let legacy_input_cost: Option<i64> = legacy.try_get("cost_input_micros").ok();
+    let shadow_input_cost: Option<i64> = shadow.try_get("cost_input_micros").ok();
+    let legacy_output_cost: Option<i64> = legacy.try_get("cost_output_micros").ok();
+    let shadow_output_cost: Option<i64> = shadow.try_get("cost_output_micros").ok();
+    let legacy_cache_state: Option<String> = legacy.try_get("cache_state").ok();
+    let shadow_cache_state: Option<String> = shadow.try_get("cache_state").ok();
+
+    // Usage tokens must match — the assembler merges from UsageObserved which
+    // is emitted synchronously by the handler, so this should hold today.
+    assert_eq!(
+        legacy_input, shadow_input,
+        "input_tokens mismatch: legacy={legacy_input:?} shadow={shadow_input:?}"
+    );
+    assert_eq!(
+        legacy_output, shadow_output,
+        "output_tokens mismatch: legacy={legacy_output:?} shadow={shadow_output:?}"
+    );
+
+    // Cost must match — this catches the Priced ordering bug: PricingSubscriber
+    // emits `Priced` on a separate task, which may arrive AFTER the assembler
+    // finalizes on RequestTerminated.
+    assert_eq!(
+        legacy_cost, shadow_cost,
+        "cost_usd_micros mismatch (Priced ordering bug?): legacy={legacy_cost:?} shadow={shadow_cost:?}"
+    );
+    assert_eq!(
+        legacy_input_cost, shadow_input_cost,
+        "cost_input_micros mismatch: legacy={legacy_input_cost:?} shadow={shadow_input_cost:?}"
+    );
+    assert_eq!(
+        legacy_output_cost, shadow_output_cost,
+        "cost_output_micros mismatch: legacy={legacy_output_cost:?} shadow={shadow_output_cost:?}"
+    );
+
+    // Cache state must match — this catches the CacheObserved ordering bug.
+    assert_eq!(
+        legacy_cache_state, shadow_cache_state,
+        "cache_state mismatch (CacheObserved ordering bug?): legacy={legacy_cache_state:?} shadow={shadow_cache_state:?}"
     );
 }
 
