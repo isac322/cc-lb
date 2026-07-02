@@ -300,7 +300,7 @@ async fn terminal_limit_rejected() -> Result<(), Box<dyn std::error::Error>> {
     let second = send_messages(&server, &plaintext_key, false).await?;
     assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
 
-    let row = wait_for_request_event(&sqlite_path).await?;
+    let row = wait_for_request_event_status(&sqlite_path, 429).await?;
     assert_eq!(row.error_code.as_deref(), Some("limit_rejected"));
     assert_eq!(row.status, 429);
     assert!(row.event_id.is_some());
@@ -737,6 +737,36 @@ async fn wait_for_request_event(
         }
         if Instant::now() >= deadline {
             return Err("no request_event row was persisted within 5s".into());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+// Multi-request tests must poll until the row with the *expected* status
+// is the latest one — the async request_event writer commits after the
+// downstream response returns, so a naive `wait_for_request_event` right
+// after the second request can race and pick up the FIRST request's row.
+// Callers that only ever fire one request should keep using
+// `wait_for_request_event`.
+async fn wait_for_request_event_status(
+    sqlite_path: &Path,
+    expected_status: u16,
+) -> Result<RequestEventRow, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_seen: Option<RequestEventRow> = None;
+    loop {
+        if let Some(row) = query_latest_request_event(sqlite_path).await?
+            && row.status == expected_status
+        {
+            return Ok(row);
+        } else if let Some(row) = query_latest_request_event(sqlite_path).await? {
+            last_seen = Some(row);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "no request_event row with status={expected_status} within 10s (last_seen={last_seen:?})",
+            )
+            .into());
         }
         sleep(Duration::from_millis(100)).await;
     }
