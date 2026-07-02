@@ -23,6 +23,7 @@ Rules:
 - Distinguish infrastructure flake (runner image, sccache races, missing secrets, transient network to `sh.rustup.rs` or crates.io) from test flake. Infrastructure flakes require a workflow, runner-image, or action-level fix and must be surfaced as an issue or CI PR — not silently retried.
 - Every flake fix commit body must contain the root cause, the applied fix, and local reproduction proof (e.g. `Verified 20/20 passing runs on <sqlite|postgres|both>`).
 - If a session cannot reach the root cause, stop and escalate to a follow-up issue with the failing job URL and observed symptoms. Do not land a band-aid.
+- Never add production API (public methods, exported types, enum variants) whose only immediate consumer is a test synchronization or observation hook. Exposing a public `flush`/completion primitive on a production type solely so a test can wait deterministically is flake masking; use a test-scoped observer or wrapper instead.
 
 Forbidden shortcuts:
 - Clicking "Re-run failed jobs" in the GitHub UI.
@@ -30,3 +31,4 @@ Forbidden shortcuts:
 - `#[ignore]`, `#[should_panic]`, or conditional-cfg deletion of the failing test.
 - `sleep`, retry loops, or weakened assertions to hide a race.
 - Silently removing, moving, or renaming the failing test to bypass CI matching.
+- Adding a public `flush`/`persist_now`/completion/notification method on a production type whose only immediate consumer is a test — that is masking the missing test seam by contaminating the production API surface.
