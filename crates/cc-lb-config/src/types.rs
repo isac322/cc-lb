@@ -182,28 +182,6 @@ impl Default for TimeoutsConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum LimitKind {
-    Requests,
-    InputTokens,
-    OutputTokens,
-    TotalTokens,
-    CostUsd,
-    Concurrent,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct Limit {
-    pub kind: LimitKind,
-    #[serde(
-        serialize_with = "crate::types::humantime_serde::serialize",
-        deserialize_with = "crate::types::humantime_serde::deserialize"
-    )]
-    pub window: Duration,
-    pub cap_micros: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
 pub enum DownstreamAuthMode {
     None,
     ApiKey,
