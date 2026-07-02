@@ -123,7 +123,10 @@ impl FilterPlugin for WasmtimeFilterPlugin {
                 }
             })?;
 
-        wire_to_host_output(archived)
+        wire_to_host_output(
+            archived,
+            self.runtime_config.wire_bounds.reason_bytes as usize,
+        )
     }
 
     fn plugin_id(&self) -> Uuid {
@@ -257,7 +260,10 @@ fn is_stripped_shape_output_header(name: &str) -> bool {
     ) || lower.starts_with("x-anthropic-")
 }
 
-fn wire_to_host_output(archived: &ArchivedFilterResponse) -> Result<FilterOutput, FilterError> {
+fn wire_to_host_output(
+    archived: &ArchivedFilterResponse,
+    reason_cap: usize,
+) -> Result<FilterOutput, FilterError> {
     let mut kept_upstream_ids = Vec::new();
     let mut per_candidate_reasons = Vec::new();
     let mut reasons = Vec::new();
@@ -278,7 +284,8 @@ fn wire_to_host_output(archived: &ArchivedFilterResponse) -> Result<FilterOutput
             per_candidate_reasons.push(per_candidate_reason_from_label(decision_str, reason_str));
         }
         if !reason_str.is_empty() {
-            reasons.push(format!("{upstream_id_str}: {reason_str}"));
+            let truncated = truncate_reason(reason_str, reason_cap);
+            reasons.push(format!("{upstream_id_str}: {truncated}"));
         }
     }
 
@@ -287,6 +294,20 @@ fn wire_to_host_output(archived: &ArchivedFilterResponse) -> Result<FilterOutput
         reason: reasons.join("; "),
         per_candidate_reasons,
     })
+}
+
+/// Truncate `reason` to at most `cap` chars, respecting UTF-8
+/// character boundaries. Returns the input slice unchanged when
+/// under the cap so the common case allocates nothing.
+fn truncate_reason(reason: &str, cap: usize) -> std::borrow::Cow<'_, str> {
+    if reason.len() <= cap {
+        return std::borrow::Cow::Borrowed(reason);
+    }
+    let mut end = cap;
+    while end > 0 && !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    std::borrow::Cow::Owned(reason[..end].to_owned())
 }
 
 fn per_candidate_reason_from_label(decision: &str, reason: &str) -> PerCandidateReason {
@@ -375,7 +396,12 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
                 },
             )?;
 
-        wire_to_host_shaped_request(builder, response)
+        wire_to_host_shaped_request(
+            builder,
+            response,
+            upstream,
+            self.runtime_config.shape_origin_policy,
+        )
     }
 
     fn normalize_error(
@@ -471,11 +497,47 @@ fn host_upstream_to_wire(upstream: &cc_lb_plugin_api::Upstream) -> cc_lb_plugin_
     }
 }
 
+/// Return the base URL the selected upstream expects the shaped
+/// request to reach. Returns `None` when the upstream variant has no
+/// pinned host (e.g. an operator-configured `None` override).
+/// Callers that need origin equality treat `None` as "policy cannot
+/// be enforced for this upstream" and skip the guard.
+fn upstream_base_url(upstream: &cc_lb_plugin_api::Upstream) -> Option<url::Url> {
+    match upstream {
+        cc_lb_plugin_api::Upstream::AnthropicDirect { base_url } => base_url.clone(),
+    }
+}
+
 fn wire_to_host_shaped_request(
     builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
     response: cc_lb_plugin_types::ShapeResponse,
+    upstream: &cc_lb_plugin_api::Upstream,
+    origin_policy: crate::policy::ShapeOriginPolicy,
 ) -> Result<cc_lb_plugin_api::ShapedRequest, cc_lb_plugin_api::DialectError> {
     let url = url::Url::parse(&response.url)?;
+
+    // Origin guard: only enforced when policy is `SelectedUpstreamOrigin`.
+    // Default `Unrestricted` preserves pre-Sprint-3 behaviour so shape
+    // plugins that legitimately route to an alternate host (gateway,
+    // subdomain, test endpoint) keep working without a config change.
+    if matches!(
+        origin_policy,
+        crate::policy::ShapeOriginPolicy::SelectedUpstreamOrigin
+    ) && let Some(expected) = upstream_base_url(upstream)
+    {
+        let expected_origin = expected.origin();
+        let actual_origin = url.origin();
+        if expected_origin != actual_origin {
+            return Err(cc_lb_plugin_api::DialectError::UnsupportedRequest {
+                reason: format!(
+                    "shape plugin returned URL origin `{}` but selected upstream requires `{}`",
+                    actual_origin.ascii_serialization(),
+                    expected_origin.ascii_serialization(),
+                ),
+            });
+        }
+    }
+
     let method = http::Method::from_bytes(response.method.as_bytes()).map_err(|e| {
         cc_lb_plugin_api::DialectError::UnsupportedRequest {
             reason: format!("plugin returned invalid method `{}`: {e}", response.method),
@@ -678,7 +740,7 @@ mod tests {
         aligned.extend_from_slice(&bytes);
         let archived =
             rkyv::access::<ArchivedFilterResponse, RkyvError>(&aligned).expect("archived view");
-        let out = wire_to_host_output(archived).expect("conversion must succeed");
+        let out = wire_to_host_output(archived, 256).expect("conversion must succeed");
         assert_eq!(out.kept_upstream_ids.len(), 1);
         assert_eq!(
             out.kept_upstream_ids[0],
