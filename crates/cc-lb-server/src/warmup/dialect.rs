@@ -133,8 +133,9 @@ pub async fn dispatch_warmup_with_dialect(
         manifest.name.clone(),
         &wasm_bytes,
     )?;
-    let dialect: Arc<dyn cc_lb_plugin_api::UpstreamDialect> =
-        Arc::new(WasmtimeUpstreamDialect::new(slot));
+    let dialect: Arc<dyn cc_lb_plugin_api::UpstreamDialect> = Arc::new(
+        WasmtimeUpstreamDialect::new(slot, params.runtime.config_arc()),
+    );
 
     let body_json = json!({
         "model": WARMUP_MODEL,

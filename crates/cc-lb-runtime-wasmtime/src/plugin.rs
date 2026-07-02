@@ -48,6 +48,7 @@ pub struct WasmtimeFilterPlugin {
     cell: Arc<PluginCell>,
     plugin_id: Uuid,
     plugin_name: String,
+    runtime_config: Arc<crate::HotEngineConfig>,
 }
 
 impl WasmtimeFilterPlugin {
@@ -59,6 +60,7 @@ impl WasmtimeFilterPlugin {
         slot_key: SlotKey,
         plugin_id: Uuid,
         plugin_name: impl Into<String>,
+        runtime_config: Arc<crate::HotEngineConfig>,
     ) -> Self {
         let cell = slot.current.load_full();
         Self {
@@ -66,6 +68,7 @@ impl WasmtimeFilterPlugin {
             cell,
             plugin_id,
             plugin_name: plugin_name.into(),
+            runtime_config,
         }
     }
 }
@@ -77,7 +80,12 @@ impl FilterPlugin for WasmtimeFilterPlugin {
         principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
-        let request = host_to_wire_request(ctx, principal, candidates);
+        let request = host_to_wire_request(
+            ctx,
+            principal,
+            candidates,
+            self.runtime_config.cookie_redaction,
+        );
 
         let in_bytes = rkyv::to_bytes::<RkyvError>(&request).map_err(|e| FilterError::Runtime {
             reason: format!("rkyv encode request: {e}"),
@@ -85,6 +93,19 @@ impl FilterPlugin for WasmtimeFilterPlugin {
 
         let out_bytes =
             call_filter_hook(&self.cell, in_bytes.as_slice()).map_err(runtime_error_to_filter)?;
+        // Wire-bound cap on filter output; matches the DEFAULT_FILES_CAP_BYTES
+        // request body cap by default so legitimate large-message flows are
+        // unaffected. Tighter caps are opt-in via config.
+        let bound = self.runtime_config.wire_bounds.output_body_bytes;
+        if out_bytes.len() as u64 > bound {
+            return Err(FilterError::Runtime {
+                reason: format!(
+                    "filter output {} bytes exceeds wire_bounds.output_body_bytes ({})",
+                    out_bytes.len(),
+                    bound
+                ),
+            });
+        }
 
         // rkyv::access enforces 16-byte alignment on the bytes; Vec<u8>
         // from Memory::data() carries no such guarantee. Copy through
@@ -133,6 +154,7 @@ fn host_to_wire_request(
     ctx: &RequestContext,
     principal: &Principal,
     candidates: &[UpstreamCandidate],
+    cookie_redaction: bool,
 ) -> WireFilterRequest {
     WireFilterRequest {
         request_id: ctx.request_id.clone(),
@@ -142,7 +164,7 @@ fn host_to_wire_request(
         headers: ctx
             .downstream_headers
             .iter()
-            .filter(|(name, _)| !is_stripped_downstream_header(name.as_str()))
+            .filter(|(name, _)| !is_stripped_downstream_header(name.as_str(), cookie_redaction))
             .map(|(name, value)| WireHeader {
                 name: name.as_str().to_owned(),
                 value: value.as_bytes().to_vec(),
@@ -192,11 +214,21 @@ fn claims_to_wire(claims: &serde_json::Map<String, serde_json::Value>) -> Vec<(S
 /// credential that the host already strips before dispatch
 /// (`hop_by_hop.rs`) — allowing guest visibility of it would let a
 /// buggy plugin log or exfiltrate a downstream proxy credential.
-fn is_stripped_downstream_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
+///
+/// When `cookie_redaction` is `true`, also strip `cookie` — an
+/// opt-in hardening for deployments that treat downstream session
+/// cookies as sensitive. The default (`false`) preserves pre-Sprint-3
+/// behaviour so filter plugins that route on `cookie` values keep
+/// working without a config change.
+fn is_stripped_downstream_header(name: &str, cookie_redaction: bool) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
         "authorization" | "x-api-key" | "host" | "proxy-authorization"
-    )
+    ) {
+        return true;
+    }
+    cookie_redaction && lower.as_str() == "cookie"
 }
 
 /// Shape-plugin output headers that must NEVER reach the dispatcher.
@@ -281,12 +313,16 @@ fn per_candidate_reason_from_label(decision: &str, reason: &str) -> PerCandidate
 /// [`WasmtimeFilterPlugin`] for the atomic hot-swap rationale.
 pub struct WasmtimeUpstreamDialect {
     cell: Arc<PluginCell>,
+    runtime_config: Arc<crate::HotEngineConfig>,
 }
 
 impl WasmtimeUpstreamDialect {
-    pub fn new(slot: Arc<PluginSlot>) -> Self {
+    pub fn new(slot: Arc<PluginSlot>, runtime_config: Arc<crate::HotEngineConfig>) -> Self {
         let cell = slot.current.load_full();
-        Self { cell }
+        Self {
+            cell,
+            runtime_config,
+        }
     }
 }
 
@@ -298,7 +334,12 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
         principal: &Principal,
         builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
     ) -> Result<cc_lb_plugin_api::ShapedRequest, cc_lb_plugin_api::DialectError> {
-        let request = host_to_wire_shape_request(ctx, upstream, principal);
+        let request = host_to_wire_shape_request(
+            ctx,
+            upstream,
+            principal,
+            self.runtime_config.cookie_redaction,
+        );
 
         let in_bytes = rkyv::to_bytes::<RkyvError>(&request).map_err(|e| {
             cc_lb_plugin_api::DialectError::UnsupportedRequest {
@@ -308,6 +349,16 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
 
         let out_bytes = crate::cache::call_shape_hook(&self.cell, in_bytes.as_slice())
             .map_err(runtime_error_to_dialect)?;
+        let out_bound = self.runtime_config.wire_bounds.output_body_bytes;
+        if out_bytes.len() as u64 > out_bound {
+            return Err(cc_lb_plugin_api::DialectError::UnsupportedRequest {
+                reason: format!(
+                    "shape output {} bytes exceeds wire_bounds.output_body_bytes ({})",
+                    out_bytes.len(),
+                    out_bound
+                ),
+            });
+        }
 
         let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
         aligned.extend_from_slice(&out_bytes);
@@ -351,7 +402,19 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
             rkyv::deserialize::<cc_lb_plugin_types::NormalizeErrorResponse, RkyvError>(archived)
                 .ok()?;
 
-        response.normalized.map(bytes::Bytes::from)
+        let normalize_cap = self.runtime_config.wire_bounds.normalize_error_body_bytes;
+        response.normalized.and_then(|body| {
+            if body.len() as u64 > normalize_cap {
+                tracing::warn!(
+                    body_len = body.len(),
+                    cap = normalize_cap,
+                    "normalize_error output body exceeds wire_bounds cap; dropping"
+                );
+                None
+            } else {
+                Some(bytes::Bytes::from(body))
+            }
+        })
     }
 }
 
@@ -372,6 +435,7 @@ fn host_to_wire_shape_request(
     ctx: &RequestContext,
     upstream: &cc_lb_plugin_api::Upstream,
     principal: &Principal,
+    cookie_redaction: bool,
 ) -> cc_lb_plugin_types::ShapeRequest {
     cc_lb_plugin_types::ShapeRequest {
         request_id: ctx.request_id.clone(),
@@ -381,7 +445,7 @@ fn host_to_wire_shape_request(
         headers: ctx
             .downstream_headers
             .iter()
-            .filter(|(name, _)| !is_stripped_downstream_header(name.as_str()))
+            .filter(|(name, _)| !is_stripped_downstream_header(name.as_str(), cookie_redaction))
             .map(|(name, value)| WireHeader {
                 name: name.as_str().to_owned(),
                 value: value.as_bytes().to_vec(),
@@ -445,12 +509,17 @@ fn wire_to_host_shaped_request(
 /// [`WasmtimeFilterPlugin`] for the atomic hot-swap rationale.
 pub struct WasmtimeObservabilityHookPlugin {
     cell: Arc<PluginCell>,
+    #[allow(dead_code)]
+    runtime_config: Arc<crate::HotEngineConfig>,
 }
 
 impl WasmtimeObservabilityHookPlugin {
-    pub fn new(slot: Arc<PluginSlot>) -> Self {
+    pub fn new(slot: Arc<PluginSlot>, runtime_config: Arc<crate::HotEngineConfig>) -> Self {
         let cell = slot.current.load_full();
-        Self { cell }
+        Self {
+            cell,
+            runtime_config,
+        }
     }
 }
 
@@ -576,7 +645,7 @@ mod tests {
     fn host_to_wire_strips_auth_headers() {
         let principal = fixture_principal();
         let ctx = fixture_request();
-        let wire = host_to_wire_request(&ctx, &principal, &[]);
+        let wire = host_to_wire_request(&ctx, &principal, &[], false);
 
         assert_eq!(wire.request_id, "req-123");
         assert_eq!(wire.method, "POST");

@@ -54,7 +54,10 @@ fn setup() -> Option<WasmtimeObservabilityHookPlugin> {
     let slot = runtime
         .register_observe(SlotKey::global("test-observe"), "test-observe", &wasm_bytes)
         .expect("register_observe OK");
-    Some(WasmtimeObservabilityHookPlugin::new(slot))
+    Some(WasmtimeObservabilityHookPlugin::new(
+        slot,
+        runtime.config_arc(),
+    ))
 }
 
 #[test]
