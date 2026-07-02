@@ -6,6 +6,7 @@ use cc_lb_lifecycle::{
     AuthInfo, CacheBreakpointLite, CacheBreakpointSourceLite, CostBreakdown, EventId,
     LifecycleEvent, ParseInfo, RequestCacheStateLite, RouteInfo, TerminationReason, UsageSnapshot,
 };
+use cc_lb_plugin_api::{InternalError, RoutingTrace};
 use cc_lb_storage_api::types::{
     RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState,
 };
@@ -118,6 +119,40 @@ struct Partial {
     cache_breakpoints: Vec<RequestCacheBreakpoint>,
     cache_prefix_hash: Option<String>,
     termination: Option<TerminationInfo>,
+
+    /// `RouteCompleted.routing_trace` top-level field. Populated on both Ok
+    /// (redundant with `route.routing_trace`) and Err (only source) paths.
+    routing_trace: Option<RoutingTrace>,
+
+    limit_reserve_ms: Option<u64>,
+
+    bulkhead_wait_ms: Option<u64>,
+    dns_ms: Option<u64>,
+    connect_ms: Option<u64>,
+    connection_reused: Option<bool>,
+    shape_ms: Option<u64>,
+    sign_ms: Option<u64>,
+    upstream_ttfb_ms: Option<u64>,
+
+    upstream_body_ms: Option<u64>,
+    first_body_chunk_ms: Option<u64>,
+    limit_reconcile_ms: Option<u64>,
+    observability_post_ms: Option<u64>,
+    proxy_setup_ms: Option<u64>,
+    internal_errors: Vec<InternalError>,
+
+    stream_body_bytes: Option<u64>,
+    stream_body_chunk_count: Option<u64>,
+    stream_message_start_ms: Option<u64>,
+    stream_content_block_start_ms: Option<u64>,
+    stream_first_content_delta_ms: Option<u64>,
+    stream_last_content_delta_ms: Option<u64>,
+    stream_message_stop_ms: Option<u64>,
+    stream_last_chunk_ms: Option<u64>,
+    stream_total_ms: Option<u64>,
+    stream_content_delta_count: Option<u64>,
+    stream_ping_count: Option<u64>,
+    stream_inter_token_avg_ms: Option<u64>,
 }
 
 struct TerminationInfo {
@@ -331,6 +366,12 @@ async fn handle_event(
         reason,
         client_status,
         duration_ms,
+        limit_reconcile_ms,
+        observability_post_ms,
+        proxy_setup_ms,
+        upstream_body_ms,
+        first_body_chunk_ms,
+        internal_errors,
         ..
     } = &event
     {
@@ -342,7 +383,13 @@ async fn handle_event(
                 "outcome" => "terminated_without_partial"
             )
             .increment(1);
-            let partial = Partial::orphan();
+            let mut partial = Partial::orphan();
+            partial.limit_reconcile_ms = *limit_reconcile_ms;
+            partial.observability_post_ms = *observability_post_ms;
+            partial.proxy_setup_ms = *proxy_setup_ms;
+            partial.upstream_body_ms = *upstream_body_ms;
+            partial.first_body_chunk_ms = *first_body_chunk_ms;
+            partial.internal_errors = internal_errors.clone();
             write_finalized_rows(
                 storage,
                 mode,
@@ -357,6 +404,14 @@ async fn handle_event(
             return;
         }
         let mut partial = existing.expect("checked !is_orphan");
+        partial.limit_reconcile_ms = *limit_reconcile_ms;
+        partial.observability_post_ms = *observability_post_ms;
+        partial.proxy_setup_ms = *proxy_setup_ms;
+        partial.upstream_body_ms = *upstream_body_ms;
+        if partial.first_body_chunk_ms.is_none() {
+            partial.first_body_chunk_ms = *first_body_chunk_ms;
+        }
+        partial.internal_errors = internal_errors.clone();
         let expects_priced = partial.usage_seen && partial.cost.is_none();
         let expects_cache =
             partial.upstream_response_status.is_some() && partial.cache_state.is_none();
@@ -454,22 +509,33 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         }
         LifecycleEvent::AuthCompleted { .. } => {}
         LifecycleEvent::RouteCompleted {
-            result: Ok(info), ..
+            result,
+            routing_trace,
+            ..
         } => {
-            partial.route = Some(info);
+            if let Some(trace) = routing_trace {
+                partial.routing_trace = Some(trace);
+            }
+            if let Ok(info) = result {
+                partial.routing_trace = partial
+                    .routing_trace
+                    .clone()
+                    .or_else(|| info.routing_trace.clone());
+                partial.route = Some(info);
+            }
         }
-        LifecycleEvent::RouteCompleted { .. } => {}
         LifecycleEvent::LimitDecision {
             decision:
                 cc_lb_lifecycle::LimitDecisionKind::Reserved {
                     reservation_id,
                     amount,
-                    ..
+                    limit_reserve_ms,
                 },
             ..
         } => {
             partial.limit_reservation_id = Some(reservation_id);
             partial.limit_amount = Some(amount);
+            partial.limit_reserve_ms = limit_reserve_ms;
         }
         LifecycleEvent::LimitDecision { .. } => {}
         LifecycleEvent::UpstreamAttempt {
@@ -480,8 +546,26 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.upstream_id = Some(upstream_id);
             partial.upstream_attempt_num = Some(attempt_num);
         }
-        LifecycleEvent::UpstreamResponseStarted { status, .. } => {
+        LifecycleEvent::UpstreamResponseStarted {
+            status,
+            headers: _,
+            bulkhead_wait_ms,
+            dns_ms,
+            connect_ms,
+            connection_reused,
+            shape_ms,
+            sign_ms,
+            upstream_ttfb_ms,
+            ..
+        } => {
             partial.upstream_response_status = Some(status);
+            partial.bulkhead_wait_ms = bulkhead_wait_ms;
+            partial.dns_ms = dns_ms;
+            partial.connect_ms = connect_ms;
+            partial.connection_reused = connection_reused;
+            partial.shape_ms = shape_ms;
+            partial.sign_ms = sign_ms;
+            partial.upstream_ttfb_ms = upstream_ttfb_ms;
         }
         LifecycleEvent::UsageObserved {
             usage,
@@ -496,6 +580,21 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 partial.usage = success.usage;
                 partial.usage_seen = true;
                 partial.stream_success = Some(success.sse_event_count);
+                partial.stream_body_bytes = success.body_bytes;
+                partial.stream_body_chunk_count = success.body_chunk_count;
+                if success.first_body_chunk_ms.is_some() {
+                    partial.first_body_chunk_ms = success.first_body_chunk_ms;
+                }
+                partial.stream_message_start_ms = success.stream_message_start_ms;
+                partial.stream_content_block_start_ms = success.stream_content_block_start_ms;
+                partial.stream_first_content_delta_ms = success.stream_first_content_delta_ms;
+                partial.stream_last_content_delta_ms = success.stream_last_content_delta_ms;
+                partial.stream_message_stop_ms = success.stream_message_stop_ms;
+                partial.stream_last_chunk_ms = success.stream_last_chunk_ms;
+                partial.stream_total_ms = success.stream_total_ms;
+                partial.stream_content_delta_count = success.content_delta_count;
+                partial.stream_ping_count = success.ping_count;
+                partial.stream_inter_token_avg_ms = success.inter_token_avg_ms;
             }
             Err(error) => {
                 partial.stream_error_type = Some(error.error_type);
@@ -546,7 +645,7 @@ fn finalize_base(
             )
         })
         .unwrap_or_default();
-    let (upstream_id, upstream_name, route_model) = partial
+    let (upstream_id, upstream_name, route_model, route_ms, route_routing_trace) = partial
         .route
         .as_ref()
         .map(|r| {
@@ -554,10 +653,28 @@ fn finalize_base(
                 Some(r.upstream_id),
                 Some(r.upstream_name.clone()),
                 r.model.clone(),
+                r.route_ms,
+                r.routing_trace.clone(),
             )
         })
         .unwrap_or_default();
     let model = route_model.or_else(|| partial.parse.as_ref().and_then(|p| p.model.clone()));
+    let auth_ms = partial.auth.as_ref().and_then(|a| a.auth_ms);
+    let routing_trace = partial.routing_trace.clone().or(route_routing_trace);
+    let (thread_id, message_id, message_index, message_count, cache_control_message_indices) =
+        partial
+            .parse
+            .as_ref()
+            .map(|p| {
+                (
+                    p.thread_id.clone(),
+                    p.message_id.clone(),
+                    p.message_index,
+                    p.message_count,
+                    p.cache_control_message_indices.clone(),
+                )
+            })
+            .unwrap_or_default();
 
     let cost = partial.cost.clone().unwrap_or_default();
     RequestEvent {
@@ -606,6 +723,41 @@ fn finalize_base(
         service_tier: partial.usage.service_tier.clone(),
         inference_geo: partial.usage.inference_geo.clone(),
         sse_event_count: partial.stream_success,
+        thread_id,
+        message_id,
+        message_index,
+        message_count,
+        cache_control_message_indices,
+        auth_ms,
+        route_ms,
+        limit_reserve_ms: partial.limit_reserve_ms,
+        bulkhead_wait_ms: partial.bulkhead_wait_ms,
+        dns_ms: partial.dns_ms,
+        connect_ms: partial.connect_ms,
+        connection_reused: partial.connection_reused,
+        limit_reconcile_ms: partial.limit_reconcile_ms,
+        observability_post_ms: partial.observability_post_ms,
+        proxy_setup_ms: partial.proxy_setup_ms,
+        shape_ms: partial.shape_ms,
+        sign_ms: partial.sign_ms,
+        upstream_ttfb_ms: partial.upstream_ttfb_ms,
+        upstream_body_ms: partial.upstream_body_ms,
+        first_body_chunk_ms: partial.first_body_chunk_ms,
+        body_chunk_count: partial.stream_body_chunk_count,
+        body_bytes: partial.stream_body_bytes,
+        stream_message_start_ms: partial.stream_message_start_ms,
+        stream_content_block_start_ms: partial.stream_content_block_start_ms,
+        stream_first_content_delta_ms: partial.stream_first_content_delta_ms,
+        stream_last_content_delta_ms: partial.stream_last_content_delta_ms,
+        stream_message_stop_ms: partial.stream_message_stop_ms,
+        stream_last_chunk_ms: partial.stream_last_chunk_ms,
+        stream_total_ms: partial.stream_total_ms,
+        content_delta_count: partial.stream_content_delta_count,
+        ping_count: partial.stream_ping_count,
+        inter_token_avg_ms: partial.stream_inter_token_avg_ms,
+        routing_trace,
+        internal_errors: partial.internal_errors.clone(),
+        iterations: partial.usage.iterations.clone(),
         ..Default::default()
     }
 }
