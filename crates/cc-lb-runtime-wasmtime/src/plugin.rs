@@ -389,18 +389,13 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
                 .map_err(|e| cc_lb_plugin_api::DialectError::UnsupportedRequest {
                     reason: format!("rkyv access ShapeResponse: {e}"),
                 })?;
-        let response: cc_lb_plugin_types::ShapeResponse =
-            rkyv::deserialize::<cc_lb_plugin_types::ShapeResponse, RkyvError>(archived).map_err(
-                |e| cc_lb_plugin_api::DialectError::UnsupportedRequest {
-                    reason: format!("rkyv deserialize ShapeResponse: {e}"),
-                },
-            )?;
 
         wire_to_host_shaped_request(
             builder,
-            response,
+            archived,
             upstream,
             self.runtime_config.shape_origin_policy,
+            &self.runtime_config.wire_bounds,
         )
     }
 
@@ -424,21 +419,21 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
         let archived =
             rkyv::access::<cc_lb_plugin_types::ArchivedNormalizeErrorResponse, RkyvError>(&aligned)
                 .ok()?;
-        let response: cc_lb_plugin_types::NormalizeErrorResponse =
-            rkyv::deserialize::<cc_lb_plugin_types::NormalizeErrorResponse, RkyvError>(archived)
-                .ok()?;
 
         let normalize_cap = self.runtime_config.wire_bounds.normalize_error_body_bytes;
-        response.normalized.and_then(|body| {
-            if body.len() as u64 > normalize_cap {
+        // Walk archived directly; ArchivedOption::as_ref → Option<&ArchivedVec<u8>>.
+        // Only the surviving body needs an owned copy for Bytes.
+        archived.normalized.as_ref().and_then(|archived_body| {
+            let body_slice: &[u8] = archived_body.as_slice();
+            if body_slice.len() as u64 > normalize_cap {
                 tracing::warn!(
-                    body_len = body.len(),
+                    body_len = body_slice.len(),
                     cap = normalize_cap,
                     "normalize_error output body exceeds wire_bounds cap; dropping"
                 );
                 None
             } else {
-                Some(bytes::Bytes::from(body))
+                Some(bytes::Bytes::copy_from_slice(body_slice))
             }
         })
     }
@@ -510,11 +505,25 @@ fn upstream_base_url(upstream: &cc_lb_plugin_api::Upstream) -> Option<url::Url> 
 
 fn wire_to_host_shaped_request(
     builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
-    response: cc_lb_plugin_types::ShapeResponse,
+    archived: &cc_lb_plugin_types::ArchivedShapeResponse,
     upstream: &cc_lb_plugin_api::Upstream,
     origin_policy: crate::policy::ShapeOriginPolicy,
+    wire_bounds: &crate::policy::PluginWireBounds,
 ) -> Result<cc_lb_plugin_api::ShapedRequest, cc_lb_plugin_api::DialectError> {
-    let url = url::Url::parse(&response.url)?;
+    // Enforce max_headers before parsing: a plugin returning
+    // 100k headers should not force the host to parse them all.
+    if archived.headers.len() as u32 > wire_bounds.max_headers {
+        return Err(cc_lb_plugin_api::DialectError::UnsupportedRequest {
+            reason: format!(
+                "shape plugin returned {} headers, exceeds wire_bounds.max_headers ({})",
+                archived.headers.len(),
+                wire_bounds.max_headers,
+            ),
+        });
+    }
+
+    let url_str: &str = &archived.url;
+    let url = url::Url::parse(url_str)?;
 
     // Origin guard: only enforced when policy is `SelectedUpstreamOrigin`.
     // Default `Unrestricted` preserves pre-Sprint-3 behaviour so shape
@@ -538,32 +547,45 @@ fn wire_to_host_shaped_request(
         }
     }
 
-    let method = http::Method::from_bytes(response.method.as_bytes()).map_err(|e| {
+    let method_str: &str = &archived.method;
+    let method = http::Method::from_bytes(method_str.as_bytes()).map_err(|e| {
         cc_lb_plugin_api::DialectError::UnsupportedRequest {
-            reason: format!("plugin returned invalid method `{}`: {e}", response.method),
+            reason: format!("plugin returned invalid method `{method_str}`: {e}"),
         }
     })?;
 
     let mut headers = http::HeaderMap::new();
-    for h in &response.headers {
-        if is_stripped_shape_output_header(&h.name) {
-            tracing::debug!(header = %h.name, "dropping shape-plugin output header per hop-by-hop/signer contract");
+    for h in archived.headers.iter() {
+        let h_name: &str = &h.name;
+        let h_value: &[u8] = &h.value;
+        if is_stripped_shape_output_header(h_name) {
+            tracing::debug!(header = %h_name, "dropping shape-plugin output header per hop-by-hop/signer contract");
             continue;
         }
-        let name = http::HeaderName::from_bytes(h.name.as_bytes()).map_err(|e| {
+        if h_value.len() as u32 > wire_bounds.max_header_value_bytes {
+            return Err(cc_lb_plugin_api::DialectError::UnsupportedRequest {
+                reason: format!(
+                    "shape plugin header `{h_name}` value {} bytes exceeds wire_bounds.max_header_value_bytes ({})",
+                    h_value.len(),
+                    wire_bounds.max_header_value_bytes,
+                ),
+            });
+        }
+        let name = http::HeaderName::from_bytes(h_name.as_bytes()).map_err(|e| {
             cc_lb_plugin_api::DialectError::UnsupportedRequest {
-                reason: format!("plugin returned invalid header name `{}`: {e}", h.name),
+                reason: format!("plugin returned invalid header name `{h_name}`: {e}"),
             }
         })?;
-        let value = http::HeaderValue::from_bytes(&h.value).map_err(|e| {
+        let value = http::HeaderValue::from_bytes(h_value).map_err(|e| {
             cc_lb_plugin_api::DialectError::UnsupportedRequest {
-                reason: format!("plugin returned invalid header value for `{}`: {e}", h.name),
+                reason: format!("plugin returned invalid header value for `{h_name}`: {e}"),
             }
         })?;
         headers.append(name, value);
     }
 
-    Ok(builder.shaped_request(url, method, headers, bytes::Bytes::from(response.body)))
+    let body: &[u8] = &archived.body;
+    Ok(builder.shaped_request(url, method, headers, bytes::Bytes::copy_from_slice(body)))
 }
 
 /// `ObservabilityHook` adapter for a wasmtime `SlotKind::Observe`
