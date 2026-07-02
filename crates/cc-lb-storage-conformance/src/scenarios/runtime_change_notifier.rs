@@ -183,6 +183,41 @@ mod tests {
 
     use super::*;
 
+    /// Actively confirm the postgres LISTEN backend is receiving events
+    /// before the caller emits the payload it wants to observe. The 100ms
+    /// fixed `startup_delay_for_backend` was tuned for a laptop and misses
+    /// under CI coverage-instrumented load, so we prove readiness by
+    /// emitting a distinguishable probe payload and polling until it
+    /// arrives (or the outer deadline expires). This is not a blind retry
+    /// loop — it's a positive-confirmation invariant that closes the
+    /// "LISTEN scheduled but not yet issued" race.
+    async fn wait_for_listen_ready_postgres(
+        pool: &sqlx::PgPool,
+        receiver: &mut tokio::sync::broadcast::Receiver<ChangeEvent>,
+    ) -> Result<()> {
+        let probe = format!("readiness-probe-{}", Uuid::new_v4());
+        let deadline = time::Instant::now() + RECEIVE_TIMEOUT;
+        loop {
+            emit(pool, ChangeChannel::Upstream, &probe).await?;
+            let remaining = deadline.saturating_duration_since(time::Instant::now());
+            ensure!(
+                !remaining.is_zero(),
+                "listener did not become ready in time"
+            );
+            let poll_budget = remaining.min(Duration::from_millis(100));
+            match time::timeout(poll_budget, receiver.recv()).await {
+                Ok(Ok(event))
+                    if event.channel == ChangeChannel::Upstream && event.payload == probe =>
+                {
+                    return Ok(());
+                }
+                Ok(Ok(_other)) => continue,
+                Ok(Err(err)) => anyhow::bail!("readiness probe receiver closed: {err}"),
+                Err(_) => continue,
+            }
+        }
+    }
+
     async fn postgres_receive_from_other_conn(
         notifier: Arc<cc_lb_storage_postgres::PostgresStorage>,
         pool: &sqlx::PgPool,
@@ -190,7 +225,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let handle = spawn_run(Arc::clone(&notifier), cancel.clone());
         let mut receiver = notifier.subscribe().await?;
-        startup_delay_for_backend(BackendKind::Postgres).await;
+        wait_for_listen_ready_postgres(pool, &mut receiver).await?;
         emit(pool, ChangeChannel::Upstream, "upstream-a").await?;
         let event = recv_matching(&mut receiver, ChangeChannel::Upstream, "upstream-a").await?;
         ensure!(event.payload == "upstream-a", "unexpected payload");
