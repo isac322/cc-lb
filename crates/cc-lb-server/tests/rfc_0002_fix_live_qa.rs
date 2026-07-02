@@ -81,6 +81,75 @@ async fn fetch_metric_scrape(metrics_addr: std::net::SocketAddr) -> String {
     response.body
 }
 
+/// 35 `RequestEvent` fields the shadow assembler must populate identically
+/// to the legacy inline writer, or the RFC-0002 parity contract is broken.
+const SHADOW_PARITY_FIELDS: &[&str] = &[
+    "thread_id",
+    "message_id",
+    "message_index",
+    "message_count",
+    "cache_control_message_indices",
+    "auth_ms",
+    "route_ms",
+    "limit_reserve_ms",
+    "bulkhead_wait_ms",
+    "dns_ms",
+    "connect_ms",
+    "connection_reused",
+    "limit_reconcile_ms",
+    "observability_post_ms",
+    "proxy_setup_ms",
+    "shape_ms",
+    "sign_ms",
+    "upstream_ttfb_ms",
+    "upstream_body_ms",
+    "first_body_chunk_ms",
+    "body_chunk_count",
+    "body_bytes",
+    "stream_message_start_ms",
+    "stream_content_block_start_ms",
+    "stream_first_content_delta_ms",
+    "stream_last_content_delta_ms",
+    "stream_message_stop_ms",
+    "stream_last_chunk_ms",
+    "stream_total_ms",
+    "content_delta_count",
+    "ping_count",
+    "inter_token_avg_ms",
+    "routing_trace",
+    "internal_errors",
+    "iterations",
+];
+
+async fn fetch_payload_json(pool: &SqlitePool, where_clause: &str) -> serde_json::Value {
+    let sql = format!(
+        "SELECT payload FROM request_events_v1 WHERE {where_clause} ORDER BY id DESC LIMIT 1"
+    );
+    let row = sqlx::query(AssertSqlSafe(sql))
+        .fetch_one(pool)
+        .await
+        .expect("payload row fetch");
+    let payload: String = row.try_get("payload").expect("payload column");
+    serde_json::from_str(&payload).expect("payload json parse")
+}
+
+fn assert_shadow_parity(legacy: &serde_json::Value, shadow: &serde_json::Value, ctx: &str) {
+    let mut mismatches: Vec<String> = Vec::new();
+    for field in SHADOW_PARITY_FIELDS {
+        let l = legacy.get(field);
+        let s = shadow.get(field);
+        if l != s {
+            mismatches.push(format!("  {field}: legacy={l:?} shadow={s:?}"));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "[{ctx}] shadow parity broken for {} field(s):\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
+}
+
 // ============================================================================
 // LIVE-1 · Default boot happy path — H4, H5, H6 baseline
 // ============================================================================
@@ -365,6 +434,67 @@ enabled = true
         legacy_cache_state, shadow_cache_state,
         "cache_state mismatch (CacheObserved ordering bug?): legacy={legacy_cache_state:?} shadow={shadow_cache_state:?}"
     );
+
+    let legacy_payload = fetch_payload_json(&pool, "shadow_event_id IS NULL").await;
+    let shadow_payload = fetch_payload_json(&pool, "shadow_event_id IS NOT NULL").await;
+    assert_shadow_parity(&legacy_payload, &shadow_payload, "non-stream happy path");
+}
+
+// ============================================================================
+// LIVE-6c · Shadow parity — streaming request must populate stream fields
+// ============================================================================
+/// Streaming complements 6b: `StreamSuccess`-only fields (body_bytes,
+/// stream_* timings) are None on non-stream and would hide divergences.
+#[tokio::test]
+async fn live_qa_6c_shadow_parity_stream_request_matches_legacy() {
+    let extra = r#"
+request_event_writer_source = "both"
+
+[lifecycle_cache_observation_subscriber]
+enabled = true
+
+[lifecycle_hook_adapter]
+enabled = false
+
+[lifecycle_pricing_subscriber]
+enabled = true
+"#;
+    let server = common::spawn_test_server_with_extra_config(extra).await;
+    let pool = open_sqlite_pool(&server.sqlite_path).await;
+    let baseline_legacy = settled_row_count(&pool, "shadow_event_id IS NULL").await;
+    let baseline_shadow = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+
+    let response = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":true}"#,
+        &[("accept", "text/event-stream")],
+    )
+    .await
+    .expect("post streaming messages");
+    assert_eq!(response.status, 200);
+
+    wait_for_row_count(&pool, "shadow_event_id IS NULL", baseline_legacy + 1).await;
+    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline_shadow + 1).await;
+    sleep(Duration::from_millis(500)).await;
+
+    let legacy_payload = fetch_payload_json(&pool, "shadow_event_id IS NULL").await;
+    let shadow_payload = fetch_payload_json(&pool, "shadow_event_id IS NOT NULL").await;
+
+    // Sanity: the streaming request should have populated at least one
+    // stream-only field on the legacy side. Otherwise the fake_anthropic
+    // path did not actually stream and the test is not exercising 6c.
+    let stream_body_bytes = legacy_payload.get("body_bytes");
+    let stream_message_start = legacy_payload.get("stream_message_start_ms");
+    let stream_total = legacy_payload.get("stream_total_ms");
+    assert!(
+        stream_body_bytes.is_some_and(|v| !v.is_null())
+            || stream_message_start.is_some_and(|v| !v.is_null())
+            || stream_total.is_some_and(|v| !v.is_null()),
+        "legacy row shows no stream-only fields populated — request did not actually stream. body_bytes={stream_body_bytes:?} stream_message_start_ms={stream_message_start:?} stream_total_ms={stream_total:?}",
+    );
+
+    assert_shadow_parity(&legacy_payload, &shadow_payload, "streaming happy path");
 }
 
 async fn admin_get_json(
