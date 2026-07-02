@@ -751,11 +751,17 @@ impl Default for LifecycleCacheHitMissSubscriberConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LifecyclePromptCacheDriftSubscriberConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl Default for LifecyclePromptCacheDriftSubscriberConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// RFC-0002 Phase 7 background TTL sweeper for stale limit reservations.

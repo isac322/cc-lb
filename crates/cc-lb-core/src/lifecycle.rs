@@ -311,7 +311,6 @@ fn saturating_u64_to_u32(value: u64) -> u32 {
 pub struct PromptCacheObservationContext {
     pub(crate) upstream_id: Uuid,
     pub(crate) canonical_model_id: String,
-    pub(crate) predicted_cache_read_tokens: u32,
     pub(crate) cache_breakpoints: Vec<CacheBreakpoint>,
     pub(crate) warm_entries_at_decision: Vec<WarmCacheEntry>,
     pub(crate) cache: Arc<dyn PromptCacheObservationCacheLike>,
@@ -351,7 +350,6 @@ pub(crate) fn prompt_cache_observation_context(
     view: &DynamicView,
     upstream_id: Uuid,
     canonical_model_id: &str,
-    predicted_cache_read_tokens: u32,
     cache_breakpoints: &[CacheBreakpoint],
 ) -> Option<PromptCacheObservationContext> {
     if canonical_model_id.is_empty() || cache_breakpoints.is_empty() {
@@ -371,7 +369,6 @@ pub(crate) fn prompt_cache_observation_context(
     Some(PromptCacheObservationContext {
         upstream_id,
         canonical_model_id: canonical_model_id.to_owned(),
-        predicted_cache_read_tokens,
         cache_breakpoints: cache_breakpoints.to_vec(),
         warm_entries_at_decision,
         cache,
@@ -520,29 +517,6 @@ pub(crate) fn record_prompt_cache_observations(
     upsert_prompt_cache_observations(context, &observations, now_unix_secs);
     enqueue_prompt_cache_observations(context, &observations, now_unix_secs);
     observations
-}
-
-fn observe_prompt_cache_token_drift(
-    context: Option<&PromptCacheObservationContext>,
-    usage: PromptCacheUsage,
-) {
-    let Some(context) = context else {
-        return;
-    };
-    let actual = i64::try_from(usage.cache_read_input_tokens).unwrap_or(i64::MAX);
-    let predicted = i64::from(context.predicted_cache_read_tokens);
-    let drift = actual
-        .saturating_sub(predicted)
-        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-    // Predicted can be 0 when the chosen candidate had no warm match; actual - 0 captures an upstream-cache false negative.
-    // Suggested ops alert: sum by (upstream, model) (increase(cc_lb_cache_token_drift_bucket{le="+Inf"}[5m])) - sum by (upstream, model) (increase(cc_lb_cache_token_drift_bucket{le="500"}[5m])) > 0.
-    let upstream = context.upstream_id.to_string();
-    metrics::histogram!(
-        "cc_lb_cache_token_drift",
-        "upstream" => upstream,
-        "model" => context.canonical_model_id.clone()
-    )
-    .record(f64::from(drift));
 }
 
 fn record_prompt_cache_observations_for_response_status(
@@ -1389,7 +1363,6 @@ impl Lifecycle {
             &view,
             resolved_upstream_id,
             &ctx.canonical_model_id,
-            predicted_cache_read_tokens,
             &ctx.cache_breakpoints,
         );
 
@@ -1606,14 +1579,6 @@ impl Lifecycle {
         }
 
         if response.status().is_client_error() || response.status().is_server_error() {
-            if response.status().is_client_error()
-                && self.config.prompt_cache_shadow.enabled
-                && prompt_cache_observation_context.is_some()
-            {
-                cc_lb_observability::inc_cache_observation_dropped(
-                    cc_lb_observability::cache_observation_dropped_reason::STATUS_4XX,
-                );
-            }
             strip_hop_by_hop(response.headers_mut());
             self.attach_limit_headers(&mut response, active_limit.as_ref());
             let status = response.status();
@@ -1844,10 +1809,6 @@ impl Lifecycle {
             }
         };
         if usage.present && self.config.prompt_cache_shadow.enabled {
-            observe_prompt_cache_token_drift(
-                prompt_cache_observation_context.as_ref(),
-                PromptCacheUsage::from(&usage),
-            );
             record_prompt_cache_observations_for_response_status(
                 status,
                 prompt_cache_observation_context.as_ref(),
@@ -2259,7 +2220,6 @@ impl Lifecycle {
             let mut prompt_cache_observations: Vec<DecodedPromptCacheObservation> = Vec::new();
             let mut prompt_cache_upserted = false;
             let mut prompt_cache_enqueued = false;
-            let mut prompt_cache_drift_observed = false;
             let mut sse_event_count: u64 = 0;
             let mut content_delta_count: u64 = 0;
             let mut ping_count: u64 = 0;
@@ -2337,16 +2297,6 @@ impl Lifecycle {
                                 if usage_update.message_start_usage {
                                     if message_start_at.is_none() {
                                         message_start_at = Some(now);
-                                    }
-                                    if status == StatusCode::OK
-                                        && prompt_cache_shadow_enabled
-                                        && !prompt_cache_drift_observed
-                                    {
-                                        observe_prompt_cache_token_drift(
-                                            prompt_cache_observation_context.as_ref(),
-                                            PromptCacheUsage::from(&usage),
-                                        );
-                                        prompt_cache_drift_observed = true;
                                     }
                                     if status == StatusCode::OK
                                         && prompt_cache_shadow_enabled
@@ -2468,16 +2418,6 @@ impl Lifecycle {
                         "streaming usage extractor decoder finish failed"
                     );
                 }
-            }
-            if status == StatusCode::OK
-                && prompt_cache_shadow_enabled
-                && usage.present
-                && !prompt_cache_drift_observed
-            {
-                observe_prompt_cache_token_drift(
-                    prompt_cache_observation_context.as_ref(),
-                    PromptCacheUsage::from(&usage),
-                );
             }
             if status == StatusCode::OK
                 && prompt_cache_shadow_enabled
@@ -4363,7 +4303,6 @@ mod tests {
         let context = PromptCacheObservationContext {
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
-            predicted_cache_read_tokens: 2_400,
             cache_breakpoints: vec![
                 cache_breakpoint(0, "short", 1_200, TtlClass::Ephemeral5m),
                 cache_breakpoint(1, "hit", 2_400, TtlClass::Ephemeral1h),
@@ -4428,7 +4367,6 @@ mod tests {
         let context = PromptCacheObservationContext {
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
-            predicted_cache_read_tokens: 1_200,
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 1_200, TtlClass::Ephemeral5m)],
             warm_entries_at_decision: vec![warm_entry("hit", TtlClass::Ephemeral5m, now + 120, 1)],
             cache: cache.clone(),
@@ -4457,7 +4395,6 @@ mod tests {
         let context = PromptCacheObservationContext {
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
-            predicted_cache_read_tokens: 0,
             cache_breakpoints: vec![cache_breakpoint(0, "tiny", 1_023, TtlClass::Ephemeral5m)],
             warm_entries_at_decision: Vec::new(),
             cache: cache.clone(),
@@ -4476,38 +4413,6 @@ mod tests {
         assert!(decoded.is_empty());
         assert!(cache.upserts().is_empty());
         assert!(sink.records().is_empty());
-    }
-
-    #[test]
-    fn drift_metric_emitted() {
-        let recorder = DriftMetricRecorder::default();
-        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000224").unwrap();
-        let cache = Arc::new(RecordingPromptCacheObservationCache::new(Vec::new()));
-        let context = PromptCacheObservationContext {
-            upstream_id,
-            canonical_model_id: TEST_MODEL.to_owned(),
-            predicted_cache_read_tokens: 400,
-            cache_breakpoints: Vec::new(),
-            warm_entries_at_decision: Vec::new(),
-            cache,
-            sink: None,
-        };
-
-        metrics::with_local_recorder(&recorder, || {
-            observe_prompt_cache_token_drift(
-                Some(&context),
-                PromptCacheUsage {
-                    cache_creation_input_tokens: 0,
-                    cache_read_input_tokens: 500,
-                },
-            );
-        });
-
-        let values = recorder.values.lock().expect("drift values lock");
-        let in_expected_bucket = values
-            .iter()
-            .any(|value| (*value > 50.0 && *value <= 100.0) || (*value > 100.0 && *value <= 500.0));
-        assert!(in_expected_bucket, "drift values: {values:?}");
     }
 
     #[test]

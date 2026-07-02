@@ -807,7 +807,6 @@ mod tests {
             prompt_cache_observation_context: Some(PromptCacheObservationContext {
                 upstream_id,
                 canonical_model_id: TEST_MODEL.to_owned(),
-                predicted_cache_read_tokens: 0,
                 cache_breakpoints: vec![cache_breakpoint(0, "write", 1_600, TtlClass::Ephemeral5m)],
                 warm_entries_at_decision: Vec::new(),
                 cache,

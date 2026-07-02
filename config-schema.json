@@ -112,7 +112,7 @@
     "lifecycle_prompt_cache_drift_subscriber": {
       "$ref": "#/$defs/LifecyclePromptCacheDriftSubscriberConfig",
       "default": {
-        "enabled": false
+        "enabled": true
       }
     },
     "lifecycle_rate_limit_header_subscriber": {
@@ -619,7 +619,7 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },
