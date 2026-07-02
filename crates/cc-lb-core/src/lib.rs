@@ -34,6 +34,7 @@ mod hop_by_hop;
 pub mod instrumented_connector;
 #[cfg(not(loom))]
 pub mod lifecycle;
+pub mod lifecycle_api_key_metrics_subscriber;
 #[cfg(not(loom))]
 pub mod lifecycle_cache_observation_subscriber;
 pub mod lifecycle_event_assembler;
@@ -132,6 +133,9 @@ pub use lifecycle::{
     LimitSubjectProvider, NoopSubscriptionQuotaCache, ProxyError, ReplicaIdentity, RequestKind,
     SubscriptionQuotaCacheLike, UpstreamDispatch, build_candidates, observe_rate_limits,
     observe_subscription_quota_headers, parse_request_cache_breakpoints,
+};
+pub use lifecycle_api_key_metrics_subscriber::{
+    ApiKeyMetricsSubscriberHandle, spawn_lifecycle_api_key_metrics_subscriber,
 };
 #[cfg(not(loom))]
 pub use lifecycle_cache_observation_subscriber::{

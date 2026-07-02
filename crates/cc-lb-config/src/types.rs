@@ -76,6 +76,8 @@ pub struct Config {
     #[serde(default)]
     pub lifecycle_limit_rejection_audit_subscriber: LifecycleLimitRejectionAuditSubscriberConfig,
     #[serde(default)]
+    pub lifecycle_api_key_metrics_subscriber: LifecycleApiKeyMetricsSubscriberConfig,
+    #[serde(default)]
     pub request_event_writer_source: RequestEventWriterSource,
     #[serde(default)]
     pub limit_reservation_ttl: LimitReservationTtlConfig,
@@ -697,6 +699,13 @@ pub struct LifecycleSubscriptionQuotaSubscriberConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LifecycleLimitRejectionAuditSubscriberConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecycleApiKeyMetricsSubscriberConfig {
     #[serde(default)]
     pub enabled: bool,
 }

@@ -986,6 +986,13 @@ async fn build_app_with_storage_inner(
         } else {
             None
         };
+    let lifecycle_api_key_metrics_rx = if config.lifecycle_api_key_metrics_subscriber.enabled {
+        Some(in_memory_bus.attach_lifecycle_api_key_metrics(
+            cc_lb_core::event_bus::DEFAULT_LIFECYCLE_API_KEY_METRICS_CAPACITY,
+        ))
+    } else {
+        None
+    };
     let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(in_memory_bus);
     let request_event_writer_handle = request_event_writer_rx
         .map(|rx| cc_lb_core::spawn_request_event_writer(storage.clone(), rx));
@@ -1032,6 +1039,8 @@ async fn build_app_with_storage_inner(
                 .clone()
                 .map(|sink| cc_lb_core::spawn_lifecycle_limit_rejection_audit_subscriber(rx, sink))
         });
+    let lifecycle_api_key_metrics_subscriber_handle = lifecycle_api_key_metrics_rx
+        .map(|rx| cc_lb_core::spawn_lifecycle_api_key_metrics_subscriber(rx, event_bus.clone()));
     let request_event_writer_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_core::RequestEventWriterHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(request_event_writer_handle));
@@ -1071,6 +1080,11 @@ async fn build_app_with_storage_inner(
         tokio::sync::Mutex<Option<cc_lb_core::LimitRejectionAuditSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(
         lifecycle_limit_rejection_audit_subscriber_handle,
+    ));
+    let lifecycle_api_key_metrics_subscriber_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::ApiKeyMetricsSubscriberHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(
+        lifecycle_api_key_metrics_subscriber_handle,
     ));
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
@@ -1256,6 +1270,18 @@ async fn build_app_with_storage_inner(
             let limit_rejection_audit_slot = limit_rejection_audit_slot.clone();
             async move {
                 let mut guard = limit_rejection_audit_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let api_key_metrics_slot = lifecycle_api_key_metrics_subscriber_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let api_key_metrics_slot = api_key_metrics_slot.clone();
+            async move {
+                let mut guard = api_key_metrics_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }
