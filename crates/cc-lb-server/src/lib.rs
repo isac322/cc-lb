@@ -38,7 +38,6 @@ pub mod warmup;
 pub use app::{App, BuildError, build_app, build_app_with_path, run_serve};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use scheduler_factory::{
-    LeaderConnectionHandle, OpenedScheduler, SchedulerBackend, SchedulerFactoryError,
-    open_scheduler_storage,
+    OpenedScheduler, SchedulerBackend, SchedulerFactoryError, open_scheduler_storage,
 };
 pub use subscription_quota_cache::{MergedQuotaSnapshot, MergedSource, SubscriptionQuotaCache};

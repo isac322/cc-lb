@@ -6,8 +6,6 @@ use metrics::Unit;
 pub const JOBS_TOTAL: &str = "cclb_scheduler_jobs_total";
 pub const JOB_DURATION_SECONDS: &str = "cclb_scheduler_job_duration_seconds";
 pub const FAILURES_TOTAL: &str = "cclb_scheduler_failures_total";
-pub const LEADER_ACQUIRED_TOTAL: &str = "cclb_scheduler_leader_acquired_total";
-pub const LEADER_LOST_TOTAL: &str = "cclb_scheduler_leader_lost_total";
 pub const INIT_FAILURE: &str = "cclb_scheduler_init_failure";
 pub const LAZY_REFRESH_TIMEOUT_TOTAL: &str = "cclb_scheduler_lazy_refresh_timeout_total";
 pub const PRUNE_ROWS_REMOVED_TOTAL: &str = "cclb_scheduler_prune_rows_removed_total";
@@ -62,16 +60,6 @@ pub fn describe_scheduler_metrics() {
             Unit::Count,
             "Scheduler terminal job failures by registered job type."
         );
-        ::metrics::describe_counter!(
-            LEADER_ACQUIRED_TOTAL,
-            Unit::Count,
-            "Scheduler leader lock acquisitions."
-        );
-        ::metrics::describe_counter!(
-            LEADER_LOST_TOTAL,
-            Unit::Count,
-            "Scheduler leader lock losses."
-        );
         ::metrics::describe_gauge!(INIT_FAILURE, Unit::Count, "Scheduler init failure state.");
         ::metrics::describe_counter!(
             LAZY_REFRESH_TIMEOUT_TOTAL,
@@ -116,8 +104,6 @@ pub fn touch_scheduler_metric_handles() {
         record_scheduler_job_duration(job_type, Duration::ZERO);
         record_scheduler_failure(job_type, 0);
     }
-    record_leader_acquired(0);
-    record_leader_lost(0);
     set_scheduler_init_failure(false);
     ::metrics::counter!(LAZY_REFRESH_TIMEOUT_TOTAL).increment(0);
     ::metrics::counter!(PRUNE_ROWS_REMOVED_TOTAL, "table" => "request_events").increment(0);
@@ -143,16 +129,6 @@ pub fn record_scheduler_job_duration(job_type: &'static str, duration: Duration)
 pub fn record_scheduler_failure(job_type: &str, count: u64) {
     describe_scheduler_metrics();
     ::metrics::counter!(FAILURES_TOTAL, "job_type" => job_type.to_owned()).increment(count);
-}
-
-pub fn record_leader_acquired(count: u64) {
-    describe_scheduler_metrics();
-    ::metrics::counter!(LEADER_ACQUIRED_TOTAL).increment(count);
-}
-
-pub fn record_leader_lost(count: u64) {
-    describe_scheduler_metrics();
-    ::metrics::counter!(LEADER_LOST_TOTAL).increment(count);
 }
 
 pub fn set_scheduler_init_failure(failed: bool) {

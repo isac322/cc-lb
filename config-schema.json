@@ -167,7 +167,6 @@
         "idempotency": {
           "claim_ttl_secs": 60
         },
-        "leader_lock_key": 224417894236161,
         "pgbouncer_transaction_mode": false,
         "recurring_jobs": {
           "anthropic_compat_refresh": {
@@ -894,11 +893,6 @@
           "default": {
             "claim_ttl_secs": 60
           }
-        },
-        "leader_lock_key": {
-          "type": "integer",
-          "format": "int64",
-          "default": 224417894236161
         },
         "pgbouncer_transaction_mode": {
           "type": "boolean",

@@ -27,7 +27,6 @@ async fn scheduler_factory_sqlite_happy_path_sets_up_tables_and_partial_index() 
         #[cfg(feature = "postgres")]
         SchedulerBackend::Postgres(_) => panic!("expected sqlite backend"),
     };
-    assert!(opened.leader_connection.is_none());
     let table_count: i64 = scheduler_sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'Jobs'",
     )
@@ -72,7 +71,7 @@ async fn scheduler_factory_sqlite_bad_path_returns_connection_failed() {
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
-async fn scheduler_factory_postgres_happy_path_sets_up_tables_index_and_leader() {
+async fn scheduler_factory_postgres_happy_path_sets_up_tables_and_index() {
     let Some(admin_url) = postgres_url() else {
         eprintln!("SKIP: postgres URL unset");
         return;
@@ -112,20 +111,10 @@ async fn scheduler_factory_postgres_happy_path_sets_up_tables_index_and_leader()
     let SchedulerBackend::Postgres(postgres) = opened.backend else {
         panic!("expected postgres backend")
     };
-    let leader = opened.leader_connection.expect("leader connection exists");
-    assert!(
-        leader
-            .election
-            .try_acquire()
-            .await
-            .expect("leader acquires")
-    );
-    assert!(leader.election.release().await.expect("leader releases"));
     let table_count: i64 = scheduler_sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'apalis' AND table_name = 'jobs'").fetch_one(&postgres.pool).await.expect("jobs table query succeeds");
     assert_eq!(table_count, 1);
     let predicate: Option<String> = scheduler_sqlx::query_scalar("SELECT pg_get_expr(indexes.indpred, indexes.indrelid) FROM pg_index indexes JOIN pg_class classes ON classes.oid = indexes.indexrelid JOIN pg_namespace namespaces ON namespaces.oid = classes.relnamespace WHERE namespaces.nspname = 'apalis' AND classes.relname = 'idx_jobs_idempotency_key'").fetch_one(&postgres.pool).await.expect("idempotency index query succeeds");
     assert!(predicate.is_none());
-    drop(leader);
     postgres.pool.close().await;
     let drop_database = format!(r#"DROP DATABASE IF EXISTS "{database_name}""#);
     scheduler_sqlx::query(&drop_database)

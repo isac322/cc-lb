@@ -9,39 +9,43 @@ The cc-lb scheduler uses a hybrid job model to coordinate background tasks acros
 The system consists of the following components:
 
 - **Entity Jobs**: Dynamic background tasks enqueued per-upstream or per-entity. Examples include warmup cycles and OAuth token refreshes.
-- **Singleton Jobs**: Periodic maintenance tasks that must run on exactly one replica at any given time. Examples include usage rollups, database pruning, and quota garbage collection.
+- **Singleton Jobs**: Periodic maintenance tasks that must produce at most one queued job per tick across the cluster. Examples include usage rollups, database pruning, and quota garbage collection.
 - **Watchdogs**: Periodic singleton jobs that scan active upstreams and enqueue missing entity jobs into Apalis storage.
-- **Cron Leader**: A single replica elected via database advisory locks to run the cron scheduler and enqueue singleton jobs.
+- **Cron Producers**: Every replica runs its own `apalis-cron` `CronStream`. Duplicate pushes for the same tick collide on the storage-level unique `(job_type, idempotency_key)` index, so exactly one job per tick is queued. Any Apalis worker on any replica can then claim and execute it. This follows the maintainer-recommended clustered-cron pattern (see [apalis#281](https://github.com/apalis-dev/apalis/issues/281) option 3).
 
 ### Worker Layout Diagram
 
 ```
 +---------------------------------------------------------------------------------+
 |                                  Postgres DB                                    |
-|  +-------------------------+  +-------------------------+  +-----------------+  |
-|  |      Apalis Queues      |  |     Cursor Tables       |  |  Advisory Lock  |  |
-|  |  (apalis.jobs table)    |  | (usage poll cursors)    |  | (0xCC1B...0001) |  |
-|  +------------^------------+  +------------^------------+  +--------^--------+  |
-+---------------|----------------------------|------------------------|-----------+
-                |                            |                        |
-        +-------+-------+            +-------+-------+        +-------+-------+
-        |               |            |               |        |               |
-+-------v---------------+------------v---------------+--------v---------------+---+
-| Replica 1 (Cron Leader)                                                         |
+|  +-------------------------+  +-------------------------+                       |
+|  |      Apalis Queues      |  |     Cursor Tables       |                       |
+|  |  (apalis.jobs table)    |  | (usage poll cursors)    |                       |
+|  |  UNIQUE(job_type,       |  +------------^------------+                       |
+|  |    idempotency_key)     |               |                                    |
+|  +------------^------------+               |                                    |
++---------------|----------------------------|------------------------------------+
+                |                            |
+        +-------+-------+            +-------+-------+
+        |               |            |               |
++-------v---------------+------------v---------------+----------------------------+
+| Replica 1                                                                       |
 |                                                                                 |
 |  +------------------+    +------------------+    +---------------------------+  |
 |  |   Cron Engine    |--->|  Apalis Storage  |    |      Apalis Workers       |  |
-|  | (Enqueues Crons) |    |  (Enqueue/Claim) |    | (Executes claimed jobs)   |  |
+|  | (Pushes ticks    |    |  (Dedups by      |    | (Executes claimed jobs)   |  |
+|  |  w/ idempotency) |    |   idempotency)   |    |                           |  |
 |  +------------------+    +--------^---------+    +---------------------------+  |
 +-----------------------------------|---------------------------------------------+
                                     |
 +-----------------------------------|---------------------------------------------+
-| Replica 2 (Follower)              |                                             |
-|                                   |                                             |
-|  +------------------+             |              +---------------------------+  |
-|  |   Cron Engine    |             +------------->|      Apalis Workers       |  |
-|  |     (Idle)       |                            | (Executes claimed jobs)   |  |
-|  +------------------+                            +---------------------------+  |
+| Replica 2                         |                                             |
+|                                                                                 |
+|  +------------------+    +--------v---------+    +---------------------------+  |
+|  |   Cron Engine    |--->|  Apalis Storage  |    |      Apalis Workers       |  |
+|  | (Pushes ticks    |    |  (Rejects dupes) |    | (Executes claimed jobs)   |  |
+|  |  w/ idempotency) |    |                  |    |                           |  |
+|  +------------------+    +------------------+    +---------------------------+  |
 +---------------------------------------------------------------------------------+
 ```
 
@@ -87,8 +91,6 @@ With these defaults, the system easily scales up to 10 replicas:
 (10 + 5) * 10 = 150 connections <= 168 (Verified)
 ```
 
-Additionally, the leader election mechanism uses 1 dedicated session-mode connection per leader replica. This connection is not managed by the pool and must be factored into capacity planning.
-
 ## 4. Idempotency and Scheduling State
 
 The scheduler now relies on Apalis Jobs as the durable coordination point for scheduler-side effects that do not require separate domain cursors. This keeps queueing, retry attempts, and idempotency keys in one table.
@@ -98,16 +100,17 @@ The scheduler now relies on Apalis Jobs as the durable coordination point for sc
 
 This design ensures duplicate enqueues collapse at the Jobs table while retryable `Failed` rows can still be treated as active work. It preserves the at-least-once external execution model defined in D-arch-1 without redundant scheduler-side state tables.
 
-## 5. Leader Election Semantics
+## 5. Cluster Coordination via Idempotency
 
-Leader election is required to coordinate cron scheduling and prevent multiple replicas from enqueuing duplicate singleton jobs.
+The scheduler does not use leader election. Cluster-safe cron is achieved entirely through Apalis storage-level idempotency, following the pattern documented by the apalis maintainer in [apalis#281](https://github.com/apalis-dev/apalis/issues/281) (option 3).
 
-- **Postgres Implementation**: Uses a dedicated `PgConnection` to acquire a session-level advisory lock. The default lock key is `0xCC1B_5CDE_0001` (defined as `DEFAULT_SCHEDULER_LEADER_LOCK_KEY` in `crates/cc-lb-config/src/types.rs`).
-- **Follower Behavior**: Replicas that fail to acquire the advisory lock become followers. They periodically attempt to acquire the lock every 5 seconds (the heartbeat interval).
-- **Handover Window**: If the leader replica crashes or disconnects, Postgres automatically releases the session-level advisory lock. The next follower will acquire the lock and assume the leader role within its next 5-second heartbeat window.
-- **SQLite Implementation**: SQLite deployments run in a single-process environment. The SQLite leader election implementation always returns `LeaderState::Single` and assumes leadership immediately.
+- **Every Replica Runs `CronStream`**: There is no primary or follower. Each replica creates an `apalis_cron::CronStream` in-process and iterates it independently.
+- **Deterministic Idempotency Keys**: Each cron tick is turned into a `TaskBuilder::new(job).run_at_timestamp(tick_secs).with_idempotency_key("cron:{kind}:{tick_secs}").build()` push. `tick_secs` comes from `Tick::get_timestamp()`, which returns the schedule-derived instant (not wall-clock at push time), so replicas with modest clock drift still produce identical keys for the same tick.
+- **Storage Dedups**: The unique `(job_type, idempotency_key)` index on `apalis.jobs` (Postgres) and `Jobs` (SQLite) collapses simultaneous pushes to exactly one row per tick. The producer swallows the resulting `SQLSTATE 23505` / `SQLite constraint 2067` violations as expected.
+- **Any Worker Executes**: Apalis workers on every replica poll the queue via `FOR UPDATE SKIP LOCKED`; whichever worker wins the row-level claim runs the job.
+- **SQLite Deployments**: SQLite is single-process by design (see `AGENTS.md` storage rules); the same code path runs but there is no clustering concern.
 
-This leader election design is specified in decision ID D-arch-6.
+This design revokes decision ID D-arch-6 (which specified advisory-lock leader election). It is stateless, has no handover window, and reserves zero dedicated database connections for coordination.
 
 ## 6. Retry Classes
 
@@ -150,10 +153,6 @@ The scheduler emits a comprehensive set of Prometheus metrics to monitor health 
 - `cclb_scheduler_failures_total` (Counter): Tracks terminal job failures.
   - Labels: `job_type`
   - Cardinality: 12
-- `cclb_scheduler_leader_acquired_total` (Counter): Tracks leader lock acquisitions.
-  - Cardinality: 1
-- `cclb_scheduler_leader_lost_total` (Counter): Tracks leader lock losses.
-  - Cardinality: 1
 - `cclb_scheduler_init_failure` (Gauge): Tracks scheduler initialization failure state (0 or 1).
   - Cardinality: 1
 - `cclb_scheduler_lazy_refresh_timeout_total` (Counter): Tracks timed-out lazy OAuth refresh waits.
@@ -184,9 +183,10 @@ The "local vs durable" rule (defined in D-arch-3 and D-arch-1) governs where bac
 ### Scheduler Stuck
 - **Symptom**: Jobs are not executing; queues are growing; `cclb_scheduler_jobs_total` is flat.
 - **Triage**:
-  1. Check the leader status via `GET /admin/scheduler/status`. Ensure a leader is active.
-  2. Check the logs for database connection errors or lock contention.
-  3. Verify that the worker threads are not blocked by long-running external HTTP calls.
+  1. Query `GET /admin/scheduler/status` and confirm `recurring_jobs[].next_run_at` is advancing across ticks.
+  2. Inspect `apalis.jobs` for the affected `job_type` and idempotency key pattern; a stuck row will show `status = 'Running'` with a stale `run_at`.
+  3. Check the logs for database connection errors or lock contention.
+  4. Verify that the worker threads are not blocked by long-running external HTTP calls.
 - **Resolution**: Restart the scheduler workers or trigger a manual reconciliation via `POST /admin/scheduler/reconcile`.
 
 ### Duplicate Effect
@@ -210,9 +210,7 @@ The "local vs durable" rule (defined in D-arch-3 and D-arch-1) governs where bac
   2. Verify that the database schema matches the expected version.
 - **Resolution**: Roll back the failed migration or manually resolve the schema conflict. Ensure that Phase 1 (PR A) is fully deployed before running Phase 2 (PR B) column drops per D-cut-6.
 
-### Leader Election Storm
-- **Symptom**: High CPU usage on the database; rapid lock acquisition and loss events in metrics.
-- **Triage**:
-  1. Monitor `cclb_scheduler_leader_acquired_total` and `cclb_scheduler_leader_lost_total`.
-  2. Check for network instability between the app replicas and the database.
-- **Resolution**: Increase the heartbeat interval or resolve the underlying network latency issues.
+### Duplicate Cron Push Noise
+- **Symptom**: Elevated `SQLSTATE 23505` (Postgres) or `2067` (SQLite) log lines from the scheduler storage during cron ticks.
+- **Triage**: These are expected. Every replica pushes each tick and all but one are rejected by the unique idempotency-key index; the producer logs but does not surface them as errors. If the volume becomes disruptive, downgrade the storage layer's log level for those specific SQL states.
+- **Resolution**: No action needed for correctness. Excessive rate typically indicates too many replicas relative to cron cadence; scale down or reduce cron frequency.

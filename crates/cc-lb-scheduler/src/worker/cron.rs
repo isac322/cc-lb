@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_config::Config;
@@ -13,9 +12,9 @@ use crate::jobs::compat::AnthropicCompatRefreshJob;
 use crate::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
 use crate::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob;
 use crate::jobs::watchdog::{OAuthRefreshWatchdogJob, WarmupWatchdogJob};
-use crate::leader_election::LeaderElection;
 
-const LEADER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+/// Delay between cron producer restarts after a transient failure.
+const CRON_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 #[cfg(feature = "postgres")]
 use super::PostgresSchedulerStorage;
@@ -34,7 +33,6 @@ impl crate::cron::SingletonCronJob for CronJob {
 pub(super) fn spawn_cron_producer(
     backend: SchedulerBackend,
     config: Config,
-    leader: Arc<LeaderElection>,
     cancel: CancellationToken,
     clock: ClockHandle,
 ) -> JoinHandle<()> {
@@ -42,11 +40,11 @@ pub(super) fn spawn_cron_producer(
         match backend {
             #[cfg(feature = "sqlite")]
             SchedulerBackend::Sqlite(sqlite) => {
-                run_sqlite_cron_producer(sqlite, config, leader, cancel, clock).await;
+                run_sqlite_cron_producer(sqlite, config, cancel, clock).await;
             }
             #[cfg(feature = "postgres")]
             SchedulerBackend::Postgres(postgres) => {
-                run_postgres_cron_producer(postgres, config, leader, cancel, clock).await;
+                run_postgres_cron_producer(postgres, config, cancel, clock).await;
             }
         }
     })
@@ -56,18 +54,16 @@ pub(super) fn spawn_cron_producer(
 async fn run_sqlite_cron_producer(
     sqlite: SqliteSchedulerStorage,
     config: Config,
-    leader: Arc<LeaderElection>,
     cancel: CancellationToken,
     clock: ClockHandle,
 ) {
     let mut handles = Vec::new();
     for spec in singleton_cron_specs(&config, clock.clone()) {
         let pool = sqlite.pool.clone();
-        let leader = leader.clone();
         let cancel = cancel.clone();
         let clock = clock.clone();
         handles.push(tokio::spawn(async move {
-            run_sqlite_singleton_cron_loop(pool, spec, leader, cancel, clock).await;
+            run_sqlite_singleton_cron_loop(pool, spec, cancel, clock).await;
         }));
     }
     cancel.cancelled().await;
@@ -78,17 +74,15 @@ async fn run_sqlite_cron_producer(
 async fn run_postgres_cron_producer(
     postgres: PostgresSchedulerStorage,
     config: Config,
-    leader: Arc<LeaderElection>,
     cancel: CancellationToken,
     clock: ClockHandle,
 ) {
     let mut handles = Vec::new();
     for spec in singleton_cron_specs(&config, clock) {
         let pool = postgres.pool.clone();
-        let leader = leader.clone();
         let cancel = cancel.clone();
         handles.push(tokio::spawn(async move {
-            run_postgres_singleton_cron_loop(pool, spec, leader, cancel).await;
+            run_postgres_singleton_cron_loop(pool, spec, cancel).await;
         }));
     }
     cancel.cancelled().await;
@@ -99,7 +93,6 @@ async fn run_postgres_cron_producer(
 async fn run_postgres_singleton_cron_loop(
     pool: sqlx::PgPool,
     spec: SingletonCronSpec,
-    leader: Arc<LeaderElection>,
     cancel: CancellationToken,
 ) {
     loop {
@@ -116,8 +109,8 @@ async fn run_postgres_singleton_cron_loop(
             storage,
             spec.factory,
         );
-        run_one_cron_attempt(spec.name, worker, &leader, &cancel).await;
-        if !sleep_or_cancel(LEADER_RETRY_INTERVAL, &cancel).await {
+        run_one_cron_attempt(spec.name, worker, &cancel).await;
+        if !sleep_or_cancel(CRON_RETRY_INTERVAL, &cancel).await {
             break;
         }
     }
@@ -127,7 +120,6 @@ async fn run_postgres_singleton_cron_loop(
 async fn run_sqlite_singleton_cron_loop(
     pool: sqlx::SqlitePool,
     spec: SingletonCronSpec,
-    leader: Arc<LeaderElection>,
     cancel: CancellationToken,
     clock: ClockHandle,
 ) {
@@ -146,8 +138,8 @@ async fn run_sqlite_singleton_cron_loop(
             storage,
             spec.factory,
         );
-        run_one_cron_attempt(spec.name, worker, &leader, &cancel).await;
-        if !sleep_or_cancel(LEADER_RETRY_INTERVAL, &cancel).await {
+        run_one_cron_attempt(spec.name, worker, &cancel).await;
+        if !sleep_or_cancel(CRON_RETRY_INTERVAL, &cancel).await {
             break;
         }
     }
@@ -156,13 +148,12 @@ async fn run_sqlite_singleton_cron_loop(
 async fn run_one_cron_attempt<Storage>(
     name: &'static str,
     worker: CronWorkerBuilder<CronJob, IntervalSchedule, Storage, CronJobFactory>,
-    leader: &Arc<LeaderElection>,
     cancel: &CancellationToken,
 ) where
     Storage: apalis::prelude::TaskSink<CronJob, Error = sqlx::Error> + Send + 'static,
 {
     tokio::select! {
-        result = worker.run(leader.as_ref()) => {
+        result = worker.run() => {
             if let Err(error) = result {
                 tracing::warn!(
                     job = name,
