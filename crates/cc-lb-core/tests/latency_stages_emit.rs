@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 mod common;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

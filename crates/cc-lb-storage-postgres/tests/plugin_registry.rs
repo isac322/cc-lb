@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use std::str::FromStr;
 
 use anyhow::Result;

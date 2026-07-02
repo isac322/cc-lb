@@ -584,7 +584,7 @@ log_redaction = true</code></pre><button class="copy">복사</button></div>
     </div>
 
     <h4>추천 해결책: random terminal strategy 사용</h4>
-    <p>여러 키에 트래픽을 나누는 가장 단순한 방법은 여러 upstream을 등록한 뒤 principal의 terminal strategy를 <code>random</code>으로 설정하는 것입니다. 고급 정책이 필요하면 wire v3 filter plugin으로 후보를 먼저 줄이고 같은 terminal 단계로 최종 선택을 맡기세요.</p>
+    <p>여러 키에 트래픽을 나누는 가장 단순한 방법은 여러 upstream을 등록한 뒤 principal의 terminal strategy를 <code>random</code>으로 설정하는 것입니다. 고급 정책이 필요하면 filter plugin으로 후보를 먼저 줄이고 같은 terminal 단계로 최종 선택을 맡기세요.</p>
 
     <h4>terminal strategy 설정 예시</h4>
     <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># POST /admin/v1/upstreams 로 여러 upstream 등록 (예: anthropic_pool_a, anthropic_pool_b)

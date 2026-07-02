@@ -45,7 +45,7 @@ pub async fn new_fixture() -> Fixture {
     let dialect_plugin = UpstreamWarmupDialectPlugin {
         wasm_registry_id: Uuid::from_u128(0x1111_1111_2222_3333_4444_5555_6666_7777),
         config: json!({"mode": "compact", "max_tokens": 1}),
-        wire_version: Some(3),
+        wire_version: Some(1),
     };
     let upstream = UpstreamStore::create(
         storage.as_ref(),

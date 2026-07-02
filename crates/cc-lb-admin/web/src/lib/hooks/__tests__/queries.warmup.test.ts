@@ -218,7 +218,7 @@ describe('useUpdateUpstreamWarmupSettings', () => {
       warmup_dialect_plugin: {
         wasm_registry_id: 'shape-plugin-1',
         config: { mode: 'anthropic' },
-        wire_version: 3,
+        wire_version: 1,
       },
     };
     const updatedUpstream = makeOauthUpstream({

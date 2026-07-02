@@ -18,7 +18,7 @@ use serde_json::json;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::dynamic_view_builder::{Stores, bridged_metadata, materialize_wasm};
+use crate::dynamic_view_builder::{Stores, materialize_wasm};
 use crate::refresh::LazyRefresher;
 use crate::warmup::request::{WARMUP_MAX_TOKENS, WARMUP_MODEL, WarmupHttpClient};
 
@@ -114,11 +114,7 @@ pub async fn dispatch_warmup_with_dialect(
         artifact: wasm_path.to_string_lossy().into_owned(),
         wire_version: plugin_ref.wire_version,
         config: plugin_ref.config.clone(),
-        metadata: bridged_metadata(
-            params.stores.plugin_registry_repo.as_ref(),
-            registry_entry.sha256,
-        )
-        .await,
+        metadata: std::collections::BTreeMap::new(),
     };
 
     let synth_name = format!("__warmup__{}", params.upstream.id);
