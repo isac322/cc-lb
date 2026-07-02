@@ -383,12 +383,12 @@ impl Inner {
                 reason,
                 client_status: event.status,
                 duration_ms,
-                limit_reconcile_ms: None,
-                observability_post_ms: None,
-                proxy_setup_ms: None,
-                upstream_body_ms: None,
-                first_body_chunk_ms: None,
-                internal_errors: Vec::new(),
+                limit_reconcile_ms: event.limit_reconcile_ms,
+                observability_post_ms: event.observability_post_ms,
+                proxy_setup_ms: event.proxy_setup_ms,
+                upstream_body_ms: event.upstream_body_ms,
+                first_body_chunk_ms: event.first_body_chunk_ms,
+                internal_errors: event.internal_errors.clone(),
             });
     }
 }

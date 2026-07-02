@@ -1028,6 +1028,7 @@ impl Lifecycle {
             }
             return Ok(*response);
         }
+        let cache_metadata = request_cache_metadata(&ctx.downstream_headers, &ctx.body_bytes);
         if let Some(o) = observer.as_ref() {
             let stream = serde_json::from_slice::<Value>(&ctx.body_bytes)
                 .ok()
@@ -1042,11 +1043,23 @@ impl Lifecycle {
                     model,
                     stream,
                     body_bytes: ctx.body_bytes.len() as u64,
-                    ..Default::default()
+                    cache_control_block_count: cache_metadata.cache_control_block_count,
+                    cache_breakpoints: cache_metadata
+                        .cache_breakpoints
+                        .iter()
+                        .map(cache_breakpoint_to_lite)
+                        .collect(),
+                    cache_prefix_hash: cache_metadata.cache_prefix_hash.clone(),
+                    thread_id: cache_metadata.thread_id.clone(),
+                    message_id: cache_metadata.message_id.clone(),
+                    message_index: cache_metadata.message_index,
+                    message_count: cache_metadata.message_count,
+                    cache_control_message_indices: cache_metadata
+                        .cache_control_message_indices
+                        .clone(),
                 }),
             });
         }
-        let cache_metadata = request_cache_metadata(&ctx.downstream_headers, &ctx.body_bytes);
         let cache_breakpoints = if view.prompt_cache_observation_cache_opt().is_some()
             && self.config.prompt_cache_shadow.enabled
         {
@@ -1135,7 +1148,7 @@ impl Lifecycle {
                     principal_kind: Some(
                         principal_kind_lite_as_str(&success.record.principal_kind).to_owned(),
                     ),
-                    auth_ms: None,
+                    auth_ms: Some(auth_ms),
                 }),
             });
         }
@@ -1367,6 +1380,7 @@ impl Lifecycle {
             dialect,
         };
         let route_ms = duration_to_ms(route_start.elapsed());
+        let routing_trace_value = pipeline_result.routing_trace(terminal_decision.clone());
         if let Some(o) = observer.as_ref() {
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                 event_id: o.event_id().to_owned(),
@@ -1377,17 +1391,17 @@ impl Lifecycle {
                     upstream_kind: pricing_upstream_kind(&route.upstream)
                         .map(pricing_upstream_kind_label)
                         .map(str::to_owned),
-                    route_ms: None,
-                    routing_trace: None,
+                    route_ms: Some(route_ms),
+                    routing_trace: Some(routing_trace_value.clone()),
                 }),
-                routing_trace: None,
+                routing_trace: Some(routing_trace_value.clone()),
             });
             o.attach_route(
                 resolved_upstream_id,
                 router_chosen_upstream_name.clone(),
                 None,
             );
-            o.set_routing_trace(pipeline_result.routing_trace(terminal_decision.clone()));
+            o.set_routing_trace(routing_trace_value);
         }
         let metric_context = ApiKeyMetricContext::new(&success, &route.upstream, &ctx.body_bytes);
         let predicted_cache_read_tokens = pipeline_result
@@ -1448,13 +1462,13 @@ impl Lifecycle {
                         .map(|r| r.id().to_owned())
                         .unwrap_or_default(),
                     amount: limit.request.max_tokens as u64,
-                    limit_reserve_ms: None,
+                    limit_reserve_ms: Some(limit_reserve_ms),
                 }
             } else {
                 cc_lb_lifecycle::LimitDecisionKind::Reserved {
                     reservation_id: String::new(),
                     amount: 0,
-                    limit_reserve_ms: None,
+                    limit_reserve_ms: Some(limit_reserve_ms),
                 }
             };
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
@@ -1533,14 +1547,14 @@ impl Lifecycle {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
                         event_id: o.event_id().to_owned(),
                         status: status.as_u16(),
-                        headers: cc_lb_lifecycle::HeaderSnapshot::default(),
-                        bulkhead_wait_ms: None,
-                        dns_ms: None,
-                        connect_ms: None,
-                        connection_reused: None,
-                        shape_ms: None,
-                        sign_ms: None,
-                        upstream_ttfb_ms: None,
+                        headers: header_snapshot_from(response.headers()),
+                        bulkhead_wait_ms: attempt_timings.bulkhead_wait_ms,
+                        dns_ms: attempt_timings.dns_ms,
+                        connect_ms: attempt_timings.connect_ms,
+                        connection_reused: attempt_timings.connection_reused,
+                        shape_ms: attempt_timings.shape_ms,
+                        sign_ms: attempt_timings.sign_ms,
+                        upstream_ttfb_ms: attempt_timings.upstream_ttfb_ms,
                     });
                 }
                 response
@@ -1993,6 +2007,17 @@ impl Lifecycle {
                     usage: to_usage_snapshot(&usage),
                     source: cc_lb_lifecycle::UsageSource::NonStreamBody,
                 });
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
+                    event_id: o.event_id().to_owned(),
+                    result: Ok(cc_lb_lifecycle::StreamSuccess {
+                        usage: to_usage_snapshot(&usage),
+                        sse_event_count: 0,
+                        body_bytes: Some(body.len() as u64),
+                        body_chunk_count: Some(body_chunk_count),
+                        first_body_chunk_ms,
+                        ..Default::default()
+                    }),
+                });
                 o.set_prebuilt_event(event);
                 o.finish();
             } else {
@@ -2046,7 +2071,7 @@ impl Lifecycle {
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                 event_id: o.event_id().to_owned(),
                 result: Err(cc_lb_lifecycle::RouteFailure::RouteNoUpstreamAfterFilter),
-                routing_trace: None,
+                routing_trace: event.routing_trace.clone(),
             });
             o.set_prebuilt_event(event);
             o.set_terminal(status, error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER);
@@ -2670,7 +2695,21 @@ impl Lifecycle {
                             result: Ok(cc_lb_lifecycle::StreamSuccess {
                                 usage: to_usage_snapshot(&usage),
                                 sse_event_count,
-                                ..Default::default()
+                                body_bytes: Some(total_bytes),
+                                body_chunk_count: Some(batch_index),
+                                first_body_chunk_ms: elapsed_ms(first_chunk_at),
+                                stream_message_start_ms: elapsed_ms(message_start_at),
+                                stream_content_block_start_ms: elapsed_ms(content_block_start_at),
+                                stream_first_content_delta_ms: elapsed_ms(
+                                    first_content_delta_at,
+                                ),
+                                stream_last_content_delta_ms: elapsed_ms(last_content_delta_at),
+                                stream_message_stop_ms: elapsed_ms(message_stop_at),
+                                stream_last_chunk_ms: elapsed_ms(last_chunk_at),
+                                stream_total_ms: Some(stream_total_ms),
+                                content_delta_count: Some(content_delta_count),
+                                ping_count: Some(ping_count),
+                                inter_token_avg_ms,
                             }),
                         });
                         o.set_prebuilt_event(event);
@@ -3149,11 +3188,66 @@ fn body_cap_for_path(config: &LifecycleConfig, path: &str) -> usize {
     }
 }
 
+fn cache_breakpoint_to_lite(
+    breakpoint: &RequestCacheBreakpoint,
+) -> cc_lb_lifecycle::CacheBreakpointLite {
+    cc_lb_lifecycle::CacheBreakpointLite {
+        block_index: breakpoint.block_index,
+        source: match breakpoint.source {
+            RequestCacheBreakpointSource::System => {
+                cc_lb_lifecycle::CacheBreakpointSourceLite::System
+            }
+            RequestCacheBreakpointSource::Tools => {
+                cc_lb_lifecycle::CacheBreakpointSourceLite::Tools
+            }
+            RequestCacheBreakpointSource::Message => {
+                cc_lb_lifecycle::CacheBreakpointSourceLite::Message
+            }
+        },
+        path: breakpoint.path.clone(),
+        message_index: breakpoint.message_index,
+        ttl: breakpoint.ttl.clone(),
+        prefix_hash: breakpoint.prefix_hash.clone(),
+        prefix_token_count: breakpoint.prefix_token_count,
+    }
+}
+
 fn header_to_string(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(name)
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned)
+}
+
+/// Project the upstream response headers into a `HeaderSnapshot` for the
+/// `UpstreamResponseStarted` lifecycle event.
+///
+/// Strips `Authorization` and similar credential-bearing headers by pattern
+/// (we only copy the fields we explicitly whitelist). The `anthropic_headers`
+/// map is a flat pass-through of every header whose lowercased name starts
+/// with `anthropic-ratelimit-` OR exactly matches one of the identity slots
+/// (`ANTHROPIC_IDENTITY_HEADERS`). Downstream subscribers reconstruct a
+/// `HeaderMap` and parse into typed rate-limit/subscription-quota records.
+fn header_snapshot_from(headers: &HeaderMap) -> cc_lb_lifecycle::HeaderSnapshot {
+    let mut anthropic_headers: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for (name, value) in headers.iter() {
+        let name_lc = name.as_str();
+        let Ok(val) = value.to_str() else { continue };
+        if name_lc.starts_with("anthropic-ratelimit-")
+            || cc_lb_lifecycle::ANTHROPIC_IDENTITY_HEADERS.contains(&name_lc)
+        {
+            anthropic_headers.insert(name_lc.to_owned(), val.to_owned());
+        }
+    }
+    cc_lb_lifecycle::HeaderSnapshot {
+        content_type: header_to_string(headers, "content-type"),
+        content_encoding: header_to_string(headers, "content-encoding"),
+        request_id: header_to_string(headers, "x-request-id")
+            .or_else(|| header_to_string(headers, "request-id")),
+        retry_after: header_to_string(headers, "retry-after"),
+        anthropic_headers,
+    }
 }
 
 fn next_request_id() -> String {
@@ -4116,7 +4210,7 @@ fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
         web_fetch_requests: u.web_fetch_requests,
         service_tier: u.service_tier.clone(),
         inference_geo: u.inference_geo.clone(),
-        iterations: None,
+        iterations: u.iterations.clone(),
     }
 }
 
