@@ -112,6 +112,21 @@ pub fn build_hot_engine(cfg: &HotEngineConfig) -> Result<Engine, WasmtimeRuntime
         .memory_reservation(1u64 << 32)
         .memory_guard_size(1u64 << 32)
         .memory_init_cow(true)
+        // Hardening knobs (RFC-0001 librarian audit):
+        // - `wasm_backtrace(false)` disables backtrace collection on
+        //   trap so a plugin cannot trigger deep backtrace work as a
+        //   DoS vector, and no wasm frames are ever captured into a
+        //   host process report.
+        // - `coredump_on_trap(false)` prevents wasmtime from writing
+        //   guest coredumps (which would contain plugin linear memory,
+        //   including any secrets a filter/shape plugin observed
+        //   before the trap) to disk.
+        // - `native_unwind_info(false)` drops native unwind tables from
+        //   compiled modules; safe once backtraces are off, saves
+        //   compile time and memory.
+        .wasm_backtrace(false)
+        .coredump_on_trap(false)
+        .native_unwind_info(false)
         .max_wasm_stack(cfg.max_wasm_stack);
 
     let max_memory_size = (cfg.memory_max_pages as usize) << 16;
