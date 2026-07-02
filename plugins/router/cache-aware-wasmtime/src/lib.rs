@@ -14,8 +14,7 @@
 
 extern crate alloc;
 
-use alloc::borrow::ToOwned;
-use alloc::string::ToString;
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::str;
 
@@ -36,7 +35,7 @@ mod cache_aware {
 
     #[cc_lb_pdk_wasmtime::handler(name = "filter", view)]
     pub fn filter(req: &ArchivedFilterRequest) -> FilterResponse {
-        let candidates = req.candidates.as_slice();
+        let candidates: &[ArchivedUpstreamCandidate] = &req.candidates;
         let keep_k = keep_k_from_principal(req);
         let kept_indices = rank_top_k(candidates, keep_k);
 
@@ -59,15 +58,15 @@ mod cache_aware {
 pub use cache_aware::filter;
 
 fn candidate_decision(candidate: &ArchivedUpstreamCandidate, keep: bool) -> PerCandidateReason {
+    let upstream_id_str: &str = &candidate.upstream_id;
     PerCandidateReason {
-        upstream_id: candidate.upstream_id.as_str().to_owned(),
-        decision: if keep {
+        upstream_id: Box::from(upstream_id_str),
+        decision: Box::from(if keep {
             ACCEPT_DECISION
         } else {
             REJECT_DECISION
-        }
-        .to_string(),
-        reason: if keep { ACCEPT_REASON } else { REJECT_REASON }.to_string(),
+        }),
+        reason: Box::from(if keep { ACCEPT_REASON } else { REJECT_REASON }),
     }
 }
 
@@ -90,8 +89,14 @@ fn keep_k_from_principal(req: &ArchivedFilterRequest) -> usize {
     req.principal
         .claims
         .iter()
-        .find(|entry| entry.0.as_str() == KEEP_K_CLAIM)
-        .and_then(|entry| str::from_utf8(entry.1.as_slice()).ok())
+        .find(|entry| {
+            let key: &str = &entry.key;
+            key == KEEP_K_CLAIM
+        })
+        .and_then(|entry| {
+            let value: &[u8] = &entry.value;
+            str::from_utf8(value).ok()
+        })
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT_KEEP_K)
 }

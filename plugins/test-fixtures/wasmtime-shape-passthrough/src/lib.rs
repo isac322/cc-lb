@@ -13,6 +13,7 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -34,24 +35,28 @@ mod passthrough {
         // half-built request, which we surface as a trap.
         let base = upstream_base_url(&req.upstream)
             .expect("host must populate Upstream::AnthropicDirect.base_url before calling shape");
-        let url = build_url(
-            &base,
-            req.path.as_str(),
-            req.query.as_ref().map(|q| q.as_str()),
-        );
+        let path_str: &str = &req.path;
+        let query_str: Option<&str> = req.query.as_ref().map(|q| &**q);
+        let url = build_url(&base, path_str, query_str);
         let headers: Vec<WireHeader> = req
             .headers
             .iter()
-            .map(|h| WireHeader {
-                name: h.name.as_str().to_string(),
-                value: h.value.as_slice().to_vec(),
+            .map(|h| {
+                let name_ref: &str = &h.name;
+                let value_ref: &[u8] = &h.value;
+                WireHeader {
+                    name: Box::from(name_ref),
+                    value: Box::from(value_ref),
+                }
             })
             .collect();
+        let method_ref: &str = &req.method;
+        let body_ref: &[u8] = &req.body;
         ShapeResponse {
-            url,
-            method: req.method.as_str().to_string(),
-            headers,
-            body: req.body.as_slice().to_vec(),
+            url: Box::from(url.as_str()),
+            method: Box::from(method_ref),
+            headers: headers.into_boxed_slice(),
+            body: Box::from(body_ref),
         }
     }
 
@@ -65,9 +70,10 @@ pub use passthrough::{normalize_error, shape};
 
 fn upstream_base_url(upstream: &ArchivedUpstream) -> Option<String> {
     match upstream {
-        ArchivedUpstream::AnthropicDirect { base_url } => {
-            base_url.as_ref().map(|b| b.as_str().to_string())
-        }
+        ArchivedUpstream::AnthropicDirect { base_url } => base_url.as_ref().map(|b| {
+            let s: &str = b;
+            s.to_string()
+        }),
     }
 }
 

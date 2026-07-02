@@ -22,16 +22,39 @@
 //! * The wire schema is fingerprinted via BLAKE3 of `cc_lb_schema_hash`
 //!   custom section content. Host and guest must agree byte-for-byte.
 //!
+//! ## Wire v2 (RFC-0001 #9 borrowed-wire optimisation)
+//!
+//! Host-to-guest request types (FilterRequest, ShapeRequest,
+//! NormalizeErrorRequest) come in two flavours that produce IDENTICAL
+//! archived bytes:
+//! * **Owned** (`FilterRequest`, `ShapeRequest`, ...) — owned `Box<str>`
+//!   / `Box<[u8]>` fields. Used by the guest for `rkyv::deserialize`
+//!   round-trips and for round-trip test fixtures.
+//! * **Borrowed ref** (`FilterRequestRef<'a>`, `ShapeRequestRef<'a>`,
+//!   ...) — `&'a str` / `&'a [u8]` fields with `#[rkyv(with =
+//!   InlineAsBox)]`. Used by the host in `wire_to_host_wire_request`
+//!   so the request body (up to 100 MiB on `/v1/files`) is serialised
+//!   IN PLACE from the request pipeline's `bytes::Bytes` without any
+//!   `.to_vec()` copy.
+//!
+//! Both variants archive to the same `ArchivedBox<ArchivedSlice<u8>>`
+//! / `ArchivedBox<ArchivedStr>` byte layouts — verified by the wire
+//! round-trip tests in `crates/cc-lb-plugin-types/tests/borrowed_wire_roundtrip.rs`.
+//! When either variant is written to guest memory, the guest reads it
+//! via `rkyv::access::<ArchivedFilterRequest, _>` — the archived
+//! type name is identical because the owned type is the sole `Archive`
+//! source of truth; the ref type carries `#[rkyv(archived = ...)]` to
+//! reuse the owned type's archived form.
+//!
 //! See `docs/rfc/0001-plugin-runtime-vnext.md`.
 #![no_std]
 #![forbid(unsafe_code)]
 
 extern crate alloc;
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::boxed::Box;
 
-use rkyv::{Archive, Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize, with::InlineAsBox};
 
 /// Principal context as seen by the filter plugin.
 ///
@@ -40,19 +63,69 @@ use rkyv::{Archive, Deserialize, Serialize};
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct Principal {
-    pub id: String,
-    pub kind: String,
+    pub id: Box<str>,
+    pub kind: Box<str>,
     /// Free-form key/value claims. Bytes intentionally, not JSON.
-    pub claims: Vec<(String, Vec<u8>)>,
+    /// Modelled as a named `Claim` struct (not a tuple) so the
+    /// borrowed [`ClaimRef`] and this owned form archive to the same
+    /// byte layout for host/guest wire compatibility.
+    pub claims: Box<[Claim]>,
+}
+
+/// One claim key/value pair — see [`Principal::claims`]. Named
+/// struct (not tuple) so that `ClaimRef<'a>` matches the archived
+/// byte layout without an extra Ref wrapper.
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
+#[rkyv(derive(Debug))]
+pub struct Claim {
+    pub key: Box<str>,
+    pub value: Box<[u8]>,
+}
+
+/// Borrowed mirror of [`Principal`] used by the host encode path. Every
+/// reference field carries `#[rkyv(with = InlineAsBox)]` so serialising
+/// this struct emits the same archived byte layout as [`Principal`].
+#[derive(Archive, Serialize)]
+pub struct PrincipalRef<'a> {
+    #[rkyv(with = InlineAsBox)]
+    pub id: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub kind: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub claims: &'a [ClaimRef<'a>],
+}
+
+/// One claim entry inside [`PrincipalRef`]. The tuple form used by the
+/// owned type does not have a straight borrowed equivalent, so we
+/// promote it to a named struct with two borrowed fields.
+#[derive(Archive, Serialize)]
+pub struct ClaimRef<'a> {
+    #[rkyv(with = InlineAsBox)]
+    pub key: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub value: &'a [u8],
 }
 
 /// One upstream candidate the filter plugin can choose to keep or drop.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct UpstreamCandidate {
-    pub upstream_id: String,
-    pub name: String,
-    pub kind: String,
+    pub upstream_id: Box<str>,
+    pub name: Box<str>,
+    pub kind: Box<str>,
+    pub observed_at_unix_secs: u64,
+    pub predicted_cache_read_tokens: u32,
+}
+
+/// Borrowed mirror of [`UpstreamCandidate`].
+#[derive(Archive, Serialize)]
+pub struct UpstreamCandidateRef<'a> {
+    #[rkyv(with = InlineAsBox)]
+    pub upstream_id: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub name: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub kind: &'a str,
     pub observed_at_unix_secs: u64,
     pub predicted_cache_read_tokens: u32,
 }
@@ -61,39 +134,76 @@ pub struct UpstreamCandidate {
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct Header {
-    pub name: String,
+    pub name: Box<str>,
     /// Raw header bytes — never base64'd. The whole point of the rkyv wire is
     /// to remove that encode/decode hop.
-    pub value: Vec<u8>,
+    pub value: Box<[u8]>,
 }
 
-/// Filter hook input.
-///
-/// Sent host → guest. The host serialises via `rkyv::to_bytes`, allocates
-/// `cc_lb_alloc(size, align_of::<Archived<FilterRequest>>())` in guest
-/// memory, writes the bytes, and calls `cc_lb_filter(in_ptr, in_len)`.
+/// Borrowed mirror of [`Header`].
+#[derive(Archive, Serialize)]
+pub struct HeaderRef<'a> {
+    #[rkyv(with = InlineAsBox)]
+    pub name: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub value: &'a [u8],
+}
+
+/// Filter hook input (owned form used by the guest).
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct FilterRequest {
-    pub request_id: String,
-    pub method: String,
-    pub path: String,
-    pub query: Option<String>,
-    pub headers: Vec<Header>,
-    pub body: Vec<u8>,
+    pub request_id: Box<str>,
+    pub method: Box<str>,
+    pub path: Box<str>,
+    pub query: Option<Box<str>>,
+    pub headers: Box<[Header]>,
+    pub body: Box<[u8]>,
     pub principal: Principal,
-    pub candidates: Vec<UpstreamCandidate>,
+    pub candidates: Box<[UpstreamCandidate]>,
+}
+
+/// Borrowed mirror of [`FilterRequest`] used by the host encode path.
+/// Serialising this emits the same archived byte layout as
+/// [`FilterRequest`] so the guest reads it via
+/// `rkyv::access::<ArchivedFilterRequest, _>` unchanged.
+#[derive(Archive, Serialize)]
+pub struct FilterRequestRef<'a> {
+    #[rkyv(with = InlineAsBox)]
+    pub request_id: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub method: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub path: &'a str,
+    pub query: Option<QueryRef<'a>>,
+    #[rkyv(with = InlineAsBox)]
+    pub headers: &'a [HeaderRef<'a>],
+    #[rkyv(with = InlineAsBox)]
+    pub body: &'a [u8],
+    pub principal: PrincipalRef<'a>,
+    #[rkyv(with = InlineAsBox)]
+    pub candidates: &'a [UpstreamCandidateRef<'a>],
+}
+
+/// Borrowed wrapper for the optional `query` field. Necessary because
+/// `Option<InlineAsBox<&'a str>>` does not compose directly at the
+/// derive layer; a named struct pushes the `#[rkyv(with = ...)]`
+/// attribute onto the inner reference.
+#[derive(Archive, Serialize)]
+pub struct QueryRef<'a> {
+    #[rkyv(with = InlineAsBox)]
+    pub value: &'a str,
 }
 
 /// Decision the plugin made for one candidate.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct PerCandidateReason {
-    pub upstream_id: String,
+    pub upstream_id: Box<str>,
     /// `"accept"` or `"reject"` — kept as string so plugins remain forward-
     /// compatible with future decision variants without a host re-bump.
-    pub decision: String,
-    pub reason: String,
+    pub decision: Box<str>,
+    pub reason: Box<str>,
 }
 
 /// Filter hook output.
@@ -104,7 +214,7 @@ pub struct PerCandidateReason {
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct FilterResponse {
-    pub results: Vec<PerCandidateReason>,
+    pub results: Box<[PerCandidateReason]>,
 }
 
 /// Upstream backend exposed to plugins. Mirrors
@@ -116,43 +226,72 @@ pub struct FilterResponse {
 pub enum Upstream {
     AnthropicDirect {
         /// Operator-configured base URL override, if any.
-        base_url: Option<String>,
+        base_url: Option<Box<str>>,
     },
 }
 
-/// Shape hook input.
-///
-/// Sent host → guest via `cc_lb_shape(in_ptr, in_len) -> u64` packing
-/// `(out_ptr, out_len)` for a [`ShapeResponse`].
+/// Borrowed mirror of [`Upstream`].
+#[derive(Archive, Serialize)]
+pub enum UpstreamRef<'a> {
+    AnthropicDirect { base_url: Option<QueryRef<'a>> },
+}
+
+/// Shape hook input (owned form).
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct ShapeRequest {
-    pub request_id: String,
-    pub method: String,
-    pub path: String,
-    pub query: Option<String>,
-    pub headers: Vec<Header>,
-    pub body: Vec<u8>,
+    pub request_id: Box<str>,
+    pub method: Box<str>,
+    pub path: Box<str>,
+    pub query: Option<Box<str>>,
+    pub headers: Box<[Header]>,
+    pub body: Box<[u8]>,
     pub principal: Principal,
     pub upstream: Upstream,
+}
+
+/// Borrowed mirror of [`ShapeRequest`] used by the host encode path.
+#[derive(Archive, Serialize)]
+pub struct ShapeRequestRef<'a> {
+    #[rkyv(with = InlineAsBox)]
+    pub request_id: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub method: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub path: &'a str,
+    pub query: Option<QueryRef<'a>>,
+    #[rkyv(with = InlineAsBox)]
+    pub headers: &'a [HeaderRef<'a>],
+    #[rkyv(with = InlineAsBox)]
+    pub body: &'a [u8],
+    pub principal: PrincipalRef<'a>,
+    pub upstream: UpstreamRef<'a>,
 }
 
 /// Shape hook output — the upstream-bound request the plugin produced.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct ShapeResponse {
-    pub url: String,
-    pub method: String,
-    pub headers: Vec<Header>,
-    pub body: Vec<u8>,
+    pub url: Box<str>,
+    pub method: Box<str>,
+    pub headers: Box<[Header]>,
+    pub body: Box<[u8]>,
 }
 
-/// `normalize_error` hook input.
+/// `normalize_error` hook input (owned form).
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct NormalizeErrorRequest {
     pub status: u16,
-    pub body: Vec<u8>,
+    pub body: Box<[u8]>,
+}
+
+/// Borrowed mirror of [`NormalizeErrorRequest`].
+#[derive(Archive, Serialize)]
+pub struct NormalizeErrorRequestRef<'a> {
+    pub status: u16,
+    #[rkyv(with = InlineAsBox)]
+    pub body: &'a [u8],
 }
 
 /// `normalize_error` hook output. `None` means "pass through original
@@ -160,23 +299,21 @@ pub struct NormalizeErrorRequest {
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct NormalizeErrorResponse {
-    pub normalized: Option<Vec<u8>>,
+    pub normalized: Option<Box<[u8]>>,
 }
 
 /// Lifecycle event delivered to the observe hook. rkyv mirror of
-/// `cc_lb_plugin_api::ObserveEvent`. The only mechanical changes vs
-/// the host enum are `http::StatusCode` → `u16` and `url::Url` →
-/// `String` (rkyv-incompatible types flattened).
+/// `cc_lb_plugin_api::ObserveEvent`.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub enum ObserveEvent {
     RequestStarted {
-        request_id: String,
-        downstream_user_agent: Option<String>,
+        request_id: Box<str>,
+        downstream_user_agent: Option<Box<str>>,
     },
     AuthnComplete {
-        principal_id: String,
-        principal_kind: String,
+        principal_id: Box<str>,
+        principal_kind: Box<str>,
     },
     UpstreamChosen {
         upstream: Upstream,
@@ -195,9 +332,9 @@ pub enum ObserveEvent {
         duration_ms: u64,
     },
     Error {
-        code: String,
-        message: String,
-        source: String,
+        code: Box<str>,
+        message: Box<str>,
+        source: Box<str>,
     },
 }
 
@@ -205,11 +342,16 @@ pub enum ObserveEvent {
 /// (proc-macro time) and `cc-lb-runtime-wasmtime::inspect`
 /// (load-time). Single source of truth — bumping any tag requires
 /// rebuilding every plugin against the new value.
+///
+/// Bumped v1 → v2 by RFC-0001 #9 (borrowed-wire optimisation). Owned
+/// wire types now use `Box<str>` / `Box<[u8]>` (was `String` / `Vec<u8>`)
+/// so the archived bytes match those emitted by the borrowed encode
+/// path (`#[rkyv(with = InlineAsBox)]`).
 pub mod schema {
-    pub const WIRE_SCHEMA_TAG_FILTER: &[u8] = b"cc_lb.wire.v1.filter.rkyv";
-    pub const WIRE_SCHEMA_TAG_SHAPE: &[u8] = b"cc_lb.wire.v1.shape.rkyv";
-    pub const WIRE_SCHEMA_TAG_NORMALIZE_ERROR: &[u8] = b"cc_lb.wire.v1.normalize_error.rkyv";
-    pub const WIRE_SCHEMA_TAG_OBSERVE: &[u8] = b"cc_lb.wire.v1.observe.rkyv";
+    pub const WIRE_SCHEMA_TAG_FILTER: &[u8] = b"cc_lb.wire.v2.filter.rkyv";
+    pub const WIRE_SCHEMA_TAG_SHAPE: &[u8] = b"cc_lb.wire.v2.shape.rkyv";
+    pub const WIRE_SCHEMA_TAG_NORMALIZE_ERROR: &[u8] = b"cc_lb.wire.v2.normalize_error.rkyv";
+    pub const WIRE_SCHEMA_TAG_OBSERVE: &[u8] = b"cc_lb.wire.v2.observe.rkyv";
 
     pub const SECTION_FILTER: &str = "cc_lb.schema.filter.v1";
     pub const SECTION_SHAPE: &str = "cc_lb.schema.shape.v1";

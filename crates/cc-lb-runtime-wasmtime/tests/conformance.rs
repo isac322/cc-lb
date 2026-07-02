@@ -22,7 +22,7 @@ use std::thread;
 
 use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_types::{
-    ArchivedFilterResponse, FilterRequest, FilterResponse, Header, Principal, UpstreamCandidate,
+    ArchivedFilterResponse, FilterRequest, FilterResponse, Principal, UpstreamCandidate,
 };
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use rkyv::rancor::Error;
@@ -53,32 +53,38 @@ fn load_wasm_or_skip() -> Option<Vec<u8>> {
 }
 
 fn request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRequest {
-    let claims = match keep_k {
-        Some(k) => Vec::from([(String::from("keep_k"), k.to_string().into_bytes())]),
-        None => Vec::new(),
+    use cc_lb_plugin_types::Claim;
+    let claims: Box<[Claim]> = match keep_k {
+        Some(k) => Box::new([Claim {
+            key: Box::from("keep_k"),
+            value: Box::from(k.to_string().into_bytes().as_slice()),
+        }]),
+        None => Box::new([]),
     };
+    let candidates: Box<[UpstreamCandidate]> = predicted
+        .iter()
+        .map(|(id, p)| UpstreamCandidate {
+            upstream_id: Box::from(*id),
+            name: format!("upstream-{id}").into_boxed_str(),
+            kind: Box::from("anthropic_api_key"),
+            observed_at_unix_secs: 0,
+            predicted_cache_read_tokens: *p,
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
     FilterRequest {
-        request_id: "req".to_owned(),
-        method: "POST".to_owned(),
-        path: "/v1/messages".to_owned(),
+        request_id: Box::from("req"),
+        method: Box::from("POST"),
+        path: Box::from("/v1/messages"),
         query: None,
-        headers: Vec::<Header>::new(),
-        body: Vec::new(),
+        headers: Box::new([]),
+        body: Box::from(&[][..]),
         principal: Principal {
-            id: "tenant".to_owned(),
-            kind: "api_key".to_owned(),
+            id: Box::from("tenant"),
+            kind: Box::from("api_key"),
             claims,
         },
-        candidates: predicted
-            .iter()
-            .map(|(id, p)| UpstreamCandidate {
-                upstream_id: (*id).to_owned(),
-                name: format!("upstream-{id}"),
-                kind: "anthropic_api_key".to_owned(),
-                observed_at_unix_secs: 0,
-                predicted_cache_read_tokens: *p,
-            })
-            .collect(),
+        candidates,
     }
 }
 
@@ -92,11 +98,11 @@ fn call(runtime: &WasmtimeRuntime, slot: &SlotKey, req: &FilterRequest) -> Filte
 }
 
 fn accepted_ids(resp: &FilterResponse) -> Vec<String> {
-    let mut ids: Vec<_> = resp
+    let mut ids: Vec<String> = resp
         .results
         .iter()
-        .filter(|r| r.decision == "accept")
-        .map(|r| r.upstream_id.clone())
+        .filter(|r| &*r.decision == "accept")
+        .map(|r| r.upstream_id.to_string())
         .collect();
     ids.sort();
     ids
