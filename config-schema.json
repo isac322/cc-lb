@@ -118,7 +118,7 @@
     "lifecycle_rate_limit_header_subscriber": {
       "$ref": "#/$defs/LifecycleRateLimitHeaderSubscriberConfig",
       "default": {
-        "enabled": false
+        "enabled": true
       }
     },
     "lifecycle_shadow_writer": {
@@ -628,7 +628,7 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },

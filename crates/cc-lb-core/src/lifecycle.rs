@@ -1648,12 +1648,6 @@ impl Lifecycle {
 
         if response.status().is_success() || response.status() == StatusCode::TOO_MANY_REQUESTS {
             let observed_at = self.clock.now();
-            self.record_upstream_rate_limit_observations(
-                &view,
-                response.headers(),
-                resolved_upstream_id,
-                system_time_to_unix_secs(observed_at),
-            );
             self.record_subscription_quota_observations(
                 response.headers(),
                 resolved_upstream_id,
@@ -2130,33 +2124,6 @@ impl Lifecycle {
             &active_limit.subject.key_id,
             &active_limit.subject.principal_id,
         );
-    }
-
-    fn record_upstream_rate_limit_observations(
-        &self,
-        view: &DynamicView,
-        headers: &HeaderMap,
-        upstream_id: Uuid,
-        observed_at: u64,
-    ) {
-        let records = observe_rate_limits(headers, upstream_id, observed_at);
-        if records.is_empty() {
-            return;
-        }
-
-        {
-            let mut cache = view.upstream_rate_limit_cache.write();
-            for record in records.iter().cloned() {
-                cache.upsert_record(record);
-            }
-            cache.updated_at_unix_secs = observed_at;
-        }
-
-        if let Some(sink) = &self.upstream_rate_limit_sink {
-            for record in records {
-                let _ = sink.enqueue(record);
-            }
-        }
     }
 
     pub fn record_subscription_quota_observations(
@@ -3288,13 +3255,6 @@ fn next_request_id() -> String {
     request_id.push_str("req_core_");
     let _ = write!(&mut request_id, "{id}");
     request_id
-}
-
-fn system_time_to_unix_secs(value: SystemTime) -> u64 {
-    value
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 fn system_time_to_unix_millis(value: SystemTime) -> u64 {
