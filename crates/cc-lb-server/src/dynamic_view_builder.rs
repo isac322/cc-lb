@@ -28,8 +28,7 @@ use cc_lb_plugin_api::{
     Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate,
 };
 use cc_lb_runtime_wasmtime::{
-    RegisterOptions, WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeRuntime,
-    WasmtimeUpstreamDialect,
+    WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeRuntime, WasmtimeUpstreamDialect,
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
@@ -88,14 +87,7 @@ async fn register_filter_slot(
     manifest: &PluginManifest,
 ) -> Result<Arc<cc_lb_runtime_wasmtime::PluginSlot>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
     let wasm = read_wasm_for_manifest(manifest).await?;
-    runtime.register_filter_with(
-        slot_key.clone(),
-        manifest.name.clone(),
-        &wasm,
-        RegisterOptions {
-            pure: manifest.pure,
-        },
-    )
+    runtime.register_filter(slot_key.clone(), manifest.name.clone(), &wasm)
 }
 
 async fn register_shape_slot(
@@ -104,14 +96,7 @@ async fn register_shape_slot(
     manifest: &PluginManifest,
 ) -> Result<Arc<cc_lb_runtime_wasmtime::PluginSlot>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
     let wasm = read_wasm_for_manifest(manifest).await?;
-    runtime.register_shape_with(
-        slot_key.clone(),
-        manifest.name.clone(),
-        &wasm,
-        RegisterOptions {
-            pure: manifest.pure,
-        },
-    )
+    runtime.register_shape(slot_key.clone(), manifest.name.clone(), &wasm)
 }
 
 async fn register_observe_slot(
@@ -120,14 +105,7 @@ async fn register_observe_slot(
     manifest: &PluginManifest,
 ) -> Result<Arc<cc_lb_runtime_wasmtime::PluginSlot>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
     let wasm = read_wasm_for_manifest(manifest).await?;
-    runtime.register_observe_with(
-        slot_key.clone(),
-        manifest.name.clone(),
-        &wasm,
-        RegisterOptions {
-            pure: manifest.pure,
-        },
-    )
+    runtime.register_observe(slot_key.clone(), manifest.name.clone(), &wasm)
 }
 
 async fn read_wasm_for_manifest(
@@ -534,7 +512,7 @@ async fn build_principal_chains(
             match register_observe_slot(runtime, &slot_key, &manifest).await {
                 Ok(slot) => {
                     let handle: Arc<dyn cc_lb_plugin_api::ObservabilityHook> =
-                        Arc::new(WasmtimeObservabilityHookPlugin::new(slot, slot_key));
+                        Arc::new(WasmtimeObservabilityHookPlugin::new(slot));
                     hooks.push(handle);
                 }
                 Err(error) => {
@@ -585,7 +563,7 @@ async fn build_principal_chains(
             match register_shape_slot(runtime, &slot_key, &manifest).await {
                 Ok(slot) => {
                     let handle: Arc<dyn cc_lb_plugin_api::UpstreamDialect> =
-                        Arc::new(WasmtimeUpstreamDialect::new(slot, slot_key));
+                        Arc::new(WasmtimeUpstreamDialect::new(slot));
                     DialectCache::Explicit(handle)
                 }
                 Err(error) => {

@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_types::{FilterRequest, Header, Principal, UpstreamCandidate};
-use cc_lb_runtime_wasmtime::{RegisterOptions, WasmtimeRuntime, call_filter_hook};
+use cc_lb_runtime_wasmtime::{WasmtimeRuntime, call_filter_hook};
 use rkyv::rancor::Error;
 
 fn cache_aware_wasm() -> Option<Vec<u8>> {
@@ -73,13 +73,8 @@ fn evict_slot_drops_registration_and_returns_true() {
     let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
     let key = SlotKey::global("evict-probe-A");
 
-    rt.register_filter_with(
-        key.clone(),
-        "cache-aware-wasmtime",
-        &wasm,
-        RegisterOptions { pure: true },
-    )
-    .expect("register");
+    rt.register_filter(key.clone(), "cache-aware-wasmtime", &wasm)
+        .expect("register");
 
     assert!(rt.get_slot(&key).is_some(), "slot registered");
     assert_eq!(rt.slot_count(), 1, "slot_count reflects registration");
@@ -118,12 +113,7 @@ fn evict_slot_leaves_prior_arc_dispatchable() {
     let key = SlotKey::global("evict-probe-B");
 
     let slot = rt
-        .register_filter_with(
-            key.clone(),
-            "cache-aware-wasmtime",
-            &wasm,
-            RegisterOptions { pure: true },
-        )
+        .register_filter(key.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register");
 
     // Caller retained the Arc from register (mimics in-flight dispatch
@@ -134,7 +124,7 @@ fn evict_slot_leaves_prior_arc_dispatchable() {
 
     let req = tiny_filter_request();
     let in_bytes = rkyv::to_bytes::<Error>(&req).expect("encode");
-    let out = call_filter_hook(&key, &cell, in_bytes.as_slice()).expect("hook still callable");
+    let out = call_filter_hook(&cell, in_bytes.as_slice()).expect("hook still callable");
     assert!(
         !out.is_empty(),
         "filter response is non-empty (cache-aware returns at least one decision)",

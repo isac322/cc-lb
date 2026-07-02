@@ -99,12 +99,11 @@ fn shape_passthrough_echoes_request() {
     };
 
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
-    let slot_key = SlotKey::global("test-shape");
     let slot = runtime
-        .register_shape(slot_key.clone(), "test-shape", &wasm_bytes)
+        .register_shape(SlotKey::global("test-shape"), "test-shape", &wasm_bytes)
         .expect("register_shape OK");
 
-    let dialect = WasmtimeUpstreamDialect::new(slot, slot_key);
+    let dialect = WasmtimeUpstreamDialect::new(slot);
 
     let ctx = fixture_request();
     let principal = fixture_principal();
@@ -141,12 +140,15 @@ fn normalize_error_returns_none_passthrough() {
     };
 
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
-    let slot_key = SlotKey::global("test-normalize");
     let slot = runtime
-        .register_shape(slot_key.clone(), "test-normalize", &wasm_bytes)
+        .register_shape(
+            SlotKey::global("test-normalize"),
+            "test-normalize",
+            &wasm_bytes,
+        )
         .expect("register_shape OK");
 
-    let dialect = WasmtimeUpstreamDialect::new(slot, slot_key);
+    let dialect = WasmtimeUpstreamDialect::new(slot);
     let body = Bytes::from_static(br#"{"error":"upstream blew up"}"#);
     let out = dialect.normalize_error(StatusCode::BAD_GATEWAY, &body);
     assert!(out.is_none(), "passthrough plugin always returns None");

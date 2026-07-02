@@ -21,4 +21,4 @@ pub use cc_lb_plugin_types::{
     ObserveEvent, PerCandidateReason, Principal, ShapeRequest, ShapeResponse, Upstream,
     UpstreamCandidate,
 };
-pub use cc_lb_runtime_wasmtime::{HotEngineConfig, RegisterOptions, SlotKind};
+pub use cc_lb_runtime_wasmtime::{HotEngineConfig, SlotKind};
