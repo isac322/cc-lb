@@ -91,6 +91,12 @@
         "enabled": false
       }
     },
+    "lifecycle_rate_limit_header_subscriber": {
+      "$ref": "#/$defs/LifecycleRateLimitHeaderSubscriberConfig",
+      "default": {
+        "enabled": false
+      }
+    },
     "lifecycle_shadow_writer": {
       "$ref": "#/$defs/LifecycleShadowWriterConfig",
       "default": {
@@ -543,6 +549,15 @@
       }
     },
     "LifecyclePricingSubscriberConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "LifecycleRateLimitHeaderSubscriberConfig": {
       "type": "object",
       "properties": {
         "enabled": {

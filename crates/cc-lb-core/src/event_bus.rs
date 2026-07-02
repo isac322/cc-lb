@@ -54,6 +54,7 @@ pub const DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_PRICING_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_LIMIT_RECONCILE_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_CACHE_OBS_CAPACITY: usize = 4096;
+pub const DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY: usize = 4096;
 
 /// Errors surfaced by [`RequestEventBus`] implementations.
 #[derive(Debug, thiserror::Error)]
@@ -174,6 +175,7 @@ struct InMemoryBusInner {
     lifecycle_pricing_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_limit_reconcile_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_cache_obs_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
+    lifecycle_rate_limit_header_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
 }
 
 impl InMemoryBus {
@@ -198,6 +200,7 @@ impl InMemoryBus {
                 lifecycle_pricing_tx: Mutex::new(None),
                 lifecycle_limit_reconcile_tx: Mutex::new(None),
                 lifecycle_cache_obs_tx: Mutex::new(None),
+                lifecycle_rate_limit_header_tx: Mutex::new(None),
             }),
         }
     }
@@ -291,6 +294,20 @@ impl InMemoryBus {
             .lifecycle_cache_obs_tx
             .lock()
             .expect("event bus lifecycle cache observation mutex poisoned");
+        *guard = Some(tx);
+        rx
+    }
+
+    pub fn attach_lifecycle_rate_limit_header(
+        &self,
+        capacity: usize,
+    ) -> mpsc::Receiver<LifecycleEvent> {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        let mut guard = self
+            .inner
+            .lifecycle_rate_limit_header_tx
+            .lock()
+            .expect("event bus lifecycle rate limit header mutex poisoned");
         *guard = Some(tx);
         rx
     }
@@ -396,6 +413,14 @@ impl RequestEventBus for InMemoryBus {
                 .expect("event bus lifecycle cache obs mutex poisoned");
             guard.clone()
         };
+        let rate_limit_header_tx = {
+            let guard = self
+                .inner
+                .lifecycle_rate_limit_header_tx
+                .lock()
+                .expect("event bus lifecycle rate limit header mutex poisoned");
+            guard.clone()
+        };
         if let Some(tx) = writer_tx {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
@@ -483,7 +508,7 @@ impl RequestEventBus for InMemoryBus {
             }
         }
         if let Some(tx) = cache_obs_tx {
-            match tx.try_send(event) {
+            match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
                     cc_lb_observability::increment_dropped_events_by("lifecycle_cache_obs_full", 1);
@@ -495,6 +520,25 @@ impl RequestEventBus for InMemoryBus {
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     tracing::debug!("lifecycle cache observation subscriber mpsc closed");
+                }
+            }
+        }
+        if let Some(tx) = rate_limit_header_tx {
+            match tx.try_send(event) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(dropped)) => {
+                    cc_lb_observability::increment_dropped_events_by(
+                        "lifecycle_rate_limit_header_full",
+                        1,
+                    );
+                    tracing::warn!(
+                        kind = dropped.kind(),
+                        event_id = %dropped.event_id(),
+                        "lifecycle rate limit header subscriber mpsc full; dropping event (upstream rate limit observation may be missing)",
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::debug!("lifecycle rate limit header subscriber mpsc closed");
                 }
             }
         }

@@ -42,6 +42,8 @@ pub mod lifecycle_hook_adapter;
 pub mod lifecycle_limit_reconcile_subscriber;
 pub mod lifecycle_pricing_subscriber;
 #[cfg(not(loom))]
+pub mod lifecycle_rate_limit_header_subscriber;
+#[cfg(not(loom))]
 pub mod limit_state_writer;
 #[cfg(not(loom))]
 pub mod model_resolution;
@@ -142,6 +144,10 @@ pub use lifecycle_limit_reconcile_subscriber::{
 };
 pub use lifecycle_pricing_subscriber::{
     PricingSubscriberHandle, spawn_lifecycle_pricing_subscriber,
+};
+#[cfg(not(loom))]
+pub use lifecycle_rate_limit_header_subscriber::{
+    RateLimitHeaderSubscriberHandle, spawn_lifecycle_rate_limit_header_subscriber,
 };
 #[cfg(not(loom))]
 pub use limit_state_writer::{
