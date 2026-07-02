@@ -182,7 +182,6 @@ impl SseRelay {
         let bytes = body.freeze();
         let usage = usage_from_json_bytes(&bytes);
         runtime.store_usage(usage);
-        runtime.finish_usage(&usage).await;
         Ok(Response::new(Body::from(bytes)))
     }
 
@@ -335,7 +334,6 @@ impl RelayRuntime {
                         }
                         None => {
                             batcher.flush(&self.obs);
-                            self.finish_usage(&usage).await;
                             self.observe_finished(
                                 StatusCode::OK,
                                 Some(usage.input_tokens),
@@ -487,18 +485,6 @@ impl RelayRuntime {
             .unwrap_or_else(|| make_error_frame("api_error", message))
     }
 
-    async fn finish_usage(&self, usage: &StreamingUsage) {
-        if usage.complete {
-            return;
-        }
-
-        metrics::counter!(
-            "cclb_streaming_usage_missing_total",
-            "dialect" => streaming_usage_dialect_label(self.upstream_kind)
-        )
-        .increment(1);
-    }
-
     fn current_usage(&self) -> StreamingUsage {
         *self
             .streaming_usage
@@ -542,12 +528,6 @@ impl RelayRuntime {
                 .try_into()
                 .unwrap_or(u64::MAX),
         });
-    }
-}
-
-fn streaming_usage_dialect_label(upstream_kind: Option<UpstreamKind>) -> &'static str {
-    match upstream_kind {
-        Some(UpstreamKind::AnthropicDirect) | None => "anthropic",
     }
 }
 

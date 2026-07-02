@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn aborted_event_only_records_drop_metric() {
+    async fn aborted_event_produces_no_cache_or_sink_writes() {
         let cache = Arc::new(RecordingPromptCacheObservationCache::default());
         let sink = Arc::new(RecordingPromptCacheObservationSink::default());
         let (tx, rx) = mpsc::channel(16);

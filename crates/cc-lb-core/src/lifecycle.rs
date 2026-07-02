@@ -1437,6 +1437,7 @@ impl Lifecycle {
                     } else {
                         error_codes::UPSTREAM_5XX
                     };
+                    o.emit_provider_error(code, status.as_str(), "upstream");
                     o.set_terminal(status, code);
                     o.finish();
                 }
