@@ -1,13 +1,9 @@
-//! Phase-5 pricing subscriber.
+//! Pricing subscriber.
 //!
-//! Consumes the advisory `LifecycleEvent` stream, tracks `(model,
-//! upstream_kind, usage)` per event_id, and on `RequestTerminated` emits a
-//! derived `LifecycleEvent::Priced` back onto the same bus. The assembler
-//! (Phase 3) merges `Priced` events into the shadow row's cost columns.
-//!
-//! Legacy pricing path (`finish_success_response` and `relay_response`)
-//! remains authoritative in Phase 5. The subscriber is advisory: it
-//! populates the shadow row so Phase 6 can diff.
+//! Consumes the `LifecycleEvent` stream, tracks `(model, upstream_kind,
+//! usage)` per `event_id`, and on `RequestTerminated` emits a derived
+//! `LifecycleEvent::Priced` back onto the same bus. The event assembler
+//! merges `Priced` events into the request row's cost columns.
 //!
 //! ## Backpressure
 //!
@@ -302,7 +298,11 @@ mod tests {
                 upstream_name: "u1".into(),
                 model: Some("claude-sonnet-4-5-20250929".into()),
                 upstream_kind: Some("anthropic_key".into()),
+                route_ms: None,
+                routing_trace: None,
+                predicted_cache_read_tokens: None,
             }),
+            routing_trace: None,
         })
         .await
         .unwrap();
@@ -322,6 +322,12 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 100,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();
@@ -353,6 +359,12 @@ mod tests {
             reason: TerminationReason::ErrorCode("upstream_5xx".into()),
             client_status: 502,
             duration_ms: 10,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();
@@ -383,7 +395,11 @@ mod tests {
                 upstream_name: "u1".into(),
                 model: Some("claude-sonnet-4-5-20250929".into()),
                 upstream_kind: Some("anthropic_oauth".into()),
+                route_ms: None,
+                routing_trace: None,
+                predicted_cache_read_tokens: None,
             }),
+            routing_trace: None,
         })
         .await
         .unwrap();
@@ -397,6 +413,7 @@ mod tests {
                     ..Default::default()
                 },
                 sse_event_count: 100,
+                ..Default::default()
             }),
         })
         .await
@@ -406,6 +423,12 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 500,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();

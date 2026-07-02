@@ -6,6 +6,7 @@
 mod cclb_metrics;
 mod hook;
 mod init;
+pub mod lifecycle_metrics;
 mod panic_hook;
 mod redaction;
 mod trace_layer;

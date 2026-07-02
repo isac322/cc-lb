@@ -359,7 +359,101 @@ pub fn summarize_restart_required(
         "storage encryption key environment changes require a process restart",
     );
     summarize_oauth_restart_required(&mut changes, current, new_config);
+    summarize_lifecycle_subscriber_restart_required(&mut changes, current, new_config);
     changes
+}
+
+fn summarize_lifecycle_subscriber_restart_required(
+    changes: &mut Vec<RestartRequiredField>,
+    current: &Config,
+    new_config: &Config,
+) {
+    const REASON: &str =
+        "lifecycle subscriber wiring is bound at startup; toggling requires a process restart";
+
+    let entries: &[(&str, bool, bool)] = &[
+        (
+            "prompt_cache_shadow.enabled",
+            current.prompt_cache_shadow.enabled,
+            new_config.prompt_cache_shadow.enabled,
+        ),
+        (
+            "lifecycle_hook_adapter.enabled",
+            current.lifecycle_hook_adapter.enabled,
+            new_config.lifecycle_hook_adapter.enabled,
+        ),
+        (
+            "lifecycle_pricing_subscriber.enabled",
+            current.lifecycle_pricing_subscriber.enabled,
+            new_config.lifecycle_pricing_subscriber.enabled,
+        ),
+        (
+            "lifecycle_cache_observation_subscriber.enabled",
+            current.lifecycle_cache_observation_subscriber.enabled,
+            new_config.lifecycle_cache_observation_subscriber.enabled,
+        ),
+        (
+            "lifecycle_rate_limit_header_subscriber.enabled",
+            current.lifecycle_rate_limit_header_subscriber.enabled,
+            new_config.lifecycle_rate_limit_header_subscriber.enabled,
+        ),
+        (
+            "lifecycle_subscription_quota_subscriber.enabled",
+            current.lifecycle_subscription_quota_subscriber.enabled,
+            new_config.lifecycle_subscription_quota_subscriber.enabled,
+        ),
+        (
+            "lifecycle_limit_rejection_audit_subscriber.enabled",
+            current.lifecycle_limit_rejection_audit_subscriber.enabled,
+            new_config
+                .lifecycle_limit_rejection_audit_subscriber
+                .enabled,
+        ),
+        (
+            "lifecycle_api_key_metrics_subscriber.enabled",
+            current.lifecycle_api_key_metrics_subscriber.enabled,
+            new_config.lifecycle_api_key_metrics_subscriber.enabled,
+        ),
+        (
+            "lifecycle_cache_hit_miss_subscriber.enabled",
+            current.lifecycle_cache_hit_miss_subscriber.enabled,
+            new_config.lifecycle_cache_hit_miss_subscriber.enabled,
+        ),
+        (
+            "lifecycle_prompt_cache_drift_subscriber.enabled",
+            current.lifecycle_prompt_cache_drift_subscriber.enabled,
+            new_config.lifecycle_prompt_cache_drift_subscriber.enabled,
+        ),
+        (
+            "lifecycle_prompt_cache_observation_subscriber.enabled",
+            current
+                .lifecycle_prompt_cache_observation_subscriber
+                .enabled,
+            new_config
+                .lifecycle_prompt_cache_observation_subscriber
+                .enabled,
+        ),
+        (
+            "lifecycle_limit_reconcile_subscriber.enabled",
+            current.lifecycle_limit_reconcile_subscriber.enabled,
+            new_config.lifecycle_limit_reconcile_subscriber.enabled,
+        ),
+        (
+            "lifecycle_limit_reconcile_subscriber.shadow",
+            current.lifecycle_limit_reconcile_subscriber.shadow,
+            new_config.lifecycle_limit_reconcile_subscriber.shadow,
+        ),
+    ];
+
+    for (field, current_value, new_value) in entries {
+        push_changed(
+            changes,
+            field,
+            current_value.to_string(),
+            new_value.to_string(),
+            REASON,
+        );
+    }
 }
 
 fn summarize_storage_restart_required(

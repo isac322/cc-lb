@@ -857,6 +857,8 @@ dependencies = [
 name = "cc-lb-lifecycle"
 version = "0.1.0"
 dependencies = [
+ "cc-lb-plugin-api",
+ "cc-lb-storage-api",
  "serde",
  "serde_json",
  "uuid",

@@ -24,8 +24,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use common::{
-    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, collect_body, lifecycle_with,
-    messages_request,
+    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, collect_body, messages_request,
 };
 
 #[test]
@@ -70,14 +69,20 @@ fn build_candidates_populates_observations_from_dynamic_view_cache() {
 #[tokio::test]
 async fn lifecycle_updates_dynamic_view_cache_when_headers_are_observed() {
     let state = TestState::default();
-    let lifecycle = lifecycle_with(
+    let shared_cache = Arc::new(RwLock::new(UpstreamRateLimitCache::default()));
+    let (sink, mut receiver) = cc_lb_core::UpstreamRateLimitSink::with_capacity(16);
+    let test_bus = common::TestLifecycleBus::new()
+        .with_rate_limit_header_subscriber_and_cache(sink, Arc::clone(&shared_cache));
+    let lifecycle = common::lifecycle_with_cache(
         TestAuthn::new(state.clone()),
         MockDispatch {
             state,
             mode: DispatchMode::HeadersOk(rate_limit_headers(321)),
         },
         Arc::new(RecordingHook::default()),
-    );
+        Arc::clone(&shared_cache),
+    )
+    .with_event_bus(test_bus.bus_arc());
 
     let response = lifecycle
         .handle(messages_request(Bytes::from_static(
@@ -88,6 +93,13 @@ async fn lifecycle_updates_dynamic_view_cache_when_headers_are_observed() {
     let (status, _headers, _body) = collect_body(response).await;
 
     assert_eq!(status, StatusCode::OK);
+    // Drain at least one record from the sink so we know the subscriber
+    // processed the response before we inspect the cache snapshot.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+        .await
+        .expect("subscriber emitted a record")
+        .expect("channel open");
+
     let view = lifecycle.dynamic_view().load();
     let cache = view.upstream_rate_limit_cache.read();
     let snapshots = cache

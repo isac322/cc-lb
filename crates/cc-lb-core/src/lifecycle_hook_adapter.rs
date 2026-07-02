@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cc_lb_lifecycle::{EventId, LifecycleEvent, UsageSnapshot};
-use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent};
+use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent, PrincipalKind};
+use cc_lb_storage_api::types::PrincipalKindLite;
 use http::StatusCode;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -120,6 +121,40 @@ fn handle_event(
         return;
     }
 
+    match &event {
+        LifecycleEvent::AuthenticationCompleted {
+            principal_id,
+            principal_kind,
+            ..
+        } => {
+            emit_observe_event(
+                hooks,
+                ObserveEvent::AuthnComplete {
+                    principal_id: principal_id.clone(),
+                    kind: principal_kind_into(*principal_kind),
+                },
+            );
+            return;
+        }
+        LifecycleEvent::ProviderErrorObserved {
+            code,
+            message,
+            source,
+            ..
+        } => {
+            emit_observe_event(
+                hooks,
+                ObserveEvent::Error {
+                    code: code.clone(),
+                    message: message.clone(),
+                    source: source.clone(),
+                },
+            );
+            return;
+        }
+        _ => {}
+    }
+
     let partial = partials
         .entry(event_id)
         .or_insert_with(|| Partial::new(now));
@@ -142,6 +177,18 @@ fn handle_event(
 
     if partials.len() > map_cap {
         drop_oldest(partials);
+    }
+}
+
+fn emit_observe_event(hooks: &[Arc<dyn ObservabilityHook>], event: ObserveEvent) {
+    for hook in hooks {
+        let _result = hook.observe(event.clone());
+    }
+}
+
+fn principal_kind_into(principal_kind: PrincipalKindLite) -> PrincipalKind {
+    match principal_kind {
+        PrincipalKindLite::Human | PrincipalKindLite::Machine => PrincipalKind::ApiKey,
     }
 }
 
@@ -277,6 +324,12 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 55,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();
@@ -316,6 +369,12 @@ mod tests {
             reason: TerminationReason::ErrorCode("body_too_large".into()),
             client_status: 413,
             duration_ms: 5,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();
@@ -362,6 +421,7 @@ mod tests {
                     ..Default::default()
                 },
                 sse_event_count: 3,
+                ..Default::default()
             }),
         })
         .await
@@ -371,6 +431,12 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 88,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();

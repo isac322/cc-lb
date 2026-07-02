@@ -143,7 +143,7 @@ impl RequestEventStore for PostgresStorage {
         let until = unix_secs_to_datetime_upper(until, "request event until")?;
 
         let rows = sqlx::query_scalar::<_, Vec<u8>>(
-            "SELECT payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND shadow_event_id IS NULL              ORDER BY seq ASC LIMIT $3",
+            "SELECT payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              ORDER BY seq ASC LIMIT $3",
         )
         .bind(since)
         .bind(until)
@@ -172,7 +172,7 @@ impl RequestEventStore for PostgresStorage {
         let until = unix_secs_to_datetime_upper(until, "request event until")?;
 
         let rows = sqlx::query_scalar::<_, Vec<u8>>(
-            "SELECT payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND shadow_event_id IS NULL              ORDER BY seq DESC LIMIT $3",
+            "SELECT payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              ORDER BY seq DESC LIMIT $3",
         )
         .bind(since)
         .bind(until)

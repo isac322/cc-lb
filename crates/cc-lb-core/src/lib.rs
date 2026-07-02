@@ -34,21 +34,28 @@ mod hop_by_hop;
 pub mod instrumented_connector;
 #[cfg(not(loom))]
 pub mod lifecycle;
+pub mod lifecycle_api_key_metrics_subscriber;
+pub mod lifecycle_cache_hit_miss_subscriber;
 #[cfg(not(loom))]
 pub mod lifecycle_cache_observation_subscriber;
 pub mod lifecycle_event_assembler;
 pub mod lifecycle_event_logger;
 pub mod lifecycle_hook_adapter;
 pub mod lifecycle_limit_reconcile_subscriber;
+pub mod lifecycle_limit_rejection_audit_subscriber;
 pub mod lifecycle_pricing_subscriber;
+pub mod lifecycle_prompt_cache_drift_subscriber;
+pub mod lifecycle_prompt_cache_observation_subscriber;
+#[cfg(not(loom))]
+pub mod lifecycle_rate_limit_header_subscriber;
+#[cfg(not(loom))]
+pub mod lifecycle_subscription_quota_subscriber;
 #[cfg(not(loom))]
 pub mod limit_state_writer;
 #[cfg(not(loom))]
 pub mod model_resolution;
 #[allow(dead_code)]
 mod rate_limit_headers;
-#[cfg(not(loom))]
-pub mod request_event_writer;
 #[cfg(not(loom))]
 pub mod request_timing;
 #[cfg(not(loom))]
@@ -115,9 +122,9 @@ pub use error_normalizer::{ErrorNormalizer, NormalizerError, UpstreamKind};
 pub use event_bus::{
     BusError, BusReceiver, DEFAULT_BROADCAST_CAPACITY, DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY,
     DEFAULT_LIFECYCLE_BROADCAST_CAPACITY, DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY,
-    DEFAULT_LIFECYCLE_PRICING_CAPACITY, DEFAULT_LIFECYCLE_WRITER_CAPACITY, DEFAULT_WRITER_CAPACITY,
-    InMemoryBus, LifecycleBusReceiver, RequestEventBus, RequestEventPhase, RequestEventUpdate,
-    new_in_memory_bus, record_dashboard_sse_lagged,
+    DEFAULT_LIFECYCLE_PRICING_CAPACITY, DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY,
+    DEFAULT_LIFECYCLE_WRITER_CAPACITY, InMemoryBus, LifecycleBusReceiver, RequestEventBus,
+    RequestEventPhase, RequestEventUpdate, new_in_memory_bus, record_dashboard_sse_lagged,
 };
 #[cfg(not(loom))]
 pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop};
@@ -127,6 +134,12 @@ pub use lifecycle::{
     LimitSubjectProvider, NoopSubscriptionQuotaCache, ProxyError, ReplicaIdentity, RequestKind,
     SubscriptionQuotaCacheLike, UpstreamDispatch, build_candidates, observe_rate_limits,
     observe_subscription_quota_headers, parse_request_cache_breakpoints,
+};
+pub use lifecycle_api_key_metrics_subscriber::{
+    ApiKeyMetricsSubscriberHandle, spawn_lifecycle_api_key_metrics_subscriber,
+};
+pub use lifecycle_cache_hit_miss_subscriber::{
+    CacheHitMissSubscriberHandle, spawn_lifecycle_cache_hit_miss_subscriber,
 };
 #[cfg(not(loom))]
 pub use lifecycle_cache_observation_subscriber::{
@@ -140,8 +153,25 @@ pub use lifecycle_hook_adapter::{
 pub use lifecycle_limit_reconcile_subscriber::{
     LimitReconcileMode, LimitReconcileSubscriberHandle, spawn_lifecycle_limit_reconcile_subscriber,
 };
+pub use lifecycle_limit_rejection_audit_subscriber::{
+    LimitRejectionAuditSubscriberHandle, spawn_lifecycle_limit_rejection_audit_subscriber,
+};
 pub use lifecycle_pricing_subscriber::{
     PricingSubscriberHandle, spawn_lifecycle_pricing_subscriber,
+};
+pub use lifecycle_prompt_cache_drift_subscriber::{
+    PromptCacheDriftSubscriberHandle, spawn_lifecycle_prompt_cache_drift_subscriber,
+};
+pub use lifecycle_prompt_cache_observation_subscriber::{
+    PromptCacheObservationSubscriberHandle, spawn_lifecycle_prompt_cache_observation_subscriber,
+};
+#[cfg(not(loom))]
+pub use lifecycle_rate_limit_header_subscriber::{
+    RateLimitHeaderSubscriberHandle, spawn_lifecycle_rate_limit_header_subscriber,
+};
+#[cfg(not(loom))]
+pub use lifecycle_subscription_quota_subscriber::{
+    SubscriptionQuotaSubscriberHandle, spawn_lifecycle_subscription_quota_subscriber,
 };
 #[cfg(not(loom))]
 pub use limit_state_writer::{
@@ -152,11 +182,11 @@ pub use rate_limit_headers::{
     percent_to_utilization_fraction,
 };
 #[cfg(not(loom))]
-pub use request_event_writer::{RequestEventWriterHandle, spawn_request_event_writer};
-#[cfg(not(loom))]
 pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
 #[cfg(not(loom))]
-pub use sse_relay::{RelayError, SseBatchConfig, SseRelay, StreamingUsage};
+pub use sse_relay::{
+    PromptCacheObservationEventEmitter, RelayError, SseBatchConfig, SseRelay, StreamingUsage,
+};
 #[cfg(not(loom))]
 pub use subscription_metadata_hook::{
     MetadataHookEnqueueError, MetadataHookHandle, MetadataHookRequest, MetadataRefreshEnqueue,

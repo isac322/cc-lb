@@ -22,9 +22,14 @@ use cc_lb_plugin_api::{
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use http::{HeaderMap, StatusCode};
+use tokio::sync::Notify;
+use tokio::time::{Duration, timeout};
 use url::Url;
 
-use common::{DispatchMode, MockDispatch, TestAuthn, TestState, collect_body, messages_request};
+use common::{
+    DispatchMode, MockDispatch, TestAuthn, TestLifecycleBus, TestState, collect_body,
+    messages_request,
+};
 
 #[test]
 fn builtin_authn_accepts_bound_principal_view() -> Result<(), Box<dyn std::error::Error>> {
@@ -68,7 +73,9 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
 -> Result<(), Box<dyn std::error::Error>> {
     let global_router_hits = Arc::new(Mutex::new(Vec::new()));
     let explicit_hook_events = Arc::new(Mutex::new(Vec::new()));
+    let explicit_hook_notify = Arc::new(Notify::new());
     let global_hook_events = Arc::new(Mutex::new(Vec::new()));
+    let global_hook_notify = Arc::new(Notify::new());
 
     let global_router: Arc<dyn RouterPlugin> = Arc::new(RecordingRouter {
         name: "global",
@@ -82,10 +89,13 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
     let explicit_hook: Arc<dyn ObservabilityHook> = Arc::new(RecordingNamedHook {
         name: "explicit",
         events: explicit_hook_events.clone(),
+        notify: explicit_hook_notify.clone(),
     });
+    let test_bus = TestLifecycleBus::new().with_hook_adapter(vec![Arc::clone(&explicit_hook)]);
     let global_hook: Arc<dyn ObservabilityHook> = Arc::new(RecordingNamedHook {
         name: "global",
         events: global_hook_events.clone(),
+        notify: global_hook_notify,
     });
     let view = principal_view(
         "principal-a",
@@ -113,7 +123,8 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
         Arc::new(DynamicViewHolder::new(dynamic_view)),
         LifecycleConfig::default(),
         Arc::new(cc_lb_core::SystemClock),
-    );
+    )
+    .with_event_bus(test_bus.bus_arc());
 
     let response = lifecycle
         .handle(messages_request(Bytes::from_static(
@@ -127,20 +138,16 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
         global_router_hits.lock().unwrap().as_slice(),
         &[] as &[String]
     );
-    assert!(
-        explicit_hook_events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|event| event == "explicit:Error")
-    );
-    assert!(
-        global_hook_events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|event| event == "global:RequestStarted")
-    );
+    timeout(
+        Duration::from_secs(1),
+        wait_named_event(
+            &explicit_hook_events,
+            &explicit_hook_notify,
+            "explicit:Error",
+        ),
+    )
+    .await
+    .expect("explicit hook error observation arrives");
     assert!(
         !global_hook_events
             .lock()
@@ -245,6 +252,16 @@ impl RouterPlugin for RecordingRouter {
 struct RecordingNamedHook {
     name: &'static str,
     events: Arc<Mutex<Vec<String>>>,
+    notify: Arc<Notify>,
+}
+
+async fn wait_named_event(events: &Arc<Mutex<Vec<String>>>, notify: &Arc<Notify>, expected: &str) {
+    loop {
+        if events.lock().unwrap().iter().any(|event| event == expected) {
+            return;
+        }
+        notify.notified().await;
+    }
 }
 
 struct RecordingFilter {
@@ -280,6 +297,7 @@ impl ObservabilityHook for RecordingNamedHook {
             .lock()
             .unwrap()
             .push(format!("{}:{}", self.name, event_name(&event)));
+        self.notify.notify_waiters();
         Ok(())
     }
 }

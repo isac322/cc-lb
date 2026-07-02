@@ -16,8 +16,8 @@ use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
 use common::{
-    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestRouter, TestState, collect_body,
-    lifecycle_with, lifecycle_with_parts, messages_request,
+    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState,
+    collect_body, lifecycle_with, lifecycle_with_parts, messages_request,
 };
 
 #[tokio::test]
@@ -25,6 +25,7 @@ async fn successful_response_enqueues_records_keyed_by_selected_upstream() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
     let (sink, mut receiver) = UpstreamRateLimitSink::with_capacity(16);
+    let test_bus = TestLifecycleBus::new().with_rate_limit_header_subscriber(sink);
     let lifecycle = lifecycle_with(
         TestAuthn::new(state),
         MockDispatch {
@@ -33,7 +34,7 @@ async fn successful_response_enqueues_records_keyed_by_selected_upstream() {
         },
         hook,
     )
-    .with_upstream_rate_limit_sink(sink);
+    .with_event_bus(test_bus.bus_arc());
 
     let response = lifecycle
         .handle(messages_request(Bytes::from_static(
@@ -57,8 +58,9 @@ async fn successful_response_enqueues_records_keyed_by_selected_upstream() {
 #[tokio::test]
 async fn too_many_requests_enqueues_but_server_error_does_not() {
     let (sink, mut receiver) = UpstreamRateLimitSink::with_capacity(16);
+    let test_bus_ok = TestLifecycleBus::new().with_rate_limit_header_subscriber(sink);
     let lifecycle = lifecycle_for_response(StatusCode::TOO_MANY_REQUESTS, rate_limit_headers(0, 1))
-        .with_upstream_rate_limit_sink(sink);
+        .with_event_bus(test_bus_ok.bus_arc());
 
     let response = lifecycle
         .handle(messages_request(Bytes::from_static(
@@ -74,9 +76,10 @@ async fn too_many_requests_enqueues_but_server_error_does_not() {
     assert_observed(&records, RateLimitKind::Tokens, Some(1));
 
     let (sink, mut receiver) = UpstreamRateLimitSink::with_capacity(16);
+    let test_bus_err = TestLifecycleBus::new().with_rate_limit_header_subscriber(sink);
     let lifecycle =
         lifecycle_for_response(StatusCode::INTERNAL_SERVER_ERROR, rate_limit_headers(9, 9))
-            .with_upstream_rate_limit_sink(sink);
+            .with_event_bus(test_bus_err.bus_arc());
 
     let response = lifecycle
         .handle(messages_request(Bytes::from_static(

@@ -17,11 +17,13 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use http::StatusCode;
+use tokio::time::{Duration, timeout};
 use url::Url;
 use uuid::Uuid;
 
 use common::{
-    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, collect_body, messages_request,
+    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestLifecycleBus, TestState,
+    collect_body, messages_request,
 };
 
 #[tokio::test]
@@ -66,6 +68,9 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
         let router_calls = Arc::new(Mutex::new(Vec::new()));
         let state = TestState::default();
         let hook = Arc::new(RecordingHook::default());
+        let test_bus = TestLifecycleBus::new().with_hook_adapter(vec![
+            hook.clone() as Arc<dyn cc_lb_plugin_api::ObservabilityHook>
+        ]);
         let filters: Vec<Arc<dyn FilterPlugin>> = vec![
             Arc::new(ErrorFilter {
                 name: error_kind.stage_name(),
@@ -79,7 +84,8 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
             }),
         ];
         let lifecycle =
-            lifecycle_with_pipeline(filters, router_calls.clone(), state.clone(), hook.clone());
+            lifecycle_with_pipeline(filters, router_calls.clone(), state.clone(), hook.clone())
+                .with_event_bus(test_bus.bus_arc());
 
         let response = lifecycle
             .handle(messages_request(Bytes::from_static(
@@ -99,11 +105,18 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
             &[vec![upstream_id]]
         );
         assert!(router_calls.lock().unwrap().is_empty());
-        assert!(hook.events.lock().unwrap().iter().any(|event| matches!(
-            event,
-            cc_lb_plugin_api::ObserveEvent::Error { code, source, .. }
-                if code == "router_filter_passthrough" && source == "router"
-        )));
+        timeout(
+            Duration::from_secs(1),
+            hook.wait_for_event(|event| {
+                matches!(
+                    event,
+                    cc_lb_plugin_api::ObserveEvent::Error { code, source, .. }
+                        if code == "router_filter_passthrough" && source == "router"
+                )
+            }),
+        )
+        .await
+        .expect("router filter error observation arrives");
     }
     Ok(())
 }

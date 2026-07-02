@@ -1,23 +1,14 @@
-//! Phase-2 shadow subscriber that counts lifecycle events by kind.
+//! Lifecycle-event logger subscriber.
 //!
-//! ## Role in RFC-0002 phased migration
-//!
-//! Phase 2 wires the proxy handler to emit both the legacy
-//! [`RequestEventUpdate`](crate::event_bus::RequestEventUpdate) stream
-//! (authoritative, feeds the DB writer) AND the new [`LifecycleEvent`]
-//! stream (advisory only). This subscriber consumes the advisory stream
-//! and increments `cc_lb_lifecycle_events_total{kind="..."}` per event.
-//!
-//! The metric provides the Phase-2 exit gate: production observes the
-//! counter shape and confirms the emission is happening 1:1 with request
-//! terminations before Phase 3's assembler subscriber is introduced.
+//! Consumes the `LifecycleEvent` stream and increments
+//! `cc_lb_lifecycle_events_total{kind="..."}` per event, providing a
+//! coarse volume-and-shape signal for the bus independent of any
+//! semantic subscriber.
 //!
 //! ## Shutdown protocol
 //!
-//! Mirrors
-//! [`RequestEventWriterHandle::shutdown`](crate::request_event_writer::RequestEventWriterHandle::shutdown):
-//! signal, drain, await. Late lifecycle events after shutdown are lost;
-//! this is acceptable because the legacy path already persisted the row.
+//! Signal, drain, await. Late lifecycle events after shutdown are lost;
+//! this is acceptable because the assembler already persisted the row.
 
 use cc_lb_lifecycle::LifecycleEvent;
 use tokio::sync::{mpsc, oneshot};
@@ -39,7 +30,7 @@ impl LifecycleEventLoggerHandle {
     }
 }
 
-/// Spawn the advisory subscriber that counts lifecycle events per kind.
+/// Spawn the subscriber that counts lifecycle events per kind.
 ///
 /// `rx` is obtained from
 /// [`InMemoryBus::attach_lifecycle_writer`](crate::event_bus::InMemoryBus::attach_lifecycle_writer).

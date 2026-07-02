@@ -209,16 +209,39 @@ impl Signer for TestSigner {
 #[derive(Default)]
 pub struct RecordingHook {
     pub events: Mutex<Vec<ObserveEvent>>,
+    notify: Notify,
+}
+
+impl RecordingHook {
+    pub async fn wait_for_event(&self, matches: impl Fn(&ObserveEvent) -> bool) -> ObserveEvent {
+        loop {
+            if let Some(event) = self
+                .events
+                .lock()
+                .expect("events lock")
+                .iter()
+                .find(|event| matches(event))
+                .cloned()
+            {
+                return event;
+            }
+            self.notify.notified().await;
+        }
+    }
 }
 
 impl ObservabilityHook for RecordingHook {
     fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError> {
-        self.events
+        let mut events = self
+            .events
             .lock()
-            .map(|mut events| events.push(event))
             .map_err(|_| ObservabilityError::Dropped {
                 reason: "lock poisoned".to_owned(),
-            })
+            })?;
+        events.push(event);
+        drop(events);
+        self.notify.notify_waiters();
+        Ok(())
     }
 }
 
@@ -313,6 +336,32 @@ pub fn lifecycle_with_parts(
         authn.authn.clone(),
         Arc::new(DynamicViewHolder::new(view)),
         config,
+        Arc::new(cc_lb_core::SystemClock),
+    )
+}
+
+pub fn lifecycle_with_cache(
+    authn: TestAuthn,
+    dispatcher: MockDispatch,
+    hook: Arc<RecordingHook>,
+    cache: Arc<parking_lot::RwLock<cc_lb_core::UpstreamRateLimitCache>>,
+) -> Lifecycle {
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .global_router(Arc::new(TestRouter {
+            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
+        }))
+        .dispatcher(Arc::new(dispatcher))
+        .global_observability_hooks(vec![hook])
+        .error_normalizer(Arc::new(ErrorNormalizer::new()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![default_upstream_record()])
+        .upstream_rate_limit_cache(cache)
+        .build();
+    Lifecycle::new_with_dynamic_view(
+        authn.authn.clone(),
+        Arc::new(DynamicViewHolder::new(view)),
+        LifecycleConfig::default(),
         Arc::new(cc_lb_core::SystemClock),
     )
 }
@@ -455,5 +504,88 @@ fn default_json_for_status(status: StatusCode) -> serde_json::Value {
         json!({"type":"message","usage":{"input_tokens":1,"output_tokens":1}})
     } else {
         json!({"type":"error","error":{"type":"authentication_error","message":"forced"}})
+    }
+}
+
+pub struct TestLifecycleBus {
+    pub bus: Arc<cc_lb_core::InMemoryBus>,
+    _assembler: Option<cc_lb_core::RequestEventAssemblerHandle>,
+    _hook_adapter: Option<cc_lb_core::ObservabilityHookAdapterHandle>,
+    _rate_limit_header: Option<cc_lb_core::RateLimitHeaderSubscriberHandle>,
+}
+
+impl TestLifecycleBus {
+    pub fn new() -> Self {
+        Self {
+            bus: Arc::new(cc_lb_core::InMemoryBus::new()),
+            _assembler: None,
+            _hook_adapter: None,
+            _rate_limit_header: None,
+        }
+    }
+
+    pub fn with_assembler(mut self, storage: Arc<dyn cc_lb_storage_api::Storage>) -> Self {
+        let rx = self
+            .bus
+            .attach_lifecycle_assembler(cc_lb_core::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY);
+        let bus_arc: Arc<dyn cc_lb_core::RequestEventBus> = self.bus.clone();
+        self._assembler = Some(cc_lb_core::spawn_request_event_assembler(
+            rx,
+            storage as Arc<dyn cc_lb_storage_api::RequestEventStore>,
+            Some(bus_arc),
+        ));
+        self
+    }
+
+    pub fn with_hook_adapter(mut self, hooks: Vec<Arc<dyn ObservabilityHook>>) -> Self {
+        let rx = self.bus.attach_lifecycle_hook_adapter(
+            cc_lb_core::event_bus::DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY,
+        );
+        self._hook_adapter = Some(cc_lb_core::spawn_observability_hook_adapter(rx, hooks));
+        self
+    }
+
+    pub fn with_rate_limit_header_subscriber(
+        mut self,
+        sink: cc_lb_core::UpstreamRateLimitSink,
+    ) -> Self {
+        let rx = self.bus.attach_lifecycle_rate_limit_header(
+            cc_lb_core::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
+        );
+        let cache = Arc::new(parking_lot::RwLock::new(
+            cc_lb_core::UpstreamRateLimitCache::default(),
+        ));
+        self._rate_limit_header = Some(cc_lb_core::spawn_lifecycle_rate_limit_header_subscriber(
+            rx,
+            cache,
+            Some(sink),
+        ));
+        self
+    }
+
+    pub fn with_rate_limit_header_subscriber_and_cache(
+        mut self,
+        sink: cc_lb_core::UpstreamRateLimitSink,
+        cache: Arc<parking_lot::RwLock<cc_lb_core::UpstreamRateLimitCache>>,
+    ) -> Self {
+        let rx = self.bus.attach_lifecycle_rate_limit_header(
+            cc_lb_core::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
+        );
+        self._rate_limit_header = Some(cc_lb_core::spawn_lifecycle_rate_limit_header_subscriber(
+            rx,
+            cache,
+            Some(sink),
+        ));
+        self
+    }
+
+    pub fn bus_arc(&self) -> Arc<dyn cc_lb_core::RequestEventBus> {
+        self.bus.clone()
+    }
+}
+
+impl Default for TestLifecycleBus {
+    fn default() -> Self {
+        Self::new()
     }
 }

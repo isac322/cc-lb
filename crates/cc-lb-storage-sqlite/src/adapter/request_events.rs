@@ -140,7 +140,7 @@ async fn query_request_events(
 
     let sql = format!(
         "SELECT payload FROM request_events_v1 \
-         WHERE ts >= ? AND ts <= ? AND shadow_event_id IS NULL \
+         WHERE ts >= ? AND ts <= ? \
          ORDER BY id {direction} LIMIT ?"
     );
     let rows = sqlx::query_scalar::<_, String>(AssertSqlSafe(sql))

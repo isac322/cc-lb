@@ -906,28 +906,11 @@ async fn build_app_with_storage_inner(
         notify_listener.run().await;
     }));
     let in_memory_bus = cc_lb_core::InMemoryBus::new();
-    let writer_source = config.request_event_writer_source;
-    if config.lifecycle_shadow_writer.enabled {
-        tracing::warn!(
-            "config.lifecycle_shadow_writer.enabled is deprecated and ignored; use \
-             request_event_writer_source = \"both\" | \"shadow\" instead"
-        );
-    }
-    // RFC-0002 Phase 6 writer cutover semantics:
-    //   Legacy → legacy RequestEventWriter task active, assembler off
-    //   Both   → both writers active (comparison mode)
-    //   Shadow → only assembler active
-    let request_event_writer_rx = writer_source
-        .legacy_writer_enabled()
-        .then(|| in_memory_bus.attach_writer(cc_lb_core::DEFAULT_WRITER_CAPACITY));
     let lifecycle_event_logger_rx =
         in_memory_bus.attach_lifecycle_writer(cc_lb_core::DEFAULT_LIFECYCLE_WRITER_CAPACITY);
-    let lifecycle_assembler_rx = writer_source.shadow_writer_enabled().then(|| {
-        in_memory_bus.attach_lifecycle_assembler(cc_lb_core::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY)
-    });
-    // Assembler only produces shadow rows now; legacy rows come from the
-    // durable RequestEventWriter task.
-    let assembler_mode = cc_lb_core::lifecycle_event_assembler::AssemblerMode::ShadowOnly;
+    let lifecycle_assembler_rx = Some(
+        in_memory_bus.attach_lifecycle_assembler(cc_lb_core::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY),
+    );
     let lifecycle_hook_adapter_rx = if config.lifecycle_hook_adapter.enabled {
         Some(
             in_memory_bus
@@ -955,13 +938,68 @@ async fn build_app_with_storage_inner(
     } else {
         None
     };
+    let lifecycle_rate_limit_header_rx = if config.lifecycle_rate_limit_header_subscriber.enabled {
+        Some(in_memory_bus.attach_lifecycle_rate_limit_header(
+            cc_lb_core::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
+        ))
+    } else {
+        None
+    };
+    let lifecycle_subscription_quota_rx = if config.lifecycle_subscription_quota_subscriber.enabled
+    {
+        Some(in_memory_bus.attach_lifecycle_subscription_quota(
+            cc_lb_core::event_bus::DEFAULT_LIFECYCLE_SUBSCRIPTION_QUOTA_CAPACITY,
+        ))
+    } else {
+        None
+    };
+    let lifecycle_limit_rejection_audit_rx =
+        if config.lifecycle_limit_rejection_audit_subscriber.enabled && audit_sink.is_some() {
+            Some(in_memory_bus.attach_lifecycle_limit_rejection_audit(
+                cc_lb_core::event_bus::DEFAULT_LIFECYCLE_LIMIT_REJECTION_AUDIT_CAPACITY,
+            ))
+        } else {
+            None
+        };
+    let lifecycle_api_key_metrics_rx = if config.lifecycle_api_key_metrics_subscriber.enabled {
+        Some(in_memory_bus.attach_lifecycle_api_key_metrics(
+            cc_lb_core::event_bus::DEFAULT_LIFECYCLE_API_KEY_METRICS_CAPACITY,
+        ))
+    } else {
+        None
+    };
+    let lifecycle_cache_hit_miss_rx = if config.lifecycle_cache_hit_miss_subscriber.enabled {
+        Some(in_memory_bus.attach_lifecycle_cache_hit_miss(
+            cc_lb_core::event_bus::DEFAULT_LIFECYCLE_CACHE_HIT_MISS_CAPACITY,
+        ))
+    } else {
+        None
+    };
+    let lifecycle_prompt_cache_drift_rx = if config.lifecycle_prompt_cache_drift_subscriber.enabled
+    {
+        Some(in_memory_bus.attach_lifecycle_prompt_cache_drift(
+            cc_lb_core::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_DRIFT_CAPACITY,
+        ))
+    } else {
+        None
+    };
+    let lifecycle_prompt_cache_observation_rx =
+        if config.lifecycle_prompt_cache_observation_subscriber.enabled
+            && config.prompt_cache_shadow.enabled
+            && initial_view.prompt_cache_observation_cache_opt().is_some()
+        {
+            Some(in_memory_bus.attach_lifecycle_prompt_cache_observation(
+                cc_lb_core::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY,
+            ))
+        } else {
+            None
+        };
     let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(in_memory_bus);
-    let request_event_writer_handle = request_event_writer_rx
-        .map(|rx| cc_lb_core::spawn_request_event_writer(storage.clone(), rx));
     let lifecycle_event_logger_handle =
         cc_lb_core::spawn_lifecycle_event_logger(lifecycle_event_logger_rx);
-    let lifecycle_event_assembler_handle = lifecycle_assembler_rx
-        .map(|rx| cc_lb_core::spawn_request_event_assembler(rx, storage.clone(), assembler_mode));
+    let lifecycle_event_assembler_handle = lifecycle_assembler_rx.map(|rx| {
+        cc_lb_core::spawn_request_event_assembler(rx, storage.clone(), Some(event_bus.clone()))
+    });
     let lifecycle_hook_adapter_handle = lifecycle_hook_adapter_rx.map(|rx| {
         let hooks = initial_view.global_observability_hooks.to_vec();
         cc_lb_core::spawn_observability_hook_adapter(rx, hooks)
@@ -978,9 +1016,54 @@ async fn build_app_with_storage_inner(
     });
     let lifecycle_cache_observation_subscriber_handle = lifecycle_cache_obs_rx
         .map(|rx| cc_lb_core::spawn_lifecycle_cache_observation_subscriber(rx, event_bus.clone()));
-    let request_event_writer_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_core::RequestEventWriterHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(request_event_writer_handle));
+    let lifecycle_rate_limit_header_subscriber_handle = lifecycle_rate_limit_header_rx.map(|rx| {
+        cc_lb_core::spawn_lifecycle_rate_limit_header_subscriber(
+            rx,
+            Arc::clone(&initial_view.upstream_rate_limit_cache),
+            Some(upstream_rate_limit_sink.clone()),
+        )
+    });
+    let lifecycle_subscription_quota_subscriber_handle =
+        lifecycle_subscription_quota_rx.map(|rx| {
+            let cache: Arc<dyn cc_lb_core::SubscriptionQuotaCacheLike> =
+                subscription_quota_cache.clone();
+            cc_lb_core::spawn_lifecycle_subscription_quota_subscriber(
+                rx,
+                Some(cache),
+                Some(subscription_quota_sink.clone()),
+            )
+        });
+    let lifecycle_limit_rejection_audit_subscriber_handle = lifecycle_limit_rejection_audit_rx
+        .and_then(|rx| {
+            audit_sink
+                .clone()
+                .map(|sink| cc_lb_core::spawn_lifecycle_limit_rejection_audit_subscriber(rx, sink))
+        });
+    let lifecycle_api_key_metrics_subscriber_handle = lifecycle_api_key_metrics_rx
+        .map(|rx| cc_lb_core::spawn_lifecycle_api_key_metrics_subscriber(rx, event_bus.clone()));
+    let lifecycle_cache_hit_miss_subscriber_handle =
+        lifecycle_cache_hit_miss_rx.map(cc_lb_core::spawn_lifecycle_cache_hit_miss_subscriber);
+    let lifecycle_prompt_cache_drift_subscriber_handle =
+        lifecycle_prompt_cache_drift_rx.map(|rx| {
+            cc_lb_core::spawn_lifecycle_prompt_cache_drift_subscriber(
+                rx,
+                config.prompt_cache_shadow.enabled,
+            )
+        });
+    let lifecycle_prompt_cache_observation_subscriber_handle =
+        lifecycle_prompt_cache_observation_rx.and_then(|rx| {
+            initial_view
+                .prompt_cache_observation_cache_opt()
+                .cloned()
+                .map(|cache| {
+                    cc_lb_core::spawn_lifecycle_prompt_cache_observation_subscriber(
+                        rx,
+                        config.lifecycle_prompt_cache_observation_subscriber.clone(),
+                        cache,
+                        initial_view.prompt_cache_observation_sink_opt().cloned(),
+                    )
+                })
+        });
     let lifecycle_event_logger_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_core::LifecycleEventLoggerHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(lifecycle_event_logger_handle)));
@@ -1003,19 +1086,49 @@ async fn build_app_with_storage_inner(
     > = Arc::new(tokio::sync::Mutex::new(
         lifecycle_cache_observation_subscriber_handle,
     ));
+    let lifecycle_rate_limit_header_subscriber_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::RateLimitHeaderSubscriberHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(
+        lifecycle_rate_limit_header_subscriber_handle,
+    ));
+    let lifecycle_subscription_quota_subscriber_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::SubscriptionQuotaSubscriberHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(
+        lifecycle_subscription_quota_subscriber_handle,
+    ));
+    let lifecycle_limit_rejection_audit_subscriber_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::LimitRejectionAuditSubscriberHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(
+        lifecycle_limit_rejection_audit_subscriber_handle,
+    ));
+    let lifecycle_api_key_metrics_subscriber_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::ApiKeyMetricsSubscriberHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(
+        lifecycle_api_key_metrics_subscriber_handle,
+    ));
+    let lifecycle_cache_hit_miss_subscriber_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::CacheHitMissSubscriberHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(
+        lifecycle_cache_hit_miss_subscriber_handle,
+    ));
+    let lifecycle_prompt_cache_drift_subscriber_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::PromptCacheDriftSubscriberHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(
+        lifecycle_prompt_cache_drift_subscriber_handle,
+    ));
+    let lifecycle_prompt_cache_observation_subscriber_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::PromptCacheObservationSubscriberHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(
+        lifecycle_prompt_cache_observation_subscriber_handle,
+    ));
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
         dynamic_view_holder.clone(),
         lifecycle_config,
         clock.clone(),
     );
-    if let Some(audit_sink) = audit_sink.clone() {
-        lifecycle = lifecycle.with_audit_sink(audit_sink);
-    }
     lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
-    lifecycle = lifecycle.with_request_event_storage(storage.clone());
     lifecycle = lifecycle.with_event_bus(event_bus.clone());
-    lifecycle = lifecycle.with_upstream_rate_limit_sink(upstream_rate_limit_sink);
     lifecycle = lifecycle.with_subscription_quota_sink(subscription_quota_sink.clone());
     if let Some(subscription_metadata_hook) = subscription_metadata_hook.clone() {
         lifecycle = lifecycle.with_subscription_metadata_hook(subscription_metadata_hook);
@@ -1061,18 +1174,6 @@ async fn build_app_with_storage_inner(
         Duration::from_secs(config.timeouts.drain_secs),
         sighup_handler(reload_tls_state, config_watcher.clone()),
     );
-    {
-        let writer_slot = request_event_writer_slot.clone();
-        signals.add_shutdown_hook(move || {
-            let writer_slot = writer_slot.clone();
-            async move {
-                let mut guard = writer_slot.lock().await;
-                if let Some(handle) = guard.take() {
-                    handle.shutdown().await;
-                }
-            }
-        });
-    }
     {
         let logger_slot = lifecycle_event_logger_slot.clone();
         signals.add_shutdown_hook(move || {
@@ -1151,6 +1252,91 @@ async fn build_app_with_storage_inner(
             let cache_obs_slot = cache_obs_slot.clone();
             async move {
                 let mut guard = cache_obs_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let rate_limit_header_slot = lifecycle_rate_limit_header_subscriber_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let rate_limit_header_slot = rate_limit_header_slot.clone();
+            async move {
+                let mut guard = rate_limit_header_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let subscription_quota_slot = lifecycle_subscription_quota_subscriber_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let subscription_quota_slot = subscription_quota_slot.clone();
+            async move {
+                let mut guard = subscription_quota_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let limit_rejection_audit_slot = lifecycle_limit_rejection_audit_subscriber_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let limit_rejection_audit_slot = limit_rejection_audit_slot.clone();
+            async move {
+                let mut guard = limit_rejection_audit_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let api_key_metrics_slot = lifecycle_api_key_metrics_subscriber_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let api_key_metrics_slot = api_key_metrics_slot.clone();
+            async move {
+                let mut guard = api_key_metrics_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let cache_hit_miss_slot = lifecycle_cache_hit_miss_subscriber_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let cache_hit_miss_slot = cache_hit_miss_slot.clone();
+            async move {
+                let mut guard = cache_hit_miss_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let prompt_cache_drift_slot = lifecycle_prompt_cache_drift_subscriber_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let prompt_cache_drift_slot = prompt_cache_drift_slot.clone();
+            async move {
+                let mut guard = prompt_cache_drift_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let prompt_cache_observation_slot =
+            lifecycle_prompt_cache_observation_subscriber_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let prompt_cache_observation_slot = prompt_cache_observation_slot.clone();
+            async move {
+                let mut guard = prompt_cache_observation_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }

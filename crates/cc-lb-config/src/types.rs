@@ -62,15 +62,26 @@ pub struct Config {
     #[serde(default)]
     pub prompt_cache_shadow: PromptCacheShadowConfig,
     #[serde(default)]
-    pub lifecycle_shadow_writer: LifecycleShadowWriterConfig,
-    #[serde(default)]
     pub lifecycle_hook_adapter: LifecycleHookAdapterConfig,
     #[serde(default)]
     pub lifecycle_pricing_subscriber: LifecyclePricingSubscriberConfig,
     #[serde(default)]
     pub lifecycle_cache_observation_subscriber: LifecycleCacheObservationSubscriberConfig,
     #[serde(default)]
-    pub request_event_writer_source: RequestEventWriterSource,
+    pub lifecycle_rate_limit_header_subscriber: LifecycleRateLimitHeaderSubscriberConfig,
+    #[serde(default)]
+    pub lifecycle_subscription_quota_subscriber: LifecycleSubscriptionQuotaSubscriberConfig,
+    #[serde(default)]
+    pub lifecycle_limit_rejection_audit_subscriber: LifecycleLimitRejectionAuditSubscriberConfig,
+    #[serde(default)]
+    pub lifecycle_api_key_metrics_subscriber: LifecycleApiKeyMetricsSubscriberConfig,
+    #[serde(default)]
+    pub lifecycle_cache_hit_miss_subscriber: LifecycleCacheHitMissSubscriberConfig,
+    #[serde(default)]
+    pub lifecycle_prompt_cache_drift_subscriber: LifecyclePromptCacheDriftSubscriberConfig,
+    #[serde(default)]
+    pub lifecycle_prompt_cache_observation_subscriber:
+        LifecyclePromptCacheObservationSubscriberConfig,
     #[serde(default)]
     pub limit_reservation_ttl: LimitReservationTtlConfig,
     #[serde(default)]
@@ -646,32 +657,134 @@ impl Default for PromptCacheShadowConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecycleShadowWriterConfig {
-    #[serde(default)]
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LifecycleHookAdapterConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+impl Default for LifecycleHookAdapterConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LifecyclePricingSubscriberConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+impl Default for LifecyclePricingSubscriberConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LifecycleCacheObservationSubscriberConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl Default for LifecycleCacheObservationSubscriberConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecycleRateLimitHeaderSubscriberConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for LifecycleRateLimitHeaderSubscriberConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecycleSubscriptionQuotaSubscriberConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for LifecycleSubscriptionQuotaSubscriberConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecycleLimitRejectionAuditSubscriberConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for LifecycleLimitRejectionAuditSubscriberConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecycleApiKeyMetricsSubscriberConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for LifecycleApiKeyMetricsSubscriberConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecycleCacheHitMissSubscriberConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for LifecycleCacheHitMissSubscriberConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecyclePromptCacheDriftSubscriberConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for LifecyclePromptCacheDriftSubscriberConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecyclePromptCacheObservationSubscriberConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for LifecyclePromptCacheObservationSubscriberConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// RFC-0002 Phase 7 background TTL sweeper for stale limit reservations.
@@ -735,36 +848,6 @@ impl Default for LifecycleLimitReconcileSubscriberConfig {
 
 fn default_true_bool() -> bool {
     true
-}
-
-/// RFC-0002 Phase 6 writer cutover switch.
-///
-/// - `Legacy` (default): only the pre-RFC-0002 writer persists rows. The
-///   Phase-3 shadow-writer feature flag is ignored.
-/// - `Both`: both writers persist rows. Rows carry distinct `event_id`s and
-///   the shadow row also carries `shadow_event_id` pointing at the legacy
-///   row's `event_id`. Diff via the comparison SQL in
-///   `docs/runbook/lifecycle-shadow.md`.
-/// - `Shadow`: only the assembler writer persists rows. Legacy path is
-///   detached from storage. Do not use until the comparison diff is empty
-///   for the target soak period.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum RequestEventWriterSource {
-    #[default]
-    Legacy,
-    Both,
-    Shadow,
-}
-
-impl RequestEventWriterSource {
-    pub fn legacy_writer_enabled(self) -> bool {
-        matches!(self, Self::Legacy | Self::Both)
-    }
-
-    pub fn shadow_writer_enabled(self) -> bool {
-        matches!(self, Self::Shadow | Self::Both)
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

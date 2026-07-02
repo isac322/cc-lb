@@ -2,8 +2,9 @@
 
 - Feature Name: `event-driven-lifecycle`
 - Start Date: 2026-07-01
-- Status: Draft — no implementation begun; supersedes ad-hoc "middleware hoist"
-  band-aid discussed post-PR #241
+- Status: Implemented — see §Implementation status (2026-07-02) below. The
+  original phased plan is preserved for historical context; the
+  as-shipped architecture is captured in the amendment.
 - Related PRs: #207 (gzip decoder sidecar), #222 (terminal observation
   guarantee), #241 (16-path integration tests), #242 (unignore
   `terminal_success_stream`)
@@ -25,6 +26,108 @@ generalises them into a full lifecycle-event pipeline and provides the phased
 migration that lets every intermediate state ship independently while
 preserving the byte-for-byte contract of the current `request_events_v1`
 persistence layer.
+
+## Implementation status (2026-07-02)
+
+The migration is complete. The handler no longer builds `RequestEvent` rows;
+it emits `LifecycleEvent`s
+which the assembler and per-concern subscribers observe. The legacy
+`request_event_writer` path was removed in Phase 13 and the shadow-vs-legacy
+comparison machinery deleted with it.
+
+### As-shipped shape
+
+- **Event vocabulary** lives in `cc-lb-lifecycle` (a new crate — resolution
+  of unresolved question #2 in the original RFC). Variants match the RFC's
+  10-variant shape, with `HeaderSnapshot`, `RouteInfo`, `AuthInfo`,
+  `ParseInfo`, `LimitDecisionKind`, `UsageSnapshot`, `StreamSuccess`,
+  `StreamError`, and `TerminationReason` supporting types. `predicted_cache_read_tokens`
+  was added to `RouteInfo` for the prompt-cache drift subscriber.
+- **`LifecycleContext`** in `crates/cc-lb-core/src/terminal_observer.rs` is
+  the successor to `TerminalObserver`. Its state is now just the 9 fields
+  the terminal event carries; `make_request_event` is gone. `Drop` emits
+  `RequestTerminated { reason: Dropped }` via the terminal-CAS-guarded
+  `emit_terminated` helper.
+- **Assembler** (`crates/cc-lb-core/src/lifecycle_event_assembler.rs`) is
+  the sole producer of `RequestEvent` rows. It maintains a
+  `HashMap<EventId, Partial>` capped at 4096 entries with a 300s TTL and a
+  30s sweeper. On `RequestTerminated` it writes a shadow row
+  (`event_id = <fresh v7>, shadow_event_id = <incoming EventId>`) and
+  republishes the finalized row to the admin SSE broadcast.
+- **Per-concern subscribers** replace six formerly-inline observations:
+  1. `lifecycle_pricing_subscriber` — cost computation.
+  2. `lifecycle_limit_reconcile_subscriber` — `reconcile_by_id`
+     (Phase 8 of the RFC's plan; the ownership redesign in Phase 7 was
+     already landed in the pre-Phase-1 base commit 070c9614).
+  3. `lifecycle_cache_observation_subscriber` — prompt-cache observations.
+  4. `lifecycle_hook_adapter_subscriber` — ObservabilityHook fanout.
+  5. `lifecycle_rate_limit_header_subscriber`,
+     `lifecycle_subscription_quota_subscriber`,
+     `lifecycle_limit_rejection_audit_subscriber`,
+     `lifecycle_api_key_metrics_subscriber`,
+     `lifecycle_cache_hit_miss_subscriber`,
+     `lifecycle_prompt_cache_drift_subscriber` — the six additional
+     subscribers that own responsibilities the RFC treated as part of
+     "ObservabilityHook fanout" but were in fact independent inline
+     observations on the handler tail.
+- **Bus wiring**: `InMemoryBus` fans `LifecycleEvent` out to per-subscriber
+  bounded mpsc channels via `attach_lifecycle_<name>(capacity)` methods.
+  Each channel drops-newest on overflow and increments
+  `cc_lb_dropped_events_total{reason="<channel>_full"}`. The
+  `RequestEventUpdate` broadcast channel remains, now fed exclusively by
+  the assembler's post-write republish.
+- **Configuration**: each subscriber is toggled by
+  `config.lifecycle_<name>_subscriber.enabled`. All defaults are `true`
+  after Phase 6; the flags exist as emergency kill switches. The writer
+  cutover flag (`request_event_writer_source`) has been removed — the
+  assembler is now the only writer.
+
+### Deviations from the original phased plan
+
+- **Phase count**: 15 executed phases vs the RFC's 9. The RFC bundled the
+  six inline-observation removals into a single "Phase 4 — ObservabilityHook
+  adapter subscriber" step; in practice each observation had a distinct
+  event footprint (rate-limit headers, subscription quota, limit
+  rejection audit, API-key metrics, cache hit/miss, prompt-cache drift)
+  and was extracted into its own subscriber (Phases 5a-5f + 6a-6f in the
+  as-shipped stack).
+- **Subscriber topology**: chain-vs-broadcast — the RFC proposed a linear
+  chain (`Pricing → CacheObservation → ObservabilityHook → Assembler →
+  Writer`). The as-shipped design is broadcast: each subscriber has its
+  own bounded mpsc off `InMemoryBus`, and the assembler is not chained
+  downstream of the others. This is because each subscriber reconstructs
+  its own `Partial<EventId>` state from the same event stream, so the
+  linear-chain premise (that each stage annotates the event with derived
+  fields the next stage consumes) turned out not to apply — the assembler
+  computes cost from `Priced` events published by the pricing subscriber,
+  and admin SSE tees off the same broadcast, but everything else is
+  independent.
+- **Shadow-mode diff tolerance** (unresolved question #3): the shipped
+  implementation writes only shadow rows; the transitional `Both` writer
+  mode + `cc_lb_lifecycle_shadow_field_drift_total` metric were removed in
+  Phase 13 when Shadow became the sole writer. The proposed 5ms timing
+  slack tolerance was not adopted; assembler field gaps had to be closed
+  before cutover.
+- **Reservation ownership redesign** (RFC Phase 7): the id-based reconcile
+  API landed before this migration. The RFC's Phase 7 is therefore listed
+  as pre-work rather than a phase of this migration.
+- **Assembler eviction policy** (unresolved question #1): shipped with
+  drop-oldest at cap 4096 + a `cap_evicted` outcome label on the metric,
+  matching the RFC's draft "drop oldest with metric" recommendation.
+  The cap bounds per-instance memory; reaching it is an operational signal
+  that requires investigation.
+
+### Where the code lives
+
+- `crates/cc-lb-lifecycle/` — event vocabulary crate.
+- `crates/cc-lb-core/src/terminal_observer.rs` — `LifecycleContext`.
+- `crates/cc-lb-core/src/lifecycle_event_assembler.rs` — the assembler.
+- `crates/cc-lb-core/src/lifecycle_*_subscriber.rs` — the per-concern
+  subscribers.
+- `crates/cc-lb-core/src/event_bus.rs` — `InMemoryBus` + per-channel
+  attach methods.
+- `crates/cc-lb-server/tests/rfc_0002_fix_live_qa.rs` — end-to-end
+  verification (5 tests).
 
 ## Motivation
 
@@ -458,6 +561,10 @@ remove the legacy path.
 
 ## Phased migration
 
+> The plan below is preserved as the design intent. The as-shipped phase
+> stack is 15 steps rather than 9, split as described in
+> §Implementation status → Deviations from the original phased plan.
+
 Every phase below is a self-contained PR that ships to production, is
 backwards compatible, and produces the same set of `request_events_v1` rows
 as the phase before it. **HC-3 satisfied.**
@@ -672,23 +779,24 @@ original spec (m0189: "서버가 복구할 수도 없이 프로세스가 강제 
 
 ## Unresolved questions
 
-1. **Assembler eviction policy under memory pressure.** If the assembler map
-   grows beyond N entries (e.g., 10K in-flight requests), do we drop the
-   oldest partial or block the incoming lifecycle event? Currently the RFC
-   says "drop oldest with metric", but this loses a row — which arguably
-   violates HC-4. Alternative: cap N very high (100K), drop = fatal alarm
-   pointing at a real bug. Decision needed before Phase 3.
-2. **Cross-crate event definition location.** `LifecycleEvent` needs to live
-   in a crate that both `cc-lb-core` and `cc-lb-admin` can depend on.
-   Options: `cc-lb-storage-api` (matches `RequestEventUpdate` today) vs.
-   new `cc-lb-lifecycle` crate. New crate is cleaner but adds compile
-   fan-out; deferring decision to Phase 2 implementation.
-3. **Shadow-mode diff tolerance.** Some fields (`duration_ms`,
-   `observability_post_ms`) may differ by microseconds between paths
-   because the timestamps are captured at slightly different points.
-   How much slack to allow before flagging a divergence? Draft: "exact
-   equality for all fields except numeric timing fields, which must match
-   within 5ms".
+All three questions raised in the original RFC were resolved during
+implementation; the resolutions are recorded in
+§Implementation status → Deviations from the original phased plan and
+summarised here.
+
+1. **Assembler eviction policy under memory pressure.** *Resolved:*
+   drop-oldest at cap 4096 with a `cap_evicted` outcome label on
+   `cc_lb_lifecycle_assembler_events_total`. TTL 300s + 30s sweeper.
+   4096 far exceeds observed peak concurrency (~50), so hitting the cap
+   is a bug-detection signal, not a routine backpressure event.
+2. **Cross-crate event definition location.** *Resolved:* new crate
+   `cc-lb-lifecycle`. Both `cc-lb-core` and `cc-lb-admin` depend on it;
+   no compile-fan-out issues surfaced in practice.
+3. **Shadow-mode diff tolerance.** *Resolved (moot):* the transitional
+   `writer_source = both` mode + drift metric were removed in Phase 13.
+   Empirically, exact equality held on all 68 fields once Phases 1-4
+   closed the 35-field gap in the assembler. No slack tolerance ended up
+   being needed.
 
 ## Future extensions (out of scope for this RFC)
 

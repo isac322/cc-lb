@@ -56,7 +56,12 @@
 
 #![deny(missing_debug_implementations)]
 
+use std::collections::BTreeMap;
+
+use cc_lb_plugin_api::{InternalError, RoutingTrace, types::TtlClass};
+use cc_lb_storage_api::types::PrincipalKindLite;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 /// Application-generated unique identifier for a single request lifecycle.
@@ -90,10 +95,17 @@ pub enum LifecycleEvent {
         event_id: EventId,
         result: Result<AuthInfo, AuthFailure>,
     },
+    AuthenticationCompleted {
+        event_id: EventId,
+        principal_id: String,
+        principal_kind: PrincipalKindLite,
+    },
     /// Router selection completed.
     RouteCompleted {
         event_id: EventId,
         result: Result<RouteInfo, RouteFailure>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        routing_trace: Option<RoutingTrace>,
     },
     /// Rate-limit / quota decision.
     LimitDecision {
@@ -107,7 +119,32 @@ pub enum LifecycleEvent {
         upstream_id: Uuid,
     },
     /// Upstream returned response headers (may be pre-body).
-    UpstreamResponseStarted { event_id: EventId, status: u16 },
+    UpstreamResponseStarted {
+        event_id: EventId,
+        status: u16,
+        #[serde(default, skip_serializing_if = "HeaderSnapshot::is_empty")]
+        headers: HeaderSnapshot,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bulkhead_wait_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dns_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connect_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection_reused: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shape_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sign_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        upstream_ttfb_ms: Option<u64>,
+    },
+    ProviderErrorObserved {
+        event_id: EventId,
+        code: String,
+        message: String,
+        source: String,
+    },
     /// Usage counts were observed from an SSE frame or non-stream body.
     UsageObserved {
         event_id: EventId,
@@ -126,21 +163,44 @@ pub enum LifecycleEvent {
         reason: TerminationReason,
         client_status: u16,
         duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit_reconcile_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observability_post_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proxy_setup_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        upstream_body_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_body_chunk_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        internal_errors: Vec<InternalError>,
     },
-    /// Emitted by the Phase-5 pricing subscriber after cost is computed
-    /// from usage counts + model + upstream kind. Advisory: the assembler
-    /// merges these micros into the shadow row.
+    /// Emitted by the pricing subscriber after cost is computed from usage
+    /// counts, model, and upstream kind. The assembler merges these micros
+    /// into the request row's cost columns.
     Priced {
         event_id: EventId,
         cost: CostBreakdown,
     },
-    /// Emitted by the Phase-5 cache observation subscriber when the final
+    /// Emitted by the cache-observation subscriber when the final
     /// prompt-cache state can be derived from the usage counters plus
-    /// parse-time cache metadata. Advisory: the assembler merges this into
-    /// the shadow row's `cache_state` column.
+    /// parse-time cache metadata. The assembler merges this into the
+    /// request row's `cache_state` column.
     CacheObserved {
         event_id: EventId,
         cache_state: RequestCacheStateLite,
+    },
+    /// Emitted by request producers after prompt-cache observations are decoded.
+    /// The prompt-cache observation subscriber owns cache writes, sink enqueue,
+    /// and drop metric side effects for these records.
+    PromptCacheObservationsProduced {
+        event_id: EventId,
+        upstream_id: Uuid,
+        canonical_model_id: String,
+        observations: Vec<PromptCacheObservationWire>,
+        dropped_below_threshold: u32,
+        dropped_aborted: u32,
     },
 }
 
@@ -151,15 +211,18 @@ impl LifecycleEvent {
             Self::RequestStarted { event_id, .. }
             | Self::ParseCompleted { event_id, .. }
             | Self::AuthCompleted { event_id, .. }
+            | Self::AuthenticationCompleted { event_id, .. }
             | Self::RouteCompleted { event_id, .. }
             | Self::LimitDecision { event_id, .. }
             | Self::UpstreamAttempt { event_id, .. }
             | Self::UpstreamResponseStarted { event_id, .. }
+            | Self::ProviderErrorObserved { event_id, .. }
             | Self::UsageObserved { event_id, .. }
             | Self::StreamCompleted { event_id, .. }
             | Self::RequestTerminated { event_id, .. }
             | Self::Priced { event_id, .. }
-            | Self::CacheObserved { event_id, .. } => event_id,
+            | Self::CacheObserved { event_id, .. }
+            | Self::PromptCacheObservationsProduced { event_id, .. } => event_id,
         }
     }
 
@@ -169,44 +232,82 @@ impl LifecycleEvent {
             Self::RequestStarted { .. } => "request_started",
             Self::ParseCompleted { .. } => "parse_completed",
             Self::AuthCompleted { .. } => "auth_completed",
+            Self::AuthenticationCompleted { .. } => "authentication_completed",
             Self::RouteCompleted { .. } => "route_completed",
             Self::LimitDecision { .. } => "limit_decision",
             Self::UpstreamAttempt { .. } => "upstream_attempt",
             Self::UpstreamResponseStarted { .. } => "upstream_response_started",
+            Self::ProviderErrorObserved { .. } => "provider_error_observed",
             Self::UsageObserved { .. } => "usage_observed",
             Self::StreamCompleted { .. } => "stream_completed",
             Self::RequestTerminated { .. } => "request_terminated",
             Self::Priced { .. } => "priced",
             Self::CacheObserved { .. } => "cache_observed",
+            Self::PromptCacheObservationsProduced { .. } => "prompt_cache_observations_produced",
         }
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromptCacheObservationWire {
+    pub prefix_hash: String,
+    pub ttl_class: TtlClass,
+    pub expires_at_unix_secs: u64,
+    pub kind: PromptCacheObservationKindWire,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptCacheObservationKindWire {
+    Hit,
+    Write,
+}
+
 /// Sanitized subset of upstream response headers carried by
 /// `LifecycleEvent::UpstreamResponseStarted` (RFC-0002 §237-241).
-/// Only compact, non-sensitive header slots are included; producers MUST
-/// NOT copy `Authorization` or similar credential-bearing headers.
+///
+/// Producers MUST NOT copy `Authorization` or similar credential-bearing
+/// headers. The `anthropic_headers` map is a flat pass-through of every
+/// header whose lowercased name starts with `anthropic-ratelimit-` OR
+/// exactly matches one of the fixed Anthropic identity slots (see
+/// `ANTHROPIC_IDENTITY_HEADERS`). Downstream subscribers parse these into
+/// typed rate-limit and subscription-quota observations.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HeaderSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_encoding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// `Retry-After` header. Anthropic sets this on 429/503.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ratelimit_requests_remaining: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ratelimit_tokens_remaining: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ratelimit_reset: Option<String>,
+    pub retry_after: Option<String>,
+    /// All headers matching `anthropic-ratelimit-*` (any window/field
+    /// combination — the vocabulary is open-ended, so we pass through
+    /// raw values keyed by their lowercased header name) plus the fixed
+    /// identity slots (`anthropic-organization-id`, etc.). Downstream
+    /// subscribers reconstruct a `HeaderMap` and hand it to the existing
+    /// `parse_anthropic_rate_limit_headers` / `parse_anthropic_unified_headers`
+    /// parsers in `cc_lb_core::rate_limit_headers`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub anthropic_headers: BTreeMap<String, String>,
 }
+
+/// Anthropic identity header slots that MUST be projected verbatim into
+/// `HeaderSnapshot::anthropic_headers` in addition to the
+/// `anthropic-ratelimit-*` prefix match. Producers use this list to
+/// build the map without duplicating string constants.
+pub const ANTHROPIC_IDENTITY_HEADERS: &[&str] =
+    &["anthropic-organization-id", "anthropic-account-uuid"];
 
 impl HeaderSnapshot {
     pub fn is_empty(&self) -> bool {
         self.content_type.is_none()
+            && self.content_encoding.is_none()
             && self.request_id.is_none()
-            && self.ratelimit_requests_remaining.is_none()
-            && self.ratelimit_tokens_remaining.is_none()
-            && self.ratelimit_reset.is_none()
+            && self.retry_after.is_none()
+            && self.anthropic_headers.is_empty()
     }
 }
 
@@ -246,6 +347,16 @@ pub struct ParseInfo {
     pub cache_breakpoints: Vec<CacheBreakpointLite>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_prefix_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cache_control_message_indices: Vec<u64>,
 }
 
 /// Snake-case string mirror of `cc_lb_storage_api::types::RequestCacheState`.
@@ -308,7 +419,10 @@ fn cache_breakpoint_token_count_is_zero(value: &u64) -> bool {
 #[non_exhaustive]
 pub enum ParseFailure {
     /// Request body exceeded the configured cap.
-    BodyTooLarge { limit_bytes: u64 },
+    BodyTooLarge {
+        limit_bytes: u64,
+    },
+    InvalidJson,
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +435,8 @@ pub struct AuthInfo {
     pub principal_id: String,
     pub key_id: Option<String>,
     pub principal_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_ms: Option<u64>,
 }
 
 /// Reason authentication failed.
@@ -329,7 +445,14 @@ pub struct AuthInfo {
 #[non_exhaustive]
 pub enum AuthFailure {
     /// Token was missing, malformed, or did not match any known key.
-    AuthenticationFailed { http_status: u16 },
+    AuthenticationFailed {
+        http_status: u16,
+        /// Coarse reason label used by the api-key metrics subscriber to
+        /// tag `cclb_key_auth_failures_total`. `None` when the caller
+        /// cannot classify the failure.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// Token matched a key but the principal record was not found.
     PrincipalMissing { principal_id: String },
 }
@@ -349,6 +472,12 @@ pub struct RouteInfo {
     /// `"anthropic_oauth"`. `None` means the pricing default (Anthropic key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_trace: Option<RoutingTrace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_cache_read_tokens: Option<u32>,
 }
 
 /// Reason routing failed.
@@ -373,8 +502,45 @@ pub enum RouteFailure {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LimitDecisionKind {
-    Reserved { reservation_id: String, amount: u64 },
-    Rejected { reason: String },
+    Reserved {
+        reservation_id: String,
+        amount: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit_reserve_ms: Option<u64>,
+    },
+    Rejected {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<LimitSubject>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_summary: Option<LimitRequestSummary>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        route_summary: Option<RouteSummary>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit_violation: Option<String>,
+    },
+}
+
+/// Identity carried by `LimitDecisionKind::Rejected` for downstream audit
+/// subscribers to reconstruct the legacy `AuditEntry`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LimitSubject {
+    pub principal_id: String,
+    pub key_id: String,
+}
+
+/// Request shape summary carried by `LimitDecisionKind::Rejected`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LimitRequestSummary {
+    pub model: String,
+    pub path: String,
+    pub method: String,
+}
+
+/// Route summary carried by `LimitDecisionKind::Rejected`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteSummary {
+    pub upstream_name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -385,7 +551,7 @@ pub enum LimitDecisionKind {
 ///
 /// Mirrors the fields in `cc_lb_core::usage_parser::UsageCounts` that are
 /// safe to broadcast to subscribers.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct UsageSnapshot {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -398,6 +564,8 @@ pub struct UsageSnapshot {
     pub web_fetch_requests: u64,
     pub service_tier: Option<String>,
     pub inference_geo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<JsonValue>,
 }
 
 /// Which SSE frame produced the update.
@@ -422,11 +590,37 @@ pub enum UsageSource {
 // ---------------------------------------------------------------------------
 
 /// Stream ended normally.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct StreamSuccess {
     pub usage: UsageSnapshot,
     /// Number of SSE events observed on the tap.
     pub sse_event_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_chunk_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_body_chunk_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_message_start_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_content_block_start_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_first_content_delta_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_last_content_delta_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_message_stop_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_last_chunk_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_total_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_delta_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ping_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inter_token_avg_ms: Option<u64>,
 }
 
 /// Stream terminated on an error before completion (e.g. mid-stream
@@ -512,18 +706,32 @@ mod tests {
             .kind(),
             LifecycleEvent::AuthCompleted {
                 event_id: sample_event_id(),
-                result: Err(AuthFailure::AuthenticationFailed { http_status: 401 }),
+                result: Err(AuthFailure::AuthenticationFailed {
+                    http_status: 401,
+                    reason: None,
+                }),
+            }
+            .kind(),
+            LifecycleEvent::AuthenticationCompleted {
+                event_id: sample_event_id(),
+                principal_id: "principal".into(),
+                principal_kind: PrincipalKindLite::Machine,
             }
             .kind(),
             LifecycleEvent::RouteCompleted {
                 event_id: sample_event_id(),
                 result: Err(RouteFailure::RouteNotConfigured),
+                routing_trace: None,
             }
             .kind(),
             LifecycleEvent::LimitDecision {
                 event_id: sample_event_id(),
                 decision: LimitDecisionKind::Rejected {
                     reason: "quota".into(),
+                    subject: None,
+                    request_summary: None,
+                    route_summary: None,
+                    limit_violation: None,
                 },
             }
             .kind(),
@@ -536,6 +744,21 @@ mod tests {
             LifecycleEvent::UpstreamResponseStarted {
                 event_id: sample_event_id(),
                 status: 200,
+                headers: HeaderSnapshot::default(),
+                bulkhead_wait_ms: None,
+                dns_ms: None,
+                connect_ms: None,
+                connection_reused: None,
+                shape_ms: None,
+                sign_ms: None,
+                upstream_ttfb_ms: None,
+            }
+            .kind(),
+            LifecycleEvent::ProviderErrorObserved {
+                event_id: sample_event_id(),
+                code: "provider_error".into(),
+                message: "redacted".into(),
+                source: "provider".into(),
             }
             .kind(),
             LifecycleEvent::UsageObserved {
@@ -546,10 +769,7 @@ mod tests {
             .kind(),
             LifecycleEvent::StreamCompleted {
                 event_id: sample_event_id(),
-                result: Ok(StreamSuccess {
-                    usage: UsageSnapshot::default(),
-                    sse_event_count: 0,
-                }),
+                result: Ok(StreamSuccess::default()),
             }
             .kind(),
             LifecycleEvent::RequestTerminated {
@@ -557,6 +777,12 @@ mod tests {
                 reason: TerminationReason::Success,
                 client_status: 200,
                 duration_ms: 1,
+                limit_reconcile_ms: None,
+                observability_post_ms: None,
+                proxy_setup_ms: None,
+                upstream_body_ms: None,
+                first_body_chunk_ms: None,
+                internal_errors: Vec::new(),
             }
             .kind(),
             LifecycleEvent::Priced {
@@ -569,6 +795,15 @@ mod tests {
                 cache_state: RequestCacheStateLite::Unknown,
             }
             .kind(),
+            LifecycleEvent::PromptCacheObservationsProduced {
+                event_id: sample_event_id(),
+                upstream_id: Uuid::nil(),
+                canonical_model_id: "model".to_owned(),
+                observations: Vec::new(),
+                dropped_below_threshold: 0,
+                dropped_aborted: 0,
+            }
+            .kind(),
         ];
         assert_eq!(
             labels,
@@ -576,15 +811,18 @@ mod tests {
                 "request_started",
                 "parse_completed",
                 "auth_completed",
+                "authentication_completed",
                 "route_completed",
                 "limit_decision",
                 "upstream_attempt",
                 "upstream_response_started",
+                "provider_error_observed",
                 "usage_observed",
                 "stream_completed",
                 "request_terminated",
                 "priced",
                 "cache_observed",
+                "prompt_cache_observations_produced",
             ],
         );
     }
@@ -597,6 +835,12 @@ mod tests {
             reason: TerminationReason::Dropped,
             client_status: 0,
             duration_ms: 0,
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
         };
         assert_eq!(event.event_id(), &id);
     }

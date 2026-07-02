@@ -69,10 +69,6 @@ Each LIVE-QA uses distinct ports and separate `/tmp/cc-lb-liveqa-N/` dir; harnes
   - Verify: raw SQL count = 2×N, API `count` = N.
   - Covers: QA7, H2.
 
-- **LIVE-8** · `request_event_writer_source = "legacy"`, `lifecycle_shadow_writer.enabled = true`.
-  - Verify: only 1 legacy row; no shadow row.
-  - Covers: M4.
-
 - **LIVE-9** · Default subscriber auth; principal with tight limit.
   - Verify: response row has `limit_reconcile_ms=0`; `cc_lb_limit_reconcile_subscriber_rows_total{outcome="reconciled"}` increments.
   - Covers: QA9, H4, H5.
