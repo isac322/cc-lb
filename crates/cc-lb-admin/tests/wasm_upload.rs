@@ -228,6 +228,71 @@ async fn rejects_host_import_violation() {
     );
 }
 
+fn filter_wasm_with_embedded_name(embedded_name: &str) -> Vec<u8> {
+    let metadata = format!(r#"{{"name":"{embedded_name}","version":"0.0.1"}}"#);
+    wat_with_sections(
+        minimal_filter_wat(),
+        &[
+            (
+                schema::SECTION_FILTER,
+                &schema_section_bytes(schema::WIRE_SCHEMA_TAG_FILTER),
+            ),
+            ("cc_lb.plugin.v1", metadata.as_bytes()),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn rejects_identity_mismatch_between_multipart_and_embedded_name() {
+    let server = spawn_admin_server().await;
+    let wasm = filter_wasm_with_embedded_name("embedded-name");
+    let body = multipart_body(&[
+        ("name", b"different-multipart-name"),
+        ("original_filename", b"identity-mismatch.wasm"),
+        ("slot_kind", b"filter"),
+        ("bytes", &wasm),
+    ]);
+    let (status, value) = upload(&server, body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(value["error"], "identity_mismatch");
+    let reason = value["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("different-multipart-name") && reason.contains("embedded-name"),
+        "reason must name both sides: {value}"
+    );
+}
+
+#[tokio::test]
+async fn accepts_when_embedded_name_matches_multipart() {
+    let server = spawn_admin_server().await;
+    let wasm = filter_wasm_with_embedded_name("aligned-name");
+    let body = multipart_body(&[
+        ("name", b"aligned-name"),
+        ("original_filename", b"aligned.wasm"),
+        ("slot_kind", b"filter"),
+        ("bytes", &wasm),
+    ]);
+    let (status, value) = upload(&server, body).await;
+    assert_eq!(status, StatusCode::CREATED, "body={value}");
+}
+
+#[tokio::test]
+async fn accepts_when_metadata_section_absent() {
+    // Plugins built without the wasmtime PDK macro (or older versions
+    // that predate the `cc_lb.plugin.v1` section) must still upload
+    // cleanly — the identity check is opt-in per plugin.
+    let server = spawn_admin_server().await;
+    let wasm = filter_wasm_valid();
+    let body = multipart_body(&[
+        ("name", b"no-metadata-section"),
+        ("original_filename", b"no-metadata.wasm"),
+        ("slot_kind", b"filter"),
+        ("bytes", &wasm),
+    ]);
+    let (status, value) = upload(&server, body).await;
+    assert_eq!(status, StatusCode::CREATED, "body={value}");
+}
+
 #[tokio::test]
 async fn rejects_missing_slot_kind_part() {
     let server = spawn_admin_server().await;
