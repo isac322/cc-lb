@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
 
-use cc_lb_plugin_api::{Principal, RateLimitKind, RateLimitObservation};
+use cc_lb_plugin_api::{RateLimitKind, RateLimitObservation};
 use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow};
 use http::HeaderMap;
-use serde_json::Value;
 
 const HEADER_PREFIX: &str = "anthropic-ratelimit-";
 const DEFAULT_WINDOW: &str = "default";
@@ -41,13 +40,6 @@ impl Default for UnifiedQuotaObservation {
             disabled_reason: None,
         }
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum LimitIdentity {
-    Account(String),
-    Credential(String),
-    Unobserved,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -268,38 +260,6 @@ pub fn percent_to_utilization_fraction(value: f64) -> f64 {
     clamp_utilization_fraction(value / 100.0)
 }
 
-pub(crate) fn derive_limit_identity(principal: &Principal, headers: &HeaderMap) -> LimitIdentity {
-    if let Some(account) = header_string(headers, "anthropic-organization-id") {
-        return LimitIdentity::Account(account);
-    }
-
-    for key in [
-        "anthropic_account_id",
-        "account_id",
-        "account_identity",
-        "organization_id",
-        "org_id",
-    ] {
-        if let Some(account) = claim_string(&principal.claims, key) {
-            return LimitIdentity::Account(account);
-        }
-    }
-
-    for key in [
-        "credentials_ref",
-        "credential_ref",
-        "real_credential_storage_key",
-        "oauth_credential_id",
-        "oauth_provider",
-    ] {
-        if let Some(credential) = claim_string(&principal.claims, key) {
-            return LimitIdentity::Credential(credential);
-        }
-    }
-
-    LimitIdentity::Unobserved
-}
-
 fn parse_header_name(name: &str) -> Option<(RateLimitKind, RateLimitField, String)> {
     let suffix = name.strip_prefix(HEADER_PREFIX)?;
     let parts = suffix
@@ -470,29 +430,10 @@ fn parse_csv_list(value: &str) -> Option<Vec<String>> {
     Some(entries)
 }
 
-fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn claim_string(claims: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
-    claims
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
 #[cfg(test)]
 mod tests {
-    use cc_lb_plugin_api::{Principal, PrincipalKind, RateLimitKind, RateLimitObservation};
+    use cc_lb_plugin_api::{RateLimitKind, RateLimitObservation};
     use http::header::{HeaderName, HeaderValue};
-    use serde_json::json;
 
     use super::*;
 
@@ -607,40 +548,6 @@ mod tests {
 
         assert!(snapshots.is_empty());
         assert!(parse_anthropic_rate_limit_headers(&HeaderMap::new()).is_empty());
-    }
-
-    #[test]
-    fn derives_account_identity_from_response_header_before_claims() {
-        let headers = headers(&[("anthropic-organization-id", "org_header")]);
-        let principal = principal_with_claims(&[
-            ("account_id", json!("org_claim")),
-            ("credentials_ref", json!("credential_claim")),
-        ]);
-
-        let identity = derive_limit_identity(&principal, &headers);
-
-        assert_eq!(identity, LimitIdentity::Account("org_header".to_owned()));
-    }
-
-    #[test]
-    fn derives_credential_identity_when_account_is_unobserved() {
-        let principal = principal_with_claims(&[("credentials_ref", json!("credential-a"))]);
-
-        let identity = derive_limit_identity(&principal, &HeaderMap::new());
-
-        assert_eq!(
-            identity,
-            LimitIdentity::Credential("credential-a".to_owned())
-        );
-    }
-
-    #[test]
-    fn marks_identity_unobserved_when_no_account_or_credential_is_known() {
-        let principal = principal_with_claims(&[]);
-
-        let identity = derive_limit_identity(&principal, &HeaderMap::new());
-
-        assert_eq!(identity, LimitIdentity::Unobserved);
     }
 
     #[test]
@@ -1114,17 +1021,5 @@ mod tests {
             );
         }
         headers
-    }
-
-    fn principal_with_claims(pairs: &[(&str, Value)]) -> Principal {
-        let mut claims = serde_json::Map::new();
-        for (key, value) in pairs {
-            claims.insert((*key).to_owned(), value.clone());
-        }
-        Principal {
-            id: "principal-test".to_owned(),
-            kind: PrincipalKind::ApiKey,
-            claims,
-        }
     }
 }
