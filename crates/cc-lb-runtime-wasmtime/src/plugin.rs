@@ -26,9 +26,8 @@ use cc_lb_plugin_api::{
     SlotKey, UpstreamCandidate,
 };
 use cc_lb_plugin_types::{
-    ArchivedFilterResponse, FilterRequest as WireFilterRequest,
-    FilterResponse as WireFilterResponse, Header as WireHeader, Principal as WirePrincipal,
-    UpstreamCandidate as WireUpstreamCandidate,
+    ArchivedFilterResponse, FilterRequest as WireFilterRequest, Header as WireHeader,
+    Principal as WirePrincipal, UpstreamCandidate as WireUpstreamCandidate,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
@@ -89,7 +88,10 @@ impl FilterPlugin for WasmtimeFilterPlugin {
 
         // rkyv::access enforces 16-byte alignment on the bytes; Vec<u8>
         // from Memory::data() carries no such guarantee. Copy through
-        // AlignedVec to satisfy the validator.
+        // AlignedVec to satisfy the validator. The subsequent
+        // wire_to_host_output walks the archived view directly (RFC-0001
+        // gap-analysis #7): no rkyv::deserialize, no owned-String or
+        // owned-Vec allocations per candidate.
         let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
         aligned.extend_from_slice(&out_bytes);
 
@@ -99,14 +101,8 @@ impl FilterPlugin for WasmtimeFilterPlugin {
                     reason: format!("rkyv access response: {e}"),
                 }
             })?;
-        let response: WireFilterResponse =
-            rkyv::deserialize::<WireFilterResponse, RkyvError>(archived).map_err(|e| {
-                FilterError::Runtime {
-                    reason: format!("rkyv deserialize response: {e}"),
-                }
-            })?;
 
-        wire_to_host_output(response)
+        wire_to_host_output(archived)
     }
 
     fn plugin_id(&self) -> Uuid {
@@ -194,29 +190,28 @@ fn claims_to_wire(claims: &serde_json::Map<String, serde_json::Value>) -> Vec<(S
         .collect()
 }
 
-fn wire_to_host_output(response: WireFilterResponse) -> Result<FilterOutput, FilterError> {
+fn wire_to_host_output(archived: &ArchivedFilterResponse) -> Result<FilterOutput, FilterError> {
     let mut kept_upstream_ids = Vec::new();
     let mut per_candidate_reasons = Vec::new();
     let mut reasons = Vec::new();
 
-    for result in response.results {
+    for result in archived.results.iter() {
+        let upstream_id_str: &str = &result.upstream_id;
+        let decision_str: &str = &result.decision;
+        let reason_str: &str = &result.reason;
         let upstream_id =
-            Uuid::parse_str(&result.upstream_id).map_err(|source| FilterError::Runtime {
+            Uuid::parse_str(upstream_id_str).map_err(|source| FilterError::Runtime {
                 reason: format!(
-                    "plugin returned invalid upstream_id `{}`: {source}",
-                    result.upstream_id
+                    "plugin returned invalid upstream_id `{upstream_id_str}`: {source}"
                 ),
             })?;
-        if result.decision == "accept" {
+        if decision_str == "accept" {
             kept_upstream_ids.push(upstream_id);
         } else {
-            per_candidate_reasons.push(per_candidate_reason_from_label(
-                &result.decision,
-                &result.reason,
-            ));
+            per_candidate_reasons.push(per_candidate_reason_from_label(decision_str, reason_str));
         }
-        if !result.reason.is_empty() {
-            reasons.push(format!("{}: {}", result.upstream_id, result.reason));
+        if !reason_str.is_empty() {
+            reasons.push(format!("{upstream_id_str}: {reason_str}"));
         }
     }
 
@@ -506,6 +501,7 @@ fn host_observe_event_to_wire(
 mod tests {
     use super::*;
     use cc_lb_plugin_api::PrincipalKind;
+    use cc_lb_plugin_types::FilterResponse as WireFilterResponse;
     use cc_lb_plugin_types::PerCandidateReason as WirePerCandidateReason;
 
     fn fixture_principal() -> Principal {
@@ -572,7 +568,12 @@ mod tests {
                 },
             ],
         };
-        let out = wire_to_host_output(response).expect("conversion must succeed");
+        let bytes = rkyv::to_bytes::<RkyvError>(&response).expect("encode");
+        let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
+        aligned.extend_from_slice(&bytes);
+        let archived =
+            rkyv::access::<ArchivedFilterResponse, RkyvError>(&aligned).expect("archived view");
+        let out = wire_to_host_output(archived).expect("conversion must succeed");
         assert_eq!(out.kept_upstream_ids.len(), 1);
         assert_eq!(
             out.kept_upstream_ids[0],
