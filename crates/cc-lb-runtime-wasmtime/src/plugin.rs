@@ -142,12 +142,7 @@ fn host_to_wire_request(
         headers: ctx
             .downstream_headers
             .iter()
-            .filter(|(name, _)| {
-                // Strip auth-bearing headers before they cross the
-                // plugin boundary.
-                let lower = name.as_str().to_ascii_lowercase();
-                lower != "authorization" && lower != "x-api-key" && lower != "host"
-            })
+            .filter(|(name, _)| !is_stripped_downstream_header(name.as_str()))
             .map(|(name, value)| WireHeader {
                 name: name.as_str().to_owned(),
                 value: value.as_bytes().to_vec(),
@@ -188,6 +183,46 @@ fn claims_to_wire(claims: &serde_json::Map<String, serde_json::Value>) -> Vec<(S
         .iter()
         .filter_map(|(k, v)| serde_json::to_vec(v).ok().map(|bytes| (k.clone(), bytes)))
         .collect()
+}
+
+/// Downstream-request headers that must NEVER cross the plugin
+/// boundary. `authorization`/`x-api-key` are the primary key material
+/// for the proxy, `host` is meaningless once the request is being
+/// routed to an upstream, and `proxy-authorization` is a hop-by-hop
+/// credential that the host already strips before dispatch
+/// (`hop_by_hop.rs`) — allowing guest visibility of it would let a
+/// buggy plugin log or exfiltrate a downstream proxy credential.
+fn is_stripped_downstream_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization" | "x-api-key" | "host" | "proxy-authorization"
+    )
+}
+
+/// Shape-plugin output headers that must NEVER reach the dispatcher.
+/// Hop-by-hop headers per RFC 7230 §6.1 are meaningless upstream (the
+/// host manages its own connection). Signer/auth-owned headers
+/// (`authorization`, `x-api-key`, `x-anthropic-*`) must come from the
+/// authenticated proxy signing path — a shape plugin trying to inject
+/// them is either buggy or hostile. `host` and `content-length` are
+/// derived from the request URL and body respectively.
+fn is_stripped_shape_output_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "host"
+            | "content-length"
+            | "authorization"
+            | "x-api-key"
+    ) || lower.starts_with("x-anthropic-")
 }
 
 fn wire_to_host_output(archived: &ArchivedFilterResponse) -> Result<FilterOutput, FilterError> {
@@ -346,10 +381,7 @@ fn host_to_wire_shape_request(
         headers: ctx
             .downstream_headers
             .iter()
-            .filter(|(name, _)| {
-                let lower = name.as_str().to_ascii_lowercase();
-                lower != "authorization" && lower != "x-api-key" && lower != "host"
-            })
+            .filter(|(name, _)| !is_stripped_downstream_header(name.as_str()))
             .map(|(name, value)| WireHeader {
                 name: name.as_str().to_owned(),
                 value: value.as_bytes().to_vec(),
@@ -388,6 +420,10 @@ fn wire_to_host_shaped_request(
 
     let mut headers = http::HeaderMap::new();
     for h in &response.headers {
+        if is_stripped_shape_output_header(&h.name) {
+            tracing::debug!(header = %h.name, "dropping shape-plugin output header per hop-by-hop/signer contract");
+            continue;
+        }
         let name = http::HeaderName::from_bytes(h.name.as_bytes()).map_err(|e| {
             cc_lb_plugin_api::DialectError::UnsupportedRequest {
                 reason: format!("plugin returned invalid header name `{}`: {e}", h.name),

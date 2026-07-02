@@ -145,14 +145,23 @@ impl NotifyListener {
                     return;
                 }
                 let generation = view.generation;
-                self.holder.store(view);
-                metrics::counter!("cclb_rebind_total", "outcome" => "success").increment(1);
-                metrics::histogram!("cclb_rebind_duration_seconds").record(elapsed.as_secs_f64());
-                tracing::info!(
-                    generation,
-                    duration_ms = elapsed.as_millis(),
-                    "dynamic view rebound after runtime change notification"
-                );
+                if self.holder.try_store_if_newer(view) {
+                    metrics::counter!("cclb_rebind_total", "outcome" => "success").increment(1);
+                    metrics::histogram!("cclb_rebind_duration_seconds")
+                        .record(elapsed.as_secs_f64());
+                    tracing::info!(
+                        generation,
+                        duration_ms = elapsed.as_millis(),
+                        "dynamic view rebound after runtime change notification"
+                    );
+                } else {
+                    metrics::counter!("cclb_rebind_total", "outcome" => "stale").increment(1);
+                    tracing::debug!(
+                        generation,
+                        duration_ms = elapsed.as_millis(),
+                        "notify-triggered view rejected: newer generation already resident"
+                    );
+                }
             }
             Err(error) => {
                 let elapsed = started.elapsed();

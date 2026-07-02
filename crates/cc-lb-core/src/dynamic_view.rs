@@ -160,6 +160,27 @@ impl DynamicViewHolder {
         self.inner.store(view);
     }
 
+    /// Store `view` only if its `generation` is strictly greater than
+    /// the currently-stored view's generation. Concurrent stores are
+    /// resolved by `arc_swap::rcu`, so a slower reconcile pass can
+    /// never overwrite a fresher admin-triggered rebind. Returns
+    /// `true` if the swap succeeded OR if an even-newer view is now
+    /// resident (both are "we're up-to-date" outcomes for the caller).
+    pub fn try_store_if_newer(&self, view: Arc<DynamicView>) -> bool {
+        let new_generation = view.generation;
+        if new_generation <= self.inner.load().generation {
+            return false;
+        }
+        self.inner.rcu(|current| {
+            if current.generation < new_generation {
+                Arc::clone(&view)
+            } else {
+                Arc::clone(current)
+            }
+        });
+        self.inner.load().generation >= new_generation
+    }
+
     pub fn generation(&self) -> u64 {
         self.inner.load().generation
     }

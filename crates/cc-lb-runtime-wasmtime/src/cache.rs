@@ -68,7 +68,10 @@ struct WorkerInstance {
     observe_fn: Option<TypedFunc<(u32, u32), u64>>,
 }
 
-fn build_worker_instance(cell: &PluginCell) -> Result<WorkerInstance, WasmtimeRuntimeError> {
+fn build_worker_instance(
+    cell: &PluginCell,
+    hook: HookFn,
+) -> Result<WorkerInstance, WasmtimeRuntimeError> {
     let engine = cell.instance_pre.module().engine();
     let mut store = Store::new(engine, HostState);
 
@@ -106,18 +109,60 @@ fn build_worker_instance(cell: &PluginCell) -> Result<WorkerInstance, WasmtimeRu
             reason: format!("missing or mistyped `cc_lb_free` export: {e}"),
         })?;
 
-    let filter_fn = instance
-        .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_filter")
-        .ok();
-    let shape_fn = instance
-        .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_shape")
-        .ok();
-    let normalize_error_fn = instance
-        .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_normalize_error")
-        .ok();
-    let observe_fn = instance
-        .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_observe")
-        .ok();
+    // Only look up the export we're about to call. `inspect_wasm`
+    // already validated the module carries the export corresponding
+    // to its `SlotKind`, so a missing lookup here is a real error
+    // (not the historical "probe all four and hope one exists").
+    let (filter_fn, shape_fn, normalize_error_fn, observe_fn) = match hook {
+        HookFn::Filter => (
+            Some(
+                instance
+                    .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_filter")
+                    .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
+                        reason: format!("missing or mistyped `cc_lb_filter` export: {e}"),
+                    })?,
+            ),
+            None,
+            None,
+            None,
+        ),
+        HookFn::Shape => (
+            None,
+            Some(
+                instance
+                    .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_shape")
+                    .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
+                        reason: format!("missing or mistyped `cc_lb_shape` export: {e}"),
+                    })?,
+            ),
+            None,
+            None,
+        ),
+        HookFn::NormalizeError => (
+            None,
+            None,
+            Some(
+                instance
+                    .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_normalize_error")
+                    .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
+                        reason: format!("missing or mistyped `cc_lb_normalize_error` export: {e}"),
+                    })?,
+            ),
+            None,
+        ),
+        HookFn::Observe => (
+            None,
+            None,
+            None,
+            Some(
+                instance
+                    .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_observe")
+                    .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
+                        reason: format!("missing or mistyped `cc_lb_observe` export: {e}"),
+                    })?,
+            ),
+        ),
+    };
 
     Ok(WorkerInstance {
         store,
@@ -206,7 +251,7 @@ fn call_hook(
     input: &[u8],
     hook: HookFn,
 ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-    let mut wi = build_worker_instance(cell)?;
+    let mut wi = build_worker_instance(cell, hook)?;
     execute_call(&mut wi, cell, input, hook)
 }
 
@@ -217,7 +262,10 @@ fn execute_call(
     hook: HookFn,
 ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
     let start = Instant::now();
-    let plugin = Arc::clone(&cell.plugin_name);
+    // Reuse the cell's owned `Arc<str>` label instead of `.to_string()`
+    // per emission — SharedString accepts `Arc<str>` directly, avoiding
+    // an owned-String heap alloc per hook call.
+    let plugin: Arc<str> = Arc::clone(&cell.plugin_name);
     let hook_label = hook.metric_label();
     let budget = cell.fuel_per_call;
 
@@ -225,7 +273,7 @@ fn execute_call(
 
     metrics::histogram!(
         "cc_lb_plugin_call_duration_seconds",
-        "plugin" => plugin.to_string(),
+        "plugin" => Arc::clone(&plugin),
         "hook" => hook_label,
     )
     .record(start.elapsed().as_secs_f64());
@@ -239,7 +287,7 @@ fn execute_call(
             };
             metrics::histogram!(
                 "cc_lb_plugin_fuel_consumed_ratio",
-                "plugin" => plugin.to_string(),
+                "plugin" => Arc::clone(&plugin),
                 "hook" => hook_label,
             )
             .record(ratio.clamp(0.0, 1.0));
@@ -247,7 +295,7 @@ fn execute_call(
         Err(err) => {
             metrics::counter!(
                 "cc_lb_plugin_trap_total",
-                "plugin" => plugin.to_string(),
+                "plugin" => plugin,
                 "hook" => hook_label,
                 "phase" => trap_phase_label(err),
             )
@@ -377,13 +425,16 @@ fn execute_call_inner(
         }
         let bytes = mem_view[out_ptr as usize..out_end].to_vec();
 
-        free_fn
-            .call(&mut *store, (out_ptr, out_len, DEFAULT_ALIGN))
-            .map_err(|e| WasmtimeRuntimeError::GuestTrap {
-                phase: "cc_lb_free",
-                source: anyhow::Error::from(e),
-            })?;
-
+        // Skip `cc_lb_free(out_ptr, out_len, ..)` on the output
+        // buffer: the surrounding pure-mode contract drops the whole
+        // `Store` on function return, so the pool immediately
+        // reclaims every memory page. Calling the guest allocator to
+        // "free" bytes that are about to vanish only spends fuel and
+        // costs a host↔guest transition. `cc_lb_free` for the INPUT
+        // buffer is still driven by the guest PDK (see the comment
+        // above `hook_fn.call`) — we're only skipping the OUTPUT
+        // free because it happens AFTER `hook_fn` returns.
+        let _ = free_fn;
         bytes
     };
 

@@ -145,7 +145,18 @@
           "force": false,
           "skip_if_fresh": true
         },
-        "wasmtime": {}
+        "wasmtime": {
+          "cookie_redaction": false,
+          "plugin_failure_policy": "pass_through",
+          "shape_origin_policy": "unrestricted",
+          "wire_bounds": {
+            "max_header_value_bytes": 8192,
+            "max_headers": 100,
+            "normalize_error_body_bytes": 262144,
+            "output_body_bytes": 104857600,
+            "reason_bytes": 256
+          }
+        }
       }
     },
     "scheduler": {
@@ -670,6 +681,50 @@
         }
       }
     },
+    "PluginFailurePolicy": {
+      "description": "What to do when a filter or shape plugin fails at the runtime\nboundary (trap, fuel exhaustion, pool saturation, invalid wire\noutput). `PassThrough` is the historical behaviour: filter treats\nthe failure as no-op and shape falls back to raw upstream\npassthrough. `FailClosed` returns 503 upstream unavailable — pick\nthis when the plugin enforces load-bearing authz / tenant policy\nand cannot silently degrade.",
+      "type": "string",
+      "enum": [
+        "pass_through",
+        "fail_closed"
+      ]
+    },
+    "PluginWireBounds": {
+      "description": "Upper bounds enforced on plugin wire I/O. Defaults match current\nunbounded-ish behaviour by tracking the request body cap already\nenforced at the HTTP layer, so enabling this struct with defaults\nis a no-op. Tightening any field is opt-in.",
+      "type": "object",
+      "properties": {
+        "max_header_value_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 8192,
+          "minimum": 0
+        },
+        "max_headers": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 100,
+          "minimum": 0
+        },
+        "normalize_error_body_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 262144,
+          "minimum": 0
+        },
+        "output_body_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 104857600,
+          "minimum": 0
+        },
+        "reason_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 256,
+          "minimum": 0
+        }
+      }
+    },
     "PostgresPoolConfig": {
       "type": "object",
       "properties": {
@@ -804,7 +859,18 @@
         },
         "wasmtime": {
           "$ref": "#/$defs/WasmtimeConfig",
-          "default": {}
+          "default": {
+            "cookie_redaction": false,
+            "plugin_failure_policy": "pass_through",
+            "shape_origin_policy": "unrestricted",
+            "wire_bounds": {
+              "max_header_value_bytes": 8192,
+              "max_headers": 100,
+              "normalize_error_body_bytes": 262144,
+              "output_body_bytes": 104857600,
+              "reason_bytes": 256
+            }
+          }
         }
       }
     },
@@ -1065,6 +1131,14 @@
       },
       "additionalProperties": false
     },
+    "ShapeOriginPolicy": {
+      "description": "Whether a shape plugin may return a URL whose origin\n(scheme+host+port) differs from the selected upstream. Historical\nbehaviour is `Unrestricted`; deployments where a compromised or\nbuggy shape plugin misrouting to a wrong host is a concern can\nopt into `SelectedUpstreamOrigin` to reject any URL that does not\nmatch the selected upstream's `base_url` origin.",
+      "type": "string",
+      "enum": [
+        "unrestricted",
+        "selected_upstream_origin"
+      ]
+    },
     "StartupHandshakeConfig": {
       "type": "object",
       "properties": {
@@ -1235,6 +1309,10 @@
     "WasmtimeConfig": {
       "type": "object",
       "properties": {
+        "cookie_redaction": {
+          "type": "boolean",
+          "default": false
+        },
         "memory_max_pages": {
           "type": [
             "integer",
@@ -1242,6 +1320,24 @@
           ],
           "format": "uint32",
           "minimum": 0
+        },
+        "plugin_failure_policy": {
+          "$ref": "#/$defs/PluginFailurePolicy",
+          "default": "pass_through"
+        },
+        "shape_origin_policy": {
+          "$ref": "#/$defs/ShapeOriginPolicy",
+          "default": "unrestricted"
+        },
+        "wire_bounds": {
+          "$ref": "#/$defs/PluginWireBounds",
+          "default": {
+            "max_header_value_bytes": 8192,
+            "max_headers": 100,
+            "normalize_error_body_bytes": 262144,
+            "output_body_bytes": 104857600,
+            "reason_bytes": 256
+          }
         }
       }
     }

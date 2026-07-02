@@ -1574,7 +1574,10 @@ impl CurrentConfig for InMemoryCurrentConfig {
             std::collections::HashMap::new(),
         ));
         let current_view = self.dynamic_view.load();
-        self.dynamic_view.store(
+        // `.build()` bumps generation +1, so CAS on strictly-newer never
+        // rejects on the happy path. If a concurrent reconcile committed
+        // a fresher view we accept it and skip the redundant swap.
+        self.dynamic_view.try_store_if_newer(
             DynamicViewBuilder::from_view(&current_view)
                 .principal_view(principal_view)
                 .build(),

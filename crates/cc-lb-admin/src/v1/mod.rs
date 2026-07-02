@@ -44,9 +44,17 @@ pub async fn apply_dynamic_view_after_mutation(state: &AdminState) -> anyhow::Re
         .ok_or_else(|| anyhow::anyhow!("dynamic view rebinder unavailable"))?;
     let current_generation = state.dynamic_view.generation();
     let view = rebinder.rebuild_dynamic_view(current_generation).await?;
-    let generation = view.generation;
-    state.dynamic_view.store(view);
-    Ok(generation)
+    let attempted_generation = view.generation;
+    // CAS on generation so a slower reconcile / notify rebind can't
+    // overwrite this admin-triggered rebuild. If a newer generation
+    // is already resident (e.g. a concurrent admin mutation) the
+    // config is still applied; return whichever generation is now
+    // authoritative.
+    if state.dynamic_view.try_store_if_newer(view) {
+        Ok(attempted_generation)
+    } else {
+        Ok(state.dynamic_view.generation())
+    }
 }
 
 pub async fn add_dynamic_rebind_headers(response: &mut Response, state: &AdminState) {
