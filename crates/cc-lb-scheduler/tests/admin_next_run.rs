@@ -22,14 +22,13 @@ async fn next_run_for_upstream_returns_earliest_active_warmup() {
         .expect("scheduler migrations apply");
     let storage =
         apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(&pool, ADAPTIVE_QUEUE);
-    let handle = SchedulerAdminHandle::new(
-        SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerStorage {
+    let handle = SchedulerAdminHandle::new(SchedulerBackend::Sqlite(
+        cc_lb_scheduler::worker::SqliteSchedulerStorage {
             pool: pool.clone(),
             storage,
             clock: Arc::new(SystemClock),
-        }),
-        Arc::new(cc_lb_scheduler::leader_election::LeaderElection::sqlite()),
-    );
+        },
+    ));
     let upstream_id = Uuid::from_u128(0x1234_5678_90ab_cdef_1234_5678_90ab_cdef);
 
     seed_job(
@@ -107,14 +106,13 @@ async fn next_run_for_upstream_returns_none_without_active_warmup() {
         .expect("scheduler migrations apply");
     let storage =
         apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(&pool, ADAPTIVE_QUEUE);
-    let handle = SchedulerAdminHandle::new(
-        SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerStorage {
+    let handle = SchedulerAdminHandle::new(SchedulerBackend::Sqlite(
+        cc_lb_scheduler::worker::SqliteSchedulerStorage {
             pool,
             storage,
             clock: Arc::new(SystemClock),
-        }),
-        Arc::new(cc_lb_scheduler::leader_election::LeaderElection::sqlite()),
-    );
+        },
+    ));
 
     let next_run = handle
         .next_run_for_upstream(Uuid::new_v4(), "warmup")

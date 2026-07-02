@@ -662,7 +662,6 @@ async fn build_app_with_storage_inner(
     lazy_refresh_claim_guard: Option<Arc<dyn LazyRefreshClaimGuard>>,
     clock: ClockHandle,
 ) -> Result<App, BuildError> {
-    opened_scheduler.probe_leader().await?;
     let scheduler_lazy_handle = opened_scheduler.lazy_handle();
     let server_state = Arc::new(ServerStateHandle::new_starting());
     let key_store = Arc::new(KeyStore::new(managed_store));
@@ -1070,16 +1069,6 @@ async fn build_app_with_storage_inner(
         Duration::from_secs(config.timeouts.drain_secs),
         sighup_handler(reload_tls_state, config_watcher.clone()),
     );
-    if let Some(leader_election) = opened_scheduler.leader_shutdown_election() {
-        signals.add_shutdown_hook(move || {
-            let leader_election = leader_election.clone();
-            async move {
-                if let Err(error) = leader_election.close().await {
-                    tracing::warn!(error = %error, "scheduler leader connection close failed");
-                }
-            }
-        });
-    }
     {
         let writer_slot = request_event_writer_slot.clone();
         signals.add_shutdown_hook(move || {
@@ -1266,7 +1255,6 @@ async fn build_app_with_storage_inner(
         config: admin_config,
         scheduler: Some(cc_lb_scheduler::admin::SchedulerAdminHandle::new(
             scheduler_lazy_handle.clone(),
-            opened_scheduler.leader_election(),
         )),
         admin_token: config
             .admin

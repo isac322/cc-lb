@@ -1,11 +1,10 @@
 use std::collections::VecDeque;
-use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use apalis_cron::Schedule;
 use cc_lb_core::clock::{Clock, SystemClock};
-use cc_lb_scheduler::cron::{LeaderRunFuture, LeaderRunner, WorkerBuilder};
+use cc_lb_scheduler::cron::WorkerBuilder;
 use chrono::{DateTime, Duration, Utc};
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -45,34 +44,13 @@ impl Schedule<Utc> for FixedTicks {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct StaticLeader {
-    is_leader: bool,
-}
-
-impl LeaderRunner for StaticLeader {
-    fn run<'a, F, Fut>(&'a self, work: F) -> LeaderRunFuture<'a>
-    where
-        F: FnOnce() -> Fut + Send + 'a,
-        Fut: Future<Output = ()> + Send + 'a,
-    {
-        let is_leader = self.is_leader;
-        Box::pin(async move {
-            if is_leader {
-                work().await;
-            }
-            Ok(())
-        })
-    }
-}
-
 fn conformance_job() -> CronConformanceJob {
     CronConformanceJob {
         name: "cron-conformance".to_owned(),
     }
 }
 
-fn next_tick() -> DateTime<Utc> {
+fn shared_tick() -> DateTime<Utc> {
     DateTime::<Utc>::from(SystemClock.now()) + Duration::milliseconds(50)
 }
 
@@ -88,37 +66,37 @@ async fn cron_sqlite_records_one_tick_across_replicas() -> Result<(), Box<dyn st
         .await?;
     SqliteStorage::setup(&pool).await?;
 
-    let leader_schedule = FixedTicks::once(next_tick());
-    let follower_schedule = FixedTicks::once(next_tick());
-    let leader_worker = WorkerBuilder::singleton_queue(
+    // Both replicas target the same scheduled tick timestamp so their
+    // idempotency keys collide; only the first `push_task` wins.
+    let tick = shared_tick();
+    let replica_one = FixedTicks::once(tick);
+    let replica_two = FixedTicks::once(tick);
+    let worker_one = WorkerBuilder::singleton_queue(
         queue,
-        leader_schedule.clone(),
+        replica_one.clone(),
         SqliteStorage::<CronConformanceJob, (), ()>::new_in_queue(&pool, queue),
         conformance_job(),
     )
     .max_ticks(1);
-    let follower_worker = WorkerBuilder::singleton_queue(
+    let worker_two = WorkerBuilder::singleton_queue(
         queue,
-        follower_schedule.clone(),
+        replica_two.clone(),
         SqliteStorage::<CronConformanceJob, (), ()>::new_in_queue(&pool, queue),
         conformance_job(),
     )
     .max_ticks(1);
 
-    let (leader_result, follower_result) = tokio::join!(
-        leader_worker.run_with(&StaticLeader { is_leader: true }),
-        follower_worker.run_with(&StaticLeader { is_leader: false })
-    );
-    leader_result?;
-    follower_result?;
+    let (result_one, result_two) = tokio::join!(worker_one.run(), worker_two.run());
+    result_one?;
+    result_two?;
 
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE job_type = ?")
         .bind(queue)
         .fetch_one(&pool)
         .await?;
     assert_eq!(count, 1);
-    assert!(leader_schedule.poll_count() > 0);
-    assert_eq!(follower_schedule.poll_count(), 0);
+    assert!(replica_one.poll_count() > 0);
+    assert!(replica_two.poll_count() > 0);
     Ok(())
 }
 
@@ -172,37 +150,35 @@ mod postgres_tests {
         PostgresStorage::setup(pool).await?;
 
         let config = Config::new(queue);
-        let leader_schedule = FixedTicks::once(next_tick());
-        let follower_schedule = FixedTicks::once(next_tick());
-        let leader_worker = WorkerBuilder::singleton_queue(
+        let tick = shared_tick();
+        let replica_one = FixedTicks::once(tick);
+        let replica_two = FixedTicks::once(tick);
+        let worker_one = WorkerBuilder::singleton_queue(
             queue,
-            leader_schedule.clone(),
+            replica_one.clone(),
             PostgresStorage::<CronConformanceJob>::new_with_config(pool, &config),
             conformance_job(),
         )
         .max_ticks(1);
-        let follower_worker = WorkerBuilder::singleton_queue(
+        let worker_two = WorkerBuilder::singleton_queue(
             queue,
-            follower_schedule.clone(),
+            replica_two.clone(),
             PostgresStorage::<CronConformanceJob>::new_with_config(pool, &config),
             conformance_job(),
         )
         .max_ticks(1);
 
-        let (leader_result, follower_result) = tokio::join!(
-            leader_worker.run_with(&StaticLeader { is_leader: true }),
-            follower_worker.run_with(&StaticLeader { is_leader: false })
-        );
-        leader_result?;
-        follower_result?;
+        let (result_one, result_two) = tokio::join!(worker_one.run(), worker_two.run());
+        result_one?;
+        result_two?;
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM apalis.jobs WHERE job_type = $1")
             .bind(queue)
             .fetch_one(pool)
             .await?;
         assert_eq!(count, 1);
-        assert!(leader_schedule.poll_count() > 0);
-        assert_eq!(follower_schedule.poll_count(), 0);
+        assert!(replica_one.poll_count() > 0);
+        assert!(replica_two.poll_count() > 0);
         Ok(())
     }
 

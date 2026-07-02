@@ -100,7 +100,6 @@ fn assert_scheduler_factory_error(error: BuildError) {
         BuildError::SchedulerFactory(
             SchedulerFactoryError::ConnectionFailed { .. }
             | SchedulerFactoryError::MigrationFailed { .. }
-            | SchedulerFactoryError::LeaderConnectionFailed { .. }
             | SchedulerFactoryError::StartupFailed { .. },
         ) => {}
         other => panic!("expected scheduler init failure, got {other:?}"),

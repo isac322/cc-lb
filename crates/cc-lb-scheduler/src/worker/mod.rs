@@ -14,7 +14,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::SchedulerError;
-use crate::leader_election::LeaderElection;
 use crate::retry::JobOutcome;
 
 mod backend_api;
@@ -105,14 +104,12 @@ impl SchedulerBackend {
         &self,
         config: Config,
         ctx: SchedulerCtx,
-        leader: Arc<LeaderElection>,
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerError> {
         let mut handles = self.spawn_consumers(ctx.clone(), cancel.clone())?;
         handles.push(cron::spawn_cron_producer(
             self.clone(),
             config,
-            leader,
             cancel,
             ctx.clock,
         ));

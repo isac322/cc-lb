@@ -1,7 +1,11 @@
 //! Cron job scheduling and tick generation.
+//!
+//! Each replica runs its own [`CronStream`] and pushes ticks to the shared
+//! Apalis storage keyed by `cron:{kind}:{tick_secs}`. The storage's unique
+//! index on `(job_type, idempotency_key)` collapses simultaneous pushes from
+//! every replica to exactly one queued job per tick, so no external leader
+//! election is required. See `docs/scheduler.md` section 5 for details.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use apalis_core::backend::pipe::{Pipe, PipeExt};
@@ -11,28 +15,6 @@ use apalis_cron::{CronStream, Schedule};
 use chrono::Utc;
 use futures_util::StreamExt;
 use thiserror::Error;
-use tokio::sync::Mutex;
-
-use crate::leader_election::{LeaderElection, LeaderError};
-
-pub type LeaderRunFuture<'a> = Pin<Box<dyn Future<Output = Result<(), LeaderError>> + Send + 'a>>;
-
-pub trait LeaderRunner {
-    fn run<'a, F, Fut>(&'a self, work: F) -> LeaderRunFuture<'a>
-    where
-        F: FnOnce() -> Fut + Send + 'a,
-        Fut: Future<Output = ()> + Send + 'a;
-}
-
-impl LeaderRunner for LeaderElection {
-    fn run<'a, F, Fut>(&'a self, work: F) -> LeaderRunFuture<'a>
-    where
-        F: FnOnce() -> Fut + Send + 'a,
-        Fut: Future<Output = ()> + Send + 'a,
-    {
-        Box::pin(async move { LeaderElection::run(self, work).await })
-    }
-}
 
 pub trait CronStreamPipeToStorageExt<Storage, Args, Ctx>: Sized {
     fn pipe_to_storage(self, storage: Storage) -> Pipe<Self, Storage, Args, Ctx>;
@@ -69,8 +51,6 @@ impl<Job: 'static> IntoJobFactory<Job> for fn(u64) -> Job {
 
 #[derive(Debug, Error)]
 pub enum CronError {
-    #[error(transparent)]
-    Leader(#[from] LeaderError),
     #[error("cron stream failed: {message}")]
     Stream { message: String },
     #[error("cron enqueue failed: {message}")]
@@ -142,28 +122,11 @@ where
     S: Schedule<Utc> + Unpin + Send + 'static,
     Storage: TaskSink<Job, Error = sqlx::Error> + Send + 'static,
 {
-    pub async fn run(self, leader: &LeaderElection) -> Result<(), CronError> {
-        self.run_with(leader).await
-    }
-
-    pub async fn run_with<Leader>(self, leader: &Leader) -> Result<(), CronError>
-    where
-        Leader: LeaderRunner + Sync,
-    {
-        let outcome = Arc::new(Mutex::new(None));
-        let outcome_writer = Arc::clone(&outcome);
-        leader
-            .run(move || async move {
-                let result = self.run_worker().await;
-                *outcome_writer.lock().await = Some(result);
-            })
-            .await?;
-
-        let mut outcome = outcome.lock().await;
-        outcome.take().unwrap_or(Ok(()))
-    }
-
-    async fn run_worker(mut self) -> Result<(), CronError> {
+    /// Runs the cron producer loop on every replica. Duplicate pushes from
+    /// sibling replicas are absorbed by the storage-level unique index on
+    /// `(job_type, idempotency_key)`, so exactly one job per tick makes it
+    /// into the queue.
+    pub async fn run(mut self) -> Result<(), CronError> {
         let mut stream = CronStream::new(self.schedule);
         let mut tick_count = 0_usize;
         while self
