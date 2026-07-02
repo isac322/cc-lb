@@ -9,3 +9,26 @@ Rules:
 - Remember that SQLite enforces foreign keys per connection. The connection pool is tuned with `PRAGMA foreign_keys = ON`, WAL mode, and a busy timeout of 5 seconds.
 - Don't attempt to configure multi-replica SQLite setups. We don't support Litestream or rqlite.
 - Map complex types like arrays using JSON text columns. SQLite doesn't have native array types like Postgres.
+
+## CI flake handling
+
+A CI failure that turns green on retry is not a flake to be waved through. It is a real defect (race, ordering, resource contention, unmanaged shared state) that will eventually hit production. Investigate the failure in the same PR that revealed it.
+
+Rules:
+- Never re-run a failed CI job or workflow to force a green result. This covers the GitHub UI "Re-run failed jobs" button, `gh run rerun`, `gh workflow run`, restarting the workflow from a fresh commit with no fix, and every equivalent retry mechanism.
+- When CI fails, reproduce locally with the exact CI invocation (features, env vars, database, runner-equivalent concurrency), find the root cause, apply a minimal fix, verify locally, and push the fix in the same PR that revealed the flake.
+- If the failure does not reproduce on the first local run, escalate stress before concluding the test is stable: raise thread counts, toggle feature flags, run alongside sibling tests, shrink internal timeouts, or run under `--test-threads=1` to isolate. Do not stop at "not reproducible" without a concrete stress budget.
+- Never `#[ignore]`, `#[should_panic]`, delete, or env-gate the failing test to bypass CI. That transfers the risk to production and destroys the signal.
+- Never add `sleep`, `tokio::time::sleep`, retry loops, looser assertions, or wider error tolerances to mask timing. Repair the invariant, not the assertion.
+- Distinguish infrastructure flake (runner image, sccache races, missing secrets, transient network to `sh.rustup.rs` or crates.io) from test flake. Infrastructure flakes require a workflow, runner-image, or action-level fix and must be surfaced as an issue or CI PR — not silently retried.
+- Every flake fix commit body must contain the root cause, the applied fix, and local reproduction proof (e.g. `Verified 20/20 passing runs on <sqlite|postgres|both>`).
+- If a session cannot reach the root cause, stop and escalate to a follow-up issue with the failing job URL and observed symptoms. Do not land a band-aid.
+- Never add production API (public methods, exported types, enum variants) whose only immediate consumer is a test synchronization or observation hook. Exposing a public `flush`/completion primitive on a production type solely so a test can wait deterministically is flake masking; use a test-scoped observer or wrapper instead.
+
+Forbidden shortcuts:
+- Clicking "Re-run failed jobs" in the GitHub UI.
+- `gh run rerun` or `gh workflow run` as a substitute for a code fix.
+- `#[ignore]`, `#[should_panic]`, or conditional-cfg deletion of the failing test.
+- `sleep`, retry loops, or weakened assertions to hide a race.
+- Silently removing, moving, or renaming the failing test to bypass CI matching.
+- Adding a public `flush`/`persist_now`/completion/notification method on a production type whose only immediate consumer is a test — that is masking the missing test seam by contaminating the production API surface.

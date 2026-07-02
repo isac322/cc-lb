@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -52,9 +52,12 @@ pub async fn spawn_test_server_with_extra_config(extra_toml: &str) -> TestServer
         axum::serve(fake_listener, fake_anthropic_app(AppConfig::default())).await
     });
 
-    let proxy_addr = free_addr();
-    let admin_addr = free_addr();
-    let metrics_addr = free_addr();
+    let proxy_listener = reserve_addr();
+    let admin_listener = reserve_addr();
+    let metrics_listener = reserve_addr();
+    let proxy_addr = proxy_listener.local_addr().expect("proxy local addr");
+    let admin_addr = admin_listener.local_addr().expect("admin local addr");
+    let metrics_addr = metrics_listener.local_addr().expect("metrics local addr");
     let config_dir = tempfile::tempdir().expect("temp config dir");
     let config_path = config_dir.path().join("cc-lb.toml");
     let sqlite_path = config_path.with_file_name("cc-lb.sqlite");
@@ -66,6 +69,8 @@ pub async fn spawn_test_server_with_extra_config(extra_toml: &str) -> TestServer
         extra_toml,
     );
     seed_storage(&sqlite_path, fake_addr).await;
+
+    drop((proxy_listener, admin_listener, metrics_listener));
 
     let child = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
         .arg("serve")
@@ -99,6 +104,10 @@ pub async fn spawn_test_server_with_extra_config(extra_toml: &str) -> TestServer
 pub fn free_addr() -> SocketAddr {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port");
     listener.local_addr().expect("free local addr")
+}
+
+fn reserve_addr() -> StdTcpListener {
+    StdTcpListener::bind("127.0.0.1:0").expect("reserve free port")
 }
 
 fn write_config(

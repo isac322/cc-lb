@@ -45,10 +45,11 @@ pub async fn open_sqlite(database_url: &str, clock: ClockHandle) -> StorageResul
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
+        .foreign_keys(true)
         .busy_timeout(Duration::from_secs(5));
 
     let pool = SqlitePoolOptions::new()
-        .max_connections(4)
+        .max_connections(1)
         .connect_with(options)
         .await
         .map_err(map_sqlx_error)?;
