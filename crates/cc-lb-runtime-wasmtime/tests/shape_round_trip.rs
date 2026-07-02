@@ -103,7 +103,7 @@ fn shape_passthrough_echoes_request() {
         .register_shape(SlotKey::global("test-shape"), "test-shape", &wasm_bytes)
         .expect("register_shape OK");
 
-    let dialect = WasmtimeUpstreamDialect::new(slot);
+    let dialect = WasmtimeUpstreamDialect::new(slot, runtime.config_arc());
 
     let ctx = fixture_request();
     let principal = fixture_principal();
@@ -148,7 +148,7 @@ fn normalize_error_returns_none_passthrough() {
         )
         .expect("register_shape OK");
 
-    let dialect = WasmtimeUpstreamDialect::new(slot);
+    let dialect = WasmtimeUpstreamDialect::new(slot, runtime.config_arc());
     let body = Bytes::from_static(br#"{"error":"upstream blew up"}"#);
     let out = dialect.normalize_error(StatusCode::BAD_GATEWAY, &body);
     assert!(out.is_none(), "passthrough plugin always returns None");

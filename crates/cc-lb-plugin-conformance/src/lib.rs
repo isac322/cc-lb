@@ -346,5 +346,6 @@ pub fn conformance_engine_config() -> HotEngineConfig {
         max_wasm_stack: 1024 * 1024,
         pool_total_memories: 64,
         pool_total_core_instances: 64,
+        ..HotEngineConfig::default()
     }
 }

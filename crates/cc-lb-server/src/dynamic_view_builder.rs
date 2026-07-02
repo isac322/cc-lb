@@ -511,8 +511,9 @@ async fn build_principal_chains(
             registered_slot_keys.insert(slot_key.clone());
             match register_observe_slot(runtime, &slot_key, &manifest).await {
                 Ok(slot) => {
-                    let handle: Arc<dyn cc_lb_plugin_api::ObservabilityHook> =
-                        Arc::new(WasmtimeObservabilityHookPlugin::new(slot));
+                    let handle: Arc<dyn cc_lb_plugin_api::ObservabilityHook> = Arc::new(
+                        WasmtimeObservabilityHookPlugin::new(slot, runtime.config_arc()),
+                    );
                     hooks.push(handle);
                 }
                 Err(error) => {
@@ -563,7 +564,7 @@ async fn build_principal_chains(
             match register_shape_slot(runtime, &slot_key, &manifest).await {
                 Ok(slot) => {
                     let handle: Arc<dyn cc_lb_plugin_api::UpstreamDialect> =
-                        Arc::new(WasmtimeUpstreamDialect::new(slot));
+                        Arc::new(WasmtimeUpstreamDialect::new(slot, runtime.config_arc()));
                     DialectCache::Explicit(handle)
                 }
                 Err(error) => {
@@ -726,6 +727,7 @@ async fn build_router_pipeline(
                     slot_key,
                     entry.id,
                     manifest.name.clone(),
+                    runtime.config_arc(),
                 ));
                 filters.push(handle);
             }
