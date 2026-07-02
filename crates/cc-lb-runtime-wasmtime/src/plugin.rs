@@ -593,17 +593,13 @@ fn wire_to_host_shaped_request(
 /// [`WasmtimeFilterPlugin`] for the atomic hot-swap rationale.
 pub struct WasmtimeObservabilityHookPlugin {
     cell: Arc<PluginCell>,
-    #[allow(dead_code)]
-    runtime_config: Arc<crate::HotEngineConfig>,
 }
 
 impl WasmtimeObservabilityHookPlugin {
     pub fn new(slot: Arc<PluginSlot>, runtime_config: Arc<crate::HotEngineConfig>) -> Self {
+        let _ = runtime_config;
         let cell = slot.current.load_full();
-        Self {
-            cell,
-            runtime_config,
-        }
+        Self { cell }
     }
 }
 
