@@ -17,7 +17,7 @@ use cc_lb_plugin_api::types::{
 };
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, FilterError, FilterOutput, InternalError, InternalErrorKind,
-    InternalErrorStage, ObservabilityHook, ObserveEvent, PerCandidateReason, Principal,
+    InternalErrorStage, ObservabilityHook, ObserveEvent, Principal,
     PrincipalKind, RequestContext, RetryDecision, RouterPlugin, RoutingTrace, ShapedRequest,
     ShapedRequestBuilder, SignedRequest, SubscriptionQuotaCandidateSnapshot, TerminalStrategy,
     Upstream, UpstreamCandidate, UpstreamDialect, UpstreamError,
@@ -2848,8 +2848,6 @@ fn execute_filter_pipeline(
 struct ValidatedOutput {
     kept_upstream_ids: Vec<Uuid>,
     reason: String,
-    #[allow(dead_code)]
-    per_candidate_reasons: Vec<PerCandidateReason>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -2908,7 +2906,6 @@ fn validate_filter_output(
     Ok(ValidatedOutput {
         kept_upstream_ids: out.kept_upstream_ids.clone(),
         reason: out.reason.clone(),
-        per_candidate_reasons,
     })
 }
 

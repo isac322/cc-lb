@@ -120,8 +120,6 @@ impl Reservation {
 #[allow(dead_code)]
 struct ReservationRecord {
     key_id: String,
-    principal_id: String,
-    effective_limits: Vec<Limit>,
     reserved: Vec<ReservedAmount>,
     /// Held here to keep the concurrent-request slot occupied until refund
     /// or reconcile removes the record.
@@ -356,8 +354,6 @@ impl LimitEngine {
             id.clone(),
             ReservationRecord {
                 key_id: key_id.clone(),
-                principal_id: principal_id.to_owned(),
-                effective_limits,
                 reserved,
                 concurrent_guards,
                 created_at: Instant::now(),
