@@ -134,7 +134,11 @@ mod postgres_tests {
         let test_result = assert_postgres_cron_behavior(&test_pool).await;
         test_pool.close().await;
 
-        let drop_database = format!(r#"DROP DATABASE IF EXISTS "{database_name}""#);
+        // apalis-postgres spawns background LISTEN tasks that may still hold
+        // pooled sessions after `.close()`. WITH (FORCE) tells Postgres to
+        // terminate any lingering sessions on this database before drop.
+        // Requires PostgreSQL 13+.
+        let drop_database = format!(r#"DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)"#);
         let drop_result = sqlx::query(&drop_database).execute(&admin_pool).await;
         admin_pool.close().await;
 
