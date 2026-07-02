@@ -3,8 +3,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cc_lb_lifecycle::{
-    AuthInfo, CostBreakdown, EventId, LifecycleEvent, ParseInfo, RouteInfo, TerminationReason,
-    UsageSnapshot,
+    AuthInfo, CacheBreakpointLite, CacheBreakpointSourceLite, CostBreakdown, EventId,
+    LifecycleEvent, ParseInfo, RequestCacheStateLite, RouteInfo, TerminationReason, UsageSnapshot,
+};
+use cc_lb_storage_api::types::{
+    RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState,
 };
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use tokio::sync::{mpsc, oneshot};
@@ -29,13 +32,39 @@ impl RequestEventAssemblerHandle {
     }
 }
 
+/// Which rows the assembler produces per `RequestTerminated`.
+///
+/// - `LegacyOnly`: one row with `shadow_event_id=NULL`, `event_id=<lifecycle event_id>`.
+///   Backwards-compat with the pre-Phase-9 writer.
+/// - `ShadowOnly`: one row with `shadow_event_id=<lifecycle event_id>`,
+///   `event_id=<new UUID>`. The RFC-0002 authoritative post-cutover shape.
+/// - `Both`: writes BOTH rows above so diffing legacy vs shadow is trivial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssemblerMode {
+    LegacyOnly,
+    ShadowOnly,
+    Both,
+}
+
+impl AssemblerMode {
+    fn writes_legacy(self) -> bool {
+        matches!(self, Self::LegacyOnly | Self::Both)
+    }
+
+    fn writes_shadow(self) -> bool {
+        matches!(self, Self::ShadowOnly | Self::Both)
+    }
+}
+
 pub fn spawn_request_event_assembler(
     rx: mpsc::Receiver<LifecycleEvent>,
     storage: Arc<dyn RequestEventStore>,
+    mode: AssemblerMode,
 ) -> RequestEventAssemblerHandle {
     spawn_with_config(
         rx,
         storage,
+        mode,
         DEFAULT_ASSEMBLER_MAP_CAP,
         DEFAULT_ASSEMBLER_TTL,
     )
@@ -44,11 +73,12 @@ pub fn spawn_request_event_assembler(
 pub fn spawn_with_config(
     rx: mpsc::Receiver<LifecycleEvent>,
     storage: Arc<dyn RequestEventStore>,
+    mode: AssemblerMode,
     map_cap: usize,
     ttl: Duration,
 ) -> RequestEventAssemblerHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(assembler_loop(rx, storage, map_cap, ttl, shutdown_rx));
+    let join = tokio::spawn(assembler_loop(rx, storage, mode, map_cap, ttl, shutdown_rx));
     RequestEventAssemblerHandle { shutdown_tx, join }
 }
 
@@ -72,10 +102,10 @@ struct Partial {
     stream_error_type: Option<String>,
     stream_error_message: Option<String>,
     cost: Option<CostBreakdown>,
-    cache_read_input_tokens_override: Option<u64>,
-    cache_creation_input_tokens_override: Option<u64>,
-    cache_creation_input_tokens_5m_override: Option<u64>,
-    cache_creation_input_tokens_1h_override: Option<u64>,
+    cache_state: Option<RequestCacheState>,
+    cache_control_block_count: Option<u64>,
+    cache_breakpoints: Vec<RequestCacheBreakpoint>,
+    cache_prefix_hash: Option<String>,
 }
 
 impl Partial {
@@ -89,11 +119,16 @@ impl Partial {
     fn touch(&mut self, now: Instant) {
         self.inserted_at = Some(now);
     }
+
+    fn orphan() -> Self {
+        Self::default()
+    }
 }
 
 async fn assembler_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     storage: Arc<dyn RequestEventStore>,
+    mode: AssemblerMode,
     map_cap: usize,
     ttl: Duration,
     mut shutdown: oneshot::Receiver<()>,
@@ -108,7 +143,7 @@ async fn assembler_loop(
             biased;
             event = rx.recv() => {
                 match event {
-                    Some(event) => handle_event(&*storage, &mut partials, map_cap, event).await,
+                    Some(event) => handle_event(&*storage, &mut partials, mode, map_cap, event).await,
                     None => break,
                 }
             }
@@ -118,13 +153,14 @@ async fn assembler_loop(
     }
 
     while let Ok(event) = rx.try_recv() {
-        handle_event(&*storage, &mut partials, map_cap, event).await;
+        handle_event(&*storage, &mut partials, mode, map_cap, event).await;
     }
 }
 
 async fn handle_event(
     storage: &dyn RequestEventStore,
     partials: &mut HashMap<EventId, Partial>,
+    mode: AssemblerMode,
     map_cap: usize,
     event: LifecycleEvent,
 ) {
@@ -138,28 +174,59 @@ async fn handle_event(
         ..
     } = &event
     {
-        if let Some(partial) = partials.remove(&event_id) {
-            let row = finalize(&event_id, partial, reason, *client_status, *duration_ms);
-            if let Err(error) = storage.append_request_event(&row).await {
-                tracing::warn!(
-                    %error,
-                    shadow_event_id = %event_id,
-                    "lifecycle event assembler: failed to persist shadow row",
-                );
-                cc_lb_observability::increment_dropped_events_by(
-                    "lifecycle_assembler_storage_error",
-                    1,
-                );
-            } else {
-                metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => "written")
-                    .increment(1);
+        let (partial, is_orphan) = match partials.remove(&event_id) {
+            Some(p) => (p, false),
+            None => {
+                metrics::counter!(
+                    "cc_lb_lifecycle_assembler_rows_total",
+                    "outcome" => "terminated_without_partial"
+                )
+                .increment(1);
+                (Partial::orphan(), true)
             }
-        } else {
-            metrics::counter!(
-                "cc_lb_lifecycle_assembler_rows_total",
-                "outcome" => "terminated_without_partial"
-            )
-            .increment(1);
+        };
+        // Legacy row (shadow_event_id = NULL) uses lifecycle event_id as row id.
+        // Shadow row (shadow_event_id = <lifecycle id>) uses a fresh UUID.
+        let base_row = finalize_base(&partial, reason, *client_status, *duration_ms, is_orphan);
+        let mut rows: Vec<RequestEvent> = Vec::new();
+        if mode.writes_legacy() {
+            let mut legacy = base_row.clone();
+            legacy.event_id = Some(event_id.clone());
+            legacy.shadow_event_id = None;
+            rows.push(legacy);
+        }
+        if mode.writes_shadow() {
+            let mut shadow = base_row;
+            shadow.event_id = Some(Uuid::now_v7().to_string());
+            shadow.shadow_event_id = Some(event_id.clone());
+            rows.push(shadow);
+        }
+        let mut wrote = 0u64;
+        for row in &rows {
+            match storage.append_request_event(row).await {
+                Ok(()) => wrote += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        shadow_event_id = %event_id,
+                        row_shape = if row.shadow_event_id.is_some() { "shadow" } else { "legacy" },
+                        "lifecycle event assembler: failed to persist row",
+                    );
+                    cc_lb_observability::increment_dropped_events_by(
+                        "lifecycle_assembler_storage_error",
+                        1,
+                    );
+                }
+            }
+        }
+        if wrote > 0 {
+            let outcome = if is_orphan {
+                "written_orphan"
+            } else {
+                "written"
+            };
+            metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => outcome)
+                .increment(wrote);
         }
         return;
     }
@@ -190,6 +257,13 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         LifecycleEvent::ParseCompleted {
             result: Ok(info), ..
         } => {
+            partial.cache_control_block_count = info.cache_control_block_count;
+            partial.cache_breakpoints = info
+                .cache_breakpoints
+                .iter()
+                .map(cache_breakpoint_from_lite)
+                .collect();
+            partial.cache_prefix_hash = info.cache_prefix_hash.clone();
             partial.parse = Some(info);
         }
         LifecycleEvent::ParseCompleted { .. } => {}
@@ -251,39 +325,34 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         LifecycleEvent::Priced { cost, .. } => {
             partial.cost = Some(cost);
         }
-        LifecycleEvent::CacheObserved {
-            cache_read_input_tokens,
-            cache_creation_input_tokens,
-            cache_creation_input_tokens_5m,
-            cache_creation_input_tokens_1h,
-            ..
-        } => {
-            partial.cache_read_input_tokens_override = Some(cache_read_input_tokens);
-            partial.cache_creation_input_tokens_override = Some(cache_creation_input_tokens);
-            partial.cache_creation_input_tokens_5m_override = Some(cache_creation_input_tokens_5m);
-            partial.cache_creation_input_tokens_1h_override = Some(cache_creation_input_tokens_1h);
+        LifecycleEvent::CacheObserved { cache_state, .. } => {
+            partial.cache_state = Some(cache_state_from_lite(cache_state));
         }
         _ => {}
     }
 }
 
-fn finalize(
-    legacy_event_id: &EventId,
-    partial: Partial,
+fn finalize_base(
+    partial: &Partial,
     reason: &TerminationReason,
     client_status: u16,
     duration_ms: u64,
+    is_orphan: bool,
 ) -> RequestEvent {
     let ts_ms = partial.ts_ms;
     let request_id = partial
         .request_id
         .clone()
         .unwrap_or_else(|| "req_unknown_shadow".to_owned());
-    let error_code = match reason {
-        TerminationReason::Success => None,
-        TerminationReason::Dropped => Some("terminal_dropped".to_owned()),
-        TerminationReason::ErrorCode(code) => Some(code.clone()),
-        _ => None,
+    let error_code = if is_orphan {
+        Some("terminal_without_partial".to_owned())
+    } else {
+        match reason {
+            TerminationReason::Success => None,
+            TerminationReason::Dropped => Some("terminal_dropped".to_owned()),
+            TerminationReason::ErrorCode(code) => Some(code.clone()),
+            _ => None,
+        }
     };
     let (principal_id, key_id, principal_kind) = partial
         .auth
@@ -313,8 +382,6 @@ fn finalize(
     RequestEvent {
         ts: ts_ms / 1_000,
         ts_ms: Some(ts_ms),
-        event_id: Some(Uuid::now_v7().to_string()),
-        shadow_event_id: Some(legacy_event_id.clone()),
         request_id,
         principal_id,
         key_id,
@@ -329,28 +396,20 @@ fn finalize(
         upstream_error_message: partial.stream_error_message.clone(),
         input_tokens: partial.usage_seen.then_some(partial.usage.input_tokens),
         output_tokens: partial.usage_seen.then_some(partial.usage.output_tokens),
-        cache_creation_input_tokens: partial.cache_creation_input_tokens_override.or_else(|| {
-            partial
-                .usage_seen
-                .then_some(partial.usage.cache_creation_input_tokens)
-        }),
-        cache_creation_input_tokens_5m: partial.cache_creation_input_tokens_5m_override.or_else(
-            || {
-                (partial.usage.cache_creation_input_tokens_5m > 0)
-                    .then_some(partial.usage.cache_creation_input_tokens_5m)
-            },
-        ),
-        cache_creation_input_tokens_1h: partial.cache_creation_input_tokens_1h_override.or_else(
-            || {
-                (partial.usage.cache_creation_input_tokens_1h > 0)
-                    .then_some(partial.usage.cache_creation_input_tokens_1h)
-            },
-        ),
-        cache_read_input_tokens: partial.cache_read_input_tokens_override.or_else(|| {
-            partial
-                .usage_seen
-                .then_some(partial.usage.cache_read_input_tokens)
-        }),
+        cache_creation_input_tokens: partial
+            .usage_seen
+            .then_some(partial.usage.cache_creation_input_tokens),
+        cache_creation_input_tokens_5m: (partial.usage.cache_creation_input_tokens_5m > 0)
+            .then_some(partial.usage.cache_creation_input_tokens_5m),
+        cache_creation_input_tokens_1h: (partial.usage.cache_creation_input_tokens_1h > 0)
+            .then_some(partial.usage.cache_creation_input_tokens_1h),
+        cache_read_input_tokens: partial
+            .usage_seen
+            .then_some(partial.usage.cache_read_input_tokens),
+        cache_state: partial.cache_state,
+        cache_control_block_count: partial.cache_control_block_count,
+        cache_breakpoints: partial.cache_breakpoints.clone(),
+        cache_prefix_hash: partial.cache_prefix_hash.clone(),
         cost_usd_micros: cost.total_micros,
         cost_input_micros: cost.input_micros,
         cost_output_micros: cost.output_micros,
@@ -367,6 +426,39 @@ fn finalize(
         inference_geo: partial.usage.inference_geo.clone(),
         sse_event_count: partial.stream_success,
         ..Default::default()
+    }
+}
+
+fn cache_state_from_lite(state: RequestCacheStateLite) -> RequestCacheState {
+    match state {
+        RequestCacheStateLite::Hit => RequestCacheState::Hit,
+        RequestCacheStateLite::Write => RequestCacheState::Write,
+        RequestCacheStateLite::Refresh => RequestCacheState::Refresh,
+        RequestCacheStateLite::Miss => RequestCacheState::Miss,
+        RequestCacheStateLite::None => RequestCacheState::None,
+        RequestCacheStateLite::Unknown => RequestCacheState::Unknown,
+    }
+}
+
+fn cache_breakpoint_source_from_lite(
+    source: CacheBreakpointSourceLite,
+) -> RequestCacheBreakpointSource {
+    match source {
+        CacheBreakpointSourceLite::System => RequestCacheBreakpointSource::System,
+        CacheBreakpointSourceLite::Tools => RequestCacheBreakpointSource::Tools,
+        CacheBreakpointSourceLite::Message => RequestCacheBreakpointSource::Message,
+    }
+}
+
+fn cache_breakpoint_from_lite(lite: &CacheBreakpointLite) -> RequestCacheBreakpoint {
+    RequestCacheBreakpoint {
+        block_index: lite.block_index,
+        source: cache_breakpoint_source_from_lite(lite.source),
+        path: lite.path.clone(),
+        message_index: lite.message_index,
+        ttl: lite.ttl.clone(),
+        prefix_hash: lite.prefix_hash.clone(),
+        prefix_token_count: lite.prefix_token_count,
     }
 }
 
@@ -438,7 +530,7 @@ mod tests {
     async fn success_terminated_persists_row_with_shadow_event_id() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone());
+        let handle = spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly);
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-1"),
@@ -482,7 +574,7 @@ mod tests {
     async fn stream_error_terminated_carries_error_type_and_message() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone());
+        let handle = spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly);
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-2"),
@@ -525,7 +617,7 @@ mod tests {
     async fn parse_failed_terminated_still_persists_error_code() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone());
+        let handle = spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly);
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-3"),
@@ -559,23 +651,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn terminated_without_partial_does_not_panic() {
+    async fn terminated_without_partial_writes_orphan_row() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone());
+        let handle = spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly);
 
         tx.send(LifecycleEvent::RequestTerminated {
             event_id: eid("orphan-terminated"),
             reason: TerminationReason::Dropped,
-            client_status: 0,
-            duration_ms: 0,
+            client_status: 499,
+            duration_ms: 7,
         })
         .await
         .unwrap();
         drop(tx);
         handle.shutdown().await;
 
-        assert!(store.rows.lock().unwrap().is_empty());
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].shadow_event_id.as_deref(),
+            Some("orphan-terminated")
+        );
+        assert_eq!(rows[0].request_id, "req_unknown_shadow");
+        assert_eq!(rows[0].status, 499);
+        assert_eq!(rows[0].duration_ms, 7);
+        assert_eq!(
+            rows[0].error_code.as_deref(),
+            Some("terminal_without_partial")
+        );
+        assert!(rows[0].input_tokens.is_none());
+        assert!(rows[0].cache_state.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -586,5 +692,49 @@ mod tests {
             sse_event_count: 0,
         };
         let _ = cc_lb_lifecycle::UsageSource::NonStreamBody;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn both_mode_persists_legacy_and_shadow_rows_from_same_terminate() {
+        let (tx, rx) = mpsc::channel(16);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), AssemblerMode::Both);
+
+        tx.send(LifecycleEvent::RequestStarted {
+            event_id: eid("legacy-both-1"),
+            request_id: "req-both-1".into(),
+            ts_ms: 1_730_000_000_000,
+            stream: false,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id: eid("legacy-both-1"),
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 7,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "Both mode must persist both legacy and shadow rows"
+        );
+        let legacy = rows
+            .iter()
+            .find(|r| r.shadow_event_id.is_none())
+            .expect("legacy row");
+        let shadow = rows
+            .iter()
+            .find(|r| r.shadow_event_id.as_deref() == Some("legacy-both-1"))
+            .expect("shadow row");
+        assert_eq!(legacy.event_id.as_deref(), Some("legacy-both-1"));
+        assert_ne!(shadow.event_id.as_deref(), Some("legacy-both-1"));
+        assert!(shadow.event_id.is_some());
     }
 }

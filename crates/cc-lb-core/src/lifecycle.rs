@@ -1042,6 +1042,7 @@ impl Lifecycle {
                     model,
                     stream,
                     body_bytes: ctx.body_bytes.len() as u64,
+                    ..Default::default()
                 }),
             });
         }

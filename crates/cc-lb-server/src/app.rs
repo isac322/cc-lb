@@ -725,17 +725,18 @@ async fn build_app_with_storage_inner(
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
     let limit_engine = LimitEngine::new(concurrent_mgr, clock.clone());
     limit_engine.startup_replay(storage.clone()).await;
-    let limit_reservation_ttl_handle = if config.limit_reservation_ttl.enabled {
-        Some(
-            cc_lb_core::api_keys::limit_engine::spawn_reservation_ttl_sweeper(
-                limit_engine.clone(),
-                std::time::Duration::from_secs(config.limit_reservation_ttl.ttl_secs.max(1)),
-                std::time::Duration::from_secs(config.limit_reservation_ttl.tick_secs.max(1)),
-            ),
-        )
-    } else {
-        None
-    };
+    if !config.limit_reservation_ttl.enabled {
+        tracing::warn!(
+            "config.limit_reservation_ttl.enabled=false is deprecated and ignored; TTL sweeper runs unconditionally per RFC-0002 Phase 8"
+        );
+    }
+    let limit_reservation_ttl_handle = Some(
+        cc_lb_core::api_keys::limit_engine::spawn_reservation_ttl_sweeper(
+            limit_engine.clone(),
+            std::time::Duration::from_secs(config.limit_reservation_ttl.ttl_secs.max(1)),
+            std::time::Duration::from_secs(config.limit_reservation_ttl.tick_secs.max(1)),
+        ),
+    );
     let limit_reservation_ttl_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_core::api_keys::limit_engine::ReservationTtlSweeperHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(limit_reservation_ttl_handle));
@@ -890,22 +891,27 @@ async fn build_app_with_storage_inner(
     }));
     let in_memory_bus = cc_lb_core::InMemoryBus::new();
     let writer_source = config.request_event_writer_source;
-    let request_event_writer_rx = if writer_source.legacy_writer_enabled() {
-        Some(in_memory_bus.attach_writer(cc_lb_core::DEFAULT_WRITER_CAPACITY))
-    } else {
-        None
-    };
+    if config.lifecycle_shadow_writer.enabled {
+        tracing::warn!(
+            "config.lifecycle_shadow_writer.enabled is deprecated and ignored; use \
+             request_event_writer_source = \"both\" | \"shadow\" instead"
+        );
+    }
+    // RFC-0002 Phase 6 writer cutover semantics:
+    //   Legacy → legacy RequestEventWriter task active, assembler off
+    //   Both   → both writers active (comparison mode)
+    //   Shadow → only assembler active
+    let request_event_writer_rx = writer_source
+        .legacy_writer_enabled()
+        .then(|| in_memory_bus.attach_writer(cc_lb_core::DEFAULT_WRITER_CAPACITY));
     let lifecycle_event_logger_rx =
         in_memory_bus.attach_lifecycle_writer(cc_lb_core::DEFAULT_LIFECYCLE_WRITER_CAPACITY);
-    let lifecycle_assembler_rx =
-        if writer_source.shadow_writer_enabled() || config.lifecycle_shadow_writer.enabled {
-            Some(
-                in_memory_bus
-                    .attach_lifecycle_assembler(cc_lb_core::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY),
-            )
-        } else {
-            None
-        };
+    let lifecycle_assembler_rx = writer_source.shadow_writer_enabled().then(|| {
+        in_memory_bus.attach_lifecycle_assembler(cc_lb_core::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY)
+    });
+    // Assembler only produces shadow rows now; legacy rows come from the
+    // durable RequestEventWriter task.
+    let assembler_mode = cc_lb_core::lifecycle_event_assembler::AssemblerMode::ShadowOnly;
     let lifecycle_hook_adapter_rx = if config.lifecycle_hook_adapter.enabled {
         Some(
             in_memory_bus
@@ -926,13 +932,20 @@ async fn build_app_with_storage_inner(
     } else {
         None
     };
+    let lifecycle_cache_obs_rx = if config.lifecycle_cache_observation_subscriber.enabled {
+        Some(in_memory_bus.attach_lifecycle_cache_observation(
+            cc_lb_core::event_bus::DEFAULT_LIFECYCLE_CACHE_OBS_CAPACITY,
+        ))
+    } else {
+        None
+    };
     let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(in_memory_bus);
     let request_event_writer_handle = request_event_writer_rx
         .map(|rx| cc_lb_core::spawn_request_event_writer(storage.clone(), rx));
     let lifecycle_event_logger_handle =
         cc_lb_core::spawn_lifecycle_event_logger(lifecycle_event_logger_rx);
     let lifecycle_event_assembler_handle = lifecycle_assembler_rx
-        .map(|rx| cc_lb_core::spawn_request_event_assembler(rx, storage.clone()));
+        .map(|rx| cc_lb_core::spawn_request_event_assembler(rx, storage.clone(), assembler_mode));
     let lifecycle_hook_adapter_handle = lifecycle_hook_adapter_rx.map(|rx| {
         let hooks = initial_view.global_observability_hooks.to_vec();
         cc_lb_core::spawn_observability_hook_adapter(rx, hooks)
@@ -947,6 +960,8 @@ async fn build_app_with_storage_inner(
         };
         cc_lb_core::spawn_lifecycle_limit_reconcile_subscriber(rx, limit_engine.clone(), mode)
     });
+    let lifecycle_cache_observation_subscriber_handle = lifecycle_cache_obs_rx
+        .map(|rx| cc_lb_core::spawn_lifecycle_cache_observation_subscriber(rx, event_bus.clone()));
     let request_event_writer_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_core::RequestEventWriterHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(request_event_writer_handle));
@@ -966,6 +981,11 @@ async fn build_app_with_storage_inner(
         tokio::sync::Mutex<Option<cc_lb_core::LimitReconcileSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(
         lifecycle_limit_reconcile_subscriber_handle,
+    ));
+    let lifecycle_cache_observation_subscriber_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::CacheObservationSubscriberHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(
+        lifecycle_cache_observation_subscriber_handle,
     ));
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
@@ -1113,6 +1133,18 @@ async fn build_app_with_storage_inner(
             let reconcile_slot = reconcile_slot.clone();
             async move {
                 let mut guard = reconcile_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let cache_obs_slot = lifecycle_cache_observation_subscriber_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let cache_obs_slot = cache_obs_slot.clone();
+            async move {
+                let mut guard = cache_obs_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }
@@ -1762,7 +1794,7 @@ fn health_router(state: ProxyState) -> Router {
 fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
     let request_ids = RequestIdState::default();
     let drain_controller = state.drain_controller.clone();
-    let service_builder = ServiceBuilder::new()
+    let outer_sb = ServiceBuilder::new()
         .layer(middleware::from_fn_with_state(
             drain_controller,
             crate::drain::proxy_drain_middleware,
@@ -1773,16 +1805,22 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             request_ids,
             request_id_middleware,
         ));
-    let service_builder = service_builder.layer(middleware::from_fn_with_state(
-        state.clone(),
-        lifecycle_middleware,
-    ));
-    let service_builder = service_builder.layer(crate::chaos::ChaosLayer::from_env());
-    let service_builder = service_builder
+
+    let lifecycle_inner_sb = ServiceBuilder::new()
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            lifecycle_middleware,
+        ))
+        .layer(crate::chaos::ChaosLayer::from_env())
         .layer(HandleErrorLayer::new(timeout_error))
         .timeout(Duration::from_secs(timeout_secs.max(1)));
 
-    Router::new()
+    let non_lifecycle_inner_sb = ServiceBuilder::new()
+        .layer(crate::chaos::ChaosLayer::from_env())
+        .layer(HandleErrorLayer::new(timeout_error))
+        .timeout(Duration::from_secs(timeout_secs.max(1)));
+
+    let lifecycle_routes = Router::new()
         .route("/v1/messages", post(lifecycle_handler))
         .route("/v1/messages/count_tokens", post(lifecycle_handler))
         .route("/v1/models", get(lifecycle_handler))
@@ -1793,13 +1831,22 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             get(lifecycle_handler).delete(lifecycle_handler),
         )
         .route("/v1/files/{id}/content", get(lifecycle_handler))
-        .route("/api/oauth/usage", get(oauth_usage_handler))
         .route("/api/{*path}", any(lifecycle_handler))
         .route("/v1/{*path}", any(lifecycle_handler))
+        .with_state(state.clone())
+        .layer(lifecycle_inner_sb);
+
+    let non_lifecycle_routes = Router::new()
+        .route("/api/oauth/usage", get(oauth_usage_handler))
+        .with_state(state)
+        .layer(non_lifecycle_inner_sb);
+
+    Router::new()
+        .merge(lifecycle_routes)
+        .merge(non_lifecycle_routes)
         .fallback(proxy_not_found)
         .method_not_allowed_fallback(proxy_method_not_allowed)
-        .with_state(state)
-        .layer(service_builder)
+        .layer(outer_sb)
 }
 
 async fn proxy_not_found() -> Response<Body> {

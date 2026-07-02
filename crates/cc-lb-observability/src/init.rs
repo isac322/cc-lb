@@ -215,9 +215,12 @@ const METRIC_DEFINITIONS: [MetricDefinition; 36] = [
 ];
 
 pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
+    let prometheus_handle = install_prometheus(cfg)?;
+    // Register describes + touch counters AFTER installing the recorder so
+    // zero-value touches (`.absolute(0)`) actually materialize on the
+    // Prometheus scrape path.
     register_metrics();
 
-    let prometheus_handle = install_prometheus(cfg)?;
     let policy = RedactionPolicy::new(cfg.user_prompt_redaction);
     install_panic_hook(policy);
 
@@ -358,6 +361,11 @@ pub fn register_metrics() {
         Unit::Count,
         "Virtual cost in micro-USD attributed to proxied responses by principal, upstream, and model."
     );
+    metrics::describe_counter!(
+        "cc_lb_limit_reservation_ttl_evicted_total",
+        Unit::Count,
+        "Limit reservations refunded by the TTL sweeper after exceeding their live-request TTL."
+    );
     register_prometheus14_metrics();
 
     touch_metrics();
@@ -470,6 +478,7 @@ fn touch_metrics() {
     metrics::counter!("cc_lb_config_reload_failed_total").increment(0);
     metrics::counter!("cc_lb_tls_reload_total", "outcome" => "success").increment(0);
     metrics::counter!("cc_lb_tls_reload_total", "outcome" => "failure").increment(0);
+    metrics::counter!("cc_lb_limit_reservation_ttl_evicted_total").absolute(0);
     metrics::counter!(
         "cc_lb_sse_events_total",
         "upstream" => "unknown",
