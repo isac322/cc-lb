@@ -804,12 +804,77 @@ pub struct RuntimeConfig {
 }
 
 // Optional overrides for the wasmtime plugin runtime hot engine.
-// `None` means "use compile-time defaults from cc-lb-runtime-wasmtime".
+// `None` / defaults preserve the compile-time behaviour from
+// `cc-lb-runtime-wasmtime`. Every knob here defaults to the
+// pre-Sprint-2 behaviour so enabling this config block is a no-op.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct WasmtimeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_max_pages: Option<u32>,
+    #[serde(default)]
+    pub plugin_failure_policy: PluginFailurePolicy,
+    #[serde(default)]
+    pub shape_origin_policy: ShapeOriginPolicy,
+    #[serde(default)]
+    pub wire_bounds: PluginWireBounds,
+    #[serde(default)]
+    pub cookie_redaction: bool,
+}
+
+/// What to do when a filter or shape plugin fails at the runtime
+/// boundary (trap, fuel exhaustion, pool saturation, invalid wire
+/// output). `PassThrough` is the historical behaviour: filter treats
+/// the failure as no-op and shape falls back to raw upstream
+/// passthrough. `FailClosed` returns 503 upstream unavailable — pick
+/// this when the plugin enforces load-bearing authz / tenant policy
+/// and cannot silently degrade.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginFailurePolicy {
+    #[default]
+    PassThrough,
+    FailClosed,
+}
+
+/// Whether a shape plugin may return a URL whose origin
+/// (scheme+host+port) differs from the selected upstream. Historical
+/// behaviour is `Unrestricted`; deployments where a compromised or
+/// buggy shape plugin misrouting to a wrong host is a concern can
+/// opt into `SelectedUpstreamOrigin` to reject any URL that does not
+/// match the selected upstream's `base_url` origin.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ShapeOriginPolicy {
+    #[default]
+    Unrestricted,
+    SelectedUpstreamOrigin,
+}
+
+/// Upper bounds enforced on plugin wire I/O. Defaults match current
+/// unbounded-ish behaviour by tracking the request body cap already
+/// enforced at the HTTP layer, so enabling this struct with defaults
+/// is a no-op. Tightening any field is opt-in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct PluginWireBounds {
+    pub output_body_bytes: u64,
+    pub max_headers: u32,
+    pub max_header_value_bytes: u32,
+    pub normalize_error_body_bytes: u64,
+    pub reason_bytes: u32,
+}
+
+impl Default for PluginWireBounds {
+    fn default() -> Self {
+        Self {
+            output_body_bytes: DEFAULT_FILES_CAP_BYTES,
+            max_headers: 100,
+            max_header_value_bytes: 8 * 1024,
+            normalize_error_body_bytes: 256 * 1024,
+            reason_bytes: 256,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

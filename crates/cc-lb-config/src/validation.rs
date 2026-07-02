@@ -42,6 +42,39 @@ fn validate_wasmtime_runtime(config: &Config) -> Result<(), ValidationError> {
             ));
         }
     }
+    let bounds = &config.runtime.wasmtime.wire_bounds;
+    // All wire-bound caps must be non-zero. A zero cap silently rejects
+    // every plugin call, which is worse than failing loudly at load.
+    if bounds.output_body_bytes == 0 {
+        return Err(ValidationError::new(
+            "runtime.wasmtime.wire_bounds.output_body_bytes",
+            "must be > 0",
+        ));
+    }
+    if bounds.max_headers == 0 {
+        return Err(ValidationError::new(
+            "runtime.wasmtime.wire_bounds.max_headers",
+            "must be > 0",
+        ));
+    }
+    if bounds.max_header_value_bytes == 0 {
+        return Err(ValidationError::new(
+            "runtime.wasmtime.wire_bounds.max_header_value_bytes",
+            "must be > 0",
+        ));
+    }
+    if bounds.normalize_error_body_bytes == 0 {
+        return Err(ValidationError::new(
+            "runtime.wasmtime.wire_bounds.normalize_error_body_bytes",
+            "must be > 0",
+        ));
+    }
+    if bounds.reason_bytes == 0 {
+        return Err(ValidationError::new(
+            "runtime.wasmtime.wire_bounds.reason_bytes",
+            "must be > 0",
+        ));
+    }
     Ok(())
 }
 

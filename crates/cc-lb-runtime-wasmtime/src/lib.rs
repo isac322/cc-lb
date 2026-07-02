@@ -43,7 +43,7 @@ use wasmtime::{Engine, Linker};
 pub struct WasmtimeRuntime {
     engine: Arc<Engine>,
     linker: Arc<Linker<HostState>>,
-    config: HotEngineConfig,
+    config: Arc<HotEngineConfig>,
     slots: RwLock<HashMap<SlotKey, Arc<PluginSlot>>>,
 }
 
@@ -54,7 +54,7 @@ impl WasmtimeRuntime {
         Ok(Self {
             engine: Arc::new(engine),
             linker: Arc::new(linker),
-            config,
+            config: Arc::new(config),
             slots: RwLock::new(HashMap::new()),
         })
     }
@@ -69,6 +69,13 @@ impl WasmtimeRuntime {
 
     pub fn config(&self) -> &HotEngineConfig {
         &self.config
+    }
+
+    /// Shareable handle to the effective runtime config. Adapters
+    /// snapshot this at construction so per-call knob reads are just
+    /// atomic pointer loads, no lock or lookup.
+    pub fn config_arc(&self) -> Arc<HotEngineConfig> {
+        Arc::clone(&self.config)
     }
 
     pub fn linker(&self) -> &Linker<HostState> {
