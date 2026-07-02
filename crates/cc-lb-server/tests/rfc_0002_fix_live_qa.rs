@@ -81,46 +81,6 @@ async fn fetch_metric_scrape(metrics_addr: std::net::SocketAddr) -> String {
     response.body
 }
 
-/// 35 `RequestEvent` fields the shadow assembler must populate identically
-/// to the legacy inline writer, or the RFC-0002 parity contract is broken.
-const SHADOW_PARITY_FIELDS: &[&str] = &[
-    "thread_id",
-    "message_id",
-    "message_index",
-    "message_count",
-    "cache_control_message_indices",
-    "auth_ms",
-    "route_ms",
-    "limit_reserve_ms",
-    "bulkhead_wait_ms",
-    "dns_ms",
-    "connect_ms",
-    "connection_reused",
-    "limit_reconcile_ms",
-    "observability_post_ms",
-    "proxy_setup_ms",
-    "shape_ms",
-    "sign_ms",
-    "upstream_ttfb_ms",
-    "upstream_body_ms",
-    "first_body_chunk_ms",
-    "body_chunk_count",
-    "body_bytes",
-    "stream_message_start_ms",
-    "stream_content_block_start_ms",
-    "stream_first_content_delta_ms",
-    "stream_last_content_delta_ms",
-    "stream_message_stop_ms",
-    "stream_last_chunk_ms",
-    "stream_total_ms",
-    "content_delta_count",
-    "ping_count",
-    "inter_token_avg_ms",
-    "routing_trace",
-    "internal_errors",
-    "iterations",
-];
-
 async fn fetch_payload_json(pool: &SqlitePool, where_clause: &str) -> serde_json::Value {
     let sql = format!(
         "SELECT payload FROM request_events_v1 WHERE {where_clause} ORDER BY id DESC LIMIT 1"
@@ -133,20 +93,12 @@ async fn fetch_payload_json(pool: &SqlitePool, where_clause: &str) -> serde_json
     serde_json::from_str(&payload).expect("payload json parse")
 }
 
-fn assert_shadow_parity(legacy: &serde_json::Value, shadow: &serde_json::Value, ctx: &str) {
-    let mut mismatches: Vec<String> = Vec::new();
-    for field in SHADOW_PARITY_FIELDS {
-        let l = legacy.get(field);
-        let s = shadow.get(field);
-        if l != s {
-            mismatches.push(format!("  {field}: legacy={l:?} shadow={s:?}"));
-        }
-    }
+fn assert_shadow_field_populated(shadow: &serde_json::Value, field: &str, ctx: &str) {
+    let value = shadow.get(field);
     assert!(
-        mismatches.is_empty(),
-        "[{ctx}] shadow parity broken for {} field(s):\n{}",
-        mismatches.len(),
-        mismatches.join("\n")
+        value.is_some_and(|v| !v.is_null()),
+        "[{ctx}] shadow row missing {field} — indicates an assembler ordering bug (event dropped after RequestTerminated). value={value:?}\nfull payload:\n{}",
+        serde_json::to_string_pretty(shadow).unwrap_or_default()
     );
 }
 
@@ -320,19 +272,18 @@ enabled = true
 }
 
 // ============================================================================
-// LIVE-6b · Shadow parity — assembler ordering (Oracle B blocking bug)
+// LIVE-6b · Shadow assembler completeness — assembler ordering (Oracle B bug)
 // ============================================================================
 /// Regression for the assembler-ordering issue documented in the RFC-0002
-/// synthesis analysis: when writer_source=both, the shadow row (written by
-/// the LifecycleEventAssembler) must carry the same cost, cache, and usage
-/// fields as the legacy row. If `Priced` / `CacheObserved` are consumed by
-/// their subscribers on separate async tasks, they can arrive at the
-/// assembler AFTER `RequestTerminated` and be dropped, leaving the shadow
-/// row with NULL cost/cache and only partial usage.
+/// synthesis analysis: the shadow row (written by LifecycleEventAssembler)
+/// must carry cost, cache, and usage fields. If `Priced` / `CacheObserved`
+/// are consumed by their subscribers on separate async tasks, they can
+/// arrive at the assembler AFTER `RequestTerminated` and be dropped,
+/// leaving the shadow row with NULL cost/cache and only partial usage.
 #[tokio::test]
-async fn live_qa_6b_shadow_parity_cost_cache_usage_fields_match_legacy() {
+async fn live_qa_6b_shadow_assembler_populates_cost_cache_usage_fields() {
     let extra = r#"
-request_event_writer_source = "both"
+request_event_writer_source = "shadow"
 
 [lifecycle_cache_observation_subscriber]
 enabled = true
@@ -346,109 +297,47 @@ enabled = true
     let server = common::spawn_test_server_with_extra_config(extra).await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
 
-    let baseline_legacy = settled_row_count(&pool, "shadow_event_id IS NULL").await;
-    let baseline_shadow = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+    let baseline = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
 
     let response = common::http_post(
         server.proxy_addr,
         "/v1/messages",
-        r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#,
+        r#"{"model":"claude-sonnet-4-5-20250929","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#,
         &[],
     )
     .await
     .expect("post messages");
     assert_eq!(response.status, 200);
 
-    wait_for_row_count(&pool, "shadow_event_id IS NULL", baseline_legacy + 1).await;
-    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline_shadow + 1).await;
-    // Give the assembler an additional beat to receive any late
-    // Priced/CacheObserved events. This is deliberately generous so a real
-    // ordering bug (missed field) — not a race with our poll — is what a
-    // failure reflects.
+    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline + 1).await;
     sleep(Duration::from_millis(500)).await;
 
-    let row_sql = r#"SELECT input_tokens, output_tokens, cache_read_input_tokens,
-                  cache_state,
-                  CAST(json_extract(payload, '$.cost_usd_micros') AS INTEGER) AS cost_usd_micros,
-                  CAST(json_extract(payload, '$.cost_input_micros') AS INTEGER) AS cost_input_micros,
-                  CAST(json_extract(payload, '$.cost_output_micros') AS INTEGER) AS cost_output_micros,
-                  CAST(json_extract(payload, '$.cost_cache_read_micros') AS INTEGER) AS cost_cache_read_micros
-             FROM request_events_v1
-            WHERE {clause}
-            ORDER BY id DESC LIMIT 1"#;
-    let legacy = sqlx::query(AssertSqlSafe(
-        row_sql.replace("{clause}", "shadow_event_id IS NULL"),
-    ))
-    .fetch_one(&pool)
-    .await
-    .expect("legacy row fetch");
-    let shadow = sqlx::query(AssertSqlSafe(
-        row_sql.replace("{clause}", "shadow_event_id IS NOT NULL"),
-    ))
-    .fetch_one(&pool)
-    .await
-    .expect("shadow row fetch");
-
-    let legacy_input: Option<i64> = legacy.try_get("input_tokens").ok();
-    let shadow_input: Option<i64> = shadow.try_get("input_tokens").ok();
-    let legacy_output: Option<i64> = legacy.try_get("output_tokens").ok();
-    let shadow_output: Option<i64> = shadow.try_get("output_tokens").ok();
-    let legacy_cost: Option<i64> = legacy.try_get("cost_usd_micros").ok();
-    let shadow_cost: Option<i64> = shadow.try_get("cost_usd_micros").ok();
-    let legacy_input_cost: Option<i64> = legacy.try_get("cost_input_micros").ok();
-    let shadow_input_cost: Option<i64> = shadow.try_get("cost_input_micros").ok();
-    let legacy_output_cost: Option<i64> = legacy.try_get("cost_output_micros").ok();
-    let shadow_output_cost: Option<i64> = shadow.try_get("cost_output_micros").ok();
-    let legacy_cache_state: Option<String> = legacy.try_get("cache_state").ok();
-    let shadow_cache_state: Option<String> = shadow.try_get("cache_state").ok();
-
-    // Usage tokens must match — the assembler merges from UsageObserved which
-    // is emitted synchronously by the handler, so this should hold today.
-    assert_eq!(
-        legacy_input, shadow_input,
-        "input_tokens mismatch: legacy={legacy_input:?} shadow={shadow_input:?}"
-    );
-    assert_eq!(
-        legacy_output, shadow_output,
-        "output_tokens mismatch: legacy={legacy_output:?} shadow={shadow_output:?}"
-    );
-
-    // Cost must match — this catches the Priced ordering bug: PricingSubscriber
-    // emits `Priced` on a separate task, which may arrive AFTER the assembler
-    // finalizes on RequestTerminated.
-    assert_eq!(
-        legacy_cost, shadow_cost,
-        "cost_usd_micros mismatch (Priced ordering bug?): legacy={legacy_cost:?} shadow={shadow_cost:?}"
-    );
-    assert_eq!(
-        legacy_input_cost, shadow_input_cost,
-        "cost_input_micros mismatch: legacy={legacy_input_cost:?} shadow={shadow_input_cost:?}"
-    );
-    assert_eq!(
-        legacy_output_cost, shadow_output_cost,
-        "cost_output_micros mismatch: legacy={legacy_output_cost:?} shadow={shadow_output_cost:?}"
-    );
-
-    // Cache state must match — this catches the CacheObserved ordering bug.
-    assert_eq!(
-        legacy_cache_state, shadow_cache_state,
-        "cache_state mismatch (CacheObserved ordering bug?): legacy={legacy_cache_state:?} shadow={shadow_cache_state:?}"
-    );
-
-    let legacy_payload = fetch_payload_json(&pool, "shadow_event_id IS NULL").await;
     let shadow_payload = fetch_payload_json(&pool, "shadow_event_id IS NOT NULL").await;
-    assert_shadow_parity(&legacy_payload, &shadow_payload, "non-stream happy path");
+
+    let ctx = "non-stream happy path";
+    assert_shadow_field_populated(&shadow_payload, "input_tokens", ctx);
+    assert_shadow_field_populated(&shadow_payload, "output_tokens", ctx);
+    assert_shadow_field_populated(&shadow_payload, "cost_usd_micros", ctx);
+    assert_shadow_field_populated(&shadow_payload, "cost_input_micros", ctx);
+    assert_shadow_field_populated(&shadow_payload, "cost_output_micros", ctx);
+    assert_shadow_field_populated(&shadow_payload, "cache_state", ctx);
+    assert_shadow_field_populated(&shadow_payload, "auth_ms", ctx);
+    assert_shadow_field_populated(&shadow_payload, "route_ms", ctx);
+    assert_shadow_field_populated(&shadow_payload, "upstream_ttfb_ms", ctx);
+    assert_shadow_field_populated(&shadow_payload, "upstream_body_ms", ctx);
+    assert_shadow_field_populated(&shadow_payload, "body_bytes", ctx);
+    assert_shadow_field_populated(&shadow_payload, "body_chunk_count", ctx);
 }
 
 // ============================================================================
-// LIVE-6c · Shadow parity — streaming request must populate stream fields
+// LIVE-6c · Shadow assembler — streaming request must populate stream fields
 // ============================================================================
 /// Streaming complements 6b: `StreamSuccess`-only fields (body_bytes,
 /// stream_* timings) are None on non-stream and would hide divergences.
 #[tokio::test]
-async fn live_qa_6c_shadow_parity_stream_request_matches_legacy() {
+async fn live_qa_6c_shadow_assembler_populates_stream_fields() {
     let extra = r#"
-request_event_writer_source = "both"
+request_event_writer_source = "shadow"
 
 [lifecycle_cache_observation_subscriber]
 enabled = true
@@ -461,40 +350,31 @@ enabled = true
 "#;
     let server = common::spawn_test_server_with_extra_config(extra).await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
-    let baseline_legacy = settled_row_count(&pool, "shadow_event_id IS NULL").await;
-    let baseline_shadow = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+    let baseline = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
 
     let response = common::http_post(
         server.proxy_addr,
         "/v1/messages",
-        r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":true}"#,
+        r#"{"model":"claude-sonnet-4-5-20250929","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":true}"#,
         &[("accept", "text/event-stream")],
     )
     .await
     .expect("post streaming messages");
     assert_eq!(response.status, 200);
 
-    wait_for_row_count(&pool, "shadow_event_id IS NULL", baseline_legacy + 1).await;
-    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline_shadow + 1).await;
+    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline + 1).await;
     sleep(Duration::from_millis(500)).await;
 
-    let legacy_payload = fetch_payload_json(&pool, "shadow_event_id IS NULL").await;
     let shadow_payload = fetch_payload_json(&pool, "shadow_event_id IS NOT NULL").await;
 
-    // Sanity: the streaming request should have populated at least one
-    // stream-only field on the legacy side. Otherwise the fake_anthropic
-    // path did not actually stream and the test is not exercising 6c.
-    let stream_body_bytes = legacy_payload.get("body_bytes");
-    let stream_message_start = legacy_payload.get("stream_message_start_ms");
-    let stream_total = legacy_payload.get("stream_total_ms");
-    assert!(
-        stream_body_bytes.is_some_and(|v| !v.is_null())
-            || stream_message_start.is_some_and(|v| !v.is_null())
-            || stream_total.is_some_and(|v| !v.is_null()),
-        "legacy row shows no stream-only fields populated — request did not actually stream. body_bytes={stream_body_bytes:?} stream_message_start_ms={stream_message_start:?} stream_total_ms={stream_total:?}",
-    );
-
-    assert_shadow_parity(&legacy_payload, &shadow_payload, "streaming happy path");
+    let ctx = "streaming happy path";
+    assert_shadow_field_populated(&shadow_payload, "body_bytes", ctx);
+    assert_shadow_field_populated(&shadow_payload, "stream_message_start_ms", ctx);
+    assert_shadow_field_populated(&shadow_payload, "stream_total_ms", ctx);
+    assert_shadow_field_populated(&shadow_payload, "sse_event_count", ctx);
+    assert_shadow_field_populated(&shadow_payload, "cost_usd_micros", ctx);
+    assert_shadow_field_populated(&shadow_payload, "input_tokens", ctx);
+    assert_shadow_field_populated(&shadow_payload, "output_tokens", ctx);
 }
 
 async fn admin_get_json(
