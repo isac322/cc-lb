@@ -30,10 +30,10 @@ use cc_lb_runtime_wasmtime::{
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AnthropicCompatibilityKvStore, AuditStore, PluginRegistryRepo, PluginRegistryStore, PluginSlot,
-    PrincipalRecord, PrincipalStore, PromptCacheObservationStore, RateLimitKind, StorageError,
-    StorageResult, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord,
-    UpstreamStore, UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
+    AnthropicCompatibilityKvStore, AuditStore, PluginRegistryStore, PluginSlot, PrincipalRecord,
+    PrincipalStore, PromptCacheObservationStore, RateLimitKind, StorageError, StorageResult,
+    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
 };
 use parking_lot::RwLock;
 use thiserror::Error;
@@ -60,11 +60,6 @@ pub struct Stores {
     pub prompt_cache_observations: Arc<dyn PromptCacheObservationStore>,
     pub anthropic_compatibility_kv: Arc<dyn AnthropicCompatibilityKvStore>,
     pub audit: Option<Arc<dyn AuditStore>>,
-    /// T43 bridge: when `Some` and a `PluginRegistryRecord` exists for the
-    /// same SHA-256 as the `WasmRegistryEntry`, the bridge injects
-    /// `augmented_metadata` into `PluginManifest.metadata["augmented_metadata"]`.
-    /// Otherwise dispatch falls back to `legacy_dispatch_metadata` in `plugin_wrap`.
-    pub plugin_registry_repo: Option<Arc<dyn PluginRegistryRepo>>,
 }
 
 #[derive(Debug, Error)]
@@ -1063,7 +1058,6 @@ mod tests {
             prompt_cache_observations,
             anthropic_compatibility_kv: storage.clone(),
             audit: Some(storage),
-            plugin_registry_repo: None,
         }
     }
 

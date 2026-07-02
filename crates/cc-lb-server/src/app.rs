@@ -38,8 +38,8 @@ use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    BackendKind, ManagedKeyStore, MetaStore, PluginBlobRepo, PluginRegistryRepo,
-    RuntimeChangeNotifier, Storage, UpstreamRecord,
+    BackendKind, ManagedKeyStore, MetaStore, PluginBlobRepo, RuntimeChangeNotifier, Storage,
+    UpstreamRecord,
 };
 use http_body_util::BodyExt;
 use hyper_rustls::HttpsConnectorBuilder;
@@ -361,7 +361,6 @@ pub async fn build_app_for_testing(
         upstream_kind: cc_lb_config::NoneModeUpstreamKind::AnthropicKey,
     });
     std::mem::forget(dir);
-    let plugin_registry_repo = storage_arc.clone() as Arc<dyn PluginRegistryRepo>;
     let plugin_blob_repo = storage_arc.clone() as Arc<dyn PluginBlobRepo>;
     let opened_scheduler = crate::scheduler_factory::open_scheduler_storage(
         &config.storage,
@@ -375,7 +374,7 @@ pub async fn build_app_for_testing(
         managed_store,
         storage,
         aead,
-        Some((plugin_registry_repo, plugin_blob_repo)),
+        Some(plugin_blob_repo),
         None,
         opened_scheduler,
         None,
@@ -572,7 +571,6 @@ async fn build_app_with_path_inner(
         managed_store,
         storage,
         aead,
-        plugin_registry_repo,
         plugin_blob_repo,
         lazy_refresh_claim_guard,
         opened_scheduler,
@@ -583,7 +581,7 @@ async fn build_app_with_path_inner(
         managed_store,
         storage,
         aead,
-        Some((plugin_registry_repo, plugin_blob_repo)),
+        Some(plugin_blob_repo),
         startup_preflight,
         opened_scheduler,
         Some(lazy_refresh_claim_guard),
@@ -656,7 +654,7 @@ async fn build_app_with_storage_inner(
     managed_store: Arc<dyn ManagedKeyStore>,
     storage: Arc<dyn Storage>,
     aead: Arc<AeadService>,
-    plugin_repos: Option<(Arc<dyn PluginRegistryRepo>, Arc<dyn PluginBlobRepo>)>,
+    plugin_blob_repo: Option<Arc<dyn PluginBlobRepo>>,
     startup_preflight: Option<StartupPreflight>,
     opened_scheduler: crate::scheduler_factory::OpenedScheduler,
     lazy_refresh_claim_guard: Option<Arc<dyn LazyRefreshClaimGuard>>,
@@ -789,13 +787,8 @@ async fn build_app_with_storage_inner(
         }
     };
 
-    let (plugin_registry_repo, _plugin_blob_repo) = match plugin_repos {
-        Some(repos) => repos,
-        None => (
-            storage.clone() as Arc<dyn PluginRegistryRepo>,
-            storage.clone() as Arc<dyn PluginBlobRepo>,
-        ),
-    };
+    let _plugin_blob_repo =
+        plugin_blob_repo.unwrap_or_else(|| storage.clone() as Arc<dyn PluginBlobRepo>);
     let stores = Arc::new(DynamicStores {
         upstreams: storage_for_dynamic.clone(),
         principals: storage_for_dynamic.clone(),
@@ -805,7 +798,6 @@ async fn build_app_with_storage_inner(
         prompt_cache_observations: storage_for_dynamic.clone(),
         anthropic_compatibility_kv: storage_for_dynamic.clone(),
         audit: Some(storage_for_dynamic.clone()),
-        plugin_registry_repo: Some(plugin_registry_repo.clone()),
     });
     let lifecycle_config = LifecycleConfig {
         messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
@@ -2162,7 +2154,6 @@ type OpenStorageParts = (
     Arc<dyn ManagedKeyStore>,
     Arc<dyn Storage>,
     Arc<AeadService>,
-    Arc<dyn PluginRegistryRepo>,
     Arc<dyn PluginBlobRepo>,
     Arc<dyn LazyRefreshClaimGuard>,
     crate::scheduler_factory::OpenedScheduler,
@@ -2189,7 +2180,6 @@ pub async fn open_storage(
         opened.managed_key_store,
         opened.storage,
         aead,
-        opened.plugin_registry_repo,
         opened.plugin_blob_repo,
         lazy_refresh_claim_guard,
         opened_scheduler,

@@ -60,7 +60,6 @@ where
         prompt_cache_observations,
         anthropic_compatibility_kv,
         audit: Some(audit),
-        plugin_registry_repo: None,
     })
 }
 

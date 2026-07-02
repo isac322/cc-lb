@@ -73,7 +73,6 @@ fn stores(storage: Arc<Storage>) -> Arc<Stores> {
         prompt_cache_observations: storage.clone(),
         anthropic_compatibility_kv: storage,
         audit: None,
-        plugin_registry_repo: None,
     })
 }
 
@@ -308,7 +307,6 @@ async fn cancel_during_tick_is_graceful() {
         prompt_cache_observations: Arc::new(EmptyPromptCacheObservationStore),
         anthropic_compatibility_kv: Arc::new(EmptyCompatibilityKvStore),
         audit: None,
-        plugin_registry_repo: None,
     });
     let (_dir, storage) = storage_fixture().await;
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));

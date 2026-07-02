@@ -116,7 +116,6 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         upstream_subscription_quotas: storage.clone(),
         anthropic_compatibility_kv: storage.clone(),
         audit: Some(storage.clone()),
-        plugin_registry_repo: None,
         prompt_cache_observations: storage.clone(),
     });
 
