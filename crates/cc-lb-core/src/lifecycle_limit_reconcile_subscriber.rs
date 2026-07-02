@@ -32,6 +32,16 @@ pub const DEFAULT_LIMIT_RECONCILE_MAP_CAP: usize = 4096;
 pub const DEFAULT_LIMIT_RECONCILE_TTL: Duration = Duration::from_secs(300);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Same rationale as the assembler's grace period: `Priced` is emitted by
+/// the pricing subscriber on a separate task and may arrive AFTER
+/// `RequestTerminated` at this subscriber's channel. Holding the partial for
+/// this window lets the cost merge in before we call `reconcile_by_id`.
+const FINALIZATION_GRACE: Duration = Duration::from_millis(200);
+
+/// Must be small compared to FINALIZATION_GRACE so terminated partials do
+/// not sit past their deadline waiting for the next tick.
+const FINALIZATION_TICK: Duration = Duration::from_millis(20);
+
 /// Handle to the spawned subscriber task.
 pub struct LimitReconcileSubscriberHandle {
     shutdown_tx: oneshot::Sender<()>,
@@ -88,6 +98,19 @@ struct Partial {
     usage: UsageSnapshot,
     usage_seen: bool,
     cost_micros: Option<i64>,
+    termination: Option<TerminationInfo>,
+}
+
+struct TerminationInfo {
+    reason: TerminationReason,
+    deadline: Instant,
+    expects_priced: bool,
+}
+
+impl TerminationInfo {
+    fn is_ready(&self, partial: &Partial) -> bool {
+        !self.expects_priced || partial.cost_micros.is_some()
+    }
 }
 
 impl Partial {
@@ -115,6 +138,9 @@ async fn subscriber_loop(
     let mut sweeper = tokio::time::interval(SWEEP_INTERVAL);
     sweeper.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     sweeper.tick().await;
+    let mut finalization_tick = tokio::time::interval(FINALIZATION_TICK);
+    finalization_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    finalization_tick.tick().await;
 
     loop {
         tokio::select! {
@@ -125,6 +151,7 @@ async fn subscriber_loop(
                     None => break,
                 }
             }
+            _ = finalization_tick.tick() => flush_expired_terminations(&engine, &mut partials, mode),
             _ = sweeper.tick() => sweep_orphans(&mut partials, ttl),
             _ = &mut shutdown => break,
         }
@@ -132,6 +159,55 @@ async fn subscriber_loop(
 
     while let Ok(event) = rx.try_recv() {
         handle_event(&engine, &mut partials, map_cap, mode, event);
+    }
+    force_flush_terminations(&engine, &mut partials, mode);
+}
+
+fn flush_expired_terminations(
+    engine: &LimitEngine,
+    partials: &mut HashMap<EventId, Partial>,
+    mode: LimitReconcileMode,
+) {
+    let now = Instant::now();
+    let expired: Vec<EventId> = partials
+        .iter()
+        .filter_map(|(id, p)| {
+            p.termination
+                .as_ref()
+                .filter(|t| now >= t.deadline)
+                .map(|_| id.clone())
+        })
+        .collect();
+    for event_id in expired {
+        if let Some(partial) = partials.remove(&event_id) {
+            let reason = partial
+                .termination
+                .as_ref()
+                .map(|t| t.reason.clone())
+                .expect("expired implies termination present");
+            finalize(engine, mode, partial, &reason);
+        }
+    }
+}
+
+fn force_flush_terminations(
+    engine: &LimitEngine,
+    partials: &mut HashMap<EventId, Partial>,
+    mode: LimitReconcileMode,
+) {
+    let pending: Vec<EventId> = partials
+        .iter()
+        .filter_map(|(id, p)| p.termination.as_ref().map(|_| id.clone()))
+        .collect();
+    for event_id in pending {
+        if let Some(partial) = partials.remove(&event_id) {
+            let reason = partial
+                .termination
+                .as_ref()
+                .map(|t| t.reason.clone())
+                .expect("pending implies termination present");
+            finalize(engine, mode, partial, &reason);
+        }
     }
 }
 
@@ -146,23 +222,50 @@ fn handle_event(
     let event_id = event.event_id().clone();
 
     if let LifecycleEvent::RequestTerminated { reason, .. } = &event {
-        if let Some(partial) = partials.remove(&event_id) {
-            finalize(engine, mode, partial, reason);
-        } else {
+        let existing = partials.remove(&event_id);
+        let Some(mut partial) = existing else {
             metrics::counter!(
                 "cc_lb_limit_reconcile_subscriber_rows_total",
                 "outcome" => "terminated_without_partial",
             )
             .increment(1);
+            return;
+        };
+        let expects_priced = partial.usage_seen && partial.cost_micros.is_none();
+        let termination = TerminationInfo {
+            reason: reason.clone(),
+            deadline: now + FINALIZATION_GRACE,
+            expects_priced,
+        };
+        if termination.is_ready(&partial) {
+            finalize(engine, mode, partial, &termination.reason);
+            return;
         }
+        partial.termination = Some(termination);
+        partial.touch(now);
+        partials.insert(event_id, partial);
         return;
     }
 
     let partial = partials
-        .entry(event_id)
+        .entry(event_id.clone())
         .or_insert_with(|| Partial::new(now));
     partial.touch(now);
     merge(partial, event);
+
+    if partial
+        .termination
+        .as_ref()
+        .is_some_and(|t| t.is_ready(partial))
+        && let Some(partial) = partials.remove(&event_id)
+    {
+        let reason = partial
+            .termination
+            .as_ref()
+            .map(|t| t.reason.clone())
+            .expect("readiness implies termination present");
+        finalize(engine, mode, partial, &reason);
+    }
 
     if partials.len() > map_cap {
         drop_oldest(partials);
