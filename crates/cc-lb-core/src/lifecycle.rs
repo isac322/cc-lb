@@ -1394,6 +1394,13 @@ impl Lifecycle {
         };
         let route_ms = duration_to_ms(route_start.elapsed());
         let routing_trace_value = pipeline_result.routing_trace(terminal_decision.clone());
+        let predicted_cache_read_tokens = pipeline_result
+            .candidates
+            .iter()
+            .find(|candidate| candidate.upstream_id == resolved_upstream_id)
+            .and_then(|candidate| candidate.cache_score.as_ref())
+            .map(|score| score.predicted_cache_read_tokens)
+            .unwrap_or(0);
         if let Some(o) = observer.as_ref() {
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                 event_id: o.event_id().to_owned(),
@@ -1406,6 +1413,7 @@ impl Lifecycle {
                         .map(str::to_owned),
                     route_ms: Some(route_ms),
                     routing_trace: Some(routing_trace_value.clone()),
+                    predicted_cache_read_tokens: Some(predicted_cache_read_tokens),
                 }),
                 routing_trace: Some(routing_trace_value.clone()),
             });
@@ -1417,13 +1425,6 @@ impl Lifecycle {
             o.set_routing_trace(routing_trace_value);
         }
         let metric_context = ApiKeyMetricContext::new(&success, &route.upstream, &ctx.body_bytes);
-        let predicted_cache_read_tokens = pipeline_result
-            .candidates
-            .iter()
-            .find(|candidate| candidate.upstream_id == resolved_upstream_id)
-            .and_then(|candidate| candidate.cache_score.as_ref())
-            .map(|score| score.predicted_cache_read_tokens)
-            .unwrap_or(0);
         let prompt_cache_observation_context = prompt_cache_observation_context(
             &view,
             resolved_upstream_id,

@@ -422,6 +422,8 @@ pub struct RouteInfo {
     pub route_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_trace: Option<RoutingTrace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_cache_read_tokens: Option<u32>,
 }
 
 /// Reason routing failed.

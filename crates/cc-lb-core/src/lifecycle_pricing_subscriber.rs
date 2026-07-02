@@ -304,6 +304,7 @@ mod tests {
                 upstream_kind: Some("anthropic_key".into()),
                 route_ms: None,
                 routing_trace: None,
+                predicted_cache_read_tokens: None,
             }),
             routing_trace: None,
         })
@@ -400,6 +401,7 @@ mod tests {
                 upstream_kind: Some("anthropic_oauth".into()),
                 route_ms: None,
                 routing_trace: None,
+                predicted_cache_read_tokens: None,
             }),
             routing_trace: None,
         })

@@ -80,6 +80,8 @@ pub struct Config {
     #[serde(default)]
     pub lifecycle_cache_hit_miss_subscriber: LifecycleCacheHitMissSubscriberConfig,
     #[serde(default)]
+    pub lifecycle_prompt_cache_drift_subscriber: LifecyclePromptCacheDriftSubscriberConfig,
+    #[serde(default)]
     pub request_event_writer_source: RequestEventWriterSource,
     #[serde(default)]
     pub limit_reservation_ttl: LimitReservationTtlConfig,
@@ -715,6 +717,13 @@ pub struct LifecycleApiKeyMetricsSubscriberConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LifecycleCacheHitMissSubscriberConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecyclePromptCacheDriftSubscriberConfig {
     #[serde(default)]
     pub enabled: bool,
 }

@@ -44,6 +44,7 @@ pub mod lifecycle_hook_adapter;
 pub mod lifecycle_limit_reconcile_subscriber;
 pub mod lifecycle_limit_rejection_audit_subscriber;
 pub mod lifecycle_pricing_subscriber;
+pub mod lifecycle_prompt_cache_drift_subscriber;
 #[cfg(not(loom))]
 pub mod lifecycle_rate_limit_header_subscriber;
 #[cfg(not(loom))]
@@ -158,6 +159,9 @@ pub use lifecycle_limit_rejection_audit_subscriber::{
 };
 pub use lifecycle_pricing_subscriber::{
     PricingSubscriberHandle, spawn_lifecycle_pricing_subscriber,
+};
+pub use lifecycle_prompt_cache_drift_subscriber::{
+    PromptCacheDriftSubscriberHandle, spawn_lifecycle_prompt_cache_drift_subscriber,
 };
 #[cfg(not(loom))]
 pub use lifecycle_rate_limit_header_subscriber::{

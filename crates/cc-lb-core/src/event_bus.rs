@@ -59,6 +59,7 @@ pub const DEFAULT_LIFECYCLE_SUBSCRIPTION_QUOTA_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_LIMIT_REJECTION_AUDIT_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_API_KEY_METRICS_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_CACHE_HIT_MISS_CAPACITY: usize = 4096;
+pub const DEFAULT_LIFECYCLE_PROMPT_CACHE_DRIFT_CAPACITY: usize = 4096;
 
 /// Errors surfaced by [`RequestEventBus`] implementations.
 #[derive(Debug, thiserror::Error)]
@@ -184,6 +185,7 @@ struct InMemoryBusInner {
     lifecycle_limit_rejection_audit_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_api_key_metrics_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_cache_hit_miss_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
+    lifecycle_prompt_cache_drift_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
 }
 
 impl InMemoryBus {
@@ -213,6 +215,7 @@ impl InMemoryBus {
                 lifecycle_limit_rejection_audit_tx: Mutex::new(None),
                 lifecycle_api_key_metrics_tx: Mutex::new(None),
                 lifecycle_cache_hit_miss_tx: Mutex::new(None),
+                lifecycle_prompt_cache_drift_tx: Mutex::new(None),
             }),
         }
     }
@@ -379,6 +382,20 @@ impl InMemoryBus {
         *guard = Some(tx);
         rx
     }
+
+    pub fn attach_lifecycle_prompt_cache_drift(
+        &self,
+        capacity: usize,
+    ) -> mpsc::Receiver<LifecycleEvent> {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        let mut guard = self
+            .inner
+            .lifecycle_prompt_cache_drift_tx
+            .lock()
+            .expect("event bus lifecycle prompt cache drift mutex poisoned");
+        *guard = Some(tx);
+        rx
+    }
 }
 
 impl Default for InMemoryBus {
@@ -519,6 +536,14 @@ impl RequestEventBus for InMemoryBus {
                 .lifecycle_cache_hit_miss_tx
                 .lock()
                 .expect("event bus lifecycle cache hit/miss mutex poisoned");
+            guard.clone()
+        };
+        let prompt_cache_drift_tx = {
+            let guard = self
+                .inner
+                .lifecycle_prompt_cache_drift_tx
+                .lock()
+                .expect("event bus lifecycle prompt cache drift mutex poisoned");
             guard.clone()
         };
         if let Some(tx) = writer_tx {
@@ -700,7 +725,7 @@ impl RequestEventBus for InMemoryBus {
             }
         }
         if let Some(tx) = cache_hit_miss_tx {
-            match tx.try_send(event) {
+            match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
                     cc_lb_observability::increment_dropped_events_by(
@@ -715,6 +740,25 @@ impl RequestEventBus for InMemoryBus {
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     tracing::debug!("lifecycle cache hit/miss subscriber mpsc closed");
+                }
+            }
+        }
+        if let Some(tx) = prompt_cache_drift_tx {
+            match tx.try_send(event) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(dropped)) => {
+                    cc_lb_observability::increment_dropped_events_by(
+                        "lifecycle_prompt_cache_drift_full",
+                        1,
+                    );
+                    tracing::warn!(
+                        kind = dropped.kind(),
+                        event_id = %dropped.event_id(),
+                        "lifecycle prompt cache drift subscriber mpsc full; dropping event (drift histogram may be missing)",
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::debug!("lifecycle prompt cache drift subscriber mpsc closed");
                 }
             }
         }
