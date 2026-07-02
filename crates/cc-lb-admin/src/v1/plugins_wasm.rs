@@ -181,6 +181,17 @@ async fn upload_wasm_inner(
     let (slot_kind, plugin_slot) = parse_slot_kind(&slot_kind_str).map_err(Box::new)?;
     let inspection = inspect_with_wasmtime(&bytes, slot_kind).await?;
     let inspected_schema_hash = inspection.primary_schema_hash();
+    if let Some(embedded_name) = embedded_plugin_name(inspection.plugin_metadata.as_deref())
+        && embedded_name != name
+    {
+        return Err(Box::new(json_error(
+            StatusCode::BAD_REQUEST,
+            "identity_mismatch",
+            format!(
+                "multipart name `{name}` does not match `cc_lb.plugin.v1` metadata name `{embedded_name}`"
+            ),
+        )));
+    }
 
     let sha256 = tokio::task::spawn_blocking({
         let bytes = bytes.clone();
@@ -474,6 +485,18 @@ async fn inspect_with_wasmtime(
         }
         Box::new(json_error(status, code, message))
     })
+}
+
+// Parse the JSON custom section `cc_lb.plugin.v1` emitted by the
+// wasmtime PDK macro and return the `name` field if present. Returns
+// `None` on missing metadata, non-UTF8 bytes, invalid JSON, or an
+// absent/non-string `name` — the section is diagnostics-only per
+// runtime contract, so silent failure keeps upload flow permissive
+// for plugins that pre-date this cross-check.
+fn embedded_plugin_name(metadata: Option<&[u8]>) -> Option<String> {
+    let bytes = metadata?;
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value.get("name")?.as_str().map(str::to_owned)
 }
 
 async fn materialize_cache(state: &AdminState, sha256_hex: &str, bytes: &[u8]) -> io::Result<()> {
