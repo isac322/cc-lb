@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 mod admin_test_common;
 
 use std::collections::HashMap;

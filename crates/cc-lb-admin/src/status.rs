@@ -61,18 +61,6 @@ pub struct PluginRefRedacted {
     pub config_hash: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct PluginRuntimeEntryStatus {
-    pub loaded: bool,
-    pub disabled: bool,
-    pub failure_count: u64,
-    pub last_error: Option<String>,
-}
-
-pub trait PluginRuntimeStatus {
-    fn plugin_status(&self, name: &str) -> Option<PluginRuntimeEntryStatus>;
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct PluginStatusEntry {
     pub slot: &'static str,
@@ -91,7 +79,6 @@ pub async fn handler(State(state): State<AdminState>) -> Json<PluginsStatusRespo
     let config = state.config.current_config();
     Json(build_status_response(
         &config,
-        None,
         state.config.last_reload_status(),
     ))
 }
@@ -116,16 +103,8 @@ pub async fn build_upstream_health(
     Err(StatusBuildError::UnknownUpstream)
 }
 
-pub fn build_plugins_status(
-    config: &Config,
-    runtime_status: Option<&dyn PluginRuntimeStatus>,
-) -> PluginsStatusResponse {
-    build_status_response(config, runtime_status, None)
-}
-
 pub fn build_status_response(
     _config: &Config,
-    _runtime_status: Option<&dyn PluginRuntimeStatus>,
     last_reload_status: Option<LastReloadStatus>,
 ) -> PluginsStatusResponse {
     PluginsStatusResponse {

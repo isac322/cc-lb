@@ -28,7 +28,6 @@ fn stores(storage: Arc<SqliteStorage>) -> Stores {
         prompt_cache_observations: storage.clone(),
         anthropic_compatibility_kv: storage,
         audit: None,
-        plugin_registry_repo: None,
     }
 }
 

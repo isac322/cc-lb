@@ -339,19 +339,14 @@ pub enum ObserveEvent {
 }
 
 /// Schema fingerprint constants shared by `cc-lb-pdk-wasmtime-macros`
-/// (proc-macro time) and `cc-lb-runtime-wasmtime::inspect`
-/// (load-time). Single source of truth — bumping any tag requires
-/// rebuilding every plugin against the new value.
-///
-/// Bumped v1 → v2 by RFC-0001 #9 (borrowed-wire optimisation). Owned
-/// wire types now use `Box<str>` / `Box<[u8]>` (was `String` / `Vec<u8>`)
-/// so the archived bytes match those emitted by the borrowed encode
-/// path (`#[rkyv(with = InlineAsBox)]`).
+/// (proc-macro time) and `cc-lb-runtime-wasmtime::inspect` (load-time).
+/// Single source of truth — bumping any tag requires rebuilding every
+/// plugin against the new value.
 pub mod schema {
-    pub const WIRE_SCHEMA_TAG_FILTER: &[u8] = b"cc_lb.wire.v2.filter.rkyv";
-    pub const WIRE_SCHEMA_TAG_SHAPE: &[u8] = b"cc_lb.wire.v2.shape.rkyv";
-    pub const WIRE_SCHEMA_TAG_NORMALIZE_ERROR: &[u8] = b"cc_lb.wire.v2.normalize_error.rkyv";
-    pub const WIRE_SCHEMA_TAG_OBSERVE: &[u8] = b"cc_lb.wire.v2.observe.rkyv";
+    pub const WIRE_SCHEMA_TAG_FILTER: &[u8] = b"cc_lb.wire.v1.filter.rkyv";
+    pub const WIRE_SCHEMA_TAG_SHAPE: &[u8] = b"cc_lb.wire.v1.shape.rkyv";
+    pub const WIRE_SCHEMA_TAG_NORMALIZE_ERROR: &[u8] = b"cc_lb.wire.v1.normalize_error.rkyv";
+    pub const WIRE_SCHEMA_TAG_OBSERVE: &[u8] = b"cc_lb.wire.v1.observe.rkyv";
 
     pub const SECTION_FILTER: &str = "cc_lb.schema.filter.v1";
     pub const SECTION_SHAPE: &str = "cc_lb.schema.shape.v1";

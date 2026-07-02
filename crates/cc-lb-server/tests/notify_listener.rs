@@ -233,7 +233,6 @@ async fn fixture() -> Fixture {
         prompt_cache_observations: storage.clone(),
         anthropic_compatibility_kv: storage.clone(),
         audit: None,
-        plugin_registry_repo: None,
     });
     let oauth = Arc::new(AnthropicOAuthConfig::default());
     let aead = Arc::new(AeadService::from_master_key([24; 32]));
@@ -372,7 +371,6 @@ async fn cancel_during_rebuild_graceful() {
         prompt_cache_observations: fixture.storage.clone(),
         anthropic_compatibility_kv: fixture.storage.clone(),
         audit: None,
-        plugin_registry_repo: None,
     });
     let task = spawn_listener(&fixture, notifier.clone(), cancel.clone(), stores).await;
 
@@ -403,7 +401,6 @@ async fn rebuild_failure_does_not_swap_view() {
         prompt_cache_observations: fixture.storage.clone(),
         anthropic_compatibility_kv: fixture.storage.clone(),
         audit: None,
-        plugin_registry_repo: None,
     });
     let task = spawn_listener(&fixture, notifier.clone(), cancel.clone(), stores).await;
 
