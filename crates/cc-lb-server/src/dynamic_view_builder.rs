@@ -76,8 +76,6 @@ pub enum RebindError {
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
-    Plugin(#[from] cc_lb_plugin_api::RuntimeError),
-    #[error(transparent)]
     PluginRuntime(#[from] cc_lb_runtime_wasmtime::WasmtimeRuntimeError),
 }
 

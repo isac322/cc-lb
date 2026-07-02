@@ -8,12 +8,12 @@ use http::StatusCode;
 use uuid::Uuid;
 
 use crate::errors::{
-    DialectError, ObservabilityError, RouteError, RuntimeError, SignerError, UpstreamError,
+    DialectError, ObservabilityError, RouteError, SignerError, UpstreamError,
 };
 use crate::types::{
-    ObserveEvent, PerCandidateReason, PluginManifest, Principal, RequestContext, RetryDecision,
-    RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, SlotKey,
-    Upstream, UpstreamCandidate,
+    ObserveEvent, PerCandidateReason, Principal, RequestContext, RetryDecision, RouteDecision,
+    ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, SlotKey, Upstream,
+    UpstreamCandidate,
 };
 
 /// Filter plugin output containing upstream selection results and per-candidate reasons.
@@ -92,7 +92,6 @@ pub trait FilterPlugin: Send + Sync {
 }
 
 /// Router plugin boundary.
-#[deprecated(since = "0.2.0", note = "Use FilterPlugin via wire v3")]
 pub trait RouterPlugin: Send + Sync {
     /// Selects the upstream and dialect for an authenticated request.
     ///
@@ -159,42 +158,4 @@ pub trait ObservabilityHook: Send + Sync {
     fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError>;
 }
 
-/// Runtime abstraction for concrete plugin systems (currently wasmtime).
-pub trait PluginRuntime: Send + Sync {
-    /// Instantiates a router plugin.
-    #[allow(deprecated)]
-    fn instantiate_router(
-        &self,
-        manifest: &PluginManifest,
-    ) -> Result<Arc<dyn RouterPlugin>, RuntimeError>;
 
-    /// Instantiates an upstream dialect plugin.
-    fn instantiate_dialect(
-        &self,
-        manifest: &PluginManifest,
-    ) -> Result<Arc<dyn UpstreamDialect>, RuntimeError>;
-
-    /// Instantiates a signer factory plugin.
-    ///
-    /// Signer plugin extension is no longer supported — cc-lb-server uses
-    /// built-in `AnthropicKeySigner` / `AnthropicOAuthSigner` directly.
-    /// New runtime impls should leave the default `unimplemented!()` body
-    /// in place. The trait method is retained as a deprecated shim so
-    /// that out-of-tree runtimes do not see a hard trait-shape break;
-    /// it is scheduled for removal in the next semver-major bump.
-    fn instantiate_signer_factory(
-        &self,
-        _manifest: &PluginManifest,
-    ) -> Result<Arc<dyn SignerFactory>, RuntimeError> {
-        unimplemented!(
-            "signer plugin extension dropped; use built-in \
-             AnthropicKeySigner / AnthropicOAuthSigner instead"
-        )
-    }
-
-    /// Instantiates an observability hook plugin.
-    fn instantiate_observability(
-        &self,
-        manifest: &PluginManifest,
-    ) -> Result<Arc<dyn ObservabilityHook>, RuntimeError>;
-}

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
 use cc_lb_plugin_api::{
-    PluginManifest, Principal, PrincipalKind, RequestContext, RuntimeError, SignerFactory, SlotKey,
-    Upstream, shape_request, sign_request,
+    PluginManifest, Principal, PrincipalKind, RequestContext, SignerFactory, SlotKey, Upstream,
+    shape_request, sign_request,
 };
 use cc_lb_runtime_wasmtime::{WasmtimeRuntime, WasmtimeRuntimeError, WasmtimeUpstreamDialect};
 use cc_lb_signer_anthropic_oauth::{
@@ -56,8 +56,6 @@ pub enum WarmupDispatchError {
     Storage(#[from] StorageError),
     #[error("wasm materialize failed: {0}")]
     Materialize(String),
-    #[error("plugin instantiate failed: {0}")]
-    Instantiate(#[from] RuntimeError),
     #[error("wasmtime plugin register failed: {0}")]
     Register(#[from] WasmtimeRuntimeError),
     #[error("warmup body serialize failed: {0}")]

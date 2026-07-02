@@ -148,7 +148,7 @@ fn uploaded_entry(metadata: Option<PluginMetadata>) -> WasmRegistryEntry {
         refcount: 0,
         revision: 0,
         kind: "filter".to_owned(),
-        wire_version: 3,
+        wire_version: 1,
         is_builtin: false,
         metadata,
         supported_slots: Vec::new(),

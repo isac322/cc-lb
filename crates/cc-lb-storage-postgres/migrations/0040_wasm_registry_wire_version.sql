@@ -2,5 +2,5 @@ ALTER TABLE wasm_registry_v2
     ADD COLUMN IF NOT EXISTS wire_version SMALLINT NULL DEFAULT NULL;
 
 UPDATE wasm_registry_v2
-   SET wire_version = 3
+   SET wire_version = 1
  WHERE id = '00000000-0000-0000-0000-000000000001';

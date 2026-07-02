@@ -135,25 +135,4 @@ pub enum ObservabilityError {
     },
 }
 
-/// Plugin runtime failures returned by [`crate::PluginRuntime`].
-#[derive(Debug, Error)]
-pub enum RuntimeError {
-    /// Plugin manifest cannot be loaded or parsed.
-    #[error("invalid plugin manifest: {reason}")]
-    InvalidManifest {
-        /// Redacted manifest failure reason.
-        reason: String,
-    },
-    /// Plugin artifact cannot be loaded.
-    #[error("plugin load failed: {reason}")]
-    LoadFailed {
-        /// Redacted load failure reason.
-        reason: String,
-    },
-    /// Plugin instantiation failed.
-    #[error("plugin instantiation failed: {reason}")]
-    InstantiateFailed {
-        /// Redacted instantiation failure reason.
-        reason: String,
-    },
-}
+

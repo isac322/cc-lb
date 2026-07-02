@@ -141,8 +141,8 @@ async fn assert_wire_version_present_after_0040(pool: &PgPool) -> TestResult {
     .await?;
     assert_eq!(
         wire_version,
-        Some(3),
-        "cache-affinity builtin row should use wire_version 3"
+        Some(1),
+        "cache-affinity builtin row should use wire_version 1"
     );
 
     Ok(())
