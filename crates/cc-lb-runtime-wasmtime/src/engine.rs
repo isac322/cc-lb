@@ -51,6 +51,18 @@ pub struct HotEngineConfig {
     pub pool_total_memories: u32,
     /// `PoolingAllocationConfig::total_core_instances`.
     pub pool_total_core_instances: u32,
+    /// Runtime policy: what to do on plugin failure. Default preserves
+    /// pre-Sprint-3 pass-through.
+    pub plugin_failure_policy: crate::policy::PluginFailurePolicy,
+    /// Runtime policy: whether shape plugins may cross origins.
+    /// Default preserves pre-Sprint-3 unrestricted behaviour.
+    pub shape_origin_policy: crate::policy::ShapeOriginPolicy,
+    /// Wire I/O bounds — see [`crate::policy::PluginWireBounds`].
+    pub wire_bounds: crate::policy::PluginWireBounds,
+    /// When `true`, strip `cookie` from filter/shape wire input so
+    /// guests do not observe downstream session credentials.
+    /// Default `false` matches pre-Sprint-3 behaviour.
+    pub cookie_redaction: bool,
 }
 
 impl Default for HotEngineConfig {
@@ -69,6 +81,10 @@ impl Default for HotEngineConfig {
             max_wasm_stack: 1024 * 1024,
             pool_total_memories: 64,
             pool_total_core_instances: 64,
+            plugin_failure_policy: crate::policy::PluginFailurePolicy::PassThrough,
+            shape_origin_policy: crate::policy::ShapeOriginPolicy::Unrestricted,
+            wire_bounds: crate::policy::PluginWireBounds::default(),
+            cookie_redaction: false,
         }
     }
 }

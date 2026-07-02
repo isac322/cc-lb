@@ -16,6 +16,7 @@ mod error;
 mod inspect;
 mod module;
 mod plugin;
+pub mod policy;
 
 pub use cache::{
     DEFAULT_ALIGN, call_filter_hook, call_normalize_error_hook, call_observe_hook, call_shape_hook,

@@ -705,6 +705,31 @@ async fn build_app_with_storage_inner(
     if let Some(pages) = config.runtime.wasmtime.memory_max_pages {
         hot_engine_cfg.memory_max_pages = pages;
     }
+    hot_engine_cfg.plugin_failure_policy = match config.runtime.wasmtime.plugin_failure_policy {
+        cc_lb_config::PluginFailurePolicy::PassThrough => {
+            cc_lb_runtime_wasmtime::policy::PluginFailurePolicy::PassThrough
+        }
+        cc_lb_config::PluginFailurePolicy::FailClosed => {
+            cc_lb_runtime_wasmtime::policy::PluginFailurePolicy::FailClosed
+        }
+    };
+    hot_engine_cfg.shape_origin_policy = match config.runtime.wasmtime.shape_origin_policy {
+        cc_lb_config::ShapeOriginPolicy::Unrestricted => {
+            cc_lb_runtime_wasmtime::policy::ShapeOriginPolicy::Unrestricted
+        }
+        cc_lb_config::ShapeOriginPolicy::SelectedUpstreamOrigin => {
+            cc_lb_runtime_wasmtime::policy::ShapeOriginPolicy::SelectedUpstreamOrigin
+        }
+    };
+    let bounds = &config.runtime.wasmtime.wire_bounds;
+    hot_engine_cfg.wire_bounds = cc_lb_runtime_wasmtime::policy::PluginWireBounds {
+        output_body_bytes: bounds.output_body_bytes,
+        max_headers: bounds.max_headers,
+        max_header_value_bytes: bounds.max_header_value_bytes,
+        normalize_error_body_bytes: bounds.normalize_error_body_bytes,
+        reason_bytes: bounds.reason_bytes,
+    };
+    hot_engine_cfg.cookie_redaction = config.runtime.wasmtime.cookie_redaction;
     let runtime =
         Arc::new(WasmtimeRuntime::new(hot_engine_cfg).map_err(BuildError::WasmtimeRuntimeInit)?);
     let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
