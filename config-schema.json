@@ -81,13 +81,13 @@
     "lifecycle_cache_observation_subscriber": {
       "$ref": "#/$defs/LifecycleCacheObservationSubscriberConfig",
       "default": {
-        "enabled": false
+        "enabled": true
       }
     },
     "lifecycle_hook_adapter": {
       "$ref": "#/$defs/LifecycleHookAdapterConfig",
       "default": {
-        "enabled": false
+        "enabled": true
       }
     },
     "lifecycle_limit_reconcile_subscriber": {
@@ -106,7 +106,7 @@
     "lifecycle_pricing_subscriber": {
       "$ref": "#/$defs/LifecyclePricingSubscriberConfig",
       "default": {
-        "enabled": false
+        "enabled": true
       }
     },
     "lifecycle_prompt_cache_drift_subscriber": {
@@ -115,16 +115,16 @@
         "enabled": true
       }
     },
-    "lifecycle_rate_limit_header_subscriber": {
-      "$ref": "#/$defs/LifecycleRateLimitHeaderSubscriberConfig",
+    "lifecycle_prompt_cache_observation_subscriber": {
+      "$ref": "#/$defs/LifecyclePromptCacheObservationSubscriberConfig",
       "default": {
         "enabled": true
       }
     },
-    "lifecycle_shadow_writer": {
-      "$ref": "#/$defs/LifecycleShadowWriterConfig",
+    "lifecycle_rate_limit_header_subscriber": {
+      "$ref": "#/$defs/LifecycleRateLimitHeaderSubscriberConfig",
       "default": {
-        "enabled": false
+        "enabled": true
       }
     },
     "lifecycle_subscription_quota_subscriber": {
@@ -565,7 +565,7 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },
@@ -574,7 +574,7 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },
@@ -606,11 +606,20 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },
     "LifecyclePromptCacheDriftSubscriberConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "LifecyclePromptCacheObservationSubscriberConfig": {
       "type": "object",
       "properties": {
         "enabled": {
@@ -625,15 +634,6 @@
         "enabled": {
           "type": "boolean",
           "default": true
-        }
-      }
-    },
-    "LifecycleShadowWriterConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": false
         }
       }
     },

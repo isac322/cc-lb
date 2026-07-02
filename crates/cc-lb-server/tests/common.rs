@@ -7,8 +7,11 @@ use std::process::{Child, Command, Stdio};
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate,
     UpstreamStore,
+    principal::Limit,
+    types::{PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
 };
 
+use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_sqlite::open_sqlite;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
@@ -34,9 +37,16 @@ pub struct TestServer {
     pub admin_addr: SocketAddr,
     pub metrics_addr: SocketAddr,
     pub sqlite_path: PathBuf,
+    pub managed_key: Option<ManagedTestKey>,
     pub _fake: JoinHandle<Result<(), std::io::Error>>,
     pub _config_dir: TempDir,
     pub _process: TestProcess,
+}
+
+#[derive(Clone, Debug)]
+pub struct ManagedTestKey {
+    pub key_id: String,
+    pub plaintext: String,
 }
 
 pub async fn spawn_test_server() -> TestServer {
@@ -44,13 +54,55 @@ pub async fn spawn_test_server() -> TestServer {
 }
 
 pub async fn spawn_test_server_with_extra_config(extra_toml: &str) -> TestServer {
+    spawn_test_server_with_options(
+        extra_toml,
+        AppConfig::default(),
+        AuthConfig::NoneMode,
+        Vec::new(),
+    )
+    .await
+}
+
+pub async fn spawn_test_server_with_fake_config(
+    extra_toml: &str,
+    fake_config: AppConfig,
+) -> TestServer {
+    spawn_test_server_with_options(extra_toml, fake_config, AuthConfig::NoneMode, Vec::new()).await
+}
+
+pub async fn spawn_test_server_with_apikey_mode(
+    extra_toml: &str,
+    principal_limits: Vec<Limit>,
+    fake_config: AppConfig,
+) -> TestServer {
+    spawn_test_server_with_options(
+        extra_toml,
+        fake_config,
+        AuthConfig::ApiKey,
+        principal_limits,
+    )
+    .await
+}
+
+enum AuthConfig {
+    NoneMode,
+    ApiKey,
+}
+
+async fn spawn_test_server_with_options(
+    extra_toml: &str,
+    fake_config: AppConfig,
+    auth_config: AuthConfig,
+    principal_limits: Vec<Limit>,
+) -> TestServer {
     let fake_listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind fake listener");
     let fake_addr = fake_listener.local_addr().expect("fake local addr");
-    let fake = tokio::spawn(async move {
-        axum::serve(fake_listener, fake_anthropic_app(AppConfig::default())).await
-    });
+    let fake =
+        tokio::spawn(
+            async move { axum::serve(fake_listener, fake_anthropic_app(fake_config)).await },
+        );
 
     let proxy_listener = reserve_addr();
     let admin_listener = reserve_addr();
@@ -67,8 +119,9 @@ pub async fn spawn_test_server_with_extra_config(extra_toml: &str) -> TestServer
         admin_addr,
         metrics_addr,
         extra_toml,
+        &auth_config,
     );
-    seed_storage(&sqlite_path, fake_addr).await;
+    let managed_key = seed_storage(&sqlite_path, fake_addr, &auth_config, principal_limits).await;
 
     drop((proxy_listener, admin_listener, metrics_listener));
 
@@ -87,7 +140,7 @@ pub async fn spawn_test_server_with_extra_config(extra_toml: &str) -> TestServer
         .expect("spawn cc-lb binary");
     let process = TestProcess { child };
 
-    wait_for_status(proxy_addr, "/v1/models", 200).await;
+    wait_for_proxy_ready(proxy_addr, managed_key.as_ref()).await;
     wait_for_status(admin_addr, "/admin/health", 200).await;
 
     TestServer {
@@ -95,6 +148,7 @@ pub async fn spawn_test_server_with_extra_config(extra_toml: &str) -> TestServer
         admin_addr,
         metrics_addr,
         sqlite_path,
+        managed_key,
         _fake: fake,
         _config_dir: config_dir,
         _process: process,
@@ -116,7 +170,14 @@ fn write_config(
     admin_addr: SocketAddr,
     metrics_addr: SocketAddr,
 ) {
-    write_config_with_extra(path, proxy_addr, admin_addr, metrics_addr, "")
+    write_config_with_extra(
+        path,
+        proxy_addr,
+        admin_addr,
+        metrics_addr,
+        "",
+        &AuthConfig::NoneMode,
+    )
 }
 
 fn write_config_with_extra(
@@ -125,6 +186,7 @@ fn write_config_with_extra(
     admin_addr: SocketAddr,
     metrics_addr: SocketAddr,
     extra_toml: &str,
+    auth_config: &AuthConfig,
 ) {
     let storage_path = path.with_file_name("cc-lb.sqlite");
     let data_dir = path.parent().expect("config path has parent");
@@ -137,6 +199,22 @@ fn write_config_with_extra(
         String::new()
     } else {
         format!("{}\n\n", extra_toml.trim())
+    };
+    let downstream_auth = match auth_config {
+        AuthConfig::NoneMode => {
+            r#"[downstream_auth]
+mode = "none"
+
+[downstream_auth.none_mode]
+principal_id = "api-key"
+upstream_kind = "anthropic_key"
+"#
+        }
+        AuthConfig::ApiKey => {
+            r#"[downstream_auth]
+mode = "api_key"
+"#
+        }
     };
     let config = format!(
         r#"{extra_prefix}
@@ -159,12 +237,7 @@ drain_secs = 5
 [runtime]
 data_dir = "{data_dir}"
 
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "api-key"
-upstream_kind = "anthropic_key"
+{downstream_auth}
 
 [storage]
 kind = "sqlite"
@@ -201,17 +274,24 @@ cache_ttl_ceiling_secs = 300
     std::fs::write(path, config).expect("write config");
 }
 
-async fn seed_storage(storage_path: &Path, upstream_addr: SocketAddr) {
+async fn seed_storage(
+    storage_path: &Path,
+    upstream_addr: SocketAddr,
+    auth_config: &AuthConfig,
+    principal_limits: Vec<Limit>,
+) -> Option<ManagedTestKey> {
     let database_url = format!("sqlite://{}", storage_path.display());
-    let storage = open_sqlite(&database_url, std::sync::Arc::new(cc_lb_core::SystemClock))
-        .await
-        .expect("test storage opens");
+    let storage = std::sync::Arc::new(
+        open_sqlite(&database_url, std::sync::Arc::new(cc_lb_core::SystemClock))
+            .await
+            .expect("test storage opens"),
+    );
     storage
         .initialize(BackendKind::Sqlite)
         .await
         .expect("test storage initializes");
     UpstreamStore::create(
-        &storage,
+        storage.as_ref(),
         UpstreamCreate {
             name: "fake_anthropic".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
@@ -227,18 +307,44 @@ async fn seed_storage(storage_path: &Path, upstream_addr: SocketAddr) {
     .await
     .expect("seed upstream");
     PrincipalStore::create(
-        &storage,
+        storage.as_ref(),
         PrincipalCreate {
             name: "api-key".to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: Vec::new(),
             allowed_upstreams: Vec::new(),
-            default_limits: Vec::new(),
+            default_limits: principal_limits,
         },
         1,
     )
     .await
     .expect("seed principal");
+    match auth_config {
+        AuthConfig::NoneMode => None,
+        AuthConfig::ApiKey => {
+            let key_store = KeyStore::new(storage.clone());
+            let (_record, plaintext) = key_store
+                .create(
+                    "api-key",
+                    CreateParams {
+                        upstream_kind: ManagedUpstreamKind::AnthropicKey,
+                        label: "live-qa".to_owned(),
+                        description: None,
+                        expires_at_unix_secs: None,
+                        limit_overrides: Vec::new(),
+                        principal_kind: PrincipalKindLite::Machine,
+                    },
+                )
+                .await
+                .expect("seed managed key");
+            let (key_id, _) = cc_lb_core::api_keys::secret::parse(plaintext.expose())
+                .expect("generated key parses");
+            Some(ManagedTestKey {
+                key_id,
+                plaintext: plaintext.expose().to_owned(),
+            })
+        }
+    }
 }
 
 fn ready_timeout(default: std::time::Duration) -> std::time::Duration {
@@ -250,9 +356,36 @@ fn ready_timeout(default: std::time::Duration) -> std::time::Duration {
 }
 
 pub async fn wait_for_status(addr: SocketAddr, path: &str, status: u16) {
+    wait_for_status_with_request(
+        addr,
+        path,
+        status,
+        &format!(
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nx-api-key: sk-ant-test\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .await;
+}
+
+async fn wait_for_proxy_ready(addr: SocketAddr, managed_key: Option<&ManagedTestKey>) {
+    let api_key = managed_key
+        .map(|key| key.plaintext.as_str())
+        .unwrap_or("sk-ant-test");
+    wait_for_status_with_request(
+        addr,
+        "/v1/models",
+        200,
+        &format!(
+            "GET /v1/models HTTP/1.1\r\nHost: {addr}\r\nx-api-key: {api_key}\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .await;
+}
+
+async fn wait_for_status_with_request(addr: SocketAddr, path: &str, status: u16, request: &str) {
     let deadline = std::time::Instant::now() + ready_timeout(std::time::Duration::from_secs(60));
     loop {
-        let last = match http_get(addr, path).await {
+        let last = match raw_http(addr, request).await {
             Ok(response) => {
                 let last = format!("status={} body={}", response.status, response.body);
                 if response.status == status {
@@ -310,6 +443,28 @@ pub async fn http_post(
 ) -> std::io::Result<RawResponse> {
     let mut request = format!(
         "POST {path} HTTP/1.1\r\nHost: {addr}\r\nx-api-key: sk-ant-test\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (name, value) in extra_headers {
+        request.push_str(name);
+        request.push_str(": ");
+        request.push_str(value);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+    raw_http(addr, &request).await
+}
+
+pub async fn http_post_with_api_key(
+    addr: SocketAddr,
+    path: &str,
+    api_key: &str,
+    body: &str,
+    extra_headers: &[(&str, &str)],
+) -> std::io::Result<RawResponse> {
+    let mut request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nx-api-key: {api_key}\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n",
         body.len()
     );
     for (name, value) in extra_headers {

@@ -58,7 +58,8 @@
 
 use std::collections::BTreeMap;
 
-use cc_lb_plugin_api::{InternalError, RoutingTrace};
+use cc_lb_plugin_api::{InternalError, RoutingTrace, types::TtlClass};
+use cc_lb_storage_api::types::PrincipalKindLite;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
@@ -93,6 +94,11 @@ pub enum LifecycleEvent {
     AuthCompleted {
         event_id: EventId,
         result: Result<AuthInfo, AuthFailure>,
+    },
+    AuthenticationCompleted {
+        event_id: EventId,
+        principal_id: String,
+        principal_kind: PrincipalKindLite,
     },
     /// Router selection completed.
     RouteCompleted {
@@ -133,6 +139,12 @@ pub enum LifecycleEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         upstream_ttfb_ms: Option<u64>,
     },
+    ProviderErrorObserved {
+        event_id: EventId,
+        code: String,
+        message: String,
+        source: String,
+    },
     /// Usage counts were observed from an SSE frame or non-stream body.
     UsageObserved {
         event_id: EventId,
@@ -164,20 +176,31 @@ pub enum LifecycleEvent {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         internal_errors: Vec<InternalError>,
     },
-    /// Emitted by the Phase-5 pricing subscriber after cost is computed
-    /// from usage counts + model + upstream kind. Advisory: the assembler
-    /// merges these micros into the shadow row.
+    /// Emitted by the pricing subscriber after cost is computed from usage
+    /// counts, model, and upstream kind. The assembler merges these micros
+    /// into the request row's cost columns.
     Priced {
         event_id: EventId,
         cost: CostBreakdown,
     },
-    /// Emitted by the Phase-5 cache observation subscriber when the final
+    /// Emitted by the cache-observation subscriber when the final
     /// prompt-cache state can be derived from the usage counters plus
-    /// parse-time cache metadata. Advisory: the assembler merges this into
-    /// the shadow row's `cache_state` column.
+    /// parse-time cache metadata. The assembler merges this into the
+    /// request row's `cache_state` column.
     CacheObserved {
         event_id: EventId,
         cache_state: RequestCacheStateLite,
+    },
+    /// Emitted by request producers after prompt-cache observations are decoded.
+    /// The prompt-cache observation subscriber owns cache writes, sink enqueue,
+    /// and drop metric side effects for these records.
+    PromptCacheObservationsProduced {
+        event_id: EventId,
+        upstream_id: Uuid,
+        canonical_model_id: String,
+        observations: Vec<PromptCacheObservationWire>,
+        dropped_below_threshold: u32,
+        dropped_aborted: u32,
     },
 }
 
@@ -188,15 +211,18 @@ impl LifecycleEvent {
             Self::RequestStarted { event_id, .. }
             | Self::ParseCompleted { event_id, .. }
             | Self::AuthCompleted { event_id, .. }
+            | Self::AuthenticationCompleted { event_id, .. }
             | Self::RouteCompleted { event_id, .. }
             | Self::LimitDecision { event_id, .. }
             | Self::UpstreamAttempt { event_id, .. }
             | Self::UpstreamResponseStarted { event_id, .. }
+            | Self::ProviderErrorObserved { event_id, .. }
             | Self::UsageObserved { event_id, .. }
             | Self::StreamCompleted { event_id, .. }
             | Self::RequestTerminated { event_id, .. }
             | Self::Priced { event_id, .. }
-            | Self::CacheObserved { event_id, .. } => event_id,
+            | Self::CacheObserved { event_id, .. }
+            | Self::PromptCacheObservationsProduced { event_id, .. } => event_id,
         }
     }
 
@@ -206,17 +232,35 @@ impl LifecycleEvent {
             Self::RequestStarted { .. } => "request_started",
             Self::ParseCompleted { .. } => "parse_completed",
             Self::AuthCompleted { .. } => "auth_completed",
+            Self::AuthenticationCompleted { .. } => "authentication_completed",
             Self::RouteCompleted { .. } => "route_completed",
             Self::LimitDecision { .. } => "limit_decision",
             Self::UpstreamAttempt { .. } => "upstream_attempt",
             Self::UpstreamResponseStarted { .. } => "upstream_response_started",
+            Self::ProviderErrorObserved { .. } => "provider_error_observed",
             Self::UsageObserved { .. } => "usage_observed",
             Self::StreamCompleted { .. } => "stream_completed",
             Self::RequestTerminated { .. } => "request_terminated",
             Self::Priced { .. } => "priced",
             Self::CacheObserved { .. } => "cache_observed",
+            Self::PromptCacheObservationsProduced { .. } => "prompt_cache_observations_produced",
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromptCacheObservationWire {
+    pub prefix_hash: String,
+    pub ttl_class: TtlClass,
+    pub expires_at_unix_secs: u64,
+    pub kind: PromptCacheObservationKindWire,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptCacheObservationKindWire {
+    Hit,
+    Write,
 }
 
 /// Sanitized subset of upstream response headers carried by
@@ -375,7 +419,10 @@ fn cache_breakpoint_token_count_is_zero(value: &u64) -> bool {
 #[non_exhaustive]
 pub enum ParseFailure {
     /// Request body exceeded the configured cap.
-    BodyTooLarge { limit_bytes: u64 },
+    BodyTooLarge {
+        limit_bytes: u64,
+    },
+    InvalidJson,
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +445,14 @@ pub struct AuthInfo {
 #[non_exhaustive]
 pub enum AuthFailure {
     /// Token was missing, malformed, or did not match any known key.
-    AuthenticationFailed { http_status: u16 },
+    AuthenticationFailed {
+        http_status: u16,
+        /// Coarse reason label used by the api-key metrics subscriber to
+        /// tag `cclb_key_auth_failures_total`. `None` when the caller
+        /// cannot classify the failure.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// Token matched a key but the principal record was not found.
     PrincipalMissing { principal_id: String },
 }
@@ -652,7 +706,16 @@ mod tests {
             .kind(),
             LifecycleEvent::AuthCompleted {
                 event_id: sample_event_id(),
-                result: Err(AuthFailure::AuthenticationFailed { http_status: 401 }),
+                result: Err(AuthFailure::AuthenticationFailed {
+                    http_status: 401,
+                    reason: None,
+                }),
+            }
+            .kind(),
+            LifecycleEvent::AuthenticationCompleted {
+                event_id: sample_event_id(),
+                principal_id: "principal".into(),
+                principal_kind: PrincipalKindLite::Machine,
             }
             .kind(),
             LifecycleEvent::RouteCompleted {
@@ -691,6 +754,13 @@ mod tests {
                 upstream_ttfb_ms: None,
             }
             .kind(),
+            LifecycleEvent::ProviderErrorObserved {
+                event_id: sample_event_id(),
+                code: "provider_error".into(),
+                message: "redacted".into(),
+                source: "provider".into(),
+            }
+            .kind(),
             LifecycleEvent::UsageObserved {
                 event_id: sample_event_id(),
                 usage: UsageSnapshot::default(),
@@ -725,6 +795,15 @@ mod tests {
                 cache_state: RequestCacheStateLite::Unknown,
             }
             .kind(),
+            LifecycleEvent::PromptCacheObservationsProduced {
+                event_id: sample_event_id(),
+                upstream_id: Uuid::nil(),
+                canonical_model_id: "model".to_owned(),
+                observations: Vec::new(),
+                dropped_below_threshold: 0,
+                dropped_aborted: 0,
+            }
+            .kind(),
         ];
         assert_eq!(
             labels,
@@ -732,15 +811,18 @@ mod tests {
                 "request_started",
                 "parse_completed",
                 "auth_completed",
+                "authentication_completed",
                 "route_completed",
                 "limit_decision",
                 "upstream_attempt",
                 "upstream_response_started",
+                "provider_error_observed",
                 "usage_observed",
                 "stream_completed",
                 "request_terminated",
                 "priced",
                 "cache_observed",
+                "prompt_cache_observations_produced",
             ],
         );
     }

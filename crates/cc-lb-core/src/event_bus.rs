@@ -3,9 +3,9 @@
 //!
 //! Every payload is a [`RequestEventUpdate`] tagged with
 //! [`RequestEventPhase::Partial`] (mid-flight snapshot for live UI updates) or
-//! [`RequestEventPhase::Final`] (one-shot terminal snapshot). The RFC-0002
-//! `lifecycle_event_assembler` publishes finalized shadow rows on this bus so
-//! the admin dashboard receives the same row that was persisted.
+//! [`RequestEventPhase::Final`] (one-shot terminal snapshot). The
+//! `lifecycle_event_assembler` publishes finalized request rows on this bus
+//! so the admin dashboard receives the same row that was persisted.
 //!
 //! Subscribers obtained via [`RequestEventBus::subscribe`] are backed by
 //! `tokio::sync::broadcast`. Slow consumers receive `RecvError::Lagged(n)` and
@@ -26,9 +26,9 @@ pub const DEFAULT_BROADCAST_CAPACITY: usize = 1024;
 
 /// Default capacity for the lifecycle-event broadcast channel.
 ///
-/// The lifecycle stream fires up to ~10 events per request during Phase 2
-/// shadow mode; this absorbs bursts up to ~200 in-flight requests before
-/// slow ephemeral consumers observe `Lagged(n)`.
+/// The lifecycle stream fires up to ~10 events per request, so this
+/// absorbs bursts of ~200 in-flight requests before slow ephemeral
+/// consumers observe `Lagged(n)`.
 pub const DEFAULT_LIFECYCLE_BROADCAST_CAPACITY: usize = 2048;
 
 /// Default capacity for the durable lifecycle-writer mpsc channel used by
@@ -45,6 +45,7 @@ pub const DEFAULT_LIFECYCLE_LIMIT_REJECTION_AUDIT_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_API_KEY_METRICS_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_CACHE_HIT_MISS_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_PROMPT_CACHE_DRIFT_CAPACITY: usize = 4096;
+pub const DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY: usize = 4096;
 
 /// Errors surfaced by [`RequestEventBus`] implementations.
 #[derive(Debug, thiserror::Error)]
@@ -112,8 +113,9 @@ pub enum BusReceiver {
 
 /// Receiver side of [`RequestEventBus::subscribe_lifecycle`].
 ///
-/// `None` is returned by trait implementations that do not opt into the
-/// RFC-0002 shadow lifecycle stream (e.g. test doubles).
+/// `None` is returned by trait implementations that do not publish
+/// lifecycle events (e.g. test doubles that only exercise the RequestEvent
+/// path).
 pub enum LifecycleBusReceiver {
     None,
     InMemory(broadcast::Receiver<LifecycleEvent>),
@@ -134,11 +136,11 @@ pub trait RequestEventBus: Send + Sync + 'static {
     /// Slow consumers may observe `Lagged(n)`.
     fn subscribe(&self) -> BusReceiver;
 
-    /// Publish a Phase-2 shadow lifecycle event. Default impl is a no-op so
-    /// existing test doubles compile unchanged.
+    /// Publish a lifecycle event. Default impl is a no-op so existing
+    /// test doubles compile unchanged.
     fn publish_lifecycle(&self, _event: LifecycleEvent) {}
 
-    /// Subscribe to the Phase-2 shadow lifecycle stream. Default returns
+    /// Subscribe to the lifecycle-event broadcast stream. Default returns
     /// `LifecycleBusReceiver::None`.
     fn subscribe_lifecycle(&self) -> LifecycleBusReceiver {
         LifecycleBusReceiver::None
@@ -170,6 +172,7 @@ struct InMemoryBusInner {
     lifecycle_api_key_metrics_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_cache_hit_miss_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_prompt_cache_drift_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
+    lifecycle_prompt_cache_observation_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
 }
 
 impl InMemoryBus {
@@ -199,11 +202,12 @@ impl InMemoryBus {
                 lifecycle_api_key_metrics_tx: Mutex::new(None),
                 lifecycle_cache_hit_miss_tx: Mutex::new(None),
                 lifecycle_prompt_cache_drift_tx: Mutex::new(None),
+                lifecycle_prompt_cache_observation_tx: Mutex::new(None),
             }),
         }
     }
 
-    /// Attach the durable Phase-2 lifecycle-writer consumer
+    /// Attach the durable lifecycle-writer consumer
     /// (`LifecycleEventLogger`). Only one may be attached; subsequent calls
     /// replace the previous sender.
     pub fn attach_lifecycle_writer(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
@@ -361,6 +365,20 @@ impl InMemoryBus {
         *guard = Some(tx);
         rx
     }
+
+    pub fn attach_lifecycle_prompt_cache_observation(
+        &self,
+        capacity: usize,
+    ) -> mpsc::Receiver<LifecycleEvent> {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        let mut guard = self
+            .inner
+            .lifecycle_prompt_cache_observation_tx
+            .lock()
+            .expect("event bus lifecycle prompt cache observation mutex poisoned");
+        *guard = Some(tx);
+        rx
+    }
 }
 
 impl Default for InMemoryBus {
@@ -477,6 +495,14 @@ impl RequestEventBus for InMemoryBus {
                 .expect("event bus lifecycle prompt cache drift mutex poisoned");
             guard.clone()
         };
+        let prompt_cache_observation_tx = {
+            let guard = self
+                .inner
+                .lifecycle_prompt_cache_observation_tx
+                .lock()
+                .expect("event bus lifecycle prompt cache observation mutex poisoned");
+            guard.clone()
+        };
         if let Some(tx) = writer_tx {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
@@ -501,7 +527,7 @@ impl RequestEventBus for InMemoryBus {
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
-                        "lifecycle assembler mpsc full; dropping event (shadow row may be missing)",
+                        "lifecycle assembler mpsc full; dropping event (request row may be missing)",
                     );
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -536,7 +562,7 @@ impl RequestEventBus for InMemoryBus {
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
-                        "lifecycle pricing subscriber mpsc full; dropping event (shadow cost may be missing)",
+                        "lifecycle pricing subscriber mpsc full; dropping event (pricing may be missing)",
                     );
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -571,7 +597,7 @@ impl RequestEventBus for InMemoryBus {
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
-                        "lifecycle cache observation subscriber mpsc full; dropping event (shadow cache_state may be missing)",
+                        "lifecycle cache observation subscriber mpsc full; dropping event (prompt cache observations may be missing)",
                     );
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -671,6 +697,27 @@ impl RequestEventBus for InMemoryBus {
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     tracing::debug!("lifecycle cache hit/miss subscriber mpsc closed");
+                }
+            }
+        }
+        if let LifecycleEvent::PromptCacheObservationsProduced { .. } = &event
+            && let Some(tx) = prompt_cache_observation_tx
+        {
+            match tx.try_send(event.clone()) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(dropped)) => {
+                    cc_lb_observability::increment_dropped_events_by(
+                        "lifecycle_prompt_cache_observation_full",
+                        1,
+                    );
+                    tracing::warn!(
+                        kind = dropped.kind(),
+                        event_id = %dropped.event_id(),
+                        "lifecycle prompt cache observation subscriber mpsc full; dropping event (prompt cache observation may be missing)",
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::debug!("lifecycle prompt cache observation subscriber mpsc closed");
                 }
             }
         }

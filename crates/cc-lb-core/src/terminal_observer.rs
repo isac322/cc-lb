@@ -30,6 +30,7 @@ use std::time::Instant;
 
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_plugin_api::InternalError;
+use cc_lb_storage_api::types::PrincipalKindLite;
 use http::StatusCode;
 use uuid::Uuid;
 
@@ -45,6 +46,7 @@ use crate::event_bus::RequestEventBus;
 #[allow(dead_code)]
 pub(crate) mod error_codes {
     pub(crate) const BODY_TOO_LARGE: &str = "body_too_large";
+    pub(crate) const INVALID_JSON: &str = "invalid_json";
     pub(crate) const AUTHENTICATION_FAILED: &str = "authentication_failed";
     pub(crate) const PRINCIPAL_MISSING: &str = "principal_missing";
     pub(crate) const ROUTER_PIPELINE_UNAVAILABLE: &str = "router_pipeline_unavailable";
@@ -118,6 +120,11 @@ impl LifecycleContext {
         state.error_code = Some(error_code);
     }
 
+    pub(crate) fn set_success_status(&self, status: StatusCode) {
+        let mut state = self.lock_state();
+        state.status = status.as_u16();
+    }
+
     pub(crate) fn set_termination_timings(
         &self,
         limit_reconcile_ms: Option<u64>,
@@ -157,11 +164,11 @@ impl LifecycleContext {
         self.finish();
     }
 
-    /// Publish the Phase-2 shadow `RequestStarted` lifecycle event.
+    /// Publish the `RequestStarted` lifecycle event.
     ///
     /// Should be called exactly once at handler entry, after the request has
     /// been parsed enough to know whether the client asked for a streaming
-    /// response. Legacy telemetry path is unaffected.
+    /// response.
     pub(crate) fn emit_request_started(&self, stream: bool) {
         let request_id = self.lock_state().request_id.clone();
         self.inner
@@ -174,14 +181,38 @@ impl LifecycleContext {
             });
     }
 
-    /// Publish an arbitrary Phase-2 shadow lifecycle event on the advisory bus.
+    /// Publish a lifecycle event on the bus.
     ///
     /// Call sites construct the event with `event_id: self.event_id().to_owned()`.
     /// This is fire-and-forget: overflow drops the event and increments the
-    /// bus-side drop counter. Legacy telemetry path is unaffected regardless
-    /// of whether the event is delivered.
+    /// bus-side drop counter.
     pub(crate) fn emit_lifecycle(&self, event: LifecycleEvent) {
         self.inner.bus.publish_lifecycle(event);
+    }
+
+    pub(crate) fn emit_authentication_completed(
+        &self,
+        principal_id: String,
+        principal_kind: PrincipalKindLite,
+    ) {
+        self.inner
+            .bus
+            .publish_lifecycle(LifecycleEvent::AuthenticationCompleted {
+                event_id: self.inner.event_id.clone(),
+                principal_id,
+                principal_kind,
+            });
+    }
+
+    pub(crate) fn emit_provider_error(&self, code: &str, message: &str, source: &str) {
+        self.inner
+            .bus
+            .publish_lifecycle(LifecycleEvent::ProviderErrorObserved {
+                event_id: self.inner.event_id.clone(),
+                code: code.to_owned(),
+                message: message.to_owned(),
+                source: source.to_owned(),
+            });
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, TerminalState> {

@@ -1,13 +1,9 @@
-//! Phase-5 pricing subscriber.
+//! Pricing subscriber.
 //!
-//! Consumes the advisory `LifecycleEvent` stream, tracks `(model,
-//! upstream_kind, usage)` per event_id, and on `RequestTerminated` emits a
-//! derived `LifecycleEvent::Priced` back onto the same bus. The assembler
-//! (Phase 3) merges `Priced` events into the shadow row's cost columns.
-//!
-//! Legacy pricing path (`finish_success_response` and `relay_response`)
-//! remains authoritative in Phase 5. The subscriber is advisory: it
-//! populates the shadow row so Phase 6 can diff.
+//! Consumes the `LifecycleEvent` stream, tracks `(model, upstream_kind,
+//! usage)` per `event_id`, and on `RequestTerminated` emits a derived
+//! `LifecycleEvent::Priced` back onto the same bus. The event assembler
+//! merges `Priced` events into the request row's cost columns.
 //!
 //! ## Backpressure
 //!

@@ -1,9 +1,9 @@
-//! Phase-5 cache hit/miss subscriber.
+//! Cache hit/miss subscriber.
 //!
-//! Reproduces the inline handler cache hit/miss counter emissions
-//! (`inc_cache_hit` / `inc_cache_miss`) off the LifecycleEvent stream.
-//! Legacy inline path remains authoritative in Phase 5; Phase 6e deletes
-//! it and flips this subscriber's default.
+//! Owns `inc_cache_hit` / `inc_cache_miss` counter emissions off the
+//! `LifecycleEvent` stream. Consumes `RequestStarted`, `UpstreamAttempt`,
+//! `UsageObserved` / `StreamCompleted`, and `RequestTerminated` per
+//! `event_id`; fires on termination when cache tokens indicate a hit.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -222,4 +222,106 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
         "outcome" => "cap_evicted"
     )
     .increment(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cc_lb_lifecycle::{
+        CacheBreakpointLite, CacheBreakpointSourceLite, ParseInfo, RouteInfo, TerminationReason,
+        UsageSnapshot, UsageSource,
+    };
+    use uuid::Uuid;
+
+    fn eid(s: &str) -> EventId {
+        s.to_owned()
+    }
+
+    fn cache_breakpoint() -> CacheBreakpointLite {
+        CacheBreakpointLite {
+            block_index: 0,
+            source: CacheBreakpointSourceLite::Message,
+            path: "/messages/0/content/0".into(),
+            message_index: Some(0),
+            ttl: Some("5m".into()),
+            prefix_hash: "prefix-a".into(),
+            prefix_token_count: 1_200,
+        }
+    }
+
+    fn parse_completed(event_id: &str) -> LifecycleEvent {
+        LifecycleEvent::ParseCompleted {
+            event_id: eid(event_id),
+            result: Ok(ParseInfo {
+                model: Some("claude-sonnet-4".into()),
+                cache_breakpoints: vec![cache_breakpoint()],
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn route_completed(event_id: &str) -> LifecycleEvent {
+        LifecycleEvent::RouteCompleted {
+            event_id: eid(event_id),
+            result: Ok(RouteInfo {
+                upstream_id: Uuid::from_u128(3),
+                upstream_name: "upstream-a".into(),
+                model: Some("claude-sonnet-4".into()),
+                upstream_kind: None,
+                route_ms: None,
+                routing_trace: None,
+                predicted_cache_read_tokens: Some(100),
+            }),
+            routing_trace: None,
+        }
+    }
+
+    fn terminated(event_id: &str) -> LifecycleEvent {
+        LifecycleEvent::RequestTerminated {
+            event_id: eid(event_id),
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 12,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminated_after_usage_sequence_records_cache_hit_metric() {
+        let (tx, rx) = mpsc::channel(16);
+        let handle = spawn_lifecycle_cache_hit_miss_subscriber(rx);
+
+        tx.send(parse_completed("cache-a")).await.unwrap();
+        tx.send(route_completed("cache-a")).await.unwrap();
+        tx.send(LifecycleEvent::UsageObserved {
+            event_id: eid("cache-a"),
+            usage: UsageSnapshot {
+                cache_read_input_tokens: 32,
+                ..Default::default()
+            },
+            source: UsageSource::NonStreamBody,
+        })
+        .await
+        .unwrap();
+        tx.send(terminated("cache-a")).await.unwrap();
+        drop(tx);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminated_without_usage_shuts_down_cleanly() {
+        let (tx, rx) = mpsc::channel(16);
+        let handle = spawn_lifecycle_cache_hit_miss_subscriber(rx);
+
+        tx.send(parse_completed("cache-b")).await.unwrap();
+        tx.send(route_completed("cache-b")).await.unwrap();
+        tx.send(terminated("cache-b")).await.unwrap();
+        drop(tx);
+        handle.shutdown().await;
+    }
 }

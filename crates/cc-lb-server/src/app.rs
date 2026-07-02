@@ -914,12 +914,6 @@ async fn build_app_with_storage_inner(
         notify_listener.run().await;
     }));
     let in_memory_bus = cc_lb_core::InMemoryBus::new();
-    if config.lifecycle_shadow_writer.enabled {
-        tracing::warn!(
-            "config.lifecycle_shadow_writer.enabled is deprecated and ignored; the RFC-0002 \
-             assembler is the only writer"
-        );
-    }
     let lifecycle_event_logger_rx =
         in_memory_bus.attach_lifecycle_writer(cc_lb_core::DEFAULT_LIFECYCLE_WRITER_CAPACITY);
     let lifecycle_assembler_rx = Some(
@@ -997,6 +991,17 @@ async fn build_app_with_storage_inner(
     } else {
         None
     };
+    let lifecycle_prompt_cache_observation_rx =
+        if config.lifecycle_prompt_cache_observation_subscriber.enabled
+            && config.prompt_cache_shadow.enabled
+            && initial_view.prompt_cache_observation_cache_opt().is_some()
+        {
+            Some(in_memory_bus.attach_lifecycle_prompt_cache_observation(
+                cc_lb_core::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY,
+            ))
+        } else {
+            None
+        };
     let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(in_memory_bus);
     let lifecycle_event_logger_handle =
         cc_lb_core::spawn_lifecycle_event_logger(lifecycle_event_logger_rx);
@@ -1053,6 +1058,20 @@ async fn build_app_with_storage_inner(
                 config.prompt_cache_shadow.enabled,
             )
         });
+    let lifecycle_prompt_cache_observation_subscriber_handle =
+        lifecycle_prompt_cache_observation_rx.and_then(|rx| {
+            initial_view
+                .prompt_cache_observation_cache_opt()
+                .cloned()
+                .map(|cache| {
+                    cc_lb_core::spawn_lifecycle_prompt_cache_observation_subscriber(
+                        rx,
+                        config.lifecycle_prompt_cache_observation_subscriber.clone(),
+                        cache,
+                        initial_view.prompt_cache_observation_sink_opt().cloned(),
+                    )
+                })
+        });
     let lifecycle_event_logger_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_core::LifecycleEventLoggerHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(lifecycle_event_logger_handle)));
@@ -1105,6 +1124,11 @@ async fn build_app_with_storage_inner(
     > = Arc::new(tokio::sync::Mutex::new(
         lifecycle_prompt_cache_drift_subscriber_handle,
     ));
+    let lifecycle_prompt_cache_observation_subscriber_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::PromptCacheObservationSubscriberHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(
+        lifecycle_prompt_cache_observation_subscriber_handle,
+    ));
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
         dynamic_view_holder.clone(),
@@ -1112,9 +1136,7 @@ async fn build_app_with_storage_inner(
         clock.clone(),
     );
     lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
-    lifecycle = lifecycle.with_request_event_storage(storage.clone());
     lifecycle = lifecycle.with_event_bus(event_bus.clone());
-    lifecycle = lifecycle.with_upstream_rate_limit_sink(upstream_rate_limit_sink);
     lifecycle = lifecycle.with_subscription_quota_sink(subscription_quota_sink.clone());
     if let Some(subscription_metadata_hook) = subscription_metadata_hook.clone() {
         lifecycle = lifecycle.with_subscription_metadata_hook(subscription_metadata_hook);
@@ -1310,6 +1332,19 @@ async fn build_app_with_storage_inner(
             let prompt_cache_drift_slot = prompt_cache_drift_slot.clone();
             async move {
                 let mut guard = prompt_cache_drift_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let prompt_cache_observation_slot =
+            lifecycle_prompt_cache_observation_subscriber_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let prompt_cache_observation_slot = prompt_cache_observation_slot.clone();
+            async move {
+                let mut guard = prompt_cache_observation_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }

@@ -1,9 +1,9 @@
-//! Phase-5 api-key metrics subscriber.
+//! API-key metrics subscriber.
 //!
-//! Reproduces the inline handler metric emissions
-//! (`record_api_key_request_metric` + `record_api_key_usage_metrics`) off
-//! the LifecycleEvent stream. Legacy inline path remains authoritative in
-//! Phase 5; Phase 6d deletes it and flips this subscriber's default.
+//! Owns `record_api_key_request_metric` and `record_api_key_usage_metrics`
+//! emissions off the `LifecycleEvent` stream. Consumes `RequestStarted`,
+//! `UsageObserved` / `StreamCompleted`, and `RequestTerminated` per
+//! `event_id` and fires the metrics on termination.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -151,6 +151,21 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.principal_id = Some(info.principal_id);
             partial.key_id = info.key_id;
         }
+        LifecycleEvent::AuthCompleted {
+            result:
+                Err(cc_lb_lifecycle::AuthFailure::AuthenticationFailed {
+                    reason: Some(reason),
+                    ..
+                }),
+            ..
+        } => {
+            metrics::counter!(
+                "cclb_key_auth_failures_total",
+                "reason" => reason
+            )
+            .increment(1);
+        }
+        LifecycleEvent::AuthCompleted { result: Err(_), .. } => {}
         LifecycleEvent::ParseCompleted {
             result: Ok(info), ..
         } => {
@@ -299,4 +314,97 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
         "outcome" => "cap_evicted"
     )
     .increment(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cc_lb_lifecycle::{
+        AuthInfo, CostBreakdown, ParseInfo, TerminationReason, UsageSnapshot, UsageSource,
+    };
+
+    fn eid(s: &str) -> EventId {
+        s.to_owned()
+    }
+
+    fn terminated(event_id: &str, status: u16) -> LifecycleEvent {
+        LifecycleEvent::RequestTerminated {
+            event_id: eid(event_id),
+            reason: TerminationReason::Success,
+            client_status: status,
+            duration_ms: 42,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
+        }
+    }
+
+    fn bus() -> Arc<dyn RequestEventBus> {
+        Arc::new(crate::event_bus::InMemoryBus::new())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminated_after_key_and_usage_sequence_emits_metrics() {
+        let (tx, rx) = mpsc::channel(16);
+        let handle = spawn_lifecycle_api_key_metrics_subscriber(rx, bus());
+
+        tx.send(LifecycleEvent::AuthCompleted {
+            event_id: eid("api-key-a"),
+            result: Ok(AuthInfo {
+                principal_id: "principal-a".into(),
+                key_id: Some("key-a".into()),
+                principal_kind: Some("api_key".into()),
+                auth_ms: Some(3),
+            }),
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::ParseCompleted {
+            event_id: eid("api-key-a"),
+            result: Ok(ParseInfo {
+                model: Some("claude-sonnet-4".into()),
+                ..Default::default()
+            }),
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::UsageObserved {
+            event_id: eid("api-key-a"),
+            usage: UsageSnapshot {
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_creation_input_tokens: 3,
+                cache_read_input_tokens: 4,
+                ..Default::default()
+            },
+            source: UsageSource::NonStreamBody,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::Priced {
+            event_id: eid("api-key-a"),
+            cost: CostBreakdown {
+                total_micros: Some(77),
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap();
+        tx.send(terminated("api-key-a", 200)).await.unwrap();
+        drop(tx);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminated_without_partial_shuts_down_cleanly() {
+        let (tx, rx) = mpsc::channel(16);
+        let handle = spawn_lifecycle_api_key_metrics_subscriber(rx, bus());
+
+        tx.send(terminated("api-key-b", 499)).await.unwrap();
+        drop(tx);
+        handle.shutdown().await;
+    }
 }

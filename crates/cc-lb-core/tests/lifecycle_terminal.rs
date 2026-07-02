@@ -32,7 +32,10 @@ use http::StatusCode;
 use url::Url;
 use uuid::Uuid;
 
-use common::{DispatchMode, MockDispatch, TestAuthn, TestState, collect_body, messages_request};
+use common::{
+    DispatchMode, MockDispatch, TestAuthn, TestLifecycleBus, TestState, collect_body,
+    messages_request,
+};
 
 #[tokio::test]
 async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dyn std::error::Error>>
@@ -44,6 +47,8 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
     let filter_calls = Arc::new(Mutex::new(Vec::new()));
     let _dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&_dir, "lifecycle-terminal.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_terminal(
         TerminalStrategy::FirstPick,
         vec![Arc::new(KeepFilter {
@@ -57,7 +62,7 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
         ],
         Arc::clone(&choices),
     )
-    .with_request_event_storage(Arc::clone(&storage) as Arc<dyn StorageTrait>)
+    .with_event_bus(test_bus.bus_arc())
     .with_static_limit_subject(
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
@@ -78,7 +83,7 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
         choices.lock().expect("choices lock").as_slice(),
         &["second".to_owned()]
     );
-    let events = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    let events = wait_for_events(storage.as_ref(), 1).await?;
     let trace = events
         .first()
         .and_then(|event| event.routing_trace.as_ref())
@@ -104,6 +109,23 @@ async fn sqlite_storage(
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock)).await?;
     storage.initialize(BackendKind::Sqlite).await?;
     Ok(storage)
+}
+
+async fn wait_for_events(
+    storage: &dyn RequestEventStore,
+    expected: usize,
+) -> Result<Vec<cc_lb_storage_api::types::RequestEvent>, Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let events = RequestEventStore::query_request_events(storage, 0, u64::MAX, 10).await?;
+        if events.len() >= expected {
+            return Ok(events);
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("expected {expected} request event(s), got {}", events.len());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
-//! RFC-0002 Phase 8 shadow subscriber that reconciles limit reservations
-//! by consuming `LifecycleEvent`s instead of running inline on the handler.
+//! Limit-reservation reconcile subscriber.
 //!
-//! The subscriber tracks (per `event_id`):
+//! Reconciles limit reservations by consuming `LifecycleEvent`s instead
+//! of running inline on the handler. Tracks (per `event_id`):
 //! - the reservation id carried on [`LifecycleEvent::LimitDecision`],
 //! - the latest [`UsageSnapshot`] observed on
 //!   [`LifecycleEvent::UsageObserved`] and [`LifecycleEvent::StreamCompleted`],
@@ -9,13 +9,13 @@
 //!
 //! On [`LifecycleEvent::RequestTerminated`], the subscriber either calls
 //! [`LimitEngine::reconcile_by_id`] (`authoritative` mode) or increments a
-//! `would_reconcile` counter (`shadow` mode). Shadow mode is the safe
-//! default for Phase 8; it lets us prove the subscriber sees every reserved
-//! reservation before the handler stops calling `reconcile` inline.
+//! `would_reconcile` counter (`shadow` mode). Operators run shadow first
+//! to prove the subscriber observes every reservation before the handler
+//! stops calling `reconcile` inline.
 //!
-//! Orphan protection is handled by the Phase 7 TTL sweeper — it evicts
-//! reservations older than `ttl_secs` regardless of whether the subscriber
-//! saw a `RequestTerminated` for them.
+//! Orphan protection is handled by the `LimitEngine`'s TTL sweeper — it
+//! evicts reservations older than `ttl_secs` regardless of whether the
+//! subscriber saw a `RequestTerminated` for them.
 
 use std::collections::HashMap;
 use std::sync::Arc;

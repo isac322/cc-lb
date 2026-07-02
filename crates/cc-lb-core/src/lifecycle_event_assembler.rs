@@ -8,7 +8,7 @@ use cc_lb_lifecycle::{
 };
 use cc_lb_plugin_api::{InternalError, RoutingTrace};
 use cc_lb_storage_api::types::{
-    RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState,
+    RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState, RequestEventUpstream,
 };
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use tokio::sync::{mpsc, oneshot};
@@ -81,10 +81,6 @@ struct Partial {
     parse: Option<ParseInfo>,
     auth: Option<AuthInfo>,
     route: Option<RouteInfo>,
-    limit_reservation_id: Option<String>,
-    limit_amount: Option<u64>,
-    upstream_id: Option<Uuid>,
-    upstream_attempt_num: Option<u32>,
     upstream_response_status: Option<u16>,
     usage: UsageSnapshot,
     usage_seen: bool,
@@ -492,25 +488,14 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         LifecycleEvent::LimitDecision {
             decision:
                 cc_lb_lifecycle::LimitDecisionKind::Reserved {
-                    reservation_id,
-                    amount,
-                    limit_reserve_ms,
+                    limit_reserve_ms, ..
                 },
             ..
         } => {
-            partial.limit_reservation_id = Some(reservation_id);
-            partial.limit_amount = Some(amount);
             partial.limit_reserve_ms = limit_reserve_ms;
         }
         LifecycleEvent::LimitDecision { .. } => {}
-        LifecycleEvent::UpstreamAttempt {
-            attempt_num,
-            upstream_id,
-            ..
-        } => {
-            partial.upstream_id = Some(upstream_id);
-            partial.upstream_attempt_num = Some(attempt_num);
-        }
+        LifecycleEvent::UpstreamAttempt { .. } => {}
         LifecycleEvent::UpstreamResponseStarted {
             status,
             headers: _,
@@ -610,19 +595,21 @@ fn finalize_base(
             )
         })
         .unwrap_or_default();
-    let (upstream_id, upstream_name, route_model, route_ms, route_routing_trace) = partial
-        .route
-        .as_ref()
-        .map(|r| {
-            (
-                Some(r.upstream_id),
-                Some(r.upstream_name.clone()),
-                r.model.clone(),
-                r.route_ms,
-                r.routing_trace.clone(),
-            )
-        })
-        .unwrap_or_default();
+    let (upstream_id, upstream_name, upstream, route_model, route_ms, route_routing_trace) =
+        partial
+            .route
+            .as_ref()
+            .map(|r| {
+                (
+                    Some(r.upstream_id),
+                    Some(r.upstream_name.clone()),
+                    Some(RequestEventUpstream::AnthropicDirect),
+                    r.model.clone(),
+                    r.route_ms,
+                    r.routing_trace.clone(),
+                )
+            })
+            .unwrap_or_default();
     let model = route_model.or_else(|| partial.parse.as_ref().and_then(|p| p.model.clone()));
     let auth_ms = partial.auth.as_ref().and_then(|a| a.auth_ms);
     let routing_trace = partial.routing_trace.clone().or(route_routing_trace);
@@ -649,6 +636,7 @@ fn finalize_base(
         principal_id,
         key_id,
         principal_kind,
+        upstream,
         upstream_id,
         upstream_name,
         model,
@@ -1009,7 +997,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn ignores_unused_auth_failure_variant() {
-        let _ = AuthFailure::AuthenticationFailed { http_status: 401 };
+        let _ = AuthFailure::AuthenticationFailed {
+            http_status: 401,
+            reason: None,
+        };
         let _ = StreamSuccess {
             usage: UsageSnapshot::default(),
             sse_event_count: 0,

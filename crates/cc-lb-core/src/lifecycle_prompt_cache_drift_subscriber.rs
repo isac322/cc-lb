@@ -1,16 +1,13 @@
-//! Phase-5 prompt cache drift subscriber.
+//! Prompt cache drift subscriber.
 //!
-//! Reproduces the inline handler emissions related to the prompt-cache
-//! shadow-write pipeline that ARE observable from the LifecycleEvent
+//! Owns the prompt-cache metrics observable from the `LifecycleEvent`
 //! stream:
-//!   * `observe_prompt_cache_token_drift` (cc_lb_cache_token_drift
-//!     histogram) - non-stream and stream call sites
-//!   * `inc_cache_observation_dropped(STATUS_4XX)` for the handler-side
-//!     4xx branch (lifecycle.rs:1668)
+//!   * `cc_lb_cache_token_drift` histogram via
+//!     `observe_prompt_cache_token_drift` (non-stream and stream)
+//!   * `inc_cache_observation_dropped(STATUS_4XX)` for the 4xx branch
 //!
-//! Not reproduced (these fire from inside the prompt-cache observation
-//! pipeline, not observable from lifecycle events, and remain inline for
-//! Phase 6f):
+//! Not owned (these fire from inside the prompt-cache observation
+//! pipeline and are not observable from lifecycle events):
 //!   * `inc_cache_observation_dropped` calls inside
 //!     `prompt_cache_observation_context` (context-build failures)
 //!   * `inc_cache_observation_dropped` inside
@@ -256,4 +253,109 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
         "outcome" => "cap_evicted"
     )
     .increment(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cc_lb_lifecycle::{
+        CacheBreakpointLite, CacheBreakpointSourceLite, ParseInfo, RouteInfo, TerminationReason,
+        UsageSnapshot, UsageSource,
+    };
+
+    fn eid(s: &str) -> EventId {
+        s.to_owned()
+    }
+
+    fn upstream_id() -> Uuid {
+        Uuid::from_u128(4)
+    }
+
+    fn cache_breakpoint() -> CacheBreakpointLite {
+        CacheBreakpointLite {
+            block_index: 0,
+            source: CacheBreakpointSourceLite::Message,
+            path: "/messages/0/content/0".into(),
+            message_index: Some(0),
+            ttl: Some("5m".into()),
+            prefix_hash: "prefix-a".into(),
+            prefix_token_count: 1_200,
+        }
+    }
+
+    fn parse_completed(event_id: &str) -> LifecycleEvent {
+        LifecycleEvent::ParseCompleted {
+            event_id: eid(event_id),
+            result: Ok(ParseInfo {
+                model: Some("claude-sonnet-4".into()),
+                cache_breakpoints: vec![cache_breakpoint()],
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn route_completed(event_id: &str) -> LifecycleEvent {
+        LifecycleEvent::RouteCompleted {
+            event_id: eid(event_id),
+            result: Ok(RouteInfo {
+                upstream_id: upstream_id(),
+                upstream_name: "upstream-a".into(),
+                model: Some("claude-sonnet-4".into()),
+                upstream_kind: None,
+                route_ms: None,
+                routing_trace: None,
+                predicted_cache_read_tokens: Some(30),
+            }),
+            routing_trace: None,
+        }
+    }
+
+    fn terminated(event_id: &str, status: u16) -> LifecycleEvent {
+        LifecycleEvent::RequestTerminated {
+            event_id: eid(event_id),
+            reason: TerminationReason::Success,
+            client_status: status,
+            duration_ms: 12,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminated_after_usage_sequence_observes_token_drift() {
+        let (tx, rx) = mpsc::channel(16);
+        let handle = spawn_lifecycle_prompt_cache_drift_subscriber(rx, true);
+
+        tx.send(parse_completed("drift-a")).await.unwrap();
+        tx.send(route_completed("drift-a")).await.unwrap();
+        tx.send(LifecycleEvent::UsageObserved {
+            event_id: eid("drift-a"),
+            usage: UsageSnapshot {
+                cache_read_input_tokens: 45,
+                ..Default::default()
+            },
+            source: UsageSource::NonStreamBody,
+        })
+        .await
+        .unwrap();
+        tx.send(terminated("drift-a", 200)).await.unwrap();
+        drop(tx);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_error_with_context_shuts_down_cleanly() {
+        let (tx, rx) = mpsc::channel(16);
+        let handle = spawn_lifecycle_prompt_cache_drift_subscriber(rx, true);
+
+        tx.send(parse_completed("drift-b")).await.unwrap();
+        tx.send(route_completed("drift-b")).await.unwrap();
+        tx.send(terminated("drift-b", 400)).await.unwrap();
+        drop(tx);
+        handle.shutdown().await;
+    }
 }

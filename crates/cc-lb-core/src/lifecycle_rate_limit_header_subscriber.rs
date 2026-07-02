@@ -1,16 +1,11 @@
-//! Phase-5 upstream rate-limit header subscriber.
+//! Upstream rate-limit header subscriber.
 //!
-//! Consumes `LifecycleEvent::UpstreamAttempt` (to correlate `upstream_id`
-//! with the event) and `LifecycleEvent::UpstreamResponseStarted` (to read
-//! `anthropic-ratelimit-*` headers). Reconstructs a `HeaderMap`,
-//! parses observations via the existing `observe_rate_limits`, applies
-//! them to the shared `UpstreamRateLimitCache`, and enqueues durable
-//! records into `UpstreamRateLimitSink` for the writer task.
-//!
-//! Legacy inline path (`Lifecycle::record_upstream_rate_limit_observations`)
-//! remains authoritative in Phase 5. This subscriber is advisory in
-//! shadow mode; Phase 6a deletes the inline call and flips the subscriber
-//! default.
+//! Consumes `LifecycleEvent::UpstreamAttempt` to correlate `upstream_id`
+//! with the event, then `LifecycleEvent::UpstreamResponseStarted` to read
+//! `anthropic-ratelimit-*` headers. Reconstructs a `HeaderMap`, parses
+//! observations via `observe_rate_limits`, applies them to the shared
+//! `UpstreamRateLimitCache`, and enqueues durable records into
+//! `UpstreamRateLimitSink` for the writer task.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -264,4 +259,127 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
         "outcome" => "cap_evicted"
     )
     .increment(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cc_lb_plugin_api::RateLimitKind;
+    use std::collections::BTreeMap;
+
+    fn eid(s: &str) -> EventId {
+        s.to_owned()
+    }
+
+    fn response_started(event_id: &str, headers: HeaderSnapshot) -> LifecycleEvent {
+        LifecycleEvent::UpstreamResponseStarted {
+            event_id: eid(event_id),
+            status: 200,
+            headers,
+            bulkhead_wait_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
+            shape_ms: None,
+            sign_ms: None,
+            upstream_ttfb_ms: None,
+        }
+    }
+
+    fn rate_limit_headers() -> HeaderSnapshot {
+        HeaderSnapshot {
+            anthropic_headers: BTreeMap::from([
+                (
+                    "anthropic-ratelimit-requests-limit".to_owned(),
+                    "1000".to_owned(),
+                ),
+                (
+                    "anthropic-ratelimit-requests-remaining".to_owned(),
+                    "997".to_owned(),
+                ),
+                (
+                    "anthropic-ratelimit-requests-reset".to_owned(),
+                    "2026-05-20T00:00:01Z".to_owned(),
+                ),
+                (
+                    "anthropic-ratelimit-tokens-limit".to_owned(),
+                    "100000".to_owned(),
+                ),
+                (
+                    "anthropic-ratelimit-tokens-remaining".to_owned(),
+                    "99990".to_owned(),
+                ),
+                (
+                    "anthropic-ratelimit-tokens-reset".to_owned(),
+                    "2026-05-20T00:00:02Z".to_owned(),
+                ),
+            ]),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn response_after_attempt_updates_cache_and_sink() {
+        let (tx, rx) = mpsc::channel(16);
+        let upstream_id = Uuid::from_u128(1);
+        let cache = Arc::new(RwLock::new(UpstreamRateLimitCache::default()));
+        let (sink, mut sink_rx) = UpstreamRateLimitSink::with_capacity(16);
+        let handle = spawn_lifecycle_rate_limit_header_subscriber(rx, cache.clone(), Some(sink));
+
+        tx.send(LifecycleEvent::UpstreamAttempt {
+            event_id: eid("rate-a"),
+            attempt_num: 1,
+            upstream_id,
+        })
+        .await
+        .unwrap();
+        tx.send(response_started("rate-a", rate_limit_headers()))
+            .await
+            .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let cache_guard = cache.read();
+        let snapshots = cache_guard.snapshots.get(&upstream_id).unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert!(snapshots.iter().any(|snapshot| {
+            snapshot.kind == RateLimitKind::Requests
+                && snapshot.limit == Some(1000)
+                && snapshot.remaining == Some(997)
+        }));
+        assert!(snapshots.iter().any(|snapshot| {
+            snapshot.kind == RateLimitKind::Tokens
+                && snapshot.limit == Some(100000)
+                && snapshot.remaining == Some(99990)
+        }));
+        drop(cache_guard);
+
+        let mut sink_records = Vec::new();
+        while let Ok(record) = sink_rx.try_recv() {
+            sink_records.push(record);
+        }
+        assert_eq!(sink_records.len(), 2);
+        assert!(
+            sink_records
+                .iter()
+                .all(|record| record.upstream_id == upstream_id)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn response_without_attempt_is_ignored() {
+        let (tx, rx) = mpsc::channel(16);
+        let cache = Arc::new(RwLock::new(UpstreamRateLimitCache::default()));
+        let (sink, mut sink_rx) = UpstreamRateLimitSink::with_capacity(16);
+        let handle = spawn_lifecycle_rate_limit_header_subscriber(rx, cache.clone(), Some(sink));
+
+        tx.send(response_started("rate-b", rate_limit_headers()))
+            .await
+            .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        assert!(cache.read().snapshots.is_empty());
+        assert!(sink_rx.try_recv().is_err());
+    }
 }

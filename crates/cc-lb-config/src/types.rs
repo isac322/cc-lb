@@ -62,8 +62,6 @@ pub struct Config {
     #[serde(default)]
     pub prompt_cache_shadow: PromptCacheShadowConfig,
     #[serde(default)]
-    pub lifecycle_shadow_writer: LifecycleShadowWriterConfig,
-    #[serde(default)]
     pub lifecycle_hook_adapter: LifecycleHookAdapterConfig,
     #[serde(default)]
     pub lifecycle_pricing_subscriber: LifecyclePricingSubscriberConfig,
@@ -81,6 +79,9 @@ pub struct Config {
     pub lifecycle_cache_hit_miss_subscriber: LifecycleCacheHitMissSubscriberConfig,
     #[serde(default)]
     pub lifecycle_prompt_cache_drift_subscriber: LifecyclePromptCacheDriftSubscriberConfig,
+    #[serde(default)]
+    pub lifecycle_prompt_cache_observation_subscriber:
+        LifecyclePromptCacheObservationSubscriberConfig,
     #[serde(default)]
     pub limit_reservation_ttl: LimitReservationTtlConfig,
     #[serde(default)]
@@ -656,32 +657,43 @@ impl Default for PromptCacheShadowConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecycleShadowWriterConfig {
-    #[serde(default)]
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LifecycleHookAdapterConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+impl Default for LifecycleHookAdapterConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LifecyclePricingSubscriberConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+impl Default for LifecyclePricingSubscriberConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LifecycleCacheObservationSubscriberConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl Default for LifecycleCacheObservationSubscriberConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -757,6 +769,19 @@ pub struct LifecyclePromptCacheDriftSubscriberConfig {
 }
 
 impl Default for LifecyclePromptCacheDriftSubscriberConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecyclePromptCacheObservationSubscriberConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for LifecyclePromptCacheObservationSubscriberConfig {
     fn default() -> Self {
         Self { enabled: true }
     }

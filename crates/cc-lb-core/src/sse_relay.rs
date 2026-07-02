@@ -9,6 +9,7 @@ use std::time::{Duration, Instant as StdInstant};
 
 use axum::body::Body;
 use bytes::{Bytes, BytesMut};
+use cc_lb_lifecycle::{EventId, LifecycleEvent};
 use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent, UpstreamDialect};
 use eventsource_stream::{Event, EventStream, EventStreamError};
 use futures_core::Stream;
@@ -22,10 +23,10 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, Sleep, sleep};
 
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
+use crate::event_bus::RequestEventBus;
 use crate::lifecycle::{
-    DecodedPromptCacheObservation, PromptCacheObservationContext, PromptCacheUsage,
-    decode_prompt_cache_observations, enqueue_prompt_cache_observations,
-    upsert_prompt_cache_observations,
+    PromptCacheObservationContext, PromptCacheObservationDecodeResult, PromptCacheUsage,
+    decode_prompt_cache_observations_pure, prompt_cache_observations_to_wire,
 };
 use crate::sse_error_frame::{make_error_frame, make_error_frame_from_json};
 
@@ -40,6 +41,13 @@ pub struct SseRelay {
     pub upstream_kind: Option<UpstreamKind>,
     pub streaming_usage: Arc<Mutex<StreamingUsage>>,
     pub prompt_cache_observation_context: Option<PromptCacheObservationContext>,
+    pub prompt_cache_observation_event_emitter: Option<PromptCacheObservationEventEmitter>,
+}
+
+#[derive(Clone)]
+pub struct PromptCacheObservationEventEmitter {
+    pub event_id: EventId,
+    pub bus: Arc<dyn RequestEventBus>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -99,6 +107,7 @@ struct RelayRuntime {
     upstream_kind: Option<UpstreamKind>,
     streaming_usage: Arc<Mutex<StreamingUsage>>,
     prompt_cache_observation_context: Option<PromptCacheObservationContext>,
+    prompt_cache_observation_event_emitter: Option<PromptCacheObservationEventEmitter>,
     started: StdInstant,
 }
 
@@ -186,6 +195,7 @@ impl SseRelay {
             upstream_kind: self.upstream_kind,
             streaming_usage: self.streaming_usage,
             prompt_cache_observation_context: self.prompt_cache_observation_context,
+            prompt_cache_observation_event_emitter: self.prompt_cache_observation_event_emitter,
             started: StdInstant::now(),
         }
     }
@@ -268,7 +278,7 @@ impl RelayRuntime {
         let mut buffer = BytesMut::new();
         let mut batcher = SseBatcher::new(self.batch);
         let mut usage = self.current_usage();
-        let mut prompt_cache_observations: Vec<DecodedPromptCacheObservation> = Vec::new();
+        let mut prompt_cache_decode = PromptCacheObservationDecodeResult::default();
         let mut prompt_cache_observations_buffered = false;
         let mut deadline = Box::pin(sleep(self.batch.max_age));
         reset_deadline(&mut deadline, self.batch.max_age);
@@ -302,7 +312,7 @@ impl RelayRuntime {
                                     &mut batcher,
                                     &mut deadline,
                                     &mut usage,
-                                    &mut prompt_cache_observations,
+                                    &mut prompt_cache_decode,
                                     &mut prompt_cache_observations_buffered,
                                 ).await.is_err() {
                                     self.observe_finished(client_disconnected_status(), None, None, None, None);
@@ -339,6 +349,9 @@ impl RelayRuntime {
                 }
             }
         }
+        if prompt_cache_observations_buffered && !prompt_cache_decode.observations.is_empty() {
+            self.emit_prompt_cache_observations_produced(&prompt_cache_decode, true);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -349,7 +362,7 @@ impl RelayRuntime {
         batcher: &mut SseBatcher,
         deadline: &mut Pin<Box<Sleep>>,
         usage: &mut StreamingUsage,
-        prompt_cache_observations: &mut Vec<DecodedPromptCacheObservation>,
+        prompt_cache_decode: &mut PromptCacheObservationDecodeResult,
         prompt_cache_observations_buffered: &mut bool,
     ) -> Result<(), ()> {
         while let Some(end) = crate::usage_parser::find_sse_event_end(buffer) {
@@ -367,7 +380,7 @@ impl RelayRuntime {
                             && let Some(context) = self.prompt_cache_observation_context.as_ref()
                         {
                             let now_unix_secs = context.cache.clock_now_unix_secs();
-                            *prompt_cache_observations = decode_prompt_cache_observations(
+                            *prompt_cache_decode = decode_prompt_cache_observations_pure(
                                 context,
                                 PromptCacheUsage {
                                     cache_creation_input_tokens: usage.cache_creation_input_tokens,
@@ -379,18 +392,11 @@ impl RelayRuntime {
                         }
                         if usage_update.message_stop
                             && *prompt_cache_observations_buffered
-                            && let Some(context) = self.prompt_cache_observation_context.as_ref()
+                            && self.prompt_cache_observation_context.is_some()
                         {
-                            let now_unix_secs = context.cache.clock_now_unix_secs();
-                            upsert_prompt_cache_observations(
-                                context,
-                                prompt_cache_observations,
-                                now_unix_secs,
-                            );
-                            enqueue_prompt_cache_observations(
-                                context,
-                                prompt_cache_observations,
-                                now_unix_secs,
+                            self.emit_prompt_cache_observations_produced(
+                                prompt_cache_decode,
+                                false,
                             );
                             *prompt_cache_observations_buffered = false;
                         }
@@ -413,6 +419,42 @@ impl RelayRuntime {
             }
         }
         Ok(())
+    }
+
+    fn emit_prompt_cache_observations_produced(
+        &self,
+        decode: &PromptCacheObservationDecodeResult,
+        was_aborted: bool,
+    ) {
+        let (Some(context), Some(emitter)) = (
+            self.prompt_cache_observation_context.as_ref(),
+            self.prompt_cache_observation_event_emitter.as_ref(),
+        ) else {
+            return;
+        };
+        let dropped_aborted = if was_aborted {
+            u32::try_from(decode.observations.len()).unwrap_or(u32::MAX)
+        } else {
+            0
+        };
+        emitter
+            .bus
+            .publish_lifecycle(LifecycleEvent::PromptCacheObservationsProduced {
+                event_id: emitter.event_id.clone(),
+                upstream_id: context.upstream_id,
+                canonical_model_id: context.canonical_model_id.clone(),
+                observations: if was_aborted {
+                    Vec::new()
+                } else {
+                    prompt_cache_observations_to_wire(&decode.observations)
+                },
+                dropped_below_threshold: if was_aborted {
+                    0
+                } else {
+                    decode.dropped_below_threshold
+                },
+                dropped_aborted,
+            });
     }
 
     fn error_frame_from_event(&self, event: &Event, raw_fallback: Bytes) -> Bytes {
@@ -719,6 +761,7 @@ mod tests {
     use http_body_util::BodyExt;
     use uuid::Uuid;
 
+    use crate::event_bus::{InMemoryBus, LifecycleBusReceiver};
     use crate::lifecycle::{
         PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
         PromptCacheObservationSinkLike,
@@ -732,7 +775,11 @@ mod tests {
     async fn abort_skips_observation() {
         let cache = Arc::new(RecordingPromptCacheObservationCache::default());
         let sink = Arc::new(RecordingPromptCacheObservationSink::default());
-        let relay = relay_with_context(cache, sink.clone());
+        let bus = Arc::new(InMemoryBus::new());
+        let LifecycleBusReceiver::InMemory(mut events) = bus.subscribe_lifecycle() else {
+            panic!("expected InMemory lifecycle receiver");
+        };
+        let relay = relay_with_context_with_emitter(cache, sink.clone(), bus, "sse-abort");
 
         let response = relay.into_response_from_body(Body::from(sse_event(
             "message_start",
@@ -741,6 +788,18 @@ mod tests {
         let _body = response.into_body().collect().await.expect("body collects");
 
         assert!(sink.records().is_empty());
+        let LifecycleEvent::PromptCacheObservationsProduced {
+            observations,
+            dropped_below_threshold,
+            dropped_aborted,
+            ..
+        } = events.try_recv().expect("abort event is emitted")
+        else {
+            panic!("expected prompt-cache observation event");
+        };
+        assert!(observations.is_empty());
+        assert_eq!(dropped_below_threshold, 0);
+        assert_eq!(dropped_aborted, 1);
     }
 
     #[tokio::test]
@@ -766,10 +825,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_stop_enables_enqueue() {
+    async fn message_stop_emits_observation_event() {
         let cache = Arc::new(RecordingPromptCacheObservationCache::default());
         let sink = Arc::new(RecordingPromptCacheObservationSink::default());
-        let relay = relay_with_context(cache, sink.clone());
+        let bus = Arc::new(InMemoryBus::new());
+        let LifecycleBusReceiver::InMemory(mut events) = bus.subscribe_lifecycle() else {
+            panic!("expected InMemory lifecycle receiver");
+        };
+        let relay = relay_with_context_with_emitter(cache, sink.clone(), bus, "sse-success");
         let body = format!(
             "{}{}",
             sse_event(
@@ -782,19 +845,51 @@ mod tests {
         let response = relay.into_response_from_body(Body::from(body));
         let _body = response.into_body().collect().await.expect("body collects");
 
-        let records = sink.records();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].prefix_hash, "write");
-        assert_eq!(records[0].canonical_model_id, TEST_MODEL);
-        assert_eq!(
-            records[0].hash_schema_version,
-            crate::lifecycle::HASH_SCHEMA_VERSION
-        );
+        assert!(sink.records().is_empty());
+        let LifecycleEvent::PromptCacheObservationsProduced {
+            canonical_model_id,
+            observations,
+            dropped_below_threshold,
+            dropped_aborted,
+            ..
+        } = events.try_recv().expect("success event is emitted")
+        else {
+            panic!("expected prompt-cache observation event");
+        };
+        assert_eq!(canonical_model_id, TEST_MODEL);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].prefix_hash, "write");
+        assert_eq!(dropped_below_threshold, 0);
+        assert_eq!(dropped_aborted, 0);
     }
 
     fn relay_with_context(
         cache: Arc<RecordingPromptCacheObservationCache>,
         sink: Arc<RecordingPromptCacheObservationSink>,
+    ) -> SseRelay {
+        relay_with_context_impl(cache, sink, None)
+    }
+
+    fn relay_with_context_with_emitter(
+        cache: Arc<RecordingPromptCacheObservationCache>,
+        sink: Arc<RecordingPromptCacheObservationSink>,
+        bus: Arc<InMemoryBus>,
+        event_id: &str,
+    ) -> SseRelay {
+        relay_with_context_impl(
+            cache,
+            sink,
+            Some(PromptCacheObservationEventEmitter {
+                event_id: event_id.to_owned(),
+                bus,
+            }),
+        )
+    }
+
+    fn relay_with_context_impl(
+        cache: Arc<RecordingPromptCacheObservationCache>,
+        _sink: Arc<RecordingPromptCacheObservationSink>,
+        prompt_cache_observation_event_emitter: Option<PromptCacheObservationEventEmitter>,
     ) -> SseRelay {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000231").unwrap();
         SseRelay {
@@ -810,8 +905,8 @@ mod tests {
                 cache_breakpoints: vec![cache_breakpoint(0, "write", 1_600, TtlClass::Ephemeral5m)],
                 warm_entries_at_decision: Vec::new(),
                 cache,
-                sink: Some(sink),
             }),
+            prompt_cache_observation_event_emitter,
         }
     }
 

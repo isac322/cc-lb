@@ -1,16 +1,15 @@
-//! Phase-5 subscription quota subscriber.
+//! Subscription quota subscriber.
 //!
 //! Consumes `LifecycleEvent::UpstreamAttempt` (to correlate `upstream_id`
 //! with the event) and `LifecycleEvent::UpstreamResponseStarted` (to read
 //! Anthropic unified-quota headers). Reconstructs a `HeaderMap`, parses
-//! observations via the existing `observe_subscription_quota_headers`,
-//! upserts them into the shared `SubscriptionQuotaCacheLike`, and enqueues
-//! durable records into `SubscriptionQuotaSink` for the writer task.
+//! observations via `observe_subscription_quota_headers`, upserts them
+//! into the shared `SubscriptionQuotaCacheLike`, and enqueues durable
+//! records into `SubscriptionQuotaSink` for the writer task.
 //!
-//! Legacy inline path (`Lifecycle::record_subscription_quota_observations`)
-//! remains authoritative in Phase 5. This subscriber is advisory in
-//! shadow mode; Phase 6b deletes the inline call and flips the subscriber
-//! default.
+//! This subscriber owns the main request path. `Lifecycle::
+//! record_subscription_quota_observations` is retained solely for admin
+//! fire-now warmup and is not called on the proxy request path.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -267,4 +266,133 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
         "outcome" => "cap_evicted"
     )
     .increment(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cc_lb_plugin_api::SubscriptionQuotaCandidateSnapshot;
+    use cc_lb_storage_api::{
+        SubscriptionQuotaObservationRecord, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Default)]
+    struct RecordingSubscriptionQuotaCache {
+        records: StdMutex<Vec<SubscriptionQuotaObservationRecord>>,
+    }
+
+    impl SubscriptionQuotaCacheLike for RecordingSubscriptionQuotaCache {
+        fn upsert_observation(&self, record: &SubscriptionQuotaObservationRecord) {
+            self.records.lock().unwrap().push(record.clone());
+        }
+
+        fn snapshot_for_upstream(
+            &self,
+            _upstream_id: Uuid,
+            _now_unix_millis: u64,
+            _max_staleness_secs: u64,
+        ) -> Vec<SubscriptionQuotaCandidateSnapshot> {
+            Vec::new()
+        }
+    }
+
+    fn eid(s: &str) -> EventId {
+        s.to_owned()
+    }
+
+    fn response_started(event_id: &str, headers: HeaderSnapshot) -> LifecycleEvent {
+        LifecycleEvent::UpstreamResponseStarted {
+            event_id: eid(event_id),
+            status: 200,
+            headers,
+            bulkhead_wait_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
+            shape_ms: None,
+            sign_ms: None,
+            upstream_ttfb_ms: None,
+        }
+    }
+
+    fn quota_headers() -> HeaderSnapshot {
+        HeaderSnapshot {
+            anthropic_headers: BTreeMap::from([
+                (
+                    "anthropic-ratelimit-unified-5h-utilization".to_owned(),
+                    "0.10".to_owned(),
+                ),
+                (
+                    "anthropic-ratelimit-unified-5h-status".to_owned(),
+                    "allowed_warning".to_owned(),
+                ),
+                (
+                    "anthropic-ratelimit-unified-5h-reset".to_owned(),
+                    "1800000001".to_owned(),
+                ),
+            ]),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn response_after_attempt_updates_cache_and_sink() {
+        let (tx, rx) = mpsc::channel(16);
+        let upstream_id = Uuid::from_u128(2);
+        let cache = Arc::new(RecordingSubscriptionQuotaCache::default());
+        let subscriber_cache: Arc<dyn SubscriptionQuotaCacheLike> = cache.clone();
+        let (sink, mut sink_rx) = SubscriptionQuotaSink::with_capacity(16);
+        let handle =
+            spawn_lifecycle_subscription_quota_subscriber(rx, Some(subscriber_cache), Some(sink));
+
+        tx.send(LifecycleEvent::UpstreamAttempt {
+            event_id: eid("quota-a"),
+            attempt_num: 1,
+            upstream_id,
+        })
+        .await
+        .unwrap();
+        tx.send(response_started("quota-a", quota_headers()))
+            .await
+            .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let records = cache.records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].upstream_id, upstream_id);
+        assert_eq!(records[0].window, SubscriptionQuotaWindow::FiveHour);
+        assert_eq!(records[0].utilization, Some(0.10));
+        assert_eq!(
+            records[0].status,
+            Some(SubscriptionQuotaStatus::AllowedWarning)
+        );
+        drop(records);
+
+        let sink_record = sink_rx.try_recv().unwrap();
+        assert_eq!(sink_record.upstream_id, upstream_id);
+        assert_eq!(sink_record.window, SubscriptionQuotaWindow::FiveHour);
+        assert!(sink_rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn response_without_attempt_is_ignored() {
+        let (tx, rx) = mpsc::channel(16);
+        let cache = Arc::new(RecordingSubscriptionQuotaCache::default());
+        let subscriber_cache: Arc<dyn SubscriptionQuotaCacheLike> = cache.clone();
+        let (sink, mut sink_rx) = SubscriptionQuotaSink::with_capacity(16);
+        let handle =
+            spawn_lifecycle_subscription_quota_subscriber(rx, Some(subscriber_cache), Some(sink));
+
+        tx.send(response_started("quota-b", quota_headers()))
+            .await
+            .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        assert!(cache.records.lock().unwrap().is_empty());
+        assert!(sink_rx.try_recv().is_err());
+    }
 }
