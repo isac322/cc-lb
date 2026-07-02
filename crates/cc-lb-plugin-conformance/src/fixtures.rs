@@ -15,8 +15,8 @@ use cc_lb_plugin_types::{
 /// `String`, or anything that dereferences to bytes.
 pub fn hdr(name: impl Into<String>, value: impl AsRef<[u8]>) -> Header {
     Header {
-        name: name.into(),
-        value: value.as_ref().to_vec(),
+        name: name.into().into_boxed_str(),
+        value: value.as_ref().to_vec().into_boxed_slice(),
     }
 }
 
@@ -26,9 +26,9 @@ pub fn hdr(name: impl Into<String>, value: impl AsRef<[u8]>) -> Header {
 /// details.
 pub fn synth_principal() -> Principal {
     Principal {
-        id: "conformance-principal".to_string(),
-        kind: "api_key".to_string(),
-        claims: Vec::new(),
+        id: Box::from("conformance-principal"),
+        kind: Box::from("api_key"),
+        claims: Box::new([]),
     }
 }
 
@@ -38,12 +38,12 @@ pub fn synth_principal() -> Principal {
 pub fn observe_event_samples() -> Vec<ObserveEvent> {
     vec![
         ObserveEvent::RequestStarted {
-            request_id: "conformance-req-1".to_string(),
-            downstream_user_agent: Some("conformance/1.0".to_string()),
+            request_id: Box::from("conformance-req-1"),
+            downstream_user_agent: Some(Box::from("conformance/1.0")),
         },
         ObserveEvent::AuthnComplete {
-            principal_id: "conformance-principal".to_string(),
-            principal_kind: "api_key".to_string(),
+            principal_id: Box::from("conformance-principal"),
+            principal_kind: Box::from("api_key"),
         },
         ObserveEvent::UpstreamChosen {
             upstream: Upstream::AnthropicDirect { base_url: None },
@@ -62,9 +62,9 @@ pub fn observe_event_samples() -> Vec<ObserveEvent> {
             duration_ms: 42,
         },
         ObserveEvent::Error {
-            code: "conformance_error".to_string(),
-            message: "synthetic".to_string(),
-            source: "conformance".to_string(),
+            code: Box::from("conformance_error"),
+            message: Box::from("synthetic"),
+            source: Box::from("conformance"),
         },
     ]
 }
@@ -76,12 +76,12 @@ pub fn observe_event_samples() -> Vec<ObserveEvent> {
 /// `PluginSession::call_shape`.
 pub fn sample_shape_request() -> ShapeRequest {
     ShapeRequest {
-        request_id: "conformance-req-1".to_string(),
-        method: "POST".to_string(),
-        path: "/v1/messages".to_string(),
+        request_id: Box::from("conformance-req-1"),
+        method: Box::from("POST"),
+        path: Box::from("/v1/messages"),
         query: None,
-        headers: vec![hdr("content-type", "application/json")],
-        body: br#"{"model":"claude-3-haiku-20240307","messages":[]}"#.to_vec(),
+        headers: Box::new([hdr("content-type", "application/json")]),
+        body: Box::from(&br#"{"model":"claude-3-haiku-20240307","messages":[]}"#[..]),
         principal: synth_principal(),
         upstream: Upstream::AnthropicDirect { base_url: None },
     }
@@ -93,14 +93,14 @@ pub fn sample_shape_request() -> ShapeRequest {
 /// `UpstreamCandidate`s before dispatch.
 pub fn sample_filter_request() -> FilterRequest {
     FilterRequest {
-        request_id: "conformance-req-1".to_string(),
-        method: "POST".to_string(),
-        path: "/v1/messages".to_string(),
+        request_id: Box::from("conformance-req-1"),
+        method: Box::from("POST"),
+        path: Box::from("/v1/messages"),
         query: None,
-        headers: vec![hdr("content-type", "application/json")],
-        body: br#"{"model":"claude-3-haiku-20240307","messages":[]}"#.to_vec(),
+        headers: Box::new([hdr("content-type", "application/json")]),
+        body: Box::from(&br#"{"model":"claude-3-haiku-20240307","messages":[]}"#[..]),
         principal: synth_principal(),
-        candidates: Vec::new(),
+        candidates: Box::new([]),
     }
 }
 
@@ -111,6 +111,6 @@ pub fn sample_filter_request() -> FilterRequest {
 pub fn sample_normalize_error_request() -> NormalizeErrorRequest {
     NormalizeErrorRequest {
         status: 500,
-        body: br#"{"error":{"type":"internal_error","message":"synthetic"}}"#.to_vec(),
+        body: Box::from(&br#"{"error":{"type":"internal_error","message":"synthetic"}}"#[..]),
     }
 }

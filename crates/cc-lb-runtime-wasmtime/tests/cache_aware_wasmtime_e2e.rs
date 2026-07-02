@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_types::{
-    ArchivedFilterResponse, FilterRequest, FilterResponse, Header, Principal, UpstreamCandidate,
+    ArchivedFilterResponse, FilterRequest, FilterResponse, Principal, UpstreamCandidate,
 };
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use rkyv::rancor::Error;
@@ -48,32 +48,38 @@ fn load_wasm_or_skip() -> Option<Vec<u8>> {
 }
 
 fn fixture_request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRequest {
-    let claims = match keep_k {
-        Some(k) => Vec::from([(String::from("keep_k"), k.to_string().into_bytes())]),
-        None => Vec::new(),
+    use cc_lb_plugin_types::Claim;
+    let claims: Box<[Claim]> = match keep_k {
+        Some(k) => Box::new([Claim {
+            key: Box::from("keep_k"),
+            value: Box::from(k.to_string().into_bytes().as_slice()),
+        }]),
+        None => Box::new([]),
     };
+    let candidates: Box<[UpstreamCandidate]> = predicted
+        .iter()
+        .map(|(id, p)| UpstreamCandidate {
+            upstream_id: Box::from(*id),
+            name: format!("upstream-{id}").into_boxed_str(),
+            kind: Box::from("anthropic_api_key"),
+            observed_at_unix_secs: 0,
+            predicted_cache_read_tokens: *p,
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
     FilterRequest {
-        request_id: "req-e2e".to_owned(),
-        method: "POST".to_owned(),
-        path: "/v1/messages".to_owned(),
+        request_id: Box::from("req-e2e"),
+        method: Box::from("POST"),
+        path: Box::from("/v1/messages"),
         query: None,
-        headers: Vec::<Header>::new(),
-        body: Vec::new(),
+        headers: Box::new([]),
+        body: Box::from(&[][..]),
         principal: Principal {
-            id: "tenant".to_owned(),
-            kind: "api_key".to_owned(),
+            id: Box::from("tenant"),
+            kind: Box::from("api_key"),
             claims,
         },
-        candidates: predicted
-            .iter()
-            .map(|(id, p)| UpstreamCandidate {
-                upstream_id: (*id).to_owned(),
-                name: format!("upstream-{id}"),
-                kind: "anthropic_api_key".to_owned(),
-                observed_at_unix_secs: 0,
-                predicted_cache_read_tokens: *p,
-            })
-            .collect(),
+        candidates,
     }
 }
 
@@ -110,17 +116,17 @@ fn cache_aware_wasmtime_round_trips_filter() {
     let resp = decode_response(&out_bytes);
     assert_eq!(resp.results.len(), 4, "one decision per candidate");
 
-    let accepted: Vec<_> = resp
+    let accepted: Vec<String> = resp
         .results
         .iter()
-        .filter(|r| r.decision == "accept")
-        .map(|r| r.upstream_id.clone())
+        .filter(|r| &*r.decision == "accept")
+        .map(|r| r.upstream_id.to_string())
         .collect();
     assert_eq!(accepted.len(), 2, "keep_k=2 keeps two candidates");
 
     // Top two by predicted_cache_read_tokens are bbbb(200) and dddd(80).
-    let accepted: std::collections::BTreeSet<_> = accepted.into_iter().collect();
-    let expected: std::collections::BTreeSet<_> =
+    let accepted: std::collections::BTreeSet<String> = accepted.into_iter().collect();
+    let expected: std::collections::BTreeSet<String> =
         ["bbbb".to_owned(), "dddd".to_owned()].into_iter().collect();
     assert_eq!(accepted, expected);
 }
@@ -145,11 +151,11 @@ fn cache_aware_wasmtime_default_keep_k_keeps_one() {
         .expect("filter");
 
     let resp = decode_response(&out_bytes);
-    let accepted: Vec<_> = resp
+    let accepted: Vec<String> = resp
         .results
         .iter()
-        .filter(|r| r.decision == "accept")
-        .map(|r| r.upstream_id.clone())
+        .filter(|r| &*r.decision == "accept")
+        .map(|r| r.upstream_id.to_string())
         .collect();
     assert_eq!(accepted, vec!["b".to_owned()]);
 }

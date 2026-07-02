@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cc_lb_plugin_api::SlotKey;
-use cc_lb_plugin_types::{FilterRequest, Header, Principal, UpstreamCandidate};
+use cc_lb_plugin_types::{FilterRequest, Principal, UpstreamCandidate};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use rkyv::rancor::Error;
@@ -42,25 +42,29 @@ fn cache_aware_wasm() -> Option<Vec<u8>> {
 }
 
 fn tiny_filter_request() -> FilterRequest {
+    use cc_lb_plugin_types::Claim;
     FilterRequest {
-        request_id: "metrics-probe".to_owned(),
-        method: "POST".to_owned(),
-        path: "/v1/messages".to_owned(),
+        request_id: Box::from("metrics-probe"),
+        method: Box::from("POST"),
+        path: Box::from("/v1/messages"),
         query: None,
-        headers: Vec::<Header>::new(),
-        body: Vec::new(),
+        headers: Box::new([]),
+        body: Box::from(&[][..]),
         principal: Principal {
-            id: "tenant".to_owned(),
-            kind: "api_key".to_owned(),
-            claims: Vec::from([(String::from("keep_k"), b"1".to_vec())]),
+            id: Box::from("tenant"),
+            kind: Box::from("api_key"),
+            claims: Box::new([Claim {
+                key: Box::from("keep_k"),
+                value: Box::from(&b"1"[..]),
+            }]),
         },
-        candidates: vec![UpstreamCandidate {
-            upstream_id: "a".to_owned(),
-            name: "upstream-a".to_owned(),
-            kind: "anthropic_api_key".to_owned(),
+        candidates: Box::new([UpstreamCandidate {
+            upstream_id: Box::from("a"),
+            name: Box::from("upstream-a"),
+            kind: Box::from("anthropic_api_key"),
             observed_at_unix_secs: 0,
             predicted_cache_read_tokens: 10,
-        }],
+        }]),
     }
 }
 

@@ -26,8 +26,8 @@ use cc_lb_plugin_api::{
     SlotKey, UpstreamCandidate,
 };
 use cc_lb_plugin_types::{
-    ArchivedFilterResponse, FilterRequest as WireFilterRequest, Header as WireHeader,
-    Principal as WirePrincipal, UpstreamCandidate as WireUpstreamCandidate,
+    ArchivedFilterResponse, ClaimRef, FilterRequestRef, HeaderRef, NormalizeErrorRequestRef,
+    PrincipalRef, QueryRef, ShapeRequestRef, UpstreamCandidateRef, UpstreamRef,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
@@ -80,14 +80,13 @@ impl FilterPlugin for WasmtimeFilterPlugin {
         principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
-        let request = host_to_wire_request(
+        let in_bytes = host_to_wire_request(
             ctx,
             principal,
             candidates,
             self.runtime_config.cookie_redaction,
-        );
-
-        let in_bytes = rkyv::to_bytes::<RkyvError>(&request).map_err(|e| FilterError::Runtime {
+        )
+        .map_err(|e| FilterError::Runtime {
             reason: format!("rkyv encode request: {e}"),
         })?;
 
@@ -158,42 +157,72 @@ fn host_to_wire_request(
     principal: &Principal,
     candidates: &[UpstreamCandidate],
     cookie_redaction: bool,
-) -> WireFilterRequest {
-    WireFilterRequest {
-        request_id: ctx.request_id.clone(),
-        method: ctx.method.as_str().to_owned(),
-        path: ctx.path.clone(),
-        query: ctx.query.clone(),
-        headers: ctx
-            .downstream_headers
-            .iter()
-            .filter(|(name, _)| !is_stripped_downstream_header(name.as_str(), cookie_redaction))
-            .map(|(name, value)| WireHeader {
-                name: name.as_str().to_owned(),
-                value: value.as_bytes().to_vec(),
-            })
-            .collect(),
-        body: ctx.body_bytes.to_vec(),
-        principal: WirePrincipal {
-            id: principal.id.clone(),
-            kind: principal_kind_to_wire(principal),
-            claims: claims_to_wire(&principal.claims),
+) -> Result<AlignedVec<16>, RkyvError> {
+    // RFC-0001 #9: build a borrowed `FilterRequestRef<'_>` and let
+    // rkyv's `InlineAsBox` serialise the body / headers / strings
+    // in-place without a `.to_vec()` on the up-to-100-MiB body.
+    // Intermediate `Vec`s exist only for values we cannot borrow from
+    // the caller's `RequestContext` / `Principal` (Uuid-to-str, JSON
+    // claim encoding, header name/value pairing).
+    let principal_kind_str = principal_kind_to_wire(principal);
+    let claim_bufs: Vec<(&str, Vec<u8>)> = principal
+        .claims
+        .iter()
+        .filter_map(|(k, v)| serde_json::to_vec(v).ok().map(|bytes| (k.as_str(), bytes)))
+        .collect();
+    let claim_refs: Vec<ClaimRef<'_>> = claim_bufs
+        .iter()
+        .map(|(k, v)| ClaimRef {
+            key: k,
+            value: v.as_slice(),
+        })
+        .collect();
+    let header_refs: Vec<HeaderRef<'_>> = ctx
+        .downstream_headers
+        .iter()
+        .filter(|(name, _)| !is_stripped_downstream_header(name.as_str(), cookie_redaction))
+        .map(|(name, value)| HeaderRef {
+            name: name.as_str(),
+            value: value.as_bytes(),
+        })
+        .collect();
+    // Uuid → String requires allocation; keep both String buffer and
+    // its borrowed slice reachable for the Ref struct's lifetime.
+    let candidate_id_bufs: Vec<String> = candidates
+        .iter()
+        .map(|c| c.upstream_id.to_string())
+        .collect();
+    let candidate_refs: Vec<UpstreamCandidateRef<'_>> = candidates
+        .iter()
+        .zip(candidate_id_bufs.iter())
+        .map(|(c, id_str)| UpstreamCandidateRef {
+            upstream_id: id_str.as_str(),
+            name: c.name.as_str(),
+            kind: c.kind.as_str(),
+            observed_at_unix_secs: c.observed_at_unix_secs,
+            predicted_cache_read_tokens: c
+                .cache_score
+                .as_ref()
+                .map(|s| s.predicted_cache_read_tokens)
+                .unwrap_or(0),
+        })
+        .collect();
+    let query_ref = ctx.query.as_deref().map(|s| QueryRef { value: s });
+    let request = FilterRequestRef {
+        request_id: ctx.request_id.as_str(),
+        method: ctx.method.as_str(),
+        path: ctx.path.as_str(),
+        query: query_ref,
+        headers: &header_refs,
+        body: ctx.body_bytes.as_ref(),
+        principal: PrincipalRef {
+            id: principal.id.as_str(),
+            kind: principal_kind_str.as_str(),
+            claims: &claim_refs,
         },
-        candidates: candidates
-            .iter()
-            .map(|c| WireUpstreamCandidate {
-                upstream_id: c.upstream_id.to_string(),
-                name: c.name.clone(),
-                kind: c.kind.as_str().to_owned(),
-                observed_at_unix_secs: c.observed_at_unix_secs,
-                predicted_cache_read_tokens: c
-                    .cache_score
-                    .as_ref()
-                    .map(|s| s.predicted_cache_read_tokens)
-                    .unwrap_or(0),
-            })
-            .collect(),
-    }
+        candidates: &candidate_refs,
+    };
+    rkyv::to_bytes::<RkyvError>(&request)
 }
 
 fn principal_kind_to_wire(principal: &Principal) -> String {
@@ -201,13 +230,6 @@ fn principal_kind_to_wire(principal: &Principal) -> String {
         .ok()
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
         .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn claims_to_wire(claims: &serde_json::Map<String, serde_json::Value>) -> Vec<(String, Vec<u8>)> {
-    claims
-        .iter()
-        .filter_map(|(k, v)| serde_json::to_vec(v).ok().map(|bytes| (k.clone(), bytes)))
-        .collect()
 }
 
 /// Downstream-request headers that must NEVER cross the plugin
@@ -355,17 +377,14 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
         principal: &Principal,
         builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
     ) -> Result<cc_lb_plugin_api::ShapedRequest, cc_lb_plugin_api::DialectError> {
-        let request = host_to_wire_shape_request(
+        let in_bytes = host_to_wire_shape_request(
             ctx,
             upstream,
             principal,
             self.runtime_config.cookie_redaction,
-        );
-
-        let in_bytes = rkyv::to_bytes::<RkyvError>(&request).map_err(|e| {
-            cc_lb_plugin_api::DialectError::UnsupportedRequest {
-                reason: format!("rkyv encode ShapeRequest: {e}"),
-            }
+        )
+        .map_err(|e| cc_lb_plugin_api::DialectError::UnsupportedRequest {
+            reason: format!("rkyv encode ShapeRequest: {e}"),
         })?;
 
         let out_bytes = crate::cache::call_shape_hook(&self.cell, in_bytes.as_slice())
@@ -404,9 +423,14 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
         status: http::StatusCode,
         body: &bytes::Bytes,
     ) -> Option<bytes::Bytes> {
-        let request = cc_lb_plugin_types::NormalizeErrorRequest {
+        // RFC-0001 #9: borrow the body via `NormalizeErrorRequestRef`
+        // so the upstream error payload is serialised without a
+        // `.to_vec()` — normalize_error is called on every 4xx/5xx
+        // from the upstream, so any per-call copy multiplies with
+        // error volume.
+        let request = NormalizeErrorRequestRef {
             status: status.as_u16(),
-            body: body.to_vec(),
+            body: body.as_ref(),
         };
 
         let in_bytes = rkyv::to_bytes::<RkyvError>(&request).ok()?;
@@ -421,10 +445,10 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
                 .ok()?;
 
         let normalize_cap = self.runtime_config.wire_bounds.normalize_error_body_bytes;
-        // Walk archived directly; ArchivedOption::as_ref → Option<&ArchivedVec<u8>>.
+        // Walk archived directly; ArchivedOption::as_ref → Option<&ArchivedBox<[u8]>>.
         // Only the surviving body needs an owned copy for Bytes.
         archived.normalized.as_ref().and_then(|archived_body| {
-            let body_slice: &[u8] = archived_body.as_slice();
+            let body_slice: &[u8] = &archived_body[..];
             if body_slice.len() as u64 > normalize_cap {
                 tracing::warn!(
                     body_len = body_slice.len(),
@@ -436,6 +460,16 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
                 Some(bytes::Bytes::copy_from_slice(body_slice))
             }
         })
+    }
+}
+
+fn host_upstream_to_wire(upstream: &cc_lb_plugin_api::Upstream) -> cc_lb_plugin_types::Upstream {
+    match upstream {
+        cc_lb_plugin_api::Upstream::AnthropicDirect { base_url } => {
+            cc_lb_plugin_types::Upstream::AnthropicDirect {
+                base_url: base_url.as_ref().map(|u| u.to_string().into_boxed_str()),
+            }
+        }
     }
 }
 
@@ -457,39 +491,57 @@ fn host_to_wire_shape_request(
     upstream: &cc_lb_plugin_api::Upstream,
     principal: &Principal,
     cookie_redaction: bool,
-) -> cc_lb_plugin_types::ShapeRequest {
-    cc_lb_plugin_types::ShapeRequest {
-        request_id: ctx.request_id.clone(),
-        method: ctx.method.as_str().to_owned(),
-        path: ctx.path.clone(),
-        query: ctx.query.clone(),
-        headers: ctx
-            .downstream_headers
-            .iter()
-            .filter(|(name, _)| !is_stripped_downstream_header(name.as_str(), cookie_redaction))
-            .map(|(name, value)| WireHeader {
-                name: name.as_str().to_owned(),
-                value: value.as_bytes().to_vec(),
-            })
-            .collect(),
-        body: ctx.body_bytes.to_vec(),
-        principal: WirePrincipal {
-            id: principal.id.clone(),
-            kind: principal_kind_to_wire(principal),
-            claims: claims_to_wire(&principal.claims),
-        },
-        upstream: host_upstream_to_wire(upstream),
-    }
-}
-
-fn host_upstream_to_wire(upstream: &cc_lb_plugin_api::Upstream) -> cc_lb_plugin_types::Upstream {
-    match upstream {
+) -> Result<AlignedVec<16>, RkyvError> {
+    // Same borrowed-encoding pattern as `host_to_wire_request`
+    // (RFC-0001 #9). Body is passed through as `&[u8]` slice; the
+    // shape upstream's optional `base_url` is stringified into a
+    // short-lived buffer to satisfy the shared `QueryRef` shape.
+    let principal_kind_str = principal_kind_to_wire(principal);
+    let claim_bufs: Vec<(&str, Vec<u8>)> = principal
+        .claims
+        .iter()
+        .filter_map(|(k, v)| serde_json::to_vec(v).ok().map(|bytes| (k.as_str(), bytes)))
+        .collect();
+    let claim_refs: Vec<ClaimRef<'_>> = claim_bufs
+        .iter()
+        .map(|(k, v)| ClaimRef {
+            key: k,
+            value: v.as_slice(),
+        })
+        .collect();
+    let header_refs: Vec<HeaderRef<'_>> = ctx
+        .downstream_headers
+        .iter()
+        .filter(|(name, _)| !is_stripped_downstream_header(name.as_str(), cookie_redaction))
+        .map(|(name, value)| HeaderRef {
+            name: name.as_str(),
+            value: value.as_bytes(),
+        })
+        .collect();
+    let base_url_str = match upstream {
         cc_lb_plugin_api::Upstream::AnthropicDirect { base_url } => {
-            cc_lb_plugin_types::Upstream::AnthropicDirect {
-                base_url: base_url.as_ref().map(|u| u.to_string()),
-            }
+            base_url.as_ref().map(|u| u.to_string())
         }
-    }
+    };
+    let upstream_ref = UpstreamRef::AnthropicDirect {
+        base_url: base_url_str.as_deref().map(|s| QueryRef { value: s }),
+    };
+    let query_ref = ctx.query.as_deref().map(|s| QueryRef { value: s });
+    let request = ShapeRequestRef {
+        request_id: ctx.request_id.as_str(),
+        method: ctx.method.as_str(),
+        path: ctx.path.as_str(),
+        query: query_ref,
+        headers: &header_refs,
+        body: ctx.body_bytes.as_ref(),
+        principal: PrincipalRef {
+            id: principal.id.as_str(),
+            kind: principal_kind_str.as_str(),
+            claims: &claim_refs,
+        },
+        upstream: upstream_ref,
+    };
+    rkyv::to_bytes::<RkyvError>(&request)
 }
 
 /// Return the base URL the selected upstream expects the shaped
@@ -637,15 +689,16 @@ fn host_observe_event_to_wire(
             request_id,
             downstream_user_agent,
         } => Wire::RequestStarted {
-            request_id,
-            downstream_user_agent,
+            request_id: request_id.into_boxed_str(),
+            downstream_user_agent: downstream_user_agent.map(String::into_boxed_str),
         },
         Host::AuthnComplete { principal_id, kind } => Wire::AuthnComplete {
-            principal_id,
+            principal_id: principal_id.into_boxed_str(),
             principal_kind: serde_json::to_value(&kind)
                 .ok()
-                .and_then(|v| v.as_str().map(ToOwned::to_owned))
-                .unwrap_or_else(|| "unknown".to_owned()),
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".to_owned())
+                .into_boxed_str(),
         },
         Host::UpstreamChosen { upstream } => Wire::UpstreamChosen {
             upstream: host_upstream_to_wire(&upstream),
@@ -679,9 +732,9 @@ fn host_observe_event_to_wire(
             message,
             source,
         } => Wire::Error {
-            code,
-            message,
-            source,
+            code: code.into_boxed_str(),
+            message: message.into_boxed_str(),
+            source: source.into_boxed_str(),
         },
     }
 }
@@ -729,33 +782,49 @@ mod tests {
     fn host_to_wire_strips_auth_headers() {
         let principal = fixture_principal();
         let ctx = fixture_request();
-        let wire = host_to_wire_request(&ctx, &principal, &[], false);
-
-        assert_eq!(wire.request_id, "req-123");
-        assert_eq!(wire.method, "POST");
-        assert_eq!(wire.path, "/v1/messages");
-        assert_eq!(wire.headers.len(), 1, "authorization must be filtered out");
-        assert_eq!(wire.headers[0].name, "content-type");
-        assert_eq!(wire.principal.id, "tenant-a");
-        assert_eq!(wire.principal.kind, "api_key");
-        assert!(wire.principal.claims.iter().any(|(k, _)| k == "scope"));
+        // Function now returns AlignedVec via borrowed encoding
+        // (RFC-0001 #9); decode via `rkyv::access` to verify shape.
+        let bytes = host_to_wire_request(&ctx, &principal, &[], false).expect("encode");
+        let archived = rkyv::access::<cc_lb_plugin_types::ArchivedFilterRequest, RkyvError>(&bytes)
+            .expect("archived");
+        let request_id: &str = &archived.request_id;
+        let method: &str = &archived.method;
+        let path: &str = &archived.path;
+        let principal_id: &str = &archived.principal.id;
+        let principal_kind: &str = &archived.principal.kind;
+        assert_eq!(request_id, "req-123");
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/v1/messages");
+        assert_eq!(
+            archived.headers.len(),
+            1,
+            "authorization must be filtered out"
+        );
+        let header_name: &str = &archived.headers[0].name;
+        assert_eq!(header_name, "content-type");
+        assert_eq!(principal_id, "tenant-a");
+        assert_eq!(principal_kind, "api_key");
+        assert!(archived.principal.claims.iter().any(|entry| {
+            let key: &str = &entry.key;
+            key == "scope"
+        }));
     }
 
     #[test]
     fn wire_to_host_splits_kept_and_rejected() {
         let response = WireFilterResponse {
-            results: vec![
+            results: Box::new([
                 WirePerCandidateReason {
-                    upstream_id: "11111111-1111-1111-1111-111111111111".to_owned(),
-                    decision: "accept".to_owned(),
-                    reason: "top-K".to_owned(),
+                    upstream_id: Box::from("11111111-1111-1111-1111-111111111111"),
+                    decision: Box::from("accept"),
+                    reason: Box::from("top-K"),
                 },
                 WirePerCandidateReason {
-                    upstream_id: "22222222-2222-2222-2222-222222222222".to_owned(),
-                    decision: "rate-limit".to_owned(),
-                    reason: "burst exceeded".to_owned(),
+                    upstream_id: Box::from("22222222-2222-2222-2222-222222222222"),
+                    decision: Box::from("rate-limit"),
+                    reason: Box::from("burst exceeded"),
                 },
-            ],
+            ]),
         };
         let bytes = rkyv::to_bytes::<RkyvError>(&response).expect("encode");
         let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
