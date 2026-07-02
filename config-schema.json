@@ -69,7 +69,7 @@
     "lifecycle_api_key_metrics_subscriber": {
       "$ref": "#/$defs/LifecycleApiKeyMetricsSubscriberConfig",
       "default": {
-        "enabled": false
+        "enabled": true
       }
     },
     "lifecycle_cache_hit_miss_subscriber": {
@@ -551,7 +551,7 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },

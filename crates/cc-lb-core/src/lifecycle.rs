@@ -1384,7 +1384,7 @@ impl Lifecycle {
             );
             o.set_routing_trace(routing_trace_value);
         }
-        let metric_context = ApiKeyMetricContext::new(&success, &route.upstream, &ctx.body_bytes);
+        let pricing_context = PricingContext::new(&route.upstream, &ctx.body_bytes);
         let prompt_cache_observation_context = prompt_cache_observation_context(
             &view,
             resolved_upstream_id,
@@ -1591,7 +1591,6 @@ impl Lifecycle {
                 let mut response = response_from_collected(unauthorized);
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
                 let status = response.status();
-                record_api_key_request_metric(&metric_context, status);
                 observe_finished_for_principal(hooks, status, started, &principal, &ctx.body_bytes);
                 if let Some(o) = observer.as_ref() {
                     let code = if status.is_client_error() {
@@ -1618,7 +1617,6 @@ impl Lifecycle {
             strip_hop_by_hop(response.headers_mut());
             self.attach_limit_headers(&mut response, active_limit.as_ref());
             let status = response.status();
-            record_api_key_request_metric(&metric_context, status);
             observe_finished_for_principal(hooks, status, started, &principal, &ctx.body_bytes);
             if let Some(o) = observer.as_ref() {
                 let code = if status.is_client_error() {
@@ -1633,12 +1631,11 @@ impl Lifecycle {
         }
 
         let status = response.status();
-        record_api_key_request_metric(&metric_context, status);
         response = self
             .finish_success_response(
                 response,
                 active_limit.take(),
-                &metric_context,
+                &pricing_context,
                 started.elapsed(),
                 status,
                 hooks,
@@ -1753,7 +1750,7 @@ impl Lifecycle {
         &self,
         response: Response<Body>,
         active_limit: Option<ActiveLimit>,
-        metric_context: &ApiKeyMetricContext,
+        pricing_context: &PricingContext,
         duration: Duration,
         status: StatusCode,
         hooks: &[Arc<dyn ObservabilityHook>],
@@ -1775,7 +1772,7 @@ impl Lifecycle {
                 Instant::now() - duration,
                 stream_hooks,
                 active_limit.take(),
-                metric_context.clone(),
+                pricing_context.clone(),
                 event_ctx.clone(),
                 prompt_cache_observation_context,
                 observer,
@@ -1887,11 +1884,11 @@ impl Lifecycle {
             let cost_model = active_limit
                 .as_ref()
                 .map(|active_limit| active_limit.request.model.as_str())
-                .unwrap_or(metric_context.model.as_str());
+                .unwrap_or(pricing_context.model.as_str());
             let pricing_upstream_kind = active_limit
                 .as_ref()
                 .and_then(|active_limit| active_limit.upstream_kind)
-                .or(metric_context.pricing_upstream_kind);
+                .or(pricing_context.pricing_upstream_kind);
             let breakdown = virtual_cost_micros_full(
                 cost_model,
                 usage.input_tokens,
@@ -1902,7 +1899,6 @@ impl Lifecycle {
                 pricing_upstream_kind,
             );
             let cost_micros = breakdown.total_micros.max(0) as u64;
-            record_api_key_usage_metrics(metric_context, &usage, cost_micros);
             (cost_micros, cost_breakdown_to_event_options(&breakdown))
         } else {
             (0, CostBreakdownOptions::default())
@@ -2236,7 +2232,7 @@ impl Lifecycle {
         started: Instant,
         hooks: StreamHooks,
         active_limit: Option<ActiveLimit>,
-        metric_context: ApiKeyMetricContext,
+        pricing_context: PricingContext,
         event_ctx: RequestEventContext,
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
         observer: Option<LifecycleContext>,
@@ -2555,7 +2551,7 @@ impl Lifecycle {
                     let cost_model = active_limit.request.model.as_str();
                     let pricing_upstream_kind = active_limit
                         .upstream_kind
-                        .or(metric_context.pricing_upstream_kind);
+                        .or(pricing_context.pricing_upstream_kind);
                     let breakdown = virtual_cost_micros_full(
                         cost_model,
                         usage.input_tokens,
@@ -2566,7 +2562,6 @@ impl Lifecycle {
                         pricing_upstream_kind,
                     );
                     let cost = breakdown.total_micros.max(0) as u64;
-                    record_api_key_usage_metrics(&metric_context, &usage, cost);
                     (cost, cost_breakdown_to_event_options(&breakdown))
                 } else {
                     (0, CostBreakdownOptions::default())
@@ -3741,21 +3736,15 @@ pub(crate) fn cost_breakdown_to_event_options(
 }
 
 #[derive(Clone)]
-struct ApiKeyMetricContext {
-    key_id: String,
-    principal_id: String,
+struct PricingContext {
     model: String,
-    upstream_kind: &'static str,
     pricing_upstream_kind: Option<cc_lb_pricing::UpstreamKind>,
 }
 
-impl ApiKeyMetricContext {
-    fn new(success: &AuthnSuccess, upstream: &Upstream, body: &Bytes) -> Self {
+impl PricingContext {
+    fn new(upstream: &Upstream, body: &Bytes) -> Self {
         Self {
-            key_id: success.key_id.clone(),
-            principal_id: success.principal_id.clone(),
             model: extract_model(body).unwrap_or_else(|| "unknown".to_owned()),
-            upstream_kind: audit_upstream_name(upstream),
             pricing_upstream_kind: pricing_upstream_kind(upstream),
         }
     }
@@ -3771,78 +3760,6 @@ fn duration_to_ms(duration: Duration) -> u64 {
 
 fn duration_to_us(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
-}
-
-fn record_api_key_request_metric(context: &ApiKeyMetricContext, status: StatusCode) {
-    metrics::counter!(
-        "cclb_api_key_requests_total",
-        "key_id" => context.key_id.clone(),
-        "principal_id" => context.principal_id.clone(),
-        "model" => context.model.clone(),
-        "upstream_kind" => context.upstream_kind,
-        "status" => status.as_u16().to_string()
-    )
-    .increment(1);
-}
-
-fn record_api_key_usage_metrics(
-    context: &ApiKeyMetricContext,
-    usage: &UsageCounts,
-    cost_micros: u64,
-) {
-    increment_token_metric(&context.key_id, "input", usage.input_tokens);
-    increment_token_metric(&context.key_id, "output", usage.output_tokens);
-    increment_token_metric(
-        &context.key_id,
-        "cache_creation",
-        usage.cache_creation_input_tokens,
-    );
-    increment_token_metric(&context.key_id, "cache_read", usage.cache_read_input_tokens);
-
-    if cost_micros > 0 {
-        metrics::counter!(
-            "cclb_api_key_cost_usd_micro_total",
-            "key_id" => context.key_id.clone()
-        )
-        .increment(cost_micros);
-    }
-
-    metrics::counter!(
-        "cc_lb_tokens_total",
-        "principal" => context.principal_id.clone(),
-        "upstream" => context.upstream_kind,
-        "model" => context.model.clone(),
-        "direction" => "input"
-    )
-    .increment(usage.input_tokens);
-    metrics::counter!(
-        "cc_lb_tokens_total",
-        "principal" => context.principal_id.clone(),
-        "upstream" => context.upstream_kind,
-        "model" => context.model.clone(),
-        "direction" => "output"
-    )
-    .increment(usage.output_tokens);
-    metrics::counter!(
-        "cc_lb_virtual_cost_usd_total",
-        "principal" => context.principal_id.clone(),
-        "upstream" => context.upstream_kind,
-        "model" => context.model.clone()
-    )
-    .increment(cost_micros);
-}
-
-fn increment_token_metric(key_id: &str, kind: &'static str, value: u64) {
-    if value == 0 {
-        return;
-    }
-
-    metrics::counter!(
-        "cclb_api_key_tokens_total",
-        "key_id" => key_id.to_owned(),
-        "kind" => kind
-    )
-    .increment(value);
 }
 
 fn record_key_auth_failure_metric(source: &BuiltinAuthError) {
