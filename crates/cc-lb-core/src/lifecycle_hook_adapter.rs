@@ -277,6 +277,12 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 55,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();
@@ -316,6 +322,12 @@ mod tests {
             reason: TerminationReason::ErrorCode("body_too_large".into()),
             client_status: 413,
             duration_ms: 5,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();
@@ -362,6 +374,7 @@ mod tests {
                     ..Default::default()
                 },
                 sse_event_count: 3,
+                ..Default::default()
             }),
         })
         .await
@@ -371,6 +384,12 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 88,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();

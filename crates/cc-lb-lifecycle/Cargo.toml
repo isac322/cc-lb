@@ -6,8 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+cc-lb-plugin-api = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-uuid = { workspace = true, features = ["serde"] }
-
-[dev-dependencies]
 serde_json = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }

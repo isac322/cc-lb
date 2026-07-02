@@ -235,6 +235,7 @@ mod tests {
                 cache_control_block_count: Some(1),
                 cache_breakpoints: Vec::new(),
                 cache_prefix_hash: None,
+                ..ParseInfo::default()
             }),
         })
         .await
@@ -254,6 +255,12 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 1,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();
@@ -293,6 +300,12 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 1,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();
@@ -322,6 +335,12 @@ mod tests {
             reason: TerminationReason::Dropped,
             client_status: 499,
             duration_ms: 1,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();

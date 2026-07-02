@@ -464,6 +464,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 cc_lb_lifecycle::LimitDecisionKind::Reserved {
                     reservation_id,
                     amount,
+                    ..
                 },
             ..
         } => {
@@ -726,6 +727,7 @@ mod tests {
                 principal_id: "p1".into(),
                 key_id: Some("k1".into()),
                 principal_kind: Some("api_key".into()),
+                auth_ms: None,
             }),
         })
         .await
@@ -735,6 +737,12 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 42,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();
@@ -778,6 +786,12 @@ mod tests {
             reason: TerminationReason::ErrorCode("upstream_stream_error".into()),
             client_status: 200,
             duration_ms: 1_234,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();
@@ -818,6 +832,12 @@ mod tests {
             reason: TerminationReason::ErrorCode("body_too_large".into()),
             client_status: 413,
             duration_ms: 5,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();
@@ -841,6 +861,12 @@ mod tests {
             reason: TerminationReason::Dropped,
             client_status: 499,
             duration_ms: 7,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();
@@ -870,6 +896,7 @@ mod tests {
         let _ = StreamSuccess {
             usage: UsageSnapshot::default(),
             sse_event_count: 0,
+            ..Default::default()
         };
         let _ = cc_lb_lifecycle::UsageSource::NonStreamBody;
     }
@@ -893,6 +920,12 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 7,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();

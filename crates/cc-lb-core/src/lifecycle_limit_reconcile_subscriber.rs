@@ -429,6 +429,7 @@ mod tests {
             decision: LimitDecisionKind::Reserved {
                 reservation_id: "res-1".to_owned(),
                 amount: 100,
+                limit_reserve_ms: None,
             },
         })
         .await
@@ -449,6 +450,12 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 20,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();
@@ -477,6 +484,7 @@ mod tests {
             decision: LimitDecisionKind::Reserved {
                 reservation_id: "unknown-id".to_owned(),
                 amount: 100,
+                limit_reserve_ms: None,
             },
         })
         .await
@@ -497,6 +505,12 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 20,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();
@@ -519,6 +533,7 @@ mod tests {
             decision: LimitDecisionKind::Reserved {
                 reservation_id: "res-3".to_owned(),
                 amount: 100,
+                limit_reserve_ms: None,
             },
         })
         .await
@@ -528,6 +543,12 @@ mod tests {
             reason: TerminationReason::ErrorCode("upstream_5xx".into()),
             client_status: 500,
             duration_ms: 20,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();
@@ -550,6 +571,12 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 1,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
         })
         .await
         .unwrap();

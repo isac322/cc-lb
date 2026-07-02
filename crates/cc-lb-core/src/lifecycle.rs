@@ -1135,6 +1135,7 @@ impl Lifecycle {
                     principal_kind: Some(
                         principal_kind_lite_as_str(&success.record.principal_kind).to_owned(),
                     ),
+                    auth_ms: None,
                 }),
             });
         }
@@ -1206,6 +1207,7 @@ impl Lifecycle {
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                     event_id: o.event_id().to_owned(),
                     result: Err(cc_lb_lifecycle::RouteFailure::RouterPipelineUnavailable),
+                    routing_trace: None,
                 });
                 o.set_terminal(
                     StatusCode::BAD_GATEWAY,
@@ -1316,6 +1318,7 @@ impl Lifecycle {
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                     event_id: o.event_id().to_owned(),
                     result: Err(cc_lb_lifecycle::RouteFailure::RouteNotConfigured),
+                    routing_trace: None,
                 });
                 o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::ROUTE_NOT_CONFIGURED);
                 o.finish();
@@ -1349,6 +1352,7 @@ impl Lifecycle {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                         event_id: o.event_id().to_owned(),
                         result: Err(cc_lb_lifecycle::RouteFailure::RouteNotConfigured),
+                        routing_trace: None,
                     });
                     o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::ROUTE_NOT_CONFIGURED);
                     o.finish();
@@ -1373,7 +1377,10 @@ impl Lifecycle {
                     upstream_kind: pricing_upstream_kind(&route.upstream)
                         .map(pricing_upstream_kind_label)
                         .map(str::to_owned),
+                    route_ms: None,
+                    routing_trace: None,
                 }),
+                routing_trace: None,
             });
             o.attach_route(
                 resolved_upstream_id,
@@ -1419,6 +1426,10 @@ impl Lifecycle {
                         event_id: o.event_id().to_owned(),
                         decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
                             reason: "limit_rejected".to_owned(),
+                            subject: None,
+                            request_summary: None,
+                            route_summary: None,
+                            limit_violation: None,
                         },
                     });
                     o.set_terminal(status, error_codes::LIMIT_REJECTED);
@@ -1437,11 +1448,13 @@ impl Lifecycle {
                         .map(|r| r.id().to_owned())
                         .unwrap_or_default(),
                     amount: limit.request.max_tokens as u64,
+                    limit_reserve_ms: None,
                 }
             } else {
                 cc_lb_lifecycle::LimitDecisionKind::Reserved {
                     reservation_id: String::new(),
                     amount: 0,
+                    limit_reserve_ms: None,
                 }
             };
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
@@ -1520,6 +1533,14 @@ impl Lifecycle {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
                         event_id: o.event_id().to_owned(),
                         status: status.as_u16(),
+                        headers: cc_lb_lifecycle::HeaderSnapshot::default(),
+                        bulkhead_wait_ms: None,
+                        dns_ms: None,
+                        connect_ms: None,
+                        connection_reused: None,
+                        shape_ms: None,
+                        sign_ms: None,
+                        upstream_ttfb_ms: None,
                     });
                 }
                 response
@@ -2025,6 +2046,7 @@ impl Lifecycle {
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                 event_id: o.event_id().to_owned(),
                 result: Err(cc_lb_lifecycle::RouteFailure::RouteNoUpstreamAfterFilter),
+                routing_trace: None,
             });
             o.set_prebuilt_event(event);
             o.set_terminal(status, error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER);
@@ -2648,6 +2670,7 @@ impl Lifecycle {
                             result: Ok(cc_lb_lifecycle::StreamSuccess {
                                 usage: to_usage_snapshot(&usage),
                                 sse_event_count,
+                                ..Default::default()
                             }),
                         });
                         o.set_prebuilt_event(event);
@@ -4093,6 +4116,7 @@ fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
         web_fetch_requests: u.web_fetch_requests,
         service_tier: u.service_tier.clone(),
         inference_geo: u.inference_geo.clone(),
+        iterations: None,
     }
 }
 
