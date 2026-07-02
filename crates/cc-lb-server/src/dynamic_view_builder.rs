@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -32,10 +30,10 @@ use cc_lb_runtime_wasmtime::{
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AnthropicCompatibilityKvStore, AuditStore, PluginRegistryRepo, PluginRegistryStore, PluginSlot,
-    PrincipalRecord, PrincipalStore, PromptCacheObservationStore, RateLimitKind, StorageError,
-    StorageResult, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord,
-    UpstreamStore, UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
+    AnthropicCompatibilityKvStore, AuditStore, PluginRegistryStore, PluginSlot, PrincipalRecord,
+    PrincipalStore, PromptCacheObservationStore, RateLimitKind, StorageError, StorageResult,
+    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
 };
 use parking_lot::RwLock;
 use thiserror::Error;
@@ -62,11 +60,6 @@ pub struct Stores {
     pub prompt_cache_observations: Arc<dyn PromptCacheObservationStore>,
     pub anthropic_compatibility_kv: Arc<dyn AnthropicCompatibilityKvStore>,
     pub audit: Option<Arc<dyn AuditStore>>,
-    /// T43 bridge: when `Some` and a `PluginRegistryRecord` exists for the
-    /// same SHA-256 as the `WasmRegistryEntry`, the bridge injects
-    /// `augmented_metadata` into `PluginManifest.metadata["augmented_metadata"]`.
-    /// Otherwise dispatch falls back to `legacy_dispatch_metadata` in `plugin_wrap`.
-    pub plugin_registry_repo: Option<Arc<dyn PluginRegistryRepo>>,
 }
 
 #[derive(Debug, Error)]
@@ -75,8 +68,6 @@ pub enum RebindError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Io(#[from] io::Error),
-    #[error(transparent)]
-    Plugin(#[from] cc_lb_plugin_api::RuntimeError),
     #[error(transparent)]
     PluginRuntime(#[from] cc_lb_runtime_wasmtime::WasmtimeRuntimeError),
 }
@@ -119,41 +110,6 @@ async fn read_wasm_for_manifest(
             ),
         }
     })
-}
-
-pub async fn bridged_metadata(
-    repo: Option<&Arc<dyn PluginRegistryRepo>>,
-    sha256: [u8; 32],
-) -> std::collections::BTreeMap<String, serde_json::Value> {
-    let mut metadata = std::collections::BTreeMap::new();
-    let Some(repo) = repo else {
-        return metadata;
-    };
-    let record = match repo.get_by_sha256(&sha256).await {
-        Ok(Some(record)) => record,
-        Ok(None) => return metadata,
-        Err(error) => {
-            tracing::warn!(
-                sha256 = %hex_sha256(sha256),
-                %error,
-                "PluginRegistry lookup failed; falling back to legacy dispatch metadata",
-            );
-            return metadata;
-        }
-    };
-    match serde_json::to_value(&record.augmented_metadata) {
-        Ok(value) => {
-            metadata.insert("augmented_metadata".to_owned(), value);
-        }
-        Err(error) => {
-            tracing::warn!(
-                sha256 = %hex_sha256(sha256),
-                %error,
-                "augmented_metadata serialization failed; falling back to legacy dispatch metadata",
-            );
-        }
-    }
-    metadata
 }
 
 pub fn ensure_wasm_cache_dirs(data_dir: &Path) -> io::Result<()> {
@@ -500,11 +456,7 @@ async fn build_principal_chains(
                 artifact: wasm_path.to_string_lossy().into_owned(),
                 wire_version: entry.wire_version,
                 config: entry.config,
-                metadata: bridged_metadata(
-                    stores.plugin_registry_repo.as_ref(),
-                    registry_entry.sha256,
-                )
-                .await,
+                metadata: std::collections::BTreeMap::new(),
             };
             let slot_key =
                 cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
@@ -552,11 +504,7 @@ async fn build_principal_chains(
                 artifact: wasm_path.to_string_lossy().into_owned(),
                 wire_version: entry.wire_version,
                 config: entry.config,
-                metadata: bridged_metadata(
-                    stores.plugin_registry_repo.as_ref(),
-                    registry_entry.sha256,
-                )
-                .await,
+                metadata: std::collections::BTreeMap::new(),
             };
             let slot_key =
                 cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
@@ -641,8 +589,7 @@ async fn manifest_for_chain_entry(
         artifact: wasm_path.to_string_lossy().into_owned(),
         wire_version: entry.wire_version,
         config: entry.config.clone(),
-        metadata: bridged_metadata(stores.plugin_registry_repo.as_ref(), registry_entry.sha256)
-            .await,
+        metadata: std::collections::BTreeMap::new(),
     })
 }
 
@@ -1111,7 +1058,6 @@ mod tests {
             prompt_cache_observations,
             anthropic_compatibility_kv: storage.clone(),
             audit: Some(storage),
-            plugin_registry_repo: None,
         }
     }
 

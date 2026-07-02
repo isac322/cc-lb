@@ -2,13 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    AugmentedMetadata, BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_SHA256,
-    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256,
-    MAX_WASM_BLOB_BYTES, PluginBlobRepo, PluginChainConflictReason, PluginChainEntry,
-    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryRecord, PluginRegistryRepo,
-    PluginRegistryStatus, PluginRegistryStore, PluginSlot, RepoError, StorageError, StorageResult,
-    WasmBlob, WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, default_wire_version,
-    sparse_order, validate_identifier,
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_SHA256, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256, MAX_WASM_BLOB_BYTES, PluginBlobRepo,
+    PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
+    PluginRegistryStore, PluginSlot, RepoError, StorageError, StorageResult, WasmBlob,
+    WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
 };
 use serde_json::Value;
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
@@ -16,7 +14,6 @@ use uuid::Uuid;
 
 use crate::{SqliteStorage, map_sqlx_error};
 
-const SHUTDOWN_MARKER_KEY: &str = "shutdown";
 const LIST_REGISTRY_SQL: &str = "SELECT wasm_registry_v2.*, wasm_blobs_v2.refcount FROM wasm_registry_v2 JOIN wasm_blobs_v2 ON wasm_blobs_v2.sha256 = wasm_registry_v2.sha256 WHERE (? IS NULL OR wasm_registry_v2.id > ?) ORDER BY wasm_registry_v2.id ASC LIMIT ?";
 const GET_REGISTRY_BY_SHA_SQL: &str = "SELECT wasm_registry_v2.*, wasm_blobs_v2.refcount FROM wasm_registry_v2 JOIN wasm_blobs_v2 ON wasm_blobs_v2.sha256 = wasm_registry_v2.sha256 WHERE wasm_registry_v2.sha256 = ?";
 const GET_REGISTRY_BY_ID_SQL: &str = "SELECT wasm_registry_v2.*, wasm_blobs_v2.refcount FROM wasm_registry_v2 JOIN wasm_blobs_v2 ON wasm_blobs_v2.sha256 = wasm_registry_v2.sha256 WHERE wasm_registry_v2.id = ?";
@@ -45,10 +42,9 @@ impl PluginRegistryStore for SqliteStorage {
         .await
         .map_err(map_sqlite_error)?;
 
-        let metadata = metadata_from_input(&input)?;
         let id = Uuid::new_v4();
         let registry_insert = sqlx::query(
-            "INSERT INTO wasm_registry_v2 (id, sha256, plugin_name, plugin_version, label, uploaded_by_admin_id, revision, wire_version, supported_slots, schema_hash, abi_envelope, augmented_metadata, host_offer_hash, handshake_schema_version, last_handshake_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?) ON CONFLICT(sha256) DO NOTHING",
+            "INSERT INTO wasm_registry_v2 (id, sha256, plugin_name, plugin_version, label, uploaded_by_admin_id, revision, wire_version, supported_slots, schema_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'active', ?, ?) ON CONFLICT(sha256) DO NOTHING",
         )
         .bind(id.to_string())
         .bind(blob.sha256.as_slice())
@@ -59,11 +55,6 @@ impl PluginRegistryStore for SqliteStorage {
         .bind(i64::from(input.wire_version))
         .bind(slots_to_json(&input.supported_slots)?)
         .bind(input.schema_hash.as_ref().map(|h| h.as_slice()))
-        .bind(i64::from(input.wire_version))
-        .bind(serde_json::to_string(&metadata)?)
-        .bind(blob.sha256.as_slice())
-        .bind(1_i64)
-        .bind(unix_secs_to_i64(input.uploaded_at_unix_secs, "wasm_registry.uploaded_at")?)
         .bind(unix_secs_to_i64(input.uploaded_at_unix_secs, "wasm_registry.created_at")?)
         .bind(unix_secs_to_i64(input.uploaded_at_unix_secs, "wasm_registry.updated_at")?)
         .execute(&mut *tx)
@@ -566,126 +557,6 @@ impl PluginRegistryStore for SqliteStorage {
 }
 
 #[async_trait]
-impl PluginRegistryRepo for SqliteStorage {
-    async fn upsert_record(&self, record: &PluginRegistryRecord) -> Result<(), RepoError> {
-        sqlx::query("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, refcount, created_at) VALUES (?, x'', 0, NULL, 0, unixepoch()) ON CONFLICT(sha256) DO NOTHING")
-            .bind(record.sha256.as_slice())
-            .execute(self.pool())
-            .await
-            .map_err(map_sqlite_error)?;
-        sqlx::query(
-            "INSERT INTO wasm_registry_v2 (id, sha256, plugin_name, plugin_version, label, uploaded_by_admin_id, revision, wire_version, supported_slots, abi_envelope, augmented_metadata, host_offer_hash, handshake_schema_version, last_handshake_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, 0, ?, '[]', ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch()) ON CONFLICT(sha256) DO UPDATE SET plugin_name = excluded.plugin_name, plugin_version = excluded.plugin_version, abi_envelope = excluded.abi_envelope, augmented_metadata = excluded.augmented_metadata, host_offer_hash = excluded.host_offer_hash, handshake_schema_version = excluded.handshake_schema_version, last_handshake_at = excluded.last_handshake_at, status = excluded.status, updated_at = unixepoch()",
-        )
-        .bind(uuid_from_sha(record.sha256).to_string())
-        .bind(record.sha256.as_slice())
-        .bind(&record.plugin_name)
-        .bind(&record.plugin_version)
-        .bind(Uuid::nil().to_string())
-        .bind(i64::from(default_wire_version()))
-        .bind(i64::from(record.abi_envelope))
-        .bind(serde_json::to_string(&record.augmented_metadata)?)
-        .bind(record.host_offer_hash.as_slice())
-        .bind(i64::from(record.handshake_schema_version))
-        .bind(record.last_handshake_at)
-        .bind(status_as_str(record.status))
-        .execute(self.pool())
-        .await
-        .map_err(map_sqlite_error)?;
-        Ok(())
-    }
-
-    async fn get_by_sha256(
-        &self,
-        sha256: &[u8; 32],
-    ) -> Result<Option<PluginRegistryRecord>, RepoError> {
-        let row = sqlx::query("SELECT * FROM wasm_registry_v2 WHERE sha256 = ?")
-            .bind(sha256.as_slice())
-            .fetch_optional(self.pool())
-            .await
-            .map_err(map_sqlx_error)?;
-        row.map(record_from_row).transpose()
-    }
-
-    async fn list_active(&self) -> Result<Vec<PluginRegistryRecord>, RepoError> {
-        let rows = sqlx::query(
-            "SELECT * FROM wasm_registry_v2 WHERE status = 'active' ORDER BY plugin_name ASC, sha256 ASC",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-        rows.into_iter().map(record_from_row).collect()
-    }
-
-    async fn set_status(
-        &self,
-        sha256: &[u8; 32],
-        status: PluginRegistryStatus,
-    ) -> Result<(), RepoError> {
-        sqlx::query(
-            "UPDATE wasm_registry_v2 SET status = ?, updated_at = unixepoch() WHERE sha256 = ?",
-        )
-        .bind(status_as_str(status))
-        .bind(sha256.as_slice())
-        .execute(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-        Ok(())
-    }
-
-    async fn delete_by_sha256(&self, sha256: &[u8; 32]) -> Result<(), RepoError> {
-        sqlx::query("DELETE FROM wasm_registry_v2 WHERE sha256 = ?")
-            .bind(sha256.as_slice())
-            .execute(self.pool())
-            .await
-            .map_err(map_sqlite_error)?;
-        Ok(())
-    }
-
-    async fn count(&self) -> Result<usize, RepoError> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM wasm_registry_v2")
-            .fetch_one(self.pool())
-            .await
-            .map_err(map_sqlx_error)?;
-        usize::try_from(count).map_err(|_| StorageError::Corrupted {
-            message: "wasm_registry_v2 count cannot fit usize".to_owned(),
-        })
-    }
-
-    async fn get_shutdown_marker(&self) -> Result<Option<i64>, RepoError> {
-        let value: Option<String> =
-            sqlx::query_scalar("SELECT value FROM plugin_registry_marker_v1 WHERE key = ?")
-                .bind(SHUTDOWN_MARKER_KEY)
-                .fetch_optional(self.pool())
-                .await
-                .map_err(map_sqlx_error)?;
-        value
-            .map(|value| parse_i64(&value, "shutdown marker"))
-            .transpose()
-    }
-
-    async fn set_shutdown_marker(&self, unix_secs: i64) -> Result<(), RepoError> {
-        sqlx::query(
-            "INSERT INTO plugin_registry_marker_v1 (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        )
-        .bind(SHUTDOWN_MARKER_KEY)
-        .bind(unix_secs.to_string())
-        .execute(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-        Ok(())
-    }
-
-    async fn clear_shutdown_marker(&self) -> Result<(), RepoError> {
-        sqlx::query("DELETE FROM plugin_registry_marker_v1 WHERE key = ?")
-            .bind(SHUTDOWN_MARKER_KEY)
-            .execute(self.pool())
-            .await
-            .map_err(map_sqlx_error)?;
-        Ok(())
-    }
-}
-
-#[async_trait]
 impl PluginBlobRepo for SqliteStorage {
     async fn put_blob(&self, sha256: &[u8; 32], bytes: &[u8]) -> Result<(), RepoError> {
         sqlx::query(
@@ -809,7 +680,7 @@ fn registry_from_row(row: SqliteRow) -> StorageResult<WasmRegistryEntry> {
         original_filename: row.try_get("plugin_version").map_err(map_sqlx_error)?,
         label: row.try_get("label").map_err(map_sqlx_error)?,
         uploaded_at_unix_secs: i64_to_u64(
-            row.try_get("last_handshake_at").map_err(map_sqlx_error)?,
+            row.try_get("created_at").map_err(map_sqlx_error)?,
             "wasm_registry.uploaded_at",
         )?,
         uploaded_by_admin_id: uploaded_by,
@@ -829,34 +700,6 @@ fn row_sha(row: &SqliteRow) -> StorageResult<[u8; 32]> {
         &row.try_get::<Vec<u8>, _>("sha256")
             .map_err(map_sqlx_error)?,
     )
-}
-
-fn record_from_row(row: SqliteRow) -> Result<PluginRegistryRecord, RepoError> {
-    let metadata_json: String = row.try_get("augmented_metadata").map_err(map_sqlx_error)?;
-    Ok(PluginRegistryRecord {
-        sha256: sha_to_array(
-            &row.try_get::<Vec<u8>, _>("sha256")
-                .map_err(map_sqlx_error)?,
-        )?,
-        plugin_name: row.try_get("plugin_name").map_err(map_sqlx_error)?,
-        plugin_version: row.try_get("plugin_version").map_err(map_sqlx_error)?,
-        abi_envelope: u32_from_i64(
-            row.try_get("abi_envelope").map_err(map_sqlx_error)?,
-            "abi_envelope",
-        )?,
-        augmented_metadata: serde_json::from_str::<AugmentedMetadata>(&metadata_json)?,
-        host_offer_hash: sha_to_array(
-            &row.try_get::<Vec<u8>, _>("host_offer_hash")
-                .map_err(map_sqlx_error)?,
-        )?,
-        handshake_schema_version: u32_from_i64(
-            row.try_get("handshake_schema_version")
-                .map_err(map_sqlx_error)?,
-            "handshake_schema_version",
-        )?,
-        last_handshake_at: row.try_get("last_handshake_at").map_err(map_sqlx_error)?,
-        status: parse_status(&row.try_get::<String, _>("status").map_err(map_sqlx_error)?)?,
-    })
 }
 
 fn chain_from_row(row: SqliteRow) -> StorageResult<PluginChainEntry> {
@@ -976,24 +819,6 @@ fn validate_blob(blob: &WasmBlob) -> StorageResult<()> {
     Ok(())
 }
 
-fn metadata_from_input(input: &WasmRegistryEntryInput) -> StorageResult<AugmentedMetadata> {
-    serde_json::from_value(serde_json::json!({
-        "identity": {
-            "magic": [204, 27, 112, 16, 0, 1, 0, 0],
-            "abi_envelope": input.wire_version,
-            "plugin_name": input.name,
-            "plugin_version": input.original_filename,
-        },
-        "negotiated_functions": {},
-        "negotiated_capabilities": [],
-        "handshake_completed_at": input.uploaded_at_unix_secs as i64,
-        "self_check_passed": true,
-        "self_check_completed_at": input.uploaded_at_unix_secs as i64,
-        "expires_at": input.uploaded_at_unix_secs as i64,
-    }))
-    .map_err(StorageError::from)
-}
-
 fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEntryInput) -> bool {
     let schema_hash_ok = match (existing.schema_hash, input.schema_hash) {
         (Some(a), Some(b)) => a == b,
@@ -1025,23 +850,6 @@ fn map_sqlite_error(error: sqlx::Error) -> StorageError {
         };
     }
     map_sqlx_error(error)
-}
-
-fn status_as_str(status: PluginRegistryStatus) -> &'static str {
-    match status {
-        PluginRegistryStatus::Active => "active",
-        PluginRegistryStatus::Disabled => "disabled",
-    }
-}
-
-fn parse_status(value: &str) -> Result<PluginRegistryStatus, RepoError> {
-    match value {
-        "active" => Ok(PluginRegistryStatus::Active),
-        "disabled" => Ok(PluginRegistryStatus::Disabled),
-        value => Err(StorageError::Corrupted {
-            message: format!("invalid plugin registry status {value}"),
-        }),
-    }
 }
 
 fn sha_to_array(bytes: &[u8]) -> StorageResult<[u8; 32]> {
@@ -1081,12 +889,6 @@ fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
     })
 }
 
-fn parse_i64(value: &str, field: &str) -> StorageResult<i64> {
-    value.parse().map_err(|_| StorageError::Corrupted {
-        message: format!("invalid {field}"),
-    })
-}
-
 fn parse_uuid(value: &str, field: &str) -> StorageResult<Uuid> {
     Uuid::parse_str(value).map_err(|error| StorageError::Corrupted {
         message: format!("invalid {field} {value}: {error}"),
@@ -1104,10 +906,4 @@ fn slots_from_json(value: &str) -> StorageResult<Vec<PluginSlot>> {
         .into_iter()
         .filter_map(|slot| PluginSlot::parse(&slot))
         .collect())
-}
-
-fn uuid_from_sha(sha256: [u8; 32]) -> Uuid {
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&sha256[..16]);
-    Uuid::from_bytes(bytes)
 }

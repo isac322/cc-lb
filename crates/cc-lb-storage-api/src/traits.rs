@@ -279,7 +279,6 @@ pub trait Storage:
     + ConfigStore
     + MetaStore
     + RuntimeChangeNotifier
-    + crate::PluginRegistryRepo
     + crate::PluginBlobRepo
     + Send
     + Sync
@@ -308,7 +307,6 @@ impl<T> Storage for T where
         + ConfigStore
         + MetaStore
         + RuntimeChangeNotifier
-        + crate::PluginRegistryRepo
         + crate::PluginBlobRepo
         + Send
         + Sync

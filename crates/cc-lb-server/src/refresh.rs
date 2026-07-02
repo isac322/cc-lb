@@ -1056,7 +1056,6 @@ mod tests {
                 prompt_cache_observations: storage.clone(),
                 anthropic_compatibility_kv: storage.clone(),
                 audit: Some(storage.clone()),
-                plugin_registry_repo: None,
             });
             let aead = Arc::new(AeadService::from_master_key([42; 32]));
             let oauth_cfg = Arc::new(AnthropicOAuthConfig {

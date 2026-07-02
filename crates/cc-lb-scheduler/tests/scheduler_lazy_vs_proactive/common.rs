@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,7 +60,6 @@ where
         prompt_cache_observations,
         anthropic_compatibility_kv,
         audit: Some(audit),
-        plugin_registry_repo: None,
     })
 }
 

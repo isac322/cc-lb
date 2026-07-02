@@ -21,14 +21,10 @@ mod errors;
 mod traits;
 pub mod types;
 
-pub use errors::{
-    DialectError, ObservabilityError, RouteError, RuntimeError, SignerError, UpstreamError,
-};
-#[allow(deprecated)]
-pub use traits::RouterPlugin;
+pub use errors::{DialectError, ObservabilityError, RouteError, SignerError, UpstreamError};
 pub use traits::{
     ApiKeyAwareSignerFactory, FilterError, FilterOutput, FilterPlugin, ObservabilityHook,
-    PluginRuntime, Signer, SignerFactory, UpstreamDialect,
+    RouterPlugin, Signer, SignerFactory, UpstreamDialect,
 };
 pub use types::{
     CredentialStrategy, GLOBAL_PRINCIPAL, InternalError, InternalErrorKind, InternalErrorStage,

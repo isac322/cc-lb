@@ -158,7 +158,6 @@ impl Fixture {
             prompt_cache_observations: storage.clone(),
             anthropic_compatibility_kv: storage.clone(),
             audit: None,
-            plugin_registry_repo: None,
         };
         Self {
             _db_dir: db_dir,

@@ -19,7 +19,6 @@ pub mod validation;
 pub mod warmup_attempts;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 
 pub use anthropic_compatibility_kv::*;
 
@@ -46,61 +45,6 @@ pub use validation::validate_identifier;
 pub use warmup_attempts::*;
 
 pub type RepoError = StorageError;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginRegistryStatus {
-    Active,
-    Disabled,
-}
-
-/// Opaque JSON blob retained as legacy metadata column on the plugin
-/// registry table. The wasmtime upload path (`schema_hash` +
-/// `supported_slots`) is the only writer today; the field is kept
-/// as a passthrough `serde_json::Value` so historical rows still
-/// deserialize.
-pub type AugmentedMetadata = serde_json::Value;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginRegistryRecord {
-    pub sha256: [u8; 32],
-    pub plugin_name: String,
-    pub plugin_version: String,
-    pub abi_envelope: u32,
-    pub augmented_metadata: AugmentedMetadata,
-    pub host_offer_hash: [u8; 32],
-    pub handshake_schema_version: u32,
-    pub last_handshake_at: i64,
-    pub status: PluginRegistryStatus,
-}
-
-#[async_trait]
-pub trait PluginRegistryRepo: Send + Sync {
-    async fn upsert_record(&self, record: &PluginRegistryRecord) -> Result<(), RepoError>;
-
-    async fn get_by_sha256(
-        &self,
-        sha256: &[u8; 32],
-    ) -> Result<Option<PluginRegistryRecord>, RepoError>;
-
-    async fn list_active(&self) -> Result<Vec<PluginRegistryRecord>, RepoError>;
-
-    async fn set_status(
-        &self,
-        sha256: &[u8; 32],
-        status: PluginRegistryStatus,
-    ) -> Result<(), RepoError>;
-
-    async fn delete_by_sha256(&self, sha256: &[u8; 32]) -> Result<(), RepoError>;
-
-    async fn count(&self) -> Result<usize, RepoError>;
-
-    async fn get_shutdown_marker(&self) -> Result<Option<i64>, RepoError>;
-
-    async fn set_shutdown_marker(&self, unix_secs: i64) -> Result<(), RepoError>;
-
-    async fn clear_shutdown_marker(&self) -> Result<(), RepoError>;
-}
 
 #[async_trait]
 pub trait PluginBlobRepo: Send + Sync {

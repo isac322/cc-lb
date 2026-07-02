@@ -4,8 +4,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
 use cc_lb_plugin_api::{
-    PluginManifest, Principal, PrincipalKind, RequestContext, RuntimeError, SignerFactory, SlotKey,
-    Upstream, shape_request, sign_request,
+    PluginManifest, Principal, PrincipalKind, RequestContext, SignerFactory, SlotKey, Upstream,
+    shape_request, sign_request,
 };
 use cc_lb_runtime_wasmtime::{WasmtimeRuntime, WasmtimeRuntimeError, WasmtimeUpstreamDialect};
 use cc_lb_signer_anthropic_oauth::{
@@ -18,7 +18,7 @@ use serde_json::json;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::dynamic_view_builder::{Stores, bridged_metadata, materialize_wasm};
+use crate::dynamic_view_builder::{Stores, materialize_wasm};
 use crate::refresh::LazyRefresher;
 use crate::warmup::request::{WARMUP_MAX_TOKENS, WARMUP_MODEL, WarmupHttpClient};
 
@@ -56,8 +56,6 @@ pub enum WarmupDispatchError {
     Storage(#[from] StorageError),
     #[error("wasm materialize failed: {0}")]
     Materialize(String),
-    #[error("plugin instantiate failed: {0}")]
-    Instantiate(#[from] RuntimeError),
     #[error("wasmtime plugin register failed: {0}")]
     Register(#[from] WasmtimeRuntimeError),
     #[error("warmup body serialize failed: {0}")]
@@ -116,11 +114,7 @@ pub async fn dispatch_warmup_with_dialect(
         artifact: wasm_path.to_string_lossy().into_owned(),
         wire_version: plugin_ref.wire_version,
         config: plugin_ref.config.clone(),
-        metadata: bridged_metadata(
-            params.stores.plugin_registry_repo.as_ref(),
-            registry_entry.sha256,
-        )
-        .await,
+        metadata: std::collections::BTreeMap::new(),
     };
 
     let synth_name = format!("__warmup__{}", params.upstream.id);

@@ -855,7 +855,6 @@ fn default_true_bool() -> bool {
 pub struct RuntimeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<PathBuf>,
-    pub startup_handshake: StartupHandshakeConfig,
     #[serde(default)]
     pub wasmtime: WasmtimeConfig,
 }
@@ -930,24 +929,6 @@ impl Default for PluginWireBounds {
             max_header_value_bytes: 8 * 1024,
             normalize_error_body_bytes: 256 * 1024,
             reason_bytes: 256,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct StartupHandshakeConfig {
-    #[serde(default = "default_true")]
-    pub skip_if_fresh: bool,
-    #[serde(default)]
-    pub force: bool,
-}
-
-impl Default for StartupHandshakeConfig {
-    fn default() -> Self {
-        Self {
-            skip_if_fresh: true,
-            force: false,
         }
     }
 }

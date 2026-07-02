@@ -26,8 +26,8 @@ pub use types::{
     PluginWireBounds, PostgresPoolConfig, PriceCatalogConfig, PromptCacheShadowConfig,
     RecurringJobConfig, RestartRequiredField, RuntimeConfig, SchedulerConfig,
     SchedulerIdempotencyConfig, SchedulerPoolConfig, SchedulerRetryClasses, SchedulerRetryConfig,
-    SchedulerStalenessConfig, ShapeOriginPolicy, StartupHandshakeConfig, StorageConfig,
-    SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig, WasmtimeConfig,
+    SchedulerStalenessConfig, ShapeOriginPolicy, StorageConfig, SubscriptionQuotaConfig,
+    TimeoutsConfig, TlsConfig, WasmtimeConfig,
 };
 pub use validation::{ValidationError, validate_postgres_url};
 

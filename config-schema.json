@@ -173,10 +173,6 @@
     "runtime": {
       "$ref": "#/$defs/RuntimeConfig",
       "default": {
-        "startup_handshake": {
-          "force": false,
-          "skip_if_fresh": true
-        },
         "wasmtime": {
           "cookie_redaction": false,
           "plugin_failure_policy": "pass_through",
@@ -926,13 +922,6 @@
             "null"
           ]
         },
-        "startup_handshake": {
-          "$ref": "#/$defs/StartupHandshakeConfig",
-          "default": {
-            "force": false,
-            "skip_if_fresh": true
-          }
-        },
         "wasmtime": {
           "$ref": "#/$defs/WasmtimeConfig",
           "default": {
@@ -1209,19 +1198,6 @@
         "unrestricted",
         "selected_upstream_origin"
       ]
-    },
-    "StartupHandshakeConfig": {
-      "type": "object",
-      "properties": {
-        "force": {
-          "type": "boolean",
-          "default": false
-        },
-        "skip_if_fresh": {
-          "type": "boolean",
-          "default": true
-        }
-      }
     },
     "StorageConfig": {
       "oneOf": [

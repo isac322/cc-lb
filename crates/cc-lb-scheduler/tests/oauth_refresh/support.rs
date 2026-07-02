@@ -1,4 +1,4 @@
-#![allow(deprecated, dead_code)]
+#![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
