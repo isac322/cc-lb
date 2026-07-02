@@ -85,6 +85,12 @@
         "shadow": false
       }
     },
+    "lifecycle_limit_rejection_audit_subscriber": {
+      "$ref": "#/$defs/LifecycleLimitRejectionAuditSubscriberConfig",
+      "default": {
+        "enabled": false
+      }
+    },
     "lifecycle_pricing_subscriber": {
       "$ref": "#/$defs/LifecyclePricingSubscriberConfig",
       "default": {
@@ -549,6 +555,15 @@
           "default": true
         },
         "shadow": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "LifecycleLimitRejectionAuditSubscriberConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
           "type": "boolean",
           "default": false
         }

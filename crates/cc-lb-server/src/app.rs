@@ -978,6 +978,14 @@ async fn build_app_with_storage_inner(
     } else {
         None
     };
+    let lifecycle_limit_rejection_audit_rx =
+        if config.lifecycle_limit_rejection_audit_subscriber.enabled && audit_sink.is_some() {
+            Some(in_memory_bus.attach_lifecycle_limit_rejection_audit(
+                cc_lb_core::event_bus::DEFAULT_LIFECYCLE_LIMIT_REJECTION_AUDIT_CAPACITY,
+            ))
+        } else {
+            None
+        };
     let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(in_memory_bus);
     let request_event_writer_handle = request_event_writer_rx
         .map(|rx| cc_lb_core::spawn_request_event_writer(storage.clone(), rx));
@@ -1018,6 +1026,12 @@ async fn build_app_with_storage_inner(
                 Some(subscription_quota_sink.clone()),
             )
         });
+    let lifecycle_limit_rejection_audit_subscriber_handle = lifecycle_limit_rejection_audit_rx
+        .and_then(|rx| {
+            audit_sink
+                .clone()
+                .map(|sink| cc_lb_core::spawn_lifecycle_limit_rejection_audit_subscriber(rx, sink))
+        });
     let request_event_writer_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_core::RequestEventWriterHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(request_event_writer_handle));
@@ -1052,6 +1066,11 @@ async fn build_app_with_storage_inner(
         tokio::sync::Mutex<Option<cc_lb_core::SubscriptionQuotaSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(
         lifecycle_subscription_quota_subscriber_handle,
+    ));
+    let lifecycle_limit_rejection_audit_subscriber_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::LimitRejectionAuditSubscriberHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(
+        lifecycle_limit_rejection_audit_subscriber_handle,
     ));
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
@@ -1225,6 +1244,18 @@ async fn build_app_with_storage_inner(
             let subscription_quota_slot = subscription_quota_slot.clone();
             async move {
                 let mut guard = subscription_quota_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let limit_rejection_audit_slot = lifecycle_limit_rejection_audit_subscriber_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let limit_rejection_audit_slot = limit_rejection_audit_slot.clone();
+            async move {
+                let mut guard = limit_rejection_audit_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }

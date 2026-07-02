@@ -40,6 +40,7 @@ pub mod lifecycle_event_assembler;
 pub mod lifecycle_event_logger;
 pub mod lifecycle_hook_adapter;
 pub mod lifecycle_limit_reconcile_subscriber;
+pub mod lifecycle_limit_rejection_audit_subscriber;
 pub mod lifecycle_pricing_subscriber;
 #[cfg(not(loom))]
 pub mod lifecycle_rate_limit_header_subscriber;
@@ -143,6 +144,9 @@ pub use lifecycle_hook_adapter::{
 };
 pub use lifecycle_limit_reconcile_subscriber::{
     LimitReconcileMode, LimitReconcileSubscriberHandle, spawn_lifecycle_limit_reconcile_subscriber,
+};
+pub use lifecycle_limit_rejection_audit_subscriber::{
+    LimitRejectionAuditSubscriberHandle, spawn_lifecycle_limit_rejection_audit_subscriber,
 };
 pub use lifecycle_pricing_subscriber::{
     PricingSubscriberHandle, spawn_lifecycle_pricing_subscriber,

@@ -650,6 +650,19 @@ pub struct LimitSubject {
     pub record: StoredApiKeyRecord,
 }
 
+struct LimitRejectionInfo {
+    subject: cc_lb_lifecycle::LimitSubject,
+    request_summary: cc_lb_lifecycle::LimitRequestSummary,
+    route_summary: cc_lb_lifecycle::RouteSummary,
+    limit_violation: Option<String>,
+    reason_label: String,
+}
+
+struct LimitRejectionErr {
+    response: Response<Body>,
+    info: LimitRejectionInfo,
+}
+
 struct StaticLimitSubjectProvider {
     subject: LimitSubject,
 }
@@ -1432,18 +1445,18 @@ impl Lifecycle {
             .await
         {
             Ok(active_limit) => active_limit,
-            Err(response) => {
+            Err(LimitRejectionErr { response, info }) => {
                 let status = response.status();
                 observe_finished_for_principal(hooks, status, started, &principal, &ctx.body_bytes);
                 if let Some(o) = observer.as_ref() {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
                         event_id: o.event_id().to_owned(),
                         decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
-                            reason: "limit_rejected".to_owned(),
-                            subject: None,
-                            request_summary: None,
-                            route_summary: None,
-                            limit_violation: None,
+                            reason: info.reason_label,
+                            subject: Some(info.subject),
+                            request_summary: Some(info.request_summary),
+                            route_summary: Some(info.route_summary),
+                            limit_violation: info.limit_violation,
                         },
                     });
                     o.set_terminal(status, error_codes::LIMIT_REJECTED);
@@ -1711,7 +1724,7 @@ impl Lifecycle {
         principal: &Principal,
         route: &cc_lb_plugin_api::RouteDecision,
         authn_success: &AuthnSuccess,
-    ) -> Result<Option<ActiveLimit>, Response<Body>> {
+    ) -> Result<Option<ActiveLimit>, LimitRejectionErr> {
         let (Some(limit_engine), Some(subject_provider)) = (
             self.limit_engine.as_ref(),
             self.limit_subject_provider.as_ref(),
@@ -1753,10 +1766,12 @@ impl Lifecycle {
             })),
             Err(reason) => {
                 record_limit_reject_metrics(&reason, &subject.key_id);
-                if let Some(limit_violation) = limit_violation_name(&reason) {
-                    self.enqueue_limit_audit(ctx, &subject, &limit_request, route, limit_violation);
+                let limit_violation = limit_violation_name(&reason).map(|v| v.to_owned());
+                if let Some(violation) = limit_violation.as_deref() {
+                    self.enqueue_limit_audit(ctx, &subject, &limit_request, route, violation);
                 }
                 let retry_after_seconds = limit_retry_after_secs(reason.clone());
+                let reason_label = "limit_rejected".to_owned();
                 let mut response = limit_rejection_response(
                     reason,
                     &limit_request.model,
@@ -1769,7 +1784,23 @@ impl Lifecycle {
                     &subject.key_id,
                     &subject.principal_id,
                 );
-                Err(response)
+                let info = LimitRejectionInfo {
+                    subject: cc_lb_lifecycle::LimitSubject {
+                        principal_id: subject.principal_id.clone(),
+                        key_id: subject.key_id.clone(),
+                    },
+                    request_summary: cc_lb_lifecycle::LimitRequestSummary {
+                        model: limit_request.model.clone(),
+                        path: ctx.path.clone(),
+                        method: ctx.method.as_str().to_owned(),
+                    },
+                    route_summary: cc_lb_lifecycle::RouteSummary {
+                        upstream_name: audit_upstream_name(&route.upstream).to_owned(),
+                    },
+                    limit_violation,
+                    reason_label,
+                };
+                Err(LimitRejectionErr { response, info })
             }
         }
     }
