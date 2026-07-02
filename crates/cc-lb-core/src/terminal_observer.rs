@@ -10,10 +10,10 @@
 //!    `request_id` is intentionally distinct because it is forwarded to/from
 //!    Anthropic and exposed to PDK plugins and therefore non-unique.
 //! 2. As each request phase completes, the lifecycle code calls
-//!    `attach_principal`, `attach_route`, `attach_model`, etc. to populate
-//!    state.
-//! 3. The SSE parser calls `update_usage` to refresh token counters mid-flight.
-//! 4. On normal completion the lifecycle calls [`LifecycleContext::finish`]
+//!    `emit_lifecycle` with a `LifecycleEvent::*` variant so that shadow-path
+//!    subscribers (assembler, pricing, cache observation, etc.) rebuild the
+//!    row without observer-side state.
+//! 3. On normal completion the lifecycle calls [`LifecycleContext::finish`]
 //!    which:
 //!      1. atomically CAS-es `finalized: false → true`,
 //!      2. snapshots state,
@@ -141,68 +141,10 @@ impl LifecycleContext {
         &self.inner.event_id
     }
 
-    pub(crate) fn attach_principal(
-        &self,
-        principal_id: String,
-        key_id: Option<String>,
-        principal_kind: Option<String>,
-    ) {
-        let mut state = self.lock_state();
-        state.principal_id = Some(principal_id);
-        state.key_id = key_id;
-        state.principal_kind = principal_kind;
-    }
-
-    pub(crate) fn attach_route(
-        &self,
-        upstream_id: Uuid,
-        upstream_name: String,
-        upstream: Option<RequestEventUpstream>,
-    ) {
-        let mut state = self.lock_state();
-        state.upstream_id = Some(upstream_id);
-        state.upstream_name = Some(upstream_name);
-        if let Some(u) = upstream {
-            state.upstream = Some(u);
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn attach_model(&self, model: String) {
-        self.lock_state().model = Some(model);
-    }
-
-    // TODO(rfc-0002-phase-9-cutover): remove once the assembler subscriber
-    // (Phase 3) becomes the authoritative writer and legacy state on the
-    // observer is no longer read by `make_request_event`. Subscribers own
-    // usage state via `LifecycleEvent::UsageObserved` after cutover.
-    pub(crate) fn update_usage(&self, usage: &UsageCounts) {
-        self.lock_state().usage = usage.clone();
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn record_internal_error(&self, error: InternalError) {
-        self.lock_state().internal_errors.push(error);
-    }
-
-    pub(crate) fn set_routing_trace(&self, trace: RoutingTrace) {
-        self.lock_state().routing_trace = Some(trace);
-    }
-
     pub(crate) fn set_terminal(&self, status: StatusCode, error_code: &'static str) {
         let mut state = self.lock_state();
         state.status = status.as_u16();
         state.error_code = Some(error_code);
-    }
-
-    pub(crate) fn set_upstream_error(
-        &self,
-        error_type: Option<String>,
-        error_message: Option<String>,
-    ) {
-        let mut state = self.lock_state();
-        state.upstream_error_type = error_type;
-        state.upstream_error_message = error_message;
     }
 
     pub(crate) fn set_termination_timings(
@@ -221,24 +163,14 @@ impl LifecycleContext {
         state.first_body_chunk_ms = first_body_chunk_ms;
     }
 
+    pub(crate) fn set_internal_errors(&self, errors: Vec<InternalError>) {
+        self.lock_state().internal_errors = errors;
+    }
+
     // TODO(rfc-0002-phase-9-cutover): remove once cache observations flow
     // exclusively through `LifecycleEvent::CacheObserved` and the assembler
     // subscriber owns cache-state assembly on the shadow row.
     #[allow(dead_code)]
-    pub(crate) fn attach_cache_metadata(
-        &self,
-        cache_state: Option<RequestCacheState>,
-        cache_control_block_count: Option<u64>,
-        cache_breakpoints: Vec<RequestCacheBreakpoint>,
-        cache_prefix_hash: Option<String>,
-    ) {
-        let mut state = self.lock_state();
-        state.cache_state = cache_state;
-        state.cache_control_block_count = cache_control_block_count;
-        state.cache_breakpoints = cache_breakpoints;
-        state.cache_prefix_hash = cache_prefix_hash;
-    }
-
     /// Synchronous publish of the terminal event. Returns silently if another
     /// path (Drop or a previous `finish`) already published.
     pub(crate) fn finish(&self) {
@@ -287,18 +219,6 @@ impl LifecycleContext {
     /// of whether the event is delivered.
     pub(crate) fn emit_lifecycle(&self, event: LifecycleEvent) {
         self.inner.bus.publish_lifecycle(event);
-    }
-
-    /// Snapshot current state and broadcast as a `Partial` update for live
-    /// dashboard consumers. Does NOT flip the `finalized` flag, does NOT
-    /// persist (the writer pipeline only persists `Final` events), and may be
-    /// called any number of times during a request's lifetime.
-    pub(crate) fn publish_partial_snapshot(&self) {
-        if self.inner.finalized.load(Ordering::Acquire) {
-            return;
-        }
-        let event = self.inner.make_request_event(None);
-        self.inner.bus.publish(RequestEventUpdate::partial(event));
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, TerminalState> {
@@ -490,97 +410,6 @@ mod tests {
         assert!(
             try_again.is_err(),
             "Drop must not republish after finish; got {try_again:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn update_usage_is_reflected_in_final() {
-        let bus = Arc::new(InMemoryBus::new());
-        let mut rx = bus.attach_writer(8);
-        let clock: ClockHandle = Arc::new(SystemClock);
-        let observer = LifecycleContext::new(
-            "req_usage".to_owned(),
-            bus.clone() as Arc<dyn RequestEventBus>,
-            &clock,
-        );
-
-        let usage = UsageCounts {
-            present: true,
-            input_tokens: 42,
-            output_tokens: 100,
-            thinking_tokens: 16,
-            ..UsageCounts::default()
-        };
-        observer.update_usage(&usage);
-        observer.set_terminal(StatusCode::OK, error_codes::UPSTREAM_4XX);
-        observer.finish();
-
-        let update = rx.recv().await.expect("update delivered");
-        assert_eq!(update.event.input_tokens, Some(42));
-        assert_eq!(update.event.output_tokens, Some(100));
-        assert_eq!(update.event.thinking_tokens, Some(16));
-    }
-
-    #[tokio::test]
-    async fn publish_partial_snapshot_emits_partial_without_finalizing() {
-        let bus = Arc::new(InMemoryBus::new());
-        let mut rx = bus.attach_writer(8);
-        let clock: ClockHandle = Arc::new(SystemClock);
-        let observer = LifecycleContext::new(
-            "req_partial".to_owned(),
-            bus.clone() as Arc<dyn RequestEventBus>,
-            &clock,
-        );
-        observer.update_usage(&UsageCounts {
-            present: true,
-            input_tokens: 5,
-            output_tokens: 12,
-            ..UsageCounts::default()
-        });
-        observer.publish_partial_snapshot();
-        observer.update_usage(&UsageCounts {
-            present: true,
-            input_tokens: 5,
-            output_tokens: 42,
-            ..UsageCounts::default()
-        });
-        observer.publish_partial_snapshot();
-        observer.set_terminal(StatusCode::OK, error_codes::UPSTREAM_4XX);
-        observer.finish();
-
-        let first = rx.recv().await.expect("first partial");
-        assert_eq!(first.phase, RequestEventPhase::Partial);
-        assert_eq!(first.event.output_tokens, Some(12));
-        let second = rx.recv().await.expect("second partial");
-        assert_eq!(second.phase, RequestEventPhase::Partial);
-        assert_eq!(second.event.output_tokens, Some(42));
-        let final_ev = rx.recv().await.expect("final");
-        assert_eq!(final_ev.phase, RequestEventPhase::Final);
-        assert_eq!(
-            final_ev.event.error_code.as_deref(),
-            Some(error_codes::UPSTREAM_4XX)
-        );
-    }
-
-    #[tokio::test]
-    async fn publish_partial_snapshot_is_noop_after_finalize() {
-        let bus = Arc::new(InMemoryBus::new());
-        let mut rx = bus.attach_writer(8);
-        let clock: ClockHandle = Arc::new(SystemClock);
-        let observer = LifecycleContext::new(
-            "req_partial_after_final".to_owned(),
-            bus.clone() as Arc<dyn RequestEventBus>,
-            &clock,
-        );
-        observer.set_terminal(StatusCode::OK, error_codes::UPSTREAM_4XX);
-        observer.finish();
-        observer.publish_partial_snapshot();
-        let first = rx.recv().await.expect("final delivered");
-        assert_eq!(first.phase, RequestEventPhase::Final);
-        let try_again = rx.try_recv();
-        assert!(
-            try_again.is_err(),
-            "publish_partial_snapshot must be a no-op after finish; got {try_again:?}"
         );
     }
 

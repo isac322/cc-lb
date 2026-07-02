@@ -1118,7 +1118,6 @@ impl Lifecycle {
                 started,
             );
             if let Some(o) = observer.as_ref() {
-                o.attach_principal(principal_id.clone(), None, None);
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
                     event_id: o.event_id().to_owned(),
                     result: Err(cc_lb_lifecycle::AuthFailure::PrincipalMissing {
@@ -1141,13 +1140,6 @@ impl Lifecycle {
             claims: serde_json::Map::new(),
         };
 
-        if let Some(o) = observer.as_ref() {
-            o.attach_principal(
-                principal.id.clone(),
-                Some(success.key_id.clone()),
-                Some("api_key".to_owned()),
-            );
-        }
         let router_pipeline = cached.resolved_pipeline(None);
         if let Some(error) = router_pipeline.instantiation_error.as_deref() {
             observe_error(hooks, "router_pipeline_unavailable", error, "router");
@@ -1335,12 +1327,6 @@ impl Lifecycle {
                 }),
                 routing_trace: Some(routing_trace_value.clone()),
             });
-            o.attach_route(
-                resolved_upstream_id,
-                router_chosen_upstream_name.clone(),
-                None,
-            );
-            o.set_routing_trace(routing_trace_value);
         }
         let prompt_cache_observation_context = prompt_cache_observation_context(
             &view,
@@ -1822,7 +1808,6 @@ impl Lifecycle {
         }
 
         if let Some(o) = observer.as_ref() {
-            o.update_usage(&usage);
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                 event_id: o.event_id().to_owned(),
                 usage: to_usage_snapshot(&usage),
@@ -1846,6 +1831,7 @@ impl Lifecycle {
                 Some(body_collect_ms),
                 first_body_chunk_ms,
             );
+            o.set_internal_errors(event_ctx.internal_errors.clone());
             o.finish();
         }
         Response::from_parts(parts, Body::from(body))
@@ -2119,10 +2105,6 @@ impl Lifecycle {
                                             error_message: err.error_message.clone().unwrap_or_default(),
                                         }),
                                     });
-                                    o.set_upstream_error(
-                                        err.error_type.clone(),
-                                        err.error_message.clone(),
-                                    );
                                     o.set_terminal(
                                         StatusCode::OK,
                                         error_codes::UPSTREAM_STREAM_ERROR,
@@ -2197,7 +2179,6 @@ impl Lifecycle {
                                     }
                                 }
                                 if let Some(o) = observer.as_ref() {
-                                    o.update_usage(&usage);
                                     if usage_update.message_start_usage {
                                         o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                             event_id: o.event_id().to_owned(),
@@ -2230,7 +2211,6 @@ impl Lifecycle {
                                                 source: cc_lb_lifecycle::UsageSource::MessageDelta,
                                             });
                                         }
-                                        o.publish_partial_snapshot();
                                         last_partial_at = Some(now);
                                         last_partial_output_tokens = usage.output_tokens;
                                     }
@@ -2255,12 +2235,8 @@ impl Lifecycle {
                         let raw = buffer.drain(..end).collect::<Vec<u8>>();
                         let _ = accumulate_sse_usage(&raw, &mut usage);
                         if let Some(o) = observer.as_ref()
-                            && let Some(err) = usage_parser::detect_mid_stream_error(&raw)
+                            && usage_parser::detect_mid_stream_error(&raw).is_some()
                         {
-                            o.set_upstream_error(
-                                err.error_type.clone(),
-                                err.error_message.clone(),
-                            );
                             o.set_terminal(
                                 StatusCode::OK,
                                 error_codes::UPSTREAM_STREAM_ERROR,
@@ -2341,7 +2317,6 @@ impl Lifecycle {
                     reservation.forget();
                 }
                 if let Some(o) = observer.as_ref() {
-                    o.update_usage(&usage);
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
                         event_id: o.event_id().to_owned(),
                         result: Ok(cc_lb_lifecycle::StreamSuccess {
@@ -2369,6 +2344,7 @@ impl Lifecycle {
                         Some(stream_total_ms),
                         elapsed_ms(first_chunk_at),
                     );
+                    o.set_internal_errors(event_ctx.internal_errors.clone());
                     o.finish();
                 }
             }
