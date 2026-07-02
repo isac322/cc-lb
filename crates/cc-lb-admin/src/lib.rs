@@ -1,5 +1,4 @@
 pub mod auth;
-mod credential_crypto;
 pub mod credentials;
 pub mod dashboard;
 pub mod dashboard_routes;
