@@ -1874,7 +1874,7 @@ impl Lifecycle {
                 inc_cache_miss(upstream, model);
             }
         }
-        let (cost_micros, cost_breakdown_opts) = if usage.present {
+        let (_cost_micros, cost_breakdown_opts) = if usage.present {
             let cost_model = active_limit
                 .as_ref()
                 .map(|active_limit| active_limit.request.model.as_str())
@@ -1899,19 +1899,12 @@ impl Lifecycle {
             (0, CostBreakdownOptions::default())
         };
 
-        let mut limit_reconcile_ms = None;
+        let limit_reconcile_ms = None;
         if let (Some(limit_engine), Some(active_limit)) =
             (self.limit_engine.as_ref(), active_limit.as_mut())
             && let Some(reservation) = active_limit.reservation.take()
         {
-            let limit_reconcile_start = Instant::now();
-            limit_engine.reconcile(
-                reservation,
-                usage.input_tokens,
-                usage.output_tokens,
-                cost_micros as i64,
-            );
-            limit_reconcile_ms = Some(duration_to_ms(limit_reconcile_start.elapsed()));
+            reservation.forget();
             attach_limit_headers_from_engine(
                 &mut parts.headers,
                 limit_engine.as_ref(),
@@ -2562,7 +2555,7 @@ impl Lifecycle {
                 "stream latency breakdown"
             );
             if let Some(mut active_limit) = active_limit {
-                let (cost_micros, cost_breakdown_opts) = if usage.present {
+                let (_cost_micros, cost_breakdown_opts) = if usage.present {
                     let cost_model = active_limit.request.model.as_str();
                     let pricing_upstream_kind = active_limit
                         .upstream_kind
@@ -2582,18 +2575,11 @@ impl Lifecycle {
                 } else {
                     (0, CostBreakdownOptions::default())
                 };
-                let mut limit_reconcile_ms = None;
-                if let (Some(limit_engine), Some(reservation)) =
+                let limit_reconcile_ms = None;
+                if let (Some(_limit_engine), Some(reservation)) =
                     (limit_engine.as_ref(), active_limit.reservation.take())
                 {
-                    let limit_reconcile_start = Instant::now();
-                    limit_engine.reconcile(
-                        reservation,
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        cost_micros as i64,
-                    );
-                    limit_reconcile_ms = Some(duration_to_ms(limit_reconcile_start.elapsed()));
+                    reservation.forget();
                 }
                 if let Some(storage) = storage.as_ref() {
                     let now_ms = unix_now_ms(&*clock);

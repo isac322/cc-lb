@@ -60,7 +60,11 @@ async fn cold_request_populates_all_connection_stages_ip_upstream() {
     // IP literals can bypass the resolver, so dns_ms is covered by the hostname regression test.
     assert!(event.dns_ms.is_none() || event.dns_ms.is_some());
     assert!(event.observability_post_ms.is_some());
-    assert!(event.limit_reconcile_ms.is_some());
+    assert!(
+        event.limit_reconcile_ms.is_none(),
+        "RFC-0002 H4: handler no longer measures reconcile; LimitReconcileSubscriber owns the reconcile call and does not populate this handler-side field. Got: {:?}",
+        event.limit_reconcile_ms
+    );
 }
 
 #[tokio::test]
