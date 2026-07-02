@@ -34,6 +34,26 @@ async fn count_request_events(pool: &SqlitePool, where_clause: &str) -> i64 {
     row.try_get::<i64, _>(0).expect("count column")
 }
 
+/// Poll the row count until it is stable for two consecutive reads separated
+/// by 100ms, or up to `deadline`. This absorbs the async lag between the
+/// `wait_for_status` handshake returning and the writer/assembler tasks
+/// draining their mpsc buffers on the `/v1/models` init request.
+async fn settled_row_count(pool: &SqlitePool, where_clause: &str) -> i64 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut previous = count_request_events(pool, where_clause).await;
+    loop {
+        sleep(Duration::from_millis(100)).await;
+        let current = count_request_events(pool, where_clause).await;
+        if current == previous {
+            return current;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return current;
+        }
+        previous = current;
+    }
+}
+
 async fn wait_for_row_count(pool: &SqlitePool, where_clause: &str, expected: i64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -65,7 +85,7 @@ async fn fetch_metric_scrape(metrics_addr: std::net::SocketAddr) -> String {
 async fn live_qa_1_default_boot_happy_path_writes_row_and_reconciles() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
-    let baseline = count_request_events(&pool, "1=1").await;
+    let baseline = settled_row_count(&pool, "1=1").await;
 
     let response = common::http_post(
         server.proxy_addr,
@@ -101,7 +121,7 @@ async fn live_qa_1_default_boot_happy_path_writes_row_and_reconciles() {
 async fn live_qa_2_oauth_usage_does_not_produce_request_event_row() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
-    let baseline = count_request_events(&pool, "1=1").await;
+    let baseline = settled_row_count(&pool, "1=1").await;
 
     // /api/oauth/usage is served by non_lifecycle_routes and MUST bypass
     // the lifecycle middleware. If middleware creates a LifecycleContext for
@@ -138,7 +158,7 @@ async fn live_qa_2_oauth_usage_does_not_produce_request_event_row() {
 async fn live_qa_3_unknown_route_and_method_not_allowed_do_not_write_row() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
-    let baseline = count_request_events(&pool, "1=1").await;
+    let baseline = settled_row_count(&pool, "1=1").await;
 
     let not_found = common::http_get(server.proxy_addr, "/definitely/not-a-route")
         .await
@@ -177,9 +197,9 @@ enabled = true
 "#;
     let server = common::spawn_test_server_with_extra_config(extra).await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
-    let baseline_total = count_request_events(&pool, "1=1").await;
-    let baseline_legacy = count_request_events(&pool, "shadow_event_id IS NULL").await;
-    let baseline_shadow = count_request_events(&pool, "shadow_event_id IS NOT NULL").await;
+    let baseline_total = settled_row_count(&pool, "1=1").await;
+    let baseline_legacy = settled_row_count(&pool, "shadow_event_id IS NULL").await;
+    let baseline_shadow = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
 
     let response = common::http_post(
         server.proxy_addr,

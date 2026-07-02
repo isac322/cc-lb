@@ -897,22 +897,21 @@ async fn build_app_with_storage_inner(
              request_event_writer_source = \"both\" | \"shadow\" instead"
         );
     }
-    // RFC-0002 Phase 9: assembler is the sole writer for all writer_source modes.
-    // Legacy `RequestEventWriter` task is not spawned (post-cutover).
+    // RFC-0002 Phase 6 writer cutover semantics:
+    //   Legacy → legacy RequestEventWriter task active, assembler off
+    //   Both   → both writers active (comparison mode)
+    //   Shadow → only assembler active
+    let request_event_writer_rx = writer_source
+        .legacy_writer_enabled()
+        .then(|| in_memory_bus.attach_writer(cc_lb_core::DEFAULT_WRITER_CAPACITY));
     let lifecycle_event_logger_rx =
         in_memory_bus.attach_lifecycle_writer(cc_lb_core::DEFAULT_LIFECYCLE_WRITER_CAPACITY);
-    let assembler_mode = match (
-        writer_source.legacy_writer_enabled(),
-        writer_source.shadow_writer_enabled(),
-    ) {
-        (true, true) => cc_lb_core::lifecycle_event_assembler::AssemblerMode::Both,
-        (true, false) => cc_lb_core::lifecycle_event_assembler::AssemblerMode::LegacyOnly,
-        (false, true) => cc_lb_core::lifecycle_event_assembler::AssemblerMode::ShadowOnly,
-        (false, false) => cc_lb_core::lifecycle_event_assembler::AssemblerMode::LegacyOnly,
-    };
-    let lifecycle_assembler_rx = Some(
-        in_memory_bus.attach_lifecycle_assembler(cc_lb_core::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY),
-    );
+    let lifecycle_assembler_rx = writer_source.shadow_writer_enabled().then(|| {
+        in_memory_bus.attach_lifecycle_assembler(cc_lb_core::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY)
+    });
+    // Assembler only produces shadow rows now; legacy rows come from the
+    // durable RequestEventWriter task.
+    let assembler_mode = cc_lb_core::lifecycle_event_assembler::AssemblerMode::ShadowOnly;
     let lifecycle_hook_adapter_rx = if config.lifecycle_hook_adapter.enabled {
         Some(
             in_memory_bus
@@ -941,6 +940,8 @@ async fn build_app_with_storage_inner(
         None
     };
     let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(in_memory_bus);
+    let request_event_writer_handle = request_event_writer_rx
+        .map(|rx| cc_lb_core::spawn_request_event_writer(storage.clone(), rx));
     let lifecycle_event_logger_handle =
         cc_lb_core::spawn_lifecycle_event_logger(lifecycle_event_logger_rx);
     let lifecycle_event_assembler_handle = lifecycle_assembler_rx
@@ -961,6 +962,9 @@ async fn build_app_with_storage_inner(
     });
     let lifecycle_cache_observation_subscriber_handle = lifecycle_cache_obs_rx
         .map(|rx| cc_lb_core::spawn_lifecycle_cache_observation_subscriber(rx, event_bus.clone()));
+    let request_event_writer_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_core::RequestEventWriterHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(request_event_writer_handle));
     let lifecycle_event_logger_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_core::LifecycleEventLoggerHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(lifecycle_event_logger_handle)));
@@ -1047,6 +1051,18 @@ async fn build_app_with_storage_inner(
             async move {
                 if let Err(error) = leader_election.close().await {
                     tracing::warn!(error = %error, "scheduler leader connection close failed");
+                }
+            }
+        });
+    }
+    {
+        let writer_slot = request_event_writer_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let writer_slot = writer_slot.clone();
+            async move {
+                let mut guard = writer_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
                 }
             }
         });

@@ -107,12 +107,7 @@ pub enum LifecycleEvent {
         upstream_id: Uuid,
     },
     /// Upstream returned response headers (may be pre-body).
-    UpstreamResponseStarted {
-        event_id: EventId,
-        status: u16,
-        #[serde(default, skip_serializing_if = "HeaderSnapshot::is_empty")]
-        headers: HeaderSnapshot,
-    },
+    UpstreamResponseStarted { event_id: EventId, status: u16 },
     /// Usage counts were observed from an SSE frame or non-stream body.
     UsageObserved {
         event_id: EventId,
@@ -245,13 +240,10 @@ pub struct ParseInfo {
     pub stream: bool,
     /// Byte length of the raw request body.
     pub body_bytes: u64,
-    /// Number of `cache_control` blocks observed in the request body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control_block_count: Option<u64>,
-    /// Per-block cache breakpoint metadata, ordered by input block index.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_breakpoints: Vec<CacheBreakpointLite>,
-    /// Deterministic hash of the request prefix up to the last cache breakpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_prefix_hash: Option<String>,
 }
@@ -544,7 +536,6 @@ mod tests {
             LifecycleEvent::UpstreamResponseStarted {
                 event_id: sample_event_id(),
                 status: 200,
-                headers: HeaderSnapshot::default(),
             }
             .kind(),
             LifecycleEvent::UsageObserved {
