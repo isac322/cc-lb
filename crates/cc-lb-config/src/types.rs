@@ -829,21 +829,19 @@ fn default_true_bool() -> bool {
 
 /// RFC-0002 Phase 6 writer cutover switch.
 ///
-/// - `Legacy` (default): only the pre-RFC-0002 writer persists rows. The
-///   Phase-3 shadow-writer feature flag is ignored.
+/// - `Shadow` (default): only the assembler writer persists rows.
 /// - `Both`: both writers persist rows. Rows carry distinct `event_id`s and
 ///   the shadow row also carries `shadow_event_id` pointing at the legacy
 ///   row's `event_id`. Diff via the comparison SQL in
 ///   `docs/runbook/lifecycle-shadow.md`.
-/// - `Shadow`: only the assembler writer persists rows. Legacy path is
-///   detached from storage. Do not use until the comparison diff is empty
-///   for the target soak period.
+/// - `Legacy`: only the pre-RFC-0002 writer persists rows. Preserved as an
+///   emergency rollback switch until Phase 13 removes the legacy path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestEventWriterSource {
-    #[default]
     Legacy,
     Both,
+    #[default]
     Shadow,
 }
 

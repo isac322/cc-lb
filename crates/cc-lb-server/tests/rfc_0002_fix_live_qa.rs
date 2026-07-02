@@ -121,13 +121,12 @@ async fn live_qa_1_default_boot_happy_path_writes_row_and_reconciles() {
     .expect("post messages");
 
     assert_eq!(response.status, 200);
-    // Legacy authoritative writer produces 1 row.
-    wait_for_row_count(&pool, "shadow_event_id IS NULL", baseline + 1).await;
+    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline + 1).await;
     let total = count_request_events(&pool, "1=1").await;
     assert_eq!(
         total,
         baseline + 1,
-        "default boot must not create shadow rows"
+        "default boot must produce exactly one shadow row"
     );
 
     // Metrics: reconcile subscriber must have processed the request.
