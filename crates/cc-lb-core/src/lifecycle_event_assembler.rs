@@ -15,6 +15,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::event_bus::{RequestEventBus, RequestEventUpdate};
+
 pub const DEFAULT_ASSEMBLER_MAP_CAP: usize = 4096;
 pub const DEFAULT_ASSEMBLER_TTL: Duration = Duration::from_secs(300);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
@@ -72,11 +74,13 @@ pub fn spawn_request_event_assembler(
     rx: mpsc::Receiver<LifecycleEvent>,
     storage: Arc<dyn RequestEventStore>,
     mode: AssemblerMode,
+    bus: Option<Arc<dyn RequestEventBus>>,
 ) -> RequestEventAssemblerHandle {
     spawn_with_config(
         rx,
         storage,
         mode,
+        bus,
         DEFAULT_ASSEMBLER_MAP_CAP,
         DEFAULT_ASSEMBLER_TTL,
     )
@@ -86,11 +90,20 @@ pub fn spawn_with_config(
     rx: mpsc::Receiver<LifecycleEvent>,
     storage: Arc<dyn RequestEventStore>,
     mode: AssemblerMode,
+    bus: Option<Arc<dyn RequestEventBus>>,
     map_cap: usize,
     ttl: Duration,
 ) -> RequestEventAssemblerHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(assembler_loop(rx, storage, mode, map_cap, ttl, shutdown_rx));
+    let join = tokio::spawn(assembler_loop(
+        rx,
+        storage,
+        mode,
+        bus,
+        map_cap,
+        ttl,
+        shutdown_rx,
+    ));
     RequestEventAssemblerHandle { shutdown_tx, join }
 }
 
@@ -192,6 +205,7 @@ async fn assembler_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     storage: Arc<dyn RequestEventStore>,
     mode: AssemblerMode,
+    bus: Option<Arc<dyn RequestEventBus>>,
     map_cap: usize,
     ttl: Duration,
     mut shutdown: oneshot::Receiver<()>,
@@ -209,12 +223,12 @@ async fn assembler_loop(
             biased;
             event = rx.recv() => {
                 match event {
-                    Some(event) => handle_event(&*storage, &mut partials, mode, map_cap, event).await,
+                    Some(event) => handle_event(&*storage, bus.as_deref(), &mut partials, mode, map_cap, event).await,
                     None => break,
                 }
             }
             _ = finalization_tick.tick() => {
-                flush_expired_terminations(&*storage, &mut partials, mode).await;
+                flush_expired_terminations(&*storage, bus.as_deref(), &mut partials, mode).await;
             }
             _ = sweeper.tick() => sweep_orphans(&mut partials, ttl),
             _ = &mut shutdown => break,
@@ -222,14 +236,23 @@ async fn assembler_loop(
     }
 
     while let Ok(event) = rx.try_recv() {
-        handle_event(&*storage, &mut partials, mode, map_cap, event).await;
+        handle_event(
+            &*storage,
+            bus.as_deref(),
+            &mut partials,
+            mode,
+            map_cap,
+            event,
+        )
+        .await;
     }
-    force_flush_terminations(&*storage, &mut partials, mode).await;
+    force_flush_terminations(&*storage, bus.as_deref(), &mut partials, mode).await;
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn write_finalized_rows(
     storage: &dyn RequestEventStore,
+    bus: Option<&dyn RequestEventBus>,
     mode: AssemblerMode,
     event_id: &EventId,
     partial: &Partial,
@@ -255,7 +278,14 @@ async fn write_finalized_rows(
     let mut wrote = 0u64;
     for row in &rows {
         match storage.append_request_event(row).await {
-            Ok(()) => wrote += 1,
+            Ok(()) => {
+                wrote += 1;
+                if let Some(bus) = bus
+                    && row.shadow_event_id.is_some()
+                {
+                    bus.publish(RequestEventUpdate::final_(row.clone()));
+                }
+            }
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -283,6 +313,7 @@ async fn write_finalized_rows(
 
 async fn flush_expired_terminations(
     storage: &dyn RequestEventStore,
+    bus: Option<&dyn RequestEventBus>,
     partials: &mut HashMap<EventId, Partial>,
     mode: AssemblerMode,
 ) {
@@ -309,6 +340,7 @@ async fn flush_expired_terminations(
             .increment(1);
             write_finalized_rows(
                 storage,
+                bus,
                 mode,
                 &event_id,
                 &partial,
@@ -324,6 +356,7 @@ async fn flush_expired_terminations(
 
 async fn force_flush_terminations(
     storage: &dyn RequestEventStore,
+    bus: Option<&dyn RequestEventBus>,
     partials: &mut HashMap<EventId, Partial>,
     mode: AssemblerMode,
 ) {
@@ -339,6 +372,7 @@ async fn force_flush_terminations(
                 .expect("pending implies termination present");
             write_finalized_rows(
                 storage,
+                bus,
                 mode,
                 &event_id,
                 &partial,
@@ -354,6 +388,7 @@ async fn force_flush_terminations(
 
 async fn handle_event(
     storage: &dyn RequestEventStore,
+    bus: Option<&dyn RequestEventBus>,
     partials: &mut HashMap<EventId, Partial>,
     mode: AssemblerMode,
     map_cap: usize,
@@ -392,6 +427,7 @@ async fn handle_event(
             partial.internal_errors = internal_errors.clone();
             write_finalized_rows(
                 storage,
+                bus,
                 mode,
                 &event_id,
                 &partial,
@@ -426,6 +462,7 @@ async fn handle_event(
         if termination.is_ready(&partial) {
             write_finalized_rows(
                 storage,
+                bus,
                 mode,
                 &event_id,
                 &partial,
@@ -461,6 +498,7 @@ async fn handle_event(
             .expect("readiness implies termination present");
         write_finalized_rows(
             storage,
+            bus,
             mode,
             &event_id,
             &partial,
@@ -863,7 +901,8 @@ mod tests {
     async fn success_terminated_persists_row_with_shadow_event_id() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly);
+        let handle =
+            spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly, None);
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-1"),
@@ -914,7 +953,8 @@ mod tests {
     async fn stream_error_terminated_carries_error_type_and_message() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly);
+        let handle =
+            spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly, None);
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-2"),
@@ -963,7 +1003,8 @@ mod tests {
     async fn parse_failed_terminated_still_persists_error_code() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly);
+        let handle =
+            spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly, None);
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-3"),
@@ -1006,7 +1047,8 @@ mod tests {
     async fn terminated_without_partial_writes_orphan_row() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly);
+        let handle =
+            spawn_request_event_assembler(rx, store.clone(), AssemblerMode::ShadowOnly, None);
 
         tx.send(LifecycleEvent::RequestTerminated {
             event_id: eid("orphan-terminated"),
@@ -1057,7 +1099,7 @@ mod tests {
     async fn both_mode_persists_legacy_and_shadow_rows_from_same_terminate() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), AssemblerMode::Both);
+        let handle = spawn_request_event_assembler(rx, store.clone(), AssemblerMode::Both, None);
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-both-1"),
@@ -1101,5 +1143,55 @@ mod tests {
         assert_eq!(legacy.event_id.as_deref(), Some("legacy-both-1"));
         assert_ne!(shadow.event_id.as_deref(), Some("legacy-both-1"));
         assert!(shadow.event_id.is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shadow_row_write_republishes_to_bus_for_admin_sse() {
+        use crate::event_bus::{InMemoryBus, RequestEventPhase};
+
+        let (tx, rx) = mpsc::channel(16);
+        let store = Arc::new(CapturingStore::default());
+        let bus = Arc::new(InMemoryBus::new());
+        let crate::event_bus::BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
+            panic!("expected InMemory receiver");
+        };
+        let handle = spawn_request_event_assembler(
+            rx,
+            store.clone(),
+            AssemblerMode::ShadowOnly,
+            Some(bus.clone() as Arc<dyn RequestEventBus>),
+        );
+
+        tx.send(LifecycleEvent::RequestStarted {
+            event_id: eid("sse-1"),
+            request_id: "req-sse-1".into(),
+            ts_ms: 1_730_000_000_000,
+            stream: false,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id: eid("sse-1"),
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 10,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let update = tokio::time::timeout(Duration::from_millis(200), broadcast_rx.recv())
+            .await
+            .expect("bus update within timeout")
+            .expect("bus receiver did not close");
+        assert_eq!(update.phase, RequestEventPhase::Final);
+        assert_eq!(update.event.shadow_event_id.as_deref(), Some("sse-1"));
     }
 }

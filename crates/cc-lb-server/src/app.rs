@@ -1013,8 +1013,14 @@ async fn build_app_with_storage_inner(
         .map(|rx| cc_lb_core::spawn_request_event_writer(storage.clone(), rx));
     let lifecycle_event_logger_handle =
         cc_lb_core::spawn_lifecycle_event_logger(lifecycle_event_logger_rx);
-    let lifecycle_event_assembler_handle = lifecycle_assembler_rx
-        .map(|rx| cc_lb_core::spawn_request_event_assembler(rx, storage.clone(), assembler_mode));
+    let lifecycle_event_assembler_handle = lifecycle_assembler_rx.map(|rx| {
+        cc_lb_core::spawn_request_event_assembler(
+            rx,
+            storage.clone(),
+            assembler_mode,
+            Some(event_bus.clone()),
+        )
+    });
     let lifecycle_hook_adapter_handle = lifecycle_hook_adapter_rx.map(|rx| {
         let hooks = initial_view.global_observability_hooks.to_vec();
         cc_lb_core::spawn_observability_hook_adapter(rx, hooks)
