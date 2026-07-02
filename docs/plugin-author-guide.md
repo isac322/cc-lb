@@ -186,10 +186,10 @@ new plugin defaults to pure dispatch.
 
 Wire-schema tags live in `cc_lb_plugin_types::schema`:
 
-- `WIRE_SCHEMA_TAG_FILTER = b"cc_lb.wire.v1.filter.rkyv"`
-- `WIRE_SCHEMA_TAG_SHAPE  = b"cc_lb.wire.v1.shape.rkyv"`
-- `WIRE_SCHEMA_TAG_NORMALIZE_ERROR = b"cc_lb.wire.v1.normalize_error.rkyv"`
-- `WIRE_SCHEMA_TAG_OBSERVE = b"cc_lb.wire.v1.observe.rkyv"`
+- `WIRE_SCHEMA_TAG_FILTER = b"cc_lb.wire.v2.filter.rkyv"`
+- `WIRE_SCHEMA_TAG_SHAPE  = b"cc_lb.wire.v2.shape.rkyv"`
+- `WIRE_SCHEMA_TAG_NORMALIZE_ERROR = b"cc_lb.wire.v2.normalize_error.rkyv"`
+- `WIRE_SCHEMA_TAG_OBSERVE = b"cc_lb.wire.v2.observe.rkyv"`
 
 Each plugin emits `BLAKE3(tag)` into its `cc_lb.schema.<kind>.v1`
 custom section. The host computes the same hash at load time and
@@ -198,6 +198,34 @@ rejects mismatch.
 To break a wire-schema: bump the tag suffix (e.g. `.v2`), update
 the constant, rebuild every plugin against the new PDK. Old uploads
 will be rejected with `hash mismatch` on next register.
+
+### Wire v2 upgrade (RFC-0001 #9 borrowed-wire)
+
+The v1 → v2 bump replaces owned `String` / `Vec<u8>` / `Vec<T>` fields
+in every wire type with `Box<str>` / `Box<[u8]>` / `Box<[T]>`. `Principal.claims`
+also switches from the anonymous `(String, Vec<u8>)` tuple to a named
+`Claim { key, value }` struct. These changes let the host serialise
+request bodies (up to 100 MiB on `/v1/files`) without a per-request
+`.to_vec()` copy by borrowing directly into the request pipeline's
+`Bytes` handle via `#[rkyv(with = InlineAsBox)] &'a [u8]`.
+
+**Impact on plugin authors:**
+
+- The handler signature (`&ArchivedFilterRequest`, `&ArchivedShapeRequest`, ...)
+  is unchanged.
+- Archived field access changes shape: `archived.body` derefs to `&[u8]`
+  (was via `ArchivedVec::as_slice()`); `archived.request_id` derefs to `&str`
+  (was via `ArchivedString::as_str()`); a claim entry now has `.key`
+  and `.value` instead of tuple `.0` and `.1`.
+- Response construction uses `Box::from(...)` / `Vec<T>::into_boxed_slice()`
+  where you previously used `String` / `Vec<T>` (`Box<str>` implements
+  `From<&str>` / `From<String>`; `Box<[u8]>` implements `From<&[u8]>` /
+  `From<Vec<u8>>`).
+
+Older v1 plugin binaries must be recompiled against the current
+`cc-lb-pdk-wasmtime` crate before they can be registered. `hash
+mismatch` on register is the signal that an older wasm slipped
+through.
 
 ## Admin upload
 
