@@ -1,36 +1,26 @@
-//! Per-request guard that guarantees exactly one final `RequestEvent` is
-//! published to the event bus per Anthropic-bound request, except for hard
-//! process kills (SIGKILL, abort, OOM, power-loss).
+//! Per-request guard that guarantees exactly one
+//! `LifecycleEvent::RequestTerminated` is emitted per Anthropic-bound request,
+//! except for hard process kills (SIGKILL, abort, OOM, power-loss).
 //!
 //! # Lifecycle
 //!
 //! 1. `LifecycleContext::new(...)` is constructed at the top of
 //!    `lifecycle::handle` (before authn). It generates a fresh `event_id`
-//!    (UUID v7) used as the DB row uniqueness key. The client-supplied
-//!    `request_id` is intentionally distinct because it is forwarded to/from
-//!    Anthropic and exposed to PDK plugins and therefore non-unique.
+//!    (UUID v7) used as the DB row uniqueness key.
 //! 2. As each request phase completes, the lifecycle code calls
-//!    `emit_lifecycle` with a `LifecycleEvent::*` variant so that shadow-path
+//!    `emit_lifecycle` with a `LifecycleEvent::*` variant. The event-driven
 //!    subscribers (assembler, pricing, cache observation, etc.) rebuild the
-//!    row without observer-side state.
+//!    request-event row from those events.
 //! 3. On normal completion the lifecycle calls [`LifecycleContext::finish`]
-//!    which:
-//!      1. atomically CAS-es `finalized: false → true`,
-//!      2. snapshots state,
-//!      3. calls `bus.publish(RequestEventUpdate::final_(snapshot))`
-//!         (synchronous, non-blocking).
-//!
-//!    There is no `.await` between the CAS and the publish, so cancellation
-//!    cannot leave the request in the "finalized but never published" state
-//!    that the original async-publish design suffered from.
-//! 5. On abnormal termination (Drop) the guard runs the same publish path
-//!    with `error_code = "terminal_dropped"` as the fallback outcome
-//!    category.
+//!    which atomically CAS-es `finalized: false → true` and emits
+//!    `LifecycleEvent::RequestTerminated`.
+//! 4. On abnormal termination (Drop) the guard runs the same emit path with
+//!    `reason = TerminationReason::Dropped`.
 //!
 //! # Race safety
 //!
 //! `finalized` is an `AtomicBool` set via `compare_exchange`. Exactly one of
-//! `{finish, Drop}` ever publishes. The UNIQUE INDEX on `event_id` in
+//! `{finish, Drop}` ever emits. The UNIQUE INDEX on `event_id` in
 //! `request_events_v1` is the DB-side safety net for any residual race or
 //! restart-after-fallback corner case.
 
@@ -39,16 +29,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
-use cc_lb_plugin_api::{InternalError, RoutingTrace};
-use cc_lb_storage_api::{
-    RequestCacheBreakpoint, RequestCacheState, RequestEvent, RequestEventUpstream,
-};
+use cc_lb_plugin_api::InternalError;
 use http::StatusCode;
 use uuid::Uuid;
 
 use crate::clock::{ClockHandle, unix_millis};
-use crate::event_bus::{RequestEventBus, RequestEventUpdate};
-use crate::usage_parser::UsageCounts;
+use crate::event_bus::RequestEventBus;
 
 /// Outcome category catalog. Every terminal call site must use one of these
 /// constants. `terminal_dropped` is reserved for the `Drop` fallback path.
@@ -92,24 +78,9 @@ struct Inner {
 #[derive(Default)]
 struct TerminalState {
     request_id: String,
-    principal_id: Option<String>,
-    key_id: Option<String>,
-    principal_kind: Option<String>,
-    upstream_id: Option<Uuid>,
-    upstream_name: Option<String>,
-    upstream: Option<RequestEventUpstream>,
-    model: Option<String>,
     status: u16,
     error_code: Option<&'static str>,
-    upstream_error_type: Option<String>,
-    upstream_error_message: Option<String>,
-    routing_trace: Option<RoutingTrace>,
     internal_errors: Vec<InternalError>,
-    usage: UsageCounts,
-    cache_state: Option<RequestCacheState>,
-    cache_control_block_count: Option<u64>,
-    cache_breakpoints: Vec<RequestCacheBreakpoint>,
-    cache_prefix_hash: Option<String>,
     limit_reconcile_ms: Option<u64>,
     observability_post_ms: Option<u64>,
     proxy_setup_ms: Option<u64>,
@@ -167,12 +138,6 @@ impl LifecycleContext {
         self.lock_state().internal_errors = errors;
     }
 
-    // TODO(rfc-0002-phase-9-cutover): remove once cache observations flow
-    // exclusively through `LifecycleEvent::CacheObserved` and the assembler
-    // subscriber owns cache-state assembly on the shadow row.
-    #[allow(dead_code)]
-    /// Synchronous publish of the terminal event. Returns silently if another
-    /// path (Drop or a previous `finish`) already published.
     pub(crate) fn finish(&self) {
         if self
             .inner
@@ -182,9 +147,7 @@ impl LifecycleContext {
         {
             return;
         }
-        let event = self.inner.make_request_event(None);
-        self.inner.emit_terminated(&event);
-        self.inner.bus.publish(RequestEventUpdate::final_(event));
+        self.inner.emit_terminated(None);
     }
 
     /// Terminate with Tower timeout status (504 GATEWAY_TIMEOUT).
@@ -230,67 +193,13 @@ impl LifecycleContext {
 }
 
 impl Inner {
-    fn make_request_event(&self, fallback_error_code: Option<&'static str>) -> RequestEvent {
+    fn emit_terminated(&self, fallback_error_code: Option<&'static str>) {
         let state = self
             .state
             .lock()
             .expect("terminal observer state mutex poisoned");
-        let duration_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        let mut event = RequestEvent {
-            ts: self.started_unix_ms / 1_000,
-            ts_ms: Some(self.started_unix_ms),
-            event_id: Some(self.event_id.clone()),
-            request_id: state.request_id.clone(),
-            principal_id: state.principal_id.clone(),
-            key_id: state.key_id.clone(),
-            principal_kind: state.principal_kind.clone(),
-            upstream: state.upstream,
-            upstream_id: state.upstream_id,
-            upstream_name: state.upstream_name.clone(),
-            model: state.model.clone(),
-            status: state.status,
-            duration_ms,
-            error_code: state
-                .error_code
-                .or(fallback_error_code)
-                .map(|s| s.to_owned()),
-            upstream_error_type: state.upstream_error_type.clone(),
-            upstream_error_message: state.upstream_error_message.clone(),
-            routing_trace: state.routing_trace.clone(),
-            internal_errors: state.internal_errors.clone(),
-            cache_state: state.cache_state,
-            cache_control_block_count: state.cache_control_block_count,
-            cache_breakpoints: state.cache_breakpoints.clone(),
-            cache_prefix_hash: state.cache_prefix_hash.clone(),
-            input_tokens: state.usage.present.then_some(state.usage.input_tokens),
-            output_tokens: state.usage.present.then_some(state.usage.output_tokens),
-            cache_creation_input_tokens: state
-                .usage
-                .present
-                .then_some(state.usage.cache_creation_input_tokens),
-            cache_creation_input_tokens_5m: (state.usage.cache_creation_input_tokens_5m > 0)
-                .then_some(state.usage.cache_creation_input_tokens_5m),
-            cache_creation_input_tokens_1h: (state.usage.cache_creation_input_tokens_1h > 0)
-                .then_some(state.usage.cache_creation_input_tokens_1h),
-            cache_read_input_tokens: state
-                .usage
-                .present
-                .then_some(state.usage.cache_read_input_tokens),
-            limit_reconcile_ms: state.limit_reconcile_ms,
-            observability_post_ms: state.observability_post_ms,
-            proxy_setup_ms: state.proxy_setup_ms,
-            upstream_body_ms: state.upstream_body_ms,
-            first_body_chunk_ms: state.first_body_chunk_ms,
-            ..Default::default()
-        };
-        state.usage.apply_extras_to(&mut event);
-        event
-    }
-}
-
-impl Inner {
-    fn emit_terminated(&self, event: &RequestEvent) {
-        let reason = match event.error_code.as_deref() {
+        let effective_error_code = state.error_code.or(fallback_error_code);
+        let reason = match effective_error_code {
             None => TerminationReason::Success,
             Some(code) if code == error_codes::TERMINAL_DROPPED => TerminationReason::Dropped,
             Some(code) => TerminationReason::ErrorCode(code.to_owned()),
@@ -300,14 +209,14 @@ impl Inner {
             .publish_lifecycle(LifecycleEvent::RequestTerminated {
                 event_id: self.event_id.clone(),
                 reason,
-                client_status: event.status,
+                client_status: state.status,
                 duration_ms,
-                limit_reconcile_ms: event.limit_reconcile_ms,
-                observability_post_ms: event.observability_post_ms,
-                proxy_setup_ms: event.proxy_setup_ms,
-                upstream_body_ms: event.upstream_body_ms,
-                first_body_chunk_ms: event.first_body_chunk_ms,
-                internal_errors: event.internal_errors.clone(),
+                limit_reconcile_ms: state.limit_reconcile_ms,
+                observability_post_ms: state.observability_post_ms,
+                proxy_setup_ms: state.proxy_setup_ms,
+                upstream_body_ms: state.upstream_body_ms,
+                first_body_chunk_ms: state.first_body_chunk_ms,
+                internal_errors: state.internal_errors.clone(),
             });
     }
 }
@@ -324,9 +233,7 @@ impl Drop for Inner {
         {
             return;
         }
-        let event = self.make_request_event(Some(error_codes::TERMINAL_DROPPED));
-        self.emit_terminated(&event);
-        self.bus.publish(RequestEventUpdate::final_(event));
+        self.emit_terminated(Some(error_codes::TERMINAL_DROPPED));
     }
 }
 
@@ -334,12 +241,32 @@ impl Drop for Inner {
 mod tests {
     use super::*;
     use crate::clock::SystemClock;
-    use crate::event_bus::{InMemoryBus, RequestEventBus, RequestEventPhase};
+    use crate::event_bus::{InMemoryBus, RequestEventBus};
+
+    fn subscribe(bus: &Arc<InMemoryBus>) -> tokio::sync::broadcast::Receiver<LifecycleEvent> {
+        use crate::event_bus::LifecycleBusReceiver;
+        let LifecycleBusReceiver::InMemory(rx) = bus.subscribe_lifecycle() else {
+            panic!("expected InMemory lifecycle receiver");
+        };
+        rx
+    }
+
+    fn expect_terminated(event: LifecycleEvent) -> (String, TerminationReason, u16) {
+        match event {
+            LifecycleEvent::RequestTerminated {
+                event_id,
+                reason,
+                client_status,
+                ..
+            } => (event_id, reason, client_status),
+            other => panic!("expected RequestTerminated, got {other:?}"),
+        }
+    }
 
     #[tokio::test]
-    async fn finish_publishes_final_with_event_id() {
+    async fn finish_emits_request_terminated_with_error_code() {
         let bus = Arc::new(InMemoryBus::new());
-        let mut rx = bus.attach_writer(8);
+        let mut rx = subscribe(&bus);
         let clock: ClockHandle = Arc::new(SystemClock);
         let observer = LifecycleContext::new(
             "req_finish".to_owned(),
@@ -350,23 +277,19 @@ mod tests {
         observer.set_terminal(StatusCode::OK, error_codes::UPSTREAM_4XX);
         observer.finish();
 
-        let update = rx.recv().await.expect("update delivered");
-        assert_eq!(update.phase, RequestEventPhase::Final);
-        assert_eq!(update.event.request_id, "req_finish");
-        assert_eq!(
-            update.event.event_id.as_deref(),
-            Some(expected_event_id.as_str())
-        );
-        assert_eq!(
-            update.event.error_code.as_deref(),
-            Some(error_codes::UPSTREAM_4XX)
+        let (event_id, reason, status) =
+            expect_terminated(rx.recv().await.expect("event delivered"));
+        assert_eq!(event_id, expected_event_id);
+        assert_eq!(status, StatusCode::OK.as_u16());
+        assert!(
+            matches!(reason, TerminationReason::ErrorCode(ref code) if code == error_codes::UPSTREAM_4XX)
         );
     }
 
     #[tokio::test]
-    async fn drop_without_finish_publishes_terminal_dropped() {
+    async fn drop_without_finish_emits_terminal_dropped() {
         let bus = Arc::new(InMemoryBus::new());
-        let mut rx = bus.attach_writer(8);
+        let mut rx = subscribe(&bus);
         let clock: ClockHandle = Arc::new(SystemClock);
         {
             let observer = LifecycleContext::new(
@@ -375,20 +298,16 @@ mod tests {
                 &clock,
             );
             let _ = observer.event_id();
-            // observer drops here without finish.
         }
-        let update = rx.recv().await.expect("drop fallback delivered");
-        assert_eq!(update.phase, RequestEventPhase::Final);
-        assert_eq!(
-            update.event.error_code.as_deref(),
-            Some(error_codes::TERMINAL_DROPPED)
-        );
+        let (_id, reason, _status) =
+            expect_terminated(rx.recv().await.expect("drop fallback delivered"));
+        assert!(matches!(reason, TerminationReason::Dropped));
     }
 
     #[tokio::test]
-    async fn drop_after_finish_does_not_double_publish() {
+    async fn drop_after_finish_does_not_emit_twice() {
         let bus = Arc::new(InMemoryBus::new());
-        let mut rx = bus.attach_writer(8);
+        let mut rx = subscribe(&bus);
         let clock: ClockHandle = Arc::new(SystemClock);
         {
             let observer = LifecycleContext::new(
@@ -399,24 +318,21 @@ mod tests {
             observer.set_terminal(StatusCode::OK, error_codes::UPSTREAM_4XX);
             observer.finish();
         }
-        let first = rx.recv().await.expect("first delivered");
-        assert_eq!(first.event.request_id, "req_norace");
-        assert_eq!(
-            first.event.error_code.as_deref(),
-            Some(error_codes::UPSTREAM_4XX)
+        let (_id, reason, _status) = expect_terminated(rx.recv().await.expect("first delivered"));
+        assert!(
+            matches!(reason, TerminationReason::ErrorCode(ref code) if code == error_codes::UPSTREAM_4XX)
         );
-        // No second event should be queued.
         let try_again = rx.try_recv();
         assert!(
             try_again.is_err(),
-            "Drop must not republish after finish; got {try_again:?}"
+            "Drop must not re-emit after finish; got {try_again:?}"
         );
     }
 
     #[tokio::test]
-    async fn shared_clone_drop_publishes_once() {
+    async fn shared_clone_drop_emits_once_on_last_arc() {
         let bus = Arc::new(InMemoryBus::new());
-        let mut rx = bus.attach_writer(8);
+        let mut rx = subscribe(&bus);
         let clock: ClockHandle = Arc::new(SystemClock);
         let observer = LifecycleContext::new(
             "req_shared".to_owned(),
@@ -427,16 +343,12 @@ mod tests {
         let clone2 = observer.clone();
         drop(observer);
         drop(clone1);
-        // Last Arc still alive; no publish yet.
         assert!(
             rx.try_recv().is_err(),
-            "publish must not fire while at least one observer Arc lives",
+            "emit must not fire while at least one observer Arc lives",
         );
         drop(clone2);
-        let update = rx.recv().await.expect("publish on last drop");
-        assert_eq!(
-            update.event.error_code.as_deref(),
-            Some(error_codes::TERMINAL_DROPPED)
-        );
+        let (_id, reason, _status) = expect_terminated(rx.recv().await.expect("emit on last drop"));
+        assert!(matches!(reason, TerminationReason::Dropped));
     }
 }
