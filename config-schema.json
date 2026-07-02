@@ -72,6 +72,12 @@
         "enabled": false
       }
     },
+    "lifecycle_cache_hit_miss_subscriber": {
+      "$ref": "#/$defs/LifecycleCacheHitMissSubscriberConfig",
+      "default": {
+        "enabled": false
+      }
+    },
     "lifecycle_cache_observation_subscriber": {
       "$ref": "#/$defs/LifecycleCacheObservationSubscriberConfig",
       "default": {
@@ -535,6 +541,15 @@
       }
     },
     "LifecycleApiKeyMetricsSubscriberConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "LifecycleCacheHitMissSubscriberConfig": {
       "type": "object",
       "properties": {
         "enabled": {

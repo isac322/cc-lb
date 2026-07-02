@@ -35,6 +35,7 @@ pub mod instrumented_connector;
 #[cfg(not(loom))]
 pub mod lifecycle;
 pub mod lifecycle_api_key_metrics_subscriber;
+pub mod lifecycle_cache_hit_miss_subscriber;
 #[cfg(not(loom))]
 pub mod lifecycle_cache_observation_subscriber;
 pub mod lifecycle_event_assembler;
@@ -136,6 +137,9 @@ pub use lifecycle::{
 };
 pub use lifecycle_api_key_metrics_subscriber::{
     ApiKeyMetricsSubscriberHandle, spawn_lifecycle_api_key_metrics_subscriber,
+};
+pub use lifecycle_cache_hit_miss_subscriber::{
+    CacheHitMissSubscriberHandle, spawn_lifecycle_cache_hit_miss_subscriber,
 };
 #[cfg(not(loom))]
 pub use lifecycle_cache_observation_subscriber::{
