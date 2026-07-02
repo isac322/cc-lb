@@ -21,9 +21,7 @@ mod errors;
 mod traits;
 pub mod types;
 
-pub use errors::{
-    DialectError, ObservabilityError, RouteError, SignerError, UpstreamError,
-};
+pub use errors::{DialectError, ObservabilityError, RouteError, SignerError, UpstreamError};
 pub use traits::{
     ApiKeyAwareSignerFactory, FilterError, FilterOutput, FilterPlugin, ObservabilityHook,
     RouterPlugin, Signer, SignerFactory, UpstreamDialect,

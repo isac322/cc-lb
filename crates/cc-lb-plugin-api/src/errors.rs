@@ -134,5 +134,3 @@ pub enum ObservabilityError {
         reason: String,
     },
 }
-
-

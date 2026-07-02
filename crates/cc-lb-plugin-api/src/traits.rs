@@ -7,9 +7,7 @@ use bytes::Bytes;
 use http::StatusCode;
 use uuid::Uuid;
 
-use crate::errors::{
-    DialectError, ObservabilityError, RouteError, SignerError, UpstreamError,
-};
+use crate::errors::{DialectError, ObservabilityError, RouteError, SignerError, UpstreamError};
 use crate::types::{
     ObserveEvent, PerCandidateReason, Principal, RequestContext, RetryDecision, RouteDecision,
     ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, SlotKey, Upstream,
@@ -157,5 +155,3 @@ pub trait ObservabilityHook: Send + Sync {
     /// Observes a lifecycle event.
     fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError>;
 }
-
-
