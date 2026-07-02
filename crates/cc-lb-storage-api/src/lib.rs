@@ -19,7 +19,6 @@ pub mod validation;
 pub mod warmup_attempts;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 
 pub use anthropic_compatibility_kv::*;
 

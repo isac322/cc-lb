@@ -6,7 +6,7 @@ use cc_lb_storage_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256, MAX_WASM_BLOB_BYTES, PluginBlobRepo,
     PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
     PluginRegistryStore, PluginSlot, RepoError, StorageError, StorageResult, WasmBlob,
-    WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, default_wire_version, sparse_order,
+    WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, sparse_order,
     validate_identifier,
 };
 use serde_json::Value;
@@ -890,12 +890,6 @@ fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
     })
 }
 
-fn parse_i64(value: &str, field: &str) -> StorageResult<i64> {
-    value.parse().map_err(|_| StorageError::Corrupted {
-        message: format!("invalid {field}"),
-    })
-}
-
 fn parse_uuid(value: &str, field: &str) -> StorageResult<Uuid> {
     Uuid::parse_str(value).map_err(|error| StorageError::Corrupted {
         message: format!("invalid {field} {value}: {error}"),
@@ -915,8 +909,4 @@ fn slots_from_json(value: &str) -> StorageResult<Vec<PluginSlot>> {
         .collect())
 }
 
-fn uuid_from_sha(sha256: [u8; 32]) -> Uuid {
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&sha256[..16]);
-    Uuid::from_bytes(bytes)
-}
+
