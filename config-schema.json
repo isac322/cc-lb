@@ -75,7 +75,7 @@
     "lifecycle_cache_hit_miss_subscriber": {
       "$ref": "#/$defs/LifecycleCacheHitMissSubscriberConfig",
       "default": {
-        "enabled": false
+        "enabled": true
       }
     },
     "lifecycle_cache_observation_subscriber": {
@@ -560,7 +560,7 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },
