@@ -12,9 +12,11 @@ use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_core::api_keys::limit_engine::LimitEngine;
 use cc_lb_core::instrumented_connector::InstrumentedHttpsConnector;
 use cc_lb_core::{
-    Body, BulkheadConfig, BulkheadDispatch, BulkheadRegistry, CachingDnsConnector, DispatchError,
-    DnsResolveFuture, DnsResolver, DnsResolverConfig, DynamicViewBuilder, DynamicViewHolder,
-    ErrorNormalizer, Lifecycle, LifecycleConfig, UpstreamDispatch,
+    Body, BulkheadConfig, BulkheadDispatch, BulkheadRegistry, CachingDnsConnector,
+    DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY, DispatchError, DnsResolveFuture, DnsResolver,
+    DnsResolverConfig, DynamicViewBuilder, DynamicViewHolder, ErrorNormalizer, InMemoryBus,
+    Lifecycle, LifecycleConfig, RequestEventAssemblerHandle, RequestEventBus, UpstreamDispatch,
+    spawn_request_event_assembler,
 };
 use cc_lb_plugin_api::{
     Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, UpstreamCandidate,
@@ -59,7 +61,11 @@ async fn cold_request_populates_all_connection_stages_ip_upstream() {
     );
     // IP literals can bypass the resolver, so dns_ms is covered by the hostname regression test.
     assert!(event.dns_ms.is_none() || event.dns_ms.is_some());
-    assert!(event.observability_post_ms.is_some());
+    assert!(
+        event.observability_post_ms.is_none(),
+        "RFC-0002 Phase 6f: handler no longer measures observability_post inline; the hook adapter subscriber runs off-thread so this handler-side field is intentionally unpopulated. Got: {:?}",
+        event.observability_post_ms
+    );
     assert!(
         event.limit_reconcile_ms.is_none(),
         "RFC-0002 H4: handler no longer measures reconcile; LimitReconcileSubscriber owns the reconcile call and does not populate this handler-side field. Got: {:?}",
@@ -95,7 +101,7 @@ async fn warm_pool_request_skips_connection_stages() {
     send_message(&harness.lifecycle).await;
     send_message(&harness.lifecycle).await;
 
-    let events = events(&harness.storage).await;
+    let events = wait_for_events(&harness.storage, 2).await;
     assert_eq!(
         events.len(),
         2,
@@ -118,6 +124,7 @@ async fn bulkhead_contention_records_wait_ms() {
         lifecycle,
         storage,
         _dir,
+        _assembler,
     } = harness;
     let lifecycle = Arc::new(lifecycle);
 
@@ -132,7 +139,7 @@ async fn bulkhead_contention_records_wait_ms() {
         handle.await.expect("request task joins");
     }
 
-    let events = events(&storage).await;
+    let events = wait_for_events(&storage, 5).await;
     assert_eq!(
         events.len(),
         5,
@@ -150,6 +157,7 @@ struct LifecycleHarness {
     lifecycle: Lifecycle,
     storage: Arc<SqliteStorage>,
     _dir: tempfile::TempDir,
+    _assembler: RequestEventAssemblerHandle,
 }
 
 async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) -> LifecycleHarness {
@@ -166,6 +174,13 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
         .await
         .expect("initialize");
     let storage = Arc::new(storage);
+    let bus = Arc::new(InMemoryBus::new());
+    let assembler_rx = bus.attach_lifecycle_assembler(DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY);
+    let assembler = spawn_request_event_assembler(
+        assembler_rx,
+        Arc::clone(&storage) as Arc<dyn StorageTrait>,
+        Some(Arc::clone(&bus) as Arc<dyn RequestEventBus>),
+    );
     let limit_engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
         Arc::new(cc_lb_core::SystemClock),
@@ -186,7 +201,7 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
         LifecycleConfig::default(),
         Arc::new(cc_lb_core::SystemClock),
     )
-    .with_request_event_storage(Arc::clone(&storage) as Arc<dyn StorageTrait>)
+    .with_event_bus(Arc::clone(&bus) as Arc<dyn RequestEventBus>)
     .with_static_limit_subject(
         limit_engine,
         "principal-test".to_owned(),
@@ -198,6 +213,7 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
         lifecycle,
         storage,
         _dir: dir,
+        _assembler: assembler,
     }
 }
 
@@ -248,7 +264,7 @@ async fn send_message(lifecycle: &Lifecycle) {
 }
 
 async fn single_event(storage: &SqliteStorage) -> RequestEvent {
-    let events = events(storage).await;
+    let events = wait_for_events(storage, 1).await;
     assert_eq!(
         events.len(),
         1,
@@ -257,10 +273,27 @@ async fn single_event(storage: &SqliteStorage) -> RequestEvent {
     events.into_iter().next().expect("event exists")
 }
 
-async fn events(storage: &SqliteStorage) -> Vec<RequestEvent> {
+async fn query_events(storage: &SqliteStorage) -> Vec<RequestEvent> {
     RequestEventStore::query_request_events(storage, 0, u64::MAX, 100)
         .await
         .expect("query request events")
+}
+
+async fn wait_for_events(storage: &SqliteStorage, expected: usize) -> Vec<RequestEvent> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let events = query_events(storage).await;
+        if events.len() >= expected {
+            return events;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for {expected} request event(s); got {} after 3s: {events:?}",
+                events.len()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 fn assert_bulkhead_wait_under(value: Option<u64>, max_ms: u64) {
