@@ -93,8 +93,7 @@
     "lifecycle_limit_reconcile_subscriber": {
       "$ref": "#/$defs/LifecycleLimitReconcileSubscriberConfig",
       "default": {
-        "enabled": true,
-        "shadow": false
+        "enabled": true
       }
     },
     "lifecycle_limit_rejection_audit_subscriber": {
@@ -136,7 +135,6 @@
     "limit_reservation_ttl": {
       "$ref": "#/$defs/LimitReservationTtlConfig",
       "default": {
-        "enabled": false,
         "tick_secs": 30,
         "ttl_secs": 300
       }
@@ -295,7 +293,6 @@
       "$ref": "#/$defs/SubscriptionQuotaConfig",
       "default": {
         "dedup_elapsed_override_secs": 30,
-        "enabled": true,
         "gc_batch_size": 10000,
         "retention_days": 30,
         "routing_max_staleness_secs": 1800,
@@ -575,16 +572,12 @@
       }
     },
     "LifecycleLimitReconcileSubscriberConfig": {
-      "description": "RFC-0002 Phase 8 subscriber for post-response limit reservation reconciliation.\n\nDefault: `enabled=true, shadow=false` — subscriber is authoritative; the\nhandler no longer reconciles inline. Set `shadow=true` to compare against a\nlegacy path (kept for debugging only). Set `enabled=false` to opt out\nentirely; reservations then reconcile only via TTL refund.",
+      "description": "Post-response limit reservation reconciliation subscriber.\n\nDefault: `enabled=true` — subscriber reconciles reservations after the\nresponse lifecycle terminates. Set `enabled=false` to opt out entirely;\nreservations then reconcile only via TTL refund.",
       "type": "object",
       "properties": {
         "enabled": {
           "type": "boolean",
           "default": true
-        },
-        "shadow": {
-          "type": "boolean",
-          "default": false
         }
       }
     },
@@ -643,13 +636,9 @@
       }
     },
     "LimitReservationTtlConfig": {
-      "description": "RFC-0002 Phase 7 background TTL sweeper for stale limit reservations.\n\nWhen enabled, the LimitEngine periodically walks its reservation map and\nfull-refunds any reservation older than `ttl_secs`. This is opt-in in\nPhase 7 and enabled unconditionally in Phase 8 once the subscriber path\nis authoritative.",
+      "description": "Background TTL sweeper for stale limit reservations. The LimitEngine\nperiodically walks its reservation map and full-refunds any reservation\nolder than `ttl_secs`; the sweeper runs unconditionally because the\nsubscriber path is authoritative.",
       "type": "object",
       "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": false
-        },
         "tick_secs": {
           "type": "integer",
           "format": "uint64",
@@ -1254,10 +1243,6 @@
           "format": "uint64",
           "default": 30,
           "minimum": 0
-        },
-        "enabled": {
-          "type": "boolean",
-          "default": true
         },
         "gc_batch_size": {
           "type": "integer",

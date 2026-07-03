@@ -37,13 +37,6 @@ use uuid::Uuid;
 use crate::clock::{ClockHandle, unix_millis};
 use crate::event_bus::RequestEventBus;
 
-/// Outcome category catalog. Every terminal call site must use one of these
-/// constants. `terminal_dropped` is reserved for the `Drop` fallback path.
-///
-/// `CLIENT_DISCONNECTED` and `TOWER_TIMEOUT` are not yet wired to call sites —
-/// Drop fallback currently subsumes both as `TERMINAL_DROPPED`. They remain
-/// in the catalog so the next iteration can route to them without churn.
-#[allow(dead_code)]
 pub(crate) mod error_codes {
     pub(crate) const BODY_TOO_LARGE: &str = "body_too_large";
     pub(crate) const INVALID_JSON: &str = "invalid_json";
@@ -58,7 +51,6 @@ pub(crate) mod error_codes {
     pub(crate) const UPSTREAM_4XX: &str = "upstream_4xx";
     pub(crate) const UPSTREAM_5XX: &str = "upstream_5xx";
     pub(crate) const UPSTREAM_STREAM_ERROR: &str = "upstream_stream_error";
-    pub(crate) const CLIENT_DISCONNECTED: &str = "client_disconnected";
     pub(crate) const TOWER_TIMEOUT: &str = "tower_timeout";
     pub(crate) const TERMINAL_DROPPED: &str = "terminal_dropped";
 }
@@ -109,7 +101,6 @@ impl LifecycleContext {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn event_id(&self) -> &str {
         &self.inner.event_id
     }

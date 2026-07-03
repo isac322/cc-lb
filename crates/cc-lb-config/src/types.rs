@@ -586,8 +586,6 @@ pub struct OAuthConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct SubscriptionQuotaConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
     #[serde(default = "default_subscription_quota_retention_days")]
     pub retention_days: u64,
     #[serde(default = "default_subscription_quota_gc_batch_size")]
@@ -607,7 +605,6 @@ pub struct SubscriptionQuotaConfig {
 impl Default for SubscriptionQuotaConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
             retention_days: 30,
             gc_batch_size: 10_000,
             writer_batch_max_records: 256,
@@ -787,17 +784,13 @@ impl Default for LifecyclePromptCacheObservationSubscriberConfig {
     }
 }
 
-/// RFC-0002 Phase 7 background TTL sweeper for stale limit reservations.
-///
-/// When enabled, the LimitEngine periodically walks its reservation map and
-/// full-refunds any reservation older than `ttl_secs`. This is opt-in in
-/// Phase 7 and enabled unconditionally in Phase 8 once the subscriber path
-/// is authoritative.
+/// Background TTL sweeper for stale limit reservations. The LimitEngine
+/// periodically walks its reservation map and full-refunds any reservation
+/// older than `ttl_secs`; the sweeper runs unconditionally because the
+/// subscriber path is authoritative.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LimitReservationTtlConfig {
-    #[serde(default)]
-    pub enabled: bool,
     #[serde(default = "default_limit_reservation_ttl_secs")]
     pub ttl_secs: u64,
     #[serde(default = "default_limit_reservation_tick_secs")]
@@ -807,7 +800,6 @@ pub struct LimitReservationTtlConfig {
 impl Default for LimitReservationTtlConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             ttl_secs: default_limit_reservation_ttl_secs(),
             tick_secs: default_limit_reservation_tick_secs(),
         }
@@ -822,27 +814,21 @@ fn default_limit_reservation_tick_secs() -> u64 {
     30
 }
 
-/// RFC-0002 Phase 8 subscriber for post-response limit reservation reconciliation.
+/// Post-response limit reservation reconciliation subscriber.
 ///
-/// Default: `enabled=true, shadow=false` — subscriber is authoritative; the
-/// handler no longer reconciles inline. Set `shadow=true` to compare against a
-/// legacy path (kept for debugging only). Set `enabled=false` to opt out
-/// entirely; reservations then reconcile only via TTL refund.
+/// Default: `enabled=true` — subscriber reconciles reservations after the
+/// response lifecycle terminates. Set `enabled=false` to opt out entirely;
+/// reservations then reconcile only via TTL refund.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LifecycleLimitReconcileSubscriberConfig {
     #[serde(default = "default_true_bool")]
     pub enabled: bool,
-    #[serde(default)]
-    pub shadow: bool,
 }
 
 impl Default for LifecycleLimitReconcileSubscriberConfig {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            shadow: false,
-        }
+        Self { enabled: true }
     }
 }
 

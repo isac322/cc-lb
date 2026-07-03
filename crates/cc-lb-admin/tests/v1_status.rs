@@ -24,10 +24,7 @@ use uuid::Uuid;
 async fn status_reflects_in_memory_dynamic_view_generation_and_replica_id() {
     let (_dir, storage) = temp_storage().await;
     let mut state = test_state(Config::default(), Some(storage.clone()));
-    let replica = ReplicaIdentity {
-        id: Uuid::new_v4(),
-        started_at_unix_secs: 1_800_000_000,
-    };
+    let replica = ReplicaIdentity { id: Uuid::new_v4() };
     let lifecycle = Lifecycle::new_with_dynamic_view(
         Arc::new(BuiltinAuthn::new(
             DownstreamAuthMode::ApiKey,

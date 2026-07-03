@@ -34,6 +34,20 @@ pub const COVERAGE_CHECKLIST: &[&str] = &[
     "bulkhead",
     "dns",
     "egress",
+    "subscription_quota",
+    "prompt_cache_shadow",
+    "limit_reservation_ttl",
+    "lifecycle_hook_adapter",
+    "lifecycle_pricing_subscriber",
+    "lifecycle_cache_observation_subscriber",
+    "lifecycle_rate_limit_header_subscriber",
+    "lifecycle_subscription_quota_subscriber",
+    "lifecycle_limit_rejection_audit_subscriber",
+    "lifecycle_api_key_metrics_subscriber",
+    "lifecycle_cache_hit_miss_subscriber",
+    "lifecycle_prompt_cache_drift_subscriber",
+    "lifecycle_prompt_cache_observation_subscriber",
+    "lifecycle_limit_reconcile_subscriber",
 ];
 
 #[derive(Debug, Error)]

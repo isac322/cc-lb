@@ -214,7 +214,6 @@ async fn write_finalized_rows(
 ) {
     let mut row = finalize_base(partial, reason, client_status, duration_ms, is_orphan);
     row.event_id = Some(Uuid::now_v7().to_string());
-    row.shadow_event_id = Some(event_id.clone());
     match storage.append_request_event(&row).await {
         Ok(()) => {
             if let Some(bus) = bus {
@@ -231,7 +230,7 @@ async fn write_finalized_rows(
         Err(error) => {
             tracing::warn!(
                 %error,
-                shadow_event_id = %event_id,
+                lifecycle_event_id = %event_id,
                 "lifecycle event assembler: failed to persist row",
             );
             cc_lb_observability::increment_dropped_events_by(
@@ -813,7 +812,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn success_terminated_persists_row_with_shadow_event_id() {
+    async fn success_terminated_persists_row() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
         let handle = spawn_request_event_assembler(rx, store.clone(), None);
@@ -856,7 +855,7 @@ mod tests {
 
         let rows = store.rows.lock().unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].shadow_event_id.as_deref(), Some("legacy-1"));
+        assert!(rows[0].event_id.as_deref().is_some_and(|id| !id.is_empty()));
         assert_eq!(rows[0].status, 200);
         assert_eq!(rows[0].duration_ms, 42);
         assert_eq!(rows[0].error_code, None);
@@ -980,10 +979,7 @@ mod tests {
 
         let rows = store.rows.lock().unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0].shadow_event_id.as_deref(),
-            Some("orphan-terminated")
-        );
+        assert!(rows[0].event_id.as_deref().is_some_and(|id| !id.is_empty()));
         assert_eq!(rows[0].request_id, "req_unknown_shadow");
         assert_eq!(rows[0].status, 499);
         assert_eq!(rows[0].duration_ms, 7);
@@ -1010,7 +1006,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn shadow_row_write_republishes_to_bus_for_admin_sse() {
+    async fn finalized_row_write_republishes_to_bus_for_admin_sse() {
         use crate::event_bus::{InMemoryBus, RequestEventPhase};
 
         let (tx, rx) = mpsc::channel(16);
@@ -1055,6 +1051,12 @@ mod tests {
             .expect("bus update within timeout")
             .expect("bus receiver did not close");
         assert_eq!(update.phase, RequestEventPhase::Final);
-        assert_eq!(update.event.shadow_event_id.as_deref(), Some("sse-1"));
+        assert!(
+            update
+                .event
+                .event_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty())
+        );
     }
 }
