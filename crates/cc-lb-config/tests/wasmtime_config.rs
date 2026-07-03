@@ -138,6 +138,39 @@ memory_reservation_bytes = 67108864
 }
 
 #[test]
+fn wasmtime_effective_default_reservation_below_max_memory_is_rejected_by_validation() {
+    let cfg = parse(
+        r#"
+[runtime.wasmtime]
+allocation_strategy = "pooling"
+memory_max_pages = 8192
+"#,
+    );
+    let err = cfg
+        .validate()
+        .expect_err("default reservation below max memory must be rejected");
+    assert!(
+        err.to_string().contains("memory_reservation_bytes"),
+        "error mentions the effective reservation field: {err}",
+    );
+}
+
+#[test]
+fn wasmtime_effective_default_reservation_accepts_matching_override() {
+    let cfg = parse(
+        r#"
+[runtime.wasmtime]
+allocation_strategy = "pooling"
+memory_max_pages = 8192
+memory_reservation_bytes = 536870912
+"#,
+    );
+
+    cfg.validate()
+        .expect("reservation matching 8192 64KiB pages is valid");
+}
+
+#[test]
 fn wasmtime_memory_guard_below_floor_is_rejected_by_validation() {
     let cfg = parse(
         r#"
