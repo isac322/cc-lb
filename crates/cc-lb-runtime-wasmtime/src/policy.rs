@@ -39,7 +39,6 @@ pub struct PluginWireBounds {
     pub output_body_bytes: u64,
     pub max_headers: u32,
     pub max_header_value_bytes: u32,
-    pub normalize_error_body_bytes: u64,
     pub reason_bytes: u32,
 }
 
@@ -51,7 +50,6 @@ impl PluginWireBounds {
     pub const DEFAULT_OUTPUT_BODY_BYTES: u64 = 100 * 1024 * 1024;
     pub const DEFAULT_MAX_HEADERS: u32 = 100;
     pub const DEFAULT_MAX_HEADER_VALUE_BYTES: u32 = 8 * 1024;
-    pub const DEFAULT_NORMALIZE_ERROR_BODY_BYTES: u64 = 256 * 1024;
     pub const DEFAULT_REASON_BYTES: u32 = 256;
 }
 
@@ -61,7 +59,6 @@ impl Default for PluginWireBounds {
             output_body_bytes: Self::DEFAULT_OUTPUT_BODY_BYTES,
             max_headers: Self::DEFAULT_MAX_HEADERS,
             max_header_value_bytes: Self::DEFAULT_MAX_HEADER_VALUE_BYTES,
-            normalize_error_body_bytes: Self::DEFAULT_NORMALIZE_ERROR_BODY_BYTES,
             reason_bytes: Self::DEFAULT_REASON_BYTES,
         }
     }

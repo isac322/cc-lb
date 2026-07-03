@@ -1,9 +1,11 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
+use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalStore,
-    StorageError, WasmBlob, WasmRegistryEntryInput,
+    StorageError, WasmBlob, WasmRegistryEntryInput, default_wire_version,
     principal::{
         Limit, LimitKind, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalUpdate,
     },
@@ -529,7 +531,9 @@ where
                 label: None,
                 uploaded_at_unix_secs: BASE_TS,
                 uploaded_by_admin_id: principal.id,
-                wire_version: 1,
+                description: format!("principal cascade plugin {seed}"),
+                usage: "test fixture".to_owned(),
+                hook_metadata: filter_hook_metadata(),
                 supported_slots: Vec::new(),
             },
         )
@@ -556,11 +560,21 @@ where
                 sse_per_event: false,
                 batched_events_per_flush: 1,
                 batched_flush_ms: 100,
-                wire_version: None,
             })
             .await?;
     }
     Ok(())
+}
+
+fn filter_hook_metadata() -> BTreeMap<String, HookMetadata> {
+    BTreeMap::from([(
+        "filter".to_owned(),
+        HookMetadata {
+            wire_version: default_wire_version(),
+            description: "filter hook".to_owned(),
+            usage: "called by router".to_owned(),
+        },
+    )])
 }
 
 async fn ensure_all_slots_empty<S>(storage: &S, principal_id: Uuid) -> Result<()>

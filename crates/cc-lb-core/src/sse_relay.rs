@@ -28,7 +28,7 @@ use crate::lifecycle::{
     PromptCacheObservationContext, PromptCacheObservationDecodeResult, PromptCacheUsage,
     decode_prompt_cache_observations_pure, prompt_cache_observations_to_wire,
 };
-use crate::sse_error_frame::{make_error_frame, make_error_frame_from_json};
+use crate::sse_error_frame::make_error_frame;
 
 const CLIENT_DISCONNECTED_STATUS: u16 = 499;
 
@@ -101,7 +101,6 @@ impl Error for RelayError {}
 
 struct RelayRuntime {
     obs: Arc<dyn ObservabilityHook>,
-    dialect: Arc<dyn UpstreamDialect>,
     batch: SseBatchConfig,
     error_normalizer: Option<Arc<ErrorNormalizer>>,
     upstream_kind: Option<UpstreamKind>,
@@ -188,7 +187,6 @@ impl SseRelay {
     fn into_runtime(self) -> RelayRuntime {
         RelayRuntime {
             obs: self.obs,
-            dialect: self.dialect,
             batch: self.batch.normalized(),
             error_normalizer: self.error_normalizer,
             upstream_kind: self.upstream_kind,
@@ -462,27 +460,11 @@ impl RelayRuntime {
             return normalizer.normalize_sse_error_frame(kind, &data);
         }
 
-        match self
-            .dialect
-            .normalize_error(StatusCode::INTERNAL_SERVER_ERROR, &data)
-        {
-            Some(json) => match serde_json::from_slice::<Value>(&json) {
-                Ok(value) => make_error_frame_from_json(&value),
-                Err(_source) => raw_fallback,
-            },
-            None => raw_fallback,
-        }
+        raw_fallback
     }
 
     fn error_frame_for_unknown_status(&self, message: &str) -> Bytes {
-        let empty = Bytes::new();
-        self.dialect
-            .normalize_error(StatusCode::BAD_GATEWAY, &empty)
-            .map(|json| match serde_json::from_slice::<Value>(&json) {
-                Ok(value) => crate::sse_error_frame::make_error_frame_from_json(&value),
-                Err(_source) => make_error_frame("api_error", message),
-            })
-            .unwrap_or_else(|| make_error_frame("api_error", message))
+        make_error_frame("api_error", message)
     }
 
     fn current_usage(&self) -> StreamingUsage {
@@ -1015,10 +997,6 @@ mod tests {
             Err(DialectError::UnsupportedRequest {
                 reason: "test dialect is relay-only".to_owned(),
             })
-        }
-
-        fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-            None
         }
     }
 

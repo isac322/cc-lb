@@ -1,9 +1,6 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_plugin_api::{Upstream, UpstreamDialect};
+use cc_lb_plugin_api::Upstream;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
 use serde_json::{Value, json};
@@ -33,36 +30,20 @@ pub enum NormalizerError {
 }
 
 #[derive(Clone, Default)]
-pub struct ErrorNormalizer {
-    dialects: HashMap<UpstreamKind, Arc<dyn UpstreamDialect>>,
-}
+pub struct ErrorNormalizer;
 
 impl ErrorNormalizer {
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_dialect(mut self, kind: UpstreamKind, dialect: Arc<dyn UpstreamDialect>) -> Self {
-        self.register_dialect(kind, dialect);
-        self
-    }
-
-    pub fn register_dialect(
-        &mut self,
-        kind: UpstreamKind,
-        dialect: Arc<dyn UpstreamDialect>,
-    ) -> &mut Self {
-        self.dialects.insert(kind, dialect);
-        self
+        Self
     }
 
     pub fn normalize_http_error(
         &self,
-        kind: UpstreamKind,
-        status: StatusCode,
+        _kind: UpstreamKind,
+        _status: StatusCode,
         body: &Bytes,
     ) -> Bytes {
-        self.normalize_http_error_with_dialect(kind, status, body, None)
+        body.clone()
     }
 
     pub fn build_http_error_response(
@@ -85,29 +66,6 @@ impl ErrorNormalizer {
             UpstreamKind::AnthropicDirect => anthropic_sse_error_json(raw_event_data_json),
         };
         make_error_frame_from_json(&error_json)
-    }
-
-    fn normalize_http_error_with_dialect(
-        &self,
-        kind: UpstreamKind,
-        status: StatusCode,
-        body: &Bytes,
-        fallback_dialect: Option<&dyn UpstreamDialect>,
-    ) -> Bytes {
-        if let Some(dialect) = self.dialects.get(&kind) {
-            if let Some(normalized) = dialect.normalize_error(status, body) {
-                return normalized;
-            }
-            return body.clone();
-        }
-
-        if let Some(dialect) = fallback_dialect
-            && let Some(normalized) = dialect.normalize_error(status, body)
-        {
-            return normalized;
-        }
-
-        body.clone()
     }
 }
 

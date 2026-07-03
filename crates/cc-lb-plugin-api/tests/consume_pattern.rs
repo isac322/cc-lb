@@ -28,10 +28,6 @@ impl UpstreamDialect for DummyDialect {
             Bytes::from_static(b"{}"),
         ))
     }
-
-    fn normalize_error(&self, _status: http::StatusCode, _body: &Bytes) -> Option<Bytes> {
-        None
-    }
 }
 
 #[async_trait::async_trait]
@@ -114,10 +110,6 @@ fn controlled_builder_cannot_be_fabricated_by_normal_callers() {
                 HeaderMap::new(),
                 Bytes::new(),
             ))
-        }
-
-        fn normalize_error(&self, _status: http::StatusCode, _body: &Bytes) -> Option<Bytes> {
-            None
         }
     }
 

@@ -1,7 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
 use axum::body::Bytes;
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, Method};
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_plugin_api::{
@@ -406,10 +406,6 @@ impl UpstreamDialect for DirectDialect {
             HeaderMap::new(),
             Bytes::from_static(b"{}"),
         ))
-    }
-
-    fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-        None
     }
 }
 

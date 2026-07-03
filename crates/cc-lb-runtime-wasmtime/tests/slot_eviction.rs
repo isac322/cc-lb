@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cc_lb_plugin_api::SlotKey;
-use cc_lb_plugin_types::{FilterRequest, Principal, UpstreamCandidate};
+use cc_lb_plugin_wire::{FilterRequest, Principal, UpstreamCandidate};
 use cc_lb_runtime_wasmtime::{WasmtimeRuntime, call_filter_hook};
 use rkyv::rancor::Error;
 
@@ -40,7 +40,7 @@ fn cache_aware_wasm() -> Option<Vec<u8>> {
 }
 
 fn tiny_filter_request() -> FilterRequest {
-    use cc_lb_plugin_types::Claim;
+    use cc_lb_plugin_wire::Claim;
     FilterRequest {
         request_id: Box::from("evict-probe"),
         method: Box::from("POST"),

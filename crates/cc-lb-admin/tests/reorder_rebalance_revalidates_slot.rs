@@ -143,7 +143,9 @@ async fn seed_registry_with_slots(
                 label: None,
                 uploaded_at_unix_secs: 1_800_000_000,
                 uploaded_by_admin_id: Uuid::new_v4(),
-                wire_version: 1,
+                description: format!("{name} description"),
+                usage: "test fixture".to_owned(),
+                hook_metadata: Default::default(),
                 supported_slots: slots,
             },
         )
@@ -169,7 +171,6 @@ async fn seed_chain_with_slot(
             sse_per_event: false,
             batched_events_per_flush: 1,
             batched_flush_ms: 100,
-            wire_version: None,
         })
         .await
         .unwrap()

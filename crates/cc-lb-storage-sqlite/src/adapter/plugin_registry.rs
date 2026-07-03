@@ -1,6 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use async_trait::async_trait;
+use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_SHA256, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
     BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256, MAX_WASM_BLOB_BYTES, PluginBlobRepo,
@@ -44,7 +45,7 @@ impl PluginRegistryStore for SqliteStorage {
 
         let id = Uuid::new_v4();
         let registry_insert = sqlx::query(
-            "INSERT INTO wasm_registry_v2 (id, sha256, plugin_name, plugin_version, label, uploaded_by_admin_id, revision, wire_version, supported_slots, schema_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'active', ?, ?) ON CONFLICT(sha256) DO NOTHING",
+            "INSERT INTO wasm_registry_v2 (id, sha256, plugin_name, plugin_version, label, uploaded_by_admin_id, revision, description, usage, hook_metadata, supported_slots, schema_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'active', ?, ?) ON CONFLICT(sha256) DO NOTHING",
         )
         .bind(id.to_string())
         .bind(blob.sha256.as_slice())
@@ -52,7 +53,9 @@ impl PluginRegistryStore for SqliteStorage {
         .bind(&input.original_filename)
         .bind(input.label.as_deref())
         .bind(input.uploaded_by_admin_id.to_string())
-        .bind(i64::from(input.wire_version))
+        .bind(&input.description)
+        .bind(&input.usage)
+        .bind(hook_metadata_to_json(&input.hook_metadata)?)
         .bind(slots_to_json(&input.supported_slots)?)
         .bind(input.schema_hash.as_ref().map(|h| h.as_slice()))
         .bind(unix_secs_to_i64(input.uploaded_at_unix_secs, "wasm_registry.created_at")?)
@@ -203,16 +206,6 @@ impl PluginRegistryStore for SqliteStorage {
         Ok(())
     }
 
-    async fn update_wire_version(&self, id: Uuid, wire_version: u8) -> StorageResult<()> {
-        sqlx::query("UPDATE wasm_registry_v2 SET wire_version = ? WHERE id = ?")
-            .bind(i64::from(wire_version))
-            .bind(id.to_string())
-            .execute(self.pool())
-            .await
-            .map_err(map_sqlx_error)?;
-        Ok(())
-    }
-
     async fn delete_registry_entry(
         &self,
         id: Uuid,
@@ -319,7 +312,7 @@ impl PluginRegistryStore for SqliteStorage {
         }
         let id = Uuid::new_v4();
         let row = sqlx::query(
-            "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_registry_id, order_value, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision, wire_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, unixepoch(), unixepoch()) RETURNING *",
+            "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_registry_id, order_value, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, unixepoch(), unixepoch()) RETURNING *",
         )
         .bind(id.to_string())
         .bind(input.principal_id.to_string())
@@ -330,7 +323,6 @@ impl PluginRegistryStore for SqliteStorage {
         .bind(input.sse_per_event)
         .bind(i64::from(input.batched_events_per_flush))
         .bind(u64_to_i64(input.batched_flush_ms, "plugin_chain.batched_flush_ms")?)
-        .bind(input.wire_version.map(i64::from))
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlite_error)?;
@@ -657,13 +649,6 @@ fn registry_from_row(row: SqliteRow) -> StorageResult<WasmRegistryEntry> {
         row.try_get("revision").map_err(map_sqlx_error)?,
         "wasm_registry.revision",
     )?;
-    let wire_version = u8::try_from(
-        row.try_get::<i64, _>("wire_version")
-            .map_err(map_sqlx_error)?,
-    )
-    .map_err(|_| StorageError::Corrupted {
-        message: "wasm_registry.wire_version is outside u8 range".to_owned(),
-    })?;
     let supported_slots = slots_from_json(
         &row.try_get::<String, _>("supported_slots")
             .map_err(map_sqlx_error)?,
@@ -687,7 +672,12 @@ fn registry_from_row(row: SqliteRow) -> StorageResult<WasmRegistryEntry> {
         refcount,
         revision,
         kind: "filter".to_owned(),
-        wire_version,
+        description: row.try_get("description").map_err(map_sqlx_error)?,
+        usage: row.try_get("usage").map_err(map_sqlx_error)?,
+        hook_metadata: hook_metadata_from_json(
+            &row.try_get::<String, _>("hook_metadata")
+                .map_err(map_sqlx_error)?,
+        )?,
         is_builtin: false,
         metadata: None,
         supported_slots,
@@ -742,15 +732,6 @@ fn chain_from_row(row: SqliteRow) -> StorageResult<PluginChainEntry> {
             row.try_get("revision").map_err(map_sqlx_error)?,
             "plugin_chain.revision",
         )?,
-        wire_version: row
-            .try_get::<Option<i64>, _>("wire_version")
-            .map_err(map_sqlx_error)?
-            .map(|value| {
-                u8::try_from(value).map_err(|_| StorageError::Corrupted {
-                    message: "plugin_chain.wire_version is outside u8 range".to_owned(),
-                })
-            })
-            .transpose()?,
     })
 }
 
@@ -827,6 +808,9 @@ fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEn
     existing.name == input.name
         && existing.original_filename == input.original_filename
         && existing.label == input.label
+        && existing.description == input.description
+        && existing.usage == input.usage
+        && existing.hook_metadata == input.hook_metadata
         && schema_hash_ok
 }
 
@@ -898,6 +882,14 @@ fn parse_uuid(value: &str, field: &str) -> StorageResult<Uuid> {
 fn slots_to_json(slots: &[PluginSlot]) -> StorageResult<String> {
     serde_json::to_string(&slots.iter().map(|slot| slot.as_str()).collect::<Vec<_>>())
         .map_err(StorageError::from)
+}
+
+fn hook_metadata_to_json(metadata: &BTreeMap<String, HookMetadata>) -> StorageResult<String> {
+    serde_json::to_string(metadata).map_err(StorageError::from)
+}
+
+fn hook_metadata_from_json(value: &str) -> StorageResult<BTreeMap<String, HookMetadata>> {
+    serde_json::from_str(value).map_err(StorageError::from)
 }
 
 fn slots_from_json(value: &str) -> StorageResult<Vec<PluginSlot>> {

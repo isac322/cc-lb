@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::thread;
 
 use cc_lb_plugin_api::SlotKey;
-use cc_lb_plugin_types::{
+use cc_lb_plugin_wire::{
     ArchivedFilterResponse, FilterRequest, FilterResponse, Principal, UpstreamCandidate,
 };
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
@@ -53,7 +53,7 @@ fn load_wasm_or_skip() -> Option<Vec<u8>> {
 }
 
 fn request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRequest {
-    use cc_lb_plugin_types::Claim;
+    use cc_lb_plugin_wire::Claim;
     let claims: Box<[Claim]> = match keep_k {
         Some(k) => Box::new([Claim {
             key: Box::from("keep_k"),

@@ -1,20 +1,30 @@
 //! Plugin Development Kit for wasmtime-based cc-lb plugins.
 //!
-//! Phase 1 W4 — re-exports `#[plugin]` / `#[handler]` from
+//! Re-exports `#[cc_lb_plugin]` / `#[handler]` from
 //! `cc-lb-pdk-wasmtime-macros` plus the host↔guest wire types from
-//! `cc-lb-plugin-types`, and provides the guest-side allocator / dispatch
+//! `cc-lb-plugin-wire`, and provides the guest-side allocator / dispatch
 //! plumbing the macros call into.
 //!
 //! The public surface for plugin authors is:
 //!
 //! ```ignore
-//! use cc_lb_pdk_wasmtime::{plugin, handler, types::*};
+//! use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler, types::*};
 //!
-//! #[plugin(name = "cache-aware", version = "0.1.0")]
+//! #[cc_lb_plugin(
+//!     name = "cache-aware",
+//!     version = "0.1.0",
+//!     description = "Routes requests by cache affinity",
+//!     usage = "Attach to a filter chain and configure principal claims.",
+//! )]
 //! mod cache_aware {
 //!     use super::*;
 //!
-//!     #[handler(name = "filter")]
+//!     #[handler(
+//!         filter,
+//!         wire = 1,
+//!         description = "Filters upstream candidates",
+//!         usage = "Returns accept/reject decisions for each candidate.",
+//!     )]
 //!     fn filter(req: FilterRequest) -> FilterResponse {
 //!         /* ... */
 //!     }
@@ -52,10 +62,10 @@ mod wasm32_glue {
     }
 }
 
-pub use cc_lb_pdk_wasmtime_macros::{handler, plugin};
+pub use cc_lb_pdk_wasmtime_macros::{WireSchema, cc_lb_plugin, handler, plugin};
 
 /// Wire types shared with the host.
-pub use cc_lb_plugin_types as types;
+pub use cc_lb_plugin_wire as types;
 
 #[doc(hidden)]
 pub mod __private {
@@ -65,15 +75,14 @@ pub mod __private {
     use core::alloc::Layout;
     use core::slice;
 
-    use cc_lb_plugin_types::{
-        ArchivedFilterRequest, ArchivedNormalizeErrorRequest, ArchivedObserveEvent,
-        ArchivedShapeRequest, FilterRequest, FilterResponse, NormalizeErrorRequest,
-        NormalizeErrorResponse, ObserveEvent, ShapeRequest, ShapeResponse, pack_ret,
+    use cc_lb_plugin_wire::{
+        ArchivedFilterRequest, ArchivedObserveEvent, ArchivedShapeRequest, FilterRequest,
+        FilterResponse, ObserveEvent, ShapeRequest, ShapeResponse, pack_ret,
     };
     use rkyv::rancor::Error;
 
     /// Default archive alignment for the rkyv 0.8 root types in
-    /// [`cc_lb_plugin_types`]. The host always passes this value to
+    /// [`cc_lb_plugin_wire`]. The host always passes this value to
     /// `cc_lb_alloc` / `cc_lb_free`.
     pub const DEFAULT_ALIGN: u32 = 16;
 
@@ -165,7 +174,7 @@ pub mod __private {
 
     /// Zero-copy view-mode filter dispatch — invoked from the
     /// macro-generated `cc_lb_filter` export when the handler is
-    /// declared `#[handler(name = "filter", view)]` and takes
+    /// declared with `#[handler(filter, wire = 1, ..., view)]` and takes
     /// `&ArchivedFilterRequest`.
     ///
     /// Skips `rkyv::deserialize` entirely. Field access happens
@@ -238,39 +247,6 @@ pub mod __private {
         let response = handler(archived);
         free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
         encode_and_pack::<ShapeResponse>(&response, "ShapeResponse")
-    }
-
-    #[allow(unsafe_code)]
-    pub fn run_normalize_error<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
-    where
-        F: FnOnce(NormalizeErrorRequest) -> NormalizeErrorResponse,
-    {
-        // SAFETY: same as run_filter.
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-        let archived: &ArchivedNormalizeErrorRequest =
-            rkyv::access::<ArchivedNormalizeErrorRequest, Error>(in_bytes)
-                .expect("rkyv::access(NormalizeErrorRequest) failed");
-        let owned: NormalizeErrorRequest =
-            rkyv::deserialize::<NormalizeErrorRequest, Error>(archived)
-                .expect("rkyv::deserialize(NormalizeErrorRequest) failed");
-        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
-        let response = handler(owned);
-        encode_and_pack::<NormalizeErrorResponse>(&response, "NormalizeErrorResponse")
-    }
-
-    #[allow(unsafe_code)]
-    pub fn run_normalize_error_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
-    where
-        F: FnOnce(&ArchivedNormalizeErrorRequest) -> NormalizeErrorResponse,
-    {
-        // SAFETY: same as run_filter.
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-        let archived: &ArchivedNormalizeErrorRequest =
-            rkyv::access::<ArchivedNormalizeErrorRequest, Error>(in_bytes)
-                .expect("rkyv::access(NormalizeErrorRequest) failed");
-        let response = handler(archived);
-        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
-        encode_and_pack::<NormalizeErrorResponse>(&response, "NormalizeErrorResponse")
     }
 
     /// Observe is side-effect-only — host hands an event, plugin

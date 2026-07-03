@@ -10,7 +10,8 @@ mod admin_test_common;
 
 use admin_test_common::spawn_admin_server;
 use axum::http::StatusCode;
-use cc_lb_plugin_types::schema;
+use cc_lb_plugin_wire::schema::{HookKind, WireSchema, WireVersion};
+use cc_lb_plugin_wire::{FilterRequest, FilterResponse};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -30,8 +31,16 @@ fn multipart_body(parts: &[(&str, &[u8])]) -> Vec<u8> {
     body
 }
 
-fn schema_section_bytes(tag: &[u8]) -> Vec<u8> {
-    blake3::hash(tag).as_bytes().to_vec()
+fn schema_section_bytes() -> Vec<u8> {
+    <FilterRequest as WireSchema>::FINGERPRINT.to_vec()
+}
+
+fn schema_section_name() -> String {
+    format!(
+        "{}.{}",
+        HookKind::Filter.section_prefix(),
+        WireVersion::V1.as_str()
+    )
 }
 
 fn append_custom_section(module: &mut Vec<u8>, name: &str, data: &[u8]) {
@@ -66,31 +75,54 @@ fn wat_with_sections(wat: &str, sections: &[(&str, &[u8])]) -> Vec<u8> {
     module
 }
 
-fn minimal_filter_wat() -> &'static str {
-    r#"
+fn minimal_filter_wat() -> String {
+    let response = rkyv::to_bytes::<rkyv::rancor::Error>(&FilterResponse {
+        results: Box::new([]),
+    })
+    .expect("encode response");
+    let data = wat_data_bytes(&response);
+    let len = response.len();
+    let packed = ((4096u64) << 32) | (len as u64);
+    format!(
+        r#"
     (module
         (memory (export "memory") 1)
-        (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
+        (data (i32.const 4096) "{data}")
+        (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 1024)
         (func (export "cc_lb_free") (param i32 i32 i32))
-        (func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const 0)
+        (func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const {packed})
     )
     "#
+    )
+}
+
+fn wat_data_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("\\{byte:02x}")).collect()
+}
+
+fn metadata(name: &str) -> String {
+    format!(
+        r#"{{"name":"{name}","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{{"filter":{{"wire_version":1,"description":"filter hook","usage":"called by router"}}}}}}"#
+    )
 }
 
 fn filter_wasm_valid() -> Vec<u8> {
     wat_with_sections(
-        minimal_filter_wat(),
-        &[(
-            schema::SECTION_FILTER,
-            &schema_section_bytes(schema::WIRE_SCHEMA_TAG_FILTER),
-        )],
+        &minimal_filter_wat(),
+        &[
+            (&schema_section_name(), &schema_section_bytes()),
+            ("cc_lb.plugin.v1", metadata("cache-aware-test").as_bytes()),
+        ],
     )
 }
 
 fn filter_wasm_wrong_schema() -> Vec<u8> {
     wat_with_sections(
-        minimal_filter_wat(),
-        &[(schema::SECTION_FILTER, &[0u8; 32])],
+        &minimal_filter_wat(),
+        &[
+            (&schema_section_name(), &[0u8; 32]),
+            ("cc_lb.plugin.v1", metadata("wrong-hash").as_bytes()),
+        ],
     )
 }
 
@@ -103,10 +135,10 @@ fn filter_wasm_missing_export() -> Vec<u8> {
             (func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const 0)
         )
         "#,
-        &[(
-            schema::SECTION_FILTER,
-            &schema_section_bytes(schema::WIRE_SCHEMA_TAG_FILTER),
-        )],
+        &[
+            (&schema_section_name(), &schema_section_bytes()),
+            ("cc_lb.plugin.v1", metadata("missing-free").as_bytes()),
+        ],
     )
 }
 
@@ -121,10 +153,10 @@ fn filter_wasm_with_import() -> Vec<u8> {
             (func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const 0)
         )
         "#,
-        &[(
-            schema::SECTION_FILTER,
-            &schema_section_bytes(schema::WIRE_SCHEMA_TAG_FILTER),
-        )],
+        &[
+            (&schema_section_name(), &schema_section_bytes()),
+            ("cc_lb.plugin.v1", metadata("with-import").as_bytes()),
+        ],
     )
 }
 
@@ -163,10 +195,9 @@ async fn happy_path_accepts_valid_filter_plugin() {
         .await
         .expect("storage lookup OK")
         .expect("entry persisted");
-    let expected = blake3::hash(schema::WIRE_SCHEMA_TAG_FILTER);
     assert_eq!(
         entry.schema_hash,
-        Some(*expected.as_bytes()),
+        Some(<FilterRequest as WireSchema>::FINGERPRINT),
         "schema_hash must round-trip via storage",
     );
 }
@@ -229,15 +260,11 @@ async fn rejects_host_import_violation() {
 }
 
 fn filter_wasm_with_embedded_name(embedded_name: &str) -> Vec<u8> {
-    let metadata = format!(r#"{{"name":"{embedded_name}","version":"0.0.1"}}"#);
     wat_with_sections(
-        minimal_filter_wat(),
+        &minimal_filter_wat(),
         &[
-            (
-                schema::SECTION_FILTER,
-                &schema_section_bytes(schema::WIRE_SCHEMA_TAG_FILTER),
-            ),
-            ("cc_lb.plugin.v1", metadata.as_bytes()),
+            (&schema_section_name(), &schema_section_bytes()),
+            ("cc_lb.plugin.v1", metadata(embedded_name).as_bytes()),
         ],
     )
 }
@@ -277,12 +304,12 @@ async fn accepts_when_embedded_name_matches_multipart() {
 }
 
 #[tokio::test]
-async fn accepts_when_metadata_section_absent() {
-    // Plugins built without the wasmtime PDK macro (or older versions
-    // that predate the `cc_lb.plugin.v1` section) must still upload
-    // cleanly — the identity check is opt-in per plugin.
+async fn rejects_when_metadata_section_absent() {
     let server = spawn_admin_server().await;
-    let wasm = filter_wasm_valid();
+    let wasm = wat_with_sections(
+        &minimal_filter_wat(),
+        &[(&schema_section_name(), &schema_section_bytes())],
+    );
     let body = multipart_body(&[
         ("name", b"no-metadata-section"),
         ("original_filename", b"no-metadata.wasm"),
@@ -290,7 +317,7 @@ async fn accepts_when_metadata_section_absent() {
         ("bytes", &wasm),
     ]);
     let (status, value) = upload(&server, body).await;
-    assert_eq!(status, StatusCode::CREATED, "body={value}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={value}");
 }
 
 #[tokio::test]

@@ -705,7 +705,7 @@ dependencies = [
  "cc-lb-core",
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-api",
- "cc-lb-plugin-types",
+ "cc-lb-plugin-wire",
  "cc-lb-runtime-wasmtime",
  "cc-lb-scheduler",
  "cc-lb-signer-anthropic-oauth",
@@ -728,6 +728,7 @@ dependencies = [
  "nix",
  "oauth2",
  "ring",
+ "rkyv",
  "rust-embed",
  "schemars 1.2.1",
  "secrecy",
@@ -914,7 +915,7 @@ name = "cc-lb-pdk-wasmtime"
 version = "0.1.0"
 dependencies = [
  "cc-lb-pdk-wasmtime-macros",
- "cc-lb-plugin-types",
+ "cc-lb-plugin-wire",
  "dlmalloc",
  "rkyv",
 ]
@@ -924,7 +925,6 @@ name = "cc-lb-pdk-wasmtime-macros"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "cc-lb-plugin-types",
  "proc-macro2",
  "quote",
  "syn",
@@ -950,16 +950,19 @@ version = "0.2.0"
 dependencies = [
  "blake3",
  "cc-lb-plugin-api",
- "cc-lb-plugin-types",
+ "cc-lb-plugin-wire",
  "cc-lb-runtime-wasmtime",
  "rkyv",
 ]
 
 [[package]]
-name = "cc-lb-plugin-types"
+name = "cc-lb-plugin-wire"
 version = "0.2.0"
 dependencies = [
+ "cc-lb-pdk-wasmtime-macros",
  "rkyv",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1013,7 +1016,7 @@ dependencies = [
  "blake3",
  "bytes",
  "cc-lb-plugin-api",
- "cc-lb-plugin-types",
+ "cc-lb-plugin-wire",
  "http",
  "metrics",
  "metrics-exporter-prometheus",
@@ -1214,6 +1217,7 @@ dependencies = [
  "cc-lb-aead",
  "cc-lb-core",
  "cc-lb-plugin-api",
+ "cc-lb-plugin-wire",
  "cc-lb-storage-sqlite",
  "chrono",
  "serde",
@@ -1234,6 +1238,7 @@ dependencies = [
  "async-trait",
  "cc-lb-aead",
  "cc-lb-core",
+ "cc-lb-plugin-wire",
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
@@ -1258,6 +1263,7 @@ dependencies = [
  "bytes",
  "cc-lb-aead",
  "cc-lb-core",
+ "cc-lb-plugin-wire",
  "cc-lb-pricing",
  "cc-lb-storage-api",
  "cc-lb-storage-conformance",
@@ -1283,6 +1289,7 @@ dependencies = [
  "cc-lb-config",
  "cc-lb-core",
  "cc-lb-plugin-api",
+ "cc-lb-plugin-wire",
  "cc-lb-storage-api",
  "chrono",
  "serde",

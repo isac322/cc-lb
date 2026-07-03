@@ -1850,10 +1850,6 @@ mod tests {
                 Bytes::from_static(b"{}"),
             ))
         }
-
-        fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-            None
-        }
     }
 
     fn aead() -> Arc<AeadService> {

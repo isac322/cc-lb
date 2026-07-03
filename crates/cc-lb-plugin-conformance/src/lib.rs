@@ -69,12 +69,13 @@ pub mod fixtures;
 pub mod prelude;
 
 use cc_lb_plugin_api::SlotKey;
-use cc_lb_plugin_types::{
-    ArchivedFilterResponse, ArchivedNormalizeErrorResponse, ArchivedShapeResponse, FilterRequest,
-    FilterResponse, NormalizeErrorRequest, NormalizeErrorResponse, ObserveEvent, ShapeRequest,
-    ShapeResponse,
+use cc_lb_plugin_wire::{
+    ArchivedFilterResponse, ArchivedShapeResponse, FilterRequest, FilterResponse, ObserveEvent,
+    ShapeRequest, ShapeResponse,
 };
-use cc_lb_runtime_wasmtime::{HotEngineConfig, SlotKind, WasmtimeRuntime, inspect_wasm};
+use cc_lb_runtime_wasmtime::{
+    HotEngineConfig, ModuleInspection, SlotKind, WasmtimeRuntime, inspect_wasm,
+};
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 
@@ -98,9 +99,6 @@ impl<'a> ConformanceSuite<'a> {
     }
 
     /// Build a suite for a Shape-slot plugin.
-    ///
-    /// Shape plugins export both `cc_lb_shape` and `cc_lb_normalize_error`
-    /// per RFC-0001.
     pub fn for_shape(wasm: &'a [u8]) -> Self {
         Self::with_kind(wasm, SlotKind::Shape)
     }
@@ -108,6 +106,21 @@ impl<'a> ConformanceSuite<'a> {
     /// Build a suite for an Observe-slot plugin.
     pub fn for_observe(wasm: &'a [u8]) -> Self {
         Self::with_kind(wasm, SlotKind::Observe)
+    }
+
+    pub fn from_wasm(wasm: &'a [u8]) -> Self {
+        let mut matches = SlotKind::ALL
+            .iter()
+            .copied()
+            .filter(|kind| inspect_wasm(*kind, wasm).is_ok());
+        let Some(kind) = matches.next() else {
+            panic!("inspect_wasm did not recognise filter, shape, or observe exports")
+        };
+        assert!(
+            matches.next().is_none(),
+            "wasm exports multiple hooks; use for_filter, for_shape, or for_observe"
+        );
+        Self::with_kind(wasm, kind)
     }
 
     fn with_kind(wasm: &'a [u8], kind: SlotKind) -> Self {
@@ -150,6 +163,19 @@ impl<'a> ConformanceSuite<'a> {
             .unwrap_or_else(|e| panic!("inspect_wasm rejected plugin: {e}"));
     }
 
+    pub fn inspect(&self) -> ModuleInspection {
+        inspect_wasm(self.kind, self.wasm)
+            .unwrap_or_else(|e| panic!("inspect_wasm rejected plugin: {e}"))
+    }
+
+    pub fn assert_recognisable_by_current_host(&self) {
+        let runtime = WasmtimeRuntime::new(self.engine_config.clone())
+            .expect("wasmtime engine build must succeed");
+        runtime
+            .admit_wasm(self.kind, self.wasm)
+            .unwrap_or_else(|e| panic!("admit_wasm rejected plugin: {e}"));
+    }
+
     /// Build a fresh [`WasmtimeRuntime`], register the plugin under
     /// [`Self::plugin_name`], and return the live session.
     ///
@@ -189,8 +215,7 @@ impl<'a> ConformanceSuite<'a> {
     ///
     /// Coverage:
     /// - `Filter` → `call_filter(sample_filter_request())`
-    /// - `Shape` → `call_shape(sample_shape_request())` +
-    ///   `call_normalize_error(sample_normalize_error_request())`
+    /// - `Shape` → `call_shape(sample_shape_request())`
     /// - `Observe` → [`PluginSession::exercise_observe_variants`]
     ///
     /// Assertions are boundary-only: hooks must not trap and responses
@@ -205,7 +230,6 @@ impl<'a> ConformanceSuite<'a> {
             }
             SlotKind::Shape => {
                 let _ = session.call_shape(fixtures::sample_shape_request());
-                let _ = session.call_normalize_error(fixtures::sample_normalize_error_request());
             }
             SlotKind::Observe => {
                 session.exercise_observe_variants();
@@ -281,31 +305,6 @@ impl PluginSession {
             .expect("rkyv access ShapeResponse");
         rkyv::deserialize::<ShapeResponse, RkyvError>(archived)
             .expect("rkyv deserialize ShapeResponse")
-    }
-
-    /// Round-trip a [`NormalizeErrorRequest`] through the guest
-    /// boundary. Returns the raw [`NormalizeErrorResponse`]; whether
-    /// `normalized.is_none()` counts as pass-through is a plugin
-    /// contract the caller asserts on, not this harness.
-    /// Panics if this session is not Shape-kind.
-    pub fn call_normalize_error(&self, request: NormalizeErrorRequest) -> NormalizeErrorResponse {
-        assert!(
-            matches!(self.kind, SlotKind::Shape),
-            "call_normalize_error requires SlotKind::Shape, got {:?}",
-            self.kind
-        );
-        let in_bytes =
-            rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode NormalizeErrorRequest");
-        let out_bytes = self
-            .runtime
-            .call_normalize_error(&self.slot_key, in_bytes.as_slice())
-            .expect("guest cc_lb_normalize_error must complete without trap");
-        let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
-        aligned.extend_from_slice(&out_bytes);
-        let archived = rkyv::access::<ArchivedNormalizeErrorResponse, RkyvError>(&aligned)
-            .expect("rkyv access NormalizeErrorResponse");
-        rkyv::deserialize::<NormalizeErrorResponse, RkyvError>(archived)
-            .expect("rkyv deserialize NormalizeErrorResponse")
     }
 
     /// Send an [`ObserveEvent`] through the guest boundary. Observe

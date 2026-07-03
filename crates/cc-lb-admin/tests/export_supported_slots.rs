@@ -25,7 +25,9 @@ async fn export_supported_slots_serializes_registry_entry_slots_as_snake_case() 
                 label: Some("slot fixture".to_owned()),
                 uploaded_at_unix_secs: 1_800_000_000,
                 uploaded_by_admin_id: Uuid::new_v4(),
-                wire_version: 1,
+                description: "slot fixture".to_owned(),
+                usage: "test fixture".to_owned(),
+                hook_metadata: Default::default(),
                 supported_slots: vec![
                     PluginSlot::Router,
                     PluginSlot::Shape,

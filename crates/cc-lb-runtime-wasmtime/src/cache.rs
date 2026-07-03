@@ -1,9 +1,8 @@
 //! ABI call wrapper for wasmtime plugin hooks.
 //!
 //! Every wasm call goes through one of [`call_filter_hook`] /
-//! [`call_shape_hook`] / [`call_normalize_error_hook`] /
-//! [`call_observe_hook`]. They all share the same alloc → write →
-//! call → read → free flow; only the typed-func name differs.
+//! [`call_shape_hook`] / [`call_observe_hook`]. They all share the same
+//! alloc → write → call → read → free flow; only the typed-func name differs.
 //!
 //! Each call builds a fresh [`Store`] via
 //! [`PluginCell::instance_pre`] and drops it on return — no
@@ -38,6 +37,7 @@ fn trap_phase_label(err: &WasmtimeRuntimeError) -> &'static str {
         WasmtimeRuntimeError::InstantiateFailed(_) => "instantiate",
         WasmtimeRuntimeError::ModuleCompile(_) => "compile",
         WasmtimeRuntimeError::EngineInit(_) => "engine_init",
+        WasmtimeRuntimeError::ProbeFailed { .. } => "probe",
         WasmtimeRuntimeError::PoolSaturated { .. } => "pool_saturated",
     }
 }
@@ -50,8 +50,8 @@ pub const DEFAULT_ALIGN: u32 = 16;
 /// Owns the `Store` for the duration of the call and drops it on
 /// return. Optional hook funcs are populated only when the plugin
 /// exports them — a Filter slot has `filter_fn = Some(_)` and all
-/// others `None`; a Shape slot has `shape_fn` and
-/// `normalize_error_fn` populated; etc. [`crate::inspect::inspect_wasm`]
+/// others `None`; a Shape slot has `shape_fn` populated; etc.
+/// [`crate::inspect::inspect_wasm`]
 /// is the gate that ensures the right `Some(_)`s are present for the
 /// slot's kind at load time.
 struct WorkerInstance {
@@ -61,7 +61,6 @@ struct WorkerInstance {
     free_fn: TypedFunc<(u32, u32, u32), ()>,
     filter_fn: Option<TypedFunc<(u32, u32), u64>>,
     shape_fn: Option<TypedFunc<(u32, u32), u64>>,
-    normalize_error_fn: Option<TypedFunc<(u32, u32), u64>>,
     observe_fn: Option<TypedFunc<(u32, u32), u64>>,
 }
 
@@ -109,8 +108,8 @@ fn build_worker_instance(
     // Only look up the export we're about to call. `inspect_wasm`
     // already validated the module carries the export corresponding
     // to its `SlotKind`, so a missing lookup here is a real error
-    // (not the historical "probe all four and hope one exists").
-    let (filter_fn, shape_fn, normalize_error_fn, observe_fn) = match hook {
+    // (not the historical "probe all hooks and hope one exists").
+    let (filter_fn, shape_fn, observe_fn) = match hook {
         HookFn::Filter => (
             Some(
                 instance
@@ -119,7 +118,6 @@ fn build_worker_instance(
                         reason: format!("missing or mistyped `cc_lb_filter` export: {e}"),
                     })?,
             ),
-            None,
             None,
             None,
         ),
@@ -133,22 +131,8 @@ fn build_worker_instance(
                     })?,
             ),
             None,
-            None,
-        ),
-        HookFn::NormalizeError => (
-            None,
-            None,
-            Some(
-                instance
-                    .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_normalize_error")
-                    .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
-                        reason: format!("missing or mistyped `cc_lb_normalize_error` export: {e}"),
-                    })?,
-            ),
-            None,
         ),
         HookFn::Observe => (
-            None,
             None,
             None,
             Some(
@@ -168,7 +152,6 @@ fn build_worker_instance(
         free_fn,
         filter_fn,
         shape_fn,
-        normalize_error_fn,
         observe_fn,
     })
 }
@@ -180,7 +163,6 @@ fn build_worker_instance(
 enum HookFn {
     Filter,
     Shape,
-    NormalizeError,
     Observe,
 }
 
@@ -189,7 +171,6 @@ impl HookFn {
         match self {
             HookFn::Filter => "cc_lb_filter",
             HookFn::Shape => "cc_lb_shape",
-            HookFn::NormalizeError => "cc_lb_normalize_error",
             HookFn::Observe => "cc_lb_observe",
         }
     }
@@ -201,7 +182,6 @@ impl HookFn {
         match self {
             HookFn::Filter => "filter",
             HookFn::Shape => "shape",
-            HookFn::NormalizeError => "normalize_error",
             HookFn::Observe => "observe",
         }
     }
@@ -223,15 +203,6 @@ pub fn call_shape_hook(
     input: &[u8],
 ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
     call_hook(cell, input, HookFn::Shape)
-}
-
-/// Synchronous normalize_error call. Sibling of [`call_shape_hook`]
-/// against the same plugin instance.
-pub fn call_normalize_error_hook(
-    cell: &Arc<PluginCell>,
-    input: &[u8],
-) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-    call_hook(cell, input, HookFn::NormalizeError)
 }
 
 /// Synchronous observe call. Guest returns `(0, 0)`; the returned
@@ -302,14 +273,12 @@ fn execute_call_inner(
         free_fn,
         filter_fn,
         shape_fn,
-        normalize_error_fn,
         observe_fn,
     } = wi;
 
     let hook_fn = match hook {
         HookFn::Filter => filter_fn.as_ref(),
         HookFn::Shape => shape_fn.as_ref(),
-        HookFn::NormalizeError => normalize_error_fn.as_ref(),
         HookFn::Observe => observe_fn.as_ref(),
     }
     .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
@@ -368,10 +337,9 @@ fn execute_call_inner(
 
     // Only the observe hook is allowed to return (0, 0) — side-effect
     // only by contract (`cc-lb-pdk-wasmtime/src/lib.rs::run_observe*`).
-    // Filter / shape / normalize_error returning (0, 0) is an ABI
+    // Filter / shape returning (0, 0) is an ABI
     // violation; collapsing it into empty bytes here would hide the
-    // bug from downstream rkyv decode (e.g. normalize_error would
-    // silently passthrough as `None`).
+    // bug from downstream rkyv decode.
     let out_bytes = if matches!(hook, HookFn::Observe) && out_ptr == 0 && out_len == 0 {
         Vec::new()
     } else if out_ptr == 0 || out_len == 0 {

@@ -66,7 +66,9 @@ async fn run_test(url: &str) -> Result<()> {
                 label: None,
                 uploaded_at_unix_secs: 1_800_000_000,
                 uploaded_by_admin_id: Uuid::new_v4(),
-                wire_version: 1,
+                description: "test plugin".to_owned(),
+                usage: "test usage".to_owned(),
+                hook_metadata: Default::default(),
                 supported_slots: Vec::new(),
             },
         )
@@ -83,7 +85,6 @@ async fn run_test(url: &str) -> Result<()> {
         sse_per_event: false,
         batched_events_per_flush: 32,
         batched_flush_ms: 100,
-        wire_version: None,
     };
 
     let entry1 = storage.insert_chain_entry(input1.clone()).await?;
@@ -103,7 +104,6 @@ async fn run_test(url: &str) -> Result<()> {
         sse_per_event: false,
         batched_events_per_flush: 32,
         batched_flush_ms: 100,
-        wire_version: None,
     };
 
     let entry_router1 = storage.insert_chain_entry(input_router1.clone()).await?;
@@ -119,7 +119,6 @@ async fn run_test(url: &str) -> Result<()> {
         sse_per_event: false,
         batched_events_per_flush: 32,
         batched_flush_ms: 100,
-        wire_version: None,
     };
 
     let entry_router2 = storage.insert_chain_entry(input_router2).await?;

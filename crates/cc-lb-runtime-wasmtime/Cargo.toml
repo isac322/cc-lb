@@ -10,7 +10,7 @@ repository = "https://github.com/isac322/cc-lb"
 
 [dependencies]
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
-cc-lb-plugin-types = { path = "../cc-lb-plugin-types", features = ["std"] }
+cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
 wasmtime.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

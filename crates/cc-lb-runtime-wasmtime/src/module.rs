@@ -16,7 +16,10 @@ use wasmtime::{Engine, Linker, Module};
 
 use crate::engine::HostState;
 use crate::error::WasmtimeRuntimeError;
-use crate::inspect::{ModuleInspection, SlotKind, inspect_wasm};
+use cc_lb_plugin_wire::schema::HookKind;
+
+use crate::inspect::{ModuleInspection, inspect_wasm};
+use crate::probe::probe_hook_dispatch;
 
 // Bumpable on validation-policy change (import allowlist, schema-hash
 // algorithm, per-hook export shape). `register()` mixes this into
@@ -48,7 +51,7 @@ pub(crate) fn compute_content_hash(wasm_bytes: &[u8], memory_max_pages: u32) -> 
 pub fn compile_module(
     engine: &Engine,
     linker: &Linker<HostState>,
-    kind: SlotKind,
+    kind: HookKind,
     wasm_bytes: &[u8],
 ) -> Result<(Arc<wasmtime::InstancePre<HostState>>, ModuleInspection), WasmtimeRuntimeError> {
     let inspection = inspect_wasm(kind, wasm_bytes)?;
@@ -69,4 +72,25 @@ pub fn compile_module(
         .map_err(|e| WasmtimeRuntimeError::InstantiateFailed(anyhow::Error::from(e)))?;
 
     Ok((Arc::new(instance_pre), inspection))
+}
+
+pub fn admit_wasm(
+    engine: &Engine,
+    linker: &Linker<HostState>,
+    kind: HookKind,
+    wasm_bytes: &[u8],
+    memory_max_pages: u32,
+) -> Result<(Arc<wasmtime::InstancePre<HostState>>, ModuleInspection), WasmtimeRuntimeError> {
+    let (instance_pre, inspection) = compile_module(engine, linker, kind, wasm_bytes)?;
+    for (hook, wire_version) in &inspection.hook_versions {
+        probe_hook_dispatch(
+            Arc::clone(&instance_pre),
+            *hook,
+            *wire_version,
+            &inspection.metadata,
+            memory_max_pages,
+        )?;
+    }
+
+    Ok((instance_pre, inspection))
 }

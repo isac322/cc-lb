@@ -112,7 +112,7 @@ pub async fn dispatch_warmup_with_dialect(
         pure: true,
         name: registry_entry.name,
         artifact: wasm_path.to_string_lossy().into_owned(),
-        wire_version: plugin_ref.wire_version,
+        wire_version: None,
         config: plugin_ref.config.clone(),
         metadata: std::collections::BTreeMap::new(),
     };
