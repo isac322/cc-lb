@@ -845,15 +845,21 @@ pub struct RuntimeConfig {
     pub wasmtime: WasmtimeConfig,
 }
 
-// Optional overrides for the wasmtime plugin runtime hot engine.
-// `None` / defaults preserve the compile-time behaviour from
-// `cc-lb-runtime-wasmtime`. Every knob here defaults to the
-// pre-Sprint-2 behaviour so enabling this config block is a no-op.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct WasmtimeConfig {
+    #[serde(default)]
+    pub allocation_strategy: WasmtimeAllocationStrategy,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_max_pages: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_reservation_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_guard_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_total_memories: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_total_core_instances: Option<u32>,
     #[serde(default)]
     pub plugin_failure_policy: PluginFailurePolicy,
     #[serde(default)]
@@ -862,6 +868,15 @@ pub struct WasmtimeConfig {
     pub wire_bounds: PluginWireBounds,
     #[serde(default)]
     pub cookie_redaction: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum WasmtimeAllocationStrategy {
+    #[default]
+    #[serde(rename = "ondemand", alias = "on_demand")]
+    OnDemand,
+    #[serde(rename = "pooling")]
+    Pooling,
 }
 
 /// What to do when a filter or shape plugin fails at the runtime

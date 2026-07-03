@@ -47,21 +47,32 @@ async fn count_request_events(pool: &SqlitePool, where_clause: &str) -> i64 {
     row.try_get::<i64, _>(0).expect("count column")
 }
 
-/// Poll the row count until it is stable for two consecutive reads separated
-/// by 300ms, or up to `deadline`. Absorbs the async lag between the
+/// Poll the row count until it is stable for THREE consecutive reads separated
+/// by 300ms (i.e. 600ms of quiescence). Absorbs the async lag between the
 /// `wait_for_status` handshake returning and the writer/assembler tasks
 /// draining their mpsc buffers on the `/v1/models` init request; the
 /// 300ms window must exceed the assembler's finalization grace (200ms)
 /// so late Priced/CacheObserved arrivals are counted before we treat the
-/// baseline as stable.
+/// baseline as stable. Coverage-instrumented CI runs can pause the
+/// assembler between arrivals longer than a single 300ms window, so the
+/// two-consecutive check would return prematurely and race a delayed write;
+/// requiring three tightens the quiescence signal without loosening the
+/// downstream assertion. The 15s failsafe only fires when the assembler
+/// truly cannot drain.
 async fn settled_row_count(pool: &SqlitePool, where_clause: &str) -> i64 {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut previous = count_request_events(pool, where_clause).await;
+    let mut stable_streak: u32 = 0;
     loop {
         sleep(Duration::from_millis(300)).await;
         let current = count_request_events(pool, where_clause).await;
         if current == previous {
-            return current;
+            stable_streak += 1;
+            if stable_streak >= 2 {
+                return current;
+            }
+        } else {
+            stable_streak = 0;
         }
         if tokio::time::Instant::now() >= deadline {
             return current;

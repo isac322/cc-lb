@@ -76,6 +76,7 @@ use cc_lb_admin::{
 
 const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_millis(500);
 const PRICE_CATALOG_LOCAL_INSTALL_INTERVAL: Duration = Duration::from_secs(60);
+const WASMTIME_POOL_METRICS_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy)]
 struct TowerTimeoutMarker;
@@ -100,6 +101,8 @@ pub struct App {
     notify_listener_task: Option<JoinHandle<()>>,
     price_catalog_install_cancel: Option<CancellationToken>,
     price_catalog_install_task: Option<JoinHandle<()>>,
+    wasmtime_pool_metrics_cancel: Option<CancellationToken>,
+    wasmtime_pool_metrics_task: Option<JoinHandle<()>>,
     scheduler_cancel: Option<CancellationToken>,
     scheduler_tasks: Vec<JoinHandle<()>>,
     audit_writer_task: Option<JoinHandle<()>>,
@@ -183,6 +186,8 @@ impl App {
             notify_listener_task,
             price_catalog_install_cancel,
             price_catalog_install_task,
+            wasmtime_pool_metrics_cancel,
+            wasmtime_pool_metrics_task,
             scheduler_cancel,
             scheduler_tasks,
             audit_writer_task,
@@ -247,6 +252,12 @@ impl App {
             cancel.cancel();
         }
         if let Some(task) = price_catalog_install_task {
+            await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        }
+        if let Some(cancel) = wasmtime_pool_metrics_cancel {
+            cancel.cancel();
+        }
+        if let Some(task) = wasmtime_pool_metrics_task {
             await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
         if let Some(cancel) = scheduler_cancel {
@@ -698,10 +709,7 @@ async fn build_app_with_storage_inner(
         }),
         clock.clone(),
     ));
-    let mut hot_engine_cfg = cc_lb_runtime_wasmtime::HotEngineConfig::default();
-    if let Some(pages) = config.runtime.wasmtime.memory_max_pages {
-        hot_engine_cfg.memory_max_pages = pages;
-    }
+    let mut hot_engine_cfg = hot_engine_config_from_config(&config);
     hot_engine_cfg.plugin_failure_policy = match config.runtime.wasmtime.plugin_failure_policy {
         cc_lb_config::PluginFailurePolicy::PassThrough => {
             cc_lb_runtime_wasmtime::policy::PluginFailurePolicy::PassThrough
@@ -728,6 +736,8 @@ async fn build_app_with_storage_inner(
     hot_engine_cfg.cookie_redaction = config.runtime.wasmtime.cookie_redaction;
     let runtime =
         Arc::new(WasmtimeRuntime::new(hot_engine_cfg).map_err(BuildError::WasmtimeRuntimeInit)?);
+    let (wasmtime_pool_metrics_cancel, wasmtime_pool_metrics_task) =
+        spawn_wasmtime_pool_metrics_publisher(runtime.clone());
     let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
     let storage_for_dynamic = storage.clone();
     let env_token = std::env::var("CC_LB_BOOTSTRAP_ADMIN_TOKEN").ok();
@@ -1440,6 +1450,8 @@ async fn build_app_with_storage_inner(
         notify_listener_task,
         price_catalog_install_cancel: Some(price_catalog_install_cancel),
         price_catalog_install_task: Some(price_catalog_install_task),
+        wasmtime_pool_metrics_cancel: Some(wasmtime_pool_metrics_cancel),
+        wasmtime_pool_metrics_task: Some(wasmtime_pool_metrics_task),
         scheduler_cancel: Some(scheduler_cancel),
         scheduler_tasks,
         audit_writer_task: Some(audit_writer_task),
@@ -1450,6 +1462,56 @@ async fn build_app_with_storage_inner(
         tls_state,
         server_state,
     })
+}
+
+fn spawn_wasmtime_pool_metrics_publisher(
+    runtime: Arc<WasmtimeRuntime>,
+) -> (CancellationToken, JoinHandle<()>) {
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task = tokio::spawn(async move {
+        runtime.publish_pool_metrics();
+        let mut interval = tokio::time::interval(WASMTIME_POOL_METRICS_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = task_cancel.cancelled() => return,
+                _ = interval.tick() => runtime.publish_pool_metrics(),
+            }
+        }
+    });
+    (cancel, task)
+}
+
+fn hot_engine_config_from_config(config: &Config) -> cc_lb_runtime_wasmtime::HotEngineConfig {
+    let defaults = cc_lb_runtime_wasmtime::HotEngineConfig::default();
+    let wasmtime = &config.runtime.wasmtime;
+    cc_lb_runtime_wasmtime::HotEngineConfig {
+        allocation_strategy: match wasmtime.allocation_strategy {
+            cc_lb_config::WasmtimeAllocationStrategy::OnDemand => {
+                cc_lb_runtime_wasmtime::HotEngineAllocationStrategy::OnDemand
+            }
+            cc_lb_config::WasmtimeAllocationStrategy::Pooling => {
+                cc_lb_runtime_wasmtime::HotEngineAllocationStrategy::Pooling
+            }
+        },
+        memory_max_pages: wasmtime
+            .memory_max_pages
+            .unwrap_or(defaults.memory_max_pages),
+        memory_reservation_bytes: wasmtime
+            .memory_reservation_bytes
+            .unwrap_or(defaults.memory_reservation_bytes),
+        memory_guard_bytes: wasmtime
+            .memory_guard_bytes
+            .unwrap_or(defaults.memory_guard_bytes),
+        pool_total_memories: wasmtime
+            .pool_total_memories
+            .unwrap_or(defaults.pool_total_memories),
+        pool_total_core_instances: wasmtime
+            .pool_total_core_instances
+            .unwrap_or(defaults.pool_total_core_instances),
+        ..defaults
+    }
 }
 
 struct ServerWarmupDialectDispatcher {
@@ -2486,6 +2548,40 @@ mod tests {
 
         assert!(catalog.lookup("operator-model-a", None).is_some());
         assert!(catalog.lookup("claude-opus-4-5", None).is_none());
+    }
+
+    #[test]
+    fn wasmtime_config_overrides_hot_engine_memory_profile() {
+        let mut config = Config::default();
+        config.runtime.wasmtime.allocation_strategy =
+            cc_lb_config::WasmtimeAllocationStrategy::Pooling;
+        config.runtime.wasmtime.memory_max_pages = Some(4096);
+        config.runtime.wasmtime.memory_reservation_bytes = Some(512 * 1024 * 1024);
+        config.runtime.wasmtime.memory_guard_bytes = Some(128 * 1024 * 1024);
+        config.runtime.wasmtime.pool_total_memories = Some(8);
+        config.runtime.wasmtime.pool_total_core_instances = Some(12);
+
+        let hot_engine_cfg = super::hot_engine_config_from_config(&config);
+
+        assert_eq!(
+            hot_engine_cfg.allocation_strategy,
+            cc_lb_runtime_wasmtime::HotEngineAllocationStrategy::Pooling,
+        );
+        assert_eq!(hot_engine_cfg.memory_max_pages, 4096);
+        assert_eq!(hot_engine_cfg.memory_reservation_bytes, 512 * 1024 * 1024);
+        assert_eq!(hot_engine_cfg.memory_guard_bytes, 128 * 1024 * 1024);
+        assert_eq!(hot_engine_cfg.pool_total_memories, 8);
+        assert_eq!(hot_engine_cfg.pool_total_core_instances, 12);
+    }
+
+    #[test]
+    fn wasmtime_config_defaults_to_on_demand_hot_engine() {
+        let hot_engine_cfg = super::hot_engine_config_from_config(&Config::default());
+
+        assert_eq!(
+            hot_engine_cfg.allocation_strategy,
+            cc_lb_runtime_wasmtime::HotEngineAllocationStrategy::OnDemand,
+        );
     }
 
     async fn assert_admin_state(router: Router, expected: &str) {

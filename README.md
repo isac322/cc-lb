@@ -19,7 +19,7 @@ See [docs/runtime-management.md](docs/runtime-management.md) for the full API an
 
 ## Plugin authors
 
-Plugins are wasm modules authored against the published `cc-lb-plugin-api`, `cc-lb-plugin-wire`, `cc-lb-pdk-wasmtime`, and `cc-lb-pdk-wasmtime-macros` crates, with `cc-lb-plugin-conformance` available as a dev-dependency. The runtime side is `cc-lb-runtime-wasmtime`, which compiles each upload via wasmtime 46 + a `PoolingAllocationConfig`, validates imports, required plugin and hook metadata, per-hook wire versions, per-hook BLAKE3 layout fingerprints, and an upload-time runtime probe before dispatching calls.
+Plugins are wasm modules authored against the published `cc-lb-plugin-api`, `cc-lb-plugin-wire`, `cc-lb-pdk-wasmtime`, and `cc-lb-pdk-wasmtime-macros` crates, with `cc-lb-plugin-conformance` available as a dev-dependency. The runtime side is `cc-lb-runtime-wasmtime`, which compiles each upload via wasmtime 46, validates imports, required plugin and hook metadata, per-hook wire versions, per-hook BLAKE3 layout fingerprints, and an upload-time runtime probe before dispatching calls. Local execution defaults to on-demand allocation with fresh per-call `Store`s, per-store `StoreLimits`, and a process-wide store budget; operators can opt into Wasmtime pooling through `[runtime.wasmtime] allocation_strategy = "pooling"`.
 
 The three hooks a plugin may implement:
 
