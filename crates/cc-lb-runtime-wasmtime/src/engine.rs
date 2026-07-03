@@ -15,9 +15,10 @@
 //! * Wasm features deny-list applied at engine construction so a module
 //!   declaring forbidden opcodes fails validation immediately — not at
 //!   call time.
-//! * `consume_fuel(true)` so every store starts at 0 fuel until the
-//!   per-call wrapper sets it (review-consensus invariant: assign fuel
-//!   before every guest call including alloc / hook / free).
+//! * Fuel metering is intentionally disabled on the hot path. Large
+//!   shape plugins may spend substantial CPU on regex + JSON work, and
+//!   the host relies on request-level timeouts/backpressure rather than
+//!   per-instruction traps.
 
 use wasmtime::{
     Config, Engine, InstanceAllocationStrategy, OptLevel, PoolingAllocationConfig, Strategy,
@@ -36,15 +37,12 @@ pub struct HostState;
 
 /// Hot-path engine tuning knobs.
 ///
-/// Defaults follow the MVP-grade choices recorded in the Phase 1 design
-/// decisions: 64 pooled memories, 4 MiB max guest memory, 10M instruction
-/// fuel budget per call, 512 KiB wasm stack.
+/// Defaults follow the current production envelope: large pooled memories
+/// for multi-MB shape payloads, bounded wasm stack, and pooling limits.
 #[derive(Clone, Debug)]
 pub struct HotEngineConfig {
     /// Maximum number of 64 KiB wasm pages per `Memory`. 64 pages = 4 MiB.
     pub memory_max_pages: u32,
-    /// Default fuel per guest call (covers `cc_lb_alloc` + hook body + `cc_lb_free`).
-    pub fuel_per_call: u64,
     /// Maximum wasm call-stack size, bytes.
     pub max_wasm_stack: usize,
     /// `PoolingAllocationConfig::total_memories`.
@@ -73,10 +71,6 @@ impl Default for HotEngineConfig {
             // cc-lb-core::lifecycle) plus rkyv envelope + per-hook
             // scratch clones; see RFC-0001 gap-analysis item #3.
             memory_max_pages: 2048,
-            // 1B fuel covers regex + serde_json parsing on multi-MB tool
-            // schemas. Empirically 10M was insufficient for a 26 KiB
-            // OpenCode system prompt, 200M for a 5 MB tools-heavy request.
-            fuel_per_call: 1_000_000_000,
             // 1 MiB wasm stack — plenty for regex-automata state machines.
             max_wasm_stack: 1024 * 1024,
             pool_total_memories: 64,
@@ -107,7 +101,6 @@ pub fn build_hot_engine(cfg: &HotEngineConfig) -> Result<Engine, WasmtimeRuntime
         .wasm_exceptions(false)
         .wasm_tail_call(false)
         .wasm_relaxed_simd(false)
-        .consume_fuel(true)
         .signals_based_traps(true)
         .memory_reservation(1u64 << 32)
         .memory_guard_size(1u64 << 32)

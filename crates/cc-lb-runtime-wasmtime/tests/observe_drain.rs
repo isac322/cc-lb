@@ -6,8 +6,7 @@
 //! → `compile_module` → `WasmtimeObservabilityHookPlugin` accepts a
 //! stream of `ObserveEvent`s and returns `Ok(())` for each — covering
 //! the best-effort + bounded retention contract the dispatch helper
-//! enforces (output buffer skip when guest returns `(0, 0)`, fuel
-//! budget per call).
+//! enforces (output buffer skip when guest returns `(0, 0)`).
 //!
 //! Pre-build the wasm artifact with:
 //!
@@ -91,9 +90,9 @@ fn observe_accepts_single_event_best_effort() {
 fn observe_drains_bounded_burst_without_error() {
     // Hammer the hook with a contiguous stream to exercise the
     // per-call fresh-Store instantiation `call_observe_hook` runs
-    // under. If a per-call Store leaked memory or ran out of fuel
-    // mid-burst, the next iteration would surface as a GuestTrap →
-    // ObservabilityError::Dropped on this test thread.
+    // under. If a per-call Store leaked memory or trapped mid-burst,
+    // the next iteration would surface as ObservabilityError::Dropped
+    // on this test thread.
     let Some(hook) = setup() else { return };
 
     let upstream = Upstream::AnthropicDirect { base_url: None };

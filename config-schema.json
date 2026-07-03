@@ -752,7 +752,7 @@
       }
     },
     "PluginFailurePolicy": {
-      "description": "What to do when a filter or shape plugin fails at the runtime\nboundary (trap, fuel exhaustion, pool saturation, invalid wire\noutput). `PassThrough` is the historical behaviour: filter treats\nthe failure as no-op and shape falls back to raw upstream\npassthrough. `FailClosed` returns 503 upstream unavailable — pick\nthis when the plugin enforces load-bearing authz / tenant policy\nand cannot silently degrade.",
+      "description": "What to do when a filter or shape plugin fails at the runtime\nboundary (trap, pool saturation, invalid wire\noutput). `PassThrough` is the historical behaviour: filter treats\nthe failure as no-op and shape falls back to raw upstream\npassthrough. `FailClosed` returns 503 upstream unavailable — pick\nthis when the plugin enforces load-bearing authz / tenant policy\nand cannot silently degrade.",
       "type": "string",
       "enum": [
         "pass_through",

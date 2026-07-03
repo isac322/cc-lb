@@ -26,7 +26,6 @@ pub struct PluginCell {
     pub version_id: u64,
     pub instance_pre: Arc<InstancePre<HostState>>,
     pub schema_hash: [u8; 32],
-    pub fuel_per_call: u64,
     pub memory_max_pages: u32,
     /// Stable label used as the `plugin` dimension on every RFC-0001
     /// plugin metric. Owned by the cell so `execute_call` can emit
@@ -34,8 +33,7 @@ pub struct PluginCell {
     /// hook function signature.
     pub plugin_name: Arc<str>,
     /// Content-identity hash covering every input that affects
-    /// runtime behaviour: wasm bytes, per-call fuel budget,
-    /// per-instance memory ceiling, plus a bumpable
+    /// runtime behaviour: wasm bytes, per-instance memory ceiling, plus a bumpable
     /// [`crate::module::VALIDATION_POLICY_VERSION`] constant so
     /// tightening validation rules force a recompile even when the
     /// wasm + knobs are unchanged. `register()` short-circuits when
@@ -50,7 +48,6 @@ impl std::fmt::Debug for PluginCell {
             .field("version_id", &self.version_id)
             .field("schema_hash_hex", &format_hex(&self.schema_hash))
             .field("content_hash_hex", &format_hex(&self.content_hash))
-            .field("fuel_per_call", &self.fuel_per_call)
             .field("memory_max_pages", &self.memory_max_pages)
             .finish_non_exhaustive()
     }
