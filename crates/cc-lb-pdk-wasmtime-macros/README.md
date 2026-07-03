@@ -1,8 +1,8 @@
 # cc-lb-pdk-wasmtime-macros
 
-`cc-lb-pdk-wasmtime-macros` contains the procedural macros used to author
-cc-lb wasmtime plugins. Most plugin crates use them through
-`cc-lb-pdk-wasmtime`:
+`cc-lb-pdk-wasmtime-macros` contains the procedural macros for authoring cc-lb
+wasmtime plugins. Plugin crates normally use these through
+`cc-lb-pdk-wasmtime`.
 
 ```rust
 use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
@@ -14,23 +14,24 @@ Annotate one inline module with plugin metadata:
 
 ```rust
 #[cc_lb_plugin(
-    name = "my-plugin",
-    version = "1.2.3",
-    description = "Routes requests with custom policy.",
-    usage = "Configure as a router filter in the admin API.",
+    name = "cache-aware",
+    version = "0.1.0",
+    description = "Routes requests by cache affinity.",
+    usage = "Attach to a router filter chain.",
 )]
-mod my_plugin {
+mod cache_aware {
     // handlers live here
 }
 ```
 
-The macro emits `cc_lb_alloc`, `cc_lb_free`, one hook export per handler, one
-`cc_lb.schema.<hook>.vN` section per handler, and one `cc_lb.plugin.v1`
-metadata section for the whole plugin.
+The macro emits allocator exports, one hook export per handler, one
+`cc_lb.schema.<hook>.vN` custom section per handler, and the consolidated
+`cc_lb.plugin.v1` metadata section.
 
 ## `#[handler]`
 
-Annotate each hook function with the hook kind, wire version, and hook docs:
+Annotate each hook function with a hook kind, wire version, description, and
+usage text:
 
 ```rust
 #[handler(
@@ -44,18 +45,16 @@ pub fn filter(req: FilterRequest) -> FilterResponse {
 }
 ```
 
-Supported hook kinds are `filter`, `shape`, and `observe`.
-
-`wire = 1` is the current baseline. The host rejects uploads whose declared
-wire version is not in the supported list for that hook. Add `view` when the
-function wants an archived zero-copy request.
+Supported hook kinds are `filter`, `shape`, and `observe`. The current PDK
+accepts `wire = 1`. Add `view` when the handler wants an archived zero-copy
+request reference instead of an owned request.
 
 ## `#[derive(WireSchema)]`
 
 Derive `WireSchema` for wire structs and enums:
 
 ```rust
-use cc_lb_plugin_wire::WireSchema;
+use cc_lb_pdk_wasmtime::WireSchema;
 
 #[derive(WireSchema)]
 pub struct RuleMatch {
@@ -65,11 +64,17 @@ pub struct RuleMatch {
 ```
 
 The derive macro produces a canonical descriptor and a BLAKE3 layout
-fingerprint. Any field-level layout change produces a new fingerprint.
+fingerprint. The host compares those embedded fingerprints with its own current
+wire expectations during admission.
 
-## Minimal plugin example
+## Minimal Complete Example
 
 ```rust
+#![cfg_attr(target_arch = "wasm32", no_std)]
+
+extern crate alloc;
+
+use alloc::boxed::Box;
 use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
 use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse};
 
@@ -94,5 +99,13 @@ mod accept_all {
 }
 ```
 
-See [`docs/plugin-author-guide.md`](../../docs/plugin-author-guide.md) for the
-full workflow.
+## Links
+
+- Main repository: <https://github.com/isac322/cc-lb>
+- Plugin author guide: <https://github.com/isac322/cc-lb/blob/master/docs/plugin-author-guide.md>
+- PDK README: <https://github.com/isac322/cc-lb/blob/master/crates/cc-lb-pdk-wasmtime/README.md>
+- Wire README: <https://github.com/isac322/cc-lb/blob/master/crates/cc-lb-plugin-wire/README.md>
+
+## License
+
+Licensed under the workspace license.

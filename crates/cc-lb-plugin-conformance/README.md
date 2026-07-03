@@ -1,27 +1,30 @@
 # cc-lb-plugin-conformance
 
-`cc-lb-plugin-conformance` is a dev-dependency for cc-lb wasm plugin authors.
+`cc-lb-plugin-conformance` is a development dependency for cc-lb wasm plugin
+authors. It loads a compiled plugin through the same inspection, admission, and
+runtime path used by the host, then runs boundary smoke tests for the exported
+hook.
 
-It loads a compiled wasm plugin through the same inspection, admission, and
-runtime path that the host uses, then runs boundary smoke tests for the selected
-hook kind.
+Use it in plugin crates to catch ABI, metadata, wire version, and layout
+fingerprint drift before uploading the wasm artifact.
 
-## Add as a dev-dependency
+## Add as a Dev-Dependency
 
 ```toml
 [dev-dependencies]
 cc-lb-plugin-conformance = "0.2"
 ```
 
-The plugin under test should already be built for `wasm32-unknown-unknown`.
+Build the plugin for `wasm32-unknown-unknown` before running the test:
 
 ```bash
 cargo build --release --target wasm32-unknown-unknown
 ```
 
-## Build a suite from wasm bytes
+## `ConformanceSuite::from_wasm(bytes)`
 
-Read the wasm artifact and construct a suite for the hook kind you implement:
+`ConformanceSuite::from_wasm(bytes)` inspects the artifact and infers the hook
+kind when the wasm exports exactly one supported hook.
 
 ```rust
 use cc_lb_plugin_conformance::ConformanceSuite;
@@ -30,35 +33,35 @@ let wasm = std::fs::read(
     "target/wasm32-unknown-unknown/release/my_plugin.wasm",
 )?;
 
-let suite = ConformanceSuite::for_shape(&wasm);
+let suite = ConformanceSuite::from_wasm(&wasm);
 ```
 
-Use `for_filter`, `for_shape`, or `for_observe` to match the exported hook.
+Use `for_filter`, `for_shape`, or `for_observe` instead when a single wasm
+artifact exports multiple hooks.
 
 ## `assert_recognisable_by_current_host()`
 
 `assert_recognisable_by_current_host()` runs the current host admission path:
 
-- parse the wasm module
-- verify required exports
+- compile the wasm module with wasmtime
+- verify required exports and import restrictions
 - parse plugin and hook metadata
 - verify declared wire versions are supported
-- verify embedded layout fingerprints match the host expectation
-- run the canonical runtime probe for the hook
+- verify embedded layout fingerprints match the current host
+- run the canonical runtime probe for each declared hook
 
-This is the fastest way to prove a plugin built against published crates is
-still accepted by the current host.
+This is the static gate to run in CI whenever the plugin or host crates change.
 
 ## `run()`
 
 `run()` builds a live wasmtime runtime, registers the plugin, and exercises the
 hook boundary with canonical sample payloads.
 
-It verifies ABI correctness and rkyv round-trips. It does not assert your plugin
-business logic, such as which upstreams should be accepted or how URLs should be
-rewritten. Keep those checks in your own tests.
+It verifies allocator exports, hook exports, rkyv encode/decode round-trips,
+and observe variant handling. It does not verify plugin business semantics such
+as routing policy or URL rewriting; keep those assertions in your own tests.
 
-## Sample test
+## Sample Test
 
 ```rust
 use cc_lb_plugin_conformance::ConformanceSuite;
@@ -74,7 +77,7 @@ fn wasm_bytes() -> Vec<u8> {
 #[test]
 fn plugin_is_recognisable_by_current_host() {
     let wasm = wasm_bytes();
-    ConformanceSuite::for_shape(&wasm)
+    ConformanceSuite::from_wasm(&wasm)
         .with_plugin_name("my-plugin")
         .assert_recognisable_by_current_host();
 }
@@ -82,17 +85,19 @@ fn plugin_is_recognisable_by_current_host() {
 #[test]
 fn plugin_passes_boundary_smoke() {
     let wasm = wasm_bytes();
-    ConformanceSuite::for_shape(&wasm)
+    ConformanceSuite::from_wasm(&wasm)
         .with_plugin_name("my-plugin")
         .run();
 }
 ```
 
-## Deeper tests
+## Links
 
-Use `session()` when you want to call the plugin repeatedly with your own
-fixtures. The session keeps the plugin registered so semantic tests do not pay a
-new runtime setup cost for every assertion.
+- Main repository: <https://github.com/isac322/cc-lb>
+- Plugin author guide: <https://github.com/isac322/cc-lb/blob/master/docs/plugin-author-guide.md>
+- Wire README: <https://github.com/isac322/cc-lb/blob/master/crates/cc-lb-plugin-wire/README.md>
+- PDK README: <https://github.com/isac322/cc-lb/blob/master/crates/cc-lb-pdk-wasmtime/README.md>
 
-See [`docs/plugin-author-guide.md`](../../docs/plugin-author-guide.md) for the
-full plugin author workflow.
+## License
+
+Licensed under the workspace license.

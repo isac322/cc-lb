@@ -17,7 +17,9 @@ crate-type = ["rlib"]
 rkyv = { workspace = true, default-features = false, features = ["alloc", "bytecheck"] }
 serde = { workspace = true, features = ["derive"], optional = true }
 serde_json = { workspace = true, optional = true }
-cc-lb-pdk-wasmtime-macros.workspace = true
+
+[build-dependencies]
+blake3 = { workspace = true, features = ["std"] }
 
 [features]
 default = []

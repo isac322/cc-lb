@@ -1,77 +1,41 @@
 # cc-lb-plugin-wire
 
 `cc-lb-plugin-wire` is the shared wire contract between the cc-lb host and
-wasm plugins.
+wasm plugins. It contains the rkyv request and response types, hook and wire
+version enums, layout fingerprint trait, and upload metadata schema used by the
+wasmtime runtime.
 
-Plugin authors use this crate for the hook request and response types, the
-schema version markers, and the metadata parser that the host uses at upload
-time.
+Use this crate directly when writing plugin code that needs typed hook inputs
+and outputs. The `cc-lb-pdk-wasmtime` crate re-exports the same wire types for
+the common PDK path.
 
-## What this crate provides
+## What This Crate Provides
 
-- Versioned hook wire types under modules such as `cc_lb_plugin_wire::v1`.
-- `WireVersion`, the enum used to name incompatible wire layouts.
-- `HookKind`, the enum for `filter`, `shape`, and `observe` hooks.
-- `WireSchema`, the trait implemented by derived layout fingerprints.
-- `PluginMetadata` and `HookMetadata`, parsed from wasm custom sections.
-- `pack_ret` and `unpack_ret`, the guest ABI return-value helpers.
+- Versioned hook wire types under `cc_lb_plugin_wire::v1`.
+- `WireVersion`, currently `WireVersion::V1`.
+- `HookKind` for `filter`, `shape`, and `observe` hooks.
+- `WireSchema`, implemented by the PDK derive macro for layout fingerprints.
+- `PluginMetadata` and `HookMetadata` behind the `std` feature.
+- `pack_ret` and `unpack_ret` helpers for guest ABI return values.
 
-## WireVersion
+## WireVersion, HookKind, and WireSchema
 
-`WireVersion` identifies a complete rkyv layout line.
+`WireVersion` identifies an incompatible wire layout line. The current baseline
+is `V1`. New versions are added when a hook request or response layout changes
+incompatibly.
 
-The current baseline is `WireVersion::V1`. A new version is added only when
-the wire layout changes incompatibly, such as adding, removing, renaming, or
-reordering fields.
+`HookKind` names the three supported plugin hooks:
 
-Each hook has its own supported-version list in the host:
+- `Filter` maps to the `cc_lb_filter` export.
+- `Shape` maps to the `cc_lb_shape` export.
+- `Observe` maps to the `cc_lb_observe` export.
 
-- `HOST_SUPPORTED_FILTER_VERSIONS`
-- `HOST_SUPPORTED_SHAPE_VERSIONS`
-- `HOST_SUPPORTED_OBSERVE_VERSIONS`
-
-That means `filter` can gain `v2` independently from `shape` or `observe`.
-
-## HookKind
-
-`HookKind` names the plugin surface:
-
-- `Filter` maps to `cc_lb_filter`.
-- `Shape` maps to `cc_lb_shape`.
-- `Observe` maps to `cc_lb_observe`.
-
-The host uses the hook kind to select the required export, schema custom
-section, wire version, and runtime probe payload.
-
-## Metadata contract
-
-Every plugin must embed a `cc_lb.plugin.v1` metadata section. The PDK macros
-generate it from `#[cc_lb_plugin(...)]` and `#[handler(...)]` attributes.
-
-The top-level `PluginMetadata` requires:
-
-- `name`
-- `version`
-- `description`
-- `usage`
-- at least one hook entry
-
-Each `HookMetadata` requires:
-
-- `wire_version`
-- `description`
-- `usage`
-
-The host rejects uploads with missing plugin metadata, missing hook metadata,
-unknown hook names, or empty description and usage text.
-
-## WireSchema derive
-
-Use `#[derive(WireSchema)]` on structs and enums that form part of a wire
-layout.
+`WireSchema` exposes a canonical descriptor and BLAKE3 fingerprint for a type.
+The trait lives in this crate. The derive macro is re-exported by
+`cc-lb-pdk-wasmtime` for plugin authors.
 
 ```rust
-use cc_lb_plugin_wire::WireSchema;
+use cc_lb_pdk_wasmtime::WireSchema;
 
 #[derive(WireSchema)]
 pub struct CacheDecision {
@@ -81,11 +45,45 @@ pub struct CacheDecision {
 }
 ```
 
-The derive macro walks the Rust AST, builds a canonical descriptor, and stores
-`BLAKE3(descriptor)` in `WireSchema::FINGERPRINT`. The host compares the
-embedded wasm fingerprint with its own expected fingerprint during admission.
+Any field addition, removal, rename, reorder, or type edit changes the derived
+descriptor and fingerprint. Plugin authors do not manage hashes manually.
 
-## More information
+## PluginMetadata Schema
 
-See [`docs/plugin-author-guide.md`](../../docs/plugin-author-guide.md) for the
-full plugin author workflow.
+The host expects one `cc_lb.plugin.v1` metadata section in each upload. PDK
+macros generate that section from plugin and handler attributes.
+
+Top-level metadata contains:
+
+- `name`
+- `version`
+- `description`
+- `usage`
+- `hooks`
+
+Each hook metadata entry contains:
+
+- `wire_version`
+- `description`
+- `usage`
+
+The upload path rejects missing metadata, unknown hook names, unsupported wire
+versions, and empty description or usage text.
+
+## Related Crates
+
+- `cc-lb-plugin-api`: host-facing plugin slots and runtime API types.
+- `cc-lb-pdk-wasmtime`: guest PDK runtime helpers and macro re-exports.
+- `cc-lb-pdk-wasmtime-macros`: macro implementation for `#[cc_lb_plugin]`,
+  `#[handler]`, and `#[derive(WireSchema)]`.
+- `cc-lb-plugin-conformance`: in-process ABI and admission test harness.
+
+## Links
+
+- Main repository: <https://github.com/isac322/cc-lb>
+- Plugin author guide: <https://github.com/isac322/cc-lb/blob/master/docs/plugin-author-guide.md>
+- PDK README: <https://github.com/isac322/cc-lb/blob/master/crates/cc-lb-pdk-wasmtime/README.md>
+
+## License
+
+Licensed under the workspace license.

@@ -22,7 +22,6 @@ pub mod metadata;
 pub mod schema;
 pub mod v1;
 
-pub use cc_lb_pdk_wasmtime_macros::WireSchema;
 #[cfg(feature = "std")]
 pub use metadata::{HookMetadata, MetadataError, PluginMetadata};
 pub use schema::*;

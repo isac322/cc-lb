@@ -53,13 +53,11 @@ use alloc::boxed::Box;
 
 use rkyv::{Archive, Deserialize, Serialize, with::InlineAsBox};
 
-use crate::WireSchema;
-
 /// Principal context as seen by the filter plugin.
 ///
 /// Mirrors `cc_lb_plugin_api::Principal` semantically but the rkyv-derived
 /// wire form is the source of truth on the host↔guest boundary.
-#[derive(Archive, Serialize, Deserialize, WireSchema, Clone, Debug)]
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct Principal {
     pub id: Box<str>,
@@ -74,7 +72,7 @@ pub struct Principal {
 /// One claim key/value pair — see [`Principal::claims`]. Named
 /// struct (not tuple) so that `ClaimRef<'a>` matches the archived
 /// byte layout without an extra Ref wrapper.
-#[derive(Archive, Serialize, Deserialize, WireSchema, Clone, Debug)]
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct Claim {
     pub key: Box<str>,
@@ -84,7 +82,7 @@ pub struct Claim {
 /// Borrowed mirror of [`Principal`] used by the host encode path. Every
 /// reference field carries `#[rkyv(with = InlineAsBox)]` so serialising
 /// this struct emits the same archived byte layout as [`Principal`].
-#[derive(Archive, Serialize, WireSchema)]
+#[derive(Archive, Serialize)]
 pub struct PrincipalRef<'a> {
     #[rkyv(with = InlineAsBox)]
     pub id: &'a str,
@@ -97,7 +95,7 @@ pub struct PrincipalRef<'a> {
 /// One claim entry inside [`PrincipalRef`]. The tuple form used by the
 /// owned type does not have a straight borrowed equivalent, so we
 /// promote it to a named struct with two borrowed fields.
-#[derive(Archive, Serialize, WireSchema)]
+#[derive(Archive, Serialize)]
 pub struct ClaimRef<'a> {
     #[rkyv(with = InlineAsBox)]
     pub key: &'a str,
@@ -106,7 +104,7 @@ pub struct ClaimRef<'a> {
 }
 
 /// One upstream candidate the filter plugin can choose to keep or drop.
-#[derive(Archive, Serialize, Deserialize, WireSchema, Clone, Debug)]
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct UpstreamCandidate {
     pub upstream_id: Box<str>,
@@ -117,7 +115,7 @@ pub struct UpstreamCandidate {
 }
 
 /// Borrowed mirror of [`UpstreamCandidate`].
-#[derive(Archive, Serialize, WireSchema)]
+#[derive(Archive, Serialize)]
 pub struct UpstreamCandidateRef<'a> {
     #[rkyv(with = InlineAsBox)]
     pub upstream_id: &'a str,
@@ -130,7 +128,7 @@ pub struct UpstreamCandidateRef<'a> {
 }
 
 /// One header on the inbound request.
-#[derive(Archive, Serialize, Deserialize, WireSchema, Clone, Debug)]
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct Header {
     pub name: Box<str>,
@@ -140,7 +138,7 @@ pub struct Header {
 }
 
 /// Borrowed mirror of [`Header`].
-#[derive(Archive, Serialize, WireSchema)]
+#[derive(Archive, Serialize)]
 pub struct HeaderRef<'a> {
     #[rkyv(with = InlineAsBox)]
     pub name: &'a str,
@@ -149,7 +147,7 @@ pub struct HeaderRef<'a> {
 }
 
 /// Filter hook input (owned form used by the guest).
-#[derive(Archive, Serialize, Deserialize, WireSchema, Clone, Debug)]
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct FilterRequest {
     pub request_id: Box<str>,
@@ -166,7 +164,7 @@ pub struct FilterRequest {
 /// Serialising this emits the same archived byte layout as
 /// [`FilterRequest`] so the guest reads it via
 /// `rkyv::access::<ArchivedFilterRequest, _>` unchanged.
-#[derive(Archive, Serialize, WireSchema)]
+#[derive(Archive, Serialize)]
 pub struct FilterRequestRef<'a> {
     #[rkyv(with = InlineAsBox)]
     pub request_id: &'a str,
@@ -188,14 +186,14 @@ pub struct FilterRequestRef<'a> {
 /// `Option<InlineAsBox<&'a str>>` does not compose directly at the
 /// derive layer; a named struct pushes the `#[rkyv(with = ...)]`
 /// attribute onto the inner reference.
-#[derive(Archive, Serialize, WireSchema)]
+#[derive(Archive, Serialize)]
 pub struct QueryRef<'a> {
     #[rkyv(with = InlineAsBox)]
     pub value: &'a str,
 }
 
 /// Decision the plugin made for one candidate.
-#[derive(Archive, Serialize, Deserialize, WireSchema, Clone, Debug)]
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct PerCandidateReason {
     pub upstream_id: Box<str>,
@@ -210,7 +208,7 @@ pub struct PerCandidateReason {
 /// Guest packs `(out_ptr, out_len)` into a single `u64` (`(ptr << 32) | len`)
 /// for the return value of `cc_lb_filter`. The host reads the bytes via
 /// `Memory::data(&store)` and runs `rkyv::access::<ArchivedFilterResponse, _>`.
-#[derive(Archive, Serialize, Deserialize, WireSchema, Clone, Debug)]
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct FilterResponse {
     pub results: Box<[PerCandidateReason]>,
@@ -220,7 +218,7 @@ pub struct FilterResponse {
 /// `cc_lb_plugin_api::Upstream` (currently a single variant —
 /// extending the host enum requires extending this one in lockstep
 /// and bumping a wire schema tag).
-#[derive(Archive, Serialize, Deserialize, WireSchema, Clone, Debug)]
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub enum Upstream {
     AnthropicDirect {
@@ -230,13 +228,13 @@ pub enum Upstream {
 }
 
 /// Borrowed mirror of [`Upstream`].
-#[derive(Archive, Serialize, WireSchema)]
+#[derive(Archive, Serialize)]
 pub enum UpstreamRef<'a> {
     AnthropicDirect { base_url: Option<QueryRef<'a>> },
 }
 
 /// Shape hook input (owned form).
-#[derive(Archive, Serialize, Deserialize, WireSchema, Clone, Debug)]
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct ShapeRequest {
     pub request_id: Box<str>,
@@ -250,7 +248,7 @@ pub struct ShapeRequest {
 }
 
 /// Borrowed mirror of [`ShapeRequest`] used by the host encode path.
-#[derive(Archive, Serialize, WireSchema)]
+#[derive(Archive, Serialize)]
 pub struct ShapeRequestRef<'a> {
     #[rkyv(with = InlineAsBox)]
     pub request_id: &'a str,
@@ -268,7 +266,7 @@ pub struct ShapeRequestRef<'a> {
 }
 
 /// Shape hook output — the upstream-bound request the plugin produced.
-#[derive(Archive, Serialize, Deserialize, WireSchema, Clone, Debug)]
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub struct ShapeResponse {
     pub url: Box<str>,
@@ -279,7 +277,7 @@ pub struct ShapeResponse {
 
 /// Lifecycle event delivered to the observe hook. rkyv mirror of
 /// `cc_lb_plugin_api::ObserveEvent`.
-#[derive(Archive, Serialize, Deserialize, WireSchema, Clone, Debug)]
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub enum ObserveEvent {
     RequestStarted {
@@ -312,3 +310,5 @@ pub enum ObserveEvent {
         source: Box<str>,
     },
 }
+
+include!(concat!(env!("OUT_DIR"), "/wire_schema_impls.rs"));

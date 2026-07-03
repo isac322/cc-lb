@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish = false
 
 [features]
 dto-roundtrip = []
@@ -14,7 +15,7 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 cc-lb-aead = { version = "0.1.0", path = "../cc-lb-aead" }
 cc-lb-plugin-api = { version = "0.3.0", path = "../cc-lb-plugin-api" }
-cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
+cc-lb-plugin-wire = { workspace = true, features = ["std"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

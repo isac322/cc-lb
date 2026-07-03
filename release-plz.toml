@@ -2,6 +2,9 @@
 #
 # CI-only: releases run exclusively via .github/workflows/release-plz.yml.
 # Do NOT run `release-plz release` or `release-plz release-pr` locally.
+# Managed crates: cc-lb-plugin-api, cc-lb-plugin-wire,
+# cc-lb-pdk-wasmtime-macros, cc-lb-pdk-wasmtime,
+# and cc-lb-plugin-conformance.
 
 [workspace]
 release = false
@@ -28,5 +31,10 @@ semver_check = true
 
 [[package]]
 name = "cc-lb-plugin-conformance"
+release = true
+semver_check = true
+
+[[package]]
+name = "cc-lb-runtime-wasmtime"
 release = true
 semver_check = true
