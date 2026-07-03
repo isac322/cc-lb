@@ -830,7 +830,7 @@ curl -s http://127.0.0.1:8080/v1/messages \
       <tr><td><code>cc_lb_bulkhead_active{upstream}</code></td><td>현재 동시 처리 수</td></tr>
       <tr><td><code>cc_lb_drain_in_progress</code></td><td>SIGTERM 후 drain 진행 중</td></tr>
       <tr><td><code>cc_lb_tls_reload_total{outcome}</code> · <code>cc_lb_config_reload_total{outcome}</code></td><td>핫리로드 성공/실패</td></tr>
-      <tr><td><code>cc_lb_plugin_failure_total{plugin,kind}</code></td><td>플러그인 패닉/OOM/fuel 등</td></tr>
+      <tr><td><code>cc_lb_plugin_failure_total{plugin,kind}</code></td><td>플러그인 패닉/OOM 등</td></tr>
       <tr><td><code>cc_lb_aws_clock_skew_total</code></td><td>Bedrock SigV4 시계 skew 회수</td></tr>
     </table>
 
