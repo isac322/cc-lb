@@ -21,11 +21,12 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use wasmtime::{Instance, Memory, Store, TypedFunc};
-
 use crate::cell::PluginCell;
-use crate::engine::HostState;
 use crate::error::WasmtimeRuntimeError;
+
+mod worker;
+
+use worker::{WorkerInstance, build_worker_instance};
 
 // RFC-0001 gap-analysis #5. Label values for the `phase` dimension
 // on `cc_lb_plugin_trap_total`. Kept bounded so cardinality stays
@@ -44,117 +45,6 @@ fn trap_phase_label(err: &WasmtimeRuntimeError) -> &'static str {
 
 /// Default archive alignment for rkyv 0.8 root types.
 pub const DEFAULT_ALIGN: u32 = 16;
-
-/// One-shot instantiation for a single hook call.
-///
-/// Owns the `Store` for the duration of the call and drops it on
-/// return. Optional hook funcs are populated only when the plugin
-/// exports them — a Filter slot has `filter_fn = Some(_)` and all
-/// others `None`; a Shape slot has `shape_fn` populated; etc.
-/// [`crate::inspect::inspect_wasm`]
-/// is the gate that ensures the right `Some(_)`s are present for the
-/// slot's kind at load time.
-struct WorkerInstance {
-    store: Store<HostState>,
-    memory: Memory,
-    alloc_fn: TypedFunc<(u32, u32), u32>,
-    free_fn: TypedFunc<(u32, u32, u32), ()>,
-    filter_fn: Option<TypedFunc<(u32, u32), u64>>,
-    shape_fn: Option<TypedFunc<(u32, u32), u64>>,
-    observe_fn: Option<TypedFunc<(u32, u32), u64>>,
-}
-
-fn build_worker_instance(
-    cell: &PluginCell,
-    hook: HookFn,
-) -> Result<WorkerInstance, WasmtimeRuntimeError> {
-    let engine = cell.instance_pre.module().engine();
-    let mut store = Store::new(engine, HostState);
-
-    let instance: Instance = cell.instance_pre.instantiate(&mut store).map_err(|e| {
-        // Distinguish pool-exhaustion from generic instantiate failure so
-        // request-path callers can react (backpressure, 503) without
-        // stringy downcasting on the anyhow chain — see RFC-0001 #6.
-        if e.downcast_ref::<wasmtime::PoolConcurrencyLimitError>()
-            .is_some()
-        {
-            WasmtimeRuntimeError::PoolSaturated {
-                resource: "core-instances",
-                limit: 0,
-            }
-        } else {
-            WasmtimeRuntimeError::InstantiateFailed(anyhow::Error::from(e))
-        }
-    })?;
-
-    let memory = instance.get_memory(&mut store, "memory").ok_or_else(|| {
-        WasmtimeRuntimeError::ModuleRejected {
-            reason: "module does not export `memory`".into(),
-        }
-    })?;
-
-    let alloc_fn = instance
-        .get_typed_func::<(u32, u32), u32>(&mut store, "cc_lb_alloc")
-        .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
-            reason: format!("missing or mistyped `cc_lb_alloc` export: {e}"),
-        })?;
-
-    let free_fn = instance
-        .get_typed_func::<(u32, u32, u32), ()>(&mut store, "cc_lb_free")
-        .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
-            reason: format!("missing or mistyped `cc_lb_free` export: {e}"),
-        })?;
-
-    // Only look up the export we're about to call. `inspect_wasm`
-    // already validated the module carries the export corresponding
-    // to its `SlotKind`, so a missing lookup here is a real error
-    // (not the historical "probe all hooks and hope one exists").
-    let (filter_fn, shape_fn, observe_fn) = match hook {
-        HookFn::Filter => (
-            Some(
-                instance
-                    .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_filter")
-                    .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
-                        reason: format!("missing or mistyped `cc_lb_filter` export: {e}"),
-                    })?,
-            ),
-            None,
-            None,
-        ),
-        HookFn::Shape => (
-            None,
-            Some(
-                instance
-                    .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_shape")
-                    .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
-                        reason: format!("missing or mistyped `cc_lb_shape` export: {e}"),
-                    })?,
-            ),
-            None,
-        ),
-        HookFn::Observe => (
-            None,
-            None,
-            Some(
-                instance
-                    .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_observe")
-                    .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
-                        reason: format!("missing or mistyped `cc_lb_observe` export: {e}"),
-                    })?,
-            ),
-        ),
-    };
-
-    Ok(WorkerInstance {
-        store,
-        memory,
-        alloc_fn,
-        free_fn,
-        filter_fn,
-        shape_fn,
-        observe_fn,
-    })
-}
 
 /// Pick a hook `TypedFunc` out of a [`WorkerInstance`] by internal
 /// hook name. The runtime guarantees the chosen variant is populated
