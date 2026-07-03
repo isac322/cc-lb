@@ -136,15 +136,9 @@ pub trait RequestEventBus: Send + Sync + 'static {
     /// Slow consumers may observe `Lagged(n)`.
     fn subscribe(&self) -> BusReceiver;
 
-    /// Publish a lifecycle event. Default impl is a no-op so existing
-    /// test doubles compile unchanged.
-    fn publish_lifecycle(&self, _event: LifecycleEvent) {}
+    fn publish_lifecycle(&self, event: LifecycleEvent);
 
-    /// Subscribe to the lifecycle-event broadcast stream. Default returns
-    /// `LifecycleBusReceiver::None`.
-    fn subscribe_lifecycle(&self) -> LifecycleBusReceiver {
-        LifecycleBusReceiver::None
-    }
+    fn subscribe_lifecycle(&self) -> LifecycleBusReceiver;
 }
 
 /// Default single-process implementation.

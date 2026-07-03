@@ -30,7 +30,6 @@ use cc_lb_core::{
         builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
         limit_engine::LimitEngine, principal_view::PrincipalView,
     },
-    clock::unix_secs,
     make_default_dispatcher, spawn_audit_writer, start_subscription_quota_writer,
     start_upstream_rate_limit_writer,
 };
@@ -477,6 +476,7 @@ pub async fn seed_app_testing_storage(
     upstream_base_url: Option<url::Url>,
     clock: &dyn cc_lb_core::Clock,
 ) -> Result<(), BuildError> {
+    use cc_lb_core::clock::unix_secs;
     use cc_lb_storage_api::principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind};
     use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
     use cc_lb_storage_api::{PrincipalStore, StorageError, UpstreamStore};
@@ -747,11 +747,6 @@ async fn build_app_with_storage_inner(
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
     let limit_engine = LimitEngine::new(concurrent_mgr, clock.clone());
     limit_engine.startup_replay(storage.clone()).await;
-    if !config.limit_reservation_ttl.enabled {
-        tracing::warn!(
-            "config.limit_reservation_ttl.enabled=false is deprecated and ignored; TTL sweeper runs unconditionally per RFC-0002 Phase 8"
-        );
-    }
     let limit_reservation_ttl_handle = Some(
         cc_lb_core::api_keys::limit_engine::spawn_reservation_ttl_sweeper(
             limit_engine.clone(),
@@ -773,13 +768,7 @@ async fn build_app_with_storage_inner(
 
     let replica_identity = {
         match replica::load_or_create_replica_id(&data_dir) {
-            Ok(id) => {
-                let started_at_unix_secs = unix_secs(clock.now());
-                Some(cc_lb_core::ReplicaIdentity {
-                    id,
-                    started_at_unix_secs,
-                })
-            }
+            Ok(id) => Some(cc_lb_core::ReplicaIdentity { id }),
             Err(e) => {
                 tracing::warn!(error = %e, "failed to load or create replica ID; proceeding without it");
                 None
@@ -1006,14 +995,8 @@ async fn build_app_with_storage_inner(
     });
     let lifecycle_pricing_subscriber_handle = lifecycle_pricing_rx
         .map(|rx| cc_lb_core::spawn_lifecycle_pricing_subscriber(rx, event_bus.clone()));
-    let lifecycle_limit_reconcile_subscriber_handle = lifecycle_limit_reconcile_rx.map(|rx| {
-        let mode = if config.lifecycle_limit_reconcile_subscriber.shadow {
-            cc_lb_core::LimitReconcileMode::Shadow
-        } else {
-            cc_lb_core::LimitReconcileMode::Authoritative
-        };
-        cc_lb_core::spawn_lifecycle_limit_reconcile_subscriber(rx, limit_engine.clone(), mode)
-    });
+    let lifecycle_limit_reconcile_subscriber_handle = lifecycle_limit_reconcile_rx
+        .map(|rx| cc_lb_core::spawn_lifecycle_limit_reconcile_subscriber(rx, limit_engine.clone()));
     let lifecycle_cache_observation_subscriber_handle = lifecycle_cache_obs_rx
         .map(|rx| cc_lb_core::spawn_lifecycle_cache_observation_subscriber(rx, event_bus.clone()));
     let lifecycle_rate_limit_header_subscriber_handle = lifecycle_rate_limit_header_rx.map(|rx| {

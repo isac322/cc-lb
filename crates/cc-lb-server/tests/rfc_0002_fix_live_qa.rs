@@ -232,12 +232,12 @@ async fn next_sse_data(reader: &mut BufReader<TcpStream>) -> serde_json::Value {
     }
 }
 
-fn assert_shadow_field_populated(shadow: &serde_json::Value, field: &str, ctx: &str) {
-    let value = shadow.get(field);
+fn assert_assembler_field_populated(row: &serde_json::Value, field: &str, ctx: &str) {
+    let value = row.get(field);
     assert!(
         value.is_some_and(|v| !v.is_null()),
-        "[{ctx}] shadow row missing {field} — indicates an assembler ordering bug (event dropped after RequestTerminated). value={value:?}\nfull payload:\n{}",
-        serde_json::to_string_pretty(shadow).unwrap_or_default()
+        "[{ctx}] assembler row missing {field} — indicates an assembler ordering bug (event dropped after RequestTerminated). value={value:?}\nfull payload:\n{}",
+        serde_json::to_string_pretty(row).unwrap_or_default()
     );
 }
 
@@ -260,12 +260,12 @@ async fn live_qa_1_default_boot_happy_path_writes_row_and_reconciles() {
     .expect("post messages");
 
     assert_eq!(response.status, 200);
-    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline + 1).await;
+    wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
     let total = count_request_events(&pool, "1=1").await;
     assert_eq!(
         total,
         baseline + 1,
-        "default boot must produce exactly one shadow row"
+        "default boot must produce exactly one assembler row"
     );
 
     // Metrics: reconcile subscriber must have processed the request.
@@ -339,16 +339,16 @@ async fn live_qa_3_unknown_route_and_method_not_allowed_do_not_write_row() {
 }
 
 // ============================================================================
-// LIVE-6b · Shadow assembler completeness — assembler ordering (Oracle B bug)
+// LIVE-6b · Assembler completeness — assembler ordering (Oracle B bug)
 // ============================================================================
 /// Regression for the assembler-ordering issue documented in the RFC-0002
-/// synthesis analysis: the shadow row (written by LifecycleEventAssembler)
+/// synthesis analysis: the row written by LifecycleEventAssembler
 /// must carry cost, cache, and usage fields. If `Priced` / `CacheObserved`
 /// are consumed by their subscribers on separate async tasks, they can
 /// arrive at the assembler AFTER `RequestTerminated` and be dropped,
-/// leaving the shadow row with NULL cost/cache and only partial usage.
+/// leaving the row with NULL cost/cache and only partial usage.
 #[tokio::test]
-async fn live_qa_6b_shadow_assembler_populates_cost_cache_usage_fields() {
+async fn live_qa_6b_assembler_populates_cost_cache_usage_fields() {
     let extra = r#"
 [lifecycle_cache_observation_subscriber]
 enabled = true
@@ -362,7 +362,7 @@ enabled = true
     let server = common::spawn_test_server_with_extra_config(extra).await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
 
-    let baseline = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+    let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
     let response = common::http_post(
         server.proxy_addr,
@@ -374,33 +374,33 @@ enabled = true
     .expect("post messages");
     assert_eq!(response.status, 200);
 
-    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline + 1).await;
+    wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
     sleep(Duration::from_millis(500)).await;
 
-    let shadow_payload = fetch_payload_json(&pool, "shadow_event_id IS NOT NULL").await;
+    let assembler_payload = fetch_payload_json(&pool, "event_id IS NOT NULL").await;
 
     let ctx = "non-stream happy path";
-    assert_shadow_field_populated(&shadow_payload, "input_tokens", ctx);
-    assert_shadow_field_populated(&shadow_payload, "output_tokens", ctx);
-    assert_shadow_field_populated(&shadow_payload, "cost_usd_micros", ctx);
-    assert_shadow_field_populated(&shadow_payload, "cost_input_micros", ctx);
-    assert_shadow_field_populated(&shadow_payload, "cost_output_micros", ctx);
-    assert_shadow_field_populated(&shadow_payload, "cache_state", ctx);
-    assert_shadow_field_populated(&shadow_payload, "auth_ms", ctx);
-    assert_shadow_field_populated(&shadow_payload, "route_ms", ctx);
-    assert_shadow_field_populated(&shadow_payload, "upstream_ttfb_ms", ctx);
-    assert_shadow_field_populated(&shadow_payload, "upstream_body_ms", ctx);
-    assert_shadow_field_populated(&shadow_payload, "body_bytes", ctx);
-    assert_shadow_field_populated(&shadow_payload, "body_chunk_count", ctx);
+    assert_assembler_field_populated(&assembler_payload, "input_tokens", ctx);
+    assert_assembler_field_populated(&assembler_payload, "output_tokens", ctx);
+    assert_assembler_field_populated(&assembler_payload, "cost_usd_micros", ctx);
+    assert_assembler_field_populated(&assembler_payload, "cost_input_micros", ctx);
+    assert_assembler_field_populated(&assembler_payload, "cost_output_micros", ctx);
+    assert_assembler_field_populated(&assembler_payload, "cache_state", ctx);
+    assert_assembler_field_populated(&assembler_payload, "auth_ms", ctx);
+    assert_assembler_field_populated(&assembler_payload, "route_ms", ctx);
+    assert_assembler_field_populated(&assembler_payload, "upstream_ttfb_ms", ctx);
+    assert_assembler_field_populated(&assembler_payload, "upstream_body_ms", ctx);
+    assert_assembler_field_populated(&assembler_payload, "body_bytes", ctx);
+    assert_assembler_field_populated(&assembler_payload, "body_chunk_count", ctx);
 }
 
 // ============================================================================
-// LIVE-6c · Shadow assembler — streaming request must populate stream fields
+// LIVE-6c · Assembler — streaming request must populate stream fields
 // ============================================================================
 /// Streaming complements 6b: `StreamSuccess`-only fields (body_bytes,
 /// stream_* timings) are None on non-stream and would hide divergences.
 #[tokio::test]
-async fn live_qa_6c_shadow_assembler_populates_stream_fields() {
+async fn live_qa_6c_assembler_populates_stream_fields() {
     let extra = r#"
 [lifecycle_cache_observation_subscriber]
 enabled = true
@@ -413,7 +413,7 @@ enabled = true
 "#;
     let server = common::spawn_test_server_with_extra_config(extra).await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
-    let baseline = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+    let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
     let response = common::http_post(
         server.proxy_addr,
@@ -425,27 +425,27 @@ enabled = true
     .expect("post streaming messages");
     assert_eq!(response.status, 200);
 
-    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline + 1).await;
+    wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
     sleep(Duration::from_millis(500)).await;
 
-    let shadow_payload = fetch_payload_json(&pool, "shadow_event_id IS NOT NULL").await;
+    let assembler_payload = fetch_payload_json(&pool, "event_id IS NOT NULL").await;
 
     let ctx = "streaming happy path";
-    assert_shadow_field_populated(&shadow_payload, "body_bytes", ctx);
-    assert_shadow_field_populated(&shadow_payload, "stream_message_start_ms", ctx);
-    assert_shadow_field_populated(&shadow_payload, "stream_total_ms", ctx);
-    assert_shadow_field_populated(&shadow_payload, "sse_event_count", ctx);
-    assert_shadow_field_populated(&shadow_payload, "cost_usd_micros", ctx);
-    assert_shadow_field_populated(&shadow_payload, "input_tokens", ctx);
-    assert_shadow_field_populated(&shadow_payload, "output_tokens", ctx);
+    assert_assembler_field_populated(&assembler_payload, "body_bytes", ctx);
+    assert_assembler_field_populated(&assembler_payload, "stream_message_start_ms", ctx);
+    assert_assembler_field_populated(&assembler_payload, "stream_total_ms", ctx);
+    assert_assembler_field_populated(&assembler_payload, "sse_event_count", ctx);
+    assert_assembler_field_populated(&assembler_payload, "cost_usd_micros", ctx);
+    assert_assembler_field_populated(&assembler_payload, "input_tokens", ctx);
+    assert_assembler_field_populated(&assembler_payload, "output_tokens", ctx);
 }
 
 #[tokio::test]
-async fn lqa_1a_proxy_path_non_stream_returns_message_and_shadow_row() {
+async fn lqa_1a_proxy_path_non_stream_returns_message_and_assembler_row() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let total_baseline = settled_row_count(&pool, "1=1").await;
-    let shadow_baseline = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+    let assembler_baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
     let response = post_happy(&server).await;
 
@@ -454,7 +454,7 @@ async fn lqa_1a_proxy_path_non_stream_returns_message_and_shadow_row() {
     assert_eq!(body["type"], "message");
     assert!(body["usage"]["input_tokens"].as_i64().unwrap_or_default() > 0);
     assert!(body["usage"]["output_tokens"].as_i64().unwrap_or_default() > 0);
-    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", shadow_baseline + 1).await;
+    wait_for_row_count(&pool, "event_id IS NOT NULL", assembler_baseline + 1).await;
     assert_eq!(count_request_events(&pool, "1=1").await, total_baseline + 1);
 }
 
@@ -462,7 +462,7 @@ async fn lqa_1a_proxy_path_non_stream_returns_message_and_shadow_row() {
 async fn lqa_1b_proxy_path_streaming_returns_sse_and_stream_payload_fields() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
-    let baseline = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+    let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
     let response = common::http_post(
         server.proxy_addr,
@@ -477,8 +477,8 @@ async fn lqa_1b_proxy_path_streaming_returns_sse_and_stream_payload_fields() {
     assert!(response.body.contains("event: message_start"));
     assert!(response.body.contains("event: message_delta"));
     assert!(response.body.contains("event: message_stop"));
-    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline + 1).await;
-    let payload = fetch_payload_json(&pool, "shadow_event_id IS NOT NULL").await;
+    wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
+    let payload = fetch_payload_json(&pool, "event_id IS NOT NULL").await;
     for field in [
         "sse_event_count",
         "stream_message_start_ms",
@@ -494,21 +494,21 @@ async fn lqa_1b_proxy_path_streaming_returns_sse_and_stream_payload_fields() {
 async fn lqa_2a_event_emission_happy_row_has_columns_and_payload() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
-    let baseline = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+    let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
     let response = post_happy(&server).await;
 
     assert_eq!(response.status, 200);
-    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline + 1).await;
-    let where_clause = "shadow_event_id IS NOT NULL";
-    assert_eq!(fetch_text(&pool, "SELECT principal_id FROM request_events_v1 WHERE shadow_event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, "api-key");
-    assert_eq!(fetch_text(&pool, "SELECT key_id FROM request_events_v1 WHERE shadow_event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, "none-mode");
-    assert_eq!(fetch_text(&pool, "SELECT upstream_name FROM request_events_v1 WHERE shadow_event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, "fake_anthropic");
-    assert!(!fetch_text(&pool, "SELECT model FROM request_events_v1 WHERE shadow_event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await.is_empty());
-    assert!(fetch_i64(&pool, "SELECT input_tokens FROM request_events_v1 WHERE shadow_event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await > 0);
-    assert!(fetch_i64(&pool, "SELECT output_tokens FROM request_events_v1 WHERE shadow_event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await > 0);
-    assert!(fetch_i64(&pool, "SELECT COUNT(*) FROM request_events_v1 WHERE shadow_event_id IS NOT NULL AND error_code IS NULL").await > 0);
-    assert!(fetch_i64(&pool, "SELECT COUNT(*) FROM request_events_v1 WHERE shadow_event_id IS NOT NULL AND cache_state IS NOT NULL").await > 0);
+    wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
+    let where_clause = "event_id IS NOT NULL";
+    assert_eq!(fetch_text(&pool, "SELECT principal_id FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, "api-key");
+    assert_eq!(fetch_text(&pool, "SELECT key_id FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, "none-mode");
+    assert_eq!(fetch_text(&pool, "SELECT upstream_name FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, "fake_anthropic");
+    assert!(!fetch_text(&pool, "SELECT model FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await.is_empty());
+    assert!(fetch_i64(&pool, "SELECT input_tokens FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await > 0);
+    assert!(fetch_i64(&pool, "SELECT output_tokens FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await > 0);
+    assert!(fetch_i64(&pool, "SELECT COUNT(*) FROM request_events_v1 WHERE event_id IS NOT NULL AND error_code IS NULL").await > 0);
+    assert!(fetch_i64(&pool, "SELECT COUNT(*) FROM request_events_v1 WHERE event_id IS NOT NULL AND cache_state IS NOT NULL").await > 0);
 
     let payload = fetch_payload_json(&pool, where_clause).await;
     assert_eq!(json_i64(&payload, "status"), 200);
@@ -536,13 +536,13 @@ async fn lqa_2a_event_emission_happy_row_has_columns_and_payload() {
 async fn lqa_2b_lifecycle_metrics_increment_for_happy_non_stream() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
-    let baseline = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+    let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
     let pre = fetch_metric_scrape(server.metrics_addr).await;
 
     let response = post_happy(&server).await;
 
     assert_eq!(response.status, 200);
-    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline + 1).await;
+    wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
     let post = wait_metric_delta(
         server.metrics_addr,
         &pre,
@@ -581,7 +581,7 @@ async fn lqa_2b_lifecycle_metrics_increment_for_happy_non_stream() {
 async fn lqa_3a_bus_drop_counters_do_not_increment_under_burst() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
-    let baseline = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+    let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
     let pre = fetch_metric_scrape(server.metrics_addr).await;
 
     for _batch in 0..4 {
@@ -598,7 +598,7 @@ async fn lqa_3a_bus_drop_counters_do_not_increment_under_burst() {
         }
     }
 
-    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline + 200).await;
+    wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 200).await;
     let post = fetch_metric_scrape(server.metrics_addr).await;
     for reason in [
         "lifecycle_writer_full",
@@ -646,11 +646,6 @@ async fn lqa_4a_admin_sse_stream_emits_final_request_event_update() {
         event["model"]
             .as_str()
             .is_some_and(|model| !model.is_empty())
-    );
-    assert!(
-        event["shadow_event_id"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty())
     );
 }
 
@@ -788,13 +783,13 @@ async fn lqa_5d_limit_reconcile_records_successful_reservation() {
     }];
     let server = common::spawn_test_server_with_apikey_mode("", limits, AppConfig::default()).await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
-    let baseline = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+    let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
     let pre = fetch_metric_scrape(server.metrics_addr).await;
 
     let response = post_happy_with_key(&server).await;
 
     assert_eq!(response.status, 200);
-    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline + 1).await;
+    wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
     let post = wait_metric_delta(
         server.metrics_addr,
         &pre,
@@ -825,18 +820,18 @@ async fn lqa_5d_limit_reconcile_records_successful_reservation() {
 }
 
 #[tokio::test]
-async fn lqa_5e_shadow_row_populates_identity_upstream_and_latency_stages() {
+async fn lqa_5e_assembler_row_populates_identity_upstream_and_latency_stages() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
-    let baseline = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+    let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
     let response = post_happy(&server).await;
 
     assert_eq!(response.status, 200);
-    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline + 1).await;
-    assert_eq!(fetch_text(&pool, "SELECT upstream_name FROM request_events_v1 WHERE shadow_event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, "fake_anthropic");
-    assert!(fetch_text(&pool, "SELECT upstream_id FROM request_events_v1 WHERE shadow_event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await.parse::<Uuid>().is_ok());
-    let payload = fetch_payload_json(&pool, "shadow_event_id IS NOT NULL").await;
+    wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
+    assert_eq!(fetch_text(&pool, "SELECT upstream_name FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, "fake_anthropic");
+    assert!(fetch_text(&pool, "SELECT upstream_id FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await.parse::<Uuid>().is_ok());
+    let payload = fetch_payload_json(&pool, "event_id IS NOT NULL").await;
     assert_eq!(json_str(&payload, "principal_kind"), "machine");
     for field in [
         "auth_ms",
@@ -850,20 +845,20 @@ async fn lqa_5e_shadow_row_populates_identity_upstream_and_latency_stages() {
 }
 
 #[tokio::test]
-async fn lqa_5f_shadow_row_records_anthropic_upstream_uuid_name_and_model() {
+async fn lqa_5f_assembler_row_records_anthropic_upstream_uuid_name_and_model() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
-    let baseline = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+    let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
     let response = post_happy(&server).await;
 
     assert_eq!(response.status, 200);
-    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline + 1).await;
-    let upstream_id = fetch_text(&pool, "SELECT upstream_id FROM request_events_v1 WHERE shadow_event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await;
+    wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
+    let upstream_id = fetch_text(&pool, "SELECT upstream_id FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await;
     assert!(upstream_id.parse::<Uuid>().is_ok());
-    assert_eq!(fetch_text(&pool, "SELECT upstream_name FROM request_events_v1 WHERE shadow_event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, "fake_anthropic");
-    assert_eq!(fetch_text(&pool, "SELECT model FROM request_events_v1 WHERE shadow_event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, HAPPY_MODEL);
-    let payload = fetch_payload_json(&pool, "shadow_event_id IS NOT NULL").await;
+    assert_eq!(fetch_text(&pool, "SELECT upstream_name FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, "fake_anthropic");
+    assert_eq!(fetch_text(&pool, "SELECT model FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, HAPPY_MODEL);
+    let payload = fetch_payload_json(&pool, "event_id IS NOT NULL").await;
     assert_eq!(json_str(&payload, "upstream"), "anthropic_direct");
 }
 
@@ -871,12 +866,12 @@ async fn lqa_5f_shadow_row_records_anthropic_upstream_uuid_name_and_model() {
 async fn lqa_6a_upstream_rate_limit_state_persists_request_and_token_observations() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
-    let baseline = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+    let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
     let response = post_happy(&server).await;
 
     assert_eq!(response.status, 200);
-    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline + 1).await;
+    wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let count = fetch_i64(&pool, "SELECT COUNT(*) FROM upstream_rate_limit_state_v1").await;
@@ -915,7 +910,7 @@ async fn lqa_6a_upstream_rate_limit_state_persists_request_and_token_observation
 async fn lqa_6b_non_stream_and_stream_rows_have_cache_and_cost_fields() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
-    let baseline = settled_row_count(&pool, "shadow_event_id IS NOT NULL").await;
+    let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
     assert_eq!(post_happy(&server).await.status, 200);
     let stream = common::http_post(
@@ -927,11 +922,13 @@ async fn lqa_6b_non_stream_and_stream_rows_have_cache_and_cost_fields() {
     .await
     .expect("post stream message");
     assert_eq!(stream.status, 200);
-    wait_for_row_count(&pool, "shadow_event_id IS NOT NULL", baseline + 2).await;
-    let rows = sqlx::query("SELECT payload FROM request_events_v1 WHERE shadow_event_id IS NOT NULL ORDER BY id DESC LIMIT 2")
-        .fetch_all(&pool)
-        .await
-        .expect("payload rows");
+    wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 2).await;
+    let rows = sqlx::query(
+        "SELECT payload FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 2",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("payload rows");
     assert_eq!(rows.len(), 2);
     for row in rows {
         let raw: String = row.try_get("payload").expect("payload column");

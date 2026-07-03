@@ -7,11 +7,8 @@
 //!   [`LifecycleEvent::UsageObserved`] and [`LifecycleEvent::StreamCompleted`],
 //! - the cost breakdown carried on [`LifecycleEvent::Priced`].
 //!
-//! On [`LifecycleEvent::RequestTerminated`], the subscriber either calls
-//! [`LimitEngine::reconcile_by_id`] (`authoritative` mode) or increments a
-//! `would_reconcile` counter (`shadow` mode). Operators run shadow first
-//! to prove the subscriber observes every reservation before the handler
-//! stops calling `reconcile` inline.
+//! On [`LifecycleEvent::RequestTerminated`], the subscriber calls
+//! [`LimitEngine::reconcile_by_id`].
 //!
 //! Orphan protection is handled by the `LimitEngine`'s TTL sweeper — it
 //! evicts reservations older than `ttl_secs` regardless of whether the
@@ -57,23 +54,13 @@ impl LimitReconcileSubscriberHandle {
     }
 }
 
-/// Whether the subscriber actually calls `reconcile_by_id` on
-/// `RequestTerminated`. In shadow mode the subscriber only measures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LimitReconcileMode {
-    Shadow,
-    Authoritative,
-}
-
 pub fn spawn_lifecycle_limit_reconcile_subscriber(
     rx: mpsc::Receiver<LifecycleEvent>,
     engine: Arc<LimitEngine>,
-    mode: LimitReconcileMode,
 ) -> LimitReconcileSubscriberHandle {
     spawn_with_config(
         rx,
         engine,
-        mode,
         DEFAULT_LIMIT_RECONCILE_MAP_CAP,
         DEFAULT_LIMIT_RECONCILE_TTL,
     )
@@ -82,12 +69,11 @@ pub fn spawn_lifecycle_limit_reconcile_subscriber(
 pub fn spawn_with_config(
     rx: mpsc::Receiver<LifecycleEvent>,
     engine: Arc<LimitEngine>,
-    mode: LimitReconcileMode,
     map_cap: usize,
     ttl: Duration,
 ) -> LimitReconcileSubscriberHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(subscriber_loop(rx, engine, mode, map_cap, ttl, shutdown_rx));
+    let join = tokio::spawn(subscriber_loop(rx, engine, map_cap, ttl, shutdown_rx));
     LimitReconcileSubscriberHandle { shutdown_tx, join }
 }
 
@@ -129,7 +115,6 @@ impl Partial {
 async fn subscriber_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     engine: Arc<LimitEngine>,
-    mode: LimitReconcileMode,
     map_cap: usize,
     ttl: Duration,
     mut shutdown: oneshot::Receiver<()>,
@@ -147,27 +132,23 @@ async fn subscriber_loop(
             biased;
             event = rx.recv() => {
                 match event {
-                    Some(event) => handle_event(&engine, &mut partials, map_cap, mode, event),
+                    Some(event) => handle_event(&engine, &mut partials, map_cap, event),
                     None => break,
                 }
             }
-            _ = finalization_tick.tick() => flush_expired_terminations(&engine, &mut partials, mode),
+            _ = finalization_tick.tick() => flush_expired_terminations(&engine, &mut partials),
             _ = sweeper.tick() => sweep_orphans(&mut partials, ttl),
             _ = &mut shutdown => break,
         }
     }
 
     while let Ok(event) = rx.try_recv() {
-        handle_event(&engine, &mut partials, map_cap, mode, event);
+        handle_event(&engine, &mut partials, map_cap, event);
     }
-    force_flush_terminations(&engine, &mut partials, mode);
+    force_flush_terminations(&engine, &mut partials);
 }
 
-fn flush_expired_terminations(
-    engine: &LimitEngine,
-    partials: &mut HashMap<EventId, Partial>,
-    mode: LimitReconcileMode,
-) {
+fn flush_expired_terminations(engine: &LimitEngine, partials: &mut HashMap<EventId, Partial>) {
     let now = Instant::now();
     let expired: Vec<EventId> = partials
         .iter()
@@ -185,16 +166,12 @@ fn flush_expired_terminations(
                 .as_ref()
                 .map(|t| t.reason.clone())
                 .expect("expired implies termination present");
-            finalize(engine, mode, partial, &reason);
+            finalize(engine, partial, &reason);
         }
     }
 }
 
-fn force_flush_terminations(
-    engine: &LimitEngine,
-    partials: &mut HashMap<EventId, Partial>,
-    mode: LimitReconcileMode,
-) {
+fn force_flush_terminations(engine: &LimitEngine, partials: &mut HashMap<EventId, Partial>) {
     let pending: Vec<EventId> = partials
         .iter()
         .filter_map(|(id, p)| p.termination.as_ref().map(|_| id.clone()))
@@ -206,7 +183,7 @@ fn force_flush_terminations(
                 .as_ref()
                 .map(|t| t.reason.clone())
                 .expect("pending implies termination present");
-            finalize(engine, mode, partial, &reason);
+            finalize(engine, partial, &reason);
         }
     }
 }
@@ -215,7 +192,6 @@ fn handle_event(
     engine: &LimitEngine,
     partials: &mut HashMap<EventId, Partial>,
     map_cap: usize,
-    mode: LimitReconcileMode,
     event: LifecycleEvent,
 ) {
     let now = Instant::now();
@@ -238,7 +214,7 @@ fn handle_event(
             expects_priced,
         };
         if termination.is_ready(&partial) {
-            finalize(engine, mode, partial, &termination.reason);
+            finalize(engine, partial, &termination.reason);
             return;
         }
         partial.termination = Some(termination);
@@ -264,7 +240,7 @@ fn handle_event(
             .as_ref()
             .map(|t| t.reason.clone())
             .expect("readiness implies termination present");
-        finalize(engine, mode, partial, &reason);
+        finalize(engine, partial, &reason);
     }
 
     if partials.len() > map_cap {
@@ -299,12 +275,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
     }
 }
 
-fn finalize(
-    engine: &LimitEngine,
-    mode: LimitReconcileMode,
-    partial: Partial,
-    reason: &TerminationReason,
-) {
+fn finalize(engine: &LimitEngine, partial: Partial, reason: &TerminationReason) {
     let Some(reservation_id) = partial.reservation_id else {
         metrics::counter!(
             "cc_lb_limit_reconcile_subscriber_rows_total",
@@ -343,28 +314,17 @@ fn finalize(
     let output = partial.usage.output_tokens;
     let cost = partial.cost_micros.unwrap_or(0);
 
-    match mode {
-        LimitReconcileMode::Shadow => {
-            metrics::counter!(
-                "cc_lb_limit_reconcile_subscriber_rows_total",
-                "outcome" => "shadow_would_reconcile",
-            )
-            .increment(1);
-        }
-        LimitReconcileMode::Authoritative => {
-            let reconciled = engine.reconcile_by_id(&reservation_id, input, output, cost);
-            let outcome = if reconciled {
-                "reconciled"
-            } else {
-                "id_unknown"
-            };
-            metrics::counter!(
-                "cc_lb_limit_reconcile_subscriber_rows_total",
-                "outcome" => outcome,
-            )
-            .increment(1);
-        }
-    }
+    let reconciled = engine.reconcile_by_id(&reservation_id, input, output, cost);
+    let outcome = if reconciled {
+        "reconciled"
+    } else {
+        "id_unknown"
+    };
+    metrics::counter!(
+        "cc_lb_limit_reconcile_subscriber_rows_total",
+        "outcome" => outcome,
+    )
+    .increment(1);
 }
 
 fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
@@ -415,69 +375,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn shadow_mode_never_touches_engine() {
-        let (tx, rx) = mpsc::channel(16);
-        let engine = build_engine();
-        let handle = spawn_lifecycle_limit_reconcile_subscriber(
-            rx,
-            engine.clone(),
-            LimitReconcileMode::Shadow,
-        );
-
-        tx.send(LifecycleEvent::LimitDecision {
-            event_id: eid("evt-1"),
-            decision: LimitDecisionKind::Reserved {
-                reservation_id: "res-1".to_owned(),
-                amount: 100,
-                limit_reserve_ms: None,
-            },
-        })
-        .await
-        .unwrap();
-        tx.send(LifecycleEvent::UsageObserved {
-            event_id: eid("evt-1"),
-            usage: UsageSnapshot {
-                input_tokens: 5,
-                output_tokens: 10,
-                ..Default::default()
-            },
-            source: UsageSource::NonStreamBody,
-        })
-        .await
-        .unwrap();
-        tx.send(LifecycleEvent::RequestTerminated {
-            event_id: eid("evt-1"),
-            reason: TerminationReason::Success,
-            client_status: 200,
-            duration_ms: 20,
-            first_body_chunk_ms: None,
-            internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
-            proxy_setup_ms: None,
-            upstream_body_ms: None,
-        })
-        .await
-        .unwrap();
-        drop(tx);
-        handle.shutdown().await;
-
-        // Shadow mode: reconcile_by_id must have NOT been called. Since we
-        // never actually reserved anything on the engine, calling it would
-        // return false anyway — but importantly the subscriber must not have
-        // touched the engine.
-        assert!(!engine.refund_by_id("res-1"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn authoritative_mode_skips_when_reservation_unknown() {
         let (tx, rx) = mpsc::channel(16);
         let engine = build_engine();
-        let handle = spawn_lifecycle_limit_reconcile_subscriber(
-            rx,
-            engine.clone(),
-            LimitReconcileMode::Authoritative,
-        );
+        let handle = spawn_lifecycle_limit_reconcile_subscriber(rx, engine.clone());
 
         tx.send(LifecycleEvent::LimitDecision {
             event_id: eid("evt-2"),
@@ -522,11 +423,7 @@ mod tests {
     async fn non_success_termination_skips_reconcile() {
         let (tx, rx) = mpsc::channel(16);
         let engine = build_engine();
-        let handle = spawn_lifecycle_limit_reconcile_subscriber(
-            rx,
-            engine.clone(),
-            LimitReconcileMode::Authoritative,
-        );
+        let handle = spawn_lifecycle_limit_reconcile_subscriber(rx, engine.clone());
 
         tx.send(LifecycleEvent::LimitDecision {
             event_id: eid("evt-3"),
@@ -560,11 +457,7 @@ mod tests {
     async fn terminated_without_reservation_id_does_not_panic() {
         let (tx, rx) = mpsc::channel(16);
         let engine = build_engine();
-        let handle = spawn_lifecycle_limit_reconcile_subscriber(
-            rx,
-            engine.clone(),
-            LimitReconcileMode::Authoritative,
-        );
+        let handle = spawn_lifecycle_limit_reconcile_subscriber(rx, engine.clone());
 
         tx.send(LifecycleEvent::RequestTerminated {
             event_id: eid("orphan"),
