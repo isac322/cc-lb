@@ -115,11 +115,8 @@ impl WasmtimeRuntime {
         name: impl Into<String>,
         wasm_bytes: &[u8],
     ) -> Result<Arc<PluginSlot>, WasmtimeRuntimeError> {
-        let new_content_hash = module::compute_content_hash(
-            wasm_bytes,
-            self.config.fuel_per_call,
-            self.config.memory_max_pages,
-        );
+        let new_content_hash =
+            module::compute_content_hash(wasm_bytes, self.config.memory_max_pages);
 
         // Fast path: skip the compile entirely when the slot is
         // already registered with byte-identical content. This is the
@@ -143,7 +140,6 @@ impl WasmtimeRuntime {
             version_id: 1,
             instance_pre,
             schema_hash: inspection.primary_schema_hash(),
-            fuel_per_call: self.config.fuel_per_call,
             memory_max_pages: self.config.memory_max_pages,
             content_hash: new_content_hash,
             plugin_name: Arc::clone(&plugin_name),
@@ -173,7 +169,6 @@ impl WasmtimeRuntime {
                     version_id: prev.version_id + 1,
                     instance_pre: new_cell.instance_pre,
                     schema_hash: new_cell.schema_hash,
-                    fuel_per_call: new_cell.fuel_per_call,
                     memory_max_pages: new_cell.memory_max_pages,
                     content_hash: new_cell.content_hash,
                     plugin_name: new_cell.plugin_name,
@@ -281,7 +276,7 @@ impl WasmtimeRuntime {
     }
 
     /// Synchronous filter call. Round-trips one request through the
-    /// cached worker; alloc/filter/free share one fuel budget.
+    /// cached worker.
     pub fn call_filter(
         &self,
         slot_key: &SlotKey,

@@ -26,14 +26,9 @@ use crate::inspect::{ModuleInspection, SlotKind, inspect_wasm};
 // carried by a stale short-circuited slot.
 pub(crate) const VALIDATION_POLICY_VERSION: u32 = 1;
 
-pub(crate) fn compute_content_hash(
-    wasm_bytes: &[u8],
-    fuel_per_call: u64,
-    memory_max_pages: u32,
-) -> [u8; 32] {
+pub(crate) fn compute_content_hash(wasm_bytes: &[u8], memory_max_pages: u32) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&VALIDATION_POLICY_VERSION.to_le_bytes());
-    hasher.update(&fuel_per_call.to_le_bytes());
     hasher.update(&memory_max_pages.to_le_bytes());
     hasher.update(wasm_bytes);
     *hasher.finalize().as_bytes()
