@@ -9,9 +9,11 @@ name: release-plz
 #      and CHANGELOG entries for any crate touched since the last release.
 #   2. On merge of that PR, the `release` job runs again, detects new versions
 #      in Cargo.toml, creates git tags + GitHub releases, and publishes the
-#      only crate that opted in (cc-lb-plugin-api) to crates.io via trusted
-#      publishing (OIDC). Other crates skip publish because their Cargo.toml
-#      carries `publish = false`.
+#      crates managed in release-plz.toml (currently 6: cc-lb-plugin-api,
+#      cc-lb-plugin-wire, cc-lb-pdk-wasmtime, cc-lb-pdk-wasmtime-macros,
+#      cc-lb-plugin-conformance, cc-lb-runtime-wasmtime) to crates.io via
+#      trusted publishing (OIDC). Host / storage / internal crates carry
+#      `publish = false` and are skipped.
 
 on:
   push:
@@ -50,6 +52,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+          # cc-lb-runtime-wasmtime/build.rs pre-builds wasm32 test fixtures
+          # so `cargo test -p cc-lb-runtime-wasmtime` never silently skips
+          # integration tests. During `cargo publish --verify`, the runner
+          # has no wasm32-unknown-unknown target installed and the fixture
+          # crates are not part of the published tarball, so that pre-build
+          # is both impossible and unnecessary. The build.rs exposes this
+          # exact escape hatch (see crates/cc-lb-runtime-wasmtime/build.rs).
+          CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
 
   release-pr:
     name: release-plz release-pr
