@@ -13,7 +13,7 @@ use cc_lb_plugin_api::{
     ShapedRequest, ShapedRequestBuilder, Upstream, UpstreamDialect,
 };
 use http::header::CONNECTION;
-use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use http::{HeaderMap, HeaderName, HeaderValue};
 use http_body_util::BodyExt;
 use proptest::prelude::*;
 use proptest::string::string_regex;
@@ -327,10 +327,6 @@ impl UpstreamDialect for NoopDialect {
         Err(DialectError::UnsupportedRequest {
             reason: "property tests use relay behavior only".to_owned(),
         })
-    }
-
-    fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-        None
     }
 }
 

@@ -2614,10 +2614,6 @@ impl UpstreamDialect for RawPassthroughDialect {
             ctx.body_bytes.clone(),
         ))
     }
-
-    fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-        None
-    }
 }
 
 fn body_cap_for_path(config: &LifecycleConfig, path: &str) -> usize {

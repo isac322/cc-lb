@@ -7,9 +7,7 @@
 //! author actually re-types every time is header construction, a
 //! synthetic principal, and the six-variant observe sample.
 
-use cc_lb_plugin_types::{
-    FilterRequest, Header, NormalizeErrorRequest, ObserveEvent, Principal, ShapeRequest, Upstream,
-};
+use cc_lb_plugin_wire::{FilterRequest, Header, ObserveEvent, Principal, ShapeRequest, Upstream};
 
 /// Build a `Header` from `(name, value)`. Value can be `&str`, `&[u8]`,
 /// `String`, or anything that dereferences to bytes.
@@ -101,16 +99,5 @@ pub fn sample_filter_request() -> FilterRequest {
         body: Box::from(&br#"{"model":"claude-3-haiku-20240307","messages":[]}"#[..]),
         principal: synth_principal(),
         candidates: Box::new([]),
-    }
-}
-
-/// Protocol-valid minimal `NormalizeErrorRequest` — HTTP 500 with a
-/// short synthetic error body. Plugins that want richer error shapes
-/// can construct their own; this one exists so the harness can push a
-/// non-empty payload through `cc_lb_normalize_error` for the ABI smoke.
-pub fn sample_normalize_error_request() -> NormalizeErrorRequest {
-    NormalizeErrorRequest {
-        status: 500,
-        body: Box::from(&br#"{"error":{"type":"internal_error","message":"synthetic"}}"#[..]),
     }
 }

@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cc_lb_plugin_api::SlotKey;
-use cc_lb_plugin_types::{FilterRequest, Principal, UpstreamCandidate};
+use cc_lb_plugin_wire::{FilterRequest, Principal, UpstreamCandidate};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use rkyv::rancor::Error;
 
@@ -34,7 +34,7 @@ fn wasm_path() -> PathBuf {
 }
 
 fn request() -> FilterRequest {
-    use cc_lb_plugin_types::Claim;
+    use cc_lb_plugin_wire::Claim;
     FilterRequest {
         request_id: Box::from("leak-probe"),
         method: Box::from("POST"),

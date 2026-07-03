@@ -3,8 +3,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bytes::Bytes;
-use http::StatusCode;
 use uuid::Uuid;
 
 use crate::errors::{DialectError, ObservabilityError, RouteError, SignerError, UpstreamError};
@@ -114,9 +112,6 @@ pub trait UpstreamDialect: Send + Sync {
         principal: &Principal,
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError>;
-
-    /// Normalizes an upstream error body to Anthropic error shape when possible.
-    fn normalize_error(&self, status: StatusCode, body: &Bytes) -> Option<Bytes>;
 }
 
 /// Signer boundary for applying credentials to shaped requests.

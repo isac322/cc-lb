@@ -9,7 +9,7 @@ use cc_lb_core::spawn_audit_writer;
 use cc_lb_storage_api::{
     AuditStore, BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
     PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
-    PrincipalStore, WasmBlob, WasmRegistryEntryInput, default_wire_version, sparse_order,
+    PrincipalStore, WasmBlob, WasmRegistryEntryInput, sparse_order,
 };
 use config_admin_common::{TOKEN, app, authed_json, temp_storage, test_state};
 use http_body_util::BodyExt;
@@ -50,7 +50,7 @@ async fn registry_list_exposes_builtin_cache_affinity() {
         .expect("builtin cache-affinity entry is listed");
     assert_eq!(builtin["name"], "cache-affinity");
     assert_eq!(builtin["kind"], "filter");
-    assert_eq!(builtin["wire_version"], default_wire_version());
+    assert!(builtin.get("wire_version").is_none_or(Value::is_null));
     assert_eq!(builtin["is_builtin"], true);
     assert_eq!(
         builtin["metadata"]["purpose"],
@@ -84,9 +84,10 @@ async fn registry_list_exposes_builtin_cache_affinity() {
         .expect("builtin subscription-preference entry is listed");
     assert_eq!(subscription_preference["name"], "subscription-preference");
     assert_eq!(subscription_preference["kind"], "filter");
-    assert_eq!(
-        subscription_preference["wire_version"],
-        default_wire_version()
+    assert!(
+        subscription_preference
+            .get("wire_version")
+            .is_none_or(Value::is_null)
     );
     assert_eq!(subscription_preference["is_builtin"], true);
     let uploaded_entry = body["entries"]
@@ -380,8 +381,7 @@ async fn chain_insert_accepts_builtin_cache_affinity_registry_id() {
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
             "slot": "Router",
-            "wasm_registry_id": BUILTIN_CACHE_AFFINITY_ID,
-            "wire_version": default_wire_version()
+            "wasm_registry_id": BUILTIN_CACHE_AFFINITY_ID
         })),
     )
     .await;
@@ -392,7 +392,7 @@ async fn chain_insert_accepts_builtin_cache_affinity_registry_id() {
         body["wasm_registry_id"],
         BUILTIN_CACHE_AFFINITY_ID.to_string()
     );
-    assert_eq!(body["wire_version"], default_wire_version());
+    assert!(body.get("wire_version").is_none_or(Value::is_null));
 
     let (status, _, chain, _) = authed_json(
         app,
@@ -423,8 +423,7 @@ async fn chain_insert_accepts_builtin_subscription_preference_registry_id() {
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
             "slot": "Router",
-            "wasm_registry_id": BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
-            "wire_version": default_wire_version()
+            "wasm_registry_id": BUILTIN_SUBSCRIPTION_PREFERENCE_ID
         })),
     )
     .await;
@@ -435,7 +434,7 @@ async fn chain_insert_accepts_builtin_subscription_preference_registry_id() {
         body["wasm_registry_id"],
         BUILTIN_SUBSCRIPTION_PREFERENCE_ID.to_string()
     );
-    assert_eq!(body["wire_version"], default_wire_version());
+    assert!(body.get("wire_version").is_none_or(Value::is_null));
 
     let (status, _, chain, _) = authed_json(
         app,
@@ -490,7 +489,7 @@ async fn plugin_chain_accepts_runtime_slot_aliases() {
         assert_eq!(body["entries"][0]["id"], expected_id.to_string());
     }
 
-    for slot in ["sign", "build_signer", "on_unauthorized", "normalize_error"] {
+    for slot in ["sign", "build_signer", "on_unauthorized"] {
         let (status, _, body, _) = authed_json(
             app.clone(),
             "GET",
@@ -501,32 +500,6 @@ async fn plugin_chain_accepts_runtime_slot_aliases() {
         assert_eq!(status, StatusCode::OK);
         assert!(body["entries"].as_array().unwrap().is_empty());
     }
-}
-
-#[tokio::test]
-async fn plugin_chain_normalize_error_does_not_return_shape_entries() {
-    let (_dir, storage) = temp_storage().await;
-    let principal_id = seed_principal(&storage, "principal-normalize-error-empty").await;
-    let entry = seed_registry_with_slots(
-        &storage,
-        27,
-        "shape-normalize-error-plugin",
-        vec![PluginSlot::Shape],
-    )
-    .await;
-    seed_chain_with_slot(&storage, principal_id, PluginSlot::Shape, entry.id, 1000).await;
-    let app = app(test_state(Config::default(), Some(storage)));
-
-    let (status, _, body, _) = authed_json(
-        app,
-        "GET",
-        &format!("/admin/v1/principals/{principal_id}/plugin-chain?slot=normalize_error"),
-        None,
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!({ "entries": [] }));
 }
 
 #[tokio::test]
@@ -1097,7 +1070,9 @@ async fn seed_registry_raw(
                 label: None,
                 uploaded_at_unix_secs: 1_800_000_000,
                 uploaded_by_admin_id: Uuid::new_v4(),
-                wire_version: 1,
+                description: format!("{name} description"),
+                usage: "test fixture".to_owned(),
+                hook_metadata: Default::default(),
                 supported_slots: Vec::new(),
             },
         )
@@ -1139,7 +1114,6 @@ async fn seed_chain_with_slot(
             sse_per_event: false,
             batched_events_per_flush: 1,
             batched_flush_ms: 100,
-            wire_version: None,
         })
         .await
         .unwrap()

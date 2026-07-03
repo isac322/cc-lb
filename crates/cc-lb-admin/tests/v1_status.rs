@@ -152,7 +152,6 @@ async fn export_round_trips_through_stable_key_ordering() {
             sse_per_event: true,
             batched_events_per_flush: 3,
             batched_flush_ms: 250,
-            wire_version: None,
         })
         .await
         .unwrap();
@@ -268,7 +267,9 @@ async fn seed_registry(
                 label: Some("fixture".to_owned()),
                 uploaded_at_unix_secs: 1_800_000_000,
                 uploaded_by_admin_id: Uuid::new_v4(),
-                wire_version: 1,
+                description: format!("{name} description"),
+                usage: "test fixture".to_owned(),
+                hook_metadata: Default::default(),
                 supported_slots: Vec::new(),
             },
         )

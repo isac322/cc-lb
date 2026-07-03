@@ -903,7 +903,6 @@ pub struct PluginWireBounds {
     pub output_body_bytes: u64,
     pub max_headers: u32,
     pub max_header_value_bytes: u32,
-    pub normalize_error_body_bytes: u64,
     pub reason_bytes: u32,
 }
 
@@ -913,7 +912,6 @@ impl Default for PluginWireBounds {
             output_body_bytes: DEFAULT_FILES_CAP_BYTES,
             max_headers: 100,
             max_header_value_bytes: 8 * 1024,
-            normalize_error_body_bytes: 256 * 1024,
             reason_bytes: 256,
         }
     }

@@ -25,10 +25,6 @@ impl UpstreamDialect for BodyDialect {
             Bytes::from_static(b"\x00\x01binary body\xff"),
         ))
     }
-
-    fn normalize_error(&self, _status: http::StatusCode, _body: &Bytes) -> Option<Bytes> {
-        None
-    }
 }
 
 #[tokio::test]

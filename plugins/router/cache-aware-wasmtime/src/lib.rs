@@ -29,11 +29,22 @@ const ACCEPT_REASON: &str = "top-K by cache_score";
 const REJECT_REASON: &str = "below K by cache_score";
 const KEEP_K_CLAIM: &str = "keep_k";
 
-#[cc_lb_pdk_wasmtime::plugin(name = "cache-aware-wasmtime", version = "0.1.0")]
+#[cc_lb_pdk_wasmtime::plugin(
+    name = "cache-aware-wasmtime",
+    version = "0.1.0",
+    description = "Balance requests across upstreams by cache affinity",
+    usage = "Reads principal.claims[keep_k] to choose how many upstreams to keep, then ranks candidates by predicted_cache_read_tokens and returns accept/reject decisions."
+)]
 mod cache_aware {
     use super::*;
 
-    #[cc_lb_pdk_wasmtime::handler(name = "filter", view)]
+    #[cc_lb_pdk_wasmtime::handler(
+        filter,
+        wire = 1,
+        description = "Filters upstream candidates by cache affinity",
+        usage = "Reads the optional keep_k principal claim as a usize and keeps the top candidates by predicted_cache_read_tokens.",
+        view
+    )]
     pub fn filter(req: &ArchivedFilterRequest) -> FilterResponse {
         let candidates: &[ArchivedUpstreamCandidate] = &req.candidates;
         let keep_k = keep_k_from_principal(req);

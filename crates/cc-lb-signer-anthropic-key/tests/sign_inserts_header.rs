@@ -29,10 +29,6 @@ impl UpstreamDialect for DirectDialect {
             Bytes::from_static(br#"{"model":"claude-3-5-sonnet-20241022"}"#),
         ))
     }
-
-    fn normalize_error(&self, _status: http::StatusCode, _body: &Bytes) -> Option<Bytes> {
-        None
-    }
 }
 
 #[tokio::test]

@@ -14,7 +14,7 @@ use cc_lb_plugin_api::{
     DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext,
     ShapedRequest, ShapedRequestBuilder, Upstream, UpstreamDialect,
 };
-use http::{Response, StatusCode};
+use http::Response;
 use http_body_util::BodyExt;
 use tokio::sync::Notify;
 
@@ -56,10 +56,6 @@ impl UpstreamDialect for TestDialect {
         Err(DialectError::UnsupportedRequest {
             reason: "test dialect is relay-only".to_owned(),
         })
-    }
-
-    fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-        None
     }
 }
 

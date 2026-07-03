@@ -136,7 +136,9 @@ async fn upload_plugin(
                 label: None,
                 uploaded_at_unix_secs: 1_800_000_000,
                 uploaded_by_admin_id: Uuid::new_v4(),
-                wire_version: 1,
+                description: format!("{name} description"),
+                usage: "test fixture".to_owned(),
+                hook_metadata: Default::default(),
                 supported_slots,
             },
         )
@@ -161,7 +163,6 @@ async fn insert_router_chain(
             sse_per_event: false,
             batched_events_per_flush: 100,
             batched_flush_ms: 1_000,
-            wire_version: None,
         })
         .await?;
     Ok(entry)

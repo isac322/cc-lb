@@ -1,5 +1,7 @@
 # ADR-0001: Plugin runtime vNext — replace Extism with raw Wasmtime + cc-lb PDK
 
+> Historical design note: this ADR records the runtime-vnext decision context and may reference earlier crate names, schema-hash terminology, and removed hook concepts. For the current plugin author contract, see [the plugin author guide](../plugin-author-guide.md).
+
 - Status: Proposed
 - Date: 2026-06-27
 - Supersedes: current Extism-based plugin runtime (`crates/cc-lb-runtime-extism/`)

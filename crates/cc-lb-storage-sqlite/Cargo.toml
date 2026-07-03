@@ -11,6 +11,7 @@ cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 async-trait = { workspace = true }
 chrono = { workspace = true }

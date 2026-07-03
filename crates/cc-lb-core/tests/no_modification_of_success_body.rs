@@ -3,16 +3,12 @@ mod common;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_core::{DispatchError, ErrorNormalizer, LifecycleConfig, UpstreamDispatch, UpstreamKind};
-use cc_lb_plugin_api::{
-    DialectError, Principal, RequestContext, ShapedRequest, ShapedRequestBuilder, SignedRequest,
-    Upstream, UpstreamDialect,
-};
+use cc_lb_core::{DispatchError, ErrorNormalizer, LifecycleConfig, UpstreamDispatch};
+use cc_lb_plugin_api::SignedRequest;
 use http::{Response, StatusCode};
 use http_body_util::BodyExt;
 use url::Url;
@@ -26,15 +22,6 @@ async fn lifecycle_does_not_invoke_normalizer_for_success_body() {
     let upstream_body = Bytes::from_static(
         br#"{"type":"message","id":"msg_success","content":[{"type":"text","text":"ok"}]}"#,
     );
-    let calls = Arc::new(AtomicUsize::new(0));
-    let mut normalizer = ErrorNormalizer::new();
-    normalizer.register_dialect(
-        UpstreamKind::AnthropicDirect,
-        Arc::new(CountingDialect {
-            calls: Arc::clone(&calls),
-        }),
-    );
-
     let state = TestState::default();
     let lifecycle = lifecycle_with_parts(
         TestAuthn::new(state),
@@ -47,7 +34,7 @@ async fn lifecycle_does_not_invoke_normalizer_for_success_body() {
         vec![Arc::new(RecordingHook::default())],
         LifecycleConfig::default(),
     )
-    .with_error_normalizer(Arc::new(normalizer));
+    .with_error_normalizer(Arc::new(ErrorNormalizer::new()));
 
     let response = lifecycle
         .handle(messages_request(Bytes::from_static(
@@ -64,8 +51,6 @@ async fn lifecycle_does_not_invoke_normalizer_for_success_body() {
         .expect("success body collects")
         .to_bytes();
     assert_eq!(client_body, upstream_body);
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
-
     write_success_diff_evidence(&upstream_body, &client_body);
 }
 
@@ -79,31 +64,6 @@ impl UpstreamDispatch for FixedSuccessDispatch {
         let mut response = Response::new(Body::from(self.body.clone()));
         *response.status_mut() = StatusCode::OK;
         Ok(response)
-    }
-}
-
-struct CountingDialect {
-    calls: Arc<AtomicUsize>,
-}
-
-impl UpstreamDialect for CountingDialect {
-    fn shape(
-        &self,
-        _ctx: &RequestContext,
-        _upstream: &Upstream,
-        _principal: &Principal,
-        _builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, DialectError> {
-        Err(DialectError::UnsupportedRequest {
-            reason: "test dialect is error-normalization only".to_owned(),
-        })
-    }
-
-    fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        Some(Bytes::from_static(
-            br#"{"type":"error","error":{"type":"api_error","message":"rewritten"}}"#,
-        ))
     }
 }
 

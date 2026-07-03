@@ -1,7 +1,7 @@
 //! `FilterPlugin` adapter backed by the wasmtime runtime.
 //!
 //! Phase 1 W6 — bridges the host-side `cc_lb_plugin_api::FilterPlugin`
-//! trait surface to the rkyv wire types in `cc_lb_plugin_types`. One
+//! trait surface to the rkyv wire types in `cc_lb_plugin_wire`. One
 //! request flows through three transforms:
 //!
 //! 1. `(RequestContext, Principal, [UpstreamCandidate]) -> wire FilterRequest`
@@ -25,9 +25,10 @@ use cc_lb_plugin_api::{
     FilterError, FilterOutput, FilterPlugin, PerCandidateReason, Principal, RequestContext,
     SlotKey, UpstreamCandidate,
 };
-use cc_lb_plugin_types::{
-    ArchivedFilterResponse, ClaimRef, FilterRequestRef, HeaderRef, NormalizeErrorRequestRef,
-    PrincipalRef, QueryRef, ShapeRequestRef, UpstreamCandidateRef, UpstreamRef,
+use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
+use cc_lb_plugin_wire::{
+    ArchivedFilterResponse, ClaimRef, FilterRequestRef, HeaderRef, PrincipalRef, QueryRef,
+    ShapeRequestRef, UpstreamCandidateRef, UpstreamRef,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
@@ -90,8 +91,17 @@ impl FilterPlugin for WasmtimeFilterPlugin {
             reason: format!("rkyv encode request: {e}"),
         })?;
 
-        let out_bytes =
-            call_filter_hook(&self.cell, in_bytes.as_slice()).map_err(runtime_error_to_filter)?;
+        let out_bytes = match self
+            .cell
+            .metadata
+            .hooks
+            .get(HookKind::Filter.as_str())
+            .and_then(|m| WireVersion::from_u8(m.wire_version))
+        {
+            Some(WireVersion::V1) => call_filter_hook(&self.cell, in_bytes.as_slice()),
+            None => unreachable!("filter slot has filter metadata"),
+        }
+        .map_err(runtime_error_to_filter)?;
         // Wire-bound cap on filter output; matches the DEFAULT_FILES_CAP_BYTES
         // request body cap by default so legitimate large-message flows are
         // unaffected. Tighter caps are opt-in via config.
@@ -350,8 +360,8 @@ fn per_candidate_reason_from_label(decision: &str, reason: &str) -> PerCandidate
     }
 }
 
-/// `UpstreamDialect` adapter that routes both `shape` and
-/// `normalize_error` to a single wasmtime `SlotKind::Shape` slot.
+/// `UpstreamDialect` adapter that routes `shape` to a wasmtime
+/// `SlotKind::Shape` slot.
 /// Snapshots the cell at construction time — see
 /// [`WasmtimeFilterPlugin`] for the atomic hot-swap rationale.
 pub struct WasmtimeUpstreamDialect {
@@ -387,8 +397,17 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
             reason: format!("rkyv encode ShapeRequest: {e}"),
         })?;
 
-        let out_bytes = crate::cache::call_shape_hook(&self.cell, in_bytes.as_slice())
-            .map_err(runtime_error_to_dialect)?;
+        let out_bytes = match self
+            .cell
+            .metadata
+            .hooks
+            .get(HookKind::Shape.as_str())
+            .and_then(|m| WireVersion::from_u8(m.wire_version))
+        {
+            Some(WireVersion::V1) => crate::cache::call_shape_hook(&self.cell, in_bytes.as_slice()),
+            None => unreachable!("shape slot has shape metadata"),
+        }
+        .map_err(runtime_error_to_dialect)?;
         let out_bound = self.runtime_config.wire_bounds.output_body_bytes;
         if out_bytes.len() as u64 > out_bound {
             return Err(cc_lb_plugin_api::DialectError::UnsupportedRequest {
@@ -403,11 +422,12 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
         let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
         aligned.extend_from_slice(&out_bytes);
 
-        let archived =
-            rkyv::access::<cc_lb_plugin_types::ArchivedShapeResponse, RkyvError>(&aligned)
-                .map_err(|e| cc_lb_plugin_api::DialectError::UnsupportedRequest {
-                    reason: format!("rkyv access ShapeResponse: {e}"),
-                })?;
+        let archived = rkyv::access::<cc_lb_plugin_wire::ArchivedShapeResponse, RkyvError>(
+            &aligned,
+        )
+        .map_err(|e| cc_lb_plugin_api::DialectError::UnsupportedRequest {
+            reason: format!("rkyv access ShapeResponse: {e}"),
+        })?;
 
         wire_to_host_shaped_request(
             builder,
@@ -417,56 +437,12 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
             &self.runtime_config.wire_bounds,
         )
     }
-
-    fn normalize_error(
-        &self,
-        status: http::StatusCode,
-        body: &bytes::Bytes,
-    ) -> Option<bytes::Bytes> {
-        // RFC-0001 #9: borrow the body via `NormalizeErrorRequestRef`
-        // so the upstream error payload is serialised without a
-        // `.to_vec()` — normalize_error is called on every 4xx/5xx
-        // from the upstream, so any per-call copy multiplies with
-        // error volume.
-        let request = NormalizeErrorRequestRef {
-            status: status.as_u16(),
-            body: body.as_ref(),
-        };
-
-        let in_bytes = rkyv::to_bytes::<RkyvError>(&request).ok()?;
-        let out_bytes =
-            crate::cache::call_normalize_error_hook(&self.cell, in_bytes.as_slice()).ok()?;
-
-        let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
-        aligned.extend_from_slice(&out_bytes);
-
-        let archived =
-            rkyv::access::<cc_lb_plugin_types::ArchivedNormalizeErrorResponse, RkyvError>(&aligned)
-                .ok()?;
-
-        let normalize_cap = self.runtime_config.wire_bounds.normalize_error_body_bytes;
-        // Walk archived directly; ArchivedOption::as_ref → Option<&ArchivedBox<[u8]>>.
-        // Only the surviving body needs an owned copy for Bytes.
-        archived.normalized.as_ref().and_then(|archived_body| {
-            let body_slice: &[u8] = &archived_body[..];
-            if body_slice.len() as u64 > normalize_cap {
-                tracing::warn!(
-                    body_len = body_slice.len(),
-                    cap = normalize_cap,
-                    "normalize_error output body exceeds wire_bounds cap; dropping"
-                );
-                None
-            } else {
-                Some(bytes::Bytes::copy_from_slice(body_slice))
-            }
-        })
-    }
 }
 
-fn host_upstream_to_wire(upstream: &cc_lb_plugin_api::Upstream) -> cc_lb_plugin_types::Upstream {
+fn host_upstream_to_wire(upstream: &cc_lb_plugin_api::Upstream) -> cc_lb_plugin_wire::Upstream {
     match upstream {
         cc_lb_plugin_api::Upstream::AnthropicDirect { base_url } => {
-            cc_lb_plugin_types::Upstream::AnthropicDirect {
+            cc_lb_plugin_wire::Upstream::AnthropicDirect {
                 base_url: base_url.as_ref().map(|u| u.to_string().into_boxed_str()),
             }
         }
@@ -557,7 +533,7 @@ fn upstream_base_url(upstream: &cc_lb_plugin_api::Upstream) -> Option<url::Url> 
 
 fn wire_to_host_shaped_request(
     builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
-    archived: &cc_lb_plugin_types::ArchivedShapeResponse,
+    archived: &cc_lb_plugin_wire::ArchivedShapeResponse,
     upstream: &cc_lb_plugin_api::Upstream,
     origin_policy: crate::policy::ShapeOriginPolicy,
     wire_bounds: &crate::policy::PluginWireBounds,
@@ -666,10 +642,20 @@ impl cc_lb_plugin_api::ObservabilityHook for WasmtimeObservabilityHookPlugin {
                 reason: format!("rkyv encode ObserveEvent: {e}"),
             }
         })?;
-        crate::cache::call_observe_hook(&self.cell, in_bytes.as_slice()).map_err(|e| {
-            cc_lb_plugin_api::ObservabilityError::Dropped {
-                reason: e.to_string(),
+        match self
+            .cell
+            .metadata
+            .hooks
+            .get(HookKind::Observe.as_str())
+            .and_then(|m| WireVersion::from_u8(m.wire_version))
+        {
+            Some(WireVersion::V1) => {
+                crate::cache::call_observe_hook(&self.cell, in_bytes.as_slice())
             }
+            None => unreachable!("observe slot has observe metadata"),
+        }
+        .map_err(|e| cc_lb_plugin_api::ObservabilityError::Dropped {
+            reason: e.to_string(),
         })?;
         Ok(())
     }
@@ -677,9 +663,9 @@ impl cc_lb_plugin_api::ObservabilityHook for WasmtimeObservabilityHookPlugin {
 
 fn host_observe_event_to_wire(
     event: cc_lb_plugin_api::ObserveEvent,
-) -> cc_lb_plugin_types::ObserveEvent {
+) -> cc_lb_plugin_wire::ObserveEvent {
     use cc_lb_plugin_api::ObserveEvent as Host;
-    use cc_lb_plugin_types::ObserveEvent as Wire;
+    use cc_lb_plugin_wire::ObserveEvent as Wire;
     match event {
         Host::RequestStarted {
             request_id,
@@ -739,8 +725,8 @@ fn host_observe_event_to_wire(
 mod tests {
     use super::*;
     use cc_lb_plugin_api::PrincipalKind;
-    use cc_lb_plugin_types::FilterResponse as WireFilterResponse;
-    use cc_lb_plugin_types::PerCandidateReason as WirePerCandidateReason;
+    use cc_lb_plugin_wire::FilterResponse as WireFilterResponse;
+    use cc_lb_plugin_wire::PerCandidateReason as WirePerCandidateReason;
 
     fn fixture_principal() -> Principal {
         let mut claims = serde_json::Map::new();
@@ -781,7 +767,7 @@ mod tests {
         // Function now returns AlignedVec via borrowed encoding
         // (RFC-0001 #9); decode via `rkyv::access` to verify shape.
         let bytes = host_to_wire_request(&ctx, &principal, &[], false).expect("encode");
-        let archived = rkyv::access::<cc_lb_plugin_types::ArchivedFilterRequest, RkyvError>(&bytes)
+        let archived = rkyv::access::<cc_lb_plugin_wire::ArchivedFilterRequest, RkyvError>(&bytes)
             .expect("archived");
         let request_id: &str = &archived.request_id;
         let method: &str = &archived.method;

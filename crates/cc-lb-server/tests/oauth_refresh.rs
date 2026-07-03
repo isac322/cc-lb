@@ -780,8 +780,4 @@ impl UpstreamDialect for DirectDialect {
             Bytes::from_static(b"{}"),
         ))
     }
-
-    fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-        None
-    }
 }

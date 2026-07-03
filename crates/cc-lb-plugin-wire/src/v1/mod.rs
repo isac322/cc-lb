@@ -1,8 +1,10 @@
+//! Wire schema version 1 (baseline).
+//!
 //! Shared types between host (`cc-lb-runtime-wasmtime`) and guest
 //! (`cc-lb-pdk-wasmtime`) compiled in lockstep.
 //!
 //! Wire types for the three hooks the wasmtime runtime ships:
-//! filter (Phase 1), shape + normalize_error (Phase 2), observe
+//! filter (Phase 1), shape (Phase 2), observe
 //! (Phase 2). Signer extension is intentionally not exposed across
 //! the plugin boundary — host-side built-in `AnthropicKeySigner` /
 //! `AnthropicOAuthSigner` handle credential signing in-process.
@@ -22,11 +24,10 @@
 //! * The wire schema is fingerprinted via BLAKE3 of `cc_lb_schema_hash`
 //!   custom section content. Host and guest must agree byte-for-byte.
 //!
-//! ## Wire v2 (RFC-0001 #9 borrowed-wire optimisation)
+//! ## Borrowed-wire optimisation (RFC-0001 #9)
 //!
-//! Host-to-guest request types (FilterRequest, ShapeRequest,
-//! NormalizeErrorRequest) come in two flavours that produce IDENTICAL
-//! archived bytes:
+//! Host-to-guest request types (FilterRequest, ShapeRequest) come in
+//! two flavours that produce IDENTICAL archived bytes:
 //! * **Owned** (`FilterRequest`, `ShapeRequest`, ...) — owned `Box<str>`
 //!   / `Box<[u8]>` fields. Used by the guest for `rkyv::deserialize`
 //!   round-trips and for round-trip test fixtures.
@@ -39,7 +40,7 @@
 //!
 //! Both variants archive to the same `ArchivedBox<ArchivedSlice<u8>>`
 //! / `ArchivedBox<ArchivedStr>` byte layouts — verified by the wire
-//! round-trip tests in `crates/cc-lb-plugin-types/tests/borrowed_wire_roundtrip.rs`.
+//! round-trip tests in `crates/cc-lb-plugin-wire/tests/borrowed_wire_roundtrip.rs`.
 //! When either variant is written to guest memory, the guest reads it
 //! via `rkyv::access::<ArchivedFilterRequest, _>` — the archived
 //! type name is identical because the owned type is the sole `Archive`
@@ -47,10 +48,6 @@
 //! reuse the owned type's archived form.
 //!
 //! See `docs/rfc/0001-plugin-runtime-vnext.md`.
-#![no_std]
-#![forbid(unsafe_code)]
-
-extern crate alloc;
 
 use alloc::boxed::Box;
 
@@ -278,30 +275,6 @@ pub struct ShapeResponse {
     pub body: Box<[u8]>,
 }
 
-/// `normalize_error` hook input (owned form).
-#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
-#[rkyv(derive(Debug))]
-pub struct NormalizeErrorRequest {
-    pub status: u16,
-    pub body: Box<[u8]>,
-}
-
-/// Borrowed mirror of [`NormalizeErrorRequest`].
-#[derive(Archive, Serialize)]
-pub struct NormalizeErrorRequestRef<'a> {
-    pub status: u16,
-    #[rkyv(with = InlineAsBox)]
-    pub body: &'a [u8],
-}
-
-/// `normalize_error` hook output. `None` means "pass through original
-/// upstream body" so plugins do not have to opt out per-status.
-#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
-#[rkyv(derive(Debug))]
-pub struct NormalizeErrorResponse {
-    pub normalized: Option<Box<[u8]>>,
-}
-
 /// Lifecycle event delivered to the observe hook. rkyv mirror of
 /// `cc_lb_plugin_api::ObserveEvent`.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
@@ -338,30 +311,4 @@ pub enum ObserveEvent {
     },
 }
 
-/// Schema fingerprint constants shared by `cc-lb-pdk-wasmtime-macros`
-/// (proc-macro time) and `cc-lb-runtime-wasmtime::inspect` (load-time).
-/// Single source of truth — bumping any tag requires rebuilding every
-/// plugin against the new value.
-pub mod schema {
-    pub const WIRE_SCHEMA_TAG_FILTER: &[u8] = b"cc_lb.wire.v1.filter.rkyv";
-    pub const WIRE_SCHEMA_TAG_SHAPE: &[u8] = b"cc_lb.wire.v1.shape.rkyv";
-    pub const WIRE_SCHEMA_TAG_NORMALIZE_ERROR: &[u8] = b"cc_lb.wire.v1.normalize_error.rkyv";
-    pub const WIRE_SCHEMA_TAG_OBSERVE: &[u8] = b"cc_lb.wire.v1.observe.rkyv";
-
-    pub const SECTION_FILTER: &str = "cc_lb.schema.filter.v1";
-    pub const SECTION_SHAPE: &str = "cc_lb.schema.shape.v1";
-    pub const SECTION_NORMALIZE_ERROR: &str = "cc_lb.schema.normalize_error.v1";
-    pub const SECTION_OBSERVE: &str = "cc_lb.schema.observe.v1";
-}
-
-/// Packed `(out_ptr, out_len)` return value used by every guest hook export.
-pub const fn pack_ret(ptr: u32, len: u32) -> u64 {
-    ((ptr as u64) << 32) | (len as u64)
-}
-
-/// Inverse of [`pack_ret`].
-pub const fn unpack_ret(packed: u64) -> (u32, u32) {
-    let ptr = (packed >> 32) as u32;
-    let len = (packed & 0xFFFF_FFFF) as u32;
-    (ptr, len)
-}
+include!(concat!(env!("OUT_DIR"), "/wire_schema_impls.rs"));

@@ -8,7 +8,7 @@ use cc_lb_plugin_api::{
     SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
     UpstreamCandidate, UpstreamDialect,
 };
-use http::{HeaderMap, Method, StatusCode};
+use http::{HeaderMap, Method};
 
 struct DummyRouter;
 struct DummyDialect;
@@ -45,10 +45,6 @@ impl UpstreamDialect for DummyDialect {
             HeaderMap::new(),
             Bytes::new(),
         ))
-    }
-
-    fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-        None
     }
 }
 

@@ -1,0 +1,63 @@
+use cc_lb_plugin_wire::{HookKind, WireVersion, schema};
+
+#[test]
+fn root_schema_exports_describe_v1_hooks() {
+    assert_eq!(WireVersion::V1.as_u8(), 1);
+    assert_eq!(WireVersion::from_u8(1), Some(WireVersion::V1));
+    assert_eq!(WireVersion::from_u8(2), None);
+    assert_eq!(WireVersion::V1.as_str(), "v1");
+
+    assert_eq!(HookKind::Filter.as_str(), "filter");
+    assert_eq!(HookKind::Filter.export_name(), "cc_lb_filter");
+    assert_eq!(HookKind::Filter.section_prefix(), "cc_lb.schema.filter");
+    assert_eq!(HookKind::parse("shape"), Some(HookKind::Shape));
+    assert!(schema::host_supports(HookKind::Observe, WireVersion::V1));
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn plugin_metadata_parse_validates_required_fields() {
+    use cc_lb_plugin_wire::{MetadataError, PluginMetadata};
+
+    let metadata = PluginMetadata::parse(
+        br#"{
+            "name":"cache-aware",
+            "version":"0.1.0",
+            "description":"Routes requests by cache state.",
+            "usage":"Attach to filter chains.",
+            "hooks":{
+                "filter":{
+                    "wire_version":1,
+                    "description":"Filters upstream candidates.",
+                    "usage":"Return accept/reject reasons."
+                }
+            }
+        }"#,
+    )
+    .expect("valid metadata parses");
+
+    assert_eq!(metadata.name, "cache-aware");
+    assert_eq!(metadata.hooks["filter"].wire_version, 1);
+
+    let error = PluginMetadata::parse(
+        br#"{
+            "name":"cache-aware",
+            "version":"0.1.0",
+            "description":"Routes requests by cache state.",
+            "usage":"Attach to filter chains.",
+            "hooks":{
+                "sign":{
+                    "wire_version":1,
+                    "description":"Invalid hook.",
+                    "usage":"Should fail."
+                }
+            }
+        }"#,
+    )
+    .expect_err("unknown hook is rejected");
+
+    match error {
+        MetadataError::UnknownHook(hook) => assert_eq!(hook, "sign"),
+        other => panic!("unexpected error: {other}"),
+    }
+}

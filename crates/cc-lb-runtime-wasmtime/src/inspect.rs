@@ -1,4 +1,4 @@
-//! Load-time wasm inspection — per-slot-kind validation gate.
+//! Load-time wasm inspection — metadata + fingerprint validation gate.
 //!
 //! The host walks raw `.wasm` bytes with `wasmparser` to enforce three
 //! invariants before the module ever sees the wasmtime engine:
@@ -6,140 +6,63 @@
 //! 1. **Imports allow-list.** Stage 1 still disallows _every_ host
 //!    import. The only legal direction of communication is host → guest
 //!    via the declared exports.
-//! 2. **Required exports per slot kind.** Every slot requires
-//!    `memory`, `cc_lb_alloc`, `cc_lb_free`. On top of that each
-//!    [`SlotKind`] adds its own hook exports — e.g. `Shape` requires
-//!    both `cc_lb_shape` AND `cc_lb_normalize_error` because the
-//!    `UpstreamDialect` trait fuses the two hooks into one host-side
-//!    plugin. Signature validation is deferred to instantiate-time via
+//! 2. **Required exports per declared hook.** Every module requires
+//!    `memory`, `cc_lb_alloc`, `cc_lb_free`. On top of that each hook
+//!    listed in `cc_lb.plugin.v1` requires its matching export.
+//!    Signature validation is deferred to instantiate-time via
 //!    `instance.get_typed_func`.
-//! 3. **Schema hashes.** Each hook ships a `cc_lb.schema.<kind>.v1`
-//!    custom section holding the 32-byte BLAKE3 of the matching
-//!    `cc_lb.wire.v1.<kind>.rkyv` tag. Every required section must be
-//!    present AND match the host's expected hash byte-for-byte;
-//!    mismatch rejects the module before compilation.
+//! 3. **Schema fingerprints.** Each declared hook ships a
+//!    `cc_lb.schema.<hook>.v<N>` custom section holding the 32-byte
+//!    [`cc_lb_plugin_wire::WireSchema::FINGERPRINT`] for the matching
+//!    host wire type.
 //!
 //! `wasmtime::Module::custom_sections` does NOT round-trip through
 //! `precompile_module → Module::deserialize`, so this inspection runs
 //! against the raw `.wasm` bytes.
 //!
 //! Section + tag names are sourced from
-//! [`cc_lb_plugin_types::schema`] so the host, the
+//! [`cc_lb_plugin_wire::schema`] so the host, the
 //! `cc-lb-pdk-wasmtime-macros` codegen, and this gate share a single
 //! source of truth.
 
+use std::collections::{BTreeMap, HashMap, HashSet};
+
 use crate::error::WasmtimeRuntimeError;
-use cc_lb_plugin_types::schema as wire_schema;
+use cc_lb_plugin_wire::metadata::PluginMetadata;
+use cc_lb_plugin_wire::schema::{HookKind, WireSchema, WireVersion, host_supported_versions};
 use wasmparser::{ExternalKind, Parser, Payload};
 
 const PLUGIN_META_SECTION: &str = "cc_lb.plugin.v1";
 const REQUIRED_MEMORY_EXPORT: &str = "memory";
 const ALWAYS_REQUIRED_FUNC_EXPORTS: &[&str] = &["cc_lb_alloc", "cc_lb_free"];
 
-/// What kind of hook surface a given plugin slot fills.
-///
-/// One [`crate::PluginSlot`] occupies exactly one variant — a single
-/// `.wasm` plugin cannot simultaneously be a filter AND a dialect.
-/// Hosts pick the kind from the manifest before calling
-/// [`inspect_wasm`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SlotKind {
-    /// Filter slot — implements `FilterPlugin`. Exports `cc_lb_filter`.
-    Filter,
-    /// Shape slot — implements `UpstreamDialect`. Exports both
-    /// `cc_lb_shape` (request shaping) AND `cc_lb_normalize_error`
-    /// (error body normalisation) because the trait fuses them.
-    Shape,
-    /// Observe slot — implements `ObservabilityHook`. Exports
-    /// `cc_lb_observe`.
-    Observe,
-}
-
-impl SlotKind {
-    /// Hook function exports required for this slot kind, in addition
-    /// to [`ALWAYS_REQUIRED_FUNC_EXPORTS`].
-    pub fn required_hook_exports(self) -> &'static [&'static str] {
-        match self {
-            SlotKind::Filter => &["cc_lb_filter"],
-            SlotKind::Shape => &["cc_lb_shape", "cc_lb_normalize_error"],
-            SlotKind::Observe => &["cc_lb_observe"],
-        }
-    }
-
-    /// `(section name, expected wire-schema tag bytes)` pairs that must
-    /// all be present + match for this slot kind.
-    pub fn required_schemas(self) -> &'static [(&'static str, &'static [u8])] {
-        match self {
-            SlotKind::Filter => &[(
-                wire_schema::SECTION_FILTER,
-                wire_schema::WIRE_SCHEMA_TAG_FILTER,
-            )],
-            SlotKind::Shape => &[
-                (
-                    wire_schema::SECTION_SHAPE,
-                    wire_schema::WIRE_SCHEMA_TAG_SHAPE,
-                ),
-                (
-                    wire_schema::SECTION_NORMALIZE_ERROR,
-                    wire_schema::WIRE_SCHEMA_TAG_NORMALIZE_ERROR,
-                ),
-            ],
-            SlotKind::Observe => &[(
-                wire_schema::SECTION_OBSERVE,
-                wire_schema::WIRE_SCHEMA_TAG_OBSERVE,
-            )],
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            SlotKind::Filter => "filter",
-            SlotKind::Shape => "shape",
-            SlotKind::Observe => "observe",
-        }
-    }
-}
-
 /// Outcome of [`inspect_wasm`].
-///
-/// `schema_hashes` carries one entry per required schema section in
-/// the same order [`SlotKind::required_schemas`] returns them — the
-/// caller stashes them on the [`crate::PluginCell`] for downstream
-/// telemetry parity.
 #[derive(Debug, Clone)]
 pub struct ModuleInspection {
-    pub slot_kind: SlotKind,
-    pub schema_hashes: Vec<(&'static str, [u8; 32])>,
-    /// Raw JSON bytes from `cc_lb.plugin.v1` if the plugin shipped
-    /// one. Optional — present only for diagnostics, not part of the
-    /// trust contract.
-    pub plugin_metadata: Option<Vec<u8>>,
+    pub metadata: PluginMetadata,
+    pub hook_versions: BTreeMap<HookKind, WireVersion>,
+    pub hook_fingerprints: BTreeMap<HookKind, [u8; 32]>,
 }
 
 impl ModuleInspection {
-    /// Primary hash — first entry from [`Self::schema_hashes`]. Useful
-    /// for callers that historically stored a single fingerprint
-    /// (e.g. [`crate::PluginCell::schema_hash`]).
+    /// Primary fingerprint — first declared hook fingerprint. Kept for
+    /// callers that still persist the historical single schema hash.
     pub fn primary_schema_hash(&self) -> [u8; 32] {
-        self.schema_hashes
-            .first()
-            .map(|(_, h)| *h)
-            .expect("required_schemas() guarantees at least one entry per SlotKind")
+        self.hook_fingerprints
+            .values()
+            .next()
+            .copied()
+            .expect("PluginMetadata::parse guarantees at least one hook")
     }
 }
 
-/// Walk `wasm` bytes once, enforcing the three invariants in the
-/// module docs against the requested [`SlotKind`]. The check is purely
-/// structural and never executes guest code.
-pub fn inspect_wasm(kind: SlotKind, wasm: &[u8]) -> Result<ModuleInspection, WasmtimeRuntimeError> {
-    let required_schemas = kind.required_schemas();
-    let required_hook_exports = kind.required_hook_exports();
-
-    let mut observed_sections: std::collections::HashMap<&'static str, [u8; 32]> =
-        std::collections::HashMap::with_capacity(required_schemas.len());
+/// Walk `wasm` bytes once, enforcing the structural invariants in the
+/// module docs. The check is purely structural and never executes guest
+/// code.
+pub fn inspect_wasm(kind: HookKind, wasm: &[u8]) -> Result<ModuleInspection, WasmtimeRuntimeError> {
+    let mut observed_sections: HashMap<String, [u8; 32]> = HashMap::new();
     let mut plugin_metadata: Option<Vec<u8>> = None;
-    let mut found_func_exports: Vec<String> =
-        Vec::with_capacity(ALWAYS_REQUIRED_FUNC_EXPORTS.len() + required_hook_exports.len());
+    let mut found_func_exports: HashSet<String> = HashSet::new();
     let mut found_memory_export = false;
 
     for payload in Parser::new(0).parse_all(wasm) {
@@ -165,13 +88,7 @@ pub fn inspect_wasm(kind: SlotKind, wasm: &[u8]) -> Result<ModuleInspection, Was
                     })?;
                     match export.kind {
                         ExternalKind::Func => {
-                            let needed = ALWAYS_REQUIRED_FUNC_EXPORTS
-                                .iter()
-                                .chain(required_hook_exports.iter())
-                                .any(|n| *n == export.name);
-                            if needed {
-                                found_func_exports.push(export.name.to_owned());
-                            }
+                            found_func_exports.insert(export.name.to_owned());
                         }
                         ExternalKind::Memory if export.name == REQUIRED_MEMORY_EXPORT => {
                             found_memory_export = true;
@@ -186,23 +103,43 @@ pub fn inspect_wasm(kind: SlotKind, wasm: &[u8]) -> Result<ModuleInspection, Was
                     plugin_metadata = Some(section.data().to_vec());
                     continue;
                 }
-                if let Some((section_name, _)) = required_schemas.iter().find(|(n, _)| *n == name) {
+                if name.starts_with("cc_lb.schema.") {
                     let data = section.data();
                     if data.len() != 32 {
                         return Err(WasmtimeRuntimeError::ModuleRejected {
                             reason: format!(
-                                "`{section_name}` section is {} bytes; expected 32",
+                                "`{name}` section is {} bytes; expected 32",
                                 data.len()
                             ),
                         });
                     }
                     let mut buf = [0u8; 32];
                     buf.copy_from_slice(data);
-                    observed_sections.insert(section_name, buf);
+                    observed_sections.insert(name.to_owned(), buf);
                 }
             }
             _ => {}
         }
+    }
+
+    let metadata = plugin_metadata
+        .as_deref()
+        .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
+            reason: format!("missing required `{PLUGIN_META_SECTION}` custom section"),
+        })
+        .and_then(|bytes| {
+            PluginMetadata::parse(bytes).map_err(|error| WasmtimeRuntimeError::ModuleRejected {
+                reason: format!("invalid `{PLUGIN_META_SECTION}` metadata: {error}"),
+            })
+        })?;
+
+    if !metadata.hooks.contains_key(kind.as_str()) {
+        return Err(WasmtimeRuntimeError::ModuleRejected {
+            reason: format!(
+                "metadata does not declare required `{}` hook for this slot",
+                kind.as_str()
+            ),
+        });
     }
 
     if !found_memory_export {
@@ -210,49 +147,96 @@ pub fn inspect_wasm(kind: SlotKind, wasm: &[u8]) -> Result<ModuleInspection, Was
             reason: format!("missing required export `{REQUIRED_MEMORY_EXPORT}` (Memory)"),
         });
     }
-    for needed in ALWAYS_REQUIRED_FUNC_EXPORTS
-        .iter()
-        .chain(required_hook_exports.iter())
-    {
-        if !found_func_exports.iter().any(|n| n == needed) {
+    for needed in ALWAYS_REQUIRED_FUNC_EXPORTS {
+        if !found_func_exports.contains(*needed) {
             return Err(WasmtimeRuntimeError::ModuleRejected {
-                reason: format!(
-                    "missing required function export `{needed}` for slot kind `{}`",
-                    kind.label()
-                ),
+                reason: format!("missing required function export `{needed}`"),
             });
         }
     }
 
-    let mut schema_hashes = Vec::with_capacity(required_schemas.len());
-    for (section_name, tag) in required_schemas {
+    let mut hook_versions = BTreeMap::new();
+    let mut hook_fingerprints = BTreeMap::new();
+    for (hook_name, hook_metadata) in &metadata.hooks {
+        let hook =
+            HookKind::parse(hook_name).ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
+                reason: format!("unknown hook `{hook_name}` in metadata"),
+            })?;
+        let wire_version = WireVersion::from_u8(hook_metadata.wire_version).ok_or_else(|| {
+            WasmtimeRuntimeError::ModuleRejected {
+                reason: format!(
+                    "hook `{}` declares unsupported wire version {}",
+                    hook.as_str(),
+                    hook_metadata.wire_version
+                ),
+            }
+        })?;
+        if !host_supported_versions(hook).contains(&wire_version) {
+            return Err(WasmtimeRuntimeError::ModuleRejected {
+                reason: format!(
+                    "host does not support hook `{}` wire version {}",
+                    hook.as_str(),
+                    wire_version.as_u8()
+                ),
+            });
+        }
+        let needed_export = hook.export_name();
+        if !found_func_exports.contains(needed_export) {
+            return Err(WasmtimeRuntimeError::ModuleRejected {
+                reason: format!(
+                    "missing required function export `{needed_export}` for declared hook `{}`",
+                    hook.as_str()
+                ),
+            });
+        }
+
+        let section_name = schema_section_name(hook, wire_version);
         let observed = observed_sections
-            .get(section_name)
+            .get(&section_name)
             .copied()
             .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
                 reason: format!(
-                    "missing `{section_name}` custom section for slot kind `{}`",
-                    kind.label()
+                    "missing `{section_name}` custom section for declared hook `{}`",
+                    hook.as_str()
                 ),
             })?;
-        let expected = blake3::hash(tag);
-        if observed != *expected.as_bytes() {
+        let expected = expected_fingerprint(hook, wire_version);
+        if observed != expected {
             return Err(WasmtimeRuntimeError::ModuleRejected {
                 reason: format!(
                     "`{section_name}` hash mismatch (host expects {} but plugin shipped {})",
-                    hex32(expected.as_bytes()),
+                    hex32(&expected),
                     hex32(&observed),
                 ),
             });
         }
-        schema_hashes.push((*section_name, observed));
+        hook_versions.insert(hook, wire_version);
+        hook_fingerprints.insert(hook, observed);
     }
 
     Ok(ModuleInspection {
-        slot_kind: kind,
-        schema_hashes,
-        plugin_metadata,
+        metadata,
+        hook_versions,
+        hook_fingerprints,
     })
+}
+
+pub(crate) fn schema_section_name(hook: HookKind, version: WireVersion) -> String {
+    format!("{}.{}", hook.section_prefix(), version.as_str())
+}
+
+pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> [u8; 32] {
+    match (hook, version) {
+        (HookKind::Filter, WireVersion::V1) => {
+            <cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT
+        }
+        (HookKind::Shape, WireVersion::V1) => {
+            <cc_lb_plugin_wire::v1::ShapeRequest as WireSchema>::FINGERPRINT
+        }
+        (HookKind::Observe, WireVersion::V1) => {
+            <cc_lb_plugin_wire::v1::ObserveEvent as WireSchema>::FINGERPRINT
+        }
+    }
 }
 
 fn hex32(bytes: &[u8; 32]) -> String {
@@ -269,24 +253,20 @@ mod tests {
     use super::*;
 
     fn filter_section_bytes() -> Vec<u8> {
-        blake3::hash(wire_schema::WIRE_SCHEMA_TAG_FILTER)
-            .as_bytes()
-            .to_vec()
+        expected_fingerprint(HookKind::Filter, WireVersion::V1).to_vec()
     }
     fn shape_section_bytes() -> Vec<u8> {
-        blake3::hash(wire_schema::WIRE_SCHEMA_TAG_SHAPE)
-            .as_bytes()
-            .to_vec()
-    }
-    fn normalize_error_section_bytes() -> Vec<u8> {
-        blake3::hash(wire_schema::WIRE_SCHEMA_TAG_NORMALIZE_ERROR)
-            .as_bytes()
-            .to_vec()
+        expected_fingerprint(HookKind::Shape, WireVersion::V1).to_vec()
     }
     fn observe_section_bytes() -> Vec<u8> {
-        blake3::hash(wire_schema::WIRE_SCHEMA_TAG_OBSERVE)
-            .as_bytes()
-            .to_vec()
+        expected_fingerprint(HookKind::Observe, WireVersion::V1).to_vec()
+    }
+
+    fn metadata_section(hook: &str) -> Vec<u8> {
+        format!(
+            r#"{{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{{"{hook}":{{"wire_version":1,"description":"{hook} hook","usage":"call {hook}"}}}}}}"#
+        )
+        .into_bytes()
     }
 
     fn wat_with_custom_sections(wat: &str, sections: &[(&str, &[u8])]) -> Vec<u8> {
@@ -340,7 +320,6 @@ mod tests {
             (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
             (func (export "cc_lb_free") (param i32 i32 i32))
             (func (export "cc_lb_shape") (param i32 i32) (result i64) i64.const 0)
-            (func (export "cc_lb_normalize_error") (param i32 i32) (result i64) i64.const 0)
         )
         "#
     }
@@ -361,100 +340,81 @@ mod tests {
         let bytes = wat_with_custom_sections(
             filter_plugin_wat(),
             &[
-                (wire_schema::SECTION_FILTER, &filter_section_bytes()),
-                ("cc_lb.plugin.v1", br#"{"name":"x","version":"0.0.1"}"#),
+                (
+                    &schema_section_name(HookKind::Filter, WireVersion::V1),
+                    &filter_section_bytes(),
+                ),
+                ("cc_lb.plugin.v1", &metadata_section("filter")),
             ],
         );
-        let inspection = inspect_wasm(SlotKind::Filter, &bytes).expect("filter plugin OK");
-        assert_eq!(inspection.slot_kind, SlotKind::Filter);
-        assert_eq!(inspection.schema_hashes.len(), 1);
+        let inspection = inspect_wasm(HookKind::Filter, &bytes).expect("filter plugin OK");
+        assert_eq!(inspection.metadata.name, "x");
+        assert_eq!(inspection.hook_fingerprints.len(), 1);
         assert_eq!(inspection.primary_schema_hash().len(), 32);
-        assert!(inspection.plugin_metadata.is_some());
+        assert_eq!(inspection.hook_versions[&HookKind::Filter], WireVersion::V1);
     }
 
     #[test]
-    fn accepts_shape_plugin_with_both_sections() {
+    fn accepts_shape_plugin_with_shape_section() {
         let bytes = wat_with_custom_sections(
             shape_plugin_wat(),
             &[
-                (wire_schema::SECTION_SHAPE, &shape_section_bytes()),
                 (
-                    wire_schema::SECTION_NORMALIZE_ERROR,
-                    &normalize_error_section_bytes(),
+                    &schema_section_name(HookKind::Shape, WireVersion::V1),
+                    &shape_section_bytes(),
                 ),
+                ("cc_lb.plugin.v1", &metadata_section("shape")),
             ],
         );
-        let inspection = inspect_wasm(SlotKind::Shape, &bytes).expect("shape plugin OK");
-        assert_eq!(inspection.slot_kind, SlotKind::Shape);
-        assert_eq!(inspection.schema_hashes.len(), 2);
+        let inspection = inspect_wasm(HookKind::Shape, &bytes).expect("shape plugin OK");
+        assert_eq!(inspection.hook_versions[&HookKind::Shape], WireVersion::V1);
     }
 
     #[test]
     fn accepts_observe_plugin() {
         let bytes = wat_with_custom_sections(
             observe_plugin_wat(),
-            &[(wire_schema::SECTION_OBSERVE, &observe_section_bytes())],
+            &[
+                (
+                    &schema_section_name(HookKind::Observe, WireVersion::V1),
+                    &observe_section_bytes(),
+                ),
+                ("cc_lb.plugin.v1", &metadata_section("observe")),
+            ],
         );
-        let inspection = inspect_wasm(SlotKind::Observe, &bytes).expect("observe plugin OK");
-        assert_eq!(inspection.slot_kind, SlotKind::Observe);
-        assert_eq!(inspection.schema_hashes.len(), 1);
+        let inspection = inspect_wasm(HookKind::Observe, &bytes).expect("observe plugin OK");
+        assert_eq!(
+            inspection.hook_versions[&HookKind::Observe],
+            WireVersion::V1
+        );
     }
 
     #[test]
     fn rejects_filter_without_schema_section() {
-        let bytes = wat::parse_str(filter_plugin_wat()).unwrap();
-        let err = inspect_wasm(SlotKind::Filter, &bytes).expect_err("missing section");
+        let bytes = wat_with_custom_sections(
+            filter_plugin_wat(),
+            &[("cc_lb.plugin.v1", &metadata_section("filter"))],
+        );
+        let err = inspect_wasm(HookKind::Filter, &bytes).expect_err("missing section");
         let msg = format!("{err}");
-        assert!(msg.contains(wire_schema::SECTION_FILTER), "got: {msg}");
+        assert!(msg.contains("cc_lb.schema.filter.v1"), "got: {msg}");
     }
 
     #[test]
     fn rejects_filter_wrong_hash() {
         let bytes = wat_with_custom_sections(
             filter_plugin_wat(),
-            &[(wire_schema::SECTION_FILTER, &[0u8; 32])],
-        );
-        let err = inspect_wasm(SlotKind::Filter, &bytes).expect_err("bad hash");
-        let msg = format!("{err}");
-        assert!(msg.contains("hash mismatch"), "got: {msg}");
-    }
-
-    #[test]
-    fn rejects_shape_missing_normalize_error_section() {
-        let bytes = wat_with_custom_sections(
-            shape_plugin_wat(),
-            &[(wire_schema::SECTION_SHAPE, &shape_section_bytes())],
-        );
-        let err = inspect_wasm(SlotKind::Shape, &bytes).expect_err("missing ne section");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains(wire_schema::SECTION_NORMALIZE_ERROR),
-            "got: {msg}"
-        );
-    }
-
-    #[test]
-    fn rejects_shape_missing_normalize_error_export() {
-        let bytes = wat_with_custom_sections(
-            r#"
-            (module
-                (memory (export "memory") 1)
-                (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
-                (func (export "cc_lb_free") (param i32 i32 i32))
-                (func (export "cc_lb_shape") (param i32 i32) (result i64) i64.const 0)
-            )
-            "#,
             &[
-                (wire_schema::SECTION_SHAPE, &shape_section_bytes()),
                 (
-                    wire_schema::SECTION_NORMALIZE_ERROR,
-                    &normalize_error_section_bytes(),
+                    &schema_section_name(HookKind::Filter, WireVersion::V1),
+                    &[0u8; 32],
                 ),
+                ("cc_lb.plugin.v1", &metadata_section("filter")),
             ],
         );
-        let err = inspect_wasm(SlotKind::Shape, &bytes).expect_err("missing ne export");
+        let err = inspect_wasm(HookKind::Filter, &bytes).expect_err("bad hash");
         let msg = format!("{err}");
-        assert!(msg.contains("cc_lb_normalize_error"), "got: {msg}");
+        assert!(msg.contains("hash mismatch"), "got: {msg}");
     }
 
     #[test]
@@ -469,9 +429,15 @@ mod tests {
                 (func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const 0)
             )
             "#,
-            &[(wire_schema::SECTION_FILTER, &filter_section_bytes())],
+            &[
+                (
+                    &schema_section_name(HookKind::Filter, WireVersion::V1),
+                    &filter_section_bytes(),
+                ),
+                ("cc_lb.plugin.v1", &metadata_section("filter")),
+            ],
         );
-        let err = inspect_wasm(SlotKind::Filter, &bytes).expect_err("import rejected");
+        let err = inspect_wasm(HookKind::Filter, &bytes).expect_err("import rejected");
         let msg = format!("{err}");
         assert!(msg.contains("disallows every host import"), "got: {msg}");
     }
@@ -486,9 +452,15 @@ mod tests {
                 (func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const 0)
             )
             "#,
-            &[(wire_schema::SECTION_FILTER, &filter_section_bytes())],
+            &[
+                (
+                    &schema_section_name(HookKind::Filter, WireVersion::V1),
+                    &filter_section_bytes(),
+                ),
+                ("cc_lb.plugin.v1", &metadata_section("filter")),
+            ],
         );
-        let err = inspect_wasm(SlotKind::Filter, &bytes).expect_err("missing free");
+        let err = inspect_wasm(HookKind::Filter, &bytes).expect_err("missing free");
         let msg = format!("{err}");
         assert!(msg.contains("cc_lb_free"), "got: {msg}");
     }
@@ -499,12 +471,18 @@ mod tests {
         // rejected — the shape exports and sections are simply absent.
         let bytes = wat_with_custom_sections(
             filter_plugin_wat(),
-            &[(wire_schema::SECTION_FILTER, &filter_section_bytes())],
+            &[
+                (
+                    &schema_section_name(HookKind::Filter, WireVersion::V1),
+                    &filter_section_bytes(),
+                ),
+                ("cc_lb.plugin.v1", &metadata_section("filter")),
+            ],
         );
-        let err = inspect_wasm(SlotKind::Shape, &bytes).expect_err("kind mismatch");
+        let err = inspect_wasm(HookKind::Shape, &bytes).expect_err("kind mismatch");
         let msg = format!("{err}");
         assert!(
-            msg.contains("cc_lb_shape") || msg.contains(wire_schema::SECTION_SHAPE),
+            msg.contains("does not declare required `shape`"),
             "got: {msg}"
         );
     }

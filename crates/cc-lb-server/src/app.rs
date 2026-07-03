@@ -723,7 +723,6 @@ async fn build_app_with_storage_inner(
         output_body_bytes: bounds.output_body_bytes,
         max_headers: bounds.max_headers,
         max_header_value_bytes: bounds.max_header_value_bytes,
-        normalize_error_body_bytes: bounds.normalize_error_body_bytes,
         reason_bytes: bounds.reason_bytes,
     };
     hot_engine_cfg.cookie_redaction = config.runtime.wasmtime.cookie_redaction;

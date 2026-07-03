@@ -1,12 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use async_trait::async_trait;
+use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, MAX_WASM_BLOB_BYTES,
     PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
     PluginRegistryStore, PluginSlot, StorageError, StorageResult, WasmBlob, WasmBlobRecord,
-    WasmRegistryEntry, WasmRegistryEntryInput, default_wire_version, sparse_order,
-    validate_identifier,
+    WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -204,16 +204,6 @@ impl PluginRegistryStore for PostgresStorage {
         Ok(())
     }
 
-    async fn update_wire_version(&self, id: Uuid, wire_version: u8) -> StorageResult<()> {
-        sqlx::query("UPDATE wasm_registry_v2 SET wire_version = $1 WHERE id = $2")
-            .bind(i16::from(wire_version))
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
-        Ok(())
-    }
-
     async fn delete_registry_entry(
         &self,
         id: Uuid,
@@ -355,8 +345,8 @@ impl PluginRegistryStore for PostgresStorage {
             });
         }
         let id = Uuid::new_v4();
-        let row = sqlx::query("INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision, wire_version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0,$10) RETURNING *")
-            .bind(id).bind(input.principal_id).bind(input.slot.as_str()).bind(input.order).bind(input.wasm_registry_id).bind(input.config).bind(input.sse_per_event).bind(i32::try_from(input.batched_events_per_flush).map_err(|_| StorageError::Fatal { message: "batched_events_per_flush exceeds i32".to_owned() })?).bind(u64_to_i64(input.batched_flush_ms, "plugin_chain.batched_flush_ms")?).bind(input.wire_version.map(i16::from))
+        let row = sqlx::query("INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0) RETURNING *")
+            .bind(id).bind(input.principal_id).bind(input.slot.as_str()).bind(input.order).bind(input.wasm_registry_id).bind(input.config).bind(input.sse_per_event).bind(i32::try_from(input.batched_events_per_flush).map_err(|_| StorageError::Fatal { message: "batched_events_per_flush exceeds i32".to_owned() })?).bind(u64_to_i64(input.batched_flush_ms, "plugin_chain.batched_flush_ms")?)
             .fetch_one(&mut *tx).await.map_err(map_sqlx_error)?;
         sqlx::query("SELECT pg_notify('cclb_plugin_chain_changed', $1)")
             .bind(input.principal_id.to_string())
@@ -641,7 +631,7 @@ async fn insert_registry_in_tx(
         .iter()
         .map(|slot| slot.as_str().to_owned())
         .collect();
-    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, revision, wire_version, supported_slots, schema_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision, wire_version, supported_slots, schema_hash")
+    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, revision, description, usage, hook_metadata, supported_slots, schema_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10, $11, $12) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision, description, usage, hook_metadata, supported_slots, schema_hash")
         .bind(id)
         .bind(sha256.as_slice())
         .bind(&input.name)
@@ -649,7 +639,9 @@ async fn insert_registry_in_tx(
         .bind(&input.label)
         .bind(uploaded_at)
         .bind(input.uploaded_by_admin_id)
-        .bind(i16::from(input.wire_version))
+        .bind(&input.description)
+        .bind(&input.usage)
+        .bind(hook_metadata_to_json(&input.hook_metadata)?)
         .bind(&supported_slots)
         .bind(input.schema_hash.as_ref().map(|h| h.as_slice()))
         .fetch_optional(&mut **tx)
@@ -699,11 +691,12 @@ fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEn
             "wasm_registry.revision",
         )?,
         kind: "filter".to_owned(),
-        wire_version: row
-            .try_get::<Option<i16>, _>("wire_version")
-            .map_err(map_sqlx_error)?
-            .map(|value| value.clamp(0, i16::from(u8::MAX)) as u8)
-            .unwrap_or_else(default_wire_version),
+        description: row.try_get("description").map_err(map_sqlx_error)?,
+        usage: row.try_get("usage").map_err(map_sqlx_error)?,
+        hook_metadata: hook_metadata_from_json(
+            &row.try_get::<String, _>("hook_metadata")
+                .map_err(map_sqlx_error)?,
+        )?,
         is_builtin: false,
         metadata: None,
         supported_slots: row
@@ -728,6 +721,9 @@ fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEn
     existing.name == input.name
         && existing.original_filename == input.original_filename
         && existing.label == input.label
+        && existing.description == input.description
+        && existing.usage == input.usage
+        && existing.hook_metadata == input.hook_metadata
         && schema_hash_ok
 }
 
@@ -766,11 +762,15 @@ fn chain_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PluginChainEntry>
             row.try_get("revision").map_err(map_sqlx_error)?,
             "plugin_chain.revision",
         )?,
-        wire_version: row
-            .try_get::<Option<i16>, _>("wire_version")
-            .map_err(map_sqlx_error)?
-            .map(|value| value.clamp(0, i16::from(u8::MAX)) as u8),
     })
+}
+
+fn hook_metadata_to_json(metadata: &BTreeMap<String, HookMetadata>) -> StorageResult<String> {
+    serde_json::to_string(metadata).map_err(StorageError::from)
+}
+
+fn hook_metadata_from_json(value: &str) -> StorageResult<BTreeMap<String, HookMetadata>> {
+    serde_json::from_str(value).map_err(StorageError::from)
 }
 
 fn sha_to_array(bytes: &[u8]) -> StorageResult<[u8; 32]> {

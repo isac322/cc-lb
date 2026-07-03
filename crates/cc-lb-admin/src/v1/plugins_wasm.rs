@@ -12,10 +12,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use cc_lb_core::{AuditEntry, AuditPayload};
-use cc_lb_runtime_wasmtime::{ModuleInspection, SlotKind, WasmtimeRuntimeError, inspect_wasm};
+use cc_lb_plugin_wire::schema::HookKind;
+use cc_lb_runtime_wasmtime::{ModuleInspection, WasmtimeRuntime, WasmtimeRuntimeError};
 use cc_lb_storage_api::{
     MAX_WASM_BLOB_BYTES, PluginSlot, StorageError, WasmBlob, WasmRegistryEntryInput,
-    default_wire_version,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -178,17 +178,16 @@ async fn upload_wasm_inner(
             "missing multipart part: slot_kind (must be one of filter, shape, observe)",
         ))
     })?;
-    let (slot_kind, plugin_slot) = parse_slot_kind(&slot_kind_str).map_err(Box::new)?;
-    let inspection = inspect_with_wasmtime(&bytes, slot_kind).await?;
+    let (hook_kind, _) = parse_slot_kind(&slot_kind_str).map_err(Box::new)?;
+    let inspection = inspect_with_wasmtime(state, &bytes, hook_kind).await?;
     let inspected_schema_hash = inspection.primary_schema_hash();
-    if let Some(embedded_name) = embedded_plugin_name(inspection.plugin_metadata.as_deref())
-        && embedded_name != name
-    {
+    if inspection.metadata.name != name {
         return Err(Box::new(json_error(
             StatusCode::BAD_REQUEST,
             "identity_mismatch",
             format!(
-                "multipart name `{name}` does not match `cc_lb.plugin.v1` metadata name `{embedded_name}`"
+                "multipart name `{name}` does not match `cc_lb.plugin.v1` metadata name `{}`",
+                inspection.metadata.name
             ),
         )));
     }
@@ -211,11 +210,10 @@ async fn upload_wasm_inner(
         .get_registry_entry_by_sha(sha256)
         .await
         .map_err(|error| Box::new(storage_response(error)))?;
-    let (supported_slots, fresh_wire_version) = match &existing {
-        Some(entry) if !entry.supported_slots.is_empty() => {
-            (entry.supported_slots.clone(), entry.wire_version)
-        }
-        _ => (vec![plugin_slot], default_wire_version()),
+    let declared_slots = supported_slots_from_inspection(&inspection);
+    let supported_slots = match &existing {
+        Some(entry) if !entry.supported_slots.is_empty() => entry.supported_slots.clone(),
+        _ => declared_slots,
     };
     let admin_id = admin_id_from_headers(headers);
     let uploaded_at_unix_secs = cc_lb_core::clock::unix_secs(state.clock.now());
@@ -232,7 +230,9 @@ async fn upload_wasm_inner(
         label: None,
         uploaded_at_unix_secs,
         uploaded_by_admin_id: admin_id,
-        wire_version: fresh_wire_version,
+        description: inspection.metadata.description.clone(),
+        usage: inspection.metadata.usage.clone(),
+        hook_metadata: inspection.metadata.hooks.clone(),
         supported_slots: supported_slots.clone(),
     };
     let (mut entry, existed) = storage
@@ -245,13 +245,6 @@ async fn upload_wasm_inner(
             .await
             .map_err(|error| Box::new(storage_response(error)))?;
         entry.supported_slots = supported_slots;
-    }
-    if existed && entry.wire_version != fresh_wire_version {
-        storage
-            .update_wire_version(entry.id, fresh_wire_version)
-            .await
-            .map_err(|error| Box::new(storage_response(error)))?;
-        entry.wire_version = fresh_wire_version;
     }
     materialize_cache(state, &sha256_hex, &bytes)
         .await
@@ -444,11 +437,11 @@ fn validate_wasm_bytes(bytes: &[u8]) -> Result<(), Response> {
 }
 
 #[allow(clippy::result_large_err)]
-fn parse_slot_kind(value: &str) -> Result<(SlotKind, PluginSlot), Response> {
+fn parse_slot_kind(value: &str) -> Result<(HookKind, PluginSlot), Response> {
     match value {
-        "filter" => Ok((SlotKind::Filter, PluginSlot::Router)),
-        "shape" => Ok((SlotKind::Shape, PluginSlot::Shape)),
-        "observe" => Ok((SlotKind::Observe, PluginSlot::ObservabilityHook)),
+        "filter" => Ok((HookKind::Filter, PluginSlot::Router)),
+        "shape" => Ok((HookKind::Shape, PluginSlot::Shape)),
+        "observe" => Ok((HookKind::Observe, PluginSlot::ObservabilityHook)),
         other => Err(json_error(
             StatusCode::BAD_REQUEST,
             "invalid_slot_kind",
@@ -458,20 +451,25 @@ fn parse_slot_kind(value: &str) -> Result<(SlotKind, PluginSlot), Response> {
 }
 
 async fn inspect_with_wasmtime(
+    state: &AdminState,
     bytes: &[u8],
-    slot_kind: SlotKind,
+    hook_kind: HookKind,
 ) -> Result<ModuleInspection, Box<Response>> {
     let bytes = bytes.to_vec();
-    let inspection = tokio::task::spawn_blocking(move || inspect_wasm(slot_kind, &bytes))
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, "wasm inspect worker failed");
-            Box::new(json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "inspect_worker_failed",
-                "wasm inspect worker panicked",
-            ))
-        })?;
+    let runtime = state.runtime.clone();
+    let inspection = tokio::task::spawn_blocking(move || match runtime {
+        Some(runtime) => runtime.admit_wasm(hook_kind, &bytes),
+        None => WasmtimeRuntime::with_defaults()?.admit_wasm(hook_kind, &bytes),
+    })
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "wasm inspect worker failed");
+        Box::new(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "inspect_worker_failed",
+            "wasm inspect worker panicked",
+        ))
+    })?;
     inspection.map_err(|error| {
         let (status, code) = match &error {
             WasmtimeRuntimeError::ModuleRejected { .. } => {
@@ -487,16 +485,16 @@ async fn inspect_with_wasmtime(
     })
 }
 
-// Parse the JSON custom section `cc_lb.plugin.v1` emitted by the
-// wasmtime PDK macro and return the `name` field if present. Returns
-// `None` on missing metadata, non-UTF8 bytes, invalid JSON, or an
-// absent/non-string `name` — the section is diagnostics-only per
-// runtime contract, so silent failure keeps upload flow permissive
-// for plugins that pre-date this cross-check.
-fn embedded_plugin_name(metadata: Option<&[u8]>) -> Option<String> {
-    let bytes = metadata?;
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    value.get("name")?.as_str().map(str::to_owned)
+fn supported_slots_from_inspection(inspection: &ModuleInspection) -> Vec<PluginSlot> {
+    inspection
+        .hook_versions
+        .keys()
+        .map(|hook| match hook {
+            HookKind::Filter => PluginSlot::Router,
+            HookKind::Shape => PluginSlot::Shape,
+            HookKind::Observe => PluginSlot::ObservabilityHook,
+        })
+        .collect()
 }
 
 async fn materialize_cache(state: &AdminState, sha256_hex: &str, bytes: &[u8]) -> io::Result<()> {

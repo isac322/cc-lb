@@ -1,5 +1,7 @@
 # RFC-0001: Plugin runtime vNext
 
+> Historical design note: this RFC records the runtime-vnext design process and may reference earlier crate names, schema-hash terminology, and removed hook concepts. For the current plugin author contract, see [the plugin author guide](../plugin-author-guide.md).
+
 - Feature Name: `plugin-runtime-vnext`
 - Start Date: 2026-06-27
 - Status: Implemented — Phase 4 complete via the Stage 0–7 commit chain

@@ -187,10 +187,6 @@ impl UpstreamDialect for TestDialect {
             ctx.body_bytes.clone(),
         ))
     }
-
-    fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-        None
-    }
 }
 
 struct RecordingDispatcher {

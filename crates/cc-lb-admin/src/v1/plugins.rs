@@ -8,6 +8,7 @@ use axum::{
     routing::{get, post},
 };
 use cc_lb_core::{AuditEntry, AuditPayload};
+use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainConflictReason,
     PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginMetadata, PluginSlot,
@@ -76,7 +77,6 @@ struct InsertChainBody {
     batched_events_per_flush: Option<u32>,
     batched_flush_ms: Option<u64>,
     position: Option<Position>,
-    wire_version: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,7 +121,9 @@ struct RegistryEntryResponse {
     revision: u64,
     uploaded_at_unix_secs: u64,
     kind: String,
-    wire_version: u8,
+    description: String,
+    usage: String,
+    hook_metadata: std::collections::BTreeMap<String, HookMetadata>,
     is_builtin: bool,
     metadata: Option<PluginMetadata>,
     supported_slots: Vec<String>,
@@ -330,11 +332,6 @@ async fn insert_chain(
             if !entry.supported_slots.is_empty() && !entry.supported_slots.contains(&slot) {
                 return unsupported_slot(&entry.name, slot);
             }
-            if let Some(requested) = body.wire_version
-                && requested > entry.wire_version
-            {
-                return unsupported_wire_version(&entry.name, requested, entry.wire_version);
-            }
             Some(plugin_chain_audit_metadata(&entry))
         }
         Ok(None) => None,
@@ -357,7 +354,6 @@ async fn insert_chain(
         sse_per_event: body.sse_per_event.unwrap_or(false),
         batched_events_per_flush: body.batched_events_per_flush.unwrap_or(1),
         batched_flush_ms: body.batched_flush_ms.unwrap_or(100),
-        wire_version: body.wire_version,
     };
     match storage.insert_chain_entry(input).await {
         Ok(entry) => {
@@ -813,7 +809,9 @@ fn registry_response(entry: WasmRegistryEntry, size_bytes: u64) -> RegistryEntry
         revision: entry.revision,
         uploaded_at_unix_secs: entry.uploaded_at_unix_secs,
         kind: entry.kind,
-        wire_version: entry.wire_version,
+        description: entry.description,
+        usage: entry.usage,
+        hook_metadata: entry.hook_metadata,
         is_builtin: entry.is_builtin,
         metadata: entry.metadata,
         supported_slots,
@@ -867,9 +865,7 @@ fn parse_slot(value: &str) -> Option<SlotParam> {
             Some(SlotParam::Stored(PluginSlot::ObservabilityHook))
         }
         "Shape" | "shape" => Some(SlotParam::Stored(PluginSlot::Shape)),
-        "build_signer" | "sign" | "on_unauthorized" | "normalize_error" => {
-            Some(SlotParam::RuntimeOnly)
-        }
+        "build_signer" | "sign" | "on_unauthorized" => Some(SlotParam::RuntimeOnly),
         _ => None,
     }
 }
@@ -1041,19 +1037,6 @@ fn slot_metadata_unknown(plugin_name: &str) -> axum::response::Response {
             "error": "slot_metadata_unknown",
             "plugin_name": plugin_name,
             "hint": "re-upload the plugin or restart the server so supported_slots can be backfilled",
-        })),
-    )
-        .into_response()
-}
-
-fn unsupported_wire_version(name: &str, requested: u8, max: u8) -> axum::response::Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({
-            "error": "unsupported_wire_version",
-            "plugin_name": name,
-            "requested": requested,
-            "max_supported": max,
         })),
     )
         .into_response()

@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
+use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_CACHE_AFFINITY_SHA256,
     PluginChainConflictReason, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
@@ -299,8 +301,11 @@ pub async fn registry_by_id_returns_seeded_builtin_cache_affinity_on_storage<
         "builtin uploader is nil"
     );
     ensure!(
-        entry.wire_version == default_wire_version(),
-        "builtin wire version matches"
+        entry
+            .hook_metadata
+            .get("filter")
+            .is_some_and(|hook| hook.wire_version == default_wire_version()),
+        "builtin filter hook wire version matches"
     );
     ensure!(entry.is_builtin, "builtin flag is persisted");
     ensure!(entry.metadata.is_some(), "builtin metadata is persisted");
@@ -335,17 +340,12 @@ pub async fn insert_chain_entry_with_builtin_cache_affinity_succeeds_on_storage<
             sse_per_event: false,
             batched_events_per_flush: 1,
             batched_flush_ms: 100,
-            wire_version: Some(default_wire_version()),
         })
         .await?;
 
     ensure!(
         inserted.wasm_registry_id == BUILTIN_CACHE_AFFINITY_ID,
         "chain entry references builtin cache-affinity"
-    );
-    ensure!(
-        inserted.wire_version == Some(default_wire_version()),
-        "chain entry preserves builtin wire version"
     );
     let listed = storage
         .list_chain_for_principal(principal.id, PluginSlot::Router)
@@ -1509,7 +1509,9 @@ fn entry(name: &str) -> WasmRegistryEntryInput {
         label: None,
         uploaded_at_unix_secs: 1_800_000_100,
         uploaded_by_admin_id: Uuid::new_v4(),
-        wire_version: 1,
+        description: format!("{name} description"),
+        usage: format!("{name} usage"),
+        hook_metadata: filter_hook_metadata(),
         supported_slots: Vec::new(),
     }
 }
@@ -1533,6 +1535,16 @@ fn chain_with_slot(
         sse_per_event: false,
         batched_events_per_flush: 1,
         batched_flush_ms: 100,
-        wire_version: None,
     }
+}
+
+fn filter_hook_metadata() -> BTreeMap<String, HookMetadata> {
+    BTreeMap::from([(
+        "filter".to_owned(),
+        HookMetadata {
+            wire_version: default_wire_version(),
+            description: "filter hook".to_owned(),
+            usage: "called by router".to_owned(),
+        },
+    )])
 }

@@ -13,6 +13,7 @@ sqlite = []
 
 [dependencies]
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
+cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
 cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-aead = { path = "../cc-lb-aead" }
 async-trait = { workspace = true }
