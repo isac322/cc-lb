@@ -1231,7 +1231,14 @@ impl Lifecycle {
 
         let limit_reserve_start = Instant::now();
         let mut active_limit = match self
-            .reserve_limit(&principal_view, &ctx, &principal, &route, &success, &body_view)
+            .reserve_limit(
+                &principal_view,
+                &ctx,
+                &principal,
+                &route,
+                &success,
+                &body_view,
+            )
             .await
         {
             Ok(active_limit) => active_limit,
