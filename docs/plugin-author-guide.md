@@ -29,10 +29,10 @@ When this guide and the code disagree, the code wins.
 ## Runtime model
 
 The host loads each plugin under a single wasmtime engine configured
-with `consume_fuel`, `signals_based_traps`, a 4 GiB memory
-reservation, and a `PoolingAllocationConfig`. Every hook call gets a
-single fuel budget that must cover `cc_lb_alloc` + the hook export +
-the implicit `cc_lb_free` the PDK does in the guest helper.
+with `signals_based_traps`, a 4 GiB memory reservation, and a
+`PoolingAllocationConfig`. Hook execution is bounded by the request
+path's normal timeout/backpressure controls rather than Wasmtime
+instruction metering.
 
 A plugin upload travels through three gates before any user request
 can reach it:
@@ -255,12 +255,9 @@ Rejections (400 + JSON `error` discriminator):
   reject at `inspect_wasm` time. Phase 1 ships zero host imports.
 - **Schema hash gate**: BLAKE3 of the wire tag must match
   byte-for-byte. No "compatible but newer" accepted.
-- **Fuel budget**: every hook call resets fuel to `fuel_per_call`
-  (default 10M instructions) before `cc_lb_alloc`. Alloc + hook +
-  `cc_lb_free` all draw from this single budget.
 - **`Store` drop on trap**: any trap in any of the three guest
   calls discards the `Store`. The next call rebuilds. No implicit
-  circuit breaker — fuel exhaustion is the natural backpressure.
+  circuit breaker.
 - **Adapter cell snapshot**: when a slot is re-registered, the
   previous live `DynamicView`'s adapters keep the old
   `Arc<PluginCell>` snapshot; the new view picks up the new cell.

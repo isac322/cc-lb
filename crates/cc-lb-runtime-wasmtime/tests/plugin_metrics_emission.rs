@@ -1,11 +1,10 @@
-//! RFC-0001 gap-analysis item #5 — plugin call / fuel / trap metrics.
+//! RFC-0001 gap-analysis item #5 — plugin call / trap metrics.
 //!
 //! Before this test lands, `execute_call` emitted no metrics at all;
 //! the three metric families the RFC mandates
 //! (`docs/rfc/0001-plugin-runtime-vnext.md:317-319`) did not exist:
 //!
 //!   * `cc_lb_plugin_call_duration_seconds{plugin, hook}` histogram
-//!   * `cc_lb_plugin_fuel_consumed_ratio{plugin, hook}` histogram
 //!   * `cc_lb_plugin_trap_total{plugin, hook, phase}` counter
 //!
 //! `cc_lb_plugin_call_duration_seconds` had bucket boundaries reserved
@@ -13,8 +12,8 @@
 //! `PLUGIN_CALL_DURATION_BUCKETS`) but was never emitted. This test
 //! pins the emission contract:
 //!
-//!   * A single successful pure-mode call emits ≥ 1 sample to each
-//!     histogram family with `plugin=<name>` + `hook=<kind>` labels.
+//!   * A single successful pure-mode call emits ≥ 1 duration sample with
+//!     `plugin=<name>` + `hook=<kind>` labels.
 //!   * A hook that traps increments `cc_lb_plugin_trap_total` with the
 //!     matching `phase=<hook>` label.
 //!
@@ -95,10 +94,6 @@ fn successful_filter_call_emits_three_metric_families() {
         "duration histogram must be emitted; rendered=\n{rendered}",
     );
     assert!(
-        rendered.contains("cc_lb_plugin_fuel_consumed_ratio"),
-        "fuel ratio histogram must be emitted; rendered=\n{rendered}",
-    );
-    assert!(
         rendered.contains(&format!("plugin=\"{plugin_name}\"")),
         "labels must include plugin=\"{plugin_name}\"; rendered=\n{rendered}",
     );
@@ -110,42 +105,4 @@ fn successful_filter_call_emits_three_metric_families() {
     // as long as the family is declared. describe/register elsewhere;
     // here we just confirm the counter name is a known symbol in the
     // rendered dump when the trap path fires (see next test).
-}
-
-#[test]
-fn fuel_exhaustion_emits_trap_counter() {
-    let Some(wasm) = cache_aware_wasm() else {
-        return;
-    };
-    let recorder = PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-
-    let plugin_name = "cache-aware-wasmtime";
-    let key = SlotKey::global("fuel-trap");
-
-    metrics::with_local_recorder(&recorder, || {
-        // Force fuel exhaustion by using a runtime whose per-call fuel
-        // is set below what the guest requires for a single hook.
-        let cfg = cc_lb_runtime_wasmtime::HotEngineConfig {
-            fuel_per_call: 1,
-            ..cc_lb_runtime_wasmtime::HotEngineConfig::default()
-        };
-        let rt = Arc::new(WasmtimeRuntime::new(cfg).expect("engine"));
-        rt.register_filter(key.clone(), plugin_name, &wasm)
-            .expect("register");
-        let req = tiny_filter_request();
-        let in_bytes = rkyv::to_bytes::<Error>(&req).expect("encode");
-        let result = rt.call_filter(&key, in_bytes.as_slice());
-        assert!(result.is_err(), "starved-fuel call must trap");
-    });
-
-    let rendered = handle.render();
-    assert!(
-        rendered.contains("cc_lb_plugin_trap_total"),
-        "trap counter must be emitted on trap path; rendered=\n{rendered}",
-    );
-    assert!(
-        rendered.contains(&format!("plugin=\"{plugin_name}\"")),
-        "trap counter must carry plugin label; rendered=\n{rendered}",
-    );
 }

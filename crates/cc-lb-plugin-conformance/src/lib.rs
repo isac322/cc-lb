@@ -133,7 +133,7 @@ impl<'a> ConformanceSuite<'a> {
 
     /// Override the [`HotEngineConfig`] used by the suite. Defaults to
     /// [`conformance_engine_config`] which mirrors production cc-lb
-    /// defaults (1024 pages / 1B fuel / 1 MiB stack).
+    /// defaults (1024 pages / 1 MiB stack).
     pub fn with_engine_config(mut self, cfg: HotEngineConfig) -> Self {
         self.engine_config = cfg;
         self
@@ -342,7 +342,6 @@ impl PluginSession {
 pub fn conformance_engine_config() -> HotEngineConfig {
     HotEngineConfig {
         memory_max_pages: 1024,
-        fuel_per_call: 1_000_000_000,
         max_wasm_stack: 1024 * 1024,
         pool_total_memories: 64,
         pool_total_core_instances: 64,

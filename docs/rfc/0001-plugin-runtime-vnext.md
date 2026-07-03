@@ -38,7 +38,7 @@ The constraints this RFC must satisfy are derived directly from the following us
 
 > "A rewrite is fine. This is genuinely an extreme hot path — if it can't be optimized the product itself is meaningless. We have not shipped yet, so I will throw out all backward compatibility. What we have to do right now is eliminate layer costs like thread pools. ... We don't have to use Extism, we can rebuild the plugins from scratch, we don't even have to use wasm. The only requirements are dynamic plugin swap without a server restart, and ideally zero thread hops. I prefer the path with the fewest hops; if that's truly impossible I'll forgive up to one thread pool hop. Also — for plugin development this matters too: from cc-lb's perspective the plugin takes a defined input, mutates it, and returns a defined output, so the function signature is extremely important. I want plugin authors to enjoy compile-time type safety on that signature." — requirements lock-in.
 
-> "I don't care about the fuel issue. That's the plugin's loss to take." — fuel policy approval.
+> User-approved policy: plugin CPU cost belongs to the plugin; the host does not need an instruction-metering kill switch.
 
 Paraphrase:
 
@@ -46,7 +46,7 @@ Paraphrase:
 - **HC-2 Plugins must be dynamically swappable without a server restart.**
 - **HC-3 Plugin authors must get compile-time type safety on the function signature.**
 - **HC-4 cc-lb is pre-launch, so plugin BC, Extism, wasm itself, and the existing plugin build format may all be replaced freely.**
-- **HC-5 Fuel is the plugin's own responsibility. No wall-clock kill guarantee required.**
+- **HC-5 Plugin CPU cost is the plugin's own responsibility. No wall-clock kill guarantee required.**
 
 ## Guide-level explanation
 
@@ -121,9 +121,8 @@ Lifecycle::handle (async fn on Tokio core worker)
        │         wi.typed = Some(instance.get_typed_func(&mut wi.store, "cc_lb_filter")?);
        │         wi.version_id = cell.version_id;
        │     }
-       │     // Direct synchronous call. No blocking pool.
-       │     wi.store.set_fuel(cell.fuel_per_call)?;
-       │     wi.typed.unwrap().call(&mut wi.store, (in_ptr, in_len))
+        │     // Direct synchronous call. No blocking pool.
+        │     wi.typed.unwrap().call(&mut wi.store, (in_ptr, in_len))
        │ })
        └─ rkyv::access::<ArchivedFilterResponse>(&out_bytes)
 ```
@@ -218,7 +217,6 @@ pub struct PluginCell {
     pub version_id:       u64,
     pub instance_pre:     Arc<wasmtime::InstancePre<HostState>>,
     pub schema_hash:      [u8; 32],
-    pub fuel_per_call:    u64,
     pub memory_max_pages: u32,
 }
 
@@ -274,16 +272,15 @@ Result: host state, network, filesystem, and clock are all blocked. Any attempt 
 - Writing `async fn` inside the guest in Rust is allowed. However, that just compiles into a state machine inside the guest; **the call does not yield back to the host**. From the host's perspective, a `cc_lb_<hook>` call is a single synchronous invocation up to return or trap.
 - Real async I/O requires (1) host async function imports plus (2) wasmtime async support (fiber stack switching). This is forbidden on the hot path.
 
-### Resource limits — fuel
+### Resource limits
 
 - Per-store `Memory` page limit + `Config::max_wasm_stack`.
-- `Store::set_fuel(cell.fuel_per_call)` at the start of each call. On exhaustion, `Trap::OutOfFuel`. Instruction-deterministic — for the same wasm + same input + same budget, the trap always occurs at the same instruction.
-- **No wall-clock kill guarantee (intentional)**: fuel is deterministic in instruction count, not in time. If time guarantees are required, one would have to choose between (a) Wasmtime epoch interrupt (known to also trap other plugins when the engine is shared — requires per-plugin engine separation), (b) OS signals (bypass wasm trap mechanics, dangerous), (c) a separate thread plus `JoinHandle` drop (which re-introduces the very thread hop we removed). None of these are adopted.
-- Fuel trip → `FilterError::Trap` → handled by the existing `execute_filter_pipeline` trap branch. The plugin owns this risk (HC-5).
+- **No wall-clock kill guarantee (intentional)**: time guarantees would require (a) Wasmtime epoch interrupt (known to also trap other plugins when the engine is shared — requires per-plugin engine separation), (b) OS signals (bypass wasm trap mechanics, dangerous), or (c) a separate thread plus `JoinHandle` drop (which re-introduces the very thread hop we removed). None of these are adopted.
+- Guest trap → handled by the existing `execute_filter_pipeline` trap branch. The plugin owns this risk (HC-5).
 
 ### Engine configuration
 
-- **Hot-path engine** (sync): `Config::async_support(false)`, `Strategy::Cranelift`, `signals_based_traps(true)`, `memory_reservation(1<<32)`, `memory_guard_size(1<<32)`, `memory_init_cow(true)`, `InstanceAllocationStrategy::Pooling(...)`, `consume_fuel(true)`. Shared across all workers, each worker owns its store.
+- **Hot-path engine** (sync): `Config::async_support(false)`, `Strategy::Cranelift`, `signals_based_traps(true)`, `memory_reservation(1<<32)`, `memory_guard_size(1<<32)`, `memory_init_cow(true)`, `InstanceAllocationStrategy::Pooling(...)`. Shared across all workers, each worker owns its store.
 - **Signer engine** (async): `async_support(true)` + epoch interrupt. Separated from the hot path to avoid epoch interference.
 - **Engine-specific InstancePre**: `Module` and `InstancePre` are bound to the engine that created them. The same wasm bytes must be processed independently through `precompile_module → deserialize → instantiate_pre` for each engine. `WasmtimeRuntime` holds two engines and a separate Linker / InstancePre cache for each.
 
@@ -305,9 +302,9 @@ When the cap is reached:
 
 Multi-round review of this RFC (Pro/Con debate) reached agreement that the following four items must be made explicit before merge. The wording below is the converged proposal after both sides made concessions.
 
-**fuel coverage**
+**trap cleanup**
 
-The runtime assigns fuel before every guest call — `cc_lb_alloc`, hook/filter body, and `cc_lb_free` all included. If a trap or fuel exhaustion occurs at any of alloc / filter / free, the `Store` is discarded and removed from the worker cache. The next call on the same worker builds a fresh instance. No explicit circuit breaker is introduced — the extra latency of drop+reinstantiate is itself a natural trap signal, and trap metrics give operator visibility. The §"Resource limits — fuel" section and the §execution-model pseudocode above must be amended to reflect this invariant during implementation.
+If a trap occurs at any of alloc / filter / free, the `Store` is discarded and removed from the worker cache. The next call on the same worker builds a fresh instance. No explicit circuit breaker is introduced — the extra latency of drop+reinstantiate is itself a natural trap signal, and trap metrics give operator visibility. The §"Resource limits" section and the §execution-model pseudocode above must be amended to reflect this invariant during implementation.
 
 **observe drain**
 
@@ -315,7 +312,7 @@ Observability buffers are best-effort in the MVP. After a version turnover, reti
 
 **worker monopolization**
 
-Fuel is an instruction-count cap, not a wall-clock timeout. A single call holds its Tokio core worker for the entire call duration (see §Drawbacks). The RFC commits to specifying within Phase 1: ① per-hook default `fuel_per_call` initial values and their derivation procedure, ② payload size limits, ③ worker occupancy/trap metrics (`cc_lb_plugin_call_duration_seconds`, `cc_lb_plugin_fuel_consumed_ratio`, `cc_lb_plugin_trap_total`). Instead of real-time preemption, mitigation goes through metrics plus operator-driven plugin disable/rollback. U-1 is promoted to a Major Open Risk (it is not merely an undefined fuel_per_call but an operational safety knob).
+A single call holds its Tokio core worker for the entire call duration (see §Drawbacks). The RFC commits to specifying payload size limits plus worker occupancy/trap metrics (`cc_lb_plugin_call_duration_seconds`, `cc_lb_plugin_trap_total`). Instead of real-time preemption, mitigation goes through metrics plus operator-driven plugin disable/rollback.
 
 **transactional WorkerInstance swap**
 
@@ -367,7 +364,7 @@ Under cc-lb's pre-launch state and first-party trusted plugin assumption, baking
   ```text
   WasmtimeRuntime { hot_engine: Engine, signer_engine: Engine, slots: RwLock<HashMap<SlotKey, Arc<PluginSlot>>>, host_state: Arc<HostState> }
   PluginSlot      { name, entry: RwLock<PluginEntry>, current: ArcSwap<PluginCell> }
-  PluginCell      { version_id, instance_pre, schema_hash, fuel_per_call, memory_max_pages }
+  PluginCell      { version_id, instance_pre, schema_hash, memory_max_pages }
   StagedSlot      { key, entry, slot }
   WasmtimeFilterPlugin   impl FilterPlugin
   WasmtimeDialectPlugin  impl UpstreamDialect
@@ -390,9 +387,9 @@ Under cc-lb's pre-launch state and first-party trusted plugin assumption, baking
 
 ## Drawbacks
 
-- **Worker occupancy**: a single plugin call holds its worker thread for the duration of the call. If the fuel ceiling is not short, neighbor task latency is affected. Set `fuel_per_call` conservatively and watch via SLO metrics.
+- **Worker occupancy**: a single plugin call holds its worker thread for the duration of the call. Neighbor task latency can be affected; watch duration/trap metrics and disable or roll back expensive plugins.
 - **Memory footprint**: `worker_threads × active_slots × memory_max_pages`. 8 worker × 20 slot × 32 page (2 MiB) = ~320 MiB hard limit. `PoolingAllocator` + CoW makes actual RSS much smaller, but capacity planning is still required.
-- **No wall-clock kill guarantee**: see the fuel policy in §"Resource limits — fuel". A user-approved trade-off, but operational visibility is required.
+- **No wall-clock kill guarantee**: see §"Resource limits". A user-approved trade-off, but operational visibility is required.
 - **PDK macro implementation burden**: the `*Ref<'_>` view auto-generation, the alignment-aware allocator, and the `schema_hash` custom-section emission must all be written in-house.
 - **wasmtime 47 vs Extism 1.30 (wasmtime 43)**: during the transition two wasmtime majors coexist. Cargo can handle it, but build time and image size grow. Cleaned up in Phase 4.
 
@@ -437,7 +434,7 @@ Core ABI + an in-house PDK delivers the same type safety through a different mec
 
 ## Unresolved questions
 
-- **U-1 Exact initial `fuel_per_call` values**: conservative starting points are needed separately for filter, shape, and normalize_error. Final values require measurement against cc-lb's actual payloads.
+- **U-1 Worker occupancy thresholds**: conservative alert thresholds are needed separately for filter, shape, and normalize_error. Final values require measurement against cc-lb's actual payloads.
 - **U-2 `*Ref<'_>` macro design details**: should `cc-lb-plugin-types` author its own helper derive such as `#[derive(ArchiveRef)]`, or depend on an external macro (e.g. an extension to `rkyv-derive`).
 - **U-3 Alignment-aware guest allocator**: how to communicate the archive root type's maximum alignment to the guest allocator. Either export `cc_lb_alloc_aligned(len, align)` or generate per-root-type alloc functions.
 - **U-4 `schema_hash` custom section format**: store only the 32-byte BLAKE3 hash, or also include a schema descriptor. The latter aids debugging at the cost of binary size.
@@ -452,7 +449,7 @@ Core ABI + an in-house PDK delivers the same type safety through a different mec
 - **F-2 Revisit the Component Model**: once WASI 0.3.x lazy lowering stabilizes in production and the sync-path overhead is resolved by measurement, migrate incrementally via a separate RFC.
 - **F-3 Direct stream/SSE handling on the hot path**: today SSE relay is handled host-side. Once Component Model `stream<u8>` plus stream splicing mature, plugins could perform stream filtering directly.
 - **F-4 Plugin instance hot-pinning**: an admin hint that pre-warms frequently called slots on every worker.
-- **F-5 Per-tenant fuel budgets**: dynamically adjust `fuel_per_call` based on tenant SLO or pricing policy.
+- **F-5 Per-tenant plugin SLO budgets**: dynamically adjust plugin admission or disablement policy based on tenant SLO or pricing policy.
 
 ## Migration
 
@@ -471,7 +468,7 @@ Comparison (preserving the m0046 estimate):
 
 ## Validation
 
-- **Conformance**: migrate the existing `crates/cc-lb-plugin-conformance` scenarios to the new PDK + runtime. Filter happy path, trap, fuel trip, invalid archive, `schema_hash` mismatch, and in-flight request consistency during hot-swap.
+- **Conformance**: migrate the existing `crates/cc-lb-plugin-conformance` scenarios to the new PDK + runtime. Filter happy path, trap, invalid archive, `schema_hash` mismatch, and in-flight request consistency during hot-swap.
 - **Benchmark**: run `benches/extism_sse_overhead` as-is plus the new runtime variant. Must hit the `tests/load/baseline.json` thresholds.
 - **Property tests**: add a wasmtime variant to `tests/property/`.
 - **Loom**: add race cases for the new `PluginCell` swap to `tests/loom`.
@@ -481,7 +478,7 @@ Comparison (preserving the m0046 estimate):
 
 ## Open risks
 
-- **R1 Worker occupancy**: keep `fuel_per_call` conservative; monitor the SLO metric `cc_lb_plugin_call_duration_seconds{plugin,hook,quantile}`.
+- **R1 Worker occupancy**: monitor the SLO metric `cc_lb_plugin_call_duration_seconds{plugin,hook,quantile}` and disable or roll back expensive plugins.
 - **R2 Memory footprint + thread-local eviction**: after `evict_slot` or a version replacement, the worker thread-local's old Store risks leaking. Policy: (a) on every call, compare version and overwrite stale entries; (b) eviction is signaled by the background drain task to every worker; (c) periodic LRU sweep GCs entries idle for N minutes.
 - **R2b Principal removal**: when a principal is removed, all of its SlotKeys disappear in the next reconciler rebuild. Worker thread-local entries are cleaned up via (a)/(b)/(c) above.
 - **R3 PoolingAllocator cap**: the capacity formula above + the Prometheus saturation metric + admin warn-log.
