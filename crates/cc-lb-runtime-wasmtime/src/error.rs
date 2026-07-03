@@ -29,6 +29,6 @@ pub enum WasmtimeRuntimeError {
     // RFC-0001 gap-analysis #6. Surfaces `wasmtime::PoolConcurrencyLimitError`
     // as a distinct variant so callers on the request/instantiate path
     // can pattern-match and translate to retry / backpressure semantics.
-    #[error("pooling allocator saturated: {resource} limit reached")]
+    #[error("plugin runtime saturated: {resource} limit reached")]
     PoolSaturated { resource: &'static str },
 }
