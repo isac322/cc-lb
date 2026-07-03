@@ -62,6 +62,16 @@ impl CronJob {
     }
 }
 
+impl AdaptiveJob {
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Warmup(_) => "warmup",
+            Self::OAuthRefresh(_) => "oauth_refresh",
+            Self::MetadataRefresh(_) => "metadata_refresh",
+        }
+    }
+}
+
 impl TraceparentCarrier for AdaptiveJob {
     fn traceparent(&self) -> Option<&str> {
         match self {

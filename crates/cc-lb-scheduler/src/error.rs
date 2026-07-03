@@ -1,5 +1,7 @@
 //! Error types for the scheduler.
 
+use std::time::Duration;
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -12,6 +14,18 @@ pub enum SchedulerError {
 
     #[error("scheduler task conflict: {0}")]
     Conflict(String),
+
+    /// Handler exceeded the per-job timeout enforced inside the dispatcher.
+    ///
+    /// This error MUST reach the apalis ack path so the row is marked `Failed`
+    /// (or retried by the retry class layer) rather than being dropped mid-flight
+    /// by a tower `TimeoutLayer`, which historically left rows stuck in
+    /// `status='Running'` forever.
+    #[error("job {job_kind} exceeded timeout of {}ms", .timeout.as_millis())]
+    JobTimeout {
+        job_kind: &'static str,
+        timeout: Duration,
+    },
 }
 
 impl SchedulerError {
