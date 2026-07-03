@@ -148,14 +148,15 @@ impl UpstreamDispatch for NoopDispatch {
 }
 
 pub fn evidence_path(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
         .unwrap()
         .join(".omo")
-        .join("evidence")
-        .join(name)
+        .join("evidence");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join(name)
 }
 
 pub fn install_prometheus() -> PrometheusHandle {

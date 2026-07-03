@@ -116,7 +116,11 @@ async fn scheduler_factory_postgres_happy_path_sets_up_tables_and_index() {
     let predicate: Option<String> = scheduler_sqlx::query_scalar("SELECT pg_get_expr(indexes.indpred, indexes.indrelid) FROM pg_index indexes JOIN pg_class classes ON classes.oid = indexes.indexrelid JOIN pg_namespace namespaces ON namespaces.oid = classes.relnamespace WHERE namespaces.nspname = 'apalis' AND classes.relname = 'idx_jobs_idempotency_key'").fetch_one(&postgres.pool).await.expect("idempotency index query succeeds");
     assert!(predicate.is_none());
     postgres.pool.close().await;
-    let drop_database = format!(r#"DROP DATABASE IF EXISTS "{database_name}""#);
+    drop(postgres.storage);
+    // Postgres 17+ WITH (FORCE) terminates any lingering apalis LISTEN/notify
+    // backends whose sessions outlive `pool.close().await`; without this the
+    // DROP races the notify worker and fails with 55006.
+    let drop_database = format!(r#"DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)"#);
     scheduler_sqlx::query(&drop_database)
         .execute(&admin_pool)
         .await

@@ -1,7 +1,10 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use cc_lb_config::{AnthropicOAuthConfig, Config, PostgresPoolConfig, StorageConfig, TlsConfig};
+use cc_lb_config::{
+    AnthropicOAuthConfig, Config, PostgresPoolConfig, StorageConfig, TlsConfig,
+    WasmtimeAllocationStrategy,
+};
 use cc_lb_server::reload::summarize_restart_required;
 use url::Url;
 
@@ -66,6 +69,28 @@ fn oauth_anthropic_client_id_change_returns_entry() {
     let changes = summarize_restart_required(&current, &new_config);
 
     assert_field(&changes, "oauth.anthropic.client_id");
+}
+
+#[test]
+fn wasmtime_runtime_knob_change_returns_entry() {
+    let current = Config::default();
+    let mut new_config = current.clone();
+    new_config.runtime.wasmtime.memory_reservation_bytes = Some(512 * 1024 * 1024);
+
+    let changes = summarize_restart_required(&current, &new_config);
+
+    assert_field(&changes, "runtime.wasmtime.memory_reservation_bytes");
+}
+
+#[test]
+fn wasmtime_allocation_strategy_change_returns_entry() {
+    let current = Config::default();
+    let mut new_config = current.clone();
+    new_config.runtime.wasmtime.allocation_strategy = WasmtimeAllocationStrategy::Pooling;
+
+    let changes = summarize_restart_required(&current, &new_config);
+
+    assert_field(&changes, "runtime.wasmtime.allocation_strategy");
 }
 
 fn socket(value: &str) -> SocketAddr {

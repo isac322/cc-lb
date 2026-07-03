@@ -8,21 +8,26 @@
 //! See `docs/rfc/0001-plugin-runtime-vnext.md`.
 #![deny(unsafe_code)]
 
+mod budget;
 mod cache;
 mod cell;
+mod dispatch;
 mod engine;
 mod error;
 mod inspect;
+mod metrics;
 mod module;
 mod plugin;
 pub mod policy;
 mod probe;
+#[cfg(test)]
+mod tests;
 
 pub use cache::{DEFAULT_ALIGN, call_filter_hook, call_observe_hook, call_shape_hook};
 pub use cc_lb_plugin_wire::schema::HookKind;
 pub use cc_lb_plugin_wire::schema::HookKind as SlotKind;
 pub use cell::{PluginCell, PluginSlot};
-pub use engine::{HostState, HotEngineConfig, build_hot_engine};
+pub use engine::{HostState, HotEngineAllocationStrategy, HotEngineConfig, build_hot_engine};
 pub use error::WasmtimeRuntimeError;
 pub use inspect::{ModuleInspection, inspect_wasm};
 pub use module::{admit_wasm, compile_module};
@@ -31,6 +36,7 @@ pub use plugin::{WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, Wasmtime
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use budget::StoreBudget;
 use cc_lb_plugin_api::SlotKey;
 use parking_lot::RwLock;
 use wasmtime::{Engine, Linker};
@@ -40,6 +46,7 @@ pub struct WasmtimeRuntime {
     engine: Arc<Engine>,
     linker: Arc<Linker<HostState>>,
     config: Arc<HotEngineConfig>,
+    store_budget: Arc<StoreBudget>,
     slots: RwLock<HashMap<SlotKey, Arc<PluginSlot>>>,
 }
 
@@ -50,6 +57,7 @@ impl WasmtimeRuntime {
         Ok(Self {
             engine: Arc::new(engine),
             linker: Arc::new(linker),
+            store_budget: Arc::new(StoreBudget::new(config.pool_total_core_instances)),
             config: Arc::new(config),
             slots: RwLock::new(HashMap::new()),
         })
@@ -162,6 +170,7 @@ impl WasmtimeRuntime {
             instance_pre,
             metadata: inspection.metadata,
             memory_max_pages: self.config.memory_max_pages,
+            store_budget: Arc::clone(&self.store_budget),
             content_hash: new_content_hash,
             plugin_name: Arc::clone(&plugin_name),
         };
@@ -191,6 +200,7 @@ impl WasmtimeRuntime {
                     instance_pre: new_cell.instance_pre,
                     metadata: new_cell.metadata,
                     memory_max_pages: new_cell.memory_max_pages,
+                    store_budget: new_cell.store_budget,
                     content_hash: new_cell.content_hash,
                     plugin_name: new_cell.plugin_name,
                 };
@@ -270,68 +280,6 @@ impl WasmtimeRuntime {
         evicted_keys
     }
 
-    fn dispatch<F>(
-        &self,
-        slot_key: &SlotKey,
-        expected_kind: SlotKind,
-        run: F,
-    ) -> Result<Vec<u8>, WasmtimeRuntimeError>
-    where
-        F: FnOnce(&Arc<PluginCell>) -> Result<Vec<u8>, WasmtimeRuntimeError>,
-    {
-        let slot = self
-            .get_slot(slot_key)
-            .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
-                reason: format!("no slot registered for {:?}", slot_key),
-            })?;
-        if slot.kind != expected_kind {
-            return Err(WasmtimeRuntimeError::ModuleRejected {
-                reason: format!(
-                    "slot {slot_key:?} is `{:?}`, callable as `{:?}` only",
-                    slot.kind, slot.kind,
-                ),
-            });
-        }
-        let cell = slot.current.load_full();
-        run(&cell)
-    }
-
-    /// Synchronous filter call. Round-trips one request through the
-    /// cached worker.
-    pub fn call_filter(
-        &self,
-        slot_key: &SlotKey,
-        input: &[u8],
-    ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.dispatch(slot_key, SlotKind::Filter, |cell| {
-            call_filter_hook(cell, input)
-        })
-    }
-
-    /// Synchronous shape call. `input` is rkyv-encoded
-    /// `ShapeRequest`; output is rkyv-encoded `ShapeResponse`.
-    pub fn call_shape(
-        &self,
-        slot_key: &SlotKey,
-        input: &[u8],
-    ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.dispatch(slot_key, SlotKind::Shape, |cell| {
-            call_shape_hook(cell, input)
-        })
-    }
-
-    /// Synchronous observe call. Plugin returns no payload; the
-    /// `Ok(Vec<u8>)` is always empty.
-    pub fn call_observe(
-        &self,
-        slot_key: &SlotKey,
-        input: &[u8],
-    ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.dispatch(slot_key, SlotKind::Observe, |cell| {
-            call_observe_hook(cell, input)
-        })
-    }
-
     /// Number of currently registered slots. Test/observability helper.
     pub fn slot_count(&self) -> usize {
         self.slots.read().len()
@@ -348,38 +296,6 @@ impl WasmtimeRuntime {
     /// item #6, Oracle adversarial review "do not gate admin
     /// registers on transient pool utilization".
     pub fn publish_pool_metrics(&self) {
-        let (memories_util, instances_util) = match self.engine.pooling_allocator_metrics() {
-            Some(m) => {
-                let mem_denom = self.config.pool_total_memories.max(1) as f64;
-                let inst_denom = self.config.pool_total_core_instances.max(1) as f64;
-                let mem_util = (m.memories() as f64) / mem_denom;
-                let inst_util = (m.core_instances() as f64) / inst_denom;
-                (mem_util.clamp(0.0, 1.0), inst_util.clamp(0.0, 1.0))
-            }
-            None => (0.0, 0.0),
-        };
-        metrics::gauge!("cc_lb_plugin_pool_memories_utilization_ratio").set(memories_util);
-        metrics::gauge!("cc_lb_plugin_pool_core_instances_utilization_ratio").set(instances_util);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn engine_build_only() {
-        let rt = WasmtimeRuntime::with_defaults().expect("engine build");
-        let _ = rt.engine();
-        assert_eq!(rt.slot_count(), 0);
-    }
-
-    #[test]
-    fn missing_slot_returns_error() {
-        let rt = WasmtimeRuntime::with_defaults().expect("engine build");
-        let err = rt
-            .call_filter(&SlotKey::global("nonexistent"), &[])
-            .expect_err("must fail on missing slot");
-        matches!(err, WasmtimeRuntimeError::ModuleRejected { .. });
+        metrics::publish_pool_metrics(&self.engine, &self.config);
     }
 }

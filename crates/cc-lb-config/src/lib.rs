@@ -27,7 +27,7 @@ pub use types::{
     RecurringJobConfig, RestartRequiredField, RuntimeConfig, SchedulerConfig,
     SchedulerIdempotencyConfig, SchedulerPoolConfig, SchedulerRetryClasses, SchedulerRetryConfig,
     SchedulerStalenessConfig, ShapeOriginPolicy, StorageConfig, SubscriptionQuotaConfig,
-    TimeoutsConfig, TlsConfig, WasmtimeConfig,
+    TimeoutsConfig, TlsConfig, WasmtimeAllocationStrategy, WasmtimeConfig,
 };
 pub use validation::{ValidationError, validate_postgres_url};
 

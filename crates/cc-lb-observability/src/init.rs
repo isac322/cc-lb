@@ -107,7 +107,7 @@ pub struct MetricDefinition {
     pub description: &'static str,
 }
 
-const METRIC_DEFINITIONS: [MetricDefinition; 36] = [
+const METRIC_DEFINITIONS: [MetricDefinition; 47] = [
     MetricDefinition {
         name: "cc_lb_requests_total",
         kind: MetricKind::Counter,
@@ -182,6 +182,61 @@ const METRIC_DEFINITIONS: [MetricDefinition; 36] = [
         name: "cc_lb_plugin_call_duration_seconds",
         kind: MetricKind::Histogram,
         description: "Plugin hook call duration in seconds.",
+    },
+    MetricDefinition {
+        name: "cc_lb_plugin_pool_memories_utilization_ratio",
+        kind: MetricKind::Gauge,
+        description: "Wasmtime memory pool utilization ratio.",
+    },
+    MetricDefinition {
+        name: "cc_lb_plugin_pool_core_instances_utilization_ratio",
+        kind: MetricKind::Gauge,
+        description: "Wasmtime core instance pool utilization ratio.",
+    },
+    MetricDefinition {
+        name: "cc_lb_plugin_pool_memories_used",
+        kind: MetricKind::Gauge,
+        description: "Wasmtime pooled memories currently in use.",
+    },
+    MetricDefinition {
+        name: "cc_lb_plugin_pool_core_instances_used",
+        kind: MetricKind::Gauge,
+        description: "Wasmtime pooled core instances currently in use.",
+    },
+    MetricDefinition {
+        name: "cc_lb_plugin_pool_memories_total",
+        kind: MetricKind::Gauge,
+        description: "Configured Wasmtime pooled memory capacity.",
+    },
+    MetricDefinition {
+        name: "cc_lb_plugin_pool_core_instances_total",
+        kind: MetricKind::Gauge,
+        description: "Configured Wasmtime pooled core instance capacity.",
+    },
+    MetricDefinition {
+        name: "cc_lb_plugin_memory_max_pages",
+        kind: MetricKind::Gauge,
+        description: "Configured maximum Wasmtime memory pages per plugin call.",
+    },
+    MetricDefinition {
+        name: "cc_lb_plugin_memory_reservation_bytes",
+        kind: MetricKind::Gauge,
+        description: "Configured Wasmtime memory reservation bytes per pooled memory.",
+    },
+    MetricDefinition {
+        name: "cc_lb_plugin_memory_guard_bytes",
+        kind: MetricKind::Gauge,
+        description: "Configured Wasmtime memory guard bytes per pooled memory.",
+    },
+    MetricDefinition {
+        name: "cc_lb_plugin_pool_virtual_reservation_bytes",
+        kind: MetricKind::Gauge,
+        description: "Computed Wasmtime virtual reservation bytes for the memory pool.",
+    },
+    MetricDefinition {
+        name: "cc_lb_plugin_pool_saturation_total",
+        kind: MetricKind::Counter,
+        description: "Wasmtime pooling allocator saturation events by resource.",
     },
     MetricDefinition {
         name: "cc_lb_tokens_total",
@@ -351,6 +406,61 @@ pub fn register_metrics() {
         Unit::Seconds,
         "Plugin hook call duration in seconds."
     );
+    metrics::describe_gauge!(
+        "cc_lb_plugin_pool_memories_utilization_ratio",
+        Unit::Count,
+        "Wasmtime memory pool utilization ratio."
+    );
+    metrics::describe_gauge!(
+        "cc_lb_plugin_pool_core_instances_utilization_ratio",
+        Unit::Count,
+        "Wasmtime core instance pool utilization ratio."
+    );
+    metrics::describe_gauge!(
+        "cc_lb_plugin_pool_memories_used",
+        Unit::Count,
+        "Wasmtime pooled memories currently in use."
+    );
+    metrics::describe_gauge!(
+        "cc_lb_plugin_pool_core_instances_used",
+        Unit::Count,
+        "Wasmtime pooled core instances currently in use."
+    );
+    metrics::describe_gauge!(
+        "cc_lb_plugin_pool_memories_total",
+        Unit::Count,
+        "Configured Wasmtime pooled memory capacity."
+    );
+    metrics::describe_gauge!(
+        "cc_lb_plugin_pool_core_instances_total",
+        Unit::Count,
+        "Configured Wasmtime pooled core instance capacity."
+    );
+    metrics::describe_gauge!(
+        "cc_lb_plugin_memory_max_pages",
+        Unit::Count,
+        "Configured maximum Wasmtime memory pages per plugin call."
+    );
+    metrics::describe_gauge!(
+        "cc_lb_plugin_memory_reservation_bytes",
+        Unit::Bytes,
+        "Configured Wasmtime memory reservation bytes per pooled memory."
+    );
+    metrics::describe_gauge!(
+        "cc_lb_plugin_memory_guard_bytes",
+        Unit::Bytes,
+        "Configured Wasmtime memory guard bytes per pooled memory."
+    );
+    metrics::describe_gauge!(
+        "cc_lb_plugin_pool_virtual_reservation_bytes",
+        Unit::Bytes,
+        "Computed Wasmtime virtual reservation bytes for the memory pool."
+    );
+    metrics::describe_counter!(
+        "cc_lb_plugin_pool_saturation_total",
+        Unit::Count,
+        "Wasmtime pooling allocator saturation events by resource."
+    );
     metrics::describe_counter!(
         "cc_lb_tokens_total",
         Unit::Count,
@@ -491,6 +601,17 @@ fn touch_metrics() {
         "hook" => "unknown"
     )
     .record(0.0);
+    metrics::gauge!("cc_lb_plugin_pool_memories_utilization_ratio").set(0.0);
+    metrics::gauge!("cc_lb_plugin_pool_core_instances_utilization_ratio").set(0.0);
+    metrics::gauge!("cc_lb_plugin_pool_memories_used").set(0.0);
+    metrics::gauge!("cc_lb_plugin_pool_core_instances_used").set(0.0);
+    metrics::gauge!("cc_lb_plugin_pool_memories_total").set(0.0);
+    metrics::gauge!("cc_lb_plugin_pool_core_instances_total").set(0.0);
+    metrics::gauge!("cc_lb_plugin_memory_max_pages").set(0.0);
+    metrics::gauge!("cc_lb_plugin_memory_reservation_bytes").set(0.0);
+    metrics::gauge!("cc_lb_plugin_memory_guard_bytes").set(0.0);
+    metrics::gauge!("cc_lb_plugin_pool_virtual_reservation_bytes").set(0.0);
+    metrics::counter!("cc_lb_plugin_pool_saturation_total", "resource" => "unknown").increment(0);
     metrics::histogram!("subscription_quota_writer_batch_size").record(0.0);
     metrics::counter!(
         "cc_lb_tokens_total",

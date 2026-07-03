@@ -28,6 +28,17 @@ fn describes_all_required_metrics() {
             "cc_lb_tls_reload_total",
             "cc_lb_sse_events_total",
             "cc_lb_plugin_call_duration_seconds",
+            "cc_lb_plugin_pool_memories_utilization_ratio",
+            "cc_lb_plugin_pool_core_instances_utilization_ratio",
+            "cc_lb_plugin_pool_memories_used",
+            "cc_lb_plugin_pool_core_instances_used",
+            "cc_lb_plugin_pool_memories_total",
+            "cc_lb_plugin_pool_core_instances_total",
+            "cc_lb_plugin_memory_max_pages",
+            "cc_lb_plugin_memory_reservation_bytes",
+            "cc_lb_plugin_memory_guard_bytes",
+            "cc_lb_plugin_pool_virtual_reservation_bytes",
+            "cc_lb_plugin_pool_saturation_total",
             "cc_lb_tokens_total",
             "cc_lb_virtual_cost_usd_total",
             "cclb_api_key_requests_total",
@@ -52,7 +63,7 @@ fn describes_all_required_metrics() {
         ]
     );
 
-    assert_eq!(definitions.len(), 36);
+    assert_eq!(definitions.len(), 47);
     assert_eq!(definitions[0].kind, MetricKind::Counter);
     assert_eq!(definitions[1].kind, MetricKind::Histogram);
     assert_eq!(definitions[3].kind, MetricKind::Gauge);

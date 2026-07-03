@@ -29,24 +29,15 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 fn pool_saturated_variant_is_part_of_error_surface() {
     // Synthetic construction. If PoolSaturated ever gets removed or
     // renamed, this stops compiling — the point.
-    let err = WasmtimeRuntimeError::PoolSaturated {
-        resource: "memories",
-        limit: 64,
-    };
+    let err = WasmtimeRuntimeError::PoolSaturated { resource: "pool" };
     assert!(matches!(
         &err,
-        WasmtimeRuntimeError::PoolSaturated {
-            resource: "memories",
-            limit: 64
-        }
+        WasmtimeRuntimeError::PoolSaturated { resource: "pool" }
     ));
     // The Display impl must mention the resource so operators can
     // triage which pool dimension exhausted.
     let msg = err.to_string();
-    assert!(
-        msg.contains("memories"),
-        "Display should name resource: {msg}"
-    );
+    assert!(msg.contains("pool"), "Display should name resource: {msg}");
 }
 
 #[test]
@@ -70,5 +61,17 @@ fn pool_utilization_gauges_are_emitted() {
     assert!(
         rendered.contains("cc_lb_plugin_pool_core_instances_utilization_ratio"),
         "core-instances utilization gauge must be emitted; rendered=\n{rendered}",
+    );
+    assert!(
+        rendered.contains("cc_lb_plugin_pool_memories_total"),
+        "memories total gauge must be emitted; rendered=\n{rendered}",
+    );
+    assert!(
+        rendered.contains("cc_lb_plugin_memory_reservation_bytes"),
+        "reservation gauge must be emitted; rendered=\n{rendered}",
+    );
+    assert!(
+        rendered.contains("cc_lb_plugin_pool_virtual_reservation_bytes"),
+        "virtual reservation gauge must be emitted; rendered=\n{rendered}",
     );
 }

@@ -10,6 +10,7 @@ use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 use wasmtime::InstancePre;
 
+use crate::budget::StoreBudget;
 use crate::cache::{call_filter_hook, call_observe_hook, call_shape_hook};
 use crate::cell::PluginCell;
 use crate::engine::HostState;
@@ -27,6 +28,7 @@ pub(crate) fn probe_hook_dispatch(
         instance_pre,
         metadata: metadata.clone(),
         memory_max_pages,
+        store_budget: Arc::new(StoreBudget::new(1)),
         plugin_name: Arc::from(metadata.name.as_str()),
         content_hash: [0; 32],
     });

@@ -10,6 +10,7 @@ use cc_lb_plugin_wire::metadata::PluginMetadata;
 use cc_lb_plugin_wire::schema::HookKind;
 use wasmtime::InstancePre;
 
+use crate::budget::StoreBudget;
 use crate::engine::HostState;
 
 /// Immutable hot-swappable plugin payload.
@@ -19,6 +20,7 @@ pub struct PluginCell {
     pub instance_pre: Arc<InstancePre<HostState>>,
     pub metadata: PluginMetadata,
     pub memory_max_pages: u32,
+    pub store_budget: Arc<StoreBudget>,
     /// Stable label used as the `plugin` dimension on every RFC-0001
     /// plugin metric. Owned by the cell so `execute_call` can emit
     /// without threading slot / registration state through every

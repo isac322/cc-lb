@@ -11,9 +11,48 @@ The focused crate READMEs are also useful while building plugins:
 - [`cc-lb-pdk-wasmtime-macros`](../crates/cc-lb-pdk-wasmtime-macros/README.md)
 - [`cc-lb-plugin-conformance`](../crates/cc-lb-plugin-conformance/README.md)
 
+## Contents
+
+1. [Runtime model](#runtime-model)
+2. [Authoring a plugin](#authoring-a-plugin)
+3. [Hook contracts](#hook-contracts)
+4. [Owned vs view mode](#owned-vs-view-mode)
+5. [Pure vs stateful dispatch](#pure-vs-stateful-dispatch)
+6. [Schema hash + bumping the wire](#schema-hash--bumping-the-wire)
+7. [Admin upload](#admin-upload)
+8. [Operational invariants](#operational-invariants)
+
+## Runtime model
+
+The host loads each plugin under a single wasmtime engine configured
+with `signals_based_traps` and request-path timeout/backpressure
+controls rather than Wasmtime instruction metering. Local execution
+defaults to on-demand allocation; each hook call gets a fresh `Store`
+with `StoreLimits` derived from `runtime.wasmtime.memory_max_pages`,
+and the runtime holds a process-wide store budget derived from
+`pool_total_core_instances` so on-demand execution cannot instantiate
+unbounded concurrent stores. Operators that need Wasmtime's pooling
+allocator can opt in with `[runtime.wasmtime] allocation_strategy =
+"pooling"` and tune the reservation/guard/pool totals in the same
+   section.
+
 ## Quick Start
 
 Create a Rust library crate that builds to `wasm32-unknown-unknown`:
+
+A plugin upload travels through three gates before any user request
+can reach it:
+
+1. **`inspect_wasm` (host)** — walks raw `.wasm` bytes with
+   `wasmparser`. Enforces imports allow-list (no host imports
+   accepted), required exports per slot kind, and 32-byte BLAKE3
+   schema hash custom section.
+2. **`Engine::precompile_module` + `Module::deserialize`** —
+   in-process compile (no .cwasm trust-boundary crossing).
+3. **`Linker::instantiate_pre`** — produce reusable `InstancePre`
+   for hot-path dispatch.
+
+`Cargo.toml`:
 
 ```toml
 [lib]

@@ -172,6 +172,7 @@
       "$ref": "#/$defs/RuntimeConfig",
       "default": {
         "wasmtime": {
+          "allocation_strategy": "ondemand",
           "cookie_redaction": false,
           "plugin_failure_policy": "pass_through",
           "shape_origin_policy": "unrestricted",
@@ -907,6 +908,7 @@
         "wasmtime": {
           "$ref": "#/$defs/WasmtimeConfig",
           "default": {
+            "allocation_strategy": "ondemand",
             "cookie_redaction": false,
             "plugin_failure_policy": "pass_through",
             "shape_origin_policy": "unrestricted",
@@ -1330,12 +1332,31 @@
         }
       }
     },
+    "WasmtimeAllocationStrategy": {
+      "type": "string",
+      "enum": [
+        "ondemand",
+        "pooling"
+      ]
+    },
     "WasmtimeConfig": {
       "type": "object",
       "properties": {
+        "allocation_strategy": {
+          "$ref": "#/$defs/WasmtimeAllocationStrategy",
+          "default": "ondemand"
+        },
         "cookie_redaction": {
           "type": "boolean",
           "default": false
+        },
+        "memory_guard_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         },
         "memory_max_pages": {
           "type": [
@@ -1345,9 +1366,33 @@
           "format": "uint32",
           "minimum": 0
         },
+        "memory_reservation_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
         "plugin_failure_policy": {
           "$ref": "#/$defs/PluginFailurePolicy",
           "default": "pass_through"
+        },
+        "pool_total_core_instances": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "pool_total_memories": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
         },
         "shape_origin_policy": {
           "$ref": "#/$defs/ShapeOriginPolicy",
