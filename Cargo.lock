@@ -966,7 +966,11 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-plugin-api"
+<<<<<<< Updated upstream
 version = "0.2.1"
+=======
+version = "0.4.0"
+>>>>>>> Stashed changes
 dependencies = [
  "async-trait",
  "bytes",

@@ -37,6 +37,7 @@ license = "Apache-2.0"
 rust-version = "1.96.0"
 
 [workspace.dependencies]
+<<<<<<< Updated upstream
 # Plugin trio — public crates.io surface. Lockstep via exact-version pin.
 # Bumping any of these requires bumping all three together.
 cc-lb-clock       = { path = "crates/cc-lb-clock", version = "=0.1.0" }
@@ -45,6 +46,27 @@ cc-lb-plugin-wire = { path = "crates/cc-lb-plugin-wire", version = "=0.1.1" }
 cc-lb-plugin-api  = { path = "crates/cc-lb-plugin-api", version = "=0.2.1" }
 cc-lb-runtime-protocol  = { path = "crates/cc-lb-runtime-protocol", version = "=0.2.2" }
 cc-lb-plugin-conformance = { path = "crates/cc-lb-plugin-conformance", version = "=0.1.3" }
+=======
+cc-lb-plugin-api = { version = "0.4", path = "crates/cc-lb-plugin-api" }
+
+# Internal, unpublished — RFC-0002 event-driven lifecycle vocabulary.
+cc-lb-lifecycle = { path = "crates/cc-lb-lifecycle", version = "0.1.0" }
+
+cc-lb-runtime-wasmtime    = { path = "crates/cc-lb-runtime-wasmtime",    version = "0.1.0" }
+cc-lb-plugin-wire = { version = "0.2", path = "crates/cc-lb-plugin-wire" }
+cc-lb-pdk-wasmtime = { version = "0.1", path = "crates/cc-lb-pdk-wasmtime" }
+cc-lb-pdk-wasmtime-macros = { version = "0.1", path = "crates/cc-lb-pdk-wasmtime-macros" }
+cc-lb-plugin-conformance = { version = "0.2", path = "crates/cc-lb-plugin-conformance" }
+
+# External wasmtime/rkyv ecosystem — wired up by cc-lb-runtime-wasmtime in Phase 1+.
+# Phase 0 declares them here so member crates can opt in via `<name>.workspace = true`
+# without churning the manifest.
+wasmtime  = "46"
+rkyv      = { version = "0.8", default-features = false }
+bytecheck = { version = "0.8", default-features = false }
+blake3    = { version = "1", default-features = false }
+wasmparser = "0.252"
+>>>>>>> Stashed changes
 
 anyhow = "1"
 arc-swap = "1"
