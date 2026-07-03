@@ -28,10 +28,7 @@ pub(super) fn build_worker_instance(
         if e.downcast_ref::<wasmtime::PoolConcurrencyLimitError>()
             .is_some()
         {
-            WasmtimeRuntimeError::PoolSaturated {
-                resource: "core-instances",
-                limit: 0,
-            }
+            WasmtimeRuntimeError::PoolSaturated { resource: "pool" }
         } else {
             WasmtimeRuntimeError::InstantiateFailed(anyhow::Error::from(e))
         }

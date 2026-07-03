@@ -29,24 +29,15 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 fn pool_saturated_variant_is_part_of_error_surface() {
     // Synthetic construction. If PoolSaturated ever gets removed or
     // renamed, this stops compiling — the point.
-    let err = WasmtimeRuntimeError::PoolSaturated {
-        resource: "memories",
-        limit: 64,
-    };
+    let err = WasmtimeRuntimeError::PoolSaturated { resource: "pool" };
     assert!(matches!(
         &err,
-        WasmtimeRuntimeError::PoolSaturated {
-            resource: "memories",
-            limit: 64
-        }
+        WasmtimeRuntimeError::PoolSaturated { resource: "pool" }
     ));
     // The Display impl must mention the resource so operators can
     // triage which pool dimension exhausted.
     let msg = err.to_string();
-    assert!(
-        msg.contains("memories"),
-        "Display should name resource: {msg}"
-    );
+    assert!(msg.contains("pool"), "Display should name resource: {msg}");
 }
 
 #[test]
