@@ -4,7 +4,7 @@
 //! called `compile_module` (wasmparser walk + wasmtime compile +
 //! precompile + `instantiate_pre`) and then, on every reconcile pass,
 //! bumped `PluginCell::version_id` by one even when the wasm bytes,
-//! fuel/memory knobs, and validation policy were byte-identical. That
+//! memory knobs, and validation policy were byte-identical. That
 //! churn (a) forced repeated `instantiate_pre` allocations and (b)
 //! periodically nudged the pooling allocator toward its 64-slot
 //! ceiling for zero benefit.
