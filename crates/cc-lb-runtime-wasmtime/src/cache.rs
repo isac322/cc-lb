@@ -219,7 +219,12 @@ fn call_hook(
     input: &[u8],
     hook: HookFn,
 ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-    let mut wi = build_worker_instance(cell, hook)?;
+    let mut wi = build_worker_instance(cell, hook).inspect_err(|err| {
+        if let WasmtimeRuntimeError::PoolSaturated { resource, .. } = err {
+            metrics::counter!("cc_lb_plugin_pool_saturation_total", "resource" => *resource)
+                .increment(1);
+        }
+    })?;
     execute_call(&mut wi, cell, input, hook)
 }
 

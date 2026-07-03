@@ -71,4 +71,16 @@ fn pool_utilization_gauges_are_emitted() {
         rendered.contains("cc_lb_plugin_pool_core_instances_utilization_ratio"),
         "core-instances utilization gauge must be emitted; rendered=\n{rendered}",
     );
+    assert!(
+        rendered.contains("cc_lb_plugin_pool_memories_total"),
+        "memories total gauge must be emitted; rendered=\n{rendered}",
+    );
+    assert!(
+        rendered.contains("cc_lb_plugin_memory_reservation_bytes"),
+        "reservation gauge must be emitted; rendered=\n{rendered}",
+    );
+    assert!(
+        rendered.contains("cc_lb_plugin_pool_virtual_reservation_bytes"),
+        "virtual reservation gauge must be emitted; rendered=\n{rendered}",
+    );
 }
