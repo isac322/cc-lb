@@ -2,7 +2,7 @@ import { Meter as BaseMeter } from '@base-ui/react/meter';
 import { Popover as BasePopover } from '@base-ui/react/popover';
 import { Toggle as BaseToggle } from '@base-ui/react/toggle';
 import { ToggleGroup as BaseToggleGroup } from '@base-ui/react/toggle-group';
-import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { createFileRoute } from '@tanstack/react-router';
 import {
   Activity,
   ArrowUpRight,
@@ -722,7 +722,6 @@ export function PoolQuotaLegend({
 }
 
 function OverviewPage() {
-  const navigate = useNavigate({ from: Route.fullPath });
   const [range, setRange] = useState<Range>('24h');
 
   const summary = useSummary(range);
@@ -1136,7 +1135,6 @@ function OverviewPage() {
               upstreamNameMap={upstreamNameMap}
               loading={events.isLoading}
               liveFlashIds={recentLiveIds}
-              onRowClick={() => navigate({ to: '/logs' })}
               columns={{ cost: true, tokens: true }}
               sentinelRef={sentinelRef}
               loadingMore={events.isFetchingNextPage}

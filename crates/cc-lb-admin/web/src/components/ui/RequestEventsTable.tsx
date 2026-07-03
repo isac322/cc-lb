@@ -1,9 +1,11 @@
 import type React from 'react';
+import { useState } from 'react';
 import { eventTime, type RequestEvent } from '../../lib/api';
 import { fmtUsd, fmtUsdCompact, splitNum } from '../../lib/format';
 import { LatencyCell } from './latency/LatencyCell';
 import { cx, Hint, SkeletonRow } from './primitives';
 import { RelativeTime } from './RelativeTime';
+import { RequestEventDrawer } from './RequestEventDrawer';
 
 const DASH = '—';
 
@@ -15,7 +17,6 @@ interface RequestEventsTableProps {
   emptyTitle?: string;
   emptyDescription?: string;
   liveFlashIds?: Set<string>;
-  onRowClick?: (event: RequestEvent) => void;
   columns?: {
     principal?: boolean;
     upstream?: boolean;
@@ -37,7 +38,6 @@ export function RequestEventsTable({
   emptyTitle = 'No requests',
   emptyDescription,
   liveFlashIds,
-  onRowClick,
   columns,
   sentinelRef,
   loadingMore,
@@ -45,6 +45,7 @@ export function RequestEventsTable({
   minWidthClass = 'min-w-[960px]',
   className,
 }: RequestEventsTableProps) {
+  const [selected, setSelected] = useState<RequestEvent | null>(null);
   const showPrincipal = columns?.principal ?? true;
   const showUpstream = columns?.upstream ?? true;
   const showTokens = columns?.tokens ?? true;
@@ -60,120 +61,138 @@ export function RequestEventsTable({
     (showCost ? 1 : 0);
 
   return (
-    <table className={cx(minWidthClass, 'w-full font-mono text-xs', className)}>
-      <thead className="table-header sticky top-0 z-10">
-        <tr className="text-[10px] uppercase tracking-wider">
-          <th className="text-left px-3 py-2 whitespace-nowrap">Timestamp</th>
-          {showPrincipal && (
-            <th className="text-left px-3 py-2 whitespace-nowrap">Principal</th>
-          )}
-          {showUpstream && (
-            <th className="text-left px-3 py-2 whitespace-nowrap">Upstream</th>
-          )}
-          <th className="text-left px-3 py-2 whitespace-nowrap">Model</th>
-          <th className="text-right px-3 py-2 whitespace-nowrap">Status</th>
-          <th className="text-right px-3 py-2 whitespace-nowrap">Latency</th>
-          {showTokens && (
-            <th className="text-right px-3 py-2 whitespace-nowrap">Token</th>
-          )}
-          {showCost && (
-            <th className="text-right px-3 py-2 whitespace-nowrap">Cost</th>
-          )}
-        </tr>
-      </thead>
-      <tbody>
-        {loading ? (
-          Array.from({ length: 5 }).map((_, i) => (
-            <SkeletonRow key={i} cols={colCount} />
-          ))
-        ) : events.length ? (
-          events.map((e) => (
-            <tr
-              key={e.request_id}
-              className={cx(
-                'border-b border-row hover:bg-overlay-1',
-                onRowClick ? 'cursor-pointer' : '',
-                liveFlashIds?.has(e.request_id) ? 'flash-in' : '',
-              )}
-              onClick={() => onRowClick?.(e)}
-            >
-              <td className="px-3 py-2 text-text-faint whitespace-nowrap">
-                <span
-                  className={cx(
-                    'status-dot mr-2',
-                    e.status >= 500
-                      ? 'danger'
-                      : e.status >= 400
-                        ? 'warn'
-                        : 'ok',
-                  )}
-                />
-                <RelativeTime compact ts={eventTime(e)} />
-              </td>
-              {showPrincipal && (
-                <td className="px-3 py-2 whitespace-nowrap truncate max-w-[160px]">
-                  {(e.principal_id && principalNameMap.get(e.principal_id)) ??
-                    e.principal_id ??
-                    DASH}
-                </td>
-              )}
-              {showUpstream && (
-                <td className="px-3 py-2 whitespace-nowrap truncate max-w-[180px]">
-                  {upstreamNameMap.get(e.upstream ?? '') ??
-                    e.upstream_name ??
-                    e.upstream ??
-                    DASH}
-                </td>
-              )}
-              <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
-                {e.model ?? DASH}
-              </td>
-              <td
+    <>
+      <table
+        className={cx(minWidthClass, 'w-full font-mono text-xs', className)}
+      >
+        <thead className="table-header sticky top-0 z-10">
+          <tr className="text-[10px] uppercase tracking-wider">
+            <th className="text-left px-3 py-2 whitespace-nowrap">Timestamp</th>
+            {showPrincipal && (
+              <th className="text-left px-3 py-2 whitespace-nowrap">
+                Principal
+              </th>
+            )}
+            {showUpstream && (
+              <th className="text-left px-3 py-2 whitespace-nowrap">
+                Upstream
+              </th>
+            )}
+            <th className="text-left px-3 py-2 whitespace-nowrap">Model</th>
+            <th className="text-right px-3 py-2 whitespace-nowrap">Status</th>
+            <th className="text-right px-3 py-2 whitespace-nowrap">Latency</th>
+            {showTokens && (
+              <th className="text-right px-3 py-2 whitespace-nowrap">Token</th>
+            )}
+            {showCost && (
+              <th className="text-right px-3 py-2 whitespace-nowrap">Cost</th>
+            )}
+          </tr>
+        </thead>
+        <tbody>
+          {loading ? (
+            Array.from({ length: 5 }).map((_, i) => (
+              <SkeletonRow key={i} cols={colCount} />
+            ))
+          ) : events.length ? (
+            events.map((e) => (
+              <tr
+                key={e.request_id}
                 className={cx(
-                  'px-3 py-2 text-right tabular-nums whitespace-nowrap',
-                  e.status >= 500
-                    ? 'text-red-400'
-                    : e.status >= 400
-                      ? 'text-amber-400'
-                      : 'text-green-400',
+                  'border-b border-row hover:bg-overlay-1 cursor-pointer',
+                  liveFlashIds?.has(e.request_id) ? 'flash-in' : '',
                 )}
+                onClick={() => setSelected(e)}
               >
-                {e.status}
-              </td>
-              <LatencyCell event={e} />
-              {showTokens && <TokenCell event={e} />}
-              {showCost && <CostCell event={e} />}
-            </tr>
-          ))
-        ) : (
-          <tr>
-            <td
-              colSpan={colCount}
-              className="px-3 py-8 text-center text-text-faint text-xs"
-            >
-              <div className="flex flex-col items-center justify-center text-center py-4">
-                <h3 className="text-sm font-medium text-text">{emptyTitle}</h3>
-                {emptyDescription && (
-                  <p className="mt-1 text-xs text-text-faint max-w-md">
-                    {emptyDescription}
-                  </p>
+                <td className="px-3 py-2 text-text-faint whitespace-nowrap">
+                  <span
+                    className={cx(
+                      'status-dot mr-2',
+                      e.status >= 500
+                        ? 'danger'
+                        : e.status >= 400
+                          ? 'warn'
+                          : 'ok',
+                    )}
+                  />
+                  <RelativeTime compact ts={eventTime(e)} />
+                </td>
+                {showPrincipal && (
+                  <td className="px-3 py-2 whitespace-nowrap truncate max-w-[160px]">
+                    {(e.principal_id && principalNameMap.get(e.principal_id)) ??
+                      e.principal_id ??
+                      DASH}
+                  </td>
                 )}
-              </div>
-            </td>
-          </tr>
-        )}
-        {events.length > 0 && sentinelRef && (
-          <tr ref={sentinelRef}>
-            <td
-              colSpan={colCount}
-              className="px-3 py-4 text-center text-text-faint text-[11px]"
-            >
-              {loadingMore ? 'Loading…' : hasMore ? '' : 'No more entries'}
-            </td>
-          </tr>
-        )}
-      </tbody>
-    </table>
+                {showUpstream && (
+                  <td className="px-3 py-2 whitespace-nowrap truncate max-w-[180px]">
+                    {upstreamNameMap.get(e.upstream ?? '') ??
+                      e.upstream_name ??
+                      e.upstream ??
+                      DASH}
+                  </td>
+                )}
+                <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
+                  {e.model ?? DASH}
+                </td>
+                <td
+                  className={cx(
+                    'px-3 py-2 text-right tabular-nums whitespace-nowrap',
+                    e.status >= 500
+                      ? 'text-red-400'
+                      : e.status >= 400
+                        ? 'text-amber-400'
+                        : 'text-green-400',
+                  )}
+                >
+                  {e.status}
+                </td>
+                <LatencyCell event={e} />
+                {showTokens && <TokenCell event={e} />}
+                {showCost && <CostCell event={e} />}
+              </tr>
+            ))
+          ) : (
+            <tr>
+              <td
+                colSpan={colCount}
+                className="px-3 py-8 text-center text-text-faint text-xs"
+              >
+                <div className="flex flex-col items-center justify-center text-center py-4">
+                  <h3 className="text-sm font-medium text-text">
+                    {emptyTitle}
+                  </h3>
+                  {emptyDescription && (
+                    <p className="mt-1 text-xs text-text-faint max-w-md">
+                      {emptyDescription}
+                    </p>
+                  )}
+                </div>
+              </td>
+            </tr>
+          )}
+          {events.length > 0 && sentinelRef && (
+            <tr ref={sentinelRef}>
+              <td
+                colSpan={colCount}
+                className="px-3 py-4 text-center text-text-faint text-[11px]"
+              >
+                {loadingMore ? 'Loading…' : hasMore ? '' : 'No more entries'}
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+      <RequestEventDrawer
+        event={selected}
+        principalName={
+          selected?.principal_id
+            ? (principalNameMap.get(selected.principal_id) ?? null)
+            : null
+        }
+        onClose={() => setSelected(null)}
+      />
+    </>
   );
 }
 
