@@ -12,8 +12,8 @@ mod sqlite {
     use sqlx::SqlitePool;
 
     use super::{
-        ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler, NOW_SECS,
-        expected_job_ids, expected_result, jobs, workers,
+        ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler,
+        ApalisHousekeepingJobResult, NOW_SECS, expected_job_ids, expected_result, jobs, workers,
     };
 
     #[tokio::test]
@@ -36,6 +36,59 @@ mod sqlite {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn reaps_stale_running_locks_and_leaves_fresh_locks_alone()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = SqlitePool::connect(":memory:").await?;
+        SqliteStorage::setup(&pool).await?;
+        seed_stale_lock_scenario(&pool).await?;
+
+        let config = ApalisHousekeepingConfig::new(30).with_stale_lock_threshold_secs(120);
+        let result = ApalisHousekeepingJobHandler::new(pool.clone(), config)
+            .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+            .await;
+
+        match result {
+            ApalisHousekeepingJobResult::Done {
+                stale_locks_reaped, ..
+            } => assert_eq!(stale_locks_reaped, 1),
+            other => panic!("expected Done with reaped=1, got {other:?}"),
+        }
+
+        let (status, lock_by, lock_at, attempts, last_result): (
+            String,
+            Option<String>,
+            Option<i64>,
+            i64,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT status, lock_by, lock_at, attempts, last_result FROM Jobs WHERE id = 'stuck-running'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(status, "Pending");
+        assert!(lock_by.is_none(), "lock_by must be cleared after reap");
+        assert!(lock_at.is_none(), "lock_at must be cleared after reap");
+        assert_eq!(attempts, 1, "attempts must advance by 1 after reap");
+        let last_result = last_result.expect("last_result must be set after reap");
+        assert!(
+            last_result.contains("cc-lb housekeeping") && last_result.contains("stale"),
+            "last_result must record the reap reason, got: {last_result}",
+        );
+
+        let (fresh_status, fresh_lock_by, fresh_attempts): (String, Option<String>, i64) =
+            sqlx::query_as("SELECT status, lock_by, attempts FROM Jobs WHERE id = 'fresh-running'")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            fresh_status, "Running",
+            "fresh Running row must be untouched"
+        );
+        assert_eq!(fresh_lock_by.as_deref(), Some("worker-live"));
+        assert_eq!(fresh_attempts, 0);
+        Ok(())
+    }
+
     async fn seed_sqlite(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         for (id, last_seen) in workers() {
             sqlx::query("INSERT INTO Workers (id, worker_type, storage_name, layers, last_seen, started_at) VALUES (?1, 'housekeeping', 'default', '', ?2, ?2)")
@@ -54,6 +107,28 @@ mod sqlite {
                 .execute(pool)
                 .await?;
         }
+        Ok(())
+    }
+
+    async fn seed_stale_lock_scenario(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+        sqlx::query("INSERT INTO Workers (id, worker_type, storage_name, layers, last_seen, started_at) VALUES ('worker-live', 'cron', 'default', '', ?1, ?1)")
+            .bind(i64::try_from(NOW_SECS).expect("test timestamp fits i64"))
+            .execute(pool)
+            .await?;
+        let stuck_lock_at = i64::try_from(NOW_SECS - 300).expect("stuck timestamp fits i64");
+        sqlx::query("INSERT INTO Jobs (job, id, job_type, status, run_at, lock_by, lock_at) VALUES (?1, 'stuck-running', 'cron', 'Running', ?2, 'worker-live', ?3)")
+            .bind(vec![0_u8])
+            .bind(i64::try_from(NOW_SECS).expect("test timestamp fits i64"))
+            .bind(stuck_lock_at)
+            .execute(pool)
+            .await?;
+        let fresh_lock_at = i64::try_from(NOW_SECS - 10).expect("fresh timestamp fits i64");
+        sqlx::query("INSERT INTO Jobs (job, id, job_type, status, run_at, lock_by, lock_at) VALUES (?1, 'fresh-running', 'cron', 'Running', ?2, 'worker-live', ?3)")
+            .bind(vec![0_u8])
+            .bind(i64::try_from(NOW_SECS).expect("test timestamp fits i64"))
+            .bind(fresh_lock_at)
+            .execute(pool)
+            .await?;
         Ok(())
     }
 
@@ -177,6 +252,7 @@ fn expected_result() -> ApalisHousekeepingJobResult {
     ApalisHousekeepingJobResult::Done {
         workers_removed: 1,
         jobs_removed: 2,
+        stale_locks_reaped: 0,
         cutoff_unix_secs: NOW_SECS - DAY_SECS,
     }
 }
