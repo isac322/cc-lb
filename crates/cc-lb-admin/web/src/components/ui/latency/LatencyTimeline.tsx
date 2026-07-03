@@ -66,7 +66,7 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
   limit_reserve:
     'Reserve tokens / requests against the principal budget before dispatching upstream.',
   setup_overhead:
-    'Residual time inside the handle-entry → attempt-entry wrapper (proxy_setup_ms) that is not accounted for by auth, route, or limit_reserve. Includes request-context assembly and per-attempt state build.',
+    'proxy_setup_ms minus auth + route + limit_reserve. Body/JSON parse, prompt-cache prefix hashing (scales with body size), and upstream credential prep (OAuth refresh can spike this).',
   shape:
     'Run the shape plugin: dialect adaptation + Anthropic-format shaping of the outbound body.',
   sign: 'Sign the outbound request (OAuth refresh if the credential needs one).',
