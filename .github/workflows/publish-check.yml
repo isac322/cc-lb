@@ -1,16 +1,51 @@
 name: publish-check
 
-# PR-stage validation that cc-lb-plugin-api remains publish-ready.
-# Catches manifest regressions (missing description/license/repository,
-# excluded source files, broken workspace inheritance) before they reach
-# the release workflow. After the Extism removal sweep the published set
-# degenerated from the historical trio (cc-lb-pdk / cc-lb-plugin-wire /
-# cc-lb-plugin-api) to a solo crate; the matrix shrinks to match.
+# PR-stage validation for the crates.io-published plugin ecosystem.
+#
+# The bug this workflow guards against: an editor removes a public trait
+# method (or otherwise makes a breaking API change) in cc-lb-plugin-api
+# but forgets to bump the crate version. Workspace-local `cargo check`
+# still passes because path deps resolve to the fresh source, so nothing
+# downstream complains. release-plz then publishes cc-lb-plugin-api at
+# the same version (skipped — already on crates.io) and tries to publish
+# the runtime crate, whose tarball verify pulls cc-lb-plugin-api back
+# from crates.io using the workspace semver constraint. The old crates.io
+# trait definition mismatches the new local impl and the publish job
+# aborts mid-release. See PR #287 → release-plz run 28669111764 for the
+# incident this workflow closes.
+#
+# Two checks:
+#
+# 1. cargo-semver-checks on every publish=true crate that already has a
+#    baseline on crates.io. It compares the current source's public API
+#    against the last published version and fails when a breaking change
+#    is not matched by a semver-appropriate version bump. This is the
+#    primary defense: it catches breakage at the SOURCE (the crate whose
+#    API changed) instead of waiting for downstream verify to fail.
+#
+# 2. cargo publish --dry-run on cc-lb-plugin-api. Foundation crate with
+#    no in-workspace unpublished deps, so packaging is self-contained
+#    and catches manifest regressions (missing description/license/
+#    repository, excluded source files, broken workspace inheritance).
+#
+# Downstream publish=true crates (cc-lb-plugin-wire, cc-lb-pdk-wasmtime,
+# cc-lb-pdk-wasmtime-macros, cc-lb-plugin-conformance, cc-lb-runtime-wasmtime)
+# intentionally skip --dry-run: their workspace deps are typically not yet
+# published to crates.io at PR-review time, so --dry-run would flake on
+# unpublished-dep resolution instead of catching real bugs. semver-checks
+# covers their public-API contract; the workspace-wide cargo check in
+# ci.yml covers dep-constraint alignment.
 
 on:
   pull_request:
     paths:
       - 'crates/cc-lb-plugin-api/**'
+      - 'crates/cc-lb-plugin-wire/**'
+      - 'crates/cc-lb-pdk-wasmtime/**'
+      - 'crates/cc-lb-pdk-wasmtime-macros/**'
+      - 'crates/cc-lb-plugin-conformance/**'
+      - 'crates/cc-lb-runtime-wasmtime/**'
+      - 'crates/cc-lb-storage-api/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'release-plz.toml'
@@ -24,24 +59,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  dry-run:
-    name: ${{ matrix.crate }}
+  semver:
+    name: semver ${{ matrix.crate }}
     runs-on: oracle4-cc-lb
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - crate: cc-lb-plugin-api
-            mode: publish
+        crate:
+          - cc-lb-plugin-api
+          - cc-lb-plugin-wire
+          - cc-lb-plugin-conformance
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust-cache
+
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154
+        with:
+          tool: cargo-semver-checks@0.48
+
+      - name: cargo semver-checks
+        run: cargo semver-checks --package ${{ matrix.crate }}
+
+  dry-run:
+    name: dry-run cc-lb-plugin-api
+    runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/setup-rust-cache
 
       - name: cargo publish --dry-run
-        if: matrix.mode == 'publish'
-        run: cargo publish --dry-run -p ${{ matrix.crate }}
-
-      - name: cargo check
-        if: matrix.mode == 'check'
-        run: cargo check -p ${{ matrix.crate }} --all-targets
+        run: cargo publish --dry-run -p cc-lb-plugin-api
