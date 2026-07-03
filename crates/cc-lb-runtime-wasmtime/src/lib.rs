@@ -22,7 +22,7 @@ pub use cache::{DEFAULT_ALIGN, call_filter_hook, call_observe_hook, call_shape_h
 pub use cc_lb_plugin_wire::schema::HookKind;
 pub use cc_lb_plugin_wire::schema::HookKind as SlotKind;
 pub use cell::{PluginCell, PluginSlot};
-pub use engine::{HostState, HotEngineConfig, build_hot_engine};
+pub use engine::{HostState, HotEngineAllocationStrategy, HotEngineConfig, build_hot_engine};
 pub use error::WasmtimeRuntimeError;
 pub use inspect::{ModuleInspection, inspect_wasm};
 pub use module::{admit_wasm, compile_module};
@@ -350,14 +350,39 @@ impl WasmtimeRuntime {
     pub fn publish_pool_metrics(&self) {
         let (memories_util, instances_util) = match self.engine.pooling_allocator_metrics() {
             Some(m) => {
+                metrics::gauge!("cc_lb_plugin_pool_memories_used").set(m.memories() as f64);
+                metrics::gauge!("cc_lb_plugin_pool_core_instances_used")
+                    .set(m.core_instances() as f64);
                 let mem_denom = self.config.pool_total_memories.max(1) as f64;
                 let inst_denom = self.config.pool_total_core_instances.max(1) as f64;
                 let mem_util = (m.memories() as f64) / mem_denom;
                 let inst_util = (m.core_instances() as f64) / inst_denom;
                 (mem_util.clamp(0.0, 1.0), inst_util.clamp(0.0, 1.0))
             }
-            None => (0.0, 0.0),
+            None => {
+                metrics::gauge!("cc_lb_plugin_pool_memories_used").set(0.0);
+                metrics::gauge!("cc_lb_plugin_pool_core_instances_used").set(0.0);
+                (0.0, 0.0)
+            }
         };
+        let (pool_memories_total, pool_core_instances_total) = match self.config.allocation_strategy
+        {
+            HotEngineAllocationStrategy::OnDemand => (0, 0),
+            HotEngineAllocationStrategy::Pooling => (
+                self.config.pool_total_memories,
+                self.config.pool_total_core_instances,
+            ),
+        };
+        metrics::gauge!("cc_lb_plugin_pool_memories_total").set(pool_memories_total as f64);
+        metrics::gauge!("cc_lb_plugin_pool_core_instances_total")
+            .set(pool_core_instances_total as f64);
+        metrics::gauge!("cc_lb_plugin_memory_max_pages").set(self.config.memory_max_pages as f64);
+        metrics::gauge!("cc_lb_plugin_memory_reservation_bytes")
+            .set(self.config.memory_reservation_bytes as f64);
+        metrics::gauge!("cc_lb_plugin_memory_guard_bytes")
+            .set(self.config.memory_guard_bytes as f64);
+        metrics::gauge!("cc_lb_plugin_pool_virtual_reservation_bytes")
+            .set(self.config.virtual_memory_reservation_bytes() as f64);
         metrics::gauge!("cc_lb_plugin_pool_memories_utilization_ratio").set(memories_util);
         metrics::gauge!("cc_lb_plugin_pool_core_instances_utilization_ratio").set(instances_util);
     }
@@ -370,6 +395,18 @@ mod tests {
     #[test]
     fn engine_build_only() {
         let rt = WasmtimeRuntime::with_defaults().expect("engine build");
+        let _ = rt.engine();
+        assert_eq!(rt.slot_count(), 0);
+    }
+
+    #[test]
+    fn pooling_engine_builds_when_selected() {
+        let rt = WasmtimeRuntime::new(HotEngineConfig {
+            allocation_strategy: HotEngineAllocationStrategy::Pooling,
+            ..HotEngineConfig::default()
+        })
+        .expect("pooling engine build");
+
         let _ = rt.engine();
         assert_eq!(rt.slot_count(), 0);
     }
