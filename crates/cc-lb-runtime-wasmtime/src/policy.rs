@@ -4,7 +4,7 @@
 //! config crate.
 
 /// Behaviour when a filter or shape plugin fails at the runtime
-/// boundary (trap, fuel exhaustion, pool saturation, invalid wire
+/// boundary (trap, pool saturation, invalid wire
 /// output). `PassThrough` is the historical behaviour: filter treats
 /// the failure as no-op and shape falls back to raw upstream
 /// passthrough. `FailClosed` returns 503 upstream unavailable — pick
