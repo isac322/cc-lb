@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/isac322/cc-lb/compare/v0.3.0...v0.4.0) - 2026-07-03
+
+### Other
+
+- *(plugin)* compress plugin versioning surfaces back to v1 baseline ([#275](https://github.com/isac322/cc-lb/pull/275))
+
 ## [0.2.1](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-api-v0.2.0...cc-lb-plugin-api-v0.2.1) - 2026-06-26
 
 ### Added
