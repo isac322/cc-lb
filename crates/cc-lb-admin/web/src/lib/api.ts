@@ -1,5 +1,6 @@
 // biome-ignore-all lint/suspicious/noExplicitAny: existing API types use any for record params
 import { createEventSource, type EventSourceClient } from 'eventsource-client';
+import * as z from 'zod';
 import { clearAdminToken, getAdminToken } from './auth';
 
 const AUTH_REQUIRED_EVENT = 'cclb:auth-required';
@@ -205,78 +206,6 @@ export async function downloadJson(
   URL.revokeObjectURL(url);
 }
 
-export function streamEventsFetch(
-  path: string,
-  options: {
-    onEvent: (data: string) => void;
-    onError: (err: Error) => void;
-    onConnect: () => void;
-    signal?: AbortSignal;
-  },
-): () => void {
-  let isClosed = false;
-  let client: EventSourceClient | null = null;
-
-  const token = getAdminToken();
-  const headers: Record<string, string> = token
-    ? { Authorization: `Bearer ${token}` }
-    : {};
-
-  const closeForAuthFailure = () => {
-    notifyAuthRequired();
-    isClosed = true;
-    client?.close();
-  };
-
-  client = createEventSource({
-    url: path,
-    headers,
-    fetch: async (url, init) => {
-      if (isClosed) {
-        throw new DOMException('SSE stream closed', 'AbortError');
-      }
-      const res = await fetch(url, init as RequestInit);
-      if (res.status === 401) {
-        const error = new ApiError(401, 'unauthorized', null, 'Unauthorized');
-        closeForAuthFailure();
-        options.onError(error);
-        throw error;
-      }
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      return res;
-    },
-    onConnect: options.onConnect,
-    onScheduleReconnect: () => {
-      if (!isClosed) {
-        options.onError(new Error('SSE stream reconnecting'));
-      }
-    },
-    onMessage(ev) {
-      options.onEvent(ev.data);
-    },
-  });
-
-  options.signal?.addEventListener(
-    'abort',
-    () => {
-      isClosed = true;
-      client?.close();
-    },
-    { once: true },
-  );
-  if (options.signal?.aborted) {
-    isClosed = true;
-    client.close();
-  }
-
-  return () => {
-    isClosed = true;
-    client?.close();
-  };
-}
-
 export interface SummaryTotals {
   request_count: number;
   input_tokens: number;
@@ -352,6 +281,84 @@ export interface DashboardUsageResponse {
 export interface RequestEventUpdate {
   phase: 'partial' | 'final';
   event: RequestEvent;
+}
+
+/**
+ * Runtime validation for SSE frames from `/admin/events/stream`. Mirrors the
+ * Rust `RequestEventUpdate` wire envelope (see
+ * `crates/cc-lb-core/src/event_bus.rs`). Only the invariants the consumer
+ * relies on for routing/dedup (`phase`, `event.request_id`) are strictly
+ * validated; the rest of `event` is passed through as `unknown` and cast to
+ * `RequestEvent` at the boundary — schema drift on non-invariant fields is
+ * tolerated so a backend adding a new metric never breaks the live tail.
+ */
+export const RequestEventUpdateSchema = z.looseObject({
+  phase: z.enum(['partial', 'final']),
+  event: z.looseObject({
+    request_id: z.string().min(1),
+    ts: z.number().nullable(),
+    status: z.number(),
+    duration_ms: z.number(),
+  }),
+});
+
+/**
+ * Async-iterate typed `RequestEventUpdate` frames from the admin SSE stream.
+ *
+ * The generator owns the `EventSource` connection: aborting `signal` closes
+ * it, and iteration ends when the server closes. Malformed JSON and
+ * schema-invariant violations are dropped silently in production (warned in
+ * dev). 401 responses call `notifyAuthRequired` so the login flow can
+ * re-engage.
+ *
+ * Designed as the `streamFn` input for TanStack Query's
+ * `experimental_streamedQuery`; consumers should not iterate it manually.
+ */
+export async function* streamRequestEventUpdates(
+  signal: AbortSignal,
+): AsyncGenerator<RequestEventUpdate> {
+  const token = getAdminToken();
+  const client: EventSourceClient = createEventSource({
+    url: '/admin/events/stream',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    fetch: async (url, init) => {
+      const res = await fetch(url, init as RequestInit);
+      if (res.status === 401) {
+        notifyAuthRequired();
+        throw new ApiError(401, 'unauthorized', null, 'Unauthorized');
+      }
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      return res;
+    },
+  });
+  const onAbort = () => client.close();
+  signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    for await (const msg of client) {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(msg.data);
+      } catch {
+        continue;
+      }
+      const parsed = RequestEventUpdateSchema.safeParse(raw);
+      if (!parsed.success) {
+        if (import.meta.env.DEV) {
+          console.warn('[SSE] request-event schema drift', parsed.error, raw);
+        }
+        continue;
+      }
+      yield {
+        phase: parsed.data.phase,
+        event: parsed.data.event as RequestEvent,
+      };
+    }
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+    client.close();
+  }
 }
 
 export interface RequestEvent {

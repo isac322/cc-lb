@@ -3,6 +3,7 @@
 // Source-of-truth: .omo/plans/cc-lb-dashboard-overhaul.md (API SURFACE section).
 
 import {
+  experimental_streamedQuery as streamedQuery,
   useInfiniteQuery,
   useMutation,
   useQuery,
@@ -36,9 +37,12 @@ import {
   postJson,
   putJson,
   type RecentEventsPayload,
+  type RequestEvent,
+  type RequestEventUpdate,
   type SeriesResponse,
   type SubscriptionMetadataResponse,
   startOauthDraft,
+  streamRequestEventUpdates,
   triggerSubscriptionMetadataRefresh,
   type UpstreamOAuthStatusResponse,
 } from './api';
@@ -377,6 +381,38 @@ export function useRecentEventsInfinite(
     },
   });
 }
+
+function upsertLiveRequestEvent(
+  acc: RequestEvent[],
+  { event }: RequestEventUpdate,
+  cap: number,
+): RequestEvent[] {
+  const key = event.event_id ?? event.request_id;
+  const idx = acc.findIndex((e) => (e.event_id ?? e.request_id) === key);
+  if (idx >= 0) {
+    const out = acc.slice();
+    out[idx] = event;
+    return out;
+  }
+  return [event, ...acc].slice(0, cap);
+}
+
+export function useLiveRequestEvents(enabled: boolean, cap = 500) {
+  return useQuery({
+    queryKey: ['request-events', 'live', cap] as const,
+    enabled,
+    staleTime: Infinity,
+    gcTime: Infinity,
+    retry: false,
+    queryFn: streamedQuery<RequestEventUpdate, RequestEvent[]>({
+      streamFn: ({ signal }) => streamRequestEventUpdates(signal),
+      initialValue: [],
+      reducer: (acc, next) => upsertLiveRequestEvent(acc, next, cap),
+      refetchMode: 'reset',
+    }),
+  });
+}
+
 export function usePrincipalNameMap(): Map<string, string> {
   const principals = usePrincipals();
   return useMemo(() => {
