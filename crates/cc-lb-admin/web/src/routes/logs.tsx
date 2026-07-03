@@ -17,14 +17,10 @@ import {
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
-import {
-  ApiError,
-  eventTime,
-  type RequestEvent,
-  streamEventsFetch,
-} from '../lib/api';
+import { eventTime, type RequestEvent } from '../lib/api';
 import { fmtBytes, fmtMs, fmtN, fmtUsd, statusTone } from '../lib/format';
 import {
+  useLiveRequestEvents,
   usePrincipalNameMap,
   useRecentEventsInfinite,
   useUpstreamNameMap,
@@ -59,13 +55,17 @@ function LogsPage() {
   const upstreamNameMap = useUpstreamNameMap();
 
   const [tailing, setTailing] = useState(true);
-  const [liveRows, setLiveRows] = useState<RequestEvent[]>([]);
   const [selected, setSelected] = useState<RequestEvent | null>(null);
-  const [tailStatus, setTailStatus] = useState<
-    'idle' | 'connecting' | 'live' | 'reconnecting' | 'down'
-  >('idle');
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLTableRowElement>(null);
+
+  const live = useLiveRequestEvents(tailing);
+  const liveRows = live.data ?? [];
+  const tailStatus: 'idle' | 'live' | 'down' = !tailing
+    ? 'idle'
+    : live.isError
+      ? 'down'
+      : 'live';
 
   useEffect(() => {
     const el = sentinelRef.current;
@@ -80,34 +80,6 @@ function LogsPage() {
     obs.observe(el);
     return () => obs.disconnect();
   }, [recent.hasNextPage, recent.isFetchingNextPage, recent.fetchNextPage]);
-
-  useEffect(() => {
-    if (!tailing) {
-      setTailStatus('idle');
-      return;
-    }
-    setTailStatus('connecting');
-    const close = streamEventsFetch('/admin/events/stream', {
-      onConnect: () => setTailStatus('live'),
-      onEvent: (data) => {
-        try {
-          const parsed = JSON.parse(data) as RequestEvent;
-          setLiveRows((prev) => [parsed, ...prev].slice(0, 500));
-        } catch {
-          /* ignore: malformed SSE chunk */
-        }
-      },
-      onError: (err) => {
-        if (err instanceof ApiError && err.status === 401) {
-          setTailStatus('down');
-          setTailing(false);
-          return;
-        }
-        setTailStatus('reconnecting');
-      },
-    });
-    return () => close();
-  }, [tailing]);
 
   const rows = useMemo(() => {
     // While filters change, `recent.data` still holds the previous filter's

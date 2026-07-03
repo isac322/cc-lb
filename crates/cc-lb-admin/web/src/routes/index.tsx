@@ -33,9 +33,10 @@ import {
   Sparkline,
 } from '../components/ui/primitives';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
-import { eventTime, type RequestEvent, streamEventsFetch } from '../lib/api';
+import { eventTime, type RequestEvent } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import {
+  useLiveRequestEvents,
   usePrincipalNameMap,
   useRecentEventsInfinite,
   useSubscriptionQuotaAggregate,
@@ -759,10 +760,9 @@ function OverviewPage() {
     untilUnixSecs: nowUnixSecs,
   });
 
-  const [liveEvents, setLiveEvents] = useState<RequestEvent[]>([]);
-  const [streamStatus, setStreamStatus] = useState<
-    'idle' | 'connecting' | 'live' | 'down'
-  >('idle');
+  const live = useLiveRequestEvents(true, 50);
+  const liveEvents = live.data ?? [];
+  const streamStatus: 'idle' | 'live' | 'down' = live.isError ? 'down' : 'live';
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLTableRowElement>(null);
 
@@ -779,36 +779,6 @@ function OverviewPage() {
     obs.observe(el);
     return () => obs.disconnect();
   }, [events.hasNextPage, events.isFetchingNextPage, events.fetchNextPage]);
-
-  useEffect(() => {
-    setStreamStatus('connecting');
-    const close = streamEventsFetch('/admin/events/stream', {
-      onConnect: () => setStreamStatus('live'),
-      onEvent: (data) => {
-        try {
-          const parsed = JSON.parse(data) as {
-            phase: 'partial' | 'final';
-            event: RequestEvent;
-          };
-          const evt = parsed.event;
-          const key = evt.event_id ?? evt.request_id;
-          setLiveEvents((prev) => {
-            const idx = prev.findIndex(
-              (e) => (e.event_id ?? e.request_id) === key,
-            );
-            if (idx >= 0) {
-              const next = [...prev];
-              next[idx] = evt;
-              return next;
-            }
-            return [evt, ...prev].slice(0, 50);
-          });
-        } catch {}
-      },
-      onError: () => setStreamStatus('down'),
-    });
-    return () => close();
-  }, []);
 
   const recentRows = useMemo(() => {
     const historical = events.data?.pages.flatMap((p) => p.events) ?? [];
