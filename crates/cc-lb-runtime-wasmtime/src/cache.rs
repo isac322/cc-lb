@@ -3,8 +3,7 @@
 //! Every wasm call goes through one of [`call_filter_hook`] /
 //! [`call_shape_hook`] / [`call_normalize_error_hook`] /
 //! [`call_observe_hook`]. They all share the same alloc → write →
-//! call → read → free flow against a single fuel budget; only the
-//! typed-func name differs.
+//! call → read → free flow; only the typed-func name differs.
 //!
 //! Each call builds a fresh [`Store`] via
 //! [`PluginCell::instance_pre`] and drops it on return — no
@@ -14,11 +13,9 @@
 //! `WorkerInstance` was never worth its cost (RFC-0001 gap-analysis
 //! item #11).
 //!
-//! Fuel is set exactly once at the hook boundary so the duration
-//! histogram and the fuel-consumed-ratio histogram measure the same
-//! interval. Observe hooks return `(0, 0)` from the guest, so the
-//! output alloc/free pair is skipped; only the input buffer is
-//! alloc'd and immediately free'd by the guest helper.
+//! Observe hooks return `(0, 0)` from the guest, so the output alloc/free
+//! pair is skipped; only the input buffer is alloc'd and immediately
+//! free'd by the guest helper.
 //!
 //! See RFC §실행 모델 + §Operational invariants (review consensus).
 
@@ -267,9 +264,8 @@ fn execute_call(
     // an owned-String heap alloc per hook call.
     let plugin: Arc<str> = Arc::clone(&cell.plugin_name);
     let hook_label = hook.metric_label();
-    let budget = cell.fuel_per_call;
 
-    let result = execute_call_inner(wi, cell, input, hook);
+    let result = execute_call_inner(wi, input, hook);
 
     metrics::histogram!(
         "cc_lb_plugin_call_duration_seconds",
@@ -279,19 +275,7 @@ fn execute_call(
     .record(start.elapsed().as_secs_f64());
 
     match &result {
-        Ok((_, remaining_fuel)) => {
-            let ratio = if budget > 0 {
-                (budget.saturating_sub(*remaining_fuel) as f64) / (budget as f64)
-            } else {
-                0.0
-            };
-            metrics::histogram!(
-                "cc_lb_plugin_fuel_consumed_ratio",
-                "plugin" => Arc::clone(&plugin),
-                "hook" => hook_label,
-            )
-            .record(ratio.clamp(0.0, 1.0));
-        }
+        Ok(_) => {}
         Err(err) => {
             metrics::counter!(
                 "cc_lb_plugin_trap_total",
@@ -303,15 +287,14 @@ fn execute_call(
         }
     }
 
-    result.map(|(bytes, _)| bytes)
+    result
 }
 
 fn execute_call_inner(
     wi: &mut WorkerInstance,
-    cell: &PluginCell,
     input: &[u8],
     hook: HookFn,
-) -> Result<(Vec<u8>, u64), WasmtimeRuntimeError> {
+) -> Result<Vec<u8>, WasmtimeRuntimeError> {
     let WorkerInstance {
         store,
         memory,
@@ -344,13 +327,6 @@ fn execute_call_inner(
                 reason: format!("input too large: {} bytes exceeds u32::MAX", input.len()),
             })?;
 
-    store
-        .set_fuel(cell.fuel_per_call)
-        .map_err(|e| WasmtimeRuntimeError::GuestTrap {
-            phase: "set_fuel",
-            source: anyhow::Error::from(e),
-        })?;
-
     let in_ptr = alloc_fn
         .call(&mut *store, (input_len, DEFAULT_ALIGN))
         .map_err(|e| WasmtimeRuntimeError::GuestTrap {
@@ -379,8 +355,7 @@ fn execute_call_inner(
     // PDK contract: the guest helper (`cc_lb_pdk_wasmtime::__private::run_*`)
     // calls `cc_lb_free(in_ptr, in_len, DEFAULT_ALIGN)` as soon as it has
     // owned/borrowed the input bytes — so the host never frees `in_ptr`
-    // explicitly. The single fuel budget set above still covers the
-    // guest-side free.
+    // explicitly.
     let packed = hook_fn
         .call(&mut *store, (in_ptr, input_len))
         .map_err(|e| WasmtimeRuntimeError::GuestTrap {
@@ -429,8 +404,8 @@ fn execute_call_inner(
         // buffer: the surrounding pure-mode contract drops the whole
         // `Store` on function return, so the pool immediately
         // reclaims every memory page. Calling the guest allocator to
-        // "free" bytes that are about to vanish only spends fuel and
-        // costs a host↔guest transition. `cc_lb_free` for the INPUT
+        // "free" bytes that are about to vanish costs a host↔guest
+        // transition. `cc_lb_free` for the INPUT
         // buffer is still driven by the guest PDK (see the comment
         // above `hook_fn.call`) — we're only skipping the OUTPUT
         // free because it happens AFTER `hook_fn` returns.
@@ -438,10 +413,5 @@ fn execute_call_inner(
         bytes
     };
 
-    // Snapshot remaining fuel AFTER free — the metric wrapper
-    // computes consumption against `cell.fuel_per_call`. Guaranteed
-    // present because the immediately preceding set_fuel succeeded.
-    let remaining_fuel = store.get_fuel().unwrap_or(0);
-
-    Ok((out_bytes, remaining_fuel))
+    Ok(out_bytes)
 }
