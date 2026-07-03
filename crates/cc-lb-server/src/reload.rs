@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use cc_lb_admin::{DynamicViewRebinder, LastReloadStatus, ReloadOutcome};
-use cc_lb_config::{Config, ConfigError, RestartRequiredField, StorageConfig};
+use cc_lb_config::{
+    Config, ConfigError, RestartRequiredField, StorageConfig, WasmtimeAllocationStrategy,
+};
 use cc_lb_core::DynamicViewHolder;
 use cc_lb_core::clock::{ClockHandle, unix_secs};
 use notify::{Event, RecursiveMode, Watcher};
@@ -358,9 +360,61 @@ pub fn summarize_restart_required(
         new_config.aead.key_env.clone(),
         "storage encryption key environment changes require a process restart",
     );
+    summarize_wasmtime_restart_required(&mut changes, current, new_config);
     summarize_oauth_restart_required(&mut changes, current, new_config);
     summarize_lifecycle_subscriber_restart_required(&mut changes, current, new_config);
     changes
+}
+
+fn summarize_wasmtime_restart_required(
+    changes: &mut Vec<RestartRequiredField>,
+    current: &Config,
+    new_config: &Config,
+) {
+    let current = &current.runtime.wasmtime;
+    let new_config = &new_config.runtime.wasmtime;
+    push_changed(
+        changes,
+        "runtime.wasmtime.allocation_strategy",
+        allocation_strategy_string(current.allocation_strategy).to_owned(),
+        allocation_strategy_string(new_config.allocation_strategy).to_owned(),
+        "wasmtime engine allocation strategy changes require a process restart",
+    );
+    push_changed(
+        changes,
+        "runtime.wasmtime.memory_max_pages",
+        option_u32_string(current.memory_max_pages),
+        option_u32_string(new_config.memory_max_pages),
+        "wasmtime engine memory changes require a process restart",
+    );
+    push_changed(
+        changes,
+        "runtime.wasmtime.memory_reservation_bytes",
+        option_u64_string(current.memory_reservation_bytes),
+        option_u64_string(new_config.memory_reservation_bytes),
+        "wasmtime engine memory changes require a process restart",
+    );
+    push_changed(
+        changes,
+        "runtime.wasmtime.memory_guard_bytes",
+        option_u64_string(current.memory_guard_bytes),
+        option_u64_string(new_config.memory_guard_bytes),
+        "wasmtime engine memory changes require a process restart",
+    );
+    push_changed(
+        changes,
+        "runtime.wasmtime.pool_total_memories",
+        option_u32_string(current.pool_total_memories),
+        option_u32_string(new_config.pool_total_memories),
+        "wasmtime engine pool changes require a process restart",
+    );
+    push_changed(
+        changes,
+        "runtime.wasmtime.pool_total_core_instances",
+        option_u32_string(current.pool_total_core_instances),
+        option_u32_string(new_config.pool_total_core_instances),
+        "wasmtime engine pool changes require a process restart",
+    );
 }
 
 fn summarize_lifecycle_subscriber_restart_required(
@@ -585,6 +639,21 @@ fn push_changed(
 fn path_option_string(path: Option<&PathBuf>) -> String {
     path.map(|path| path.display().to_string())
         .unwrap_or_default()
+}
+
+fn option_u32_string(value: Option<u32>) -> String {
+    value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+fn option_u64_string(value: Option<u64>) -> String {
+    value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+fn allocation_strategy_string(value: WasmtimeAllocationStrategy) -> &'static str {
+    match value {
+        WasmtimeAllocationStrategy::OnDemand => "ondemand",
+        WasmtimeAllocationStrategy::Pooling => "pooling",
+    }
 }
 
 fn storage_kind(storage: &StorageConfig) -> &'static str {
