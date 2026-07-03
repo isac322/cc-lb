@@ -91,6 +91,34 @@ describe('buildStageDetails', () => {
     expect(nonStream.map((s) => s.key)).toContain('body_collect');
     expect(nonStream.map((s) => s.key)).not.toContain('stream_relay');
   });
+
+  it('inserts setup_overhead between limit_reserve and shape when proxy_setup_ms is set', () => {
+    const stages = buildStageDetails(
+      ev({
+        duration_ms: 1000,
+        auth_ms: 0,
+        route_ms: 0,
+        limit_reserve_ms: 2,
+        proxy_setup_ms: 235,
+        shape_ms: 4,
+        sign_ms: 3,
+      }),
+    );
+    const internalPre = stages.filter((s) => s.group === 'internal_pre');
+    expect(internalPre.map((s) => s.key)).toEqual([
+      'limit_reserve',
+      'setup_overhead',
+      'shape',
+      'sign',
+    ]);
+    const overhead = internalPre.find((s) => s.key === 'setup_overhead')!;
+    expect(overhead.ms).toBe(235 - 2);
+  });
+
+  it('omits setup_overhead when proxy_setup_ms is undefined', () => {
+    const stages = buildStageDetails(ev({ duration_ms: 500, auth_ms: 10 }));
+    expect(stages.map((s) => s.key)).not.toContain('setup_overhead');
+  });
 });
 
 describe('buildSseMarkers', () => {
@@ -110,6 +138,24 @@ describe('buildSseMarkers', () => {
     expect(first.absMs).toBe(515 + 20);
     const last = markers.find((m) => m.key === 'last_chunk')!;
     expect(last.absMs).toBe(515 + 1000);
+  });
+
+  it('folds setup_overhead into relayStart so SSE markers stay aligned with the timeline', () => {
+    const markers = buildSseMarkers(
+      ev({
+        duration_ms: 2000,
+        auth_ms: 0,
+        route_ms: 0,
+        limit_reserve_ms: 2,
+        proxy_setup_ms: 235,
+        shape_ms: 0,
+        sign_ms: 0,
+        upstream_ttfb_ms: 500,
+        stream_first_content_delta_ms: 20,
+      }),
+    );
+    const first = markers.find((m) => m.key === 'first_delta')!;
+    expect(first.absMs).toBe(2 + (235 - 2) + 500 + 20);
   });
 });
 

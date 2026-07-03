@@ -871,17 +871,14 @@ impl Lifecycle {
         let started = Instant::now();
         let observer_from_ext = req.extensions().get::<LifecycleContext>().cloned();
         let (mut ctx, body_too_large) = self.parse(req);
+        let body_view = RequestBodyView::new(&ctx.body_bytes);
         let observer: Option<LifecycleContext> = observer_from_ext.or_else(|| {
             self.event_bus
                 .as_ref()
                 .map(|bus| LifecycleContext::new(ctx.request_id.clone(), bus.clone(), &self.clock))
         });
         if let Some(o) = observer.as_ref() {
-            let stream = serde_json::from_slice::<Value>(&ctx.body_bytes)
-                .ok()
-                .and_then(|v| v.get("stream").and_then(Value::as_bool))
-                .unwrap_or(false);
-            o.emit_request_started(stream);
+            o.emit_request_started(body_view.stream());
         }
         if let Some(response) = body_too_large {
             if let Some(o) = observer.as_ref() {
@@ -897,7 +894,7 @@ impl Lifecycle {
             }
             return Ok(*response);
         }
-        if is_invalid_json_messages_request(&ctx) {
+        if ctx.path == "/v1/messages" && !ctx.body_bytes.is_empty() && !body_view.is_valid_json() {
             if let Some(o) = observer.as_ref() {
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                     event_id: o.event_id().to_owned(),
@@ -912,20 +909,16 @@ impl Lifecycle {
                 "request body must be valid JSON",
             ));
         }
-        let cache_metadata = request_cache_metadata(&ctx.downstream_headers, &ctx.body_bytes);
+        let cache_metadata =
+            request_cache_metadata_from_value(&ctx.downstream_headers, body_view.value());
         if let Some(o) = observer.as_ref() {
-            let stream = serde_json::from_slice::<Value>(&ctx.body_bytes)
-                .ok()
-                .and_then(|v| v.get("stream").and_then(Value::as_bool))
-                .unwrap_or(false);
-            let model = extract_model(&ctx.body_bytes);
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                 event_id: o.event_id().to_owned(),
                 result: Ok(cc_lb_lifecycle::ParseInfo {
                     path: ctx.path.clone(),
                     method: ctx.method.to_string(),
-                    model,
-                    stream,
+                    model: body_view.model(),
+                    stream: body_view.stream(),
                     body_bytes: ctx.body_bytes.len() as u64,
                     cache_control_block_count: cache_metadata.cache_control_block_count,
                     cache_breakpoints: cache_metadata
@@ -1218,7 +1211,7 @@ impl Lifecycle {
                 result: Ok(cc_lb_lifecycle::RouteInfo {
                     upstream_id: resolved_upstream_id,
                     upstream_name: router_chosen_upstream_name.clone(),
-                    model: extract_model(&ctx.body_bytes),
+                    model: body_view.model(),
                     upstream_kind: pricing_upstream_kind(&route.upstream)
                         .map(pricing_upstream_kind_label)
                         .map(str::to_owned),
@@ -1238,7 +1231,14 @@ impl Lifecycle {
 
         let limit_reserve_start = Instant::now();
         let mut active_limit = match self
-            .reserve_limit(&principal_view, &ctx, &principal, &route, &success)
+            .reserve_limit(
+                &principal_view,
+                &ctx,
+                &principal,
+                &route,
+                &success,
+                &body_view,
+            )
             .await
         {
             Ok(active_limit) => active_limit,
@@ -1488,6 +1488,7 @@ impl Lifecycle {
         principal: &Principal,
         route: &cc_lb_plugin_api::RouteDecision,
         authn_success: &AuthnSuccess,
+        body_view: &RequestBodyView,
     ) -> Result<Option<ActiveLimit>, LimitRejectionErr> {
         let (Some(limit_engine), Some(subject_provider)) = (
             self.limit_engine.as_ref(),
@@ -1501,7 +1502,7 @@ impl Lifecycle {
         else {
             return Ok(None);
         };
-        let limit_request = LimitRequest::from_body(&ctx.body_bytes);
+        let limit_request = body_view.limit_request();
         let upstream_kind = pricing_upstream_kind(&route.upstream);
         let max_input_estimate = DEFAULT_MAX_INPUT_ESTIMATE;
         let cost_estimate = global_catalog()
@@ -2624,12 +2625,6 @@ fn body_cap_for_path(config: &LifecycleConfig, path: &str) -> usize {
     }
 }
 
-fn is_invalid_json_messages_request(ctx: &RequestContext) -> bool {
-    ctx.path == "/v1/messages"
-        && !ctx.body_bytes.is_empty()
-        && serde_json::from_slice::<Value>(&ctx.body_bytes).is_err()
-}
-
 fn cache_breakpoint_to_lite(
     breakpoint: &RequestCacheBreakpoint,
 ) -> cc_lb_lifecycle::CacheBreakpointLite {
@@ -2708,15 +2703,45 @@ fn system_time_to_unix_millis(value: SystemTime) -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-fn extract_model(body: &Bytes) -> Option<String> {
-    serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("model")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        })
+// Shared parse of the request body inside `handle`. Every downstream consumer
+// (stream / model / max_tokens / cache metadata) reads through this view so
+// the body JSON is parsed exactly once per request instead of up to 7 times.
+struct RequestBodyView {
+    parsed: Result<Value, serde_json::Error>,
+}
+
+impl RequestBodyView {
+    fn new(body: &Bytes) -> Self {
+        Self {
+            parsed: serde_json::from_slice::<Value>(body),
+        }
+    }
+
+    fn value(&self) -> Option<&Value> {
+        self.parsed.as_ref().ok()
+    }
+
+    fn is_valid_json(&self) -> bool {
+        self.parsed.is_ok()
+    }
+
+    fn stream(&self) -> bool {
+        self.value()
+            .and_then(|v| v.get("stream"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    fn model(&self) -> Option<String> {
+        self.value()
+            .and_then(|v| v.get("model"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+    }
+
+    fn limit_request(&self) -> LimitRequest {
+        LimitRequest::from_value(self.value())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2727,17 +2752,19 @@ struct LimitRequest {
 }
 
 impl LimitRequest {
-    fn from_body(body: &Bytes) -> Self {
-        let value = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+    fn from_value(value: Option<&Value>) -> Self {
         Self {
             model: value
-                .get("model")
+                .and_then(|v| v.get("model"))
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_owned(),
-            max_tokens: value.get("max_tokens").and_then(Value::as_i64).unwrap_or(0),
+            max_tokens: value
+                .and_then(|v| v.get("max_tokens"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
             stream: value
-                .get("stream")
+                .and_then(|v| v.get("stream"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         }
@@ -2840,9 +2867,17 @@ pub fn parse_request_cache_breakpoints(headers: &HeaderMap, body: &Bytes) -> Vec
 }
 
 fn request_cache_metadata(headers: &HeaderMap, body: &Bytes) -> RequestCacheMetadata {
+    let value = serde_json::from_slice::<Value>(body).ok();
+    request_cache_metadata_from_value(headers, value.as_ref())
+}
+
+fn request_cache_metadata_from_value(
+    headers: &HeaderMap,
+    value: Option<&Value>,
+) -> RequestCacheMetadata {
     let thread_id = header_to_string(headers, "x-claude-code-session-id")
         .or_else(|| header_to_string(headers, "x-claude-session-id"));
-    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+    let Some(value) = value else {
         return RequestCacheMetadata {
             thread_id,
             ..Default::default()
@@ -2866,7 +2901,7 @@ fn request_cache_metadata(headers: &HeaderMap, body: &Bytes) -> RequestCacheMeta
 
     let mut cache_breakpoints = Vec::new();
     collect_cache_breakpoints(
-        &value,
+        value,
         value.get("tools"),
         RequestCacheBreakpointSource::Tools,
         "tools".to_owned(),
@@ -2874,7 +2909,7 @@ fn request_cache_metadata(headers: &HeaderMap, body: &Bytes) -> RequestCacheMeta
         &mut cache_breakpoints,
     );
     collect_cache_breakpoints(
-        &value,
+        value,
         value.get("system"),
         RequestCacheBreakpointSource::System,
         "system".to_owned(),
@@ -2886,7 +2921,7 @@ fn request_cache_metadata(headers: &HeaderMap, body: &Bytes) -> RequestCacheMeta
         for (index, message) in messages.iter().enumerate() {
             let previous_count = cache_breakpoints.len();
             collect_cache_breakpoints(
-                &value,
+                value,
                 Some(message),
                 RequestCacheBreakpointSource::Message,
                 format!("messages[{index}]"),

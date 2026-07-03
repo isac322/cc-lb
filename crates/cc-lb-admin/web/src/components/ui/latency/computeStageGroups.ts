@@ -2,6 +2,7 @@ import type { RequestEvent } from '../../../lib/api';
 
 export interface StageGroups {
   internalPre: number;
+  setupOverhead: number;
   wait: number;
   upstream: number;
   body: number;
@@ -9,11 +10,27 @@ export interface StageGroups {
   unaccounted: number;
 }
 
+// `proxy_setup_ms` wraps handle-entry → attempt-entry and includes
+// auth + route + limit_reserve + ctx build. `setup_overhead` is the
+// residual inside that wrapper not attributed to a named sub-stage.
+export function deriveSetupOverhead(e: Partial<RequestEvent>): number {
+  if (e.proxy_setup_ms == null) return 0;
+  return Math.max(
+    0,
+    e.proxy_setup_ms -
+      (e.auth_ms ?? 0) -
+      (e.route_ms ?? 0) -
+      (e.limit_reserve_ms ?? 0),
+  );
+}
+
 export function computeStageGroups(e: Partial<RequestEvent>): StageGroups {
+  const setupOverhead = deriveSetupOverhead(e);
   const internalPre =
     (e.auth_ms ?? 0) +
     (e.route_ms ?? 0) +
     (e.limit_reserve_ms ?? 0) +
+    setupOverhead +
     (e.shape_ms ?? 0) +
     (e.sign_ms ?? 0);
   const wait = (e.bulkhead_wait_ms ?? 0) + (e.dns_ms ?? 0);
@@ -30,5 +47,13 @@ export function computeStageGroups(e: Partial<RequestEvent>): StageGroups {
     (e.observability_post_ms ?? 0) + (e.limit_reconcile_ms ?? 0);
   const sum = internalPre + wait + upstream + body + internalPost;
   const unaccounted = Math.max(0, (e.duration_ms ?? 0) - sum);
-  return { internalPre, wait, upstream, body, internalPost, unaccounted };
+  return {
+    internalPre,
+    setupOverhead,
+    wait,
+    upstream,
+    body,
+    internalPost,
+    unaccounted,
+  };
 }
