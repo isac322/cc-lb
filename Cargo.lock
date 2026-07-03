@@ -980,7 +980,11 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-plugin-conformance"
+<<<<<<< Updated upstream
 version = "0.1.3"
+=======
+version = "0.2.1"
+>>>>>>> Stashed changes
 dependencies = [
  "anyhow",
  "base64",
@@ -1064,8 +1068,13 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< Updated upstream
 name = "cc-lb-runtime-extism"
 version = "0.1.0"
+=======
+name = "cc-lb-runtime-wasmtime"
+version = "0.1.1"
+>>>>>>> Stashed changes
 dependencies = [
  "arc-swap",
  "async-trait",
