@@ -284,7 +284,6 @@ async fn apply_plugin_chain(
                 sse_per_event: plugin.sse_per_event().unwrap_or(false),
                 batched_events_per_flush: plugin.batched_events_per_flush().unwrap_or(1),
                 batched_flush_ms: plugin.batched_flush_ms().unwrap_or(100),
-                wire_version: plugin.wire_version(),
             })
             .await
             .map_err(|e| BootstrapError::Storage(e.to_string()))?;
@@ -406,13 +405,6 @@ impl BootstrapPluginRef {
         match self {
             Self::Name(_) => None,
             Self::Entry(entry) => entry.batched_flush_ms,
-        }
-    }
-
-    fn wire_version(&self) -> Option<u8> {
-        match self {
-            Self::Name(_) => None,
-            Self::Entry(entry) => entry.wire_version,
         }
     }
 
@@ -674,7 +666,9 @@ plugins = ["missing-plugin"]
                     label: None,
                     uploaded_at_unix_secs: 1_800_000_000,
                     uploaded_by_admin_id: Uuid::new_v4(),
-                    wire_version: 1,
+                    description: format!("{name} description"),
+                    usage: "test fixture".to_owned(),
+                    hook_metadata: Default::default(),
                     supported_slots: Vec::new(),
                 },
             )

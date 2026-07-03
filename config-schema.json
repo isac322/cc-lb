@@ -178,7 +178,6 @@
           "wire_bounds": {
             "max_header_value_bytes": 8192,
             "max_headers": 100,
-            "normalize_error_body_bytes": 262144,
             "output_body_bytes": 104857600,
             "reason_bytes": 256
           }
@@ -775,12 +774,6 @@
           "default": 100,
           "minimum": 0
         },
-        "normalize_error_body_bytes": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 262144,
-          "minimum": 0
-        },
         "output_body_bytes": {
           "type": "integer",
           "format": "uint64",
@@ -920,7 +913,6 @@
             "wire_bounds": {
               "max_header_value_bytes": 8192,
               "max_headers": 100,
-              "normalize_error_body_bytes": 262144,
               "output_body_bytes": 104857600,
               "reason_bytes": 256
             }
@@ -1366,7 +1358,6 @@
           "default": {
             "max_header_value_bytes": 8192,
             "max_headers": 100,
-            "normalize_error_body_bytes": 262144,
             "output_body_bytes": 104857600,
             "reason_bytes": 256
           }

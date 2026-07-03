@@ -1,9 +1,11 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::StorageResult;
+use cc_lb_plugin_wire::metadata::HookMetadata;
 
 pub use cc_lb_plugin_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
@@ -44,8 +46,12 @@ pub struct WasmRegistryEntryInput {
     pub label: Option<String>,
     pub uploaded_at_unix_secs: u64,
     pub uploaded_by_admin_id: Uuid,
-    #[serde(default = "default_wire_version")]
-    pub wire_version: u8,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub usage: String,
+    #[serde(default)]
+    pub hook_metadata: BTreeMap<String, HookMetadata>,
     /// Slots the plugin exports a wire function for, derived from
     /// `HandshakeAccept.implemented_functions`. Empty preserves legacy uploads
     /// that did not supply this metadata.
@@ -81,8 +87,12 @@ pub struct WasmRegistryEntry {
     pub revision: u64,
     #[serde(default = "default_plugin_kind")]
     pub kind: String,
-    #[serde(default = "default_wire_version")]
-    pub wire_version: u8,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub usage: String,
+    #[serde(default)]
+    pub hook_metadata: BTreeMap<String, HookMetadata>,
     #[serde(default)]
     pub is_builtin: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,7 +119,11 @@ impl WasmRegistryEntry {
             refcount,
             revision: 0,
             kind: BUILTIN_PLUGIN_KIND_FILTER.to_owned(),
-            wire_version: default_wire_version(),
+            description: "Prefer upstreams whose prompt cache is already warm for this request."
+                .to_owned(),
+            usage: "Attach to router chains to bias routing toward warm-cache upstreams."
+                .to_owned(),
+            hook_metadata: builtin_filter_hook_metadata(),
             is_builtin: true,
             metadata: Some(builtin_metadata_for_cache_affinity()),
             supported_slots: vec![PluginSlot::Router],
@@ -133,7 +147,10 @@ impl WasmRegistryEntry {
             refcount,
             revision: 0,
             kind: BUILTIN_PLUGIN_KIND_FILTER.to_owned(),
-            wire_version: default_wire_version(),
+            description: "Prefer subscription/OAuth upstreams while quota appears alive."
+                .to_owned(),
+            usage: "Attach to router chains before API-key fallback filters.".to_owned(),
+            hook_metadata: builtin_filter_hook_metadata(),
             is_builtin: true,
             metadata: Some(builtin_metadata_for_subscription_preference()),
             supported_slots: vec![PluginSlot::Router],
@@ -148,6 +165,17 @@ fn default_plugin_kind() -> String {
 
 pub fn default_wire_version() -> u8 {
     1
+}
+
+fn builtin_filter_hook_metadata() -> BTreeMap<String, HookMetadata> {
+    BTreeMap::from([(
+        "filter".to_owned(),
+        HookMetadata {
+            wire_version: default_wire_version(),
+            description: "Built-in filter hook".to_owned(),
+            usage: "Called by the router filter pipeline.".to_owned(),
+        },
+    )])
 }
 
 fn builtin_metadata_for_cache_affinity() -> PluginMetadata {
@@ -188,11 +216,6 @@ pub struct PluginChainEntryInput {
     pub sse_per_event: bool,
     pub batched_events_per_flush: u32,
     pub batched_flush_ms: u64,
-    /// Host-side wire version to negotiate when instantiating this plugin.
-    /// `None` (the default) preserves the historical behaviour of falling back
-    /// to wire v1 inside the runtime; admins must opt v2 plugins in explicitly.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wire_version: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -207,8 +230,6 @@ pub struct PluginChainEntry {
     pub batched_events_per_flush: u32,
     pub batched_flush_ms: u64,
     pub revision: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wire_version: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -258,8 +279,6 @@ pub trait PluginRegistryStore: Send + Sync {
         id: Uuid,
         supported_slots: Vec<PluginSlot>,
     ) -> StorageResult<()>;
-
-    async fn update_wire_version(&self, id: Uuid, wire_version: u8) -> StorageResult<()>;
 
     async fn delete_registry_entry(
         &self,

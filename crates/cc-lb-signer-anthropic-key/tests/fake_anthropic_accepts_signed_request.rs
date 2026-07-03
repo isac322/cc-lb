@@ -27,10 +27,6 @@ impl UpstreamDialect for E2EDialect {
             Bytes::from_static(br#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":10}"#),
         ))
     }
-
-    fn normalize_error(&self, _status: http::StatusCode, _body: &Bytes) -> Option<Bytes> {
-        None
-    }
 }
 
 #[tokio::test]

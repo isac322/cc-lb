@@ -454,7 +454,7 @@ async fn build_principal_chains(
                 pure: true,
                 name: registry_entry.name,
                 artifact: wasm_path.to_string_lossy().into_owned(),
-                wire_version: entry.wire_version,
+                wire_version: None,
                 config: entry.config,
                 metadata: std::collections::BTreeMap::new(),
             };
@@ -502,7 +502,7 @@ async fn build_principal_chains(
                 pure: true,
                 name: registry_entry.name,
                 artifact: wasm_path.to_string_lossy().into_owned(),
-                wire_version: entry.wire_version,
+                wire_version: None,
                 config: entry.config,
                 metadata: std::collections::BTreeMap::new(),
             };
@@ -587,7 +587,7 @@ async fn manifest_for_chain_entry(
         pure: true,
         name: registry_entry.name,
         artifact: wasm_path.to_string_lossy().into_owned(),
-        wire_version: entry.wire_version,
+        wire_version: None,
         config: entry.config.clone(),
         metadata: std::collections::BTreeMap::new(),
     })

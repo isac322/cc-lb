@@ -16,6 +16,9 @@ pub enum WasmtimeRuntimeError {
     #[error("module rejected at load time: {reason}")]
     ModuleRejected { reason: String },
 
+    #[error("runtime probe failed for hook {hook}: {reason}")]
+    ProbeFailed { hook: &'static str, reason: String },
+
     #[error("guest trap during {phase}: {source}")]
     GuestTrap {
         phase: &'static str,

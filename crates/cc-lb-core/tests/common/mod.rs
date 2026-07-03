@@ -148,10 +148,6 @@ impl UpstreamDialect for PassthroughDialect {
             ctx.body_bytes.clone(),
         ))
     }
-
-    fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-        None
-    }
 }
 
 pub struct TestSignerFactory {

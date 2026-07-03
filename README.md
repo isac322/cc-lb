@@ -19,14 +19,14 @@ See [docs/runtime-management.md](docs/runtime-management.md) for the full API an
 
 ## Plugin authors
 
-Plugins are wasm modules authored against `cc-lb-pdk-wasmtime` (re-exports `#[plugin]` + `#[handler]` proc-macros) with rkyv wire types from `cc-lb-plugin-types`. The runtime side is `cc-lb-runtime-wasmtime`, which compiles each upload via wasmtime 46 + a `PoolingAllocationConfig`, validates imports + per-hook BLAKE3 schema fingerprints at load time, and dispatches every call against a fresh `Store` by default (pure mode).
+Plugins are wasm modules authored against the published `cc-lb-plugin-api`, `cc-lb-plugin-wire`, `cc-lb-pdk-wasmtime`, and `cc-lb-pdk-wasmtime-macros` crates, with `cc-lb-plugin-conformance` available as a dev-dependency. The runtime side is `cc-lb-runtime-wasmtime`, which compiles each upload via wasmtime 46 + a `PoolingAllocationConfig`, validates imports, required plugin and hook metadata, per-hook wire versions, per-hook BLAKE3 layout fingerprints, and an upload-time runtime probe before dispatching calls.
 
 The three hooks a plugin may implement:
 
 - **filter** — return a `FilterResponse` deciding which upstream candidates to keep.
-- **shape** — transform the incoming request into an upstream-bound `ShapedRequest`. Shape plugins may also expose `cc_lb_normalize_error` for upstream-error rewriting.
+- **shape** — transform the incoming request into an upstream-bound `ShapedRequest`.
 - **observe** — receive lifecycle events; side-effect only.
 
-Only `cc-lb-plugin-api` is published to crates.io. The wasmtime PDK + runtime + plugin-types crates ship in-tree only; see [release-plz.toml](./release-plz.toml) for the publish policy. Author guide: [docs/plugin-author-guide.md](./docs/plugin-author-guide.md). Runtime design: [docs/rfc/0001-plugin-runtime-vnext.md](./docs/rfc/0001-plugin-runtime-vnext.md).
+The crates.io authoring surface is `cc-lb-plugin-api`, `cc-lb-plugin-wire`, `cc-lb-pdk-wasmtime`, `cc-lb-pdk-wasmtime-macros`, and `cc-lb-plugin-conformance`; host/runtime crates remain in-tree. Start with [docs/plugin-author-guide.md](./docs/plugin-author-guide.md), then use the crate READMEs for focused API notes: [`cc-lb-plugin-wire`](./crates/cc-lb-plugin-wire/README.md), [`cc-lb-pdk-wasmtime`](./crates/cc-lb-pdk-wasmtime/README.md), [`cc-lb-pdk-wasmtime-macros`](./crates/cc-lb-pdk-wasmtime-macros/README.md), and [`cc-lb-plugin-conformance`](./crates/cc-lb-plugin-conformance/README.md). Runtime design background is in the historical [RFC-0001](./docs/rfc/0001-plugin-runtime-vnext.md).
 
-Upload flow: build the plugin to `wasm32-unknown-unknown`, then POST the artifact + `slot_kind=filter|shape|observe` to `POST /admin/v1/plugins/wasm`. The host runs `inspect_wasm`, persists the SHA-256 + the 32-byte schema hash, and triggers a dynamic-view rebind.
+Upload flow: build the plugin to `wasm32-unknown-unknown`, then POST the artifact + `slot_kind=filter|shape|observe` to `POST /admin/v1/plugins/wasm`. The host runs `admit_wasm`, persists the SHA-256, plugin description, plugin usage, and per-hook metadata, then triggers a dynamic-view rebind.

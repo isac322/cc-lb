@@ -1,9 +1,7 @@
-use bytes::Bytes;
 use cc_lb_plugin_api::{
     DialectError, Principal, RequestContext, ShapedRequest, ShapedRequestBuilder, Upstream,
     UpstreamDialect,
 };
-use http::StatusCode;
 use url::Url;
 
 use crate::{ANTHROPIC_API_BASE_URL, compose_url};
@@ -44,9 +42,5 @@ impl UpstreamDialect for AnthropicDirectDialect {
             ctx.downstream_headers.clone(),
             ctx.body_bytes.clone(),
         ))
-    }
-
-    fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-        None
     }
 }

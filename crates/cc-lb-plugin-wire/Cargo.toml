@@ -1,0 +1,26 @@
+[package]
+name = "cc-lb-plugin-wire"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Wire types and schema versioning contract for cc-lb wasm plugin authors."
+repository = "https://github.com/isac322/cc-lb"
+readme = "README.md"
+keywords = ["cc-lb", "plugin", "wasm", "wire", "rkyv"]
+categories = ["wasm", "api-bindings", "development-tools"]
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+rkyv = { workspace = true, default-features = false, features = ["alloc", "bytecheck"] }
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_json = { workspace = true, optional = true }
+
+[build-dependencies]
+blake3 = { workspace = true, features = ["std"] }
+
+[features]
+default = []
+std = ["dep:serde", "dep:serde_json", "rkyv/std"]

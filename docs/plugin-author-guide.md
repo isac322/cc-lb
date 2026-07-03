@@ -1,227 +1,301 @@
-# cc-lb plugin author guide (wasmtime PDK)
+# cc-lb Plugin Author Guide
 
-This guide is for engineers writing or porting a wasm plugin against
-the cc-lb wasmtime + rkyv plugin runtime.
+This guide describes the current v1 wasmtime plugin contract for cc-lb plugin
+authors. It covers the published crates, metadata requirements, per-hook wire
+versioning, layout fingerprints, upload admission, and conformance testing.
 
-The canonical sources are:
+The focused crate READMEs are also useful while building plugins:
 
-- `crates/cc-lb-pdk-wasmtime` — guest PDK, re-exports `#[plugin]` /
-  `#[handler]` macros + wire types.
-- `crates/cc-lb-pdk-wasmtime-macros` — proc-macro implementation.
-- `crates/cc-lb-plugin-types` — host ↔ guest wire types (rkyv) +
-  schema constants under `cc_lb_plugin_types::schema`.
-- `crates/cc-lb-runtime-wasmtime` — host runtime (engine config,
-  load-time inspection, dispatch).
+- [`cc-lb-plugin-wire`](../crates/cc-lb-plugin-wire/README.md)
+- [`cc-lb-pdk-wasmtime`](../crates/cc-lb-pdk-wasmtime/README.md)
+- [`cc-lb-pdk-wasmtime-macros`](../crates/cc-lb-pdk-wasmtime-macros/README.md)
+- [`cc-lb-plugin-conformance`](../crates/cc-lb-plugin-conformance/README.md)
 
-When this guide and the code disagree, the code wins.
+## Quick Start
 
-## Contents
-
-1. [Runtime model](#runtime-model)
-2. [Authoring a plugin](#authoring-a-plugin)
-3. [Hook contracts](#hook-contracts)
-4. [Owned vs view mode](#owned-vs-view-mode)
-5. [Pure vs stateful dispatch](#pure-vs-stateful-dispatch)
-6. [Schema hash + bumping the wire](#schema-hash--bumping-the-wire)
-7. [Admin upload](#admin-upload)
-8. [Operational invariants](#operational-invariants)
-
-## Runtime model
-
-The host loads each plugin under a single wasmtime engine configured
-with `signals_based_traps`, a 4 GiB memory reservation, and a
-`PoolingAllocationConfig`. Hook execution is bounded by the request
-path's normal timeout/backpressure controls rather than Wasmtime
-instruction metering.
-
-A plugin upload travels through three gates before any user request
-can reach it:
-
-1. **`inspect_wasm` (host)** — walks raw `.wasm` bytes with
-   `wasmparser`. Enforces imports allow-list (no host imports
-   accepted), required exports per slot kind, and 32-byte BLAKE3
-   schema hash custom section.
-2. **`Engine::precompile_module` + `Module::deserialize`** —
-   in-process compile (no .cwasm trust-boundary crossing).
-3. **`Linker::instantiate_pre`** — produce reusable `InstancePre`
-   for hot-path dispatch.
-
-## Authoring a plugin
-
-`Cargo.toml`:
+Create a Rust library crate that builds to `wasm32-unknown-unknown`:
 
 ```toml
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-cc-lb-pdk-wasmtime.workspace = true
+cc-lb-plugin-wire = "0.2"
+cc-lb-pdk-wasmtime = "0.1"
 ```
 
-Plugin module:
+Minimal filter plugin:
 
 ```rust
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
-use cc_lb_pdk_wasmtime::types::{
-    ArchivedFilterRequest, FilterResponse, PerCandidateReason,
-};
+extern crate alloc;
 
-#[cc_lb_pdk_wasmtime::plugin(name = "cache-aware", version = "0.1.0")]
+use alloc::boxed::Box;
+use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
+use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse};
+
+#[cc_lb_plugin(
+    name = "accept-all",
+    version = "0.1.0",
+    description = "Accepts every upstream candidate.",
+    usage = "Use as a smoke-test router filter.",
+)]
+mod accept_all {
+    use super::*;
+
+    #[handler(
+        filter,
+        wire = 1,
+        description = "Accepts all candidates without modification.",
+        usage = "Attach to a router filter chain for baseline validation.",
+    )]
+    pub fn filter(_req: FilterRequest) -> FilterResponse {
+        FilterResponse { results: Box::from([]) }
+    }
+}
+```
+
+Build it:
+
+```bash
+cargo build --release --target wasm32-unknown-unknown
+```
+
+## Authoring a Plugin
+
+The PDK expects one inline module annotated with `#[cc_lb_plugin(...)]`.
+Handlers live inside that module and are annotated with `#[handler(...)]`.
+
+Required plugin metadata:
+
+- `name`: stable plugin identity; must match the admin upload `name` field.
+- `version`: plugin package or artifact version.
+- `description`: short operator-facing summary.
+- `usage`: operator-facing deployment guidance.
+
+```rust
+#[cc_lb_plugin(
+    name = "cache-aware",
+    version = "0.1.0",
+    description = "Routes requests toward warm prompt-cache upstreams.",
+    usage = "Attach to router filter chains where cache locality is preferred.",
+)]
 mod cache_aware {
     use super::*;
 
-    #[cc_lb_pdk_wasmtime::handler(name = "filter", view)]
-    pub fn filter(req: &ArchivedFilterRequest) -> FilterResponse {
-        // …
+    #[handler(
+        filter,
+        wire = 1,
+        description = "Marks candidates as accepted or rejected by cache affinity.",
+        usage = "Requires upstream candidate cache metadata from the host.",
+    )]
+    pub fn filter(req: FilterRequest) -> FilterResponse {
+        let _ = req;
+        FilterResponse { results: Box::from([]) }
     }
 }
 ```
 
-Build to wasm32:
+The macro emits allocator exports, hook exports, per-hook schema custom
+sections, and one `cc_lb.plugin.v1` metadata custom section.
+
+## Hook Contracts
+
+cc-lb currently supports three hook kinds. A wasm artifact may implement one or
+more hooks, and upload-time `slot_kind=filter|shape|observe` selects which hook
+the registration targets.
+
+| Hook | Export | Request type | Response type | Use |
+|---|---|---|---|---|
+| `filter` | `cc_lb_filter` | `FilterRequest` | `FilterResponse` | Keep or reject upstream candidates. |
+| `shape` | `cc_lb_shape` | `ShapeRequest` | `ShapeResponse` | Produce the upstream-bound request. |
+| `observe` | `cc_lb_observe` | `ObserveEvent` | none | Receive lifecycle events for side effects. |
+
+Filter example:
+
+```rust
+use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse, PerCandidateReason};
+
+#[handler(
+    filter,
+    wire = 1,
+    description = "Rejects candidates without observed cache state.",
+    usage = "Attach before fallback filters in router chains.",
+)]
+pub fn filter(req: FilterRequest) -> FilterResponse {
+    let results = req
+        .candidates
+        .iter()
+        .map(|candidate| PerCandidateReason {
+            upstream_id: candidate.upstream_id.clone(),
+            decision: if candidate.observed_at_unix_secs > 0 {
+                Box::from("accept")
+            } else {
+                Box::from("reject")
+            },
+            reason: Box::from("cache-observation-required"),
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+
+    FilterResponse { results }
+}
+```
+
+Shape example:
+
+```rust
+use cc_lb_plugin_wire::v1::{Header, ShapeRequest, ShapeResponse};
+
+#[handler(
+    shape,
+    wire = 1,
+    description = "Builds the upstream Anthropic-compatible request.",
+    usage = "Attach to shape slots that require URL rewriting.",
+)]
+pub fn shape(req: ShapeRequest) -> ShapeResponse {
+    ShapeResponse {
+        url: Box::from(format!("https://api.anthropic.com{}", req.path)),
+        method: req.method,
+        headers: Box::from([Header {
+            name: Box::from("content-type"),
+            value: Box::from(&b"application/json"[..]),
+        }]),
+        body: req.body,
+    }
+}
+```
+
+Observe example:
+
+```rust
+use cc_lb_plugin_wire::v1::ObserveEvent;
+
+#[handler(
+    observe,
+    wire = 1,
+    description = "Receives request lifecycle events.",
+    usage = "Attach as an observability hook for audit or metrics sinks.",
+)]
+pub fn observe(event: ObserveEvent) {
+    let _ = event;
+}
+```
+
+Each handler declares its own `wire = N`. The current published PDK supports
+`wire = 1`.
+
+## Metadata Contract
+
+Plugin and per-hook metadata is required. The host rejects uploads when the
+`cc_lb.plugin.v1` section is absent, malformed, or incomplete.
+
+Required top-level fields:
+
+- `name`
+- `version`
+- `description`
+- `usage`
+- `hooks`
+
+Required per-hook fields:
+
+- `wire_version`
+- `description`
+- `usage`
+
+Upload rejection names relevant to plugin authors include:
+
+- `missing_part`: a required multipart field is absent.
+- `invalid_slot_kind`: `slot_kind` is not `filter`, `shape`, or `observe`.
+- `invalid_wasm_magic`: uploaded bytes do not start with the wasm magic.
+- `invalid_wasm_length`: uploaded bytes are too short to be wasm.
+- `wasm_too_large`: the wasm exceeds the 32 MiB upload limit.
+- `identity_mismatch`: multipart `name` does not match plugin metadata `name`.
+- `invalid_wasm`: wasmtime admission rejected exports, metadata, wire versions,
+  fingerprints, imports, or the runtime probe.
+
+## Wire Versioning
+
+Wire versions are independent per hook. A future host can support filter v1 and
+v2 while shape and observe remain on v1. The plugin declares the version on each
+handler:
+
+```rust
+#[handler(
+    filter,
+    wire = 1,
+    description = "Filters candidates.",
+    usage = "Attach to router filter chains.",
+)]
+pub fn filter(req: FilterRequest) -> FilterResponse {
+    let _ = req;
+    FilterResponse { results: Box::from([]) }
+}
+```
+
+The host maintains supported-version lists per hook:
+
+- `HOST_SUPPORTED_FILTER_VERSIONS`
+- `HOST_SUPPORTED_SHAPE_VERSIONS`
+- `HOST_SUPPORTED_OBSERVE_VERSIONS`
+
+Admission rejects a plugin when the declared hook version is not in the host's
+supported list. This rejection happens before the plugin is persisted into a
+chain or called on user traffic.
+
+## Layout Fingerprint (`WireSchema`)
+
+The wire layout fingerprint is derived from the Rust type AST with
+`#[derive(WireSchema)]`. The derive macro builds a canonical descriptor string
+from the type name, fields, variants, and field types, then embeds
+`BLAKE3(descriptor)` as a 32-byte fingerprint.
+
+Plugin authors do not edit schema tags or manual hashes. A field edit naturally
+changes the descriptor and the embedded fingerprint. During admission, the host
+compares the plugin's embedded fingerprint with the current host fingerprint for
+the requested hook and wire version. Mismatches are rejected as `invalid_wasm`.
+
+## Runtime Probe (`admit_wasm`)
+
+Static metadata and fingerprints do not catch every integration bug. The host
+therefore runs `admit_wasm` for uploads, which compiles the module and executes
+a canonical sample payload for each declared hook.
+
+The runtime probe catches issues such as:
+
+- missing allocator exports
+- mismatched `cc_lb_alloc` or `cc_lb_free` behavior
+- guest encoding mistakes
+- hook export traps
+- response buffers that cannot be decoded as the expected rkyv type
+
+The probe runs before the upload is accepted for dispatch.
+
+## Building the Wasm
+
+Install the target once in your development environment:
 
 ```bash
-cargo build --target wasm32-unknown-unknown --release -p your-plugin
+rustup target add wasm32-unknown-unknown
 ```
 
-The macro emits `cc_lb_alloc` / `cc_lb_free` / one
-`cc_lb_<kind>(in_ptr, in_len) -> u64` export per handler, plus a
-`cc_lb.schema.<kind>.v1` custom section per handler with the 32-byte
-BLAKE3 of the wire-schema tag.
+Build the plugin artifact:
 
-A single wasm artifact may implement multiple hook kinds; the
-admin upload's `slot_kind` form field picks which exports + schema
-section the host requires for that registration.
-
-## Hook contracts
-
-| Hook | Wire request | Wire response | Slot |
-|---|---|---|---|
-| `filter` | `FilterRequest` | `FilterResponse` | router-scope |
-| `shape` | `ShapeRequest` | `ShapeResponse` | upstream-shape |
-| `normalize_error` (optional, on a shape slot) | `NormalizeErrorRequest` | `NormalizeErrorResponse` | shape (paired) |
-| `observe` | `ObserveEvent` | `(0, 0)` (no payload) | observability |
-
-Observe is side-effect-only — the PDK dispatch helpers automatically
-return `pack_ret(0, 0)`.
-
-Minimal skeleton showing all four handlers in a single plugin:
-
-```rust
-use cc_lb_pdk_wasmtime::types::{
-    ArchivedFilterRequest, ArchivedObserveEvent, ArchivedShapeRequest,
-    FilterResponse, NormalizeErrorRequest, NormalizeErrorResponse,
-    ShapeResponse,
-};
-
-#[cc_lb_pdk_wasmtime::plugin(name = "everything", version = "0.1.0")]
-mod everything {
-    use super::*;
-
-    #[cc_lb_pdk_wasmtime::handler(name = "filter", view)]
-    pub fn filter(_req: &ArchivedFilterRequest) -> FilterResponse {
-        FilterResponse { results: Default::default() }
-    }
-
-    #[cc_lb_pdk_wasmtime::handler(name = "shape", view)]
-    pub fn shape(_req: &ArchivedShapeRequest) -> ShapeResponse {
-        ShapeResponse {
-            url: "https://example.invalid".to_owned(),
-            method: "POST".to_owned(),
-            headers: Default::default(),
-            body: Default::default(),
-        }
-    }
-
-    #[cc_lb_pdk_wasmtime::handler(name = "normalize_error")]
-    pub fn normalize_error(_req: NormalizeErrorRequest) -> NormalizeErrorResponse {
-        NormalizeErrorResponse { normalized: None }
-    }
-
-    #[cc_lb_pdk_wasmtime::handler(name = "observe", view)]
-    pub fn observe(_event: &ArchivedObserveEvent) {}
-}
+```bash
+cargo build --release --target wasm32-unknown-unknown
 ```
 
-## Owned vs view mode
+The artifact is usually under:
 
-Each `#[handler]` accepts an optional `view` flag:
-
-```rust
-#[cc_lb_pdk_wasmtime::handler(name = "filter", view)]
-pub fn filter(req: &ArchivedFilterRequest) -> FilterResponse { … }
+```text
+target/wasm32-unknown-unknown/release/<crate_name>.wasm
 ```
 
-vs
+## Uploading
 
-```rust
-#[cc_lb_pdk_wasmtime::handler(name = "filter")]
-pub fn filter(req: FilterRequest) -> FilterResponse { … }
-```
-
-| Mode | Argument | When to use |
-|---|---|---|
-| `view` | `&ArchivedT` (zero-copy) | Read-mostly handlers. Avoids deserialize cost. |
-| owned (default) | `T` (deserialized) | Handlers that mutate or store the request beyond the call. |
-
-The PDK frees the input buffer on the guest side as soon as the
-borrow / owned copy is finished. The host traps if `cc_lb_alloc`
-returns `0` and rejects `(out_ptr, out_len) = (0, 0)` for any
-non-observe hook.
-
-## Pure vs stateful dispatch
-
-- **Pure** (default). Every call builds a fresh `Store`, runs the
-  hook, drops the `Store`. No per-worker state across calls.
-- **Stateful**. Per-worker `WorkerInstance` cached per `SlotKey` in
-  a `thread_local!`. Rebuilds transactionally on `version_id` change
-  or any trap.
-
-Opt out of pure mode by setting `pure = false` in the
-`PluginManifest` at upload time. The default
-(`PluginManifest::pure = true` via `default_pure()`) means every
-new plugin defaults to pure dispatch.
-
-## Schema hash + bumping the wire
-
-Wire-schema tags live in `cc_lb_plugin_types::schema`:
-
-- `WIRE_SCHEMA_TAG_FILTER = b"cc_lb.wire.v1.filter.rkyv"`
-- `WIRE_SCHEMA_TAG_SHAPE  = b"cc_lb.wire.v1.shape.rkyv"`
-- `WIRE_SCHEMA_TAG_NORMALIZE_ERROR = b"cc_lb.wire.v1.normalize_error.rkyv"`
-- `WIRE_SCHEMA_TAG_OBSERVE = b"cc_lb.wire.v1.observe.rkyv"`
-
-Each plugin emits `BLAKE3(tag)` into its `cc_lb.schema.<kind>.v1`
-custom section. The host computes the same hash at load time and
-rejects mismatch.
-
-To break the wire schema: bump the tag suffix (e.g. `.v2`), update
-the constant, rebuild every plugin against the new PDK. Old uploads
-will be rejected with `hash mismatch` on next register.
-
-### Wire type shapes
-
-Owned wire types use `Box<str>` / `Box<[u8]>` / `Box<[T]>` (not
-`String` / `Vec<u8>` / `Vec<T>`) so their archived bytes match the
-borrowed encode path (`#[rkyv(with = InlineAsBox)] &'a [u8]`). This
-lets the host serialise request bodies (up to 100 MiB on
-`/v1/files`) without a per-request `.to_vec()` copy — the request
-pipeline's `Bytes` handle is borrowed straight into the archive.
-`Principal.claims` is a `Box<[Claim]>` where `Claim { key, value }`
-is a named struct.
-
-Handler signatures (`&ArchivedFilterRequest`, `&ArchivedShapeRequest`,
-...) are unchanged. Field access on archived types:
-
-- `archived.body` derefs to `&[u8]` (no `ArchivedVec::as_slice()`).
-- `archived.request_id` derefs to `&str` (no `ArchivedString::as_str()`).
-- A claim entry uses `.key` and `.value` (no tuple `.0` / `.1`).
-
-Response construction uses `Box::from(...)` /
-`Vec<T>::into_boxed_slice()` (`Box<str>: From<&str> + From<String>`;
-`Box<[u8]>: From<&[u8]> + From<Vec<u8>>`).
-
-## Admin upload
+Upload through the admin API:
 
 ```bash
 curl -sS -X POST \
@@ -230,40 +304,113 @@ curl -sS -X POST \
   -F "name=my-plugin" \
   -F "original_filename=my-plugin.wasm" \
   -F "slot_kind=filter" \
-  http://localhost:$ADMIN_PORT/admin/v1/plugins/wasm
+  "http://localhost:$ADMIN_PORT/admin/v1/plugins/wasm"
 ```
 
-The endpoint validates the multipart parts, runs `inspect_wasm`
-inside `spawn_blocking`, computes SHA-256, persists to
-`data/plugins/wasm/cache/{sha}.wasm`, inserts a `wasm_registry_v2`
-row with `schema_hash` populated, and triggers a dynamic-view
-rebind.
+Successful upload responses include:
 
-Rejections (400 + JSON `error` discriminator):
+```json
+{
+  "sha256_hex": "...",
+  "id": "...",
+  "size_bytes": 12345,
+  "original_filename": "my-plugin.wasm",
+  "revision": 1,
+  "idempotent": false
+}
+```
 
-- `invalid_slot_kind` — slot_kind not `filter|shape|observe`.
-- `missing_part` — required multipart part absent.
-- `invalid_wasm` — `inspect_wasm` rejected (bad imports, missing
-  exports, wrong schema_hash).
-- `wasm_too_large` — > 32 MiB.
+The registry list endpoint surfaces the persisted author metadata, including
+`description`, `usage`, and `hook_metadata`:
 
-`gc_wasm` at `POST /admin/v1/plugins/wasm/gc` evicts orphaned blobs.
+```json
+{
+  "entries": [
+    {
+      "id": "...",
+      "sha256_hex": "...",
+      "name": "my-plugin",
+      "description": "Accepts every upstream candidate.",
+      "usage": "Use as a smoke-test router filter.",
+      "hook_metadata": {
+        "filter": {
+          "wire_version": 1,
+          "description": "Accepts all candidates without modification.",
+          "usage": "Attach to a router filter chain for baseline validation."
+        }
+      }
+    }
+  ]
+}
+```
 
-## Operational invariants
+## Conformance Test
 
-- **Imports allow-list**: any host import in the upload is a hard
-  reject at `inspect_wasm` time. Phase 1 ships zero host imports.
-- **Schema hash gate**: BLAKE3 of the wire tag must match
-  byte-for-byte. No "compatible but newer" accepted.
-- **`Store` drop on trap**: any trap in any of the three guest
-  calls discards the `Store`. The next call rebuilds. No implicit
-  circuit breaker.
-- **Adapter cell snapshot**: when a slot is re-registered, the
-  previous live `DynamicView`'s adapters keep the old
-  `Arc<PluginCell>` snapshot; the new view picks up the new cell.
-  Atomic hot-swap with no mid-call state crossover.
-- **Observe is non-blocking**: the host treats observe failures as
-  `ObservabilityError::Dropped` and continues.
+Add the conformance harness as a dev-dependency:
 
-For deeper background see
-[docs/rfc/0001-plugin-runtime-vnext.md](./rfc/0001-plugin-runtime-vnext.md).
+```toml
+[dev-dependencies]
+cc-lb-plugin-conformance = "0.2"
+```
+
+Use `ConformanceSuite::from_wasm` when the artifact exports one hook:
+
+```rust
+use cc_lb_plugin_conformance::ConformanceSuite;
+
+fn wasm_bytes() -> Vec<u8> {
+    std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/target/wasm32-unknown-unknown/release/my_plugin.wasm"
+    ))
+    .expect("build plugin wasm first")
+}
+
+#[test]
+fn plugin_is_recognisable_by_current_host() {
+    let wasm = wasm_bytes();
+    ConformanceSuite::from_wasm(&wasm)
+        .with_plugin_name("my-plugin")
+        .assert_recognisable_by_current_host();
+}
+
+#[test]
+fn plugin_passes_boundary_smoke() {
+    let wasm = wasm_bytes();
+    ConformanceSuite::from_wasm(&wasm)
+        .with_plugin_name("my-plugin")
+        .run();
+}
+```
+
+`assert_recognisable_by_current_host()` is the admission gate. It proves the
+current host can inspect, compile, fingerprint-check, and probe the plugin.
+
+`run()` builds a live runtime session and performs ABI round-trips using
+canonical payloads. It proves the boundary works; it does not replace semantic
+tests for your plugin's routing, shaping, or observability behavior.
+
+## Wire Version Bump Policy
+
+Bump a hook's wire version when the hook request or response layout changes
+incompatibly. Examples include adding fields, removing fields, renaming fields,
+reordering fields, changing field types, or changing enum variants.
+
+Host-side migration policy:
+
+1. Add new v2 wire types for the changed hook.
+2. Add `WireVersion::V2`.
+3. Add v2 to that hook's supported-version list.
+4. Keep v1 in the list while existing plugins are still supported.
+5. Update admission, probe fixtures, and conformance coverage for v2.
+
+Plugin author migration policy:
+
+1. Update `cc-lb-plugin-wire` and `cc-lb-pdk-wasmtime`.
+2. Change only the affected handler to `wire = 2`.
+3. Update handler signatures and response construction for the new types.
+4. Run conformance tests against the target host version.
+5. Upload the rebuilt wasm and rebind chains after admission succeeds.
+
+Because versions are per-hook, a multi-hook plugin can migrate one hook at a
+time. For example, `filter` can move to v2 while `observe` remains on v1.

@@ -350,7 +350,9 @@ async fn delete_principal_cascades_owned_plugin_chains() {
                 label: None,
                 uploaded_at_unix_secs: 1,
                 uploaded_by_admin_id: principal_id,
-                wire_version: 1,
+                description: "filter plugin".to_owned(),
+                usage: "test fixture".to_owned(),
+                hook_metadata: Default::default(),
                 supported_slots: Vec::new(),
             },
         )
@@ -367,7 +369,6 @@ async fn delete_principal_cascades_owned_plugin_chains() {
             sse_per_event: false,
             batched_events_per_flush: 1,
             batched_flush_ms: 1000,
-            wire_version: None,
         })
         .await
         .unwrap();

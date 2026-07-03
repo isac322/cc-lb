@@ -16,15 +16,16 @@ mod inspect;
 mod module;
 mod plugin;
 pub mod policy;
+mod probe;
 
-pub use cache::{
-    DEFAULT_ALIGN, call_filter_hook, call_normalize_error_hook, call_observe_hook, call_shape_hook,
-};
+pub use cache::{DEFAULT_ALIGN, call_filter_hook, call_observe_hook, call_shape_hook};
+pub use cc_lb_plugin_wire::schema::HookKind;
+pub use cc_lb_plugin_wire::schema::HookKind as SlotKind;
 pub use cell::{PluginCell, PluginSlot};
 pub use engine::{HostState, HotEngineConfig, build_hot_engine};
 pub use error::WasmtimeRuntimeError;
-pub use inspect::{ModuleInspection, SlotKind, inspect_wasm};
-pub use module::compile_module;
+pub use inspect::{ModuleInspection, inspect_wasm};
+pub use module::{admit_wasm, compile_module};
 pub use plugin::{WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeUpstreamDialect};
 
 use std::collections::{HashMap, HashSet};
@@ -77,6 +78,21 @@ impl WasmtimeRuntime {
         &self.linker
     }
 
+    pub fn admit_wasm(
+        &self,
+        kind: HookKind,
+        wasm_bytes: &[u8],
+    ) -> Result<ModuleInspection, WasmtimeRuntimeError> {
+        let (_, inspection) = module::admit_wasm(
+            &self.engine,
+            &self.linker,
+            kind,
+            wasm_bytes,
+            self.config.memory_max_pages,
+        )?;
+        Ok(inspection)
+    }
+
     /// Register (or replace) a filter-hook slot.
     pub fn register_filter(
         &self,
@@ -88,7 +104,7 @@ impl WasmtimeRuntime {
     }
 
     /// Register (or replace) a shape-hook slot. The plugin module
-    /// must export both `cc_lb_shape` and `cc_lb_normalize_error`.
+    /// must export `cc_lb_shape`.
     pub fn register_shape(
         &self,
         slot_key: SlotKey,
@@ -134,12 +150,17 @@ impl WasmtimeRuntime {
 
         let name_string: String = name.into();
         let plugin_name: Arc<str> = Arc::from(name_string.as_str());
-        let (instance_pre, inspection) =
-            compile_module(&self.engine, &self.linker, kind, wasm_bytes)?;
+        let (instance_pre, inspection) = module::admit_wasm(
+            &self.engine,
+            &self.linker,
+            kind,
+            wasm_bytes,
+            self.config.memory_max_pages,
+        )?;
         let new_cell = PluginCell {
             version_id: 1,
             instance_pre,
-            schema_hash: inspection.primary_schema_hash(),
+            metadata: inspection.metadata,
             memory_max_pages: self.config.memory_max_pages,
             content_hash: new_content_hash,
             plugin_name: Arc::clone(&plugin_name),
@@ -168,7 +189,7 @@ impl WasmtimeRuntime {
                 let bumped = PluginCell {
                     version_id: prev.version_id + 1,
                     instance_pre: new_cell.instance_pre,
-                    schema_hash: new_cell.schema_hash,
+                    metadata: new_cell.metadata,
                     memory_max_pages: new_cell.memory_max_pages,
                     content_hash: new_cell.content_hash,
                     plugin_name: new_cell.plugin_name,
@@ -296,19 +317,6 @@ impl WasmtimeRuntime {
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
         self.dispatch(slot_key, SlotKind::Shape, |cell| {
             call_shape_hook(cell, input)
-        })
-    }
-
-    /// Synchronous normalize_error call against a Shape slot. Sibling
-    /// of `call_shape` — both target the same plugin instance, picking
-    /// the hook by name.
-    pub fn call_normalize_error(
-        &self,
-        slot_key: &SlotKey,
-        input: &[u8],
-    ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.dispatch(slot_key, SlotKind::Shape, |cell| {
-            call_normalize_error_hook(cell, input)
         })
     }
 

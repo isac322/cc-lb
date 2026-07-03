@@ -63,12 +63,6 @@ fn validate_wasmtime_runtime(config: &Config) -> Result<(), ValidationError> {
             "must be > 0",
         ));
     }
-    if bounds.normalize_error_body_bytes == 0 {
-        return Err(ValidationError::new(
-            "runtime.wasmtime.wire_bounds.normalize_error_body_bytes",
-            "must be > 0",
-        ));
-    }
     if bounds.reason_bytes == 0 {
         return Err(ValidationError::new(
             "runtime.wasmtime.wire_bounds.reason_bytes",

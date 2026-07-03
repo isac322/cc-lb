@@ -1,5 +1,4 @@
-//! End-to-end shape + normalize_error against the
-//! `wasmtime-shape-passthrough` fixture.
+//! End-to-end shape against the `wasmtime-shape-passthrough` fixture.
 //!
 //! Verifies that
 //! [`WasmtimeRuntime::register_shape`][cc_lb_runtime_wasmtime::WasmtimeRuntime::register_shape]
@@ -22,10 +21,10 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    Principal, PrincipalKind, RequestContext, SlotKey, Upstream, UpstreamDialect, shape_request,
+    Principal, PrincipalKind, RequestContext, SlotKey, Upstream, shape_request,
 };
 use cc_lb_runtime_wasmtime::{WasmtimeRuntime, WasmtimeUpstreamDialect};
-use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+use http::{HeaderMap, HeaderName, HeaderValue, Method};
 
 fn wasm_path() -> PathBuf {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -131,25 +130,4 @@ fn shape_passthrough_echoes_request() {
         shaped.headers().get(http::header::AUTHORIZATION).is_none(),
         "authorization must be stripped at the host boundary"
     );
-}
-
-#[test]
-fn normalize_error_returns_none_passthrough() {
-    let Some(wasm_bytes) = load_wasm_or_skip() else {
-        return;
-    };
-
-    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
-    let slot = runtime
-        .register_shape(
-            SlotKey::global("test-normalize"),
-            "test-normalize",
-            &wasm_bytes,
-        )
-        .expect("register_shape OK");
-
-    let dialect = WasmtimeUpstreamDialect::new(slot, runtime.config_arc());
-    let body = Bytes::from_static(br#"{"error":"upstream blew up"}"#);
-    let out = dialect.normalize_error(StatusCode::BAD_GATEWAY, &body);
-    assert!(out.is_none(), "passthrough plugin always returns None");
 }

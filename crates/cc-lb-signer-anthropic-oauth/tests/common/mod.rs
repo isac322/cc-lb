@@ -269,10 +269,6 @@ impl UpstreamDialect for DirectDialect {
             Bytes::from_static(br#"{"model":"claude-test"}"#),
         ))
     }
-
-    fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-        None
-    }
 }
 
 pub fn unauthorized_error() -> cc_lb_plugin_api::UpstreamError {

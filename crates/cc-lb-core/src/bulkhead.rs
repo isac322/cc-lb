@@ -397,7 +397,7 @@ mod tests {
         ShapedRequestBuilder, SignedRequest, Signer, SignerError, SigningCapability, Upstream,
         UpstreamDialect, shape_request, sign_request,
     };
-    use http::{HeaderMap, Method, Response, StatusCode};
+    use http::{HeaderMap, Method, Response};
     use url::Url;
 
     use super::*;
@@ -530,10 +530,6 @@ mod tests {
                 ctx.downstream_headers.clone(),
                 ctx.body_bytes.clone(),
             ))
-        }
-
-        fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-            None
         }
     }
 

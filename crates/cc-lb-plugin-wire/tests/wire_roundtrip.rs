@@ -4,16 +4,16 @@
 //!
 //! Also asserts the RFC-0001 #9 borrowed-wire ABI contract: the bytes
 //! emitted by encoding a `FilterRequestRef<'_>` / `ShapeRequestRef<'_>`
-//! / `NormalizeErrorRequestRef<'_>` are structurally decodable via the
-//! owned `Archived*` view. If this ever regresses, the host-side
+//! are structurally decodable via the owned `Archived*` view. If this
+//! ever regresses, the host-side
 //! borrowed encoding stops producing bytes the guest can parse.
 
-use cc_lb_plugin_types::{
-    ArchivedFilterRequest, ArchivedNormalizeErrorRequest, ArchivedObserveEvent,
-    ArchivedShapeRequest, Claim, ClaimRef, FilterRequest, FilterRequestRef, Header, HeaderRef,
-    NormalizeErrorRequest, NormalizeErrorRequestRef, NormalizeErrorResponse, ObserveEvent,
-    Principal, PrincipalRef, QueryRef, ShapeRequest, ShapeRequestRef, ShapeResponse, Upstream,
-    UpstreamCandidate, UpstreamCandidateRef, UpstreamRef, schema,
+use cc_lb_plugin_wire::{
+    ArchivedFilterRequest, ArchivedObserveEvent, ArchivedShapeRequest, Claim, ClaimRef,
+    FilterRequest, FilterRequestRef, Header, HeaderRef, ObserveEvent, Principal, PrincipalRef,
+    QueryRef, ShapeRequest, ShapeRequestRef, ShapeResponse, Upstream, UpstreamCandidate,
+    UpstreamCandidateRef, UpstreamRef, WireSchema,
+    schema::{HookKind, WireVersion},
 };
 use rkyv::rancor::Error;
 
@@ -176,39 +176,6 @@ fn shape_response_round_trips() {
 }
 
 #[test]
-fn normalize_error_round_trips() {
-    let req = NormalizeErrorRequest {
-        status: 429,
-        body: Box::from(&b"rate_limited"[..]),
-    };
-    let bytes = rkyv::to_bytes::<Error>(&req).expect("encode req");
-    let archived =
-        rkyv::access::<ArchivedNormalizeErrorRequest, Error>(&bytes).expect("access req");
-    let owned: NormalizeErrorRequest =
-        rkyv::deserialize::<NormalizeErrorRequest, Error>(archived).expect("deserialize req");
-    assert_eq!(owned.status, 429);
-
-    let resp = NormalizeErrorResponse {
-        normalized: Some(Box::from(&b"{\"type\":\"rate_limit_error\"}"[..])),
-    };
-    let bytes = rkyv::to_bytes::<Error>(&resp).expect("encode resp");
-    let _ = bytes;
-}
-
-#[test]
-fn normalize_error_ref_encodes_to_owned_wire() {
-    let req_ref = NormalizeErrorRequestRef {
-        status: 429,
-        body: b"rate_limited",
-    };
-    let bytes = rkyv::to_bytes::<Error>(&req_ref).expect("encode ref");
-    let archived =
-        rkyv::access::<ArchivedNormalizeErrorRequest, Error>(&bytes).expect("access owned");
-    let body: &[u8] = &archived.body;
-    assert_eq!(body, b"rate_limited");
-}
-
-#[test]
 fn observe_event_request_started_round_trips() {
     let ev = ObserveEvent::RequestStarted {
         request_id: Box::from("req-3"),
@@ -282,23 +249,36 @@ fn observe_event_request_finished_round_trips() {
 }
 
 #[test]
-fn schema_constants_are_distinct() {
-    let tags = [
-        schema::WIRE_SCHEMA_TAG_FILTER,
-        schema::WIRE_SCHEMA_TAG_SHAPE,
-        schema::WIRE_SCHEMA_TAG_NORMALIZE_ERROR,
-        schema::WIRE_SCHEMA_TAG_OBSERVE,
+fn schema_fingerprints_and_sections_are_distinct() {
+    let fingerprints = [
+        <FilterRequest as WireSchema>::FINGERPRINT,
+        <ShapeRequest as WireSchema>::FINGERPRINT,
+        <ObserveEvent as WireSchema>::FINGERPRINT,
     ];
-    for i in 0..tags.len() {
-        for j in i + 1..tags.len() {
-            assert_ne!(tags[i], tags[j], "schema tags {i} and {j} collide");
+    for i in 0..fingerprints.len() {
+        for j in i + 1..fingerprints.len() {
+            assert_ne!(
+                fingerprints[i], fingerprints[j],
+                "schema fingerprints {i} and {j} collide"
+            );
         }
     }
     let sections = [
-        schema::SECTION_FILTER,
-        schema::SECTION_SHAPE,
-        schema::SECTION_NORMALIZE_ERROR,
-        schema::SECTION_OBSERVE,
+        format!(
+            "{}.{}",
+            HookKind::Filter.section_prefix(),
+            WireVersion::V1.as_str()
+        ),
+        format!(
+            "{}.{}",
+            HookKind::Shape.section_prefix(),
+            WireVersion::V1.as_str()
+        ),
+        format!(
+            "{}.{}",
+            HookKind::Observe.section_prefix(),
+            WireVersion::V1.as_str()
+        ),
     ];
     for i in 0..sections.len() {
         for j in i + 1..sections.len() {

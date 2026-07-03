@@ -33,6 +33,7 @@ cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-scheduler = { path = "../cc-lb-scheduler", default-features = false }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
 cc-lb-runtime-wasmtime = { workspace = true }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 tracing.workspace = true
@@ -63,7 +64,7 @@ tower.workspace = true
 http-body-util.workspace = true
 wat = "1"
 blake3 = { workspace = true, features = ["std"] }
-cc-lb-plugin-types = { path = "../cc-lb-plugin-types", features = ["std"] }
+rkyv = { workspace = true, features = ["std", "bytecheck"] }
 humantime = "2.3"
 insta.workspace = true
 tempfile.workspace = true

@@ -6,8 +6,6 @@
 //! (defaulting to `https://api.anthropic.com` when no override is
 //! present on `AnthropicDirect`).
 //!
-//! `normalize_error` always returns `None` — passthrough.
-//!
 //! Used by `crates/cc-lb-runtime-wasmtime/tests/shape_round_trip.rs`.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
@@ -19,15 +17,25 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use cc_lb_pdk_wasmtime::types::{
-    ArchivedShapeRequest, ArchivedUpstream, Header as WireHeader, NormalizeErrorRequest,
-    NormalizeErrorResponse, ShapeResponse,
+    ArchivedShapeRequest, ArchivedUpstream, Header as WireHeader, ShapeResponse,
 };
 
-#[cc_lb_pdk_wasmtime::plugin(name = "wasmtime-shape-passthrough", version = "0.1.0")]
+#[cc_lb_pdk_wasmtime::plugin(
+    name = "wasmtime-shape-passthrough",
+    version = "0.1.0",
+    description = "Test fixture: passes request through unchanged",
+    usage = "Testing only, no config. Echoes the request method, headers, and body against the host-provided upstream base URL."
+)]
 mod passthrough {
     use super::*;
 
-    #[cc_lb_pdk_wasmtime::handler(name = "shape", view)]
+    #[cc_lb_pdk_wasmtime::handler(
+        shape,
+        wire = 1,
+        description = "Passes the incoming request through to the selected upstream",
+        usage = "Testing only, no config. Requires the host to populate Upstream::AnthropicDirect.base_url before dispatch.",
+        view
+    )]
     pub fn shape(req: &ArchivedShapeRequest) -> ShapeResponse {
         // The host is responsible for filling `base_url` before
         // calling `shape` — a plugin must never invent a production
@@ -59,14 +67,9 @@ mod passthrough {
             body: Box::from(body_ref),
         }
     }
-
-    #[cc_lb_pdk_wasmtime::handler(name = "normalize_error")]
-    pub fn normalize_error(_req: NormalizeErrorRequest) -> NormalizeErrorResponse {
-        NormalizeErrorResponse { normalized: None }
-    }
 }
 
-pub use passthrough::{normalize_error, shape};
+pub use passthrough::shape;
 
 fn upstream_base_url(upstream: &ArchivedUpstream) -> Option<String> {
     match upstream {

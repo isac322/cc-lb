@@ -70,8 +70,4 @@ impl UpstreamDialect for NoopDialect {
             reason: "fuzz target exercises SSE relay only".to_owned(),
         })
     }
-
-    fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-        None
-    }
 }
