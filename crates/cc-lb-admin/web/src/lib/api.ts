@@ -1,6 +1,6 @@
 // biome-ignore-all lint/suspicious/noExplicitAny: existing API types use any for record params
 import { createEventSource, type EventSourceClient } from 'eventsource-client';
-import { z } from 'zod';
+import * as z from 'zod';
 import { clearAdminToken, getAdminToken } from './auth';
 
 const AUTH_REQUIRED_EVENT = 'cclb:auth-required';
