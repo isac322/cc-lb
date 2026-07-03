@@ -5,6 +5,11 @@ use thiserror::Error;
 
 use crate::{Config, ConfigError, DEFAULT_SQLITE_PATH, DownstreamAuthMode, StorageConfig};
 
+const WASMTIME_PAGE_BYTES: u64 = 64 * 1024;
+const WASMTIME_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const WASMTIME_MIN_GUARD_BYTES: u64 = 32 * 1024 * 1024;
+const WASMTIME_MAX_POOL_TOTAL: u32 = 4096;
+
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("{field}: {message}")]
 pub struct ValidationError {
@@ -42,6 +47,28 @@ fn validate_wasmtime_runtime(config: &Config) -> Result<(), ValidationError> {
             ));
         }
     }
+    let effective_pages = config.runtime.wasmtime.memory_max_pages.unwrap_or(2048);
+    let max_memory_bytes = u64::from(effective_pages) * WASMTIME_PAGE_BYTES;
+    if let Some(bytes) = config.runtime.wasmtime.memory_reservation_bytes {
+        validate_wasmtime_bytes(
+            "runtime.wasmtime.memory_reservation_bytes",
+            bytes,
+            max_memory_bytes,
+        )?;
+    }
+    if let Some(bytes) = config.runtime.wasmtime.memory_guard_bytes {
+        validate_wasmtime_bytes(
+            "runtime.wasmtime.memory_guard_bytes",
+            bytes,
+            WASMTIME_MIN_GUARD_BYTES,
+        )?;
+    }
+    if let Some(total) = config.runtime.wasmtime.pool_total_memories {
+        validate_wasmtime_pool_total("runtime.wasmtime.pool_total_memories", total)?;
+    }
+    if let Some(total) = config.runtime.wasmtime.pool_total_core_instances {
+        validate_wasmtime_pool_total("runtime.wasmtime.pool_total_core_instances", total)?;
+    }
     let bounds = &config.runtime.wasmtime.wire_bounds;
     // All wire-bound caps must be non-zero. A zero cap silently rejects
     // every plugin call, which is worse than failing loudly at load.
@@ -67,6 +94,32 @@ fn validate_wasmtime_runtime(config: &Config) -> Result<(), ValidationError> {
         return Err(ValidationError::new(
             "runtime.wasmtime.wire_bounds.reason_bytes",
             "must be > 0",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_wasmtime_bytes(
+    field: &'static str,
+    bytes: u64,
+    min: u64,
+) -> Result<(), ValidationError> {
+    if bytes < min || bytes > WASMTIME_MAX_BYTES || bytes % WASMTIME_PAGE_BYTES != 0 {
+        return Err(ValidationError::new(
+            field,
+            format!(
+                "must be 64KiB-aligned and in range {min}..={WASMTIME_MAX_BYTES} (got {bytes})"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_wasmtime_pool_total(field: &'static str, total: u32) -> Result<(), ValidationError> {
+    if total == 0 || total > WASMTIME_MAX_POOL_TOTAL {
+        return Err(ValidationError::new(
+            field,
+            format!("must be in range 1..={WASMTIME_MAX_POOL_TOTAL} (got {total})"),
         ));
     }
     Ok(())
