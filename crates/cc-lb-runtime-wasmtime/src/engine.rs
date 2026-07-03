@@ -20,7 +20,8 @@
 //!   per-instruction traps.
 
 use wasmtime::{
-    Config, Engine, InstanceAllocationStrategy, OptLevel, PoolingAllocationConfig, Strategy,
+    Config, Engine, InstanceAllocationStrategy, OptLevel, PoolingAllocationConfig, StoreLimits,
+    StoreLimitsBuilder, Strategy,
 };
 
 use crate::error::WasmtimeRuntimeError;
@@ -39,13 +40,30 @@ pub enum HotEngineAllocationStrategy {
 }
 
 /// Host state attached to every [`wasmtime::Store`] on the hot path.
-///
-/// Phase 1 carries nothing — host imports are zero by load-time enforcement.
-/// Future phases may add an audit-log handle for the signer engine or
-/// per-call accounting. The `()` newtype keeps the type signature stable
-/// across phases so downstream code never needs to switch on it.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct HostState;
+#[derive(Debug)]
+pub struct HostState {
+    limits: StoreLimits,
+}
+
+impl HostState {
+    pub fn new(memory_max_pages: u32) -> Self {
+        Self {
+            limits: StoreLimitsBuilder::new()
+                .memory_size((memory_max_pages as usize) << 16)
+                .build(),
+        }
+    }
+
+    pub fn limits(&mut self) -> &mut StoreLimits {
+        &mut self.limits
+    }
+}
+
+impl Default for HostState {
+    fn default() -> Self {
+        Self::new(DEFAULT_MEMORY_MAX_PAGES)
+    }
+}
 
 /// Hot-path engine tuning knobs.
 ///

@@ -21,7 +21,8 @@ pub(super) fn build_worker_instance(
     hook: HookFn,
 ) -> Result<WorkerInstance, WasmtimeRuntimeError> {
     let engine = cell.instance_pre.module().engine();
-    let mut store = Store::new(engine, HostState);
+    let mut store = Store::new(engine, HostState::new(cell.memory_max_pages));
+    store.limiter(|state| state.limits());
 
     let instance: Instance = cell.instance_pre.instantiate(&mut store).map_err(|e| {
         if e.downcast_ref::<wasmtime::PoolConcurrencyLimitError>()
