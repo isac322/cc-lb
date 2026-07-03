@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { computeStageGroups } from './computeStageGroups';
+import { computeStageGroups, deriveSetupOverhead } from './computeStageGroups';
 
 describe('computeStageGroups', () => {
   it('returns all zero groups for empty event', () => {
     expect(computeStageGroups({})).toEqual({
       internalPre: 0,
+      setupOverhead: 0,
       wait: 0,
       upstream: 0,
       body: 0,
@@ -90,5 +91,48 @@ describe('computeStageGroups', () => {
     // upstream = 0 (connect_ms undefined) + (800 - 2 - 0 - 0) = 798
     expect(r.upstream).toBe(798);
     expect(r.unaccounted).toBe(10);
+  });
+
+  it('derives setup_overhead as proxy_setup_ms minus auth+route+limit_reserve', () => {
+    expect(
+      deriveSetupOverhead({
+        proxy_setup_ms: 235,
+        auth_ms: 0,
+        route_ms: 0,
+        limit_reserve_ms: 2,
+      }),
+    ).toBe(233);
+  });
+
+  it('clamps setup_overhead to zero when named sub-stages exceed proxy_setup_ms', () => {
+    expect(
+      deriveSetupOverhead({
+        proxy_setup_ms: 10,
+        auth_ms: 40,
+        route_ms: 0,
+        limit_reserve_ms: 0,
+      }),
+    ).toBe(0);
+  });
+
+  it('returns zero setup_overhead when proxy_setup_ms is undefined', () => {
+    expect(deriveSetupOverhead({ auth_ms: 100 })).toBe(0);
+  });
+
+  it('folds setup_overhead into internalPre and reduces unaccounted', () => {
+    const r = computeStageGroups({
+      auth_ms: 0,
+      route_ms: 0,
+      limit_reserve_ms: 2,
+      shape_ms: 0,
+      sign_ms: 0,
+      proxy_setup_ms: 235,
+      upstream_ttfb_ms: 1000,
+      upstream_body_ms: 500,
+      duration_ms: 1780,
+    });
+    expect(r.setupOverhead).toBe(235 - 2);
+    expect(r.internalPre).toBe(235);
+    expect(r.unaccounted).toBe(1780 - 235 - 1000 - 500);
   });
 });
