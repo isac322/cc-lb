@@ -5,15 +5,25 @@ name: release-plz
 # release-plz.toml policy header.
 #
 # Flow:
-#   1. `release-pr` job opens/updates a "chore: release" PR with version bumps
-#      and CHANGELOG entries for any crate touched since the last release.
-#   2. On merge of that PR, the `release` job runs again, detects new versions
+#   1. `preflight` job re-runs the publish-check gate (cargo semver-checks
+#      on every publish=true crate that has a crates.io baseline, plus a
+#      `cargo publish --dry-run` on the foundation crate cc-lb-plugin-api).
+#      This is defense-in-depth against the class of failure where a PR
+#      slips through with a public API break that has no matching version
+#      bump — path deps hide the mismatch until `cargo publish --verify`
+#      resolves the workspace dep constraint against crates.io. If this
+#      job fails no publish is attempted, so partial crates.io publishes
+#      cannot happen.
+#   2. `release` job runs after preflight succeeds. It detects new versions
 #      in Cargo.toml, creates git tags + GitHub releases, and publishes the
 #      crates managed in release-plz.toml (currently 6: cc-lb-plugin-api,
 #      cc-lb-plugin-wire, cc-lb-pdk-wasmtime, cc-lb-pdk-wasmtime-macros,
 #      cc-lb-plugin-conformance, cc-lb-runtime-wasmtime) to crates.io via
 #      trusted publishing (OIDC). Host / storage / internal crates carry
 #      `publish = false` and are skipped.
+#   3. `release-pr` job runs in parallel with preflight/release. It opens
+#      or updates a "chore: release" PR with version bumps and CHANGELOG
+#      entries for any crate touched since the last release.
 
 on:
   push:
@@ -26,8 +36,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: preflight publish-check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154
+        with:
+          tool: cargo-semver-checks@0.48
+
+      - name: cargo semver-checks (published baselines)
+        run: |
+          set -euo pipefail
+          cargo semver-checks --package cc-lb-plugin-api
+          cargo semver-checks --package cc-lb-plugin-wire
+          cargo semver-checks --package cc-lb-plugin-conformance
+
+      - name: cargo publish --dry-run cc-lb-plugin-api
+        run: cargo publish --dry-run -p cc-lb-plugin-api
+
   release:
     name: release-plz release
+    needs: preflight
     runs-on: ubuntu-latest
     permissions:
       contents: write
