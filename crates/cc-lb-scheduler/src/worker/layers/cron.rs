@@ -1,8 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Duration;
 
-use apalis::layers::TimeoutLayer;
 use apalis::layers::catch_panic::CatchPanicLayer;
 use apalis::layers::limit::ConcurrencyLimitLayer;
 use apalis::layers::prometheus::PrometheusLayer;
@@ -15,8 +13,6 @@ use crate::retry::RetryClass;
 
 use super::super::dispatch::{SingletonHandlerFn, singleton_job_handler};
 use super::super::{CRON_QUEUE, CronJob, SchedulerBackend, SchedulerCtx};
-
-const SINGLETON_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[cfg(feature = "sqlite")]
 type SqliteSingletonStorage = apalis_sqlite::SqliteStorage<
@@ -83,7 +79,6 @@ fn build_sqlite_singleton_worker(
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Maintenance.layer())
-                    .layer(TimeoutLayer::new(SINGLETON_TIMEOUT))
                     .layer(CatchPanicLayer::new())
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))
@@ -119,7 +114,6 @@ fn build_postgres_singleton_worker(
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Maintenance.layer())
-                    .layer(TimeoutLayer::new(SINGLETON_TIMEOUT))
                     .layer(CatchPanicLayer::new())
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))

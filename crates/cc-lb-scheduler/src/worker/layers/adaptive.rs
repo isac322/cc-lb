@@ -2,7 +2,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use apalis::layers::TimeoutLayer;
 use apalis::layers::catch_panic::CatchPanicLayer;
 use apalis::layers::limit::ConcurrencyLimitLayer;
 use apalis::layers::prometheus::PrometheusLayer;
@@ -19,8 +18,6 @@ use super::super::PostgresApalisStorage;
 use super::super::SqliteApalisStorage;
 use super::super::dispatch::{EntityHandlerFn, entity_job_handler};
 use super::super::{ADAPTIVE_QUEUE, SchedulerBackend, SchedulerCtx};
-
-const ENTITY_TIMEOUT: Duration = Duration::from_secs(60);
 
 type AdaptiveWorkerFuture = Pin<Box<dyn Future<Output = Result<(), WorkerError>> + Send>>;
 
@@ -87,7 +84,6 @@ fn build_sqlite_worker(
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Adaptive.layer())
-                    .layer(TimeoutLayer::new(ENTITY_TIMEOUT))
                     .layer(CatchPanicLayer::new())
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))
@@ -118,7 +114,6 @@ fn build_postgres_worker(
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Adaptive.layer())
-                    .layer(TimeoutLayer::new(ENTITY_TIMEOUT))
                     .layer(CatchPanicLayer::new())
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))
