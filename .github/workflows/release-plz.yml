@@ -41,6 +41,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      # cc-lb-plugin-conformance's semver check transitively pulls
+      # cc-lb-runtime-wasmtime, whose build.rs pre-builds wasm32 test
+      # fixtures. That pre-build has no bearing on the rustdoc surface
+      # semver-checks inspects, and it fails on runners without a
+      # wasm32-unknown-unknown target — which ubuntu-latest is. Skip
+      # via the same escape hatch that gates the release step below.
+      CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
         with:
