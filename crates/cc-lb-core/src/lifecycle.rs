@@ -508,7 +508,6 @@ fn prompt_cache_ttl_secs(ttl_class: TtlClass) -> u64 {
 #[derive(Clone, Debug)]
 pub struct ReplicaIdentity {
     pub id: Uuid,
-    pub started_at_unix_secs: u64,
 }
 
 #[derive(Clone, Debug)]

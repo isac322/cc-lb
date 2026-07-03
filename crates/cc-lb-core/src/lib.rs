@@ -151,7 +151,7 @@ pub use lifecycle_hook_adapter::{
     ObservabilityHookAdapterHandle, spawn_observability_hook_adapter,
 };
 pub use lifecycle_limit_reconcile_subscriber::{
-    LimitReconcileMode, LimitReconcileSubscriberHandle, spawn_lifecycle_limit_reconcile_subscriber,
+    LimitReconcileSubscriberHandle, spawn_lifecycle_limit_reconcile_subscriber,
 };
 pub use lifecycle_limit_rejection_audit_subscriber::{
     LimitRejectionAuditSubscriberHandle, spawn_lifecycle_limit_rejection_audit_subscriber,

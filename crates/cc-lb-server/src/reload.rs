@@ -438,11 +438,6 @@ fn summarize_lifecycle_subscriber_restart_required(
             current.lifecycle_limit_reconcile_subscriber.enabled,
             new_config.lifecycle_limit_reconcile_subscriber.enabled,
         ),
-        (
-            "lifecycle_limit_reconcile_subscriber.shadow",
-            current.lifecycle_limit_reconcile_subscriber.shadow,
-            new_config.lifecycle_limit_reconcile_subscriber.shadow,
-        ),
     ];
 
     for (field, current_value, new_value) in entries {

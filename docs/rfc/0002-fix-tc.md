@@ -7,15 +7,15 @@ Consensus of 3 independent test-design agents (behavior verification, regression
 - **TC-STATIC-1** · No compile references to `LifecycleContext::update_usage`, `set_prebuilt_event`, `attach_cache_metadata`. `rg` returns 0 code hits under `crates/`.
 - **TC-STATIC-2** · No `RequestEvent {` literals in handler success paths (`crates/cc-lb-core/src/lifecycle.rs`).
 - **TC-STATIC-3** · `TerminalState` struct field list excludes `usage`, `prebuilt_event`, `cache_state`, `cache_control_block_count`, `cache_breakpoints`, `cache_prefix_hash`.
-- **TC-STATIC-4** · Default config values: `lifecycle_limit_reconcile_subscriber.enabled = true`, `.shadow = false`; TTL sweeper spawns regardless of config gate.
+- **TC-STATIC-4** · Default config values: `lifecycle_limit_reconcile_subscriber.enabled = true`; TTL sweeper spawns regardless of config gate.
 - **TC-STATIC-5** · `terminal_observer` module renamed to `lifecycle_context`; grep returns 0 production hits (docs/tests may keep the term).
 
 ## Unit tests
 
-- **TC-U-M2-1** · Assembler receives only `RequestTerminated` (no partial) → writes minimal shadow row with `error_code=terminal_without_partial`, `request_id=req_unknown_shadow`, all usage/cache fields NULL.
-- **TC-U-M2-2** · Partial with no usage + `RequestTerminated(Success)` → shadow row with status=200, no usage.
+- **TC-U-M2-1** · Assembler receives only `RequestTerminated` (no partial) → writes minimal assembler row with `error_code=terminal_without_partial`, `request_id=req_unknown_shadow`, all usage/cache fields NULL.
+- **TC-U-M2-2** · Partial with no usage + `RequestTerminated(Success)` → assembler row with status=200, no usage.
 - **TC-U-M1-1** · `LifecycleEvent::UpstreamResponseStarted` carries `HeaderSnapshot` with sanitized subset (content-type, x-request-id, rate-limit headers). No `authorization` header included.
-- **TC-U-H5-1** · Fresh config parse: `lifecycle_limit_reconcile_subscriber.{enabled, shadow}` = `(true, false)`.
+- **TC-U-H5-1** · Fresh config parse: `lifecycle_limit_reconcile_subscriber.{enabled}` = `(true)`.
 - **TC-U-H5-2** · `LimitReconcileSubscriber` receives `LimitDecision::Reserved { reservation_id: "" }` + terminate → no panic; increments `empty_reservation_id` outcome counter.
 - **TC-U-M4-1** · `RequestEventWriterSource` semantics: given all 9 permutations of `(source ∈ {Legacy, Both, Shadow}) × (old_flag ∈ {true, false, unset})`, only `source` decides.
 
@@ -23,10 +23,10 @@ Consensus of 3 independent test-design agents (behavior verification, regression
 
 - **TC-INT-H1-1** · Boot server with SQLite + writer enabled; hit `/api/oauth/usage`, `/admin/health`, unknown fallback, method-not-allowed. Assert `SELECT COUNT(*) FROM request_events_v1` unchanged.
 - **TC-INT-H1-2** · Proxy timeout still writes row with `error_code=tower_timeout`; middleware still active on lifecycle routes.
-- **TC-INT-H2-1** · Seed rows: legacy A, shadow A, legacy B, shadow B, legacy C (increasing id). Call `query_request_events(since, until, 2)`. Assert 2 rows returned, both legacy (A and B). Shadow A does NOT consume LIMIT slot.
-- **TC-INT-H2-2** · Same seeding. Call `query_recent_request_events(since, until, 2)`. Assert returned rows are legacy C then legacy B (DESC by id), no shadow row.
-- **TC-INT-H3-1** · `writer_source=both`, mock upstream returns cache-bearing response. Assert `WHERE l.event_id = s.shadow_event_id`: `cache_state`, `cache_control_block_count`, `cache_breakpoints`, `cache_prefix_hash` all equal.
-- **TC-INT-H3-2** · Two sequential requests: cache-bearing then cache-free. Assert second row's shadow row has NULL cache fields (no cross-request leakage via event_id keying).
+- **TC-INT-H2-1** · Removed — legacy row filtering became obsolete when PR #276 deleted the inline handler writer; all returned rows are assembler rows.
+- **TC-INT-H2-2** · Removed — legacy row filtering became obsolete when PR #276 deleted the inline handler writer; all returned rows are assembler rows.
+- **TC-INT-H3-1** · Removed — legacy-vs-assembler parity is no longer meaningful after PR #276 deleted the legacy writer, so no correlation join is needed.
+- **TC-INT-H3-2** · Two sequential requests: cache-bearing then cache-free. Assert second assembler row has NULL cache fields (no cross-request leakage via event_id keying).
 - **TC-INT-H4-1** · Fake LimitEngine counts `reconcile` vs `reconcile_by_id` calls. One `/v1/messages` success → legacy `reconcile` count = 0, `reconcile_by_id` count = 1.
 - **TC-INT-H4-2** · Streaming request → same assertion after full stream drain.
 - **TC-INT-H4-3** · Race check: reservation state transitions to reconciled exactly once. No double-refund.
@@ -41,7 +41,7 @@ Each LIVE-QA uses distinct ports and separate `/tmp/cc-lb-liveqa-N/` dir; harnes
 
 - **LIVE-1** · Default boot: SQLite, no `request_event_writer_source` override.
   - Trigger: single `POST /v1/messages` happy path.
-  - Verify: `SELECT COUNT(*) FROM request_events_v1 WHERE shadow_event_id IS NULL` = 1; status=200; `error_code IS NULL`.
+  - Verify: `SELECT COUNT(*) FROM request_events_v1` = 1; status=200; `error_code IS NULL`.
   - Metrics: `cc_lb_limit_reservation_ttl_evicted_total` and `cc_lb_limit_reconcile_subscriber_rows_total{outcome="reconciled"}` both present.
   - Covers: QA1, QA2, H5, H6.
 
@@ -61,13 +61,13 @@ Each LIVE-QA uses distinct ports and separate `/tmp/cc-lb-liveqa-N/` dir; harnes
   - Verify: row has `sse_event_count > 0`, stream timing fields non-null, cache fields populated when applicable.
   - Covers: QA4.
 
-- **LIVE-6** · `request_event_writer_source = "both"`; cache-bearing request.
-  - Verify: 2 rows, legacy + shadow pair; diff SQL over cache fields returns 0 mismatched.
-  - Covers: QA6, H2, H3.
+- **LIVE-6** · Cache-bearing request.
+  - Verify: 1 assembler row; cache fields are populated.
+  - Covers: QA6, H3.
 
-- **LIVE-7** · `request_event_writer_source = "both"`; admin `/admin/v1/events/recent?limit=10`.
-  - Verify: raw SQL count = 2×N, API `count` = N.
-  - Covers: QA7, H2.
+- **LIVE-7** · Admin `/admin/v1/events/recent?limit=10`.
+  - Verify: raw SQL count matches API `count`.
+  - Covers: QA7.
 
 - **LIVE-9** · Default subscriber auth; principal with tight limit.
   - Verify: response row has `limit_reconcile_ms=0`; `cc_lb_limit_reconcile_subscriber_rows_total{outcome="reconciled"}` increments.
@@ -77,12 +77,12 @@ Each LIVE-QA uses distinct ports and separate `/tmp/cc-lb-liveqa-N/` dir; harnes
   - Verify: `cc_lb_limit_reservation_ttl_evicted_total >= 1`; retry returns 200 (capacity refunded).
   - Covers: QA8, H6.
 
-- **LIVE-11** · `request_event_writer_source = "both"`; complete N requests; SIGTERM.
-  - Verify: no shadow row missing; no null `event_id`; log has no panic.
+- **LIVE-11** · Complete N requests; SIGTERM.
+  - Verify: no assembler row missing; no null `event_id`; log has no panic.
   - Covers: QA10.
 
-- **LIVE-12** · `request_event_writer_source = "shadow"`; happy path.
-  - Verify: 1 row with `shadow_event_id IS NOT NULL`, status=200.
+- **LIVE-12** · Happy path.
+  - Verify: 1 row, status=200.
   - Also runs `rg` pre-check for deleted symbols (STATIC-1 + STATIC-2 + STATIC-3 + STATIC-5).
   - Covers: H7, H8, H9.
 

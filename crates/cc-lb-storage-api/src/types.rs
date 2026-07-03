@@ -198,12 +198,6 @@ pub struct RequestEvent {
     /// therefore intentionally NOT guaranteed unique.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_id: Option<String>,
-    /// RFC-0002 Phase-3 shadow-mode correlation. When the assembler subscriber
-    /// writes a row synthesised from `LifecycleEvent`s, this carries the
-    /// legacy path's `event_id` so a comparison SQL query can diff the two
-    /// rows for the same request. Legacy-path rows leave this NULL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shadow_event_id: Option<String>,
     /// Output tokens spent on extended-thinking content (subset of
     /// [`output_tokens`](Self::output_tokens)).
     /// Source: `usage.output_tokens_details.thinking_tokens`.
