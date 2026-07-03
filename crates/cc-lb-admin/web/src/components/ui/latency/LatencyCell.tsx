@@ -3,7 +3,7 @@ import type { RequestEvent } from '../../../lib/api';
 import { fmtMs, fmtMsCompact } from '../../../lib/format';
 import { cx, Hint } from '../primitives';
 import { Sparkline } from '../RequestEventsTable';
-import { computeStageGroups } from './computeStageGroups';
+import { computeStageGroups, deriveSetupOverhead } from './computeStageGroups';
 
 function pctOf(value: number | null | undefined, denom: number): number {
   if (denom <= 0 || value == null || value <= 0) return 0;
@@ -74,6 +74,8 @@ export function LatencyCell({ event: e }: { event: RequestEvent }) {
   const { value, unit } = fmtMsCompact(e.duration_ms);
   const duration = e.duration_ms ?? 0;
 
+  const setup_overhead_ms = deriveSetupOverhead(e);
+
   const upstream_wait_ms = Math.max(
     0,
     (e.upstream_ttfb_ms ?? 0) -
@@ -98,6 +100,7 @@ export function LatencyCell({ event: e }: { event: RequestEvent }) {
             { label: 'Auth', value: e.auth_ms },
             { label: 'Route', value: e.route_ms },
             { label: 'Limit reserve', value: e.limit_reserve_ms },
+            { label: 'Setup overhead', value: setup_overhead_ms },
             { label: 'Shape', value: e.shape_ms },
             { label: 'Sign', value: e.sign_ms },
           ]}

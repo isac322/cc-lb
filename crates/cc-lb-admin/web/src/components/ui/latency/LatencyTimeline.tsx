@@ -9,6 +9,7 @@ import {
 import type { RequestEvent } from '../../../lib/api';
 import { fmtMs, fmtN } from '../../../lib/format';
 import { cx } from '../primitives';
+import { deriveSetupOverhead } from './computeStageGroups';
 
 // -----------------------------------------------------------------------------
 // Group / stage taxonomy
@@ -64,6 +65,8 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
     'Match the request path against configured upstream routes and pick a candidate list.',
   limit_reserve:
     'Reserve tokens / requests against the principal budget before dispatching upstream.',
+  setup_overhead:
+    'Residual time inside the handle-entry → attempt-entry wrapper (proxy_setup_ms) that is not accounted for by auth, route, or limit_reserve. Includes request-context assembly and per-attempt state build.',
   shape:
     'Run the shape plugin: dialect adaptation + Anthropic-format shaping of the outbound body.',
   sign: 'Sign the outbound request (OAuth refresh if the credential needs one).',
@@ -140,6 +143,12 @@ export function buildStageDetails(e: RequestEvent): StageDetail[] {
   push('auth', 'Auth', 'internal_pre', e.auth_ms);
   push('route', 'Route', 'internal_pre', e.route_ms);
   push('limit_reserve', 'Limit reserve', 'internal_pre', e.limit_reserve_ms);
+  push(
+    'setup_overhead',
+    'Setup overhead',
+    'internal_pre',
+    deriveSetupOverhead(e),
+  );
   push('shape', 'Shape', 'internal_pre', e.shape_ms);
   push('sign', 'Sign', 'internal_pre', e.sign_ms);
   push('bulkhead_wait', 'Bulkhead wait', 'wait', e.bulkhead_wait_ms);
@@ -206,6 +215,7 @@ export function buildSseMarkers(e: RequestEvent): SseMarker[] {
     (e.auth_ms ?? 0) +
     (e.route_ms ?? 0) +
     (e.limit_reserve_ms ?? 0) +
+    deriveSetupOverhead(e) +
     (e.shape_ms ?? 0) +
     (e.sign_ms ?? 0) +
     (e.upstream_ttfb_ms ?? 0);
