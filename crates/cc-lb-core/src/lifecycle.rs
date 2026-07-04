@@ -3883,12 +3883,7 @@ mod tests {
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
-            warm_entries_at_decision: vec![warm_entry(
-                "hit",
-                TtlClass::Ephemeral5m,
-                now + 30,
-                1,
-            )],
+            warm_entries_at_decision: vec![warm_entry("hit", TtlClass::Ephemeral5m, now + 30, 1)],
             cache: cache.clone(),
         };
 
