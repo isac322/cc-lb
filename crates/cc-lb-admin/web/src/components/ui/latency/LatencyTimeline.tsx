@@ -749,7 +749,8 @@ function formatRelative(ms: number, format: 'HMS' | 'HM'): string {
   const m = Math.floor((totalSec % 3600) / 60);
   const s = totalSec % 60;
   if (format === 'HMS') {
-    if (h) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    if (h)
+      return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     return `${m}:${String(s).padStart(2, '0')}`;
   }
   if (h) return `${h}:${String(m).padStart(2, '0')}`;
@@ -774,9 +775,12 @@ function TimeAxisTicks({
       {ticks.map((t, i) => {
         const isFirst = i === 0;
         const isLast = i === last;
-        const anchor = isFirst ? 'left-0' : isLast ? 'right-0' : '-translate-x-1/2';
-        const style =
-          isFirst || isLast ? undefined : { left: `${t.leftPct}%` };
+        const anchor = isFirst
+          ? 'left-0'
+          : isLast
+            ? 'right-0'
+            : '-translate-x-1/2';
+        const style = isFirst || isLast ? undefined : { left: `${t.leftPct}%` };
         return (
           <span
             key={`${t.leftPct}-${i}`}
