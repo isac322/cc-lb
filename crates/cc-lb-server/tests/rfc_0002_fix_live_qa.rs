@@ -783,6 +783,17 @@ async fn lqa_5c_concurrent_limit_rejects_second_request_and_audits() {
     )
     .await;
     assert_eq!(audit_count, 1);
+
+    let rejected_payload =
+        fetch_payload_json(&pool, "json_extract(payload, '$.status') = 429").await;
+    assert!(
+        rejected_payload
+            .get("proxy_setup_ms")
+            .and_then(serde_json::Value::as_i64)
+            .is_some(),
+        "429 limit-reject row must record proxy_setup_ms so the admin UI does not \
+         attribute the setup time to Unaccounted; payload was: {rejected_payload}"
+    );
 }
 
 #[tokio::test]
