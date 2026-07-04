@@ -406,10 +406,18 @@ pub(crate) fn decode_prompt_cache_observations_pure(
     let mut dropped_below_threshold = 0_u32;
     if let Some((breakpoint, warm_entry)) = hit {
         if breakpoint.prefix_token_count >= threshold {
+            // Sliding TTL: Anthropic refreshes the prompt-cache lifetime on every
+            // hit (per the prompt-caching docs). Emit a fresh `now + ttl - grace`
+            // so downstream observation storage extends the window and the router
+            // does not falsely conclude the upstream went cold while it was still
+            // being kept warm by continuous reads.
             observations.push(DecodedPromptCacheObservation {
                 prefix_hash: breakpoint.prefix_hash.clone(),
                 ttl_class: warm_entry.ttl_class,
-                expires_at_unix_secs: warm_entry.expires_at_unix_secs,
+                expires_at_unix_secs: prompt_cache_observation_expires_at(
+                    now_unix_secs,
+                    warm_entry.ttl_class,
+                ),
                 kind: DecodedPromptCacheObservationKind::Hit,
             });
         } else {
@@ -3788,11 +3796,69 @@ mod tests {
         assert_eq!(decoded.observations.len(), 2);
         assert_eq!(decoded.observations[0].prefix_hash, "hit");
         assert_eq!(decoded.observations[0].ttl_class, TtlClass::Ephemeral1h);
-        assert_eq!(decoded.observations[0].expires_at_unix_secs, now + 3_000);
+        assert_eq!(decoded.observations[0].expires_at_unix_secs, now + 3_570);
         assert_eq!(decoded.observations[1].prefix_hash, "write");
         assert_eq!(decoded.observations[1].ttl_class, TtlClass::Ephemeral5m);
         assert_eq!(decoded.observations[1].expires_at_unix_secs, now + 270);
         assert!(cache.upserts().is_empty());
+    }
+
+    #[test]
+    fn hit_observation_uses_sliding_ttl_from_now() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000224").unwrap();
+        let now = 1_800_000_000;
+        let near_expiry = now + 30;
+        let cache = Arc::new(
+            RecordingPromptCacheObservationCache::new(vec![warm_entry(
+                "hit",
+                TtlClass::Ephemeral5m,
+                near_expiry,
+                1,
+            )])
+            .with_clock_now(now),
+        );
+        let context = PromptCacheObservationContext {
+            upstream_id,
+            canonical_model_id: TEST_MODEL.to_owned(),
+            cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
+            warm_entries_at_decision: vec![warm_entry(
+                "hit",
+                TtlClass::Ephemeral5m,
+                near_expiry,
+                1,
+            )],
+            cache: cache.clone(),
+        };
+
+        let decoded = decode_prompt_cache_observations_pure(
+            &context,
+            PromptCacheUsage {
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 2_400,
+            },
+            now,
+        );
+
+        assert_eq!(decoded.dropped_below_threshold, 0);
+        assert_eq!(decoded.observations.len(), 1);
+        let observation = &decoded.observations[0];
+        assert_eq!(observation.prefix_hash, "hit");
+        assert_eq!(observation.ttl_class, TtlClass::Ephemeral5m);
+        assert_eq!(
+            observation.kind,
+            DecodedPromptCacheObservationKind::Hit,
+            "cache_read>0 must produce a Hit observation"
+        );
+        assert_eq!(
+            observation.expires_at_unix_secs,
+            now + 270,
+            "Hit observation must carry a fresh `now + ttl - grace` (Ephemeral5m -> 300 - 30) so the sliding-TTL semantics of Anthropic's prompt cache are reflected in cc-lb's observation store; regression guard for the router false-cold bug"
+        );
+        assert!(
+            observation.expires_at_unix_secs > near_expiry,
+            "sliding refresh must strictly extend the near-expiry stored value ({near_expiry}); got {}",
+            observation.expires_at_unix_secs
+        );
     }
 
     #[test]
