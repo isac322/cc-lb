@@ -1,0 +1,46 @@
+# Build context hygiene for the cc-lb server image.
+#
+# Keep ALL Cargo.toml / Cargo.lock / crate + plugin + test sources: `cargo build
+# -p cc-lb-server` still needs every workspace member's manifest to resolve the
+# workspace graph, and the tests/*, plugins/* members are declared members.
+# Only exclude large, regenerated, or irrelevant paths.
+
+# Rust build artifacts (regenerated in-image via cache mounts)
+target/
+**/target/
+
+# Node / SPA artifacts (cc-lb-admin/build.rs rebuilds web/dist via bun in-image)
+**/node_modules/
+**/dist/
+**/dist-ssr/
+**/.vite/
+**/*.tsbuildinfo
+
+# VCS metadata (build metadata is passed via the GIT_SHA build-arg instead)
+.git/
+.gitignore
+.gitattributes
+
+# CI / tooling / docs — not needed to compile the binary
+.github/
+docs/
+.omo/
+.run/
+.deploy/
+.editorconfig
+.vscode/
+.idea/
+
+# Fuzzing tree is excluded from the workspace and unused by the server build
+fuzz/
+
+# The Docker assets and Helm chart themselves
+Dockerfile
+.dockerignore
+compose.yaml
+deploy/
+
+# Local/editor noise
+*.log
+*.tmp
+**/.DS_Store

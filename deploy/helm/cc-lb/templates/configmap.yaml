@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cc-lb.fullname" . }}
+  labels:
+    {{- include "cc-lb.labels" . | nindent 4 }}
+data:
+  cc-lb.toml: |
+    [runtime]
+    data_dir = {{ .Values.config.dataDir | quote }}
+
+    [listener]
+    proxy_addr = {{ .Values.config.listener.proxyAddr | quote }}
+    admin_addr = {{ .Values.config.listener.adminAddr | quote }}
+    metrics_addr = {{ .Values.config.listener.metricsAddr | quote }}
+
+    [storage]
+    kind = {{ .Values.config.storage.kind | quote }}
+    {{- if eq .Values.config.storage.kind "sqlite" }}
+    path = {{ .Values.config.storage.path | quote }}
+    {{- else if eq .Values.config.storage.kind "postgres" }}
+    {{- with .Values.config.storage.postgres.url }}
+    url = {{ . | quote }}
+    {{- end }}
+    {{- with .Values.config.storage.postgres.poolToml }}
+    [storage.pool]
+    {{- . | nindent 4 }}
+    {{- end }}
+    {{- end }}
+
+    [admin]
+    token_env = {{ .Values.config.admin.tokenEnv | quote }}
+
+    [aead]
+    key_env = {{ .Values.config.aead.keyEnv | quote }}
+
+    [api_keys.price_catalog]
+    cache_path = {{ .Values.config.priceCatalog.cachePath | quote }}
+    {{- with .Values.config.extraToml }}
+{{ . | nindent 4 }}
+    {{- end }}
