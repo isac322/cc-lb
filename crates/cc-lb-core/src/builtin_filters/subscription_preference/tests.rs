@@ -507,7 +507,11 @@ fn window_urgency_aggregation_uses_max() {
                 .build(),
         ],
     );
-    let dist = wrh_distribution(&[tight_5h.clone(), loose_only.clone()], MODEL_AGNOSTIC, 1000);
+    let dist = wrh_distribution(
+        &[tight_5h.clone(), loose_only.clone()],
+        MODEL_AGNOSTIC,
+        1000,
+    );
     let tight_share = *dist.get(&tight_5h.upstream_id).unwrap_or(&0) as f64 / 1000.0;
     assert!(
         tight_share > 0.99,

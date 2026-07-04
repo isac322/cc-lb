@@ -356,7 +356,10 @@ async fn load_plan_info_by_upstream(stores: &Stores) -> StorageResult<HashMap<Uu
         .upstream_subscription_metadata
         .list_upstream_subscription_metadata()
         .await?;
-    let organization_metadata = stores.organization_metadata.list_organization_metadata().await?;
+    let organization_metadata = stores
+        .organization_metadata
+        .list_organization_metadata()
+        .await?;
     let organizations = organization_metadata
         .iter()
         .map(|record| (record.organization_uuid.as_str(), record))

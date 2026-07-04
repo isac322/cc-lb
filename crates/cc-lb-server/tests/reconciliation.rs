@@ -16,10 +16,10 @@ use cc_lb_storage_api::{
     PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
     PrincipalRecord, PrincipalStore, PrincipalUpdate, PromptCacheObservationStore, StorageResult,
     SubscriptionQuotaObservationRecord, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
-    UpstreamCreate, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord,
-    UpstreamStore, UpstreamSubscriptionMetadataRecord, UpstreamSubscriptionMetadataStore,
-    UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob, WasmRegistryEntry,
-    WasmRegistryEntryInput,
+    UpstreamCreate, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
+    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
+    UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob,
+    WasmRegistryEntry, WasmRegistryEntryInput,
 };
 
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
