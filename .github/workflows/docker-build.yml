@@ -38,13 +38,28 @@ jobs:
       # jobs use via setup-rust-cache's stable-build-metadata).
       - name: Build image (cross-compile, sccache)
         run: |
-          docker buildx build \
-            --load \
-            --build-arg USE_SCCACHE=1 \
-            --build-arg GIT_SHA=0000000 \
-            --build-arg SOURCE_DATE_EPOCH=0 \
-            -t cc-lb:ci \
-            .
+          # Retry to ride out transient registry/network blips (e.g. a gcr.io
+          # 5xx while pulling the distroless base). BuildKit keeps completed
+          # layers in the dind builder, so a retry reuses the compile and only
+          # re-attempts whatever actually failed.
+          for attempt in 1 2 3; do
+            echo "::group::docker build (attempt ${attempt}/3)"
+            if docker buildx build \
+                --load \
+                --build-arg USE_SCCACHE=1 \
+                --build-arg GIT_SHA=0000000 \
+                --build-arg SOURCE_DATE_EPOCH=0 \
+                -t cc-lb:ci \
+                .; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "::warning::docker build attempt ${attempt}/3 failed"
+            sleep $((attempt * 20))
+          done
+          echo "::error::docker build failed after 3 attempts"
+          exit 1
 
       # A successful build already proves both storage backends compile (default
       # FEATURES=sqlite,postgres); this just confirms the static binary runs.
