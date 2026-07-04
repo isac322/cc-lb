@@ -793,6 +793,8 @@ async fn build_app_with_storage_inner(
         plugin_registry: storage_for_dynamic.clone(),
         upstream_rate_limits: storage_for_dynamic.clone(),
         upstream_subscription_quotas: storage_for_dynamic.clone(),
+        upstream_subscription_metadata: storage_for_dynamic.clone(),
+        organization_metadata: storage_for_dynamic.clone(),
         prompt_cache_observations: storage_for_dynamic.clone(),
         anthropic_compatibility_kv: storage_for_dynamic.clone(),
         audit: Some(storage_for_dynamic.clone()),

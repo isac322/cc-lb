@@ -15,6 +15,7 @@ use cc_lb_core::api_keys::principal_view::{
 use cc_lb_core::builtin_filters::cache_affinity::CacheAffinityFilter;
 use cc_lb_core::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_core::clock::unix_secs;
+use cc_lb_core::plan_capacity::{PlanInfo, plan_capacity_ratio};
 use cc_lb_core::{
     ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
     UpstreamStatusEntry, UpstreamStatusSnapshot, make_default_dispatcher,
@@ -30,9 +31,10 @@ use cc_lb_runtime_wasmtime::{
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AnthropicCompatibilityKvStore, AuditStore, PluginRegistryStore, PluginSlot, PrincipalRecord,
-    PrincipalStore, PromptCacheObservationStore, RateLimitKind, StorageError, StorageResult,
-    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
+    AnthropicCompatibilityKvStore, AuditStore, OrganizationMetadataStore, PluginRegistryStore,
+    PluginSlot, PrincipalRecord, PrincipalStore, PromptCacheObservationStore, RateLimitKind,
+    StorageError, StorageResult, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
+    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataStore,
     UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
 };
 use parking_lot::RwLock;
@@ -57,6 +59,8 @@ pub struct Stores {
     pub plugin_registry: Arc<dyn PluginRegistryStore>,
     pub upstream_rate_limits: Arc<dyn UpstreamRateLimitStateStore>,
     pub upstream_subscription_quotas: Arc<dyn UpstreamSubscriptionQuotaStore>,
+    pub upstream_subscription_metadata: Arc<dyn UpstreamSubscriptionMetadataStore>,
+    pub organization_metadata: Arc<dyn OrganizationMetadataStore>,
     pub prompt_cache_observations: Arc<dyn PromptCacheObservationStore>,
     pub anthropic_compatibility_kv: Arc<dyn AnthropicCompatibilityKvStore>,
     pub audit: Option<Arc<dyn AuditStore>>,
@@ -278,6 +282,7 @@ pub async fn build_dynamic_view(
         revision_hash,
     });
 
+    let plan_info_by_upstream = load_plan_info_by_upstream(stores).await?;
     let mut builder = DynamicViewBuilder::new(current_generation)
         .signer_factory(signer_factory)
         .global_router(global_router)
@@ -291,6 +296,7 @@ pub async fn build_dynamic_view(
         .subscription_quota_routing_max_staleness_secs(
             subscription_quota_routing_max_staleness_secs,
         )
+        .plan_info_by_upstream(plan_info_by_upstream)
         .upstream_records(upstreams.clone());
     if let Some(cache) = prompt_cache_observation_cache {
         builder = builder.prompt_cache_observation_cache(cache);
@@ -343,6 +349,42 @@ fn rate_limit_kind(kind: RateLimitKind) -> cc_lb_plugin_api::RateLimitKind {
         RateLimitKind::InputTokens => cc_lb_plugin_api::RateLimitKind::InputTokens,
         RateLimitKind::OutputTokens => cc_lb_plugin_api::RateLimitKind::OutputTokens,
     }
+}
+
+async fn load_plan_info_by_upstream(stores: &Stores) -> StorageResult<HashMap<Uuid, PlanInfo>> {
+    let subscription_metadata = stores
+        .upstream_subscription_metadata
+        .list_upstream_subscription_metadata()
+        .await?;
+    let organization_metadata = stores.organization_metadata.list_organization_metadata().await?;
+    let organizations = organization_metadata
+        .iter()
+        .map(|record| (record.organization_uuid.as_str(), record))
+        .collect::<HashMap<_, _>>();
+    let mut plan_info = HashMap::new();
+    for record in subscription_metadata {
+        let Some(organization_uuid) = record.organization_uuid.as_deref() else {
+            continue;
+        };
+        let Some(organization) = organizations.get(organization_uuid).copied() else {
+            continue;
+        };
+        let capacity_ratio = plan_capacity_ratio(
+            organization.organization_type.as_deref(),
+            organization.rate_limit_tier.as_deref(),
+            organization.seat_tier.as_deref(),
+        );
+        plan_info.insert(
+            record.upstream_id,
+            PlanInfo {
+                organization_type: organization.organization_type.clone(),
+                rate_limit_tier: organization.rate_limit_tier.clone(),
+                seat_tier: organization.seat_tier.clone(),
+                capacity_ratio,
+            },
+        );
+    }
+    Ok(plan_info)
 }
 
 async fn list_upstreams(stores: &Stores) -> StorageResult<Vec<UpstreamRecord>> {
@@ -1055,6 +1097,8 @@ mod tests {
             plugin_registry: storage.clone(),
             upstream_rate_limits: storage.clone(),
             upstream_subscription_quotas: storage.clone(),
+            upstream_subscription_metadata: storage.clone(),
+            organization_metadata: storage.clone(),
             prompt_cache_observations,
             anthropic_compatibility_kv: storage.clone(),
             audit: Some(storage),
