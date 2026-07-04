@@ -531,8 +531,9 @@ function MarkerInfo({ marker }: { marker: SseMarker }) {
         <span>{fmtMs(marker.absMs)}</span>
         <span className="text-text-faint">from request start</span>
       </div>
-      <div className="tabular-nums text-text-faint">
-        relay+{fmtMs(marker.relayMs)}
+      <div className="flex items-center gap-2 tabular-nums text-text-faint">
+        <span>+{fmtMs(marker.relayMs)}</span>
+        <span>from relay start</span>
       </div>
       {description ? (
         <div className="text-text-faint leading-snug border-t border-subtle/40 pt-1.5">
@@ -615,7 +616,7 @@ function UnaccountedRow({
           {fmtMs(ms)} · {pct(ms, total)}%
         </span>
       </div>
-      <div className="relative h-4 w-full rounded-sm bg-overlay-5 border border-subtle/40">
+      <div className="relative h-4 w-full rounded-sm bg-overlay-5">
         <InfoPopover content={<UnaccountedInfo ms={ms} total={total} />}>
           <button
             type="button"
@@ -661,7 +662,7 @@ function MarkerDot({
       {stemHeight > 0 && (
         <div
           aria-hidden
-          className="absolute w-0.5 bg-white/50 pointer-events-none -translate-x-1/2"
+          className="absolute w-0.5 bg-[color:var(--color-text-faint)]/60 pointer-events-none -translate-x-1/2"
           style={{
             left: `${leftPct}%`,
             top: `${axisTop}px`,
@@ -696,6 +697,103 @@ function MarkerDot({
   );
 }
 
+const NICE_TICK_INTERVALS_MS = [
+  500, 1000, 2000, 5000, 10000, 15000, 30000, 60000, 120000, 300000, 600000,
+  900000, 1800000, 3600000, 7200000, 21600000,
+];
+
+interface TimeAxisTick {
+  leftPct: number;
+  label: string;
+}
+
+export function pickTimeAxisTicks(
+  totalMs: number,
+  tsMs: number | null | undefined,
+): { ticks: TimeAxisTick[] } {
+  if (!totalMs || totalMs <= 0) return { ticks: [] };
+  const targetTicks = 5;
+  const rawInterval = totalMs / (targetTicks - 1);
+  const interval =
+    NICE_TICK_INTERVALS_MS.find((n) => n >= rawInterval) ??
+    NICE_TICK_INTERVALS_MS[NICE_TICK_INTERVALS_MS.length - 1];
+  const wallClock = tsMs != null;
+  const format: 'HMS' | 'HM' = interval < 60000 ? 'HMS' : 'HM';
+  const push = (ms: number): TimeAxisTick => ({
+    leftPct: (ms / totalMs) * 100,
+    label: wallClock
+      ? formatWallClock((tsMs as number) + ms, format)
+      : formatRelative(ms, format),
+  });
+  const minGapToEndpointFraction = 0.8;
+  const interiorCutoffMs = totalMs - interval * minGapToEndpointFraction;
+  const ticks: TimeAxisTick[] = [];
+  for (let ms = 0; ms <= interiorCutoffMs; ms += interval) {
+    ticks.push(push(ms));
+  }
+  ticks.push(push(totalMs));
+  return { ticks };
+}
+
+function formatWallClock(ms: number, format: 'HMS' | 'HM'): string {
+  const d = new Date(ms);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return format === 'HMS' ? `${hh}:${mm}:${ss}` : `${hh}:${mm}`;
+}
+
+function formatRelative(ms: number, format: 'HMS' | 'HM'): string {
+  const totalSec = Math.round(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (format === 'HMS') {
+    if (h) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+  if (h) return `${h}:${String(m).padStart(2, '0')}`;
+  return `${m}m`;
+}
+
+function TimeAxisTicks({
+  totalMs,
+  tsMs,
+}: {
+  totalMs: number;
+  tsMs: number | null | undefined;
+}) {
+  const { ticks } = useMemo(
+    () => pickTimeAxisTicks(totalMs, tsMs),
+    [totalMs, tsMs],
+  );
+  if (ticks.length === 0) return null;
+  const last = ticks.length - 1;
+  return (
+    <div className="relative h-3 mt-1" aria-hidden>
+      {ticks.map((t, i) => {
+        const isFirst = i === 0;
+        const isLast = i === last;
+        const anchor = isFirst ? 'left-0' : isLast ? 'right-0' : '-translate-x-1/2';
+        const style =
+          isFirst || isLast ? undefined : { left: `${t.leftPct}%` };
+        return (
+          <span
+            key={`${t.leftPct}-${i}`}
+            className={cx(
+              'absolute top-0 text-[9px] text-text-faint tabular-nums whitespace-nowrap',
+              anchor,
+            )}
+            style={style}
+          >
+            {t.label}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function SseLane({
   markers,
   total,
@@ -727,7 +825,7 @@ function SseLane({
       </div>
       <div className="relative w-full" style={{ height: `${laneHeight}px` }}>
         <div
-          className="absolute inset-x-0 h-px bg-white/30"
+          className="absolute inset-x-0 h-px bg-[color:var(--color-text-faint)]/40"
           style={{ top: `${axisTop}px` }}
         />
         {staggered.map((m) => (
@@ -741,6 +839,7 @@ function SseLane({
           />
         ))}
       </div>
+      <TimeAxisTicks totalMs={total} tsMs={event.ts_ms} />
       <StreamCounters event={event} />
     </div>
   );
@@ -773,7 +872,7 @@ function StreamCounters({ event }: { event: RequestEvent }) {
         label="avg gap"
         value={
           event.inter_token_avg_ms != null
-            ? `${event.inter_token_avg_ms}ms`
+            ? fmtMs(event.inter_token_avg_ms)
             : undefined
         }
         description="Average time between consecutive content_block_delta events: (last_content_delta − first_content_delta) / (delta_count − 1). Approximates per-token pacing."
@@ -822,13 +921,13 @@ function CollapsibleSummary({
       className={cx(
         'text-[10px] uppercase tracking-wider cursor-pointer select-none flex items-center gap-2 px-1.5 py-1 rounded transition',
         suggested
-          ? 'bg-amber-300/10 ring-1 ring-amber-300/60 text-amber-200'
+          ? 'bg-[color:var(--color-warn)]/10 ring-1 ring-[color:var(--color-warn)]/40 text-[color:var(--color-warn)]'
           : 'text-text-faint',
       )}
     >
       {children}
       {suggested ? (
-        <span className="ml-auto normal-case tracking-normal text-[10px] text-amber-200/90">
+        <span className="ml-auto normal-case tracking-normal text-[10px] text-[color:var(--color-warn)]/90">
           ← click to expand
         </span>
       ) : null}
@@ -950,18 +1049,22 @@ function SseDetailsList({
                 isActive
                   ? 'bg-overlay-10 text-text'
                   : 'text-text-muted hover:bg-overlay-5',
-                isSticky ? 'ring-1 ring-white/25' : '',
+                isSticky
+                  ? 'ring-2 ring-inset ring-[color:var(--color-accent)]/70'
+                  : isActive
+                    ? 'ring-1 ring-inset ring-[color:var(--color-accent)]/45'
+                    : '',
               )}
             >
               <span className={cx(m.color, 'shrink-0 w-3 text-center')}>
                 {m.starred ? '★' : '▲'}
               </span>
               <span className="flex-1 truncate">{m.label}</span>
-              <span className="tabular-nums shrink-0 w-14 text-right">
+              <span className="tabular-nums shrink-0 w-16 text-right">
                 {fmtMs(m.absMs)}
               </span>
               <span className="tabular-nums shrink-0 w-20 text-right text-text-faint">
-                relay+{fmtMs(m.relayMs)}
+                +{fmtMs(m.relayMs)}
               </span>
             </button>
           );
@@ -1011,13 +1114,17 @@ function DetailRow({
         isActive
           ? 'bg-overlay-10 text-text'
           : 'text-text-muted hover:bg-overlay-5',
-        isSticky ? 'ring-1 ring-white/25' : '',
+        isSticky
+          ? 'ring-2 ring-inset ring-[color:var(--color-accent)]/70'
+          : isActive
+            ? 'ring-1 ring-inset ring-[color:var(--color-accent)]/45'
+            : '',
       )}
     >
       {leading}
       <span className="flex-1 truncate">{label}</span>
       {hint ? <span className="text-text-faint shrink-0">· {hint}</span> : null}
-      <span className="tabular-nums shrink-0 w-14 text-right">{fmtMs(ms)}</span>
+      <span className="tabular-nums shrink-0 w-16 text-right">{fmtMs(ms)}</span>
       <span className="tabular-nums shrink-0 w-8 text-right text-text-faint">
         {pct(ms, total)}%
       </span>
@@ -1116,7 +1223,7 @@ export function LatencyTimeline({ event }: { event: RequestEvent }) {
                   {fmtMs(groupSum)} · {pct(groupSum, total)}%
                 </span>
               </div>
-              <div className="relative h-4 w-full rounded-sm bg-overlay-5 border border-subtle/40">
+              <div className="relative h-4 w-full rounded-sm bg-overlay-5">
                 {items.map((it) => (
                   <SegmentButton
                     key={it.key}
