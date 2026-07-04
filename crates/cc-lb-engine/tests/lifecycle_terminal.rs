@@ -12,8 +12,7 @@ use cc_lb_engine::api_keys::principal_view::{
     RouterPipelineCache,
 };
 use cc_lb_engine::{
-    ApiKeyAwareSignerFactory, DynamicViewBuilder, DynamicViewHolder, ErrorNormalizer, Lifecycle,
-    LifecycleConfig,
+    ApiKeyAwareSignerFactory, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
 };
 use cc_lb_plugin_api::{
     DialectError, FilterError, FilterOutput, FilterPlugin, Principal, RequestContext,
@@ -213,15 +212,14 @@ fn lifecycle_with_terminal(
     let principal_view = principal_view(terminal, filters);
     let state = TestState::default();
     let authn = TestAuthn::with_principal_view(state.clone(), Arc::clone(&principal_view));
+    let dispatcher = Arc::new(MockDispatch {
+        state,
+        mode: DispatchMode::Statuses(Arc::new(Mutex::new(vec![StatusCode::OK].into()))),
+    });
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(RecordingSignerFactory { choices }))
         .global_router(Arc::new(NullRouter))
-        .dispatcher(Arc::new(MockDispatch {
-            state,
-            mode: DispatchMode::Statuses(Arc::new(Mutex::new(vec![StatusCode::OK].into()))),
-        }))
         .global_observability_hooks(Vec::new())
-        .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(principal_view)
         .upstream_records(records)
         .build();
@@ -229,6 +227,7 @@ fn lifecycle_with_terminal(
     Lifecycle::new_with_dynamic_view(
         authn.authn.clone(),
         Arc::new(DynamicViewHolder::new(view)),
+        dispatcher,
         LifecycleConfig::default(),
         Arc::new(cc_lb_engine::SystemClock),
     )

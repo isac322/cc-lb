@@ -13,8 +13,8 @@ use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
 use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::{
-    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder,
-    ErrorNormalizer, Lifecycle, LifecycleConfig, UpstreamDispatch,
+    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle,
+    LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
     DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
@@ -322,15 +322,14 @@ pub fn lifecycle_with_parts(
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
         .global_router(global_router)
-        .dispatcher(dispatcher)
         .global_observability_hooks(global_observability_hooks)
-        .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![default_upstream_record()])
         .build();
     Lifecycle::new_with_dynamic_view(
         authn.authn.clone(),
         Arc::new(DynamicViewHolder::new(view)),
+        dispatcher,
         config,
         Arc::new(cc_lb_engine::SystemClock),
     )
@@ -342,14 +341,13 @@ pub fn lifecycle_with_cache(
     hook: Arc<RecordingHook>,
     cache: Arc<parking_lot::RwLock<cc_lb_engine::UpstreamRateLimitCache>>,
 ) -> Lifecycle {
+    let dispatcher = Arc::new(dispatcher);
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
         .global_router(Arc::new(TestRouter {
             base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
         }))
-        .dispatcher(Arc::new(dispatcher))
         .global_observability_hooks(vec![hook])
-        .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![default_upstream_record()])
         .upstream_rate_limit_cache(cache)
@@ -357,6 +355,7 @@ pub fn lifecycle_with_cache(
     Lifecycle::new_with_dynamic_view(
         authn.authn.clone(),
         Arc::new(DynamicViewHolder::new(view)),
+        dispatcher,
         LifecycleConfig::default(),
         Arc::new(cc_lb_engine::SystemClock),
     )

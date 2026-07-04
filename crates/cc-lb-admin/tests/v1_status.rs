@@ -33,6 +33,7 @@ async fn status_reflects_in_memory_dynamic_view_generation_and_replica_id() {
             Arc::new(cc_lb_engine::SystemClock),
         )),
         state.dynamic_view.clone(),
+        cc_lb_engine::make_default_dispatcher(50),
         LifecycleConfig {
             replica_identity: Some(replica.clone()),
             ..LifecycleConfig::default()

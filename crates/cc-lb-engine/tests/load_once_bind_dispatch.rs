@@ -11,9 +11,7 @@ use cc_lb_engine::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
 };
-use cc_lb_engine::{
-    DynamicViewBuilder, DynamicViewHolder, ErrorNormalizer, Lifecycle, LifecycleConfig,
-};
+use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
 use cc_lb_plugin_api::{
     FilterError, FilterOutput, FilterPlugin, ObservabilityError, ObservabilityHook, ObserveEvent,
     Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, TerminalStrategy, Upstream,
@@ -106,21 +104,21 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
     );
     let state = TestState::default();
     let authn = none_mode_authn("principal-a", view.clone(), state.clone())?;
+    let dispatcher = Arc::new(MockDispatch {
+        state,
+        mode: DispatchMode::Statuses(Arc::new(Mutex::new(vec![StatusCode::OK].into()))),
+    });
     let dynamic_view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
         .global_router(global_router)
-        .dispatcher(Arc::new(MockDispatch {
-            state,
-            mode: DispatchMode::Statuses(Arc::new(Mutex::new(vec![StatusCode::OK].into()))),
-        }))
         .global_observability_hooks(vec![global_hook])
-        .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(view)
         .upstream_records(vec![test_upstream_record()])
         .build();
     let lifecycle = Lifecycle::new_with_dynamic_view(
         authn.authn.clone(),
         Arc::new(DynamicViewHolder::new(dynamic_view)),
+        dispatcher,
         LifecycleConfig::default(),
         Arc::new(cc_lb_engine::SystemClock),
     )

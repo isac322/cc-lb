@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::{
-    ApiKeyAwareSignerFactory, Body, DispatchError, DynamicView, DynamicViewBuilder,
-    ErrorNormalizer, RequestKind, UpstreamDispatch, UpstreamRateLimitCache, build_candidates,
+    ApiKeyAwareSignerFactory, DynamicView, DynamicViewBuilder, RequestKind, UpstreamRateLimitCache,
+    build_candidates,
 };
 use cc_lb_plugin_api::{
     ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RateLimitKind, RequestContext,
@@ -17,10 +17,9 @@ use cc_lb_plugin_api::{
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{RateLimitKind as StoredRateLimitKind, UpstreamRateLimitObservationRecord};
-use http::header::{CONTENT_TYPE, HeaderName};
-use http::{HeaderMap, HeaderValue, Response, StatusCode};
+use http::header::HeaderName;
+use http::{HeaderMap, HeaderValue, StatusCode};
 use parking_lot::RwLock;
-use serde_json::json;
 use uuid::Uuid;
 
 use common::{
@@ -120,9 +119,7 @@ fn test_view(
     DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(TestSignerFactory))
         .global_router(Arc::new(TestRouter))
-        .dispatcher(Arc::new(TestDispatcher))
         .global_observability_hooks(vec![Arc::new(TestHook)])
-        .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(Arc::new(PrincipalView::from_db(
             &principals,
             std::collections::HashMap::new(),
@@ -263,21 +260,6 @@ impl RouterPlugin for TestRouter {
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         panic!("cache candidate test must not route")
-    }
-}
-
-struct TestDispatcher;
-
-#[async_trait]
-impl UpstreamDispatch for TestDispatcher {
-    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
-        Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(Bytes::from(
-                json!({"type":"message","usage":{"input_tokens":1,"output_tokens":1}}).to_string(),
-            )))
-            .expect("test response builds"))
     }
 }
 

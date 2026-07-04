@@ -10,16 +10,7 @@
 /// Pro-plan baseline. All other ratios are expressed relative to this value.
 pub const PRO_CAPACITY_RATIO: f64 = 1.0;
 
-/// Per-upstream plan metadata routed through `DynamicView` so router filters
-/// can read Anthropic subscription tier information without touching storage
-/// on the request hot path.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct PlanInfo {
-    pub organization_type: Option<String>,
-    pub rate_limit_tier: Option<String>,
-    pub seat_tier: Option<String>,
-    pub capacity_ratio: f64,
-}
+pub use cc_lb_control::dynamic_view::PlanInfo;
 
 /// Return the Pro-relative capacity ratio for an upstream given its
 /// organization type, rate-limit tier, and seat tier.

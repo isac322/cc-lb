@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwap;
-use cc_lb_plugin_api::types::{TtlClass, WarmCacheEntry};
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, ObservabilityHook, RateLimitObservation, RouterPlugin,
 };
@@ -10,20 +9,15 @@ use parking_lot::RwLock;
 use uuid::Uuid;
 
 use crate::api_keys::principal_view::PrincipalView;
-use crate::error_normalizer::ErrorNormalizer;
-use crate::lifecycle::{
+use crate::traits::{
     NoopSubscriptionQuotaCache, PromptCacheObservationCacheLike, PromptCacheObservationSinkLike,
-    SubscriptionQuotaCacheLike, UpstreamDispatch,
+    SubscriptionQuotaCacheLike,
 };
-use crate::plan_capacity::PlanInfo;
-
 #[non_exhaustive]
 pub struct DynamicView {
     pub signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
     pub global_router: Arc<dyn RouterPlugin>,
-    pub dispatcher: Arc<dyn UpstreamDispatch>,
     pub global_observability_hooks: Arc<[Arc<dyn ObservabilityHook>]>,
-    pub error_normalizer: Arc<ErrorNormalizer>,
     pub principal_view: Arc<PrincipalView>,
     pub upstream_status_snapshot: Arc<UpstreamStatusSnapshot>,
     pub upstream_rate_limit_cache: Arc<RwLock<UpstreamRateLimitCache>>,
@@ -51,48 +45,6 @@ impl DynamicView {
         &self,
     ) -> Option<&Arc<dyn PromptCacheObservationSinkLike>> {
         self.prompt_cache_observation_sink.as_ref()
-    }
-}
-
-impl PromptCacheObservationCacheLike for NoopSubscriptionQuotaCache {
-    fn snapshot_for_upstream(
-        &self,
-        _upstream_id: Uuid,
-        _canonical_model: &str,
-        _request_breakpoint_hashes: &[(String, TtlClass)],
-        _now_unix_secs: u64,
-    ) -> Vec<WarmCacheEntry> {
-        Vec::new()
-    }
-
-    fn upsert_observation(
-        &self,
-        _upstream_id: Uuid,
-        _canonical_model: String,
-        _prefix_hash: String,
-        _ttl_class: TtlClass,
-        _expires_at_unix_secs: u64,
-        _now_unix_secs: u64,
-    ) {
-    }
-
-    fn refresh_on_hit(
-        &self,
-        _upstream_id: Uuid,
-        _canonical_model: &str,
-        _prefix_hash: &str,
-        _ttl_class: TtlClass,
-        _now_unix_secs: u64,
-    ) -> bool {
-        false
-    }
-
-    fn grace_margin_secs(&self) -> u64 {
-        30
-    }
-
-    fn clock_now_unix_secs(&self) -> u64 {
-        0
     }
 }
 
@@ -211,13 +163,19 @@ pub enum ApplyStatus {
     Error,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlanInfo {
+    pub organization_type: Option<String>,
+    pub rate_limit_tier: Option<String>,
+    pub seat_tier: Option<String>,
+    pub capacity_ratio: f64,
+}
+
 pub struct DynamicViewBuilder {
     previous_generation: u64,
     signer_factory: Option<Arc<dyn ApiKeyAwareSignerFactory>>,
     global_router: Option<Arc<dyn RouterPlugin>>,
-    dispatcher: Option<Arc<dyn UpstreamDispatch>>,
     global_observability_hooks: Option<Arc<[Arc<dyn ObservabilityHook>]>>,
-    error_normalizer: Option<Arc<ErrorNormalizer>>,
     principal_view: Option<Arc<PrincipalView>>,
     upstream_status_snapshot: Option<Arc<UpstreamStatusSnapshot>>,
     upstream_rate_limit_cache: Option<Arc<RwLock<UpstreamRateLimitCache>>>,
@@ -235,9 +193,7 @@ impl DynamicViewBuilder {
             previous_generation,
             signer_factory: None,
             global_router: None,
-            dispatcher: None,
             global_observability_hooks: None,
-            error_normalizer: None,
             principal_view: None,
             upstream_status_snapshot: None,
             upstream_rate_limit_cache: None,
@@ -255,9 +211,7 @@ impl DynamicViewBuilder {
             previous_generation: view.generation,
             signer_factory: Some(Arc::clone(&view.signer_factory)),
             global_router: Some(Arc::clone(&view.global_router)),
-            dispatcher: Some(Arc::clone(&view.dispatcher)),
             global_observability_hooks: Some(Arc::clone(&view.global_observability_hooks)),
-            error_normalizer: Some(Arc::clone(&view.error_normalizer)),
             principal_view: Some(Arc::clone(&view.principal_view)),
             upstream_status_snapshot: Some(Arc::clone(&view.upstream_status_snapshot)),
             upstream_rate_limit_cache: Some(Arc::clone(&view.upstream_rate_limit_cache)),
@@ -282,21 +236,11 @@ impl DynamicViewBuilder {
         self
     }
 
-    pub fn dispatcher(mut self, dispatcher: Arc<dyn UpstreamDispatch>) -> Self {
-        self.dispatcher = Some(dispatcher);
-        self
-    }
-
     pub fn global_observability_hooks(
         mut self,
         global_observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
     ) -> Self {
         self.global_observability_hooks = Some(Arc::from(global_observability_hooks));
-        self
-    }
-
-    pub fn error_normalizer(mut self, error_normalizer: Arc<ErrorNormalizer>) -> Self {
-        self.error_normalizer = Some(error_normalizer);
         self
     }
 
@@ -362,15 +306,9 @@ impl DynamicViewBuilder {
             global_router: self
                 .global_router
                 .expect("DynamicViewBuilder requires global_router"),
-            dispatcher: self
-                .dispatcher
-                .expect("DynamicViewBuilder requires dispatcher"),
             global_observability_hooks: self
                 .global_observability_hooks
                 .expect("DynamicViewBuilder requires global_observability_hooks"),
-            error_normalizer: self
-                .error_normalizer
-                .expect("DynamicViewBuilder requires error_normalizer"),
             principal_view: self
                 .principal_view
                 .expect("DynamicViewBuilder requires principal_view"),
@@ -397,13 +335,11 @@ impl DynamicViewBuilder {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use bytes::Bytes;
     use cc_lb_plugin_api::{
         ObservabilityError, ObserveEvent, Principal, RequestContext, RouteDecision, RouteError,
         SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
         UpstreamCandidate, UpstreamError,
     };
-    use http::{Response, StatusCode};
 
     struct TestSignerFactory;
 
@@ -456,21 +392,6 @@ mod tests {
         }
     }
 
-    struct TestDispatcher;
-
-    #[async_trait]
-    impl UpstreamDispatch for TestDispatcher {
-        async fn dispatch(
-            &self,
-            _request: SignedRequest,
-        ) -> Result<Response<crate::Body>, crate::DispatchError> {
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .body(crate::Body::from(Bytes::new()))
-                .expect("test response builds"))
-        }
-    }
-
     struct TestHook;
 
     impl ObservabilityHook for TestHook {
@@ -487,9 +408,7 @@ mod tests {
         DynamicViewBuilder::new(previous_generation)
             .signer_factory(Arc::new(TestSignerFactory))
             .global_router(Arc::new(TestRouter))
-            .dispatcher(Arc::new(TestDispatcher))
             .global_observability_hooks(vec![Arc::new(TestHook)])
-            .error_normalizer(Arc::new(ErrorNormalizer::new()))
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build()

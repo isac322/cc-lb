@@ -1600,8 +1600,7 @@ mod tests {
     use cc_lb_engine::api_keys::limit_engine::LimitEngine;
     use cc_lb_engine::api_keys::principal_view::PrincipalView;
     use cc_lb_engine::{
-        Body as CoreBody, DispatchError, DynamicView, DynamicViewBuilder, DynamicViewHolder,
-        ErrorNormalizer, UpstreamDispatch, UpstreamStatusSnapshot,
+        DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
     };
     use cc_lb_plugin_api::{
         ApiKeyAwareSignerFactory, ObservabilityError, ObservabilityHook, ObserveEvent, Principal,
@@ -1736,21 +1735,6 @@ mod tests {
             Err(RouteError::NoRoute {
                 reason: "test router has no route".to_owned(),
             })
-        }
-    }
-
-    struct TestDispatcher;
-
-    #[async_trait]
-    impl UpstreamDispatch for TestDispatcher {
-        async fn dispatch(
-            &self,
-            _request: SignedRequest,
-        ) -> Result<axum::http::Response<CoreBody>, DispatchError> {
-            Ok(axum::http::Response::builder()
-                .status(StatusCode::OK)
-                .body(CoreBody::from(Bytes::new()))
-                .expect("test response builds"))
         }
     }
 
@@ -1897,9 +1881,7 @@ mod tests {
         DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(TestSignerFactory))
             .global_router(Arc::new(TestRouter))
-            .dispatcher(Arc::new(TestDispatcher))
             .global_observability_hooks(vec![Arc::new(TestHook)])
-            .error_normalizer(Arc::new(ErrorNormalizer::new()))
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build()

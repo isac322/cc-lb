@@ -147,14 +147,11 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     .await
     .expect("dynamic view builds");
 
-    // Swap the default HTTPS dispatcher with a no-network recording one.
     let captured: Arc<Mutex<Vec<Url>>> = Arc::new(Mutex::new(Vec::new()));
     let recording = Arc::new(RecordingDispatcher {
         captured: captured.clone(),
     }) as Arc<dyn UpstreamDispatch>;
-    let view = DynamicViewBuilder::from_view(&view)
-        .dispatcher(recording)
-        .build();
+    let view = DynamicViewBuilder::from_view(&view).build();
     let holder = Arc::new(DynamicViewHolder::new(view));
 
     let lifecycle = Lifecycle::new_with_dynamic_view(
@@ -168,6 +165,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
             Arc::new(cc_lb_engine::SystemClock),
         )),
         holder,
+        recording,
         LifecycleConfig::default(),
         Arc::new(cc_lb_engine::SystemClock),
     );

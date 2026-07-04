@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_engine::{
-    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder,
-    ErrorNormalizer, Lifecycle, LifecycleConfig, UpstreamDispatch,
+    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle,
+    LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
     DialectError, ObservabilityHook, Principal, RequestContext, RetryDecision, RouteDecision,
@@ -37,22 +37,22 @@ pub fn lifecycle_with_records(
 ) -> Lifecycle {
     let authn = TestAuthn::new(TestState::default());
     let hook: Arc<dyn ObservabilityHook> = Arc::new(RecordingHook::default());
+    let dispatcher = Arc::new(RecordingDispatch {
+        state: state.clone(),
+    });
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(RecordingSignerFactory {
             choices: state.router_choice_names.clone(),
         }))
         .global_router(router)
-        .dispatcher(Arc::new(RecordingDispatch {
-            state: state.clone(),
-        }))
         .global_observability_hooks(vec![hook])
-        .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(authn.principal_view.clone())
         .upstream_records(records)
         .build();
     Lifecycle::new_with_dynamic_view(
         authn.authn.clone(),
         Arc::new(DynamicViewHolder::new(view)),
+        dispatcher,
         LifecycleConfig::default(),
         Arc::new(cc_lb_engine::SystemClock),
     )

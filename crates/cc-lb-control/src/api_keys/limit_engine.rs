@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::api_keys::concurrent_guard::{KeyConcurrencyGuard, KeyConcurrencyManager};
 use crate::api_keys::principal_view::{PrincipalStatus, PrincipalView};
 use crate::api_keys::types::{Limit, LimitKind};
-use crate::clock::{ClockHandle, unix_secs};
+use cc_lb_clock::{ClockHandle, unix_secs};
 
 /// Stable identifier for a live [`Reservation`].
 ///
@@ -1083,7 +1083,7 @@ mod tests {
     fn record_principal_limit_state_feeds_limit_engine_snapshot() {
         let engine = LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(crate::clock::SystemClock),
+            Arc::new(cc_lb_clock::SystemClock),
         );
         let observed_at_unix_secs = unix_secs(engine.inner.clock.now());
 
@@ -1126,7 +1126,7 @@ mod tests {
     ) -> (Arc<LimitEngine>, PrincipalView, StoredApiKeyRecord) {
         let engine = LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(crate::clock::SystemClock),
+            Arc::new(cc_lb_clock::SystemClock),
         );
         let default_limits = vec![cc_lb_storage_api::principal::Limit {
             kind: cc_lb_storage_api::principal::LimitKind::OutputTokens,
@@ -1280,7 +1280,7 @@ mod tests {
     fn replay_event_restores_all_rolling_counters() {
         let engine = LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(crate::clock::SystemClock),
+            Arc::new(cc_lb_clock::SystemClock),
         );
         let observed_at_unix_secs = unix_secs(engine.inner.clock.now());
         let event = RequestEvent {

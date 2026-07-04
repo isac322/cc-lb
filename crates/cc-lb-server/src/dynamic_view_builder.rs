@@ -18,8 +18,8 @@ use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferen
 use cc_lb_engine::clock::unix_secs;
 use cc_lb_engine::plan_capacity::{PlanInfo, plan_capacity_ratio};
 use cc_lb_engine::{
-    ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
-    UpstreamStatusEntry, UpstreamStatusSnapshot, make_default_dispatcher,
+    ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamRateLimitCache, UpstreamStatusEntry,
+    UpstreamStatusSnapshot,
 };
 use cc_lb_plugin_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, FilterPlugin, PluginManifest,
@@ -42,7 +42,7 @@ use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
-use cc_lb_engine::lifecycle::PromptCacheObservationSinkLike;
+use cc_lb_engine::PromptCacheObservationSinkLike;
 
 use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
 use crate::prompt_cache_observation_sink::{
@@ -275,7 +275,6 @@ pub async fn build_dynamic_view(
         lazy_refresher,
         clock.clone(),
     ));
-    let dispatcher = make_default_dispatcher(50);
     let snapshot = Arc::new(UpstreamStatusSnapshot {
         entries: statuses,
         applied_at_unix_secs: unix_secs(clock.now()),
@@ -286,9 +285,7 @@ pub async fn build_dynamic_view(
     let mut builder = DynamicViewBuilder::new(current_generation)
         .signer_factory(signer_factory)
         .global_router(global_router)
-        .dispatcher(dispatcher)
         .global_observability_hooks(Vec::new())
-        .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(principal_view)
         .upstream_status_snapshot(snapshot)
         .upstream_rate_limit_cache(upstream_rate_limit_cache)

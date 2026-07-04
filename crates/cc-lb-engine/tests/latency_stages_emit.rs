@@ -13,9 +13,8 @@ use cc_lb_engine::instrumented_connector::InstrumentedHttpsConnector;
 use cc_lb_engine::{
     Body, BulkheadConfig, BulkheadDispatch, BulkheadRegistry, CachingDnsConnector,
     DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY, DispatchError, DnsResolveFuture, DnsResolver,
-    DnsResolverConfig, DynamicViewBuilder, DynamicViewHolder, ErrorNormalizer, InMemoryBus,
-    Lifecycle, LifecycleConfig, RequestEventAssemblerHandle, UpstreamDispatch,
-    spawn_request_event_assembler,
+    DnsResolverConfig, DynamicViewBuilder, DynamicViewHolder, InMemoryBus, Lifecycle,
+    LifecycleConfig, RequestEventAssemblerHandle, UpstreamDispatch, spawn_request_event_assembler,
 };
 use cc_lb_plugin_api::{
     Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, UpstreamCandidate,
@@ -188,15 +187,14 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
         .global_router(Arc::new(SelectingRouter))
-        .dispatcher(dispatcher)
         .global_observability_hooks(Vec::new())
-        .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![upstream_record(base_url)])
         .build();
     let lifecycle = Lifecycle::new_with_dynamic_view(
         authn.authn.clone(),
         Arc::new(DynamicViewHolder::new(view)),
+        dispatcher,
         LifecycleConfig::default(),
         Arc::new(cc_lb_engine::SystemClock),
     )

@@ -11,7 +11,7 @@ use crate::api_keys::{
     principal_view::{PrincipalStatus, PrincipalView},
     secret,
 };
-use crate::clock::{ClockHandle, unix_secs};
+use cc_lb_clock::{ClockHandle, unix_secs};
 
 #[derive(Clone)]
 pub struct BuiltinAuthn {
@@ -440,7 +440,7 @@ mod tests {
                 upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
             }),
             Some(Arc::new(KeyStore::new(store))),
-            Arc::new(crate::clock::SystemClock),
+            Arc::new(cc_lb_clock::SystemClock),
         );
 
         let success = authn
@@ -470,7 +470,7 @@ mod tests {
             DownstreamAuthMode::ApiKey,
             None,
             Some(Arc::new(KeyStore::new(store.clone()))),
-            Arc::new(crate::clock::SystemClock),
+            Arc::new(cc_lb_clock::SystemClock),
         );
         (authn, store)
     }

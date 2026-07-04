@@ -72,6 +72,7 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
             Arc::new(cc_lb_engine::SystemClock),
         )),
         Arc::new(DynamicViewHolder::new(view)),
+        cc_lb_engine::make_default_dispatcher(50),
         LifecycleConfig::default(),
         Arc::new(cc_lb_engine::SystemClock),
     );

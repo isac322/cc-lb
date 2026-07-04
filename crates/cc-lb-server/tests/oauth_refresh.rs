@@ -289,6 +289,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
             fixture.clock.clone(),
         )),
         Arc::new(DynamicViewHolder::new(view)),
+        cc_lb_engine::make_default_dispatcher(50),
         LifecycleConfig::default(),
         fixture.clock.clone(),
     );

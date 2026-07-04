@@ -816,6 +816,39 @@ dependencies = [
 [[package]]
 name = "cc-lb-control"
 version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "base64",
+ "bincode",
+ "bytes",
+ "cc-lb-clock",
+ "cc-lb-config",
+ "cc-lb-contract",
+ "cc-lb-plugin-api",
+ "cc-lb-storage-api",
+ "chrono",
+ "dashmap",
+ "globset",
+ "http",
+ "http-body-util",
+ "hyper-rustls",
+ "hyper-util",
+ "loom",
+ "metrics",
+ "parking_lot",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "ulid",
+ "uuid",
+]
 
 [[package]]
 name = "cc-lb-dialect-anthropic"
@@ -843,8 +876,10 @@ dependencies = [
  "cc-lb-clock",
  "cc-lb-config",
  "cc-lb-contract",
+ "cc-lb-control",
  "cc-lb-observability",
  "cc-lb-plugin-api",
+ "cc-lb-pricing",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
  "chrono",

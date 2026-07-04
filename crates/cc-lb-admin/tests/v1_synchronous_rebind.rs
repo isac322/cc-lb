@@ -10,12 +10,12 @@ use cc_lb_admin::{AdminState, CurrentConfig, DynamicViewRebinder, router};
 use cc_lb_config::Config;
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::{
-    ApiKeyAwareSignerFactory, ApplyStatus, DispatchError, DynamicView, DynamicViewBuilder,
-    UpstreamDispatch, UpstreamStatusEntry, UpstreamStatusSnapshot,
+    ApiKeyAwareSignerFactory, ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamStatusEntry,
+    UpstreamStatusSnapshot,
 };
 use cc_lb_plugin_api::{
-    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, SignedRequest,
-    SignerFactory, Upstream, UpstreamCandidate,
+    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, SignerFactory, Upstream,
+    UpstreamCandidate,
 };
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
@@ -74,9 +74,7 @@ impl DynamicViewRebinder for SnapshotRebinder {
         Ok(DynamicViewBuilder::new(current_generation)
             .signer_factory(Arc::new(NoopSignerFactory))
             .global_router(Arc::new(NoopRouter))
-            .dispatcher(Arc::new(NoopDispatch))
             .global_observability_hooks(Vec::new())
-            .error_normalizer(Arc::new(cc_lb_engine::ErrorNormalizer::new()))
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot {
                 entries,
@@ -123,18 +121,6 @@ impl RouterPlugin for NoopRouter {
         Err(RouteError::NoRoute {
             reason: "noop test router".to_owned(),
         })
-    }
-}
-
-struct NoopDispatch;
-
-#[async_trait]
-impl UpstreamDispatch for NoopDispatch {
-    async fn dispatch(
-        &self,
-        _request: SignedRequest,
-    ) -> Result<http::Response<Body>, DispatchError> {
-        Ok(http::Response::new(Body::empty()))
     }
 }
 

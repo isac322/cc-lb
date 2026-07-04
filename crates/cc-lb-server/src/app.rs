@@ -814,7 +814,7 @@ async fn build_app_with_storage_inner(
         clock.clone(),
     ));
 
-    let (_dispatcher, _breaker_registry) = dispatcher(&config, clock.clone());
+    let (dispatcher, _breaker_registry) = dispatcher(&config, clock.clone());
 
     let replica_identity = {
         match replica::load_or_create_replica_id(&data_dir) {
@@ -1248,6 +1248,7 @@ async fn build_app_with_storage_inner(
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
         dynamic_view_holder.clone(),
+        dispatcher,
         lifecycle_config,
         clock.clone(),
     );

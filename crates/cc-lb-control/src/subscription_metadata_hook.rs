@@ -10,7 +10,7 @@ use crate::anthropic_metadata::{
     MetadataHttpClient, OverageGrantResponse, ProfileResponse, RolesResponse,
     fetch_claude_cli_roles, fetch_oauth_profile, fetch_overage_credit_grant,
 };
-use crate::clock::{Clock, ClockHandle, unix_millis};
+use cc_lb_clock::{Clock, ClockHandle, unix_millis};
 
 #[derive(Clone)]
 pub struct MetadataHookHandle {

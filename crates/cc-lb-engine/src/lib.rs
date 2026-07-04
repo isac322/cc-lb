@@ -1,13 +1,23 @@
 #![forbid(unsafe_code)]
 
 #[cfg(not(loom))]
-pub mod anthropic_compat;
+pub mod anthropic_compat {
+    pub use cc_lb_control::anthropic_compat::*;
+}
 #[cfg(not(loom))]
-pub mod anthropic_metadata;
-pub mod api_keys;
-pub mod audit_payload;
+pub mod anthropic_metadata {
+    pub use cc_lb_control::anthropic_metadata::*;
+}
+pub mod api_keys {
+    pub use cc_lb_control::api_keys::*;
+}
+pub mod audit_payload {
+    pub use cc_lb_control::audit_payload::*;
+}
 #[cfg(not(loom))]
-pub mod audit_writer;
+pub mod audit_writer {
+    pub use cc_lb_control::audit_writer::*;
+}
 #[cfg(not(loom))]
 pub mod builtin_filters;
 #[cfg(not(loom))]
@@ -21,13 +31,20 @@ mod dns_cache;
 #[cfg(not(loom))]
 mod drain;
 #[cfg(not(loom))]
-mod dynamic_view;
+pub mod dynamic_view {
+    pub use cc_lb_control::dynamic_view::*;
+}
 #[cfg(not(loom))]
 mod error_format;
 #[cfg(not(loom))]
 mod error_normalizer;
 #[cfg(not(loom))]
-pub mod event_bus;
+pub mod event_bus {
+    pub use cc_lb_contract::event_bus::{
+        BusReceiver, LifecycleBusReceiver, RequestEventBus, RequestEventPhase, RequestEventUpdate,
+    };
+    pub use cc_lb_control::event_bus::*;
+}
 #[cfg(not(loom))]
 mod hop_by_hop;
 #[cfg(not(loom))]
@@ -68,7 +85,9 @@ mod sse_relay;
 #[cfg(not(loom))]
 pub mod storage_tail_poller;
 #[cfg(not(loom))]
-pub mod subscription_metadata_hook;
+pub mod subscription_metadata_hook {
+    pub use cc_lb_control::subscription_metadata_hook::*;
+}
 #[cfg(not(loom))]
 pub mod subscription_quota_events;
 #[cfg(not(loom))]
@@ -94,6 +113,13 @@ pub use audit_writer::{AuditDropped, AuditEntry, AuditWriterSink, spawn_audit_wr
 pub use bulkhead::{
     Bulkhead, BulkheadConfig, BulkheadDispatch, BulkheadError, BulkheadRegistry, ExecuteError,
     make_default_dispatcher, make_http_dispatcher_with_connector,
+};
+#[cfg(not(loom))]
+pub use cc_lb_contract::ReplicaIdentity;
+#[cfg(not(loom))]
+pub use cc_lb_control::{
+    NoopSubscriptionQuotaCache, PromptCacheObservationCacheLike,
+    PromptCacheObservationEnqueueError, PromptCacheObservationSinkLike, SubscriptionQuotaCacheLike,
 };
 #[cfg(not(loom))]
 pub use cc_lb_plugin_api::ApiKeyAwareSignerFactory;
@@ -135,9 +161,9 @@ pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop}
 #[cfg(not(loom))]
 pub use lifecycle::{
     Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig, LimitCostEstimator,
-    LimitSubject, LimitSubjectProvider, NoopSubscriptionQuotaCache, ProxyError, ReplicaIdentity,
-    RequestKind, SubscriptionQuotaCacheLike, UpstreamDispatch, build_candidates,
-    observe_rate_limits, observe_subscription_quota_headers, parse_request_cache_breakpoints,
+    LimitSubject, LimitSubjectProvider, ProxyError, RequestKind, UpstreamDispatch,
+    build_candidates, observe_rate_limits, observe_subscription_quota_headers,
+    parse_request_cache_breakpoints,
 };
 pub use lifecycle_api_key_metrics_subscriber::{
     ApiKeyMetricsSubscriberHandle, spawn_lifecycle_api_key_metrics_subscriber,

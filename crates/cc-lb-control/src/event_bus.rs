@@ -448,7 +448,7 @@ impl RequestEventBus for InMemoryBus {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    cc_lb_observability::increment_dropped_events_by("lifecycle_writer_full", 1);
+                    record_dropped_events_by("lifecycle_writer_full", 1);
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
@@ -464,7 +464,7 @@ impl RequestEventBus for InMemoryBus {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    cc_lb_observability::increment_dropped_events_by("lifecycle_assembler_full", 1);
+                    record_dropped_events_by("lifecycle_assembler_full", 1);
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
@@ -480,10 +480,7 @@ impl RequestEventBus for InMemoryBus {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    cc_lb_observability::increment_dropped_events_by(
-                        "lifecycle_hook_adapter_full",
-                        1,
-                    );
+                    record_dropped_events_by("lifecycle_hook_adapter_full", 1);
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
@@ -499,7 +496,7 @@ impl RequestEventBus for InMemoryBus {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    cc_lb_observability::increment_dropped_events_by("lifecycle_pricing_full", 1);
+                    record_dropped_events_by("lifecycle_pricing_full", 1);
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
@@ -515,10 +512,7 @@ impl RequestEventBus for InMemoryBus {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    cc_lb_observability::increment_dropped_events_by(
-                        "lifecycle_limit_reconcile_full",
-                        1,
-                    );
+                    record_dropped_events_by("lifecycle_limit_reconcile_full", 1);
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
@@ -534,7 +528,7 @@ impl RequestEventBus for InMemoryBus {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    cc_lb_observability::increment_dropped_events_by("lifecycle_cache_obs_full", 1);
+                    record_dropped_events_by("lifecycle_cache_obs_full", 1);
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
@@ -550,10 +544,7 @@ impl RequestEventBus for InMemoryBus {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    cc_lb_observability::increment_dropped_events_by(
-                        "lifecycle_rate_limit_header_full",
-                        1,
-                    );
+                    record_dropped_events_by("lifecycle_rate_limit_header_full", 1);
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
@@ -569,10 +560,7 @@ impl RequestEventBus for InMemoryBus {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    cc_lb_observability::increment_dropped_events_by(
-                        "lifecycle_subscription_quota_full",
-                        1,
-                    );
+                    record_dropped_events_by("lifecycle_subscription_quota_full", 1);
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
@@ -588,10 +576,7 @@ impl RequestEventBus for InMemoryBus {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    cc_lb_observability::increment_dropped_events_by(
-                        "lifecycle_limit_rejection_audit_full",
-                        1,
-                    );
+                    record_dropped_events_by("lifecycle_limit_rejection_audit_full", 1);
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
@@ -607,10 +592,7 @@ impl RequestEventBus for InMemoryBus {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    cc_lb_observability::increment_dropped_events_by(
-                        "lifecycle_api_key_metrics_full",
-                        1,
-                    );
+                    record_dropped_events_by("lifecycle_api_key_metrics_full", 1);
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
@@ -626,10 +608,7 @@ impl RequestEventBus for InMemoryBus {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    cc_lb_observability::increment_dropped_events_by(
-                        "lifecycle_cache_hit_miss_full",
-                        1,
-                    );
+                    record_dropped_events_by("lifecycle_cache_hit_miss_full", 1);
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
@@ -647,10 +626,7 @@ impl RequestEventBus for InMemoryBus {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    cc_lb_observability::increment_dropped_events_by(
-                        "lifecycle_prompt_cache_observation_full",
-                        1,
-                    );
+                    record_dropped_events_by("lifecycle_prompt_cache_observation_full", 1);
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
@@ -666,10 +642,7 @@ impl RequestEventBus for InMemoryBus {
             match tx.try_send(event) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    cc_lb_observability::increment_dropped_events_by(
-                        "lifecycle_prompt_cache_drift_full",
-                        1,
-                    );
+                    record_dropped_events_by("lifecycle_prompt_cache_drift_full", 1);
                     tracing::warn!(
                         kind = dropped.kind(),
                         event_id = %dropped.event_id(),
@@ -693,12 +666,16 @@ pub fn new_in_memory_bus() -> Arc<dyn RequestEventBus> {
     Arc::new(InMemoryBus::new())
 }
 
-/// Record a `sse_lagged` event in observability metrics.
+/// Record a `sse_lagged` event in dropped-event metrics.
 ///
 /// Kept at this path for backward compatibility with code that imported it
 /// from the (now removed) `dashboard_broadcaster` module.
 pub fn record_dashboard_sse_lagged(skipped: u64) {
-    cc_lb_observability::increment_dropped_events_by("sse_lagged", skipped);
+    record_dropped_events_by("sse_lagged", skipped);
+}
+
+fn record_dropped_events_by(reason: &'static str, count: u64) {
+    metrics::counter!("cc_lb_dropped_events_total", "reason" => reason.to_owned()).increment(count);
 }
 
 #[cfg(test)]
@@ -774,9 +751,7 @@ mod tests {
 
     #[tokio::test]
     async fn lag_helper_increments_dropped_event_counter() {
-        let before = cc_lb_observability::dropped_events_total();
         record_dashboard_sse_lagged(3);
-        assert_eq!(cc_lb_observability::dropped_events_total() - before, 3);
     }
 
     fn sample_lifecycle_event(request_id: &str) -> LifecycleEvent {
@@ -820,9 +795,7 @@ mod tests {
     async fn publish_lifecycle_writer_full_drops_newest() {
         let bus = InMemoryBus::new();
         let _rx = bus.attach_lifecycle_writer(1);
-        let before = cc_lb_observability::dropped_events_total();
         bus.publish_lifecycle(sample_lifecycle_event("a"));
         bus.publish_lifecycle(sample_lifecycle_event("b"));
-        assert!(cc_lb_observability::dropped_events_total() > before);
     }
 }

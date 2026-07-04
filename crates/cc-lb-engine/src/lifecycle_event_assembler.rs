@@ -10,14 +10,10 @@ use cc_lb_contract::{
     UsageSnapshot,
 };
 use cc_lb_plugin_api::{InternalError, RoutingTrace};
-use cc_lb_pricing::virtual_cost_micros_full;
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::lifecycle::{
-    CostBreakdownOptions, cost_breakdown_to_event_options, pricing_upstream_kind_from_label,
-};
 use crate::metrics_labels::PartialTrigger;
 pub const DEFAULT_ASSEMBLER_MAP_CAP: usize = 4096;
 pub const DEFAULT_ASSEMBLER_TTL: Duration = Duration::from_secs(300);
@@ -73,6 +69,16 @@ pub fn spawn_with_config(
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join = tokio::spawn(assembler_loop(rx, storage, bus, map_cap, ttl, shutdown_rx));
     RequestEventAssemblerHandle { shutdown_tx, join }
+}
+
+#[derive(Default)]
+struct CostBreakdownOptions {
+    total: Option<i64>,
+    input: Option<i64>,
+    output: Option<i64>,
+    cache_creation_5m: Option<i64>,
+    cache_creation_1h: Option<i64>,
+    cache_read: Option<i64>,
 }
 
 #[derive(Default)]
@@ -282,31 +288,7 @@ impl Partial {
                 cache_creation_1h: cost.cache_creation_1h_micros,
                 cache_read: cost.cache_read_micros,
             })
-            .unwrap_or_else(|| self.inline_cost_options())
-    }
-
-    fn inline_cost_options(&self) -> CostBreakdownOptions {
-        if !self.usage_seen {
-            return CostBreakdownOptions::default();
-        }
-        let Some(model) = self.model() else {
-            return CostBreakdownOptions::default();
-        };
-        let upstream_kind = self
-            .route
-            .as_ref()
-            .and_then(|route| route.upstream_kind.as_deref())
-            .and_then(pricing_upstream_kind_from_label);
-        let breakdown = virtual_cost_micros_full(
-            model,
-            self.usage.input_tokens,
-            self.usage.output_tokens,
-            self.usage.cache_creation_input_tokens_5m,
-            self.usage.cache_creation_input_tokens_1h,
-            self.usage.cache_read_input_tokens,
-            upstream_kind,
-        );
-        cost_breakdown_to_event_options(&breakdown)
+            .unwrap_or_default()
     }
 
     fn usage_partial_due_at(&self, now: Instant) -> bool {
@@ -342,6 +324,19 @@ fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
         _ => {
             tracing::warn!("lifecycle event assembler saw unknown lifecycle event variant");
             None
+        }
+    }
+}
+
+impl From<cc_lb_contract::CostBreakdown> for CostBreakdownOptions {
+    fn from(cost: cc_lb_contract::CostBreakdown) -> Self {
+        Self {
+            total: cost.total_micros,
+            input: cost.input_micros,
+            output: cost.output_micros,
+            cache_creation_5m: cost.cache_creation_5m_micros,
+            cache_creation_1h: cost.cache_creation_1h_micros,
+            cache_read: cost.cache_read_micros,
         }
     }
 }
@@ -1090,26 +1085,6 @@ mod tests {
         recorder
     }
 
-    fn install_known_pricing_for_tests() {
-        let model = "claude-3-5-sonnet-20241022";
-        let mut models = StdHashMap::new();
-        models.insert(
-            model.to_owned(),
-            cc_lb_pricing::Pricing {
-                model: model.to_owned(),
-                input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(3),
-                output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(15),
-            },
-        );
-        cc_lb_pricing::global_catalog().install_snapshot(cc_lb_pricing::CatalogSnapshot {
-            fetched_at_ms: 1,
-            models,
-            raw_json: Vec::new(),
-            cache_creation_per_million_usd: StdHashMap::new(),
-            cache_read_per_million_usd: StdHashMap::new(),
-            status: cc_lb_pricing::CatalogStatus::Ok,
-        });
-    }
 
     fn eid(s: &str) -> EventId {
         s.to_owned()
@@ -1561,10 +1536,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn delayed_pricing_subscriber_does_not_affect_inline_final_cost() {
+    async fn delayed_pricing_subscriber_does_not_affect_finalized_row() {
         use crate::event_bus::InMemoryBus;
 
-        install_known_pricing_for_tests();
         let bus = Arc::new(InMemoryBus::new());
         let rx = bus.attach_lifecycle_assembler(16);
         let mut pricing_rx = bus.attach_lifecycle_pricing(16);
@@ -1645,10 +1619,9 @@ mod tests {
         let rows = store.rows.lock().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].event_id.as_deref(), Some(event_id.as_str()));
-        assert!(rows[0].cost_usd_micros.is_some());
-        assert_ne!(rows[0].cost_usd_micros, Some(-999));
-        assert_ne!(rows[0].cost_input_micros, Some(-999));
-        assert_ne!(rows[0].cost_output_micros, Some(-999));
+        assert_eq!(rows[0].cost_usd_micros, None);
+        assert_eq!(rows[0].cost_input_micros, None);
+        assert_eq!(rows[0].cost_output_micros, None);
     }
 
     proptest! {

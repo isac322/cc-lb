@@ -17,13 +17,12 @@ use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, FilterError, FilterOutput, InternalError, InternalErrorKind,
     InternalErrorStage, ObservabilityHook, ObserveEvent, Principal, PrincipalKind, RequestContext,
     RetryDecision, RouterPlugin, RoutingTrace, ShapedRequest, ShapedRequestBuilder, SignedRequest,
-    SubscriptionQuotaCandidateSnapshot, TerminalStrategy, Upstream, UpstreamCandidate,
-    UpstreamDialect, UpstreamError, UpstreamKind as CandidateUpstreamKind, shape_request,
-    sign_request,
+    TerminalStrategy, Upstream, UpstreamCandidate, UpstreamDialect, UpstreamError,
+    UpstreamKind as CandidateUpstreamKind, shape_request, sign_request,
 };
 use cc_lb_storage_api::{
-    PromptCacheObservationRecord, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
-    SubscriptionQuotaSource, UpstreamRateLimitObservationRecord, UpstreamRecord,
+    SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    UpstreamRateLimitObservationRecord, UpstreamRecord,
     types::{RequestCacheBreakpoint, RequestCacheBreakpointSource, StoredApiKeyRecord},
     upstream::UpstreamKind as StorageUpstreamKind,
 };
@@ -65,7 +64,11 @@ use crate::usage_decoder::{UsageDecoder, decode_full_body};
 use crate::usage_parser::{
     self, UsageCounts, accumulate_sse_usage, sse_event_name, usage_from_json_body,
 };
-use cc_lb_contract::RequestEventBus;
+use cc_lb_contract::{ReplicaIdentity, RequestEventBus};
+pub use cc_lb_control::{
+    PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
+    PromptCacheObservationSinkLike, SubscriptionQuotaCacheLike,
+};
 use cc_lb_observability::{redact_internal_errors, truncate_reason};
 
 pub type Body = AxumBody;
@@ -78,79 +81,6 @@ const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
 const DEFAULT_MAX_INPUT_ESTIMATE: i64 = 4000;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-pub trait SubscriptionQuotaCacheLike: Send + Sync {
-    fn upsert_observation(&self, record: &SubscriptionQuotaObservationRecord);
-
-    fn snapshot_for_upstream(
-        &self,
-        upstream_id: Uuid,
-        now_unix_millis: u64,
-        max_staleness_secs: u64,
-    ) -> Vec<SubscriptionQuotaCandidateSnapshot>;
-}
-
-pub trait PromptCacheObservationCacheLike: Send + Sync {
-    fn snapshot_for_upstream(
-        &self,
-        upstream_id: Uuid,
-        canonical_model: &str,
-        request_breakpoint_hashes: &[(String, TtlClass)],
-        now_unix_secs: u64,
-    ) -> Vec<WarmCacheEntry>;
-
-    fn upsert_observation(
-        &self,
-        upstream_id: Uuid,
-        canonical_model: String,
-        prefix_hash: String,
-        ttl_class: TtlClass,
-        expires_at_unix_secs: u64,
-        now_unix_secs: u64,
-    );
-
-    fn refresh_on_hit(
-        &self,
-        upstream_id: Uuid,
-        canonical_model: &str,
-        prefix_hash: &str,
-        ttl_class: TtlClass,
-        now_unix_secs: u64,
-    ) -> bool;
-
-    fn grace_margin_secs(&self) -> u64;
-
-    fn clock_now_unix_secs(&self) -> u64;
-}
-
-pub trait PromptCacheObservationSinkLike: Send + Sync {
-    fn enqueue(
-        &self,
-        record: PromptCacheObservationRecord,
-    ) -> Result<(), PromptCacheObservationEnqueueError>;
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PromptCacheObservationEnqueueError {
-    ChannelFull,
-    ChannelClosed,
-}
-
-#[derive(Debug, Default)]
-pub struct NoopSubscriptionQuotaCache;
-
-impl SubscriptionQuotaCacheLike for NoopSubscriptionQuotaCache {
-    fn upsert_observation(&self, _record: &SubscriptionQuotaObservationRecord) {}
-
-    fn snapshot_for_upstream(
-        &self,
-        _upstream_id: Uuid,
-        _now_unix_millis: u64,
-        _max_staleness_secs: u64,
-    ) -> Vec<SubscriptionQuotaCandidateSnapshot> {
-        Vec::new()
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestKind {
@@ -547,11 +477,6 @@ fn prompt_cache_ttl_secs(ttl_class: TtlClass) -> u64 {
 }
 
 #[derive(Clone, Debug)]
-pub struct ReplicaIdentity {
-    pub id: Uuid,
-}
-
-#[derive(Clone, Debug)]
 pub struct LifecycleConfig {
     pub messages_body_cap_bytes: usize,
     pub files_body_cap_bytes: usize,
@@ -722,6 +647,7 @@ impl UpstreamDispatch for HyperDispatcher {
 pub struct Lifecycle {
     authn: Arc<BuiltinAuthn>,
     dynamic_view: Arc<DynamicViewHolder>,
+    dispatcher: Arc<dyn UpstreamDispatch>,
     config: LifecycleConfig,
     limit_engine: Option<Arc<LimitEngine>>,
     limit_subject_provider: Option<Arc<dyn LimitSubjectProvider>>,
@@ -749,18 +675,18 @@ impl Lifecycle {
         config: LifecycleConfig,
         clock: ClockHandle,
     ) -> Self {
+        let dispatcher = static_view.dispatcher;
         let dynamic_view = DynamicViewBuilder::new(0)
             .signer_factory(static_view.signer_factory)
             .global_router(static_view.global_router)
-            .dispatcher(static_view.dispatcher)
             .global_observability_hooks(static_view.global_observability_hooks)
-            .error_normalizer(Arc::new(ErrorNormalizer::new()))
             .principal_view(static_view.principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build();
         Self {
             authn,
             dynamic_view: Arc::new(DynamicViewHolder::new(dynamic_view)),
+            dispatcher,
             config,
             limit_engine: None,
             limit_subject_provider: None,
@@ -777,12 +703,14 @@ impl Lifecycle {
     pub fn new_with_dynamic_view(
         authn: Arc<BuiltinAuthn>,
         dynamic_view: Arc<DynamicViewHolder>,
+        dispatcher: Arc<dyn UpstreamDispatch>,
         config: LifecycleConfig,
         clock: ClockHandle,
     ) -> Self {
         Self {
             authn,
             dynamic_view,
+            dispatcher,
             config,
             limit_engine: None,
             limit_subject_provider: None,
@@ -801,12 +729,7 @@ impl Lifecycle {
         self
     }
 
-    pub fn with_error_normalizer(self, error_normalizer: Arc<ErrorNormalizer>) -> Self {
-        let current = self.dynamic_view.load();
-        let next = DynamicViewBuilder::from_view(&current)
-            .error_normalizer(error_normalizer)
-            .build();
-        self.dynamic_view.store(next);
+    pub fn with_error_normalizer(self, _error_normalizer: Arc<ErrorNormalizer>) -> Self {
         self
     }
 
@@ -1471,7 +1394,7 @@ impl Lifecycle {
         }
         let mut response = match self
             .attempt(
-                view.dispatcher.as_ref(),
+                self.dispatcher.as_ref(),
                 &ctx,
                 &principal,
                 &route,
@@ -1530,7 +1453,7 @@ impl Lifecycle {
                 }
                 response = match self
                     .attempt(
-                        view.dispatcher.as_ref(),
+                        self.dispatcher.as_ref(),
                         &ctx,
                         &principal,
                         &route,
@@ -3728,9 +3651,7 @@ mod tests {
         let view_without_cache = DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(TestSignerFactory))
             .global_router(Arc::new(TestRouter))
-            .dispatcher(Arc::new(TestDispatcher))
             .global_observability_hooks(Vec::new())
-            .error_normalizer(Arc::new(ErrorNormalizer::new()))
             .principal_view(Arc::new(PrincipalView::from_db(
                 &[principal_record("principal")],
                 HashMap::new(),
@@ -4550,9 +4471,7 @@ mod tests {
         DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(TestSignerFactory))
             .global_router(Arc::new(TestRouter))
-            .dispatcher(Arc::new(TestDispatcher))
             .global_observability_hooks(Vec::new())
-            .error_normalizer(Arc::new(ErrorNormalizer::new()))
             .principal_view(Arc::new(PrincipalView::from_db(
                 &[principal_record("principal")],
                 HashMap::new(),
@@ -4676,18 +4595,6 @@ mod tests {
             _candidates: &[UpstreamCandidate],
         ) -> Result<cc_lb_plugin_api::RouteDecision, cc_lb_plugin_api::RouteError> {
             panic!("cache score tests do not route")
-        }
-    }
-
-    struct TestDispatcher;
-
-    #[async_trait]
-    impl UpstreamDispatch for TestDispatcher {
-        async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from(Bytes::new()))
-                .expect("test response builds"))
         }
     }
 

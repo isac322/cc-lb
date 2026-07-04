@@ -69,6 +69,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
+pub trait AuditSink: Send + Sync {
+    fn sink_audit(&self, entry: AuditEntry);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplicaIdentity {
+    pub id: Uuid,
+}
+
+pub trait ReplicaIdentityProvider: Send + Sync {
+    fn replica_identity(&self) -> Option<ReplicaIdentity>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PrincipalKindLite {

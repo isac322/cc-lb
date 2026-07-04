@@ -3,7 +3,7 @@ use std::fmt;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::AuditEntry;
+use cc_lb_contract::AuditEntry;
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

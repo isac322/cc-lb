@@ -10,13 +10,12 @@ use cc_lb_engine::api_keys::{
     concurrent_guard::KeyConcurrencyManager, principal_view::PrincipalView,
 };
 use cc_lb_engine::{
-    ApiKeyAwareSignerFactory, ClockHandle, DispatchError, DynamicViewBuilder, DynamicViewHolder,
-    ErrorNormalizer, SystemClock, UpstreamDispatch, UpstreamStatusSnapshot,
-    api_keys::limit_engine::LimitEngine, spawn_audit_writer,
+    ApiKeyAwareSignerFactory, ClockHandle, DynamicViewBuilder, DynamicViewHolder, SystemClock,
+    UpstreamStatusSnapshot, api_keys::limit_engine::LimitEngine, spawn_audit_writer,
 };
 use cc_lb_plugin_api::{
     ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    SignedRequest, SignerFactory, Upstream, UpstreamCandidate,
+    SignerFactory, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -48,9 +47,7 @@ pub fn dynamic_view_holder(_config: &Config) -> Arc<DynamicViewHolder> {
         DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(NoopSignerFactory))
             .global_router(Arc::new(NoopRouter))
-            .dispatcher(Arc::new(NoopDispatch))
             .global_observability_hooks(Vec::<Arc<dyn ObservabilityHook>>::new())
-            .error_normalizer(Arc::new(ErrorNormalizer::new()))
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build(),
@@ -93,18 +90,6 @@ impl RouterPlugin for NoopRouter {
         Err(RouteError::NoRoute {
             reason: "noop test router".to_owned(),
         })
-    }
-}
-
-struct NoopDispatch;
-
-#[async_trait]
-impl UpstreamDispatch for NoopDispatch {
-    async fn dispatch(
-        &self,
-        _request: SignedRequest,
-    ) -> Result<http::Response<Body>, DispatchError> {
-        Ok(http::Response::new(Body::empty()))
     }
 }
 

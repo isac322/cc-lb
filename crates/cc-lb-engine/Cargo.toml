@@ -13,6 +13,7 @@ postgres = []
 [dependencies]
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-config = { path = "../cc-lb-config" }
+cc-lb-control = { path = "../cc-lb-control" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 globset.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -27,6 +28,7 @@ bytes.workspace = true
 bincode.workspace = true
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-contract = { workspace = true }
+cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 brotli.workspace = true

@@ -10,8 +10,7 @@ use cc_lb_engine::api_keys::principal_view::{
 };
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, Body, DispatchError, DynamicView, DynamicViewBuilder,
-    DynamicViewHolder, ErrorNormalizer, Lifecycle, LifecycleConfig, RequestKind, UpstreamDispatch,
-    build_candidates,
+    DynamicViewHolder, Lifecycle, LifecycleConfig, RequestKind, UpstreamDispatch, build_candidates,
 };
 use cc_lb_plugin_api::{
     DialectError, FilterError, FilterOutput, FilterPlugin, ObservabilityError, ObservabilityHook,
@@ -224,6 +223,7 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
     let lifecycle = Lifecycle::new_with_dynamic_view(
         authn,
         Arc::new(DynamicViewHolder::new(view)),
+        Arc::new(TestDispatcher),
         LifecycleConfig::default(),
         Arc::new(cc_lb_engine::SystemClock),
     );
@@ -271,9 +271,7 @@ fn test_view_with_principal_view(
     DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(TestSignerFactory))
         .global_router(router)
-        .dispatcher(Arc::new(TestDispatcher))
         .global_observability_hooks(vec![Arc::new(TestHook)])
-        .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(principal_view)
         .upstream_records(upstreams)
         .build()
