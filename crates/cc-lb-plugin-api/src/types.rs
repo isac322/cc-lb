@@ -364,6 +364,23 @@ pub struct UpstreamCandidate {
     /// the configured upstream instead of hardcoding api.anthropic.com.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Plan-capacity ratio relative to Claude Pro (base = 1.0). Populated by
+    /// the host from `plan_capacity_ratio(organization_type, rate_limit_tier,
+    /// seat_tier)`. `None` when organization metadata is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_capacity_ratio: Option<f64>,
+    /// Anthropic-reported organization type (e.g. `claude_max`, `claude_team`,
+    /// `claude_pro`). `None` when organization metadata is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_type: Option<String>,
+    /// Anthropic-reported rate-limit tier (e.g. `default_claude_max_20x`).
+    /// `None` when organization metadata is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_tier: Option<String>,
+    /// Anthropic-reported seat tier for team plans (e.g. `team_tier_1`).
+    /// `None` for non-team plans or when metadata is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seat_tier: Option<String>,
 }
 
 /// Credential strategy expected by a selected upstream.
@@ -1072,6 +1089,10 @@ mod tests {
             observed_at_unix_secs: 1700000000,
             cache_score: None,
             base_url: None,
+            plan_capacity_ratio: None,
+            organization_type: None,
+            rate_limit_tier: None,
+            seat_tier: None,
         };
         let json = serde_json::to_string(&candidate_no_cache).unwrap();
         let decoded: UpstreamCandidate = serde_json::from_str(&json).unwrap();
@@ -1098,6 +1119,10 @@ mod tests {
             observed_at_unix_secs: 1700000000,
             cache_score: Some(cache_score),
             base_url: None,
+            plan_capacity_ratio: None,
+            organization_type: None,
+            rate_limit_tier: None,
+            seat_tier: None,
         };
         let json = serde_json::to_string(&candidate_with_cache).unwrap();
         let decoded: UpstreamCandidate = serde_json::from_str(&json).unwrap();

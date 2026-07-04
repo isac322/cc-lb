@@ -215,6 +215,10 @@ fn host_to_wire_request(
                 .as_ref()
                 .map(|s| s.predicted_cache_read_tokens)
                 .unwrap_or(0),
+            plan_capacity_ratio: c.plan_capacity_ratio.unwrap_or(1.0),
+            organization_type: c.organization_type.as_deref().unwrap_or(""),
+            rate_limit_tier: c.rate_limit_tier.as_deref().unwrap_or(""),
+            seat_tier: c.seat_tier.as_deref().unwrap_or(""),
         })
         .collect();
     let query_ref = ctx.query.as_deref().map(|s| QueryRef { value: s });

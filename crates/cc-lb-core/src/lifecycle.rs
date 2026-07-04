@@ -230,6 +230,10 @@ pub fn build_candidates(
                     observed_at_unix_secs,
                     cache_score,
                     base_url: upstream.base_url.as_ref().map(|url| url.to_string()),
+                    plan_capacity_ratio: None,
+                    organization_type: None,
+                    rate_limit_tier: None,
+                    seat_tier: None,
                 }
             })
             .collect()
