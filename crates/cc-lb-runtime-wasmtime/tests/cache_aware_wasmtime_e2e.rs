@@ -64,6 +64,10 @@ fn fixture_request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRe
             kind: Box::from("anthropic_api_key"),
             observed_at_unix_secs: 0,
             predicted_cache_read_tokens: *p,
+            plan_capacity_ratio: 1.0,
+            organization_type: Box::from(""),
+            rate_limit_tier: Box::from(""),
+            seat_tier: Box::from(""),
         })
         .collect::<Vec<_>>()
         .into_boxed_slice();

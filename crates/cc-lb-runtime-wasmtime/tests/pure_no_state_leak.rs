@@ -57,6 +57,10 @@ fn request() -> FilterRequest {
                 kind: Box::from("anthropic_api_key"),
                 observed_at_unix_secs: 0,
                 predicted_cache_read_tokens: 10,
+                plan_capacity_ratio: 1.0,
+                organization_type: Box::from(""),
+                rate_limit_tier: Box::from(""),
+                seat_tier: Box::from(""),
             },
             UpstreamCandidate {
                 upstream_id: Box::from("b"),
@@ -64,6 +68,10 @@ fn request() -> FilterRequest {
                 kind: Box::from("anthropic_api_key"),
                 observed_at_unix_secs: 0,
                 predicted_cache_read_tokens: 200,
+                plan_capacity_ratio: 1.0,
+                organization_type: Box::from(""),
+                rate_limit_tier: Box::from(""),
+                seat_tier: Box::from(""),
             },
         ]),
     }

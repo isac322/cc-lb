@@ -237,6 +237,10 @@ fn allow_all_filter_execution() {
             observed_at_unix_secs: 0,
             cache_score: None,
             base_url: None,
+            plan_capacity_ratio: None,
+            organization_type: None,
+            rate_limit_tier: None,
+            seat_tier: None,
         },
         UpstreamCandidate {
             upstream_id: id2,
@@ -247,6 +251,10 @@ fn allow_all_filter_execution() {
             observed_at_unix_secs: 0,
             cache_score: None,
             base_url: None,
+            plan_capacity_ratio: None,
+            organization_type: None,
+            rate_limit_tier: None,
+            seat_tier: None,
         },
     ];
 
@@ -288,6 +296,10 @@ fn selective_filter_execution() {
             observed_at_unix_secs: 0,
             cache_score: None,
             base_url: None,
+            plan_capacity_ratio: None,
+            organization_type: None,
+            rate_limit_tier: None,
+            seat_tier: None,
         },
         UpstreamCandidate {
             upstream_id: staging_id,
@@ -298,6 +310,10 @@ fn selective_filter_execution() {
             observed_at_unix_secs: 0,
             cache_score: None,
             base_url: None,
+            plan_capacity_ratio: None,
+            organization_type: None,
+            rate_limit_tier: None,
+            seat_tier: None,
         },
     ];
 

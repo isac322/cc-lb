@@ -11,14 +11,15 @@ use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::reconcile::Reconciler;
 use cc_lb_storage_api::{
-    AnthropicCompatibilityKvStore, BackendKind, CompatibilityKvRecord, MetaStore, PluginChainEntry,
-    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlot,
-    PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
-    PromptCacheObservationStore, StorageResult, SubscriptionQuotaObservationRecord,
-    SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery, UpstreamCreate,
-    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
-    UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob, WasmRegistryEntry,
-    WasmRegistryEntryInput,
+    AnthropicCompatibilityKvStore, BackendKind, CompatibilityKvRecord, MetaStore,
+    OrganizationMetadataRecord, OrganizationMetadataStore, PluginChainEntry, PluginChainEntryInput,
+    PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
+    PrincipalRecord, PrincipalStore, PrincipalUpdate, PromptCacheObservationStore, StorageResult,
+    SubscriptionQuotaObservationRecord, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
+    UpstreamCreate, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
+    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
+    UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob,
+    WasmRegistryEntry, WasmRegistryEntryInput,
 };
 
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
@@ -70,6 +71,8 @@ fn stores(storage: Arc<Storage>) -> Arc<Stores> {
         plugin_registry: storage.clone(),
         upstream_rate_limits: storage.clone(),
         upstream_subscription_quotas: storage.clone(),
+        upstream_subscription_metadata: storage.clone(),
+        organization_metadata: storage.clone(),
         prompt_cache_observations: storage.clone(),
         anthropic_compatibility_kv: storage,
         audit: None,
@@ -306,6 +309,8 @@ async fn cancel_during_tick_is_graceful() {
         plugin_registry: Arc::new(EmptyPluginRegistryStore),
         upstream_rate_limits: Arc::new(EmptyRateLimitStore),
         upstream_subscription_quotas: Arc::new(EmptySubscriptionQuotaStore),
+        upstream_subscription_metadata: Arc::new(EmptyUpstreamSubscriptionMetadataStore),
+        organization_metadata: Arc::new(EmptyOrganizationMetadataStore),
         prompt_cache_observations: Arc::new(EmptyPromptCacheObservationStore),
         anthropic_compatibility_kv: Arc::new(EmptyCompatibilityKvStore),
         audit: None,
@@ -520,6 +525,54 @@ impl UpstreamSubscriptionQuotaStore for EmptySubscriptionQuotaStore {
 struct EmptyPromptCacheObservationStore;
 
 impl PromptCacheObservationStore for EmptyPromptCacheObservationStore {}
+
+struct EmptyUpstreamSubscriptionMetadataStore;
+
+#[async_trait]
+impl UpstreamSubscriptionMetadataStore for EmptyUpstreamSubscriptionMetadataStore {
+    async fn put_upstream_subscription_metadata(
+        &self,
+        _record: &UpstreamSubscriptionMetadataRecord,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn get_upstream_subscription_metadata(
+        &self,
+        _upstream_id: Uuid,
+    ) -> StorageResult<Option<UpstreamSubscriptionMetadataRecord>> {
+        Ok(None)
+    }
+
+    async fn list_upstream_subscription_metadata(
+        &self,
+    ) -> StorageResult<Vec<UpstreamSubscriptionMetadataRecord>> {
+        Ok(Vec::new())
+    }
+}
+
+struct EmptyOrganizationMetadataStore;
+
+#[async_trait]
+impl OrganizationMetadataStore for EmptyOrganizationMetadataStore {
+    async fn put_organization_metadata(
+        &self,
+        _record: &OrganizationMetadataRecord,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn get_organization_metadata(
+        &self,
+        _organization_uuid: &str,
+    ) -> StorageResult<Option<OrganizationMetadataRecord>> {
+        Ok(None)
+    }
+
+    async fn list_organization_metadata(&self) -> StorageResult<Vec<OrganizationMetadataRecord>> {
+        Ok(Vec::new())
+    }
+}
 
 struct EmptyCompatibilityKvStore;
 

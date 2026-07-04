@@ -217,6 +217,7 @@ pub fn build_candidates(
                     );
                     build_cache_score(request_breakpoints, &warm_entries)
                 });
+                let plan_info = view.plan_info_by_upstream.get(&upstream.id);
                 UpstreamCandidate {
                     upstream_id: upstream.id,
                     name: upstream.name.clone(),
@@ -230,6 +231,10 @@ pub fn build_candidates(
                     observed_at_unix_secs,
                     cache_score,
                     base_url: upstream.base_url.as_ref().map(|url| url.to_string()),
+                    plan_capacity_ratio: plan_info.map(|p| p.capacity_ratio),
+                    organization_type: plan_info.and_then(|p| p.organization_type.clone()),
+                    rate_limit_tier: plan_info.and_then(|p| p.rate_limit_tier.clone()),
+                    seat_tier: plan_info.and_then(|p| p.seat_tier.clone()),
                 }
             })
             .collect()

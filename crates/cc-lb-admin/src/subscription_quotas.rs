@@ -9,7 +9,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use cc_lb_core::{Clock, DynamicViewHolder};
+use cc_lb_core::{
+    Clock, DynamicViewHolder,
+    plan_capacity::{PRO_CAPACITY_RATIO, plan_capacity_ratio},
+};
 use cc_lb_plugin_api::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaHistoryStore,
@@ -44,7 +47,6 @@ const HEADER_FALLBACK_CAVEAT: &str = "utilization is the arithmetic mean of head
 const PLAN_RATIO_CAVEAT: &str = "utilization is weighted by subscription plan ratios from Anthropic metadata; 5h and 7d use the same documented plan ratios";
 const STALE_DATA_CAVEAT: &str =
     "latest observation is older than max_staleness_secs; analysis may be outdated";
-const PRO_CAPACITY_RATIO: f64 = 1.0;
 
 pub fn router() -> Router<AdminState> {
     Router::new()
@@ -1651,32 +1653,6 @@ fn capacity_ratios_by_upstream(
         .collect()
 }
 
-fn plan_capacity_ratio(
-    organization_type: Option<&str>,
-    rate_limit_tier: Option<&str>,
-    seat_tier: Option<&str>,
-) -> f64 {
-    let organization_type = organization_type.unwrap_or_default().to_ascii_lowercase();
-    let rate_limit_tier = rate_limit_tier.unwrap_or_default().to_ascii_lowercase();
-    let seat_tier = seat_tier.unwrap_or_default().to_ascii_lowercase();
-    if organization_type == "claude_team" {
-        return match seat_tier.as_str() {
-            "team_standard" => 1.25,
-            "team_tier_1" | "team_premium" => 6.25,
-            _ if rate_limit_tier == "default_raven" => 1.25,
-            _ if rate_limit_tier.contains("5x") => 6.25,
-            _ => PRO_CAPACITY_RATIO,
-        };
-    }
-    if rate_limit_tier.contains("20x") || rate_limit_tier.contains("x20") {
-        20.0
-    } else if rate_limit_tier.contains("5x") || rate_limit_tier.contains("x5") {
-        5.0
-    } else {
-        PRO_CAPACITY_RATIO
-    }
-}
-
 fn aggregate_confidence(
     lots: &[AggregateProviderLotResponse],
     weighted_utilization: Option<f64>,
@@ -2574,38 +2550,6 @@ mod tests {
         assert_eq!(response.used_tokens, 150);
         assert_eq!(response.capacity_to_now_tokens_estimate, Some(300.0));
         assert_eq!(response.utilization_percent, Some(50.0));
-    }
-
-    #[test]
-    fn plan_capacity_ratio_classifies_team_standard_and_premium() {
-        assert_eq!(
-            plan_capacity_ratio(
-                Some("claude_team"),
-                Some("default_raven"),
-                Some("team_standard")
-            ),
-            1.25
-        );
-        assert_eq!(
-            plan_capacity_ratio(
-                Some("claude_team"),
-                Some("default_claude_max_5x"),
-                Some("team_tier_1")
-            ),
-            6.25
-        );
-        assert_eq!(
-            plan_capacity_ratio(
-                Some("claude_team"),
-                Some("default_claude_max_5x"),
-                Some("team_premium")
-            ),
-            6.25
-        );
-        assert_eq!(
-            plan_capacity_ratio(Some("claude_max"), Some("default_claude_max_20x"), None),
-            20.0
-        );
     }
 
     #[test]
