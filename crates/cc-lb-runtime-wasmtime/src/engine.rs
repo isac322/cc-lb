@@ -104,7 +104,7 @@ impl Default for HotEngineConfig {
             allocation_strategy: HotEngineAllocationStrategy::OnDemand,
             // 2048 pages = 128 MiB per plugin instance. Sized to survive
             // the 100 MiB /v1/files body cap (DEFAULT_FILES_CAP_BYTES in
-            // cc-lb-core::lifecycle) plus rkyv envelope + per-hook
+            // cc-lb-engine::lifecycle) plus rkyv envelope + per-hook
             // scratch clones; see RFC-0001 gap-analysis item #3.
             memory_max_pages: DEFAULT_MEMORY_MAX_PAGES,
             // 1 MiB wasm stack — plenty for regex-automata state machines.

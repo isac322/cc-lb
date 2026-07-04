@@ -6,7 +6,7 @@ pub const NEXT_SCHEDULED_AT: i64 = 1_900_000_000;
 
 pub async fn scheduler_with_next_warmup(
     upstream_id: Uuid,
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 ) -> SchedulerAdminHandle {
     let pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)

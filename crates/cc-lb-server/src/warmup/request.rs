@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use cc_lb_core::{UnifiedQuotaObservation, parse_anthropic_unified_headers};
+use cc_lb_engine::{UnifiedQuotaObservation, parse_anthropic_unified_headers};
 use http::{Method, Request, StatusCode};
 use http_body_util::Full;
 use hyper_util::client::legacy::Client;

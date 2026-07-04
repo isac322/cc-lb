@@ -1,8 +1,8 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use cc_lb_core::clock::ClockHandle;
-use cc_lb_core::usage_pruner::{IntoUsagePrunerStorage, PruneResult, UsagePruner};
+use cc_lb_clock::ClockHandle;
+use cc_lb_engine::usage_pruner::{IntoUsagePrunerStorage, PruneResult, UsagePruner};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

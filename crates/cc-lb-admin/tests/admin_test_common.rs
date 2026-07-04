@@ -6,10 +6,10 @@ use async_trait::async_trait;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use axum::{Router, body::Body};
 use cc_lb_config::Config;
-use cc_lb_core::api_keys::{
+use cc_lb_engine::api_keys::{
     concurrent_guard::KeyConcurrencyManager, principal_view::PrincipalView,
 };
-use cc_lb_core::{
+use cc_lb_engine::{
     ApiKeyAwareSignerFactory, ClockHandle, DispatchError, DynamicViewBuilder, DynamicViewHolder,
     ErrorNormalizer, SystemClock, UpstreamDispatch, UpstreamStatusSnapshot,
     api_keys::limit_engine::LimitEngine, spawn_audit_writer,
@@ -35,8 +35,8 @@ fn system_clock() -> ClockHandle {
     Arc::new(SystemClock)
 }
 
-pub fn key_store(storage: Arc<SqliteStorage>) -> Arc<cc_lb_core::api_keys::key_store::KeyStore> {
-    Arc::new(cc_lb_core::api_keys::key_store::KeyStore::new(storage))
+pub fn key_store(storage: Arc<SqliteStorage>) -> Arc<cc_lb_engine::api_keys::key_store::KeyStore> {
+    Arc::new(cc_lb_engine::api_keys::key_store::KeyStore::new(storage))
 }
 
 pub fn dynamic_view_holder(_config: &Config) -> Arc<DynamicViewHolder> {

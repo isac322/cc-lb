@@ -5,7 +5,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_core::{AuditEntry, AuditPayload};
+use cc_lb_engine::{AuditEntry, AuditPayload};
 use cc_lb_plugin_api::TerminalStrategy;
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::{
@@ -140,7 +140,7 @@ async fn create_principal(
     match PrincipalStore::create(
         storage,
         input,
-        cc_lb_core::clock::unix_secs(state.clock.now()),
+        cc_lb_engine::clock::unix_secs(state.clock.now()),
     )
     .await
     {
@@ -280,7 +280,7 @@ async fn set_enabled(
         id,
         expected_revision,
         enabled,
-        cc_lb_core::clock::unix_secs(state.clock.now()),
+        cc_lb_engine::clock::unix_secs(state.clock.now()),
     )
     .await
     {
@@ -320,7 +320,7 @@ async fn delete_principal(
         storage,
         id,
         expected_revision,
-        cc_lb_core::clock::unix_secs(state.clock.now()),
+        cc_lb_engine::clock::unix_secs(state.clock.now()),
     )
     .await
     {
@@ -435,7 +435,7 @@ async fn update_router_terminal(
             router_terminal_strategy: Some(strategy),
             ..PrincipalUpdate::default()
         },
-        cc_lb_core::clock::unix_secs(state.clock.now()),
+        cc_lb_engine::clock::unix_secs(state.clock.now()),
     )
     .await
     {
@@ -475,7 +475,7 @@ async fn update_principal_record(
         id,
         expected_revision,
         update,
-        cc_lb_core::clock::unix_secs(state.clock.now()),
+        cc_lb_engine::clock::unix_secs(state.clock.now()),
     )
     .await
     {
@@ -666,7 +666,7 @@ fn emit_audit(state: &AdminState, payload: AuditPayload) {
     };
     let principal_id = principal_id_for_audit(&payload);
     let action = payload.to_string();
-    let ts = cc_lb_core::clock::unix_secs(state.clock.now());
+    let ts = cc_lb_engine::clock::unix_secs(state.clock.now());
     let mut entry: AuditEntry = payload.into();
     entry.ts = ts;
     entry.request_id = format!("admin-v1-principal-{principal_id}-{ts}");

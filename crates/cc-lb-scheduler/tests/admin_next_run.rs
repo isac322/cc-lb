@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use cc_lb_core::clock::SystemClock;
+use cc_lb_clock::SystemClock;
 use cc_lb_scheduler::admin::SchedulerAdminHandle;
 use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, AdaptiveJob, SchedulerBackend};
 use uuid::Uuid;

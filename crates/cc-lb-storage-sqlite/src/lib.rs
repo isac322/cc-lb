@@ -1,6 +1,6 @@
 use std::{str::FromStr, time::Duration};
 
-use cc_lb_core::{Clock, ClockHandle};
+use cc_lb_clock::{Clock, ClockHandle};
 use cc_lb_storage_api::{StorageError, StorageResult};
 use sqlx::{
     Sqlite, SqlitePool, Transaction,

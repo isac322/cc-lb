@@ -7,7 +7,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_core::{AuditEntry, AuditPayload};
+use cc_lb_engine::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::{Storage, StorageError};
 use http_body_util::BodyExt;
 use serde::Deserialize;
@@ -376,7 +376,7 @@ async fn put_config_draft(
     match crate::settings::put_draft(
         storage,
         request,
-        cc_lb_core::clock::unix_secs(state.clock.now()),
+        cc_lb_engine::clock::unix_secs(state.clock.now()),
     )
     .await
     {
@@ -617,7 +617,7 @@ fn emit_admin_action(
     let Some(audit_sink) = &state.audit_sink else {
         return;
     };
-    let ts = cc_lb_core::clock::unix_secs(state.clock.now());
+    let ts = cc_lb_engine::clock::unix_secs(state.clock.now());
     let _ = audit_sink.try_enqueue(AuditEntry {
         ts,
         request_id: format!("{route}-{ts}"),

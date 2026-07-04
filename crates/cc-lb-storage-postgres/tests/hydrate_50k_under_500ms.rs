@@ -120,7 +120,7 @@ impl Fixture {
     fn store(&self) -> PostgresStorage {
         PostgresStorage::new(
             self.pool.clone(),
-            std::sync::Arc::new(cc_lb_core::SystemClock),
+            std::sync::Arc::new(cc_lb_clock::SystemClock),
         )
     }
 

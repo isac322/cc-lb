@@ -52,7 +52,7 @@ pub enum ManagementError {
     #[error(transparent)]
     Storage(#[from] cc_lb_storage_api::StorageError),
     #[error(transparent)]
-    KeyStore(#[from] cc_lb_core::api_keys::key_store::KeyStoreError),
+    KeyStore(#[from] cc_lb_engine::api_keys::key_store::KeyStoreError),
 }
 
 impl IntoResponse for ManagementError {

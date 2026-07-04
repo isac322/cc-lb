@@ -27,7 +27,7 @@ use cc_lb_config::{Config, RestartRequiredField};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use serde::Serialize;
 
-use cc_lb_core::{
+use cc_lb_engine::{
     AuditWriterSink, ClockHandle, DynamicView, DynamicViewHolder, Lifecycle, MetadataHookHandle,
     RequestEventBus,
     api_keys::{key_store::KeyStore, limit_engine::LimitEngine},

@@ -8,8 +8,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use cc_lb_admin::{AdminState, CurrentConfig, DynamicViewRebinder, router};
 use cc_lb_config::Config;
-use cc_lb_core::api_keys::principal_view::PrincipalView;
-use cc_lb_core::{
+use cc_lb_engine::api_keys::principal_view::PrincipalView;
+use cc_lb_engine::{
     ApiKeyAwareSignerFactory, ApplyStatus, DispatchError, DynamicView, DynamicViewBuilder,
     UpstreamDispatch, UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
@@ -76,7 +76,7 @@ impl DynamicViewRebinder for SnapshotRebinder {
             .global_router(Arc::new(NoopRouter))
             .dispatcher(Arc::new(NoopDispatch))
             .global_observability_hooks(Vec::new())
-            .error_normalizer(Arc::new(cc_lb_core::ErrorNormalizer::new()))
+            .error_normalizer(Arc::new(cc_lb_engine::ErrorNormalizer::new()))
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot {
                 entries,
@@ -166,7 +166,7 @@ async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
         start_time: std::time::Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_core::SystemClock),
+        clock: Arc::new(cc_lb_engine::SystemClock),
     };
     let app = router(state);
 

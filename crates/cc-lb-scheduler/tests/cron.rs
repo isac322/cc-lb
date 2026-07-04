@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use apalis_cron::Schedule;
-use cc_lb_core::clock::{Clock, SystemClock};
+use cc_lb_clock::{Clock, SystemClock};
 use cc_lb_scheduler::cron::WorkerBuilder;
 use chrono::{DateTime, Duration, Utc};
 

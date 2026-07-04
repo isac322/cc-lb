@@ -46,9 +46,9 @@ pub fn use_temp_sqlite(config: &mut Config, prefix: &str, key_env: &'static str)
 }
 
 fn unique_sqlite_path(prefix: &str) -> std::path::PathBuf {
-    use cc_lb_core::Clock as _;
+    use cc_lb_engine::Clock as _;
 
-    let clock = cc_lb_core::SystemClock;
+    let clock = cc_lb_engine::SystemClock;
     let nanos = clock
         .now()
         .duration_since(std::time::UNIX_EPOCH)

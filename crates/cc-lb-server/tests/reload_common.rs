@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::body::Body;
 use cc_lb_config::Config;
-use cc_lb_core::api_keys::principal_view::PrincipalView;
-use cc_lb_core::{
+use cc_lb_engine::api_keys::principal_view::PrincipalView;
+use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder,
     ErrorNormalizer, UpstreamDispatch, UpstreamStatusSnapshot,
 };

@@ -38,7 +38,7 @@ pub fn app_with_scheduler(scheduler: SchedulerAdminHandle) -> axum::Router {
         start_time: std::time::Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_core::SystemClock),
+        clock: Arc::new(cc_lb_engine::SystemClock),
     };
     cc_lb_admin::router(state)
 }
@@ -93,7 +93,7 @@ pub async fn sqlite_fixture()
     let backend = SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerStorage {
         pool: pool.clone(),
         storage,
-        clock: std::sync::Arc::new(cc_lb_core::SystemClock),
+        clock: std::sync::Arc::new(cc_lb_engine::SystemClock),
     });
     Ok(RouteFixture {
         pool,

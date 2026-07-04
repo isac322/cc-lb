@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use cc_lb_config::RestartRequiredField;
-use cc_lb_core::{ApplyStatus, ReplicaIdentity};
+use cc_lb_engine::{ApplyStatus, ReplicaIdentity};
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
@@ -143,7 +143,7 @@ pub(crate) async fn status(State(state): State<AdminState>) -> axum::response::R
 }
 
 async fn export(State(state): State<AdminState>) -> axum::response::Response {
-    match build_export(&state, cc_lb_core::clock::unix_secs(state.clock.now())).await {
+    match build_export(&state, cc_lb_engine::clock::unix_secs(state.clock.now())).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => status_error_response(error),
     }

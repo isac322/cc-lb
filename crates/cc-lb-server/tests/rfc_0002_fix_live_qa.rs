@@ -557,7 +557,7 @@ async fn lqa_2b_lifecycle_metrics_increment_for_happy_non_stream() {
     let post = wait_metric_delta(
         server.metrics_addr,
         &pre,
-        r#"cc_lb_lifecycle_events_total{kind="request_terminated"}"#,
+        r#"cc_lb_contract_events_total{kind="request_terminated"}"#,
         1,
     )
     .await;
@@ -575,14 +575,14 @@ async fn lqa_2b_lifecycle_metrics_increment_for_happy_non_stream() {
         "priced",
         "cache_observed",
     ] {
-        let prefix = format!(r#"cc_lb_lifecycle_events_total{{kind="{kind}"}}"#);
+        let prefix = format!(r#"cc_lb_contract_events_total{{kind="{kind}"}}"#);
         assert_eq!(diff_counter(&pre, &post, &prefix), 1, "metric {kind}");
     }
     assert_eq!(
         diff_counter(
             &pre,
             &post,
-            r#"cc_lb_lifecycle_events_total{kind="provider_error_observed"}"#,
+            r#"cc_lb_contract_events_total{kind="provider_error_observed"}"#,
         ),
         0
     );
@@ -1010,7 +1010,7 @@ async fn lqa_6c_upstream_rate_limit_error_records_provider_error_metric() {
     let post = wait_metric_delta(
         server.metrics_addr,
         &pre,
-        r#"cc_lb_lifecycle_events_total{kind="provider_error_observed"}"#,
+        r#"cc_lb_contract_events_total{kind="provider_error_observed"}"#,
         1,
     )
     .await;
@@ -1018,7 +1018,7 @@ async fn lqa_6c_upstream_rate_limit_error_records_provider_error_metric() {
         diff_counter(
             &pre,
             &post,
-            r#"cc_lb_lifecycle_events_total{kind="provider_error_observed"}"#
+            r#"cc_lb_contract_events_total{kind="provider_error_observed"}"#
         ),
         1
     );
@@ -1083,7 +1083,7 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
     let post = wait_metric_delta(
         server.metrics_addr,
         &pre,
-        r#"cc_lb_lifecycle_events_total{kind="request_terminated"}"#,
+        r#"cc_lb_contract_events_total{kind="request_terminated"}"#,
         1,
     )
     .await;
@@ -1091,7 +1091,7 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
         diff_counter(
             &pre,
             &post,
-            r#"cc_lb_lifecycle_events_total{kind="parse_completed"}"#
+            r#"cc_lb_contract_events_total{kind="parse_completed"}"#
         ),
         1
     );
@@ -1099,7 +1099,7 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
         diff_counter(
             &pre,
             &post,
-            r#"cc_lb_lifecycle_events_total{kind="request_terminated"}"#
+            r#"cc_lb_contract_events_total{kind="request_terminated"}"#
         ),
         1
     );
@@ -1107,7 +1107,7 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
         diff_counter(
             &pre,
             &post,
-            r#"cc_lb_lifecycle_events_total{kind="route_completed"}"#
+            r#"cc_lb_contract_events_total{kind="route_completed"}"#
         ),
         0
     );
@@ -1115,7 +1115,7 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
         diff_counter(
             &pre,
             &post,
-            r#"cc_lb_lifecycle_events_total{kind="upstream_attempt"}"#
+            r#"cc_lb_contract_events_total{kind="upstream_attempt"}"#
         ),
         0
     );

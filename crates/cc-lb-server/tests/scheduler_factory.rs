@@ -16,7 +16,7 @@ async fn scheduler_factory_sqlite_happy_path_sets_up_tables_and_partial_index() 
     let opened = open_scheduler_storage(
         &storage,
         &SchedulerConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect("sqlite scheduler opens");
@@ -58,7 +58,7 @@ async fn scheduler_factory_sqlite_bad_path_returns_connection_failed() {
     let error = open_scheduler_storage(
         &storage,
         &SchedulerConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect_err("missing parent cannot open sqlite database");
@@ -104,7 +104,7 @@ async fn scheduler_factory_postgres_happy_path_sets_up_tables_and_index() {
     let opened = open_scheduler_storage(
         &storage,
         &SchedulerConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect("postgres scheduler opens");
@@ -139,7 +139,7 @@ async fn scheduler_factory_postgres_feature_disabled_returns_error() {
     let error = open_scheduler_storage(
         &storage,
         &SchedulerConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect_err("postgres feature is disabled");
@@ -160,7 +160,7 @@ async fn scheduler_factory_sqlite_feature_disabled_returns_error() {
     let error = open_scheduler_storage(
         &storage,
         &SchedulerConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect_err("sqlite feature is disabled");
@@ -182,7 +182,7 @@ async fn scheduler_factory_postgres_bad_url_returns_connection_failed() {
     let error = open_scheduler_storage(
         &storage,
         &SchedulerConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect_err("invalid postgres URL cannot open");

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cc_lb_core::{Clock, unix_secs};
+use cc_lb_clock::{Clock, unix_secs};
 use cc_lb_storage_api::{
     ManagedKeyStore, StorageError, StorageResult,
     types::{

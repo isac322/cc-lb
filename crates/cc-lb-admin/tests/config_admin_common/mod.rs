@@ -10,11 +10,11 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use bytes::Bytes;
 use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig, router};
 use cc_lb_config::Config;
-use cc_lb_core::api_keys::{
+use cc_lb_engine::api_keys::{
     concurrent_guard::KeyConcurrencyManager, key_store::KeyStore, limit_engine::LimitEngine,
     principal_view::PrincipalView,
 };
-use cc_lb_core::{
+use cc_lb_engine::{
     ApiKeyAwareSignerFactory, ClockHandle, DispatchError, DynamicViewBuilder, DynamicViewHolder,
     ErrorNormalizer, SystemClock, UpstreamDispatch, UpstreamStatusSnapshot,
 };
@@ -96,9 +96,9 @@ pub fn test_state_with_clock(
     ));
     let dynamic_view = dynamic_view_holder(principal_view);
     let key_store = storage.clone().map(key_store);
-    let event_bus: Option<Arc<dyn cc_lb_core::RequestEventBus>> = storage
-        .as_ref()
-        .map(|_| Arc::new(cc_lb_core::InMemoryBus::new()) as Arc<dyn cc_lb_core::RequestEventBus>);
+    let event_bus: Option<Arc<dyn cc_lb_engine::RequestEventBus>> = storage.as_ref().map(|_| {
+        Arc::new(cc_lb_engine::InMemoryBus::new()) as Arc<dyn cc_lb_engine::RequestEventBus>
+    });
     AdminState {
         storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
         key_store,

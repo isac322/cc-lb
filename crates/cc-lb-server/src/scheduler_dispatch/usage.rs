@@ -1,4 +1,4 @@
-use cc_lb_core::SubscriptionQuotaSink;
+use cc_lb_engine::SubscriptionQuotaSink;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_storage_api::{
     SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,

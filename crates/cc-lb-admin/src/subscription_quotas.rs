@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use cc_lb_core::{
+use cc_lb_engine::{
     Clock, DynamicViewHolder,
     plan_capacity::{PRO_CAPACITY_RATIO, plan_capacity_ratio},
 };
@@ -2412,7 +2412,7 @@ fn internal_error(error: &str) -> Response {
 }
 
 fn now_unix_millis(clock: &dyn Clock) -> u64 {
-    cc_lb_core::clock::unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
+    cc_lb_engine::clock::unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use cc_lb_aead::EncryptedOAuthTokens;
-use cc_lb_core::unix_secs;
+use cc_lb_clock::unix_secs;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
     StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,

@@ -8,7 +8,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use cc_lb_config::Config;
-use cc_lb_core::{InMemoryBus, RequestEventBus};
+use cc_lb_engine::{InMemoryBus, RequestEventBus};
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use config_admin_common::{TOKEN, app, authed_bytes, temp_storage, test_state};
 use http_body_util::BodyExt;
@@ -133,8 +133,8 @@ async fn events_stream_writes_reset_frame_when_bus_lagged() {
         }
     }
 
-    bus.publish(cc_lb_core::RequestEventUpdate::final_(request_event(1), 1));
-    bus.publish(cc_lb_core::RequestEventUpdate::final_(request_event(2), 2));
+    bus.publish(cc_lb_engine::RequestEventUpdate::final_(request_event(1), 1));
+    bus.publish(cc_lb_engine::RequestEventUpdate::final_(request_event(2), 2));
 
     while !text.contains("event: reset") {
         let frame = timeout(Duration::from_secs(2), body.frame())

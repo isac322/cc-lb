@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
-use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_core::api_keys::principal_view::PrincipalView;
-use cc_lb_core::{
+use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_engine::api_keys::principal_view::PrincipalView;
+use cc_lb_engine::{
     ApiKeyAwareSignerFactory, Body, DispatchError, DynamicViewBuilder, DynamicViewHolder,
     ErrorNormalizer, Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
@@ -38,7 +38,7 @@ async fn none_mode_terminal_selects_bound_principal_upstream() {
             upstream_kind: NoneModeUpstreamKind::AnthropicKey,
         }),
         None,
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     ));
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(RecordingSignerFactory {
@@ -62,7 +62,7 @@ async fn none_mode_terminal_selects_bound_principal_upstream() {
         authn,
         Arc::new(DynamicViewHolder::new(view)),
         LifecycleConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     );
 
     let response = lifecycle

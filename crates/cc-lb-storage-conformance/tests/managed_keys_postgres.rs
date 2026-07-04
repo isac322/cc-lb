@@ -3,7 +3,7 @@
 use std::{str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
-use cc_lb_core::{ClockHandle, SystemClock};
+use cc_lb_engine::{ClockHandle, SystemClock};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_conformance::scenarios::managed_keys::{
     ManagedKeyBackend, managed_keys_concurrent_issue_no_index_collision,

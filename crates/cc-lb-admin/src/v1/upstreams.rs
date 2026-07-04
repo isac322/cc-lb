@@ -13,13 +13,13 @@ use axum::{
 };
 use bytes::Bytes;
 use cc_lb_aead::{AeadEncryptedField, OAuthTokenBundle};
-use cc_lb_core::anthropic_compat::{
+use cc_lb_engine::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
-use cc_lb_core::warmup_attempts::{
+use cc_lb_engine::warmup_attempts::{
     WarmupAttemptExecution, WarmupAttemptExecutionResult, execute_warmup_attempt,
 };
-use cc_lb_core::{
+use cc_lb_engine::{
     AuditEntry, AuditPayload, Clock, UnifiedQuotaObservation, make_metadata_http_client,
     observe_subscription_quota_headers, parse_anthropic_unified_headers, run_metadata_refresh,
 };
@@ -66,7 +66,7 @@ async fn write_warmup_status_after_success(
     clock: &dyn Clock,
 ) {
     let status = UpstreamStatusUpdate {
-        last_warmup_at_unix_secs: Some(Some(cc_lb_core::clock::unix_secs(clock.now()))),
+        last_warmup_at_unix_secs: Some(Some(cc_lb_engine::clock::unix_secs(clock.now()))),
         ..UpstreamStatusUpdate::default()
     };
     if let Err(error) = UpstreamStore::set_status(storage, upstream_id, status).await {
@@ -1079,7 +1079,7 @@ async fn seed_warmup_if_toggled(
     let Some(scheduler) = state.scheduler.as_ref() else {
         return Ok(());
     };
-    let seed_secs = cc_lb_core::clock::unix_secs(state.clock.now());
+    let seed_secs = cc_lb_engine::clock::unix_secs(state.clock.now());
     match scheduler
         .push_adaptive_task(warmup_bootstrap_task(after.id, seed_secs))
         .await
@@ -1304,7 +1304,7 @@ async fn fresh_enough_access_token(
     upstream: &UpstreamRecord,
     bundle: OAuthTokenBundle,
 ) -> Result<String, UpstreamError> {
-    let now = cc_lb_core::clock::unix_secs(state.clock.now());
+    let now = cc_lb_engine::clock::unix_secs(state.clock.now());
     if bundle.expires_at_unix_secs > now.saturating_add(METADATA_REFRESH_LOOKAHEAD_SECS) {
         return Ok(bundle.access_token);
     }
@@ -1562,7 +1562,7 @@ fn enqueue_upstream_audit(state: &AdminState, upstream: &UpstreamRecord, payload
     let Some(audit_sink) = &state.audit_sink else {
         return;
     };
-    let ts = cc_lb_core::clock::unix_secs(state.clock.now());
+    let ts = cc_lb_engine::clock::unix_secs(state.clock.now());
     let action = payload.to_string();
     let mut entry: AuditEntry = payload.into();
     entry.ts = ts;
@@ -1578,12 +1578,12 @@ fn enqueue_upstream_audit(state: &AdminState, upstream: &UpstreamRecord, payload
 }
 
 fn unix_now_secs_i64(clock: &dyn Clock) -> Result<i64, UpstreamError> {
-    i64::try_from(cc_lb_core::clock::unix_secs(clock.now()))
+    i64::try_from(cc_lb_engine::clock::unix_secs(clock.now()))
         .map_err(|_| invalid_warmup_state("current timestamp overflow"))
 }
 
 fn unix_now_millis(clock: &dyn Clock) -> Result<u64, UpstreamError> {
-    cc_lb_core::clock::unix_secs(clock.now())
+    cc_lb_engine::clock::unix_secs(clock.now())
         .checked_mul(1_000)
         .ok_or_else(|| invalid_warmup_state("current timestamp millis overflow"))
 }
@@ -1596,10 +1596,10 @@ mod tests {
     use axum::body::{Body as AxumBody, to_bytes};
     use cc_lb_aead::AeadService;
     use cc_lb_config::Config;
-    use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
-    use cc_lb_core::api_keys::limit_engine::LimitEngine;
-    use cc_lb_core::api_keys::principal_view::PrincipalView;
-    use cc_lb_core::{
+    use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
+    use cc_lb_engine::api_keys::limit_engine::LimitEngine;
+    use cc_lb_engine::api_keys::principal_view::PrincipalView;
+    use cc_lb_engine::{
         Body as CoreBody, DispatchError, DynamicView, DynamicViewBuilder, DynamicViewHolder,
         ErrorNormalizer, UpstreamDispatch, UpstreamStatusSnapshot,
     };
@@ -1851,7 +1851,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("storage dir");
         let database_url = format!("sqlite://{}", dir.path().join("upstreams.sqlite").display());
         let storage =
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
                 .await
                 .expect("storage opens");
         storage
@@ -1866,7 +1866,7 @@ mod tests {
             aead: aead.clone(),
             limit_engine: LimitEngine::new(
                 Arc::new(KeyConcurrencyManager::new()),
-                Arc::new(cc_lb_core::SystemClock),
+                Arc::new(cc_lb_engine::SystemClock),
             ),
             lifecycle: None,
             subscription_metadata_hook: None,
@@ -1882,7 +1882,7 @@ mod tests {
             start_time: std::time::Instant::now(),
             event_bus: None,
             storage_tail: crate::events::storage_tail_channel(),
-            clock: Arc::new(cc_lb_core::SystemClock),
+            clock: Arc::new(cc_lb_engine::SystemClock),
         };
         TestContext {
             _dir: dir,

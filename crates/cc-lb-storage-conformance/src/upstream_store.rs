@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_core::{ClockHandle, TestClock, unix_secs};
+use cc_lb_engine::{ClockHandle, TestClock, unix_secs};
 use cc_lb_storage_api::upstream::{
     UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
     UpstreamUpdate,

@@ -25,7 +25,7 @@ url = { workspace = true, features = ["serde"] }
 uuid = { workspace = true }
 
 [dev-dependencies]
-cc-lb-core = { path = "../cc-lb-core" }
+cc-lb-engine = { path = "../cc-lb-engine" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

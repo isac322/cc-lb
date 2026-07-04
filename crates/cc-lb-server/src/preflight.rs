@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DEFAULT_SQLITE_PATH, StorageConfig, TlsConfig};
-use cc_lb_core::{ClockHandle, LifecycleConfig};
+use cc_lb_engine::{ClockHandle, LifecycleConfig};
 use cc_lb_storage_api::{
     PluginChainEntry, PluginSlot, PrincipalRecord, StorageError as ApiStorageError, UpstreamRecord,
     WasmRegistryEntry,

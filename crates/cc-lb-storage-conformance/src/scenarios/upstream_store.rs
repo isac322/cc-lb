@@ -618,7 +618,7 @@ mod tests {
                     .await?;
                 let storage = PostgresStorage::new(
                     pool.clone(),
-                    std::sync::Arc::new(cc_lb_core::SystemClock),
+                    std::sync::Arc::new(cc_lb_engine::SystemClock),
                 );
                 MetaStore::initialize(&storage, BackendKind::Postgres).await?;
                 Ok(PostgresFixture { url, schema, pool })
@@ -627,7 +627,7 @@ mod tests {
             async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Store> {
                 Ok(PostgresStorage::new(
                     fixture.pool.clone(),
-                    std::sync::Arc::new(cc_lb_core::SystemClock),
+                    std::sync::Arc::new(cc_lb_engine::SystemClock),
                 ))
             }
 

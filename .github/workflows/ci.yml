@@ -167,7 +167,7 @@ jobs:
       - name: Check per-package coverage gates
         run: |
           set -euo pipefail
-          cargo llvm-cov report --package cc-lb-core                  --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-engine                  --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov report --package cc-lb-dialect-anthropic     --fail-under-lines 80 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov report --package cc-lb-admin                 --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov report --package cc-lb-config                --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'

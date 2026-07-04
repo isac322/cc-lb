@@ -1,0 +1,10 @@
+[package]
+name = "cc-lb-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# Will be filled in later batches. Empty for now.

@@ -715,7 +715,7 @@ dependencies = [
  "bytes",
  "cc-lb-aead",
  "cc-lb-config",
- "cc-lb-core",
+ "cc-lb-engine",
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
@@ -802,7 +802,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "cc-lb-core"
+name = "cc-lb-contract"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-plugin-api",
+ "cc-lb-storage-api",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "cc-lb-control"
+version = "0.1.0"
+
+[[package]]
+name = "cc-lb-dialect-anthropic"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "cc-lb-plugin-api",
+ "http",
+ "url",
+]
+
+[[package]]
+name = "cc-lb-engine"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
@@ -816,7 +841,7 @@ dependencies = [
  "cc-lb-aead",
  "cc-lb-clock",
  "cc-lb-config",
- "cc-lb-lifecycle",
+ "cc-lb-contract",
  "cc-lb-observability",
  "cc-lb-plugin-api",
  "cc-lb-pricing",
@@ -860,27 +885,6 @@ dependencies = [
  "url",
  "uuid",
  "zstd",
-]
-
-[[package]]
-name = "cc-lb-dialect-anthropic"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "cc-lb-plugin-api",
- "http",
- "url",
-]
-
-[[package]]
-name = "cc-lb-lifecycle"
-version = "0.1.0"
-dependencies = [
- "cc-lb-plugin-api",
- "cc-lb-storage-api",
- "serde",
- "serde_json",
- "uuid",
 ]
 
 [[package]]
@@ -1017,7 +1021,7 @@ dependencies = [
  "async-stream",
  "axum",
  "bytes",
- "cc-lb-core",
+ "cc-lb-engine",
  "cc-lb-plugin-api",
  "http",
  "http-body-util",
@@ -1065,8 +1069,9 @@ dependencies = [
  "axum",
  "base64",
  "cc-lb-aead",
+ "cc-lb-clock",
  "cc-lb-config",
- "cc-lb-core",
+ "cc-lb-engine",
  "cc-lb-oauth-protocol",
  "cc-lb-pricing",
  "cc-lb-server",
@@ -1121,8 +1126,8 @@ dependencies = [
  "cc-lb-admin",
  "cc-lb-aead",
  "cc-lb-config",
- "cc-lb-core",
  "cc-lb-dialect-anthropic",
+ "cc-lb-engine",
  "cc-lb-oauth-protocol",
  "cc-lb-observability",
  "cc-lb-plugin-api",
@@ -1205,7 +1210,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cc-lb-aead",
- "cc-lb-core",
+ "cc-lb-clock",
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-api",
  "cc-lb-storage-api",
@@ -1236,7 +1241,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cc-lb-aead",
- "cc-lb-core",
+ "cc-lb-engine",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "cc-lb-storage-sqlite",
@@ -1258,7 +1263,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "cc-lb-aead",
- "cc-lb-core",
+ "cc-lb-engine",
  "cc-lb-plugin-wire",
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
@@ -1283,7 +1288,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cc-lb-aead",
- "cc-lb-core",
+ "cc-lb-clock",
  "cc-lb-plugin-wire",
  "cc-lb-pricing",
  "cc-lb-storage-api",
@@ -1307,8 +1312,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "cc-lb-aead",
+ "cc-lb-clock",
  "cc-lb-config",
- "cc-lb-core",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "cc-lb-storage-api",
@@ -1332,7 +1337,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "cc-lb-config",
- "cc-lb-core",
+ "cc-lb-engine",
  "cc-lb-server",
  "fake-anthropic",
  "ring",
@@ -5907,7 +5912,7 @@ name = "tests-integration"
 version = "0.1.0"
 dependencies = [
  "cc-lb-config",
- "cc-lb-core",
+ "cc-lb-engine",
  "cc-lb-pricing",
  "cc-lb-server",
  "cc-lb-storage-api",

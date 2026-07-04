@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
-use cc_lb_core::ClockHandle;
+use cc_lb_clock::ClockHandle;
 use cc_lb_storage_api::{ChangeEvent, StorageError, StorageResult};
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::PgPool;

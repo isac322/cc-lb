@@ -12,7 +12,7 @@ confidence-threshold = 0.8
 yanked = "warn"
 ignore = [
     { id = "RUSTSEC-2025-0134", reason = "rustls 0.23 still depends on rustls-pemfile 2.2.0; removing it requires a broader TLS stack migration." },
-    { id = "RUSTSEC-2025-0141", reason = "cc-lb-core still uses bincode 2.x `serde` integration for persisted internal records; replacing it requires a storage-format migration." },
+    { id = "RUSTSEC-2025-0141", reason = "cc-lb-engine still uses bincode 2.x `serde` integration for persisted internal records; replacing it requires a storage-format migration." },
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but required by tikv-jemalloc-ctl for memory bound testing." },
 ]
 

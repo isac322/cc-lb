@@ -1,4 +1,4 @@
-use cc_lb_core::clock::{Clock, unix_secs};
+use cc_lb_engine::clock::{Clock, unix_secs};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_storage_api::WarmupPermanentFailureReason;
 

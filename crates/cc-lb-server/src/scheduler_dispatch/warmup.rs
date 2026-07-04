@@ -1,4 +1,4 @@
-use cc_lb_core::clock::unix_secs;
+use cc_lb_engine::clock::unix_secs;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::retry::JobOutcome;

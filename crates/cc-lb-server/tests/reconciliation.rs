@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_core::DynamicViewHolder;
+use cc_lb_engine::DynamicViewHolder;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::reconcile::Reconciler;
@@ -56,7 +56,7 @@ async fn storage_fixture() -> (tempfile::TempDir, Arc<Storage>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!("sqlite://{}", dir.path().join("test.sqlite").display());
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
             .await
             .expect("storage"),
     );
@@ -155,7 +155,7 @@ async fn initial_holder(
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect("initial dynamic view");
@@ -181,7 +181,7 @@ fn reconciler(
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         Arc::new(cc_lb_config::Config::default()),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     ))
 }
 

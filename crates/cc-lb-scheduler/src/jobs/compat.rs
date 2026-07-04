@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use cc_lb_core::anthropic_compat::{COMPATIBILITY_KEYS, CompatibilityKey};
+use cc_lb_engine::anthropic_compat::{COMPATIBILITY_KEYS, CompatibilityKey};
 use cc_lb_storage_api::AnthropicCompatibilityKvStore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};

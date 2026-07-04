@@ -45,7 +45,7 @@ impl Fixture {
         let dir = tempfile::tempdir().expect("tempdir");
         let database_url = format!("sqlite://{}", dir.path().join("composite.sqlite").display());
         let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
                 .await
                 .expect("storage"),
         );
@@ -169,7 +169,7 @@ async fn oauth_upstream_routes_to_oauth_signer() {
         fixture.storage.clone(),
         fixture.aead.clone(),
         "oauth-test",
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     );
 
     let signer = factory
@@ -243,7 +243,7 @@ async fn router_choice_selects_matching_oauth_upstream() {
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect("dynamic view builds");
@@ -285,7 +285,7 @@ async fn empty_router_choice_errors() {
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect("dynamic view builds");
@@ -321,7 +321,7 @@ async fn missing_oauth_credentials_returns_proper_signer_error() {
         fixture.storage.clone(),
         fixture.aead.clone(),
         "oauth-missing",
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     );
 
     let result = factory
@@ -412,9 +412,9 @@ impl UpstreamDialect for DirectDialect {
 }
 
 fn now_secs() -> u64 {
-    use cc_lb_core::Clock as _;
+    use cc_lb_engine::Clock as _;
 
-    let clock = cc_lb_core::SystemClock;
+    let clock = cc_lb_engine::SystemClock;
     clock
         .now()
         .duration_since(std::time::UNIX_EPOCH)

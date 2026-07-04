@@ -397,6 +397,6 @@ async fn build_admin_state(
         start_time: std::time::Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_core::SystemClock),
+        clock: Arc::new(cc_lb_engine::SystemClock),
     }
 }

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_config::{Config, DownstreamAuthMode};
-use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_core::{
+use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_engine::{
     ApplyStatus, DynamicViewBuilder, Lifecycle, LifecycleConfig, ReplicaIdentity,
     UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
@@ -30,14 +30,14 @@ async fn status_reflects_in_memory_dynamic_view_generation_and_replica_id() {
             DownstreamAuthMode::ApiKey,
             None,
             state.key_store.clone(),
-            Arc::new(cc_lb_core::SystemClock),
+            Arc::new(cc_lb_engine::SystemClock),
         )),
         state.dynamic_view.clone(),
         LifecycleConfig {
             replica_identity: Some(replica.clone()),
             ..LifecycleConfig::default()
         },
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     );
     state.lifecycle = Some(Arc::new(lifecycle));
     bump_dynamic_generation(&state, UpstreamStatusSnapshot::default());

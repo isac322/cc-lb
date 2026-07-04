@@ -87,7 +87,7 @@ async fn open_sqlite_storage(path: &Path) -> anyhow::Result<SqliteStorage> {
     let database_url = format!("sqlite://{}", path.display());
     let storage = cc_lb_storage_sqlite::open_sqlite(
         &database_url,
-        std::sync::Arc::new(cc_lb_core::SystemClock),
+        std::sync::Arc::new(cc_lb_engine::SystemClock),
     )
     .await?;
     storage.initialize(BackendKind::Sqlite).await?;

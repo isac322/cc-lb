@@ -13,10 +13,10 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cc_lb_aead::{AeadEncryptedField, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_core::anthropic_compat::{
+use cc_lb_engine::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
-use cc_lb_core::{AuditEntry, AuditPayload, fetch_metadata_only, make_metadata_http_client};
+use cc_lb_engine::{AuditEntry, AuditPayload, fetch_metadata_only, make_metadata_http_client};
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
@@ -239,7 +239,7 @@ async fn start_oauth(
         .query_pairs_mut()
         .append_pair("state", &state_token);
 
-    let now = cc_lb_core::clock::unix_secs(state.clock.now());
+    let now = cc_lb_engine::clock::unix_secs(state.clock.now());
     let in_flight = InFlightPkce {
         handshake: handshake_state.clone(),
         created_at_unix_secs: now,
@@ -312,7 +312,7 @@ async fn start_oauth_draft(State(state): State<AdminState>) -> Response {
         .query_pairs_mut()
         .append_pair("state", &state_token);
 
-    let now = cc_lb_core::clock::unix_secs(state.clock.now());
+    let now = cc_lb_engine::clock::unix_secs(state.clock.now());
     let in_flight = InFlightPkce {
         handshake: handshake_state.clone(),
         created_at_unix_secs: now,
@@ -438,7 +438,7 @@ async fn complete_oauth_draft(
         encrypted_tokens,
         subscription_metadata_record: records.subscription_metadata_record.clone(),
         organization_metadata_record: records.organization_metadata_record.clone(),
-        fetched_at_unix_secs: cc_lb_core::clock::unix_secs(state.clock.now()),
+        fetched_at_unix_secs: cc_lb_engine::clock::unix_secs(state.clock.now()),
     };
 
     match pkce_flows().lock() {
@@ -816,7 +816,7 @@ async fn get_oauth_status(
 
     match encrypted.decrypt(state.aead.as_ref(), upstream.id.as_bytes()) {
         Ok(bundle) => {
-            let now = cc_lb_core::clock::unix_secs(state.clock.now());
+            let now = cc_lb_engine::clock::unix_secs(state.clock.now());
             let status = if bundle.expires_at_unix_secs <= now {
                 "expired"
             } else {
@@ -958,7 +958,7 @@ async fn seed_oauth_bootstrap_tasks(
     let Some(scheduler) = state.scheduler.as_ref() else {
         return Ok(());
     };
-    let seed_secs = cc_lb_core::clock::unix_secs(state.clock.now());
+    let seed_secs = cc_lb_engine::clock::unix_secs(state.clock.now());
     for task in oauth_bootstrap_tasks(upstream.id, seed_secs) {
         match scheduler.push_adaptive_task(task).await {
             Ok(()) | Err(SchedulerError::Conflict(_)) => {}
@@ -1108,7 +1108,7 @@ fn enqueue_upstream_audit(
     let Some(audit_sink) = &state.audit_sink else {
         return;
     };
-    let ts = cc_lb_core::clock::unix_secs(state.clock.now());
+    let ts = cc_lb_engine::clock::unix_secs(state.clock.now());
     let _ = audit_sink.try_enqueue(AuditEntry {
         ts,
         request_id: format!("admin-upstream-oauth-{upstream_id}-{ts}"),
