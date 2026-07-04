@@ -21,7 +21,6 @@ use cc_lb_plugin_api::{
     UpstreamDialect, UpstreamError, UpstreamKind as CandidateUpstreamKind, shape_request,
     sign_request,
 };
-use cc_lb_pricing::{PricingStatus, global_catalog};
 use cc_lb_storage_api::{
     PromptCacheObservationRecord, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSource, UpstreamRateLimitObservationRecord, UpstreamRecord,
@@ -604,6 +603,16 @@ pub trait LimitSubjectProvider: Send + Sync {
     ) -> Option<LimitSubject>;
 }
 
+pub trait LimitCostEstimator: Send + Sync {
+    fn estimate_max(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        upstream_kind: Option<&str>,
+    ) -> Option<i64>;
+}
+
 #[derive(Clone, Debug)]
 pub struct LimitSubject {
     pub principal_id: String,
@@ -716,6 +725,7 @@ pub struct Lifecycle {
     config: LifecycleConfig,
     limit_engine: Option<Arc<LimitEngine>>,
     limit_subject_provider: Option<Arc<dyn LimitSubjectProvider>>,
+    limit_cost_estimator: Option<Arc<dyn LimitCostEstimator>>,
     event_bus: Option<Arc<dyn RequestEventBus>>,
     subscription_quota_sink: Option<SubscriptionQuotaSink>,
     subscription_metadata_hook: Option<MetadataHookHandle>,
@@ -754,6 +764,7 @@ impl Lifecycle {
             config,
             limit_engine: None,
             limit_subject_provider: None,
+            limit_cost_estimator: None,
             event_bus: None,
             subscription_quota_sink: None,
             subscription_metadata_hook: None,
@@ -775,6 +786,7 @@ impl Lifecycle {
             config,
             limit_engine: None,
             limit_subject_provider: None,
+            limit_cost_estimator: None,
             event_bus: None,
             subscription_quota_sink: None,
             subscription_metadata_hook: None,
@@ -859,6 +871,11 @@ impl Lifecycle {
     ) -> Self {
         self.limit_engine = Some(limit_engine);
         self.limit_subject_provider = Some(limit_subject_provider);
+        self
+    }
+
+    pub fn with_limit_cost_estimator(mut self, estimator: Arc<dyn LimitCostEstimator>) -> Self {
+        self.limit_cost_estimator = Some(estimator);
         self
     }
 
@@ -1343,9 +1360,7 @@ impl Lifecycle {
                     upstream_id: resolved_upstream_id,
                     upstream_name: router_chosen_upstream_name.clone(),
                     model: body_view.model(),
-                    upstream_kind: pricing_upstream_kind(&route.upstream)
-                        .map(pricing_upstream_kind_label)
-                        .map(str::to_owned),
+                    upstream_kind: pricing_upstream_kind_label(&route.upstream).map(str::to_owned),
                     route_ms: Some(route_ms),
                     routing_trace: Some(routing_trace_value.clone()),
                     predicted_cache_read_tokens: Some(predicted_cache_read_tokens),
@@ -1636,16 +1651,16 @@ impl Lifecycle {
             return Ok(None);
         };
         let limit_request = body_view.limit_request();
-        let upstream_kind = pricing_upstream_kind(&route.upstream);
+        let upstream_kind = pricing_upstream_kind_label(&route.upstream);
         let max_input_estimate = DEFAULT_MAX_INPUT_ESTIMATE;
-        let cost_estimate = global_catalog()
-            .estimate_max(
+        let cost_estimate = self.limit_cost_estimator.as_ref().and_then(|estimator| {
+            estimator.estimate_max(
                 &limit_request.model,
                 max_input_estimate as u64,
                 limit_request.max_tokens.max(0) as u64,
                 upstream_kind,
             )
-            .map(|cost| cost as i64);
+        });
 
         match limit_engine.reserve(
             view,
@@ -3322,32 +3337,6 @@ fn hex_sha256(bytes: &[u8]) -> String {
     output
 }
 
-#[derive(Clone, Copy, Default)]
-pub(crate) struct CostBreakdownOptions {
-    pub(crate) total: Option<i64>,
-    pub(crate) input: Option<i64>,
-    pub(crate) output: Option<i64>,
-    pub(crate) cache_creation_5m: Option<i64>,
-    pub(crate) cache_creation_1h: Option<i64>,
-    pub(crate) cache_read: Option<i64>,
-}
-
-pub(crate) fn cost_breakdown_to_event_options(
-    breakdown: &cc_lb_pricing::CostBreakdown,
-) -> CostBreakdownOptions {
-    match breakdown.pricing_status {
-        PricingStatus::Known => CostBreakdownOptions {
-            total: Some(breakdown.total_micros),
-            input: Some(breakdown.input_micros),
-            output: Some(breakdown.output_micros),
-            cache_creation_5m: Some(breakdown.cache_creation_5m_micros),
-            cache_creation_1h: Some(breakdown.cache_creation_1h_micros),
-            cache_read: Some(breakdown.cache_read_micros),
-        },
-        PricingStatus::Unknown => CostBreakdownOptions::default(),
-    }
-}
-
 fn unix_now_ms(clock: &dyn Clock) -> u64 {
     unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
 }
@@ -3555,24 +3544,9 @@ fn audit_upstream_name(upstream: &Upstream) -> &'static str {
     }
 }
 
-fn pricing_upstream_kind(upstream: &Upstream) -> Option<cc_lb_pricing::UpstreamKind> {
+fn pricing_upstream_kind_label(upstream: &Upstream) -> Option<&'static str> {
     match upstream {
-        Upstream::AnthropicDirect { .. } => Some(cc_lb_pricing::UpstreamKind::AnthropicKey),
-    }
-}
-
-pub(crate) fn pricing_upstream_kind_label(kind: cc_lb_pricing::UpstreamKind) -> &'static str {
-    match kind {
-        cc_lb_pricing::UpstreamKind::AnthropicKey => "anthropic_key",
-        cc_lb_pricing::UpstreamKind::AnthropicOAuth => "anthropic_oauth",
-    }
-}
-
-pub(crate) fn pricing_upstream_kind_from_label(label: &str) -> Option<cc_lb_pricing::UpstreamKind> {
-    match label {
-        "anthropic_key" => Some(cc_lb_pricing::UpstreamKind::AnthropicKey),
-        "anthropic_oauth" => Some(cc_lb_pricing::UpstreamKind::AnthropicOAuth),
-        _ => None,
+        Upstream::AnthropicDirect { .. } => Some("anthropic_key"),
     }
 }
 

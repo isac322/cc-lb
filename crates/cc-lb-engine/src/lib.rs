@@ -43,7 +43,6 @@ pub mod lifecycle_event_logger;
 pub mod lifecycle_hook_adapter;
 pub mod lifecycle_limit_reconcile_subscriber;
 pub mod lifecycle_limit_rejection_audit_subscriber;
-pub mod lifecycle_pricing_subscriber;
 pub mod lifecycle_prompt_cache_drift_subscriber;
 pub mod lifecycle_prompt_cache_observation_subscriber;
 #[cfg(not(loom))]
@@ -135,10 +134,10 @@ pub use event_bus::{
 pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop};
 #[cfg(not(loom))]
 pub use lifecycle::{
-    Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig, LimitSubject,
-    LimitSubjectProvider, NoopSubscriptionQuotaCache, ProxyError, ReplicaIdentity, RequestKind,
-    SubscriptionQuotaCacheLike, UpstreamDispatch, build_candidates, observe_rate_limits,
-    observe_subscription_quota_headers, parse_request_cache_breakpoints,
+    Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig, LimitCostEstimator,
+    LimitSubject, LimitSubjectProvider, NoopSubscriptionQuotaCache, ProxyError, ReplicaIdentity,
+    RequestKind, SubscriptionQuotaCacheLike, UpstreamDispatch, build_candidates,
+    observe_rate_limits, observe_subscription_quota_headers, parse_request_cache_breakpoints,
 };
 pub use lifecycle_api_key_metrics_subscriber::{
     ApiKeyMetricsSubscriberHandle, spawn_lifecycle_api_key_metrics_subscriber,
@@ -160,9 +159,6 @@ pub use lifecycle_limit_reconcile_subscriber::{
 };
 pub use lifecycle_limit_rejection_audit_subscriber::{
     LimitRejectionAuditSubscriberHandle, spawn_lifecycle_limit_rejection_audit_subscriber,
-};
-pub use lifecycle_pricing_subscriber::{
-    PricingSubscriberHandle, spawn_lifecycle_pricing_subscriber,
 };
 pub use lifecycle_prompt_cache_drift_subscriber::{
     PromptCacheDriftSubscriberHandle, spawn_lifecycle_prompt_cache_drift_subscriber,

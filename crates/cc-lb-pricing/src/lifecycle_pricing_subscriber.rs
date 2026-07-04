@@ -19,8 +19,6 @@ use cc_lb_contract::{CostBreakdown, EventId, LifecycleEvent, RequestEventBus};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::lifecycle::{cost_breakdown_to_event_options, pricing_upstream_kind_from_label};
-
 pub const DEFAULT_PRICING_MAP_CAP: usize = 4096;
 pub const DEFAULT_PRICING_TTL: Duration = Duration::from_secs(300);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
@@ -168,8 +166,8 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         LifecycleEvent::RouteCompleted {
             result: Ok(info), ..
         } => {
-            if let Some(m) = info.model {
-                partial.model = Some(m);
+            if let Some(model) = info.model {
+                partial.model = Some(model);
             }
             partial.upstream_kind_label = info.upstream_kind;
         }
@@ -205,7 +203,7 @@ fn compute_cost(partial: &Partial) -> Option<CostBreakdown> {
         .upstream_kind_label
         .as_deref()
         .and_then(pricing_upstream_kind_from_label);
-    let breakdown = cc_lb_pricing::virtual_cost_micros_full(
+    let breakdown = crate::virtual_cost_micros_full(
         model,
         partial.input_tokens,
         partial.output_tokens,
@@ -214,21 +212,31 @@ fn compute_cost(partial: &Partial) -> Option<CostBreakdown> {
         partial.cache_read,
         upstream_kind,
     );
-    let opts = cost_breakdown_to_event_options(&breakdown);
-    Some(CostBreakdown {
-        total_micros: opts.total,
-        input_micros: opts.input,
-        output_micros: opts.output,
-        cache_creation_5m_micros: opts.cache_creation_5m,
-        cache_creation_1h_micros: opts.cache_creation_1h,
-        cache_read_micros: opts.cache_read,
-    })
+    Some(event_cost_breakdown_from_pricing(breakdown))
+}
+
+fn pricing_upstream_kind_from_label(label: &str) -> Option<crate::UpstreamKind> {
+    match label {
+        "anthropic_key" => Some(crate::UpstreamKind::AnthropicKey),
+        "anthropic_oauth" => Some(crate::UpstreamKind::AnthropicOAuth),
+        _ => None,
+    }
+}
+
+fn event_cost_breakdown_from_pricing(
+    breakdown: crate::ComputedCostBreakdown,
+) -> cc_lb_contract::CostBreakdown {
+    breakdown.into()
 }
 
 fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
     let now = Instant::now();
     let before = partials.len();
-    partials.retain(|_, p| p.inserted_at.is_none_or(|t| now.duration_since(t) < ttl));
+    partials.retain(|_, partial| {
+        partial
+            .inserted_at
+            .is_none_or(|inserted_at| now.duration_since(inserted_at) < ttl)
+    });
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
         metrics::counter!(
@@ -242,8 +250,8 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
 fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     let Some((oldest_key, _)) = partials
         .iter()
-        .min_by_key(|(_, p)| p.inserted_at.unwrap_or_else(Instant::now))
-        .map(|(k, v)| (k.clone(), v.inserted_at))
+        .min_by_key(|(_, partial)| partial.inserted_at.unwrap_or_else(Instant::now))
+        .map(|(key, partial)| (key.clone(), partial.inserted_at))
     else {
         return;
     };
@@ -258,12 +266,40 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event_bus::InMemoryBus;
     use cc_lb_contract::{
-        LifecycleBusReceiver, ParseInfo, RouteInfo, StreamSuccess, TerminationReason,
-        UsageSnapshot, UsageSource,
+        BusReceiver, LifecycleBusReceiver, ParseInfo, RequestEventUpdate, RouteInfo, StreamSuccess,
+        TerminationReason, UsageSnapshot, UsageSource,
     };
+    use tokio::sync::broadcast;
     use uuid::Uuid;
+
+    struct TestBus {
+        lifecycle_tx: broadcast::Sender<LifecycleEvent>,
+    }
+
+    impl TestBus {
+        fn new() -> Self {
+            let (lifecycle_tx, _) = broadcast::channel(16);
+            Self { lifecycle_tx }
+        }
+    }
+
+    impl RequestEventBus for TestBus {
+        fn publish(&self, _update: RequestEventUpdate) {}
+
+        fn subscribe(&self) -> BusReceiver {
+            let (_, request_rx) = broadcast::channel(1);
+            BusReceiver::InMemory(request_rx)
+        }
+
+        fn publish_lifecycle(&self, event: LifecycleEvent) {
+            let _ = self.lifecycle_tx.send(event);
+        }
+
+        fn subscribe_lifecycle(&self) -> LifecycleBusReceiver {
+            LifecycleBusReceiver::InMemory(self.lifecycle_tx.subscribe())
+        }
+    }
 
     fn eid(s: &str) -> EventId {
         s.to_owned()
@@ -271,7 +307,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn terminated_with_usage_emits_priced() {
-        let bus = Arc::new(InMemoryBus::new());
+        let bus = Arc::new(TestBus::new());
         let LifecycleBusReceiver::InMemory(mut rx_bcast) = bus.subscribe_lifecycle() else {
             panic!("expected in-memory lifecycle receiver");
         };
@@ -347,7 +383,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn terminated_without_usage_skips_priced() {
-        let bus = Arc::new(InMemoryBus::new());
+        let bus = Arc::new(TestBus::new());
         let LifecycleBusReceiver::InMemory(mut rx_bcast) = bus.subscribe_lifecycle() else {
             panic!("expected in-memory lifecycle receiver");
         };
@@ -381,7 +417,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn stream_success_terminated_emits_priced() {
-        let bus = Arc::new(InMemoryBus::new());
+        let bus = Arc::new(TestBus::new());
         let LifecycleBusReceiver::InMemory(mut rx_bcast) = bus.subscribe_lifecycle() else {
             panic!("expected in-memory lifecycle receiver");
         };

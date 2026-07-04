@@ -81,6 +81,33 @@ const WASMTIME_POOL_METRICS_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy)]
 struct TowerTimeoutMarker;
 
+struct PricingLimitCostEstimator {
+    catalog: Arc<cc_lb_pricing::PriceCatalog>,
+}
+
+impl cc_lb_engine::LimitCostEstimator for PricingLimitCostEstimator {
+    fn estimate_max(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        upstream_kind: Option<&str>,
+    ) -> Option<i64> {
+        let upstream_kind = upstream_kind.and_then(pricing_upstream_kind_from_label);
+        self.catalog
+            .estimate_max(model, max_input, max_output, upstream_kind)
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
+}
+
+fn pricing_upstream_kind_from_label(label: &str) -> Option<cc_lb_pricing::UpstreamKind> {
+    match label {
+        "anthropic_key" => Some(cc_lb_pricing::UpstreamKind::AnthropicKey),
+        "anthropic_oauth" => Some(cc_lb_pricing::UpstreamKind::AnthropicOAuth),
+        _ => None,
+    }
+}
+
 pub const PROXY_FILES_ROUTE_COLLECTION: &str = "/v1/files";
 pub const PROXY_FILES_ROUTE_ITEM: &str = "/v1/files/{id}";
 pub const PROXY_FILES_ROUTE_ITEM_CONTENT: &str = "/v1/files/{id}/content";
@@ -1106,11 +1133,13 @@ async fn build_app_with_storage_inner(
         cc_lb_engine::spawn_observability_hook_adapter(rx, hooks)
     });
     let lifecycle_pricing_subscriber_handle = lifecycle_pricing_rx
-        .map(|rx| cc_lb_engine::spawn_lifecycle_pricing_subscriber(rx, event_bus.clone()));
-    let lifecycle_limit_reconcile_subscriber_handle = lifecycle_limit_reconcile_rx
-        .map(|rx| cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(rx, limit_engine.clone()));
-    let lifecycle_cache_observation_subscriber_handle = lifecycle_cache_obs_rx
-        .map(|rx| cc_lb_engine::spawn_lifecycle_cache_observation_subscriber(rx, event_bus.clone()));
+        .map(|rx| cc_lb_pricing::spawn_lifecycle_pricing_subscriber(rx, event_bus.clone()));
+    let lifecycle_limit_reconcile_subscriber_handle = lifecycle_limit_reconcile_rx.map(|rx| {
+        cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(rx, limit_engine.clone())
+    });
+    let lifecycle_cache_observation_subscriber_handle = lifecycle_cache_obs_rx.map(|rx| {
+        cc_lb_engine::spawn_lifecycle_cache_observation_subscriber(rx, event_bus.clone())
+    });
     let lifecycle_rate_limit_header_subscriber_handle = lifecycle_rate_limit_header_rx.map(|rx| {
         cc_lb_engine::spawn_lifecycle_rate_limit_header_subscriber(
             rx,
@@ -1169,7 +1198,7 @@ async fn build_app_with_storage_inner(
         tokio::sync::Mutex<Option<cc_lb_engine::ObservabilityHookAdapterHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(lifecycle_hook_adapter_handle));
     let lifecycle_pricing_subscriber_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_engine::PricingSubscriberHandle>>,
+        tokio::sync::Mutex<Option<cc_lb_pricing::PricingSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(lifecycle_pricing_subscriber_handle));
     let lifecycle_limit_reconcile_subscriber_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::LimitReconcileSubscriberHandle>>,
@@ -1223,6 +1252,9 @@ async fn build_app_with_storage_inner(
         clock.clone(),
     );
     lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
+    lifecycle = lifecycle.with_limit_cost_estimator(Arc::new(PricingLimitCostEstimator {
+        catalog: price_catalog.clone(),
+    }));
     lifecycle = lifecycle.with_event_bus(event_bus.clone());
     lifecycle = lifecycle.with_subscription_quota_sink(subscription_quota_sink.clone());
     if let Some(subscription_metadata_hook) = subscription_metadata_hook.clone() {
