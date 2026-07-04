@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-api-v0.4.0...cc-lb-plugin-api-v0.5.0) - 2026-07-04
+
+### Other
+
+- *(routing)* rewrite subscription-preference filter with weighted-rendezvous selection ([#312](https://github.com/isac322/cc-lb/pull/312))
+
 ## [0.4.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-api-v0.3.0...cc-lb-plugin-api-v0.4.0) - 2026-07-03
 
 ### Added
