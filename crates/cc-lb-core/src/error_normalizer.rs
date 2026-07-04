@@ -101,7 +101,7 @@ fn is_protocol_header(name: &HeaderName) -> bool {
 }
 
 fn anthropic_sse_error_json(raw_event_data_json: &Bytes) -> Value {
-    match serde_json::from_slice::<Value>(raw_event_data_json) {
+    match sonic_rs::from_slice::<Value>(raw_event_data_json) {
         Ok(value) => match canonical_anthropic_error_value(&value) {
             Some(error) => error,
             None => fallback_error_value(),

@@ -627,7 +627,7 @@ struct StreamingUsageUpdate {
 
 fn update_usage_from_event(event: &Event, usage: &mut StreamingUsage) -> StreamingUsageUpdate {
     let mut update = StreamingUsageUpdate::default();
-    let Ok(value) = serde_json::from_str::<Value>(&event.data) else {
+    let Ok(value) = sonic_rs::from_str::<Value>(&event.data) else {
         return update;
     };
     let event_type = value
@@ -661,7 +661,7 @@ fn update_usage_from_event(event: &Event, usage: &mut StreamingUsage) -> Streami
 
 fn usage_from_json_bytes(bytes: &Bytes) -> StreamingUsage {
     let mut usage = StreamingUsage::default();
-    if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
+    if let Ok(value) = sonic_rs::from_slice::<Value>(bytes) {
         update_usage_from_value(&value, &mut usage);
         usage.mark_complete();
     }
