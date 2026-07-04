@@ -29,7 +29,6 @@ pub struct PromptCacheObservationCache {
     >,
     #[allow(dead_code)]
     clock: ClockHandle,
-    #[allow(dead_code)]
     grace_margin_secs: u64,
     warm_set_cap: usize,
     refresh_debounce_secs: u64,
@@ -663,6 +662,55 @@ pub(crate) mod tests {
 
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].prefix_hash, "active");
+    }
+
+    #[test]
+    fn hit_upsert_extends_expiry_and_keeps_snapshot_warm() {
+        let cache = cache_with_cap(32);
+        let upstream_id = Uuid::new_v4();
+        let now = base_now();
+        let original_expiry = now + 60;
+        let refreshed_expiry = now + 270;
+        let request_breakpoints = [("system".to_owned(), TtlClass::Ephemeral5m)];
+
+        upsert(
+            &cache,
+            upstream_id,
+            "system",
+            TtlClass::Ephemeral5m,
+            original_expiry,
+            now,
+        );
+
+        let baseline =
+            cache.snapshot_for_upstream(upstream_id, MODEL, &request_breakpoints, original_expiry);
+        assert!(
+            baseline.is_empty(),
+            "sanity: without sliding refresh the entry would be filtered at its original expiry"
+        );
+
+        upsert(
+            &cache,
+            upstream_id,
+            "system",
+            TtlClass::Ephemeral5m,
+            refreshed_expiry,
+            now + 30,
+        );
+
+        let after_refresh = cache.snapshot_for_upstream(
+            upstream_id,
+            MODEL,
+            &request_breakpoints,
+            original_expiry + 60,
+        );
+        assert_eq!(
+            after_refresh.len(),
+            1,
+            "sliding refresh must keep the entry warm past the original expiry"
+        );
+        assert_eq!(after_refresh[0].prefix_hash, "system");
+        assert_eq!(after_refresh[0].expires_at_unix_secs, refreshed_expiry);
     }
 
     #[test]
