@@ -124,7 +124,10 @@ CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
 # ---- Final: distroless static (DEFAULT target) ----
 # Ships /etc/passwd, a nonroot user (65532), /tmp, and CA certs — a safe,
 # debuggable base while staying ~2 MB over the static binary.
-FROM gcr.io/distroless/static-debian13:nonroot AS distroless
+# Digest-pinned on purpose: :nonroot is a rolling tag, and resolving it live let
+# a stale mirror manifest point CI at a garbage-collected blob (gcr.io 500 on
+# every retry). Bump this digest alongside the other base images (freshen-deps).
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240 AS distroless
 COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
 USER 65532:65532
 EXPOSE 8080 9090 9091
