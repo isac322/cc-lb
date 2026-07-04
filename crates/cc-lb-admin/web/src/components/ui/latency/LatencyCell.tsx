@@ -38,7 +38,7 @@ function Section({
           {title}
           {pill}
         </span>
-        <span className="tabular-nums text-text w-14 text-right">
+        <span className="tabular-nums text-text w-16 text-right">
           {fmtMs(total)}
         </span>
         <span className="tabular-nums text-text-faint w-9 text-right">
@@ -55,7 +55,7 @@ function Section({
               <span className="text-text-faint flex-1 truncate">
                 {item.label}
               </span>
-              <span className="tabular-nums text-text-muted w-14 text-right">
+              <span className="tabular-nums text-text-muted w-16 text-right">
                 {fmtMs(item.value)}
               </span>
               <span className="tabular-nums text-text-faint w-9 text-right">

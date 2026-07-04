@@ -3,7 +3,7 @@ import type { RequestEvent } from './api';
 const DASH = '—';
 
 export function fmtMs(v: number | null | undefined): string {
-  return v == null ? DASH : `${Math.round(v).toLocaleString()}ms`;
+  return v == null ? DASH : `${Math.round(v).toLocaleString()} ms`;
 }
 
 export function fmtN(v: number | null | undefined): string {
