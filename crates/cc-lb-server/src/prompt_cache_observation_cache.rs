@@ -29,7 +29,6 @@ pub struct PromptCacheObservationCache {
     >,
     #[allow(dead_code)]
     clock: ClockHandle,
-    #[allow(dead_code)]
     grace_margin_secs: u64,
     warm_set_cap: usize,
     refresh_debounce_secs: u64,
