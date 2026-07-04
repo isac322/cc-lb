@@ -57,7 +57,7 @@ pub(super) fn observe_usage_body(
     sink: &SubscriptionQuotaSink,
     cache: &SubscriptionQuotaCache,
 ) -> SchedulerResult<()> {
-    let usage: UsageBody = serde_json::from_slice(body)
+    let usage: UsageBody = sonic_rs::from_slice(body)
         .map_err(|error| SchedulerError::Job(format!("oauth usage JSON parse failed: {error}")))?;
     for record in records_from_usage(upstream_id, usage, observed_at_unix_millis) {
         cache.upsert_observation(upstream_id, &record);

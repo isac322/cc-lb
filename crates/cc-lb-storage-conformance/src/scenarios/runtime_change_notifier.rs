@@ -291,8 +291,8 @@ mod tests {
             first.payload == "before-terminate",
             "first payload mismatch"
         );
-        terminate_listener_backend(pool).await?;
-        time::sleep(Duration::from_millis(200)).await;
+        let terminated_pid = terminate_listener_backend(pool).await?;
+        wait_for_reconnected_listener(pool, terminated_pid).await?;
         emit(pool, ChangeChannel::PluginChain, "after-terminate").await?;
         let second =
             recv_matching(&mut receiver, ChangeChannel::PluginChain, "after-terminate").await?;
@@ -313,7 +313,7 @@ mod tests {
         Ok(())
     }
 
-    async fn terminate_listener_backend(pool: &sqlx::PgPool) -> Result<()> {
+    async fn terminate_listener_backend(pool: &sqlx::PgPool) -> Result<i32> {
         for _ in 0..100 {
             let pid = sqlx::query_scalar::<_, Option<i32>>("SELECT pid FROM pg_stat_activity WHERE query LIKE 'LISTEN %cclb_%_changed%' AND state = 'idle' ORDER BY backend_start DESC LIMIT 1")
                 .fetch_one(pool)
@@ -324,11 +324,25 @@ mod tests {
                     .fetch_one(pool)
                     .await?;
                 ensure!(terminated, "listener backend was not terminated");
-                return Ok(());
+                return Ok(pid);
             }
             time::sleep(Duration::from_millis(20)).await;
         }
         anyhow::bail!("timed out waiting for postgres listener backend")
+    }
+
+    async fn wait_for_reconnected_listener(pool: &sqlx::PgPool, terminated_pid: i32) -> Result<()> {
+        for _ in 0..500 {
+            let pid = sqlx::query_scalar::<_, i32>("SELECT pid FROM pg_stat_activity WHERE query LIKE 'LISTEN %cclb_%_changed%' AND state = 'idle' AND pid <> $1 ORDER BY backend_start DESC LIMIT 1")
+                .bind(terminated_pid)
+                .fetch_optional(pool)
+                .await?;
+            if pid.is_some() {
+                return Ok(());
+            }
+            time::sleep(Duration::from_millis(20)).await;
+        }
+        anyhow::bail!("timed out waiting for reconnected postgres listener backend")
     }
 
     #[test]

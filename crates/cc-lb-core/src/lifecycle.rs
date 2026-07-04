@@ -2708,14 +2708,18 @@ fn system_time_to_unix_millis(value: SystemTime) -> u64 {
 // Shared parse of the request body inside `handle`. Every downstream consumer
 // (stream / model / max_tokens / cache metadata) reads through this view so
 // the body JSON is parsed exactly once per request instead of up to 7 times.
+//
+// Parser: `sonic_rs::from_slice` — hot-path SIMD JSON parser. Yields a
+// `serde_json::Value` so all downstream consumers stay compatible without
+// touching the serialization side (see `docs/adr/0002-json-library-strategy.md`).
 struct RequestBodyView {
-    parsed: Result<Value, serde_json::Error>,
+    parsed: Result<Value, sonic_rs::Error>,
 }
 
 impl RequestBodyView {
     fn new(body: &Bytes) -> Self {
         Self {
-            parsed: serde_json::from_slice::<Value>(body),
+            parsed: sonic_rs::from_slice::<Value>(body),
         }
     }
 
@@ -2869,7 +2873,7 @@ pub fn parse_request_cache_breakpoints(headers: &HeaderMap, body: &Bytes) -> Vec
 }
 
 fn request_cache_metadata(headers: &HeaderMap, body: &Bytes) -> RequestCacheMetadata {
-    let value = serde_json::from_slice::<Value>(body).ok();
+    let value = sonic_rs::from_slice::<Value>(body).ok();
     request_cache_metadata_from_value(headers, value.as_ref())
 }
 

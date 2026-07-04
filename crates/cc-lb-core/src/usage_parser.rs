@@ -119,7 +119,7 @@ pub(crate) fn accumulate_sse_usage(raw: &[u8], usage: &mut UsageCounts) -> SseUs
         let Some(payload) = line.strip_prefix("data:").map(str::trim_start) else {
             continue;
         };
-        let Ok(value) = serde_json::from_str::<Value>(payload) else {
+        let Ok(value) = sonic_rs::from_str::<Value>(payload) else {
             continue;
         };
         let event_type = value
@@ -157,7 +157,7 @@ pub(crate) fn accumulate_sse_usage(raw: &[u8], usage: &mut UsageCounts) -> SseUs
 /// `UsageCounts`. Returns an empty (`present=false`) value if the body is not
 /// valid JSON or carries no `usage` object.
 pub(crate) fn usage_from_json_body(body: &[u8]) -> UsageCounts {
-    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+    let Ok(value) = sonic_rs::from_slice::<Value>(body) else {
         return UsageCounts::default();
     };
     let Some(usage_value) = value.get("usage") else {
@@ -185,7 +185,7 @@ pub(crate) fn detect_mid_stream_error(raw: &[u8]) -> Option<UpstreamStreamError>
             continue;
         }
         if let Some(payload) = line.strip_prefix("data:").map(str::trim_start)
-            && let Ok(value) = serde_json::from_str::<Value>(payload)
+            && let Ok(value) = sonic_rs::from_str::<Value>(payload)
         {
             payload_value = Some(value);
         }
