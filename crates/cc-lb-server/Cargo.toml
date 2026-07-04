@@ -53,6 +53,7 @@ chrono.workspace = true
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-admin = { version = "0.1.0", path = "../cc-lb-admin", default-features = false }
 cc-lb-config = { path = "../cc-lb-config" }
+cc-lb-contract = { workspace = true }
 cc-lb-engine = { path = "../cc-lb-engine" }
 cc-lb-dialect-anthropic = { path = "../cc-lb-dialect-anthropic" }
 cc-lb-observability = { path = "../cc-lb-observability" }

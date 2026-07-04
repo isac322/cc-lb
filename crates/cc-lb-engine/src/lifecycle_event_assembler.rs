@@ -5,8 +5,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use cc_lb_contract::{
     AuthInfo,
     CostBreakdown as LifecycleCostBreakdown, EventId, LifecycleEvent, ParseInfo,
-    RequestCacheBreakpoint, RequestCacheState,
-    RequestEventPartial, RequestEventUpstream, RouteInfo, TerminationReason, UsageSnapshot,
+    RequestCacheBreakpoint, RequestCacheState, RequestEventBus, RequestEventPartial,
+    RequestEventUpdate, RequestEventUpstream, RouteInfo, TerminationReason,
+    UsageSnapshot,
 };
 use cc_lb_plugin_api::{InternalError, RoutingTrace};
 use cc_lb_pricing::virtual_cost_micros_full;
@@ -14,12 +15,10 @@ use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::event_bus::{RequestEventBus, RequestEventUpdate};
 use crate::lifecycle::{
     CostBreakdownOptions, cost_breakdown_to_event_options, pricing_upstream_kind_from_label,
 };
 use crate::metrics_labels::PartialTrigger;
-
 pub const DEFAULT_ASSEMBLER_MAP_CAP: usize = 4096;
 pub const DEFAULT_ASSEMBLER_TTL: Duration = Duration::from_secs(300);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
@@ -985,8 +984,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use cc_lb_contract::{
-        AuthFailure, CostBreakdown, HeaderSnapshot, ParseFailure, RouteInfo, StreamError,
-        StreamSuccess, UsageSource,
+        AuthFailure, CostBreakdown, HeaderSnapshot, ParseFailure, RequestEventPhase, RouteInfo,
+        StreamError, StreamSuccess, UsageSource,
     };
     use cc_lb_storage_api::{RequestEvent, StorageResult};
     use metrics::{Counter, CounterFn, Key, KeyName, Metadata, Recorder, SharedString, Unit};
@@ -1366,11 +1365,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn finalized_row_write_republishes_to_bus_for_admin_sse() {
         use crate::event_bus::InMemoryBus;
-
+        use cc_lb_contract::BusReceiver;
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
         let bus = Arc::new(InMemoryBus::new());
-        let crate::event_bus::BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
+        let BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
             panic!("expected InMemory receiver");
         };
         let handle = spawn_request_event_assembler(
@@ -1423,12 +1422,13 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn full_lifecycle_publishes_throttled_partials_and_one_final() {
-        use crate::event_bus::{InMemoryBus, RequestEventPhase};
+        use crate::event_bus::InMemoryBus;
+        use cc_lb_contract::BusReceiver;
 
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
         let bus = Arc::new(InMemoryBus::new());
-        let crate::event_bus::BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
+        let BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
             panic!("expected InMemory receiver");
         };
         let event_id = eid("01978c00-0000-7000-8000-000000000002");

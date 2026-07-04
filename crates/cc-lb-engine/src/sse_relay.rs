@@ -9,7 +9,7 @@ use std::time::{Duration, Instant as StdInstant};
 
 use axum::body::Body;
 use bytes::{Bytes, BytesMut};
-use cc_lb_contract::{EventId, LifecycleEvent};
+use cc_lb_contract::{EventId, LifecycleEvent, RequestEventBus};
 use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent, UpstreamDialect};
 use eventsource_stream::{Event, EventStream, EventStreamError};
 use futures_core::Stream;
@@ -23,7 +23,6 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, Sleep, sleep};
 
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
-use crate::event_bus::RequestEventBus;
 use crate::lifecycle::{
     PromptCacheObservationContext, PromptCacheObservationDecodeResult, PromptCacheUsage,
     decode_prompt_cache_observations_pure, prompt_cache_observations_to_wire,
@@ -723,11 +722,12 @@ mod tests {
     use http_body_util::BodyExt;
     use uuid::Uuid;
 
-    use crate::event_bus::{InMemoryBus, LifecycleBusReceiver};
+    use crate::event_bus::InMemoryBus;
     use crate::lifecycle::{
         PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
         PromptCacheObservationSinkLike,
     };
+    use cc_lb_contract::LifecycleBusReceiver;
 
     use super::*;
 

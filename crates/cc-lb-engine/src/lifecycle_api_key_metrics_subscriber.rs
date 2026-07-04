@@ -9,11 +9,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::{EventId, LifecycleEvent};
+use cc_lb_contract::{EventId, LifecycleEvent, RequestEventBus};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-
-use crate::event_bus::RequestEventBus;
 
 pub const DEFAULT_API_KEY_METRICS_MAP_CAP: usize = 4096;
 pub const DEFAULT_API_KEY_METRICS_TTL: Duration = Duration::from_secs(300);

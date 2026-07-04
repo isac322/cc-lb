@@ -1023,7 +1023,7 @@ async fn build_app_with_storage_inner(
         let _ = &mut event_fanout_tasks;
         let _ = &mut internal_partials_state;
     }
-    let event_bus: Arc<dyn cc_lb_engine::RequestEventBus> = match config.event_bus.transport {
+    let event_bus: Arc<dyn cc_lb_contract::RequestEventBus> = match config.event_bus.transport {
         EventBusTransport::InMemory => Arc::new(in_memory_bus.clone()),
         EventBusTransport::PgNotify => {
             #[cfg(not(feature = "postgres"))]
@@ -1061,7 +1061,7 @@ async fn build_app_with_storage_inner(
                     event_fanout_shutdown_rx.clone(),
                 ));
 
-                let listener_bus: Arc<dyn cc_lb_engine::RequestEventBus> =
+                let listener_bus: Arc<dyn cc_lb_contract::RequestEventBus> =
                     Arc::new(in_memory_bus.clone());
                 let http_client = reqwest::Client::builder()
                     .timeout(Duration::from_secs(3))

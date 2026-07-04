@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use cc_lb_contract::RequestEventBus;
 use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_engine::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::instrumented_connector::InstrumentedHttpsConnector;
@@ -13,7 +14,7 @@ use cc_lb_engine::{
     Body, BulkheadConfig, BulkheadDispatch, BulkheadRegistry, CachingDnsConnector,
     DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY, DispatchError, DnsResolveFuture, DnsResolver,
     DnsResolverConfig, DynamicViewBuilder, DynamicViewHolder, ErrorNormalizer, InMemoryBus,
-    Lifecycle, LifecycleConfig, RequestEventAssemblerHandle, RequestEventBus, UpstreamDispatch,
+    Lifecycle, LifecycleConfig, RequestEventAssemblerHandle, UpstreamDispatch,
     spawn_request_event_assembler,
 };
 use cc_lb_plugin_api::{

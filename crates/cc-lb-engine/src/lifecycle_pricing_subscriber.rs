@@ -15,11 +15,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::{CostBreakdown, EventId, LifecycleEvent};
+use cc_lb_contract::{CostBreakdown, EventId, LifecycleEvent, RequestEventBus};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::event_bus::RequestEventBus;
 use crate::lifecycle::{cost_breakdown_to_event_options, pricing_upstream_kind_from_label};
 
 pub const DEFAULT_PRICING_MAP_CAP: usize = 4096;
@@ -259,9 +258,10 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event_bus::{InMemoryBus, LifecycleBusReceiver};
+    use crate::event_bus::InMemoryBus;
     use cc_lb_contract::{
-        ParseInfo, RouteInfo, StreamSuccess, TerminationReason, UsageSnapshot, UsageSource,
+        LifecycleBusReceiver, ParseInfo, RouteInfo, StreamSuccess, TerminationReason,
+        UsageSnapshot, UsageSource,
     };
     use uuid::Uuid;
 

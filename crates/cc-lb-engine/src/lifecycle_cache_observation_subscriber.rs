@@ -2,11 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::{EventId, LifecycleEvent, RequestCacheState, UsageSnapshot};
+use cc_lb_contract::{EventId, LifecycleEvent, RequestCacheState, RequestEventBus, UsageSnapshot};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-
-use crate::event_bus::RequestEventBus;
 
 pub const DEFAULT_CACHE_OBS_MAP_CAP: usize = 4096;
 pub const DEFAULT_CACHE_OBS_TTL: Duration = Duration::from_secs(300);
@@ -208,8 +206,8 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event_bus::{InMemoryBus, LifecycleBusReceiver};
-    use cc_lb_contract::{ParseInfo, TerminationReason};
+    use crate::event_bus::InMemoryBus;
+    use cc_lb_contract::{LifecycleBusReceiver, ParseInfo, TerminationReason};
 
     fn eid(s: &str) -> EventId {
         s.to_owned()

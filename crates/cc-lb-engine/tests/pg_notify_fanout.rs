@@ -1,4 +1,5 @@
-use cc_lb_engine::{PgNotifyFanout, RequestEventBus, RequestEventUpdate};
+use cc_lb_contract::{RequestEventBus, RequestEventUpdate};
+use cc_lb_engine::PgNotifyFanout;
 use cc_lb_storage_api::RequestEventPartial;
 
 #[tokio::test]

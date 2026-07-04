@@ -544,13 +544,13 @@ fn batch_b_wire_snapshots_are_stable() {
     });
     assert_wire(request_event.clone(), request_event_json.clone());
     assert_wire(
-        RequestEventUpdate {
-            phase: RequestEventPhase::Final,
-            event: request_event,
-        },
+        RequestEventUpdate::final_(request_event, 7),
         json!({
             "phase": "final",
-            "event": request_event_json
+            "payload": {
+                "event": request_event_json,
+                "cursor": 7
+            }
         }),
     );
 

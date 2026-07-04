@@ -1,7 +1,8 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cc_lb_admin::internal_partials::{InternalPartialsState, router};
-use cc_lb_engine::{PartialRetentionCache, RequestEventUpdate};
+use cc_lb_contract::RequestEventUpdate;
+use cc_lb_engine::PartialRetentionCache;
 use cc_lb_storage_api::RequestEventPartial;
 use http_body_util::BodyExt;
 use tower::ServiceExt;

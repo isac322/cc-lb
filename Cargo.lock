@@ -715,6 +715,7 @@ dependencies = [
  "bytes",
  "cc-lb-aead",
  "cc-lb-config",
+ "cc-lb-contract",
  "cc-lb-engine",
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-api",
@@ -808,6 +809,7 @@ dependencies = [
  "cc-lb-plugin-api",
  "serde",
  "serde_json",
+ "tokio",
  "uuid",
 ]
 
@@ -1125,6 +1127,7 @@ dependencies = [
  "cc-lb-admin",
  "cc-lb-aead",
  "cc-lb-config",
+ "cc-lb-contract",
  "cc-lb-dialect-anthropic",
  "cc-lb-engine",
  "cc-lb-oauth-protocol",

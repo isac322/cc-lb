@@ -524,7 +524,7 @@ impl TestLifecycleBus {
         let rx = self
             .bus
             .attach_lifecycle_assembler(cc_lb_engine::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY);
-        let bus_arc: Arc<dyn cc_lb_engine::RequestEventBus> = self.bus.clone();
+        let bus_arc: Arc<dyn cc_lb_contract::RequestEventBus> = self.bus.clone();
         self._assembler = Some(cc_lb_engine::spawn_request_event_assembler(
             rx,
             storage as Arc<dyn cc_lb_storage_api::RequestEventStore>,
@@ -575,7 +575,7 @@ impl TestLifecycleBus {
         self
     }
 
-    pub fn bus_arc(&self) -> Arc<dyn cc_lb_engine::RequestEventBus> {
+    pub fn bus_arc(&self) -> Arc<dyn cc_lb_contract::RequestEventBus> {
         self.bus.clone()
     }
 }

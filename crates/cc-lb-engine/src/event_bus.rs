@@ -19,18 +19,14 @@ use std::sync::{Arc, Mutex};
 use cc_lb_contract::LifecycleEvent;
 #[cfg(test)]
 use cc_lb_contract::{RequestEvent, RequestEventPartial};
-pub use cc_lb_contract::{RequestEventPhase, RequestEventUpdate};
+pub use cc_lb_contract::{
+    BusReceiver, DEFAULT_LIFECYCLE_BROADCAST_CAPACITY, LifecycleBusReceiver, RequestEventBus,
+    RequestEventPhase, RequestEventUpdate,
+};
 use tokio::sync::{broadcast, mpsc};
 
 /// Default capacity for the broadcast channel powering admin SSE subscribers.
 pub const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
-
-/// Default capacity for the lifecycle-event broadcast channel.
-///
-/// The lifecycle stream fires up to ~10 events per request, so this
-/// absorbs bursts of ~200 in-flight requests before slow ephemeral
-/// consumers observe `Lagged(n)`.
-pub const DEFAULT_LIFECYCLE_BROADCAST_CAPACITY: usize = 2048;
 
 /// Default capacity for the durable lifecycle-writer mpsc channel used by
 /// [`LifecycleEventLogger`](crate::lifecycle_event_logger::LifecycleEventLogger).
@@ -55,42 +51,6 @@ pub enum BusError {
     Closed,
     #[error("event bus backend failure: {0}")]
     Backend(String),
-}
-
-/// Receiver side of [`RequestEventBus::subscribe`] (ephemeral consumers).
-pub enum BusReceiver {
-    InMemory(broadcast::Receiver<RequestEventUpdate>),
-    Remote(mpsc::Receiver<RequestEventUpdate>),
-}
-
-/// Receiver side of [`RequestEventBus::subscribe_lifecycle`].
-///
-/// `None` is returned by trait implementations that do not publish
-/// lifecycle events (e.g. test doubles that only exercise the RequestEvent
-/// path).
-pub enum LifecycleBusReceiver {
-    None,
-    InMemory(broadcast::Receiver<LifecycleEvent>),
-}
-
-/// Transport-agnostic event sink used by the `lifecycle_event_assembler`
-/// (producer) and the admin SSE handler (ephemeral consumer via
-/// [`subscribe`](RequestEventBus::subscribe)).
-pub trait RequestEventBus: Send + Sync + 'static {
-    /// Publish an event update. **Synchronous, non-blocking.**
-    ///
-    /// Hot-path contract: never block on slow consumers. Failures are
-    /// best-effort logged + metered by the impl.
-    fn publish(&self, update: RequestEventUpdate);
-
-    /// Subscribe an ephemeral consumer (live dashboard SSE).
-    ///
-    /// Slow consumers may observe `Lagged(n)`.
-    fn subscribe(&self) -> BusReceiver;
-
-    fn publish_lifecycle(&self, event: LifecycleEvent);
-
-    fn subscribe_lifecycle(&self) -> LifecycleBusReceiver;
 }
 
 #[async_trait::async_trait]
@@ -128,7 +88,6 @@ impl EventFanout for InMemoryFanout {
         RequestEventBus::subscribe(&self.bus)
     }
 }
-
 /// Default single-process implementation.
 ///
 /// Holds a broadcast channel for ephemeral SSE subscribers and an optional

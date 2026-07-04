@@ -51,7 +51,6 @@ use crate::dynamic_view::{
 };
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::ErrorNormalizer;
-use crate::event_bus::RequestEventBus;
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::rate_limit_headers::{
@@ -67,6 +66,7 @@ use crate::usage_decoder::{UsageDecoder, decode_full_body};
 use crate::usage_parser::{
     self, UsageCounts, accumulate_sse_usage, sse_event_name, usage_from_json_body,
 };
+use cc_lb_contract::RequestEventBus;
 use cc_lb_observability::{redact_internal_errors, truncate_reason};
 
 pub type Body = AxumBody;
@@ -806,7 +806,7 @@ impl Lifecycle {
         self.config.replica_identity.clone()
     }
 
-    pub fn event_bus(&self) -> Option<Arc<dyn crate::event_bus::RequestEventBus>> {
+    pub fn event_bus(&self) -> Option<Arc<dyn RequestEventBus>> {
         self.event_bus.clone()
     }
 

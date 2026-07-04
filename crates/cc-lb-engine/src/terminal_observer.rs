@@ -28,14 +28,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use cc_lb_contract::{LifecycleEvent, TerminationReason};
+use cc_lb_contract::{LifecycleEvent, RequestEventBus, TerminationReason};
 use cc_lb_plugin_api::InternalError;
 use cc_lb_storage_api::types::PrincipalKindLite;
 use http::StatusCode;
 use uuid::Uuid;
 
 use crate::clock::{ClockHandle, unix_millis};
-use crate::event_bus::RequestEventBus;
 
 pub(crate) mod error_codes {
     pub(crate) const BODY_TOO_LARGE: &str = "body_too_large";
@@ -263,10 +262,10 @@ impl Drop for Inner {
 mod tests {
     use super::*;
     use crate::clock::SystemClock;
-    use crate::event_bus::{InMemoryBus, RequestEventBus};
+    use crate::event_bus::InMemoryBus;
 
     fn subscribe(bus: &Arc<InMemoryBus>) -> tokio::sync::broadcast::Receiver<LifecycleEvent> {
-        use crate::event_bus::LifecycleBusReceiver;
+        use cc_lb_contract::LifecycleBusReceiver;
         let LifecycleBusReceiver::InMemory(rx) = bus.subscribe_lifecycle() else {
             panic!("expected InMemory lifecycle receiver");
         };

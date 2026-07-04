@@ -96,8 +96,8 @@ pub fn test_state_with_clock(
     ));
     let dynamic_view = dynamic_view_holder(principal_view);
     let key_store = storage.clone().map(key_store);
-    let event_bus: Option<Arc<dyn cc_lb_engine::RequestEventBus>> = storage.as_ref().map(|_| {
-        Arc::new(cc_lb_engine::InMemoryBus::new()) as Arc<dyn cc_lb_engine::RequestEventBus>
+    let event_bus: Option<Arc<dyn cc_lb_contract::RequestEventBus>> = storage.as_ref().map(|_| {
+        Arc::new(cc_lb_engine::InMemoryBus::new()) as Arc<dyn cc_lb_contract::RequestEventBus>
     });
     AdminState {
         storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
