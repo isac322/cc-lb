@@ -1,5 +1,4 @@
 use std::collections::{HashMap, VecDeque};
-use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -24,12 +23,6 @@ use crate::clock::{ClockHandle, unix_secs};
 /// out-of-band consumers (Phase 8 `LimitReconcileSubscriber`, TTL sweeper)
 /// can reconcile or refund without holding the `Reservation` handle.
 pub type ReservationId = String;
-
-impl Hash for LimitKind {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        (*self as u8).hash(state);
-    }
-}
 
 type RollingKey = (String, LimitKind, u64);
 const STARTUP_REPLAY_PAGE_LIMIT: usize = 50_000;
@@ -250,7 +243,7 @@ impl LimitEngine {
         let mut concurrent_guards = Vec::new();
 
         for limit in &effective_limits {
-            let window_sec = limit.window.as_secs();
+            let window_sec = limit.window_secs;
             match limit.kind {
                 LimitKind::Requests => {
                     let amount = 1;
@@ -469,7 +462,7 @@ impl LimitEngine {
                 _ => continue,
             };
 
-            let window_sec = limit.window.as_secs();
+            let window_sec = limit.window_secs;
             let (total, oldest) =
                 self.current_total_and_oldest(key_id, limit.kind, window_sec, now_sec);
             let remaining = limit.cap_micros.saturating_sub(total).max(0);
@@ -553,13 +546,13 @@ impl LimitEngine {
     ) -> Vec<PrincipalLimitWindowSnapshot> {
         let mut windows = Vec::new();
         for limit in defaults {
-            let window_sec = limit.window.as_secs();
+            let window_sec = limit.window_secs;
             let mut total = 0_i64;
             let mut oldest: Option<u64> = None;
             for ((key_id, stored_principal_id), limits) in effective_limits {
                 if stored_principal_id != principal_id
                     || !limits.iter().any(|candidate| {
-                        candidate.kind == limit.kind && candidate.window == limit.window
+                        candidate.kind == limit.kind && candidate.window_secs == limit.window_secs
                     })
                 {
                     continue;
@@ -586,7 +579,7 @@ impl LimitEngine {
     ) -> Vec<PrincipalLimitWindowSnapshot> {
         let mut windows = Vec::new();
         for limit in limits {
-            let window_sec = limit.window.as_secs();
+            let window_sec = limit.window_secs;
             let (total, oldest) =
                 self.current_total_and_oldest(key_id, limit.kind, window_sec, now_sec);
             push_limit_snapshot(&mut windows, limit, total, oldest, now_sec);
@@ -669,7 +662,7 @@ impl LimitEngine {
         if let Some(limit) = state.limit {
             let limit = Limit {
                 kind,
-                window: Duration::from_secs(window_sec),
+                window_secs: window_sec,
                 cap_micros: u64_to_i64_saturating(limit),
             };
             let mut effective_limits = self.inner.effective_limits.write();
@@ -677,7 +670,7 @@ impl LimitEngine {
                 .entry((key_id.clone(), state.principal_id.clone()))
                 .or_default();
             limits.retain(|candidate| {
-                candidate.kind != limit.kind || candidate.window != limit.window
+                candidate.kind != limit.kind || candidate.window_secs != limit.window_secs
             });
             limits.push(limit);
         }
@@ -780,7 +773,7 @@ fn push_limit_snapshot(
     oldest: Option<u64>,
     now_sec: u64,
 ) {
-    let window_sec = limit.window.as_secs();
+    let window_sec = limit.window_secs;
     let remaining = limit.cap_micros.saturating_sub(total).max(0) as u64;
     let reset_sec = oldest.unwrap_or(now_sec).saturating_add(window_sec);
     let window = format_window(window_sec);
@@ -898,15 +891,14 @@ fn effective_limits(record: &StoredApiKeyRecord, defaults: &[Limit]) -> Vec<Limi
 
     for override_limit in &record.limit_overrides {
         let limit = Limit {
-            kind: convert_limit_kind(override_limit.kind),
-            window: std::time::Duration::from_secs(override_limit.window_secs),
+            kind: override_limit.kind,
+            window_secs: override_limit.window_secs,
             cap_micros: override_limit.cap_micros,
         };
 
-        if let Some(existing) = limits
-            .iter_mut()
-            .find(|existing| existing.kind == limit.kind && existing.window == limit.window)
-        {
+        if let Some(existing) = limits.iter_mut().find(|existing| {
+            existing.kind == limit.kind && existing.window_secs == limit.window_secs
+        }) {
             *existing = limit;
         } else {
             limits.push(limit);
@@ -928,17 +920,6 @@ fn replay_amount(event: &RequestEvent, kind: LimitKind) -> i64 {
             as i64,
         LimitKind::CostUsd => event.cost_usd_micros.unwrap_or(0).max(0),
         LimitKind::Concurrent => 0,
-    }
-}
-
-fn convert_limit_kind(kind: cc_lb_storage_api::types::LimitKind) -> LimitKind {
-    match kind {
-        cc_lb_storage_api::types::LimitKind::Requests => LimitKind::Requests,
-        cc_lb_storage_api::types::LimitKind::InputTokens => LimitKind::InputTokens,
-        cc_lb_storage_api::types::LimitKind::OutputTokens => LimitKind::OutputTokens,
-        cc_lb_storage_api::types::LimitKind::TotalTokens => LimitKind::TotalTokens,
-        cc_lb_storage_api::types::LimitKind::CostUsd => LimitKind::CostUsd,
-        cc_lb_storage_api::types::LimitKind::Concurrent => LimitKind::Concurrent,
     }
 }
 

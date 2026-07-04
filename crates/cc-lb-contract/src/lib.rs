@@ -59,10 +59,456 @@
 use std::collections::BTreeMap;
 
 use cc_lb_plugin_api::{InternalError, RoutingTrace, types::TtlClass};
-use cc_lb_storage_api::types::PrincipalKindLite;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PrincipalKindLite {
+    Human,
+    #[default]
+    Machine,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RequestEvent {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ts: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts_ms: Option<u64>,
+    pub principal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    pub principal_kind: Option<String>,
+    pub upstream: Option<RequestEventUpstream>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_name: Option<String>,
+    pub model: Option<String>,
+    pub status: u16,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens_5m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens_1h: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_state: Option<RequestCacheState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control_block_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cache_control_message_indices: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cache_breakpoints: Vec<RequestCacheBreakpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_prefix_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_input_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_output_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_creation_5m_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_creation_1h_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_read_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_reserve_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulkhead_wait_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_reused: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_reconcile_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observability_post_ms: Option<u64>,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_setup_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_ttfb_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_body_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_body_chunk_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_chunk_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_message_start_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_content_block_start_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_first_content_delta_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_last_content_delta_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_message_stop_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_last_chunk_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_total_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sse_event_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_delta_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ping_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inter_token_avg_ms: Option<u64>,
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_trace: Option<RoutingTrace>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub internal_errors: Vec<InternalError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search_requests: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_fetch_requests: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_geo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_error_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_error_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<JsonValue>,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestEventUpstream {
+    AnthropicDirect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestCacheState {
+    Hit,
+    Write,
+    Refresh,
+    Miss,
+    None,
+    Unknown,
+}
+
+impl RequestCacheState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Write => "write",
+            Self::Refresh => "refresh",
+            Self::Miss => "miss",
+            Self::None => "none",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestCacheBreakpoint {
+    pub block_index: u64,
+    pub source: RequestCacheBreakpointSource,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+    pub prefix_hash: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub prefix_token_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestCacheBreakpointSource {
+    System,
+    Tools,
+    Message,
+}
+
+/// In-flight snapshot of an active request, emitted by the lifecycle event
+/// assembler while the request is still executing (before finalization).
+///
+/// The dashboard uses partials to render live request rows that update as the
+/// request progresses (streaming, incremental usage, live cost estimate).
+/// Partials are **memory-only**: they are not persisted to storage. Only the
+/// final [`RequestEvent`] row is durable.
+///
+/// Fields are a strict subset of [`RequestEvent`] limited to what is
+/// meaningful before the request finalizes. Terminal-only fields (final
+/// `status`, `duration_ms`, `error_code`, `routing_trace`, `internal_errors`,
+/// `iterations`, `cache_breakpoints`, and detailed stream timing) are
+/// intentionally excluded to keep partial payloads compact.
+///
+/// See `.omo/plans/dashboard-live-tail-redesign.md` §3.4 for the field
+/// classification rationale.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RequestEventPartial {
+    pub event_id: String,
+    pub request_id: String,
+    pub ts: u64,
+    pub ts_ms: u64,
+    /// Millisecond timestamp of the most recent lifecycle event merged into
+    /// this snapshot. Client uses this for orphan-eviction and freshness UX.
+    pub last_update_ms: u64,
+    /// Milliseconds since `ts_ms`. Rendered as the running duration in the
+    /// dashboard until finalization replaces it with the exact `duration_ms`.
+    pub elapsed_ms: u64,
+    pub stream: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<RequestEventUpstream>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// HTTP status observed from upstream response headers, if received.
+    /// Distinct from final client-visible `status` on [`RequestEvent`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_response_status: Option<u16>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens_5m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens_1h: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search_requests: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_fetch_requests: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_geo: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_input_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_output_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_creation_5m_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_creation_1h_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_read_micros: Option<i64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control_block_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_prefix_hash: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_reserve_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulkhead_wait_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_reused: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_ttfb_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_body_chunk_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalRequestEventUpdate {
+    pub event: RequestEvent,
+    pub cursor: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RequestEventPhase {
+    Partial,
+    Final,
+}
+
+impl RequestEventPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Partial => "partial",
+            Self::Final => "final",
+        }
+    }
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", content = "payload", rename_all = "snake_case")]
+pub enum RequestEventUpdate {
+    Partial(RequestEventPartial),
+    Final(FinalRequestEventUpdate),
+}
+
+impl RequestEventUpdate {
+    pub fn partial(snapshot: RequestEventPartial) -> Self {
+        Self::Partial(snapshot)
+    }
+
+    pub fn final_(event: RequestEvent, cursor: u64) -> Self {
+        Self::Final(FinalRequestEventUpdate { event, cursor })
+    }
+
+    pub fn phase(&self) -> RequestEventPhase {
+        match self {
+            Self::Partial(_) => RequestEventPhase::Partial,
+            Self::Final(_) => RequestEventPhase::Final,
+        }
+    }
+
+    pub fn is_final(&self) -> bool {
+        matches!(self, Self::Final(_))
+    }
+
+    pub fn event_id(&self) -> &str {
+        match self {
+            Self::Partial(snapshot) => &snapshot.event_id,
+            Self::Final(FinalRequestEventUpdate { event, .. }) => {
+                event.event_id.as_deref().unwrap_or("")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AuditEntry {
+    pub ts: u64,
+    pub request_id: String,
+    pub principal_id: String,
+    pub route: String,
+    pub upstream: String,
+    pub model: Option<String>,
+    pub status: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    pub duration_ms: u64,
+    pub agent_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_violation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitKind {
+    #[default]
+    Requests,
+    InputTokens,
+    OutputTokens,
+    TotalTokens,
+    CostUsd,
+    Concurrent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Limit {
+    pub kind: LimitKind,
+    pub window_secs: u64,
+    pub cap_micros: i64,
+}
+
+impl Limit {
+    pub fn is_subset_of(&self, parent: &Limit) -> bool {
+        self.kind == parent.kind
+            && self.window_secs == parent.window_secs
+            && self.cap_micros <= parent.cap_micros
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyStatus {
+    #[default]
+    Active,
+    Disabled,
+    Revoked,
+}
 
 /// Application-generated unique identifier for a single request lifecycle.
 ///
@@ -189,7 +635,7 @@ pub enum LifecycleEvent {
     /// request row's `cache_state` column.
     CacheObserved {
         event_id: EventId,
-        cache_state: RequestCacheStateLite,
+        cache_state: RequestCacheState,
     },
     /// Emitted by request producers after prompt-cache observations are decoded.
     /// The prompt-cache observation subscriber owns cache writes, sink enqueue,
@@ -344,7 +790,7 @@ pub struct ParseInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control_block_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cache_breakpoints: Vec<CacheBreakpointLite>,
+    pub cache_breakpoints: Vec<RequestCacheBreakpoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_prefix_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -357,60 +803,6 @@ pub struct ParseInfo {
     pub message_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_control_message_indices: Vec<u64>,
-}
-
-/// Snake-case string mirror of `cc_lb_storage_api::types::RequestCacheState`.
-/// Duplicated in `cc-lb-contract` so this crate stays free of `cc-lb-storage-api`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RequestCacheStateLite {
-    Hit,
-    Write,
-    Refresh,
-    Miss,
-    None,
-    Unknown,
-}
-
-impl RequestCacheStateLite {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Hit => "hit",
-            Self::Write => "write",
-            Self::Refresh => "refresh",
-            Self::Miss => "miss",
-            Self::None => "none",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-/// Snake-case string mirror of `cc_lb_storage_api::types::RequestCacheBreakpointSource`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CacheBreakpointSourceLite {
-    System,
-    Tools,
-    Message,
-}
-
-/// Lightweight mirror of `cc_lb_storage_api::types::RequestCacheBreakpoint`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CacheBreakpointLite {
-    pub block_index: u64,
-    pub source: CacheBreakpointSourceLite,
-    pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message_index: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttl: Option<String>,
-    pub prefix_hash: String,
-    #[serde(default, skip_serializing_if = "cache_breakpoint_token_count_is_zero")]
-    pub prefix_token_count: u64,
-}
-
-fn cache_breakpoint_token_count_is_zero(value: &u64) -> bool {
-    *value == 0
 }
 
 /// Reason the body parser rejected the request.
@@ -792,7 +1184,7 @@ mod tests {
             .kind(),
             LifecycleEvent::CacheObserved {
                 event_id: sample_event_id(),
-                cache_state: RequestCacheStateLite::Unknown,
+                cache_state: RequestCacheState::Unknown,
             }
             .kind(),
             LifecycleEvent::PromptCacheObservationsProduced {

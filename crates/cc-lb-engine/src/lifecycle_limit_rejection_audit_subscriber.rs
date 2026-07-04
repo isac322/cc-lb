@@ -132,6 +132,8 @@ fn handle_event(audit_sink: &AuditWriterSink, event: LifecycleEvent) {
         limit_violation: Some(violation),
         admin_action: None,
         actor: Some("system".to_owned()),
+        kind: None,
+        payload: None,
     };
 
     match audit_sink.try_enqueue(entry) {

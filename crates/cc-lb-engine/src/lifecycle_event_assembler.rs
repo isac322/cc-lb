@@ -3,16 +3,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cc_lb_contract::{
-    AuthInfo, CacheBreakpointLite, CacheBreakpointSourceLite,
+    AuthInfo,
     CostBreakdown as LifecycleCostBreakdown, EventId, LifecycleEvent, ParseInfo,
-    RequestCacheStateLite, RouteInfo, TerminationReason, UsageSnapshot,
+    RequestCacheBreakpoint, RequestCacheState,
+    RequestEventPartial, RequestEventUpstream, RouteInfo, TerminationReason, UsageSnapshot,
 };
 use cc_lb_plugin_api::{InternalError, RoutingTrace};
 use cc_lb_pricing::virtual_cost_micros_full;
-use cc_lb_storage_api::types::{
-    RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState, RequestEventPartial,
-    RequestEventUpstream,
-};
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -696,11 +693,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             result: Ok(info), ..
         } => {
             partial.cache_control_block_count = info.cache_control_block_count;
-            partial.cache_breakpoints = info
-                .cache_breakpoints
-                .iter()
-                .map(cache_breakpoint_from_lite)
-                .collect();
+            partial.cache_breakpoints = info.cache_breakpoints.clone();
             partial.cache_prefix_hash = info.cache_prefix_hash.clone();
             partial.parse = Some(info);
         }
@@ -798,7 +791,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.cost = Some(cost);
         }
         LifecycleEvent::CacheObserved { cache_state, .. } => {
-            partial.cache_state = Some(cache_state_from_lite(cache_state));
+            partial.cache_state = Some(cache_state);
         }
         _ => {}
     }
@@ -954,39 +947,6 @@ fn finalize_base(
         internal_errors: partial.internal_errors.clone(),
         iterations: partial.usage.iterations.clone(),
         event_id: Some(partial.event_id.clone()),
-    }
-}
-
-fn cache_state_from_lite(state: RequestCacheStateLite) -> RequestCacheState {
-    match state {
-        RequestCacheStateLite::Hit => RequestCacheState::Hit,
-        RequestCacheStateLite::Write => RequestCacheState::Write,
-        RequestCacheStateLite::Refresh => RequestCacheState::Refresh,
-        RequestCacheStateLite::Miss => RequestCacheState::Miss,
-        RequestCacheStateLite::None => RequestCacheState::None,
-        RequestCacheStateLite::Unknown => RequestCacheState::Unknown,
-    }
-}
-
-fn cache_breakpoint_source_from_lite(
-    source: CacheBreakpointSourceLite,
-) -> RequestCacheBreakpointSource {
-    match source {
-        CacheBreakpointSourceLite::System => RequestCacheBreakpointSource::System,
-        CacheBreakpointSourceLite::Tools => RequestCacheBreakpointSource::Tools,
-        CacheBreakpointSourceLite::Message => RequestCacheBreakpointSource::Message,
-    }
-}
-
-fn cache_breakpoint_from_lite(lite: &CacheBreakpointLite) -> RequestCacheBreakpoint {
-    RequestCacheBreakpoint {
-        block_index: lite.block_index,
-        source: cache_breakpoint_source_from_lite(lite.source),
-        path: lite.path.clone(),
-        message_index: lite.message_index,
-        ttl: lite.ttl.clone(),
-        prefix_hash: lite.prefix_hash.clone(),
-        prefix_token_count: lite.prefix_token_count,
     }
 }
 

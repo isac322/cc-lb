@@ -806,7 +806,6 @@ name = "cc-lb-contract"
 version = "0.1.0"
 dependencies = [
  "cc-lb-plugin-api",
- "cc-lb-storage-api",
  "serde",
  "serde_json",
  "uuid",
@@ -1241,6 +1240,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cc-lb-aead",
+ "cc-lb-contract",
  "cc-lb-engine",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",

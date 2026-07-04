@@ -1,46 +1,12 @@
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LimitKind {
-    Requests,
-    InputTokens,
-    OutputTokens,
-    TotalTokens,
-    CostUsd,
-    Concurrent,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Limit {
-    pub kind: LimitKind,
-    pub window: Duration,
-    pub cap_micros: i64,
-}
-
-impl Limit {
-    pub fn is_subset_of(&self, parent: &Limit) -> bool {
-        self.kind == parent.kind
-            && self.window == parent.window
-            && self.cap_micros <= parent.cap_micros
-    }
-}
+pub use cc_lb_contract::{KeyStatus, Limit, LimitKind};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamKind {
     AnthropicKey,
     AnthropicOAuth,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum KeyStatus {
-    Active,
-    Disabled,
-    Revoked,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -90,19 +56,6 @@ mod tests {
     }
 
     #[test]
-    fn limit_bincode_roundtrip() {
-        let value = Limit {
-            kind: LimitKind::Requests,
-            window: Duration::from_secs(60),
-            cap_micros: 123,
-        };
-
-        let decoded: Limit = bincode_roundtrip(&value);
-
-        assert_eq!(decoded, value);
-    }
-
-    #[test]
     fn upstream_kind_bincode_roundtrip() {
         let value = UpstreamKind::AnthropicOAuth;
 
@@ -124,12 +77,12 @@ mod tests {
     fn is_subset_of_accepts_same_kind_window_and_lower_cap() {
         let parent = Limit {
             kind: LimitKind::OutputTokens,
-            window: Duration::from_secs(300),
+            window_secs: 300,
             cap_micros: 1_000,
         };
         let child = Limit {
             kind: LimitKind::OutputTokens,
-            window: Duration::from_secs(300),
+            window_secs: 300,
             cap_micros: 750,
         };
 
@@ -140,12 +93,12 @@ mod tests {
     fn is_subset_of_rejects_larger_cap() {
         let parent = Limit {
             kind: LimitKind::Requests,
-            window: Duration::from_secs(60),
+            window_secs: 60,
             cap_micros: 100,
         };
         let child = Limit {
             kind: LimitKind::Requests,
-            window: Duration::from_secs(60),
+            window_secs: 60,
             cap_micros: 200,
         };
 
@@ -156,12 +109,12 @@ mod tests {
     fn is_subset_of_rejects_different_kind() {
         let parent = Limit {
             kind: LimitKind::Concurrent,
-            window: Duration::from_secs(60),
+            window_secs: 60,
             cap_micros: 1,
         };
         let child = Limit {
             kind: LimitKind::CostUsd,
-            window: Duration::from_secs(60),
+            window_secs: 60,
             cap_micros: 1,
         };
 

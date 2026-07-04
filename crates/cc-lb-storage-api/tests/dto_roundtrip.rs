@@ -1,5 +1,12 @@
 #![cfg(feature = "dto-roundtrip")]
+#![recursion_limit = "256"]
 
+use cc_lb_contract::CostBreakdown;
+use cc_lb_engine::event_bus::{RequestEventPhase, RequestEventUpdate};
+use cc_lb_plugin_api::{
+    InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace,
+    types::{StageDecision, TerminalDecision, TerminalStrategy},
+};
 use cc_lb_storage_api::principal::{Limit, LimitKind};
 use cc_lb_storage_api::types::UpstreamKind;
 use cc_lb_storage_api::types::{Limit as TypesLimit, LimitKind as TypesLimitKind};
@@ -13,7 +20,7 @@ use cc_lb_storage_api::{
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 #[test]
@@ -300,6 +307,347 @@ backend = 'sqlite'"
     });
 }
 
+#[test]
+fn batch_b_wire_snapshots_are_stable() {
+    assert_wire(PrincipalKindLite::Machine, json!("machine"));
+    assert_wire(PrincipalKindLite::Human, json!("human"));
+
+    assert_wire(
+        RequestEventUpstream::AnthropicDirect,
+        json!("anthropic_direct"),
+    );
+
+    assert_wire(RequestCacheState::Hit, json!("hit"));
+    assert_wire(RequestCacheState::Write, json!("write"));
+    assert_wire(RequestCacheState::Refresh, json!("refresh"));
+    assert_wire(RequestCacheState::Miss, json!("miss"));
+    assert_wire(RequestCacheState::None, json!("none"));
+    assert_wire(RequestCacheState::Unknown, json!("unknown"));
+
+    assert_wire(RequestCacheBreakpointSource::Message, json!("message"));
+    assert_wire(
+        RequestCacheBreakpoint {
+            block_index: 7,
+            source: RequestCacheBreakpointSource::Message,
+            path: "messages[2].content[0]".to_owned(),
+            message_index: Some(2),
+            ttl: Some("5m".to_owned()),
+            prefix_hash: "abcdef0123456789".to_owned(),
+            prefix_token_count: 4096,
+        },
+        json!({
+            "block_index": 7,
+            "source": "message",
+            "path": "messages[2].content[0]",
+            "message_index": 2,
+            "ttl": "5m",
+            "prefix_hash": "abcdef0123456789",
+            "prefix_token_count": 4096
+        }),
+    );
+
+    let request_event = RequestEvent {
+        ts: 1_700_000_000,
+        request_id: "req_batch_b".to_owned(),
+        ts_ms: Some(1_700_000_000_123),
+        principal_id: Some("principal_batch_b".to_owned()),
+        key_id: Some("key_batch_b".to_owned()),
+        principal_kind: Some("machine".to_owned()),
+        upstream: Some(RequestEventUpstream::AnthropicDirect),
+        upstream_id: Some(Uuid::from_u128(0x11111111111111111111111111111111)),
+        upstream_name: Some("anthropic-primary".to_owned()),
+        model: Some("claude-3-5-sonnet".to_owned()),
+        status: 200,
+        input_tokens: Some(111),
+        output_tokens: Some(222),
+        cache_creation_input_tokens: Some(333),
+        cache_creation_input_tokens_5m: Some(123),
+        cache_creation_input_tokens_1h: Some(210),
+        cache_read_input_tokens: Some(444),
+        cache_state: Some(RequestCacheState::Refresh),
+        thread_id: Some("thread_batch_b".to_owned()),
+        message_id: Some("msg_batch_b".to_owned()),
+        message_index: Some(2),
+        message_count: Some(5),
+        cache_control_block_count: Some(1),
+        cache_control_message_indices: vec![2, 4],
+        cache_breakpoints: vec![RequestCacheBreakpoint {
+            block_index: 7,
+            source: RequestCacheBreakpointSource::Message,
+            path: "messages[2].content[0]".to_owned(),
+            message_index: Some(2),
+            ttl: Some("5m".to_owned()),
+            prefix_hash: "abcdef0123456789".to_owned(),
+            prefix_token_count: 4096,
+        }],
+        cache_prefix_hash: Some("prefix_hash_batch_b".to_owned()),
+        cost_usd_micros: Some(987_654),
+        cost_input_micros: Some(111_000),
+        cost_output_micros: Some(222_000),
+        cost_cache_creation_5m_micros: Some(333_000),
+        cost_cache_creation_1h_micros: Some(444_000),
+        cost_cache_read_micros: Some(55_000),
+        auth_ms: Some(5),
+        route_ms: Some(6),
+        limit_reserve_ms: Some(7),
+        bulkhead_wait_ms: Some(8),
+        dns_ms: Some(9),
+        connect_ms: Some(10),
+        connection_reused: Some(true),
+        limit_reconcile_ms: Some(11),
+        observability_post_ms: Some(12),
+        duration_ms: 1234,
+        proxy_setup_ms: Some(13),
+        shape_ms: Some(14),
+        sign_ms: Some(15),
+        upstream_ttfb_ms: Some(16),
+        upstream_body_ms: Some(17),
+        first_body_chunk_ms: Some(18),
+        body_chunk_count: Some(19),
+        body_bytes: Some(2048),
+        stream_message_start_ms: Some(20),
+        stream_content_block_start_ms: Some(21),
+        stream_first_content_delta_ms: Some(22),
+        stream_last_content_delta_ms: Some(23),
+        stream_message_stop_ms: Some(24),
+        stream_last_chunk_ms: Some(25),
+        stream_total_ms: Some(26),
+        sse_event_count: Some(27),
+        content_delta_count: Some(28),
+        ping_count: Some(29),
+        inter_token_avg_ms: Some(30),
+        error_code: Some("upstream_5xx".to_owned()),
+        routing_trace: Some(RoutingTrace {
+            stages: vec![StageDecision {
+                stage_name: "router".to_owned(),
+                upstream_id: Some(Uuid::from_u128(0x22222222222222222222222222222222)),
+                reason: Some("selected".to_owned()),
+                duration_us: 321,
+            }],
+            terminal_decision: Some(TerminalDecision {
+                upstream_id: Some(Uuid::from_u128(0x33333333333333333333333333333333)),
+                strategy: TerminalStrategy::FirstPick,
+            }),
+        }),
+        internal_errors: vec![InternalError {
+            stage: InternalErrorStage::Router,
+            kind: InternalErrorKind::PluginError,
+            message: Some("plugin warning".to_owned()),
+        }],
+        event_id: Some("0193f76b-1ab2-7a4d-8a3c-44ab3c5e1f0a".to_owned()),
+        thinking_tokens: Some(64),
+        web_search_requests: Some(3),
+        web_fetch_requests: Some(1),
+        service_tier: Some("priority".to_owned()),
+        inference_geo: Some("us-east".to_owned()),
+        upstream_error_type: Some("overloaded_error".to_owned()),
+        upstream_error_message: Some("upstream overloaded; retry".to_owned()),
+        iterations: Some(json!([{ "type": "message", "input_tokens": 100 }])),
+    };
+    let request_event_json = json!({
+        "ts": 1_700_000_000u64,
+        "request_id": "req_batch_b",
+        "ts_ms": 1_700_000_000_123u64,
+        "principal_id": "principal_batch_b",
+        "key_id": "key_batch_b",
+        "principal_kind": "machine",
+        "upstream": "anthropic_direct",
+        "upstream_id": "11111111-1111-1111-1111-111111111111",
+        "upstream_name": "anthropic-primary",
+        "model": "claude-3-5-sonnet",
+        "status": 200,
+        "input_tokens": 111,
+        "output_tokens": 222,
+        "cache_creation_input_tokens": 333,
+        "cache_creation_input_tokens_5m": 123,
+        "cache_creation_input_tokens_1h": 210,
+        "cache_read_input_tokens": 444,
+        "cache_state": "refresh",
+        "thread_id": "thread_batch_b",
+        "message_id": "msg_batch_b",
+        "message_index": 2,
+        "message_count": 5,
+        "cache_control_block_count": 1,
+        "cache_control_message_indices": [2, 4],
+        "cache_breakpoints": [{
+            "block_index": 7,
+            "source": "message",
+            "path": "messages[2].content[0]",
+            "message_index": 2,
+            "ttl": "5m",
+            "prefix_hash": "abcdef0123456789",
+            "prefix_token_count": 4096
+        }],
+        "cache_prefix_hash": "prefix_hash_batch_b",
+        "cost_usd_micros": 987_654,
+        "cost_input_micros": 111_000,
+        "cost_output_micros": 222_000,
+        "cost_cache_creation_5m_micros": 333_000,
+        "cost_cache_creation_1h_micros": 444_000,
+        "cost_cache_read_micros": 55_000,
+        "auth_ms": 5,
+        "route_ms": 6,
+        "limit_reserve_ms": 7,
+        "bulkhead_wait_ms": 8,
+        "dns_ms": 9,
+        "connect_ms": 10,
+        "connection_reused": true,
+        "limit_reconcile_ms": 11,
+        "observability_post_ms": 12,
+        "duration_ms": 1234,
+        "proxy_setup_ms": 13,
+        "shape_ms": 14,
+        "sign_ms": 15,
+        "upstream_ttfb_ms": 16,
+        "upstream_body_ms": 17,
+        "first_body_chunk_ms": 18,
+        "body_chunk_count": 19,
+        "body_bytes": 2048,
+        "stream_message_start_ms": 20,
+        "stream_content_block_start_ms": 21,
+        "stream_first_content_delta_ms": 22,
+        "stream_last_content_delta_ms": 23,
+        "stream_message_stop_ms": 24,
+        "stream_last_chunk_ms": 25,
+        "stream_total_ms": 26,
+        "sse_event_count": 27,
+        "content_delta_count": 28,
+        "ping_count": 29,
+        "inter_token_avg_ms": 30,
+        "error_code": "upstream_5xx",
+        "routing_trace": {
+            "stages": [{
+                "stage_name": "router",
+                "upstream_id": "22222222-2222-2222-2222-222222222222",
+                "reason": "selected",
+                "duration_us": 321
+            }],
+            "terminal_decision": {
+                "upstream_id": "33333333-3333-3333-3333-333333333333",
+                "strategy": "first-pick"
+            }
+        },
+        "internal_errors": [{
+            "stage": "router",
+            "kind": "plugin_error",
+            "message": "plugin warning"
+        }],
+        "event_id": "0193f76b-1ab2-7a4d-8a3c-44ab3c5e1f0a",
+        "thinking_tokens": 64,
+        "web_search_requests": 3,
+        "web_fetch_requests": 1,
+        "service_tier": "priority",
+        "inference_geo": "us-east",
+        "upstream_error_type": "overloaded_error",
+        "upstream_error_message": "upstream overloaded; retry",
+        "iterations": [{ "type": "message", "input_tokens": 100 }]
+    });
+    assert_wire(request_event.clone(), request_event_json.clone());
+    assert_wire(
+        RequestEventUpdate {
+            phase: RequestEventPhase::Final,
+            event: request_event,
+        },
+        json!({
+            "phase": "final",
+            "event": request_event_json
+        }),
+    );
+
+    assert_wire(
+        AuditEntry {
+            ts: 1_700_000_001,
+            request_id: "req_audit".to_owned(),
+            principal_id: "principal_audit".to_owned(),
+            route: "/v1/messages".to_owned(),
+            upstream: "anthropic-primary".to_owned(),
+            model: Some("claude-3-haiku".to_owned()),
+            status: 429,
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+            duration_ms: 345,
+            agent_label: Some("agent-a".to_owned()),
+            api_key_id: Some("key_audit".to_owned()),
+            cost_usd_micros: Some(456),
+            limit_violation: Some("requests".to_owned()),
+            admin_action: Some("disable_key".to_owned()),
+            actor: Some("admin@example.test".to_owned()),
+            kind: Some("admin_action".to_owned()),
+            payload: Some(json!({ "key_id": "key_audit", "enabled": false })),
+        },
+        json!({
+            "ts": 1_700_000_001u64,
+            "request_id": "req_audit",
+            "principal_id": "principal_audit",
+            "route": "/v1/messages",
+            "upstream": "anthropic-primary",
+            "model": "claude-3-haiku",
+            "status": 429,
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "duration_ms": 345,
+            "agent_label": "agent-a",
+            "api_key_id": "key_audit",
+            "cost_usd_micros": 456,
+            "limit_violation": "requests",
+            "admin_action": "disable_key",
+            "actor": "admin@example.test",
+            "kind": "admin_action",
+            "payload": { "key_id": "key_audit", "enabled": false }
+        }),
+    );
+
+    assert_wire(TypesLimitKind::CostUsd, json!("cost_usd"));
+    assert_wire(PrincipalLimitKind::Requests, json!("requests"));
+    assert_wire(
+        TypesLimit {
+            kind: TypesLimitKind::CostUsd,
+            window_secs: 3600,
+            cap_micros: 12_345,
+        },
+        json!({
+            "kind": "cost_usd",
+            "window_secs": 3600,
+            "cap_micros": 12_345
+        }),
+    );
+    assert_wire(
+        Limit {
+            kind: LimitKind::Requests,
+            window_secs: 60,
+            cap_micros: 1000,
+        },
+        json!({
+            "kind": "requests",
+            "window_secs": 60,
+            "cap_micros": 1000
+        }),
+    );
+
+    assert_wire(KeyStatus::Active, json!("active"));
+    assert_wire(KeyStatus::Disabled, json!("disabled"));
+    assert_wire(KeyStatus::Revoked, json!("revoked"));
+
+    assert_wire(
+        CostBreakdown {
+            total_micros: Some(999),
+            input_micros: Some(111),
+            output_micros: Some(222),
+            cache_creation_5m_micros: Some(333),
+            cache_creation_1h_micros: Some(444),
+            cache_read_micros: Some(55),
+        },
+        json!({
+            "total_micros": 999,
+            "input_micros": 111,
+            "output_micros": 222,
+            "cache_creation_5m_micros": 333,
+            "cache_creation_1h_micros": 444,
+            "cache_read_micros": 55
+        }),
+    );
+}
+
 fn assert_json_roundtrip<T>(value: T)
 where
     T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
@@ -307,4 +655,16 @@ where
     let encoded = serde_json::to_string(&value).unwrap();
     let decoded = serde_json::from_str::<T>(&encoded).unwrap();
     assert_eq!(decoded, value);
+}
+
+fn assert_wire<T>(value: T, expected: Value)
+where
+    T: Serialize + DeserializeOwned,
+{
+    let encoded = serde_json::to_value(&value).unwrap();
+    assert_eq!(encoded, expected);
+
+    let decoded = serde_json::from_value::<T>(encoded).unwrap();
+    let reencoded = serde_json::to_value(decoded).unwrap();
+    assert_eq!(reencoded, expected);
 }

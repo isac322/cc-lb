@@ -1056,11 +1056,7 @@ impl Lifecycle {
                     stream: body_view.stream(),
                     body_bytes: ctx.body_bytes.len() as u64,
                     cache_control_block_count: cache_metadata.cache_control_block_count,
-                    cache_breakpoints: cache_metadata
-                        .cache_breakpoints
-                        .iter()
-                        .map(cache_breakpoint_to_lite)
-                        .collect(),
+                    cache_breakpoints: cache_metadata.cache_breakpoints.clone(),
                     cache_prefix_hash: cache_metadata.cache_prefix_hash.clone(),
                     thread_id: cache_metadata.thread_id.clone(),
                     message_id: cache_metadata.message_id.clone(),
@@ -2764,28 +2760,6 @@ fn body_cap_for_path(config: &LifecycleConfig, path: &str) -> usize {
         config.files_body_cap_bytes
     } else {
         config.messages_body_cap_bytes
-    }
-}
-
-fn cache_breakpoint_to_lite(
-    breakpoint: &RequestCacheBreakpoint,
-) -> cc_lb_contract::CacheBreakpointLite {
-    cc_lb_contract::CacheBreakpointLite {
-        block_index: breakpoint.block_index,
-        source: match breakpoint.source {
-            RequestCacheBreakpointSource::System => {
-                cc_lb_contract::CacheBreakpointSourceLite::System
-            }
-            RequestCacheBreakpointSource::Tools => cc_lb_contract::CacheBreakpointSourceLite::Tools,
-            RequestCacheBreakpointSource::Message => {
-                cc_lb_contract::CacheBreakpointSourceLite::Message
-            }
-        },
-        path: breakpoint.path.clone(),
-        message_index: breakpoint.message_index,
-        ttl: breakpoint.ttl.clone(),
-        prefix_hash: breakpoint.prefix_hash.clone(),
-        prefix_token_count: breakpoint.prefix_token_count,
     }
 }
 

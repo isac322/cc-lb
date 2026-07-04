@@ -259,8 +259,8 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 mod tests {
     use super::*;
     use cc_lb_contract::{
-        CacheBreakpointLite, CacheBreakpointSourceLite, ParseInfo, RouteInfo, TerminationReason,
-        UsageSnapshot, UsageSource,
+        ParseInfo, RequestCacheBreakpoint, RequestCacheBreakpointSource, RouteInfo,
+        TerminationReason, UsageSnapshot, UsageSource,
     };
 
     fn eid(s: &str) -> EventId {
@@ -271,10 +271,10 @@ mod tests {
         Uuid::from_u128(4)
     }
 
-    fn cache_breakpoint() -> CacheBreakpointLite {
-        CacheBreakpointLite {
+    fn cache_breakpoint() -> RequestCacheBreakpoint {
+        RequestCacheBreakpoint {
             block_index: 0,
-            source: CacheBreakpointSourceLite::Message,
+            source: RequestCacheBreakpointSource::Message,
             path: "/messages/0/content/0".into(),
             message_index: Some(0),
             ttl: Some("5m".into()),

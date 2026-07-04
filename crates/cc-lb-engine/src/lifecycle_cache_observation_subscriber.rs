@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::{EventId, LifecycleEvent, RequestCacheStateLite, UsageSnapshot};
+use cc_lb_contract::{EventId, LifecycleEvent, RequestCacheState, UsageSnapshot};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -160,18 +160,18 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
     }
 }
 
-fn derive_cache_state(partial: &Partial) -> RequestCacheStateLite {
+fn derive_cache_state(partial: &Partial) -> RequestCacheState {
     let cache_read = partial.usage.cache_read_input_tokens > 0;
     let cache_write = partial.usage.cache_creation_input_tokens > 0;
     let has_breakpoints = partial.cache_control_block_count.unwrap_or(0) > 0;
     let usage_present = partial.usage_seen;
     match (cache_read, cache_write, has_breakpoints, usage_present) {
-        (true, true, _, _) => RequestCacheStateLite::Refresh,
-        (true, false, _, _) => RequestCacheStateLite::Hit,
-        (false, true, _, _) => RequestCacheStateLite::Write,
-        (false, false, true, _) => RequestCacheStateLite::Miss,
-        (false, false, false, true) => RequestCacheStateLite::None,
-        _ => RequestCacheStateLite::Unknown,
+        (true, true, _, _) => RequestCacheState::Refresh,
+        (true, false, _, _) => RequestCacheState::Hit,
+        (false, true, _, _) => RequestCacheState::Write,
+        (false, false, true, _) => RequestCacheState::Miss,
+        (false, false, false, true) => RequestCacheState::None,
+        _ => RequestCacheState::Unknown,
     }
 }
 
@@ -273,7 +273,7 @@ mod tests {
                 observed = Some(cache_state);
             }
         }
-        assert_eq!(observed, Some(RequestCacheStateLite::Hit));
+        assert_eq!(observed, Some(RequestCacheState::Hit));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -318,7 +318,7 @@ mod tests {
                 observed = Some(cache_state);
             }
         }
-        assert_eq!(observed, Some(RequestCacheStateLite::Write));
+        assert_eq!(observed, Some(RequestCacheState::Write));
     }
 
     #[tokio::test(flavor = "current_thread")]

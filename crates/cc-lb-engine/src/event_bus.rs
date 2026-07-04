@@ -17,8 +17,9 @@
 use std::sync::{Arc, Mutex};
 
 use cc_lb_contract::LifecycleEvent;
-use cc_lb_storage_api::{RequestEvent, RequestEventPartial};
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use cc_lb_contract::{RequestEvent, RequestEventPartial};
+pub use cc_lb_contract::{RequestEventPhase, RequestEventUpdate};
 use tokio::sync::{broadcast, mpsc};
 
 /// Default capacity for the broadcast channel powering admin SSE subscribers.
@@ -54,88 +55,6 @@ pub enum BusError {
     Closed,
     #[error("event bus backend failure: {0}")]
     Backend(String),
-}
-
-/// Phase tag for `RequestEvent` updates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RequestEventPhase {
-    /// Mid-flight snapshot for live UI updates. **Never persisted.**
-    Partial,
-    /// One-shot terminal snapshot. Durable consumer persists this to DB.
-    Final,
-}
-
-impl RequestEventPhase {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Partial => "partial",
-            Self::Final => "final",
-        }
-    }
-}
-
-/// Terminal snapshot carried by [`RequestEventUpdate::Final`].
-///
-/// `cursor` is the storage-assigned opaque monotonic position of the row
-/// (SQLite `id` or Postgres `seq`) returned by
-/// [`RequestEventStore::append_request_event`]. The SSE handler uses it as
-/// the SSE `id:` value so `Last-Event-ID` reconnection works structurally.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FinalRequestEventUpdate {
-    pub event: RequestEvent,
-    pub cursor: u64,
-}
-
-/// Wire envelope carried by [`RequestEventBus::publish`]. Adjacent-tagged
-/// discriminated union: `{"phase":"partial","payload":{...}}` or
-/// `{"phase":"final","payload":{"event":{...},"cursor":123}}`.
-///
-/// See `.omo/plans/dashboard-live-tail-redesign.md` §3.3 for wire format
-/// rationale.
-// Both variants intentionally hold their payload inline: the enum lives in a
-// tokio broadcast slot pool with `broadcast_capacity` slots (default 4096) so
-// slot size × capacity ≈ a few MB per bus. Boxing either variant would trade
-// that fixed memory for a heap allocation on every publish (2500+ /s under
-// load), which is the far hotter path. Bus count is O(1) per admin server, so
-// the memory ceiling is acceptable.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "phase", content = "payload", rename_all = "snake_case")]
-pub enum RequestEventUpdate {
-    Partial(RequestEventPartial),
-    Final(FinalRequestEventUpdate),
-}
-
-impl RequestEventUpdate {
-    pub fn partial(snapshot: RequestEventPartial) -> Self {
-        Self::Partial(snapshot)
-    }
-
-    /// Trailing underscore avoids the `final` reserved keyword.
-    pub fn final_(event: RequestEvent, cursor: u64) -> Self {
-        Self::Final(FinalRequestEventUpdate { event, cursor })
-    }
-
-    pub fn phase(&self) -> RequestEventPhase {
-        match self {
-            Self::Partial(_) => RequestEventPhase::Partial,
-            Self::Final(_) => RequestEventPhase::Final,
-        }
-    }
-
-    pub fn is_final(&self) -> bool {
-        matches!(self, Self::Final(_))
-    }
-
-    pub fn event_id(&self) -> &str {
-        match self {
-            Self::Partial(snapshot) => &snapshot.event_id,
-            Self::Final(FinalRequestEventUpdate { event, .. }) => {
-                event.event_id.as_deref().unwrap_or("")
-            }
-        }
-    }
 }
 
 /// Receiver side of [`RequestEventBus::subscribe`] (ephemeral consumers).

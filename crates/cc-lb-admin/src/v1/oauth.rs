@@ -1126,6 +1126,8 @@ fn enqueue_upstream_audit(
         limit_violation: None,
         admin_action: Some(payload.to_string()),
         actor: Some("admin".to_owned()),
+        kind: None,
+        payload: None,
     });
 }
 

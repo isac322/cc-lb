@@ -1,7 +1,5 @@
 #![forbid(unsafe_code)]
 
-use std::time::Duration;
-
 use cc_lb_engine::api_keys::types::{Limit, LimitKind};
 use proptest::prelude::*;
 
@@ -34,12 +32,12 @@ proptest! {
     ) {
         let child = Limit {
             kind: child_kind,
-            window: Duration::from_secs(child_window_secs),
+            window_secs: child_window_secs,
             cap_micros: child_cap,
         };
         let parent = Limit {
             kind: parent_kind,
-            window: Duration::from_secs(parent_window_secs),
+            window_secs: parent_window_secs,
             cap_micros: parent_cap,
         };
 

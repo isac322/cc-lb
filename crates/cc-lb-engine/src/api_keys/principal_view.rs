@@ -2,12 +2,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use cc_lb_plugin_api::{FilterPlugin, ObservabilityHook, TerminalStrategy, UpstreamDialect};
-use cc_lb_storage_api::principal::{Limit as DbLimit, LimitKind as DbLimitKind};
+use cc_lb_storage_api::principal::Limit as DbLimit;
 use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use uuid::Uuid;
 
-use crate::api_keys::types::{Limit, LimitKind, PrincipalType};
+use crate::api_keys::types::{Limit, PrincipalType};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrincipalStatus {
@@ -153,12 +153,7 @@ impl PrincipalView {
                     allowed_models,
                     allowed_models_exact: exact,
                     allowed_upstreams: principal.allowed_upstreams.clone(),
-                    default_limits: principal
-                        .default_limits
-                        .iter()
-                        .cloned()
-                        .map(Into::into)
-                        .collect(),
+                    default_limits: principal.default_limits.clone(),
                     enabled: principal.enabled,
                     router_pipeline,
                     default_router_pipeline,
@@ -280,34 +275,11 @@ impl PrincipalSpecCached {
     }
 }
 
-impl From<DbLimit> for Limit {
-    fn from(value: DbLimit) -> Self {
-        Self {
-            kind: value.kind.into(),
-            window: std::time::Duration::from_secs(value.window_secs),
-            cap_micros: value.cap_micros,
-        }
-    }
-}
-
 impl From<DbPrincipalKind> for PrincipalType {
     fn from(value: DbPrincipalKind) -> Self {
         match value {
             DbPrincipalKind::Human => Self::Human,
             DbPrincipalKind::Machine | DbPrincipalKind::Admin => Self::Machine,
-        }
-    }
-}
-
-impl From<DbLimitKind> for LimitKind {
-    fn from(value: DbLimitKind) -> Self {
-        match value {
-            DbLimitKind::Requests => Self::Requests,
-            DbLimitKind::InputTokens => Self::InputTokens,
-            DbLimitKind::OutputTokens => Self::OutputTokens,
-            DbLimitKind::TotalTokens => Self::TotalTokens,
-            DbLimitKind::CostUsd => Self::CostUsd,
-            DbLimitKind::Concurrent => Self::Concurrent,
         }
     }
 }
