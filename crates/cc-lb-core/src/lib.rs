@@ -54,6 +54,7 @@ pub mod lifecycle_subscription_quota_subscriber;
 pub mod limit_state_writer;
 #[cfg(not(loom))]
 pub mod model_resolution;
+pub mod plan_capacity;
 #[allow(dead_code)]
 mod rate_limit_headers;
 #[cfg(not(loom))]

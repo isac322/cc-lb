@@ -1,52 +1,47 @@
 //! Subscription-preference router filter.
 //!
-//! Selects at most one OAuth upstream per request via a strict lexicographic
-//! **tier** ordering that keeps the Anthropic base plan strictly higher
-//! priority than the overage bucket. Base plan (5h + 7d, plus 7d_sonnet on
-//! sonnet requests) always wins over overage: an upstream whose base is
-//! healthy is preferred even when its overage has been auto-topup-rejected.
+//! Selects at most one OAuth upstream per request via:
 //!
-//! ## Tiers (strict lexicographic order — highest tier wins as a whole)
+//! 1. A strict tier ordering (KnownBase > PartialBase > Overage > UnknownProbe)
+//!    that keeps the Anthropic base plan strictly higher priority than the
+//!    overage bucket.
+//! 2. Within the winning tier, a Weighted Rendezvous Hash (WRH, Vilkonis) using
+//!    per-candidate urgency as the weight. Urgency for base tiers is
+//!    `capacity_multiplier * (1 - util)^2 / remaining_secs`, taken as the max
+//!    over relevant base windows. Overage-tier urgency uses a fixed nominal
+//!    30-day denominator and does not apply the capacity multiplier.
+//! 3. A deterministic tiebreak if two candidates produce numerically identical
+//!    WRH scores (rendezvous_hash DESC, upstream_id ASC).
 //!
-//! 1. **KnownBase** — every relevant base window is currently positive
-//!    (fresh + allowed/warning, or fresh + no status + utilization < 1).
-//! 2. **PartialBase** — at least one relevant base window is currently
-//!    positive, no window is a hard negative.
-//! 3. **Overage** — base is proven blocked (some window is a hard negative
-//!    OR upstream reports `overage_in_use=true`) AND overage is usable.
-//! 4. **UnknownProbe** — no positive AND no hard negative base signals; the
-//!    upstream may or may not be healthy. Policy-toggleable.
+//! ## Design rationale
 //!
-//! Candidates that fit no tier are Dead and dropped. If every OAuth candidate
-//! is Dead, an API-key upstream is preferred when available; otherwise the
-//! filter passes the exhausted OAuth candidates through so the upstream's
-//! authoritative response reaches the caller.
+//! The previous algorithm used a scalar `min_headroom + positive_ratio -
+//! warning_penalty` score with a rendezvous hash as a secondary tiebreak. In
+//! practice `f64::total_cmp` on the score never tied, so the rendezvous hash
+//! never fired and traffic funnelled to whichever candidate had the highest
+//! headroom. See the production trace at 2026-07-04 where 78% of cache-miss
+//! traffic landed on `bear-max` even though four upstreams were healthy.
 //!
-//! Within a tier, the winner is selected by:
+//! WRH restores load spread. The urgency weight biases the distribution
+//! towards candidates that will hit their reset first, and the capacity
+//! multiplier lifts small-plan upstreams so their effective "burnable minutes
+//! remaining" competes fairly with the large Max/Team plans they otherwise
+//! lose to on raw headroom.
 //!
-//! 1. Tier-specific score (higher wins). The score for a base tier reads
-//!    **only** base windows; the overage tier score reads **only** the
-//!    overage snapshot; the probe tier score reads **only** base window
-//!    unknown signals. This isolates tiers from each other's noise.
-//! 2. Rendezvous hash of `(salt, request_id, upstream_id)` (higher wins).
-//!    Provides load spread + per-request affinity without hot-spotting the
-//!    lowest UUID.
-//! 3. `upstream_id` lexical order (lowest wins). Deterministic final
-//!    tie-break.
+//! ## Windows
 //!
-//! ## Design notes
+//! Base: `5h`, `7d`, plus `7d_sonnet` on sonnet requests. `7d_opus` is
+//! deliberately ignored (Anthropic ships the label without a real quota).
+//! `unified` is not itself an exhaustion window; its top-level flags
+//! (`overage_in_use`, `fallback_available`, `extra_usage_*`) enrich the
+//! overage assessment.
 //!
-//! - `7d_opus` is deliberately ignored. Anthropic ships the label with no
-//!   real quota attached, so opus traffic uses the shared `7d` counter.
-//! - `unified` is not read as an exhaustion window itself; the per-window
-//!   signals (`5h`, `7d`, `overage`) are already independent. `unified`'s
-//!   top-level flags (`overage_in_use`, `fallback_available`) are used only
-//!   to enrich the overage assessment.
-//! - Reset semantics are strict: a reset scheduled 30s from now does **not**
-//!   unblock a currently-rejected candidate for the request in flight.
-//! - Stale evidence: a stale `rejected` snapshot with `resets_at` in the
-//!   future is still a hard negative. Stale evidence whose reset has already
-//!   passed downgrades to unknown so the candidate can recover naturally.
+//! ## Reset semantics
+//!
+//! - Fresh + `resets_at` in the future: window contributes to urgency.
+//! - Fresh without `resets_at`: window excluded from urgency (Q4).
+//! - Stale + `rejected` + future reset: hard negative (rejection still live).
+//! - Stale + `rejected` + past reset: unknown (rejection expired).
 
 use cc_lb_plugin_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, FilterError,
@@ -56,14 +51,14 @@ use cc_lb_plugin_api::{
 use std::cmp::Ordering;
 use uuid::Uuid;
 
-// -- Reason strings surfaced on FilterOutput.reason (part of the log/audit surface). ------------
+// -- Reason strings surfaced on FilterOutput.reason (log/audit surface). -----
 
 pub(crate) const SUBSCRIPTION_ALIVE_REASON: &str = "keep:best_subscription_candidate";
 pub(crate) const API_KEY_FALLBACK_REASON: &str = "keep:api_key_subscription_exhausted";
 pub(crate) const NO_API_KEY_REASON: &str = "keep:subscription_exhausted_no_api_key";
 pub(crate) const NO_SUBSCRIPTION_REASON: &str = "keep:no_subscription_candidates";
 
-// -- Window labels. -----------------------------------------------------------------------------
+// -- Window labels. ----------------------------------------------------------
 
 pub(crate) const WINDOW_FIVE_HOUR: &str = "5h";
 pub(crate) const WINDOW_SEVEN_DAY: &str = "7d";
@@ -73,38 +68,48 @@ pub(crate) const WINDOW_SEVEN_DAY_OPUS: &str = "7d_opus";
 pub(crate) const WINDOW_OVERAGE: &str = "overage";
 pub(crate) const WINDOW_UNIFIED: &str = "unified";
 
-// -- Intra-tier score constants. ---------------------------------------------------------------
+// -- Algorithm constants. ---------------------------------------------------
 
-/// Penalty applied per warning-status base window inside the base tier
-/// score. Keeps warnings below cleanly-allowed candidates while remaining
-/// small enough not to dominate the base headroom term.
-const WARNING_PENALTY: f64 = 0.05;
+/// Exponent applied to per-window headroom `(1 - util)` before dividing by
+/// remaining seconds. Q5 requires strong bias against near-full candidates.
+pub(crate) const HEADROOM_EXPONENT: i32 = 2;
 
-/// Salt for the rendezvous hash. Kept versioned so bucket assignment can be
-/// rotated by bumping the salt without changing per-window semantics.
-const RENDEZVOUS_SALT: &str = "cclb-subscription-preference-v1";
+/// Upper bound on the plan capacity multiplier. Prevents 20x plans from
+/// dominating pure headroom math; anything above cap saturates.
+pub(crate) const CAPACITY_CAP: f64 = 2.0;
 
-// -- Config knobs. -----------------------------------------------------------------------------
-//
-// Currently hard-coded to sane defaults. The filter registers as a built-in
-// with no per-principal config plumbed in; when routing config surfaces
-// need to expose these, promote `FilterConfig` to a public struct threaded
-// through `SubscriptionPreferenceFilter::with_config` at instantiation
-// time in `dynamic_view_builder`.
+/// Fallback capacity ratio when the upstream has no plan metadata cached
+/// (either the OAuth org poll has never completed or the plan is not in the
+/// classification table).
+pub(crate) const UNKNOWN_CAPACITY_RATIO: f64 = 1.0;
+
+/// Floor on the remaining-seconds denominator, so a resets-at-in-3-seconds
+/// candidate does not blow past finite arithmetic.
+pub(crate) const MIN_REMAIN_SECS: u64 = 60;
+
+/// Guard below which the aggregate WRH weight is treated as zero and the
+/// filter falls back to a uniform distribution.
+pub(crate) const EPSILON: f64 = 1e-12;
+
+/// Nominal remaining-seconds denominator for overage-tier urgency. Anthropic
+/// overage windows do not carry a reliable `resets_at`; billing rolls over on
+/// the monthly boundary, so we use a fixed 30-day nominal.
+pub(crate) const OVERAGE_REMAINING_NOMINAL_SECS: u64 = 30 * 86_400;
+
+/// Baseline WRH weight for overage candidates whose utilization we cannot
+/// read.
+pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
+
+/// Salt for the weighted-rendezvous hash. Bumped as a version stamp when the
+/// selection algorithm changes shape; older salts must never be reused.
+const RENDEZVOUS_SALT: &str = "cc-lb:subscription-preference:v3:weighted-rendezvous:2026-07-04";
+
+// -- Config knobs (compiled defaults today; expose per-principal later). ----
 
 struct FilterConfig {
-    /// When true, candidates with no positive base signal AND no hard
-    /// negative base signal are eligible via the `UnknownProbe` tier. When
-    /// false, unknown-only candidates are Dead. Default: `true`.
     unknown_probe_enabled: bool,
-    /// Stale `rejected` snapshots without a `resets_at` are treated as hard
-    /// negatives when this is `true`; unknown when `false`. Default: `true`.
     stale_rejected_without_reset_blocks: bool,
-    /// Overage `blocked` evidence overrides overage `positive` evidence when
-    /// this is `true` (default). Set `false` only to allow explicit
-    /// `overage_in_use=true` to defeat conflicting header-parsed rejection.
     hard_overage_block_wins: bool,
-    /// Salt for rendezvous-hash spread + affinity.
     rendezvous_hash_salt: &'static str,
 }
 
@@ -119,7 +124,7 @@ impl Default for FilterConfig {
     }
 }
 
-// -- Public plugin type. -----------------------------------------------------------------------
+// -- Public plugin type. ----------------------------------------------------
 
 #[derive(Clone, Debug, Default)]
 pub struct SubscriptionPreferenceFilter;
@@ -150,7 +155,7 @@ impl FilterPlugin for SubscriptionPreferenceFilter {
     }
 }
 
-// -- Core evaluation. --------------------------------------------------------------------------
+// -- Evaluation entry point. ------------------------------------------------
 
 fn evaluate(
     ctx: &RequestContext,
@@ -175,7 +180,6 @@ fn evaluate(
         };
     }
 
-    // Classify every OAuth candidate into a tier bucket.
     let mut buckets: [Vec<Assessment<'_>>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
     for (index, candidate) in candidates.iter().enumerate() {
         if candidate.kind != UpstreamKind::AnthropicOauth {
@@ -186,7 +190,6 @@ fn evaluate(
         }
     }
 
-    // Pick winner from the highest non-empty bucket.
     for bucket in buckets.iter() {
         if bucket.is_empty() {
             continue;
@@ -199,7 +202,6 @@ fn evaluate(
         };
     }
 
-    // Every OAuth candidate was Dead.
     if has_api_key {
         FilterOutput {
             kept_upstream_ids: collect_kind(candidates, UpstreamKind::AnthropicApiKey),
@@ -231,7 +233,7 @@ fn collect_kind(candidates: &[UpstreamCandidate], kind: UpstreamKind) -> Vec<Uui
         .collect()
 }
 
-// -- Tier & signal types. ----------------------------------------------------------------------
+// -- Tier & signal types. ---------------------------------------------------
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Tier {
@@ -243,33 +245,27 @@ enum Tier {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BaseSignal {
-    CurrentPositive { warning: bool },
+    CurrentPositive,
     HardNegative,
     Unknown,
-}
-
-struct BaseSignalEntry {
-    signal: BaseSignal,
-    utilization: Option<f64>,
 }
 
 struct OverageAssessment {
     ok: bool,
     base_exhausted_hint: bool,
-    remaining_headroom: Option<f64>,
-    positive_count: u32,
-    fresh_positive: bool,
+    /// Fresh, finite utilization on the overage window (if present). Used
+    /// for overage-tier urgency; `None` means "use OVERAGE_UNKNOWN_WEIGHT".
+    fresh_overage_util: Option<f64>,
 }
 
 struct Assessment<'a> {
     candidate: &'a UpstreamCandidate,
     original_index: usize,
     tier: Tier,
-    base_signals: Vec<BaseSignalEntry>,
-    overage: OverageAssessment,
+    urgency: f64,
 }
 
-// -- Candidate assessment. --------------------------------------------------------------------
+// -- Candidate assessment. --------------------------------------------------
 
 fn assess_candidate<'a>(
     candidate: &'a UpstreamCandidate,
@@ -278,40 +274,45 @@ fn assess_candidate<'a>(
     config: &FilterConfig,
 ) -> Option<Assessment<'a>> {
     let now_secs = candidate_estimated_now(candidate);
+    let multiplier = capacity_multiplier(candidate);
 
-    let mut base_signals = Vec::with_capacity(base_windows.len());
     let mut positive_count = 0u32;
     let mut hard_negative_count = 0u32;
+    let mut base_urgency = 0.0f64;
     for &window in base_windows {
         let snapshot = find_snapshot(candidate, window);
         let signal = classify_base_snapshot(snapshot, now_secs, config);
         match signal {
-            BaseSignal::CurrentPositive { .. } => positive_count += 1,
+            BaseSignal::CurrentPositive => {
+                positive_count += 1;
+                if let Some(contribution) =
+                    window_urgency_contribution(snapshot, now_secs, multiplier)
+                    && contribution > base_urgency
+                {
+                    base_urgency = contribution;
+                }
+            }
             BaseSignal::HardNegative => hard_negative_count += 1,
             BaseSignal::Unknown => {}
         }
-        base_signals.push(BaseSignalEntry {
-            signal,
-            utilization: snapshot.and_then(|s| s.utilization),
-        });
     }
     let total = base_windows.len() as u32;
 
     let overage = assess_overage(candidate, config);
     let base_proven_blocked = hard_negative_count > 0 || overage.base_exhausted_hint;
 
-    let tier = if base_proven_blocked {
+    let (tier, urgency) = if base_proven_blocked {
         if overage.ok {
-            Tier::Overage
+            (Tier::Overage, overage_urgency(overage.fresh_overage_util))
         } else {
             return None;
         }
     } else if positive_count == total && total > 0 {
-        Tier::KnownBase
+        (Tier::KnownBase, base_urgency)
     } else if positive_count > 0 {
-        Tier::PartialBase
+        (Tier::PartialBase, base_urgency)
     } else if config.unknown_probe_enabled {
-        Tier::UnknownProbe
+        (Tier::UnknownProbe, 0.0)
     } else {
         return None;
     };
@@ -320,25 +321,61 @@ fn assess_candidate<'a>(
         candidate,
         original_index,
         tier,
-        base_signals,
-        overage,
+        urgency,
     })
 }
 
-/// Classify one base-window snapshot. Encodes the state machine from the
-/// filter design doc:
-///
-/// - Missing / no snapshot → Unknown
-/// - Fresh + disabled_reason → HardNegative
-/// - Fresh + status="rejected" → HardNegative
-/// - Fresh + status="allowed"/"allowed_warning" → CurrentPositive
-/// - Fresh + no known status → utilization decides:
-///   util ≥ 1 → HardNegative, util < 1 → CurrentPositive, util=None → Unknown
-/// - Stale + status="rejected":
-///   resets_at > now → HardNegative (rejection still live)
-///   resets_at ≤ now → Unknown (rejection expired, allow recovery)
-///   resets_at=None → HardNegative if config, else Unknown
-/// - Stale + anything else → Unknown
+/// Compute the WRH urgency contribution of a single base window. Returns
+/// `None` when the window should be excluded from urgency: non-fresh state,
+/// missing / non-finite utilization, or missing / already-elapsed `resets_at`.
+fn window_urgency_contribution(
+    snapshot: Option<&SubscriptionQuotaCandidateSnapshot>,
+    now_secs: u64,
+    multiplier: f64,
+) -> Option<f64> {
+    let snap = snapshot?;
+    if snap.state != SubscriptionQuotaDataState::Fresh {
+        return None;
+    }
+    let util = snap.utilization?;
+    if !util.is_finite() {
+        return None;
+    }
+    let resets_at = snap.resets_at_unix_secs?;
+    if resets_at <= now_secs {
+        return None;
+    }
+    let remaining_secs = (resets_at - now_secs).max(MIN_REMAIN_SECS) as f64;
+    let clamped_util = util.clamp(0.0, 1.0);
+    let headroom = (1.0 - clamped_util).powi(HEADROOM_EXPONENT);
+    Some(multiplier * headroom / remaining_secs)
+}
+
+fn overage_urgency(fresh_util: Option<f64>) -> f64 {
+    match fresh_util {
+        Some(u) if u.is_finite() => {
+            let clamped = u.clamp(0.0, 1.0);
+            let headroom = (1.0 - clamped).powi(HEADROOM_EXPONENT);
+            headroom / (OVERAGE_REMAINING_NOMINAL_SECS as f64)
+        }
+        _ => OVERAGE_UNKNOWN_WEIGHT,
+    }
+}
+
+/// Map the upstream's plan capacity ratio to a WRH multiplier in `[0, 2.0]`.
+/// `sqrt` compresses the range so Pro (1.0), team_standard (1.25), and
+/// large Max/Team plans (5x, 6.25x, 20x) all sit within one order of
+/// magnitude, and the `CAPACITY_CAP` prevents 20x from dominating.
+fn capacity_multiplier(candidate: &UpstreamCandidate) -> f64 {
+    let ratio = candidate
+        .plan_capacity_ratio
+        .unwrap_or(UNKNOWN_CAPACITY_RATIO);
+    if !ratio.is_finite() || ratio <= 0.0 {
+        return UNKNOWN_CAPACITY_RATIO;
+    }
+    ratio.sqrt().min(CAPACITY_CAP)
+}
+
 fn classify_base_snapshot(
     snapshot: Option<&SubscriptionQuotaCandidateSnapshot>,
     now_secs: u64,
@@ -355,9 +392,7 @@ fn classify_base_snapshot(
             }
             match snap.status.as_deref() {
                 Some("rejected") => BaseSignal::HardNegative,
-                Some("allowed") => BaseSignal::CurrentPositive { warning: false },
-                Some("allowed_warning") => BaseSignal::CurrentPositive { warning: true },
-                // Unknown status label — fall through to utilization gate.
+                Some("allowed") | Some("allowed_warning") => BaseSignal::CurrentPositive,
                 Some(_) | None => utilization_signal(snap.utilization),
             }
         }
@@ -365,7 +400,7 @@ fn classify_base_snapshot(
             if snap.status.as_deref() == Some("rejected") {
                 match snap.resets_at_unix_secs {
                     Some(resets_at) if resets_at > now_secs => BaseSignal::HardNegative,
-                    Some(_) => BaseSignal::Unknown, // rejection expired
+                    Some(_) => BaseSignal::Unknown,
                     None => {
                         if config.stale_rejected_without_reset_blocks {
                             BaseSignal::HardNegative
@@ -385,18 +420,11 @@ fn utilization_signal(util: Option<f64>) -> BaseSignal {
     match util {
         Some(u) if !u.is_finite() => BaseSignal::Unknown,
         Some(u) if u >= 1.0 => BaseSignal::HardNegative,
-        Some(u) if (0.0..1.0).contains(&u) => BaseSignal::CurrentPositive { warning: false },
+        Some(u) if (0.0..1.0).contains(&u) => BaseSignal::CurrentPositive,
         _ => BaseSignal::Unknown,
     }
 }
 
-/// Assess overage headroom for a candidate. Reads the `overage` snapshot for
-/// per-window signals and the `unified` snapshot for top-level flags
-/// (`overage_in_use`, `fallback_available`), plus `extra_usage_*` fields
-/// wherever they were surfaced.
-///
-/// A `positive` signal alone does not make overage usable; a `blocked`
-/// signal wins by default (`hard_overage_block_wins=true`).
 fn assess_overage(candidate: &UpstreamCandidate, config: &FilterConfig) -> OverageAssessment {
     let overage_snap = find_snapshot(candidate, WINDOW_OVERAGE);
     let unified_snap = find_snapshot(candidate, WINDOW_UNIFIED);
@@ -423,29 +451,19 @@ fn assess_overage(candidate: &UpstreamCandidate, config: &FilterConfig) -> Overa
         .and_then(|s| s.utilization)
         .filter(|u| u.is_finite());
 
-    // Positive signals — any evidence overage is usable.
     let mut positive_count = 0u32;
-    let mut fresh_positive = false;
     if matches!(overage_status, Some("allowed") | Some("allowed_warning")) {
         positive_count += 1;
-        if is_overage_fresh {
-            fresh_positive = true;
-        }
     }
     if let Some(u) = overage_util
         && u < 1.0
     {
         positive_count += 1;
-        if is_overage_fresh {
-            fresh_positive = true;
-        }
     }
     if fallback_available == Some(true) {
         positive_count += 1;
     }
     if overage_in_use {
-        // overage_in_use=true simultaneously proves base is spent AND
-        // demonstrates overage is currently servicing traffic.
         positive_count += 1;
     }
     if extra_usage_enabled == Some(true) && extra_usage_remaining.map(|r| r > 0.0).unwrap_or(false)
@@ -454,9 +472,6 @@ fn assess_overage(candidate: &UpstreamCandidate, config: &FilterConfig) -> Overa
     }
     let positive = positive_count > 0;
 
-    // Blocked signals — only fresh evidence counts against overage
-    // (an expired 4-hour-old header rejection should not permanently kill
-    // overage routing).
     let overage_status_blocked = is_overage_fresh && overage_status == Some("rejected");
     let overage_util_blocked = is_overage_fresh && overage_util.map(|u| u >= 1.0).unwrap_or(false);
     let extra_usage_disabled = extra_usage_enabled == Some(false);
@@ -474,14 +489,12 @@ fn assess_overage(candidate: &UpstreamCandidate, config: &FilterConfig) -> Overa
         positive
     };
 
-    let remaining_headroom = overage_util.map(|u| (1.0 - u).clamp(0.0, 1.0));
+    let fresh_overage_util = if is_overage_fresh { overage_util } else { None };
 
     OverageAssessment {
         ok,
         base_exhausted_hint: overage_in_use,
-        remaining_headroom,
-        positive_count,
-        fresh_positive,
+        fresh_overage_util,
     }
 }
 
@@ -517,7 +530,7 @@ fn candidate_estimated_now(candidate: &UpstreamCandidate) -> u64 {
     candidate.observed_at_unix_secs.max(snap_max)
 }
 
-// -- Intra-tier winner selection. --------------------------------------------------------------
+// -- Weighted-rendezvous selection. -----------------------------------------
 
 fn pick_within_tier<'a, 'b>(
     bucket: &'b [Assessment<'a>],
@@ -525,11 +538,18 @@ fn pick_within_tier<'a, 'b>(
     config: &FilterConfig,
 ) -> &'b Assessment<'a> {
     debug_assert!(!bucket.is_empty());
+    if bucket.len() == 1 {
+        return &bucket[0];
+    }
+
+    let total_urgency: f64 = bucket.iter().map(|a| a.urgency).sum();
+    let uniform = total_urgency < EPSILON;
+
     let mut best_index = 0usize;
-    let mut best_key = tiebreak_key(&bucket[0], ctx, config);
+    let mut best_key = wrh_key(&bucket[0], ctx, config, uniform);
     for (i, assessment) in bucket.iter().enumerate().skip(1) {
-        let key = tiebreak_key(assessment, ctx, config);
-        if compare_tiebreak_key(&key, &best_key) == Ordering::Less {
+        let key = wrh_key(assessment, ctx, config, uniform);
+        if compare_wrh_key(&key, &best_key) == Ordering::Less {
             best_index = i;
             best_key = key;
         }
@@ -537,126 +557,66 @@ fn pick_within_tier<'a, 'b>(
     &bucket[best_index]
 }
 
-struct TiebreakKey {
-    /// Negated score so that lower key = higher score = better candidate.
-    score_neg: f64,
-    /// Negated hash so higher hash sorts first.
+struct WrhKey {
+    /// `-ln(u) / weight`. Lower key wins.
+    score: f64,
+    /// Negated raw hash so that higher hash wins during score ties.
     rendezvous_neg: u64,
     upstream_id: Uuid,
     original_index: usize,
 }
 
-fn tiebreak_key(
+fn wrh_key(
     assessment: &Assessment<'_>,
     ctx: &RequestContext,
     config: &FilterConfig,
-) -> TiebreakKey {
-    let score = intra_tier_score(assessment);
-    let rendezvous = rendezvous_hash(
+    uniform: bool,
+) -> WrhKey {
+    let hash = rendezvous_hash(
         config.rendezvous_hash_salt,
         &ctx.request_id,
         assessment.candidate.upstream_id,
     );
-    TiebreakKey {
-        score_neg: -score,
-        rendezvous_neg: u64::MAX - rendezvous,
+    let weight = if uniform { 1.0 } else { assessment.urgency };
+    let u = hash_to_open_unit(hash);
+    let score = if weight <= 0.0 {
+        f64::INFINITY
+    } else {
+        -u.ln() / weight
+    };
+    WrhKey {
+        score,
+        rendezvous_neg: u64::MAX - hash,
         upstream_id: assessment.candidate.upstream_id,
         original_index: assessment.original_index,
     }
 }
 
-fn compare_tiebreak_key(a: &TiebreakKey, b: &TiebreakKey) -> Ordering {
-    a.score_neg
-        .total_cmp(&b.score_neg)
+fn compare_wrh_key(a: &WrhKey, b: &WrhKey) -> Ordering {
+    a.score
+        .total_cmp(&b.score)
         .then_with(|| a.rendezvous_neg.cmp(&b.rendezvous_neg))
         .then_with(|| a.upstream_id.cmp(&b.upstream_id))
         .then_with(|| a.original_index.cmp(&b.original_index))
 }
 
-fn intra_tier_score(a: &Assessment<'_>) -> f64 {
-    match a.tier {
-        Tier::KnownBase | Tier::PartialBase => score_base_tier(a),
-        Tier::Overage => score_overage_tier(a),
-        Tier::UnknownProbe => score_probe_tier(a),
-    }
+/// Map a 64-bit hash to `u ∈ (0, 1)` using the top 53 bits so the division
+/// is exact in f64. Guarantees `-ln(u)` is a finite positive number so WRH
+/// scoring is numerically well-defined.
+fn hash_to_open_unit(hash: u64) -> f64 {
+    let top53 = hash >> 11;
+    ((top53 as f64) + 0.5) / ((1u64 << 53) as f64)
 }
 
-/// Base-tier score. Reads only base-window signals; overage/unified
-/// utilization must never leak in.
-///
-/// Components (higher wins):
-/// - min headroom across positive base windows in `[0, 1]`
-/// - positive ratio in `[0, 1]`
-/// - warning penalty (small negative per warning window)
-fn score_base_tier(a: &Assessment<'_>) -> f64 {
-    let mut min_headroom: f64 = 1.0;
-    let mut has_positive_headroom = false;
-    let mut positive_count = 0.0;
-    let mut warning_count = 0.0;
-    let mut total = 0.0;
-    for entry in &a.base_signals {
-        total += 1.0;
-        if let BaseSignal::CurrentPositive { warning } = entry.signal {
-            positive_count += 1.0;
-            if warning {
-                warning_count += 1.0;
-            }
-            if let Some(u) = entry.utilization
-                && u.is_finite()
-                && (0.0..=1.0).contains(&u)
-            {
-                min_headroom = min_headroom.min(1.0 - u);
-                has_positive_headroom = true;
-            }
-        }
-    }
-    let headroom_component = if has_positive_headroom {
-        min_headroom
-    } else {
-        0.5
-    };
-    let positive_ratio = if total > 0.0 {
-        positive_count / total
-    } else {
-        0.0
-    };
-    let warning_penalty = warning_count * WARNING_PENALTY;
-
-    headroom_component + positive_ratio - warning_penalty
-}
-
-/// Overage-tier score. Reads only the overage snapshot.
-fn score_overage_tier(a: &Assessment<'_>) -> f64 {
-    let ov = &a.overage;
-    let remaining = ov.remaining_headroom.unwrap_or(0.5);
-    let positive_rank = (ov.positive_count as f64).min(3.0) * 0.1;
-    let fresh_bonus = if ov.fresh_positive { 0.05 } else { 0.0 };
-    remaining + positive_rank + fresh_bonus
-}
-
-/// Probe-tier score. Reads only the unknown-base signals — an unknown
-/// candidate whose stale reads suggest lower utilization is preferred over
-/// one whose stale reads look near-full.
-fn score_probe_tier(a: &Assessment<'_>) -> f64 {
-    let mut snapshots_present = 0.0;
-    let mut lowest_util: Option<f64> = None;
-    for entry in &a.base_signals {
-        if !matches!(entry.signal, BaseSignal::Unknown) {
-            continue;
-        }
-        if let Some(u) = entry.utilization
-            && u.is_finite()
-            && (0.0..=1.0).contains(&u)
-        {
-            snapshots_present += 1.0;
-            lowest_util = Some(lowest_util.map(|x| x.min(u)).unwrap_or(u));
-        }
-    }
-    let headroom_estimate = lowest_util.map(|u| 1.0 - u).unwrap_or(0.5);
-    headroom_estimate + snapshots_present * 0.05
-}
-
-// -- Rendezvous hash (FNV-1a 64 over salt || request_id || upstream_id). ----------------------
+// -- Rendezvous hash (FNV-1a 64 over salt || request_id || upstream_id,
+// with a Murmur3 fmix64 avalanche finalizer). ------------------------------
+//
+// FNV-1a alone has weak avalanche: two inputs differing in one trailing byte
+// produce hash values that differ by only a small fixed delta * fnv_prime.
+// That is fatal for WRH — near-identical `u` values across candidates cause
+// the highest-weight candidate to win every request. The Murmur3 fmix64
+// step spreads any local input change across all 64 output bits, restoring
+// the "independent uniforms per candidate" property WRH requires.
 
 fn rendezvous_hash(salt: &str, request_id: &str, upstream_id: Uuid) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -676,6 +636,15 @@ fn rendezvous_hash(salt: &str, request_id: &str, upstream_id: Uuid) -> u64 {
     for &b in upstream_id.as_bytes() {
         mix(&mut h, b);
     }
+    fmix64(h)
+}
+
+fn fmix64(mut h: u64) -> u64 {
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^= h >> 33;
     h
 }
 

@@ -15,6 +15,7 @@ use crate::lifecycle::{
     NoopSubscriptionQuotaCache, PromptCacheObservationCacheLike, PromptCacheObservationSinkLike,
     SubscriptionQuotaCacheLike, UpstreamDispatch,
 };
+use crate::plan_capacity::PlanInfo;
 
 #[non_exhaustive]
 pub struct DynamicView {
@@ -30,6 +31,7 @@ pub struct DynamicView {
     pub subscription_quota_routing_max_staleness_secs: u64,
     pub prompt_cache_observation_cache: Option<Arc<dyn PromptCacheObservationCacheLike>>,
     pub prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
+    pub plan_info_by_upstream: HashMap<Uuid, PlanInfo>,
     pub generation: u64,
     upstream_records: Vec<UpstreamRecord>,
 }
@@ -223,6 +225,7 @@ pub struct DynamicViewBuilder {
     subscription_quota_routing_max_staleness_secs: Option<u64>,
     prompt_cache_observation_cache: Option<Arc<dyn PromptCacheObservationCacheLike>>,
     prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
+    plan_info_by_upstream: HashMap<Uuid, PlanInfo>,
     upstream_records: Vec<UpstreamRecord>,
 }
 
@@ -242,6 +245,7 @@ impl DynamicViewBuilder {
             subscription_quota_routing_max_staleness_secs: None,
             prompt_cache_observation_cache: None,
             prompt_cache_observation_sink: None,
+            plan_info_by_upstream: HashMap::new(),
             upstream_records: Vec::new(),
         }
     }
@@ -263,6 +267,7 @@ impl DynamicViewBuilder {
             ),
             prompt_cache_observation_cache: view.prompt_cache_observation_cache.clone(),
             prompt_cache_observation_sink: view.prompt_cache_observation_sink.clone(),
+            plan_info_by_upstream: view.plan_info_by_upstream.clone(),
             upstream_records: view.upstreams_snapshot().to_vec(),
         }
     }
@@ -352,6 +357,11 @@ impl DynamicViewBuilder {
         self
     }
 
+    pub fn plan_info_by_upstream(mut self, plan_info: HashMap<Uuid, PlanInfo>) -> Self {
+        self.plan_info_by_upstream = plan_info;
+        self
+    }
+
     pub fn build(self) -> Arc<DynamicView> {
         Arc::new(DynamicView {
             signer_factory: self
@@ -384,6 +394,7 @@ impl DynamicViewBuilder {
                 .unwrap_or(0),
             prompt_cache_observation_cache: self.prompt_cache_observation_cache,
             prompt_cache_observation_sink: self.prompt_cache_observation_sink,
+            plan_info_by_upstream: self.plan_info_by_upstream,
             generation: self.previous_generation.saturating_add(1),
             upstream_records: self.upstream_records,
         })

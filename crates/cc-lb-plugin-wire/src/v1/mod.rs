@@ -112,6 +112,10 @@ pub struct UpstreamCandidate {
     pub kind: Box<str>,
     pub observed_at_unix_secs: u64,
     pub predicted_cache_read_tokens: u32,
+    pub plan_capacity_ratio: f64,
+    pub organization_type: Box<str>,
+    pub rate_limit_tier: Box<str>,
+    pub seat_tier: Box<str>,
 }
 
 /// Borrowed mirror of [`UpstreamCandidate`].
@@ -125,6 +129,13 @@ pub struct UpstreamCandidateRef<'a> {
     pub kind: &'a str,
     pub observed_at_unix_secs: u64,
     pub predicted_cache_read_tokens: u32,
+    pub plan_capacity_ratio: f64,
+    #[rkyv(with = InlineAsBox)]
+    pub organization_type: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub rate_limit_tier: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub seat_tier: &'a str,
 }
 
 /// One header on the inbound request.

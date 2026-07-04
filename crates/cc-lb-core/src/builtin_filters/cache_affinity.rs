@@ -184,6 +184,10 @@ mod tests {
             observed_at_unix_secs: 0,
             cache_score: None,
             base_url: None,
+            plan_capacity_ratio: None,
+            organization_type: None,
+            rate_limit_tier: None,
+            seat_tier: None,
         }
     }
 }

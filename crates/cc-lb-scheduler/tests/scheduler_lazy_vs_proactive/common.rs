@@ -6,9 +6,9 @@ use cc_lb_core::clock::{Clock, SystemClock, unix_secs};
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AnthropicCompatibilityKvStore, AuditStore, PluginRegistryStore, PrincipalStore,
-    PromptCacheObservationStore, UpstreamCreate, UpstreamRateLimitStateStore, UpstreamStore,
-    UpstreamSubscriptionQuotaStore,
+    AnthropicCompatibilityKvStore, AuditStore, OrganizationMetadataStore, PluginRegistryStore,
+    PrincipalStore, PromptCacheObservationStore, UpstreamCreate, UpstreamRateLimitStateStore,
+    UpstreamStore, UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore,
 };
 use uuid::Uuid;
 
@@ -34,11 +34,13 @@ pub fn stores_from_storage<Storage>(storage: Arc<Storage>) -> Arc<Stores>
 where
     Storage: AnthropicCompatibilityKvStore
         + AuditStore
+        + OrganizationMetadataStore
         + PluginRegistryStore
         + PrincipalStore
         + PromptCacheObservationStore
         + UpstreamRateLimitStateStore
         + UpstreamStore
+        + UpstreamSubscriptionMetadataStore
         + UpstreamSubscriptionQuotaStore
         + 'static,
 {
@@ -47,6 +49,9 @@ where
     let plugin_registry: Arc<dyn PluginRegistryStore> = storage.clone();
     let upstream_rate_limits: Arc<dyn UpstreamRateLimitStateStore> = storage.clone();
     let upstream_subscription_quotas: Arc<dyn UpstreamSubscriptionQuotaStore> = storage.clone();
+    let upstream_subscription_metadata: Arc<dyn UpstreamSubscriptionMetadataStore> =
+        storage.clone();
+    let organization_metadata: Arc<dyn OrganizationMetadataStore> = storage.clone();
     let prompt_cache_observations: Arc<dyn PromptCacheObservationStore> = storage.clone();
     let anthropic_compatibility_kv: Arc<dyn AnthropicCompatibilityKvStore> = storage.clone();
     let audit: Arc<dyn AuditStore> = storage;
@@ -57,6 +62,8 @@ where
         plugin_registry,
         upstream_rate_limits,
         upstream_subscription_quotas,
+        upstream_subscription_metadata,
+        organization_metadata,
         prompt_cache_observations,
         anthropic_compatibility_kv,
         audit: Some(audit),

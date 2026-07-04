@@ -33,12 +33,12 @@ fn main() {
         SchemaEntry {
             impl_generics: "",
             ty: "UpstreamCandidate",
-            descriptor: "UpstreamCandidate{kind:Box<str>,name:Box<str>,observed_at_unix_secs:u64,predicted_cache_read_tokens:u32,upstream_id:Box<str>}",
+            descriptor: "UpstreamCandidate{kind:Box<str>,name:Box<str>,observed_at_unix_secs:u64,organization_type:Box<str>,plan_capacity_ratio:f64,predicted_cache_read_tokens:u32,rate_limit_tier:Box<str>,seat_tier:Box<str>,upstream_id:Box<str>}",
         },
         SchemaEntry {
             impl_generics: "<'a>",
             ty: "UpstreamCandidateRef<'a>",
-            descriptor: "UpstreamCandidateRef{kind:&str,name:&str,observed_at_unix_secs:u64,predicted_cache_read_tokens:u32,upstream_id:&str}",
+            descriptor: "UpstreamCandidateRef{kind:&str,name:&str,observed_at_unix_secs:u64,organization_type:&str,plan_capacity_ratio:f64,predicted_cache_read_tokens:u32,rate_limit_tier:&str,seat_tier:&str,upstream_id:&str}",
         },
         SchemaEntry {
             impl_generics: "",

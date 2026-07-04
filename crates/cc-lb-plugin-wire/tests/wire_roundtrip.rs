@@ -51,6 +51,10 @@ fn filter_request_round_trips() {
             kind: Box::from("anthropic_api_key"),
             observed_at_unix_secs: 42,
             predicted_cache_read_tokens: 256,
+            plan_capacity_ratio: 1.0,
+            organization_type: Box::from(""),
+            rate_limit_tier: Box::from(""),
+            seat_tier: Box::from(""),
         }]),
     };
     let bytes = rkyv::to_bytes::<Error>(&req).expect("encode");
@@ -80,6 +84,10 @@ fn filter_request_ref_encodes_to_owned_wire() {
         kind: "anthropic_api_key",
         observed_at_unix_secs: 42,
         predicted_cache_read_tokens: 256,
+        plan_capacity_ratio: 1.0,
+        organization_type: "",
+        rate_limit_tier: "",
+        seat_tier: "",
     }];
     let req_ref = FilterRequestRef {
         request_id: "req-1",
