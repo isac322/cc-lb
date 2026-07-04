@@ -75,7 +75,6 @@ pub const HASH_SCHEMA_VERSION: u8 = 2;
 
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
-const PROMPT_CACHE_TTL_GRACE_SECS: u64 = 30;
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
 const DEFAULT_MAX_INPUT_ESTIMATE: i64 = 4000;
 
@@ -120,9 +119,7 @@ pub trait PromptCacheObservationCacheLike: Send + Sync {
         now_unix_secs: u64,
     ) -> bool;
 
-    fn grace_margin_secs(&self) -> u64 {
-        0
-    }
+    fn grace_margin_secs(&self) -> u64;
 
     fn clock_now_unix_secs(&self) -> u64;
 }
@@ -402,14 +399,24 @@ pub(crate) fn decode_prompt_cache_observations_pure(
         })
         .flatten();
 
+    let grace_secs = context.cache.grace_margin_secs();
     let mut observations = Vec::new();
     let mut dropped_below_threshold = 0_u32;
     if let Some((breakpoint, warm_entry)) = hit {
         if breakpoint.prefix_token_count >= threshold {
+            // Sliding TTL: Anthropic refreshes the prompt-cache lifetime on every
+            // hit (per the prompt-caching docs). Emit a fresh `now + ttl - grace`
+            // so downstream observation storage extends the window and the router
+            // does not falsely conclude the upstream went cold while it was still
+            // being kept warm by continuous reads.
             observations.push(DecodedPromptCacheObservation {
                 prefix_hash: breakpoint.prefix_hash.clone(),
                 ttl_class: warm_entry.ttl_class,
-                expires_at_unix_secs: warm_entry.expires_at_unix_secs,
+                expires_at_unix_secs: prompt_cache_observation_expires_at(
+                    now_unix_secs,
+                    warm_entry.ttl_class,
+                    grace_secs,
+                ),
                 kind: DecodedPromptCacheObservationKind::Hit,
             });
         } else {
@@ -433,6 +440,7 @@ pub(crate) fn decode_prompt_cache_observations_pure(
                 expires_at_unix_secs: prompt_cache_observation_expires_at(
                     now_unix_secs,
                     breakpoint.requested_ttl,
+                    grace_secs,
                 ),
                 kind: DecodedPromptCacheObservationKind::Write,
             });
@@ -492,10 +500,14 @@ fn emit_prompt_cache_observations_produced(
     );
 }
 
-fn prompt_cache_observation_expires_at(now_unix_secs: u64, ttl_class: TtlClass) -> u64 {
+fn prompt_cache_observation_expires_at(
+    now_unix_secs: u64,
+    ttl_class: TtlClass,
+    grace_secs: u64,
+) -> u64 {
     now_unix_secs
         .saturating_add(prompt_cache_ttl_secs(ttl_class))
-        .saturating_sub(PROMPT_CACHE_TTL_GRACE_SECS)
+        .saturating_sub(grace_secs)
 }
 
 fn prompt_cache_ttl_secs(ttl_class: TtlClass) -> u64 {
@@ -3788,11 +3800,108 @@ mod tests {
         assert_eq!(decoded.observations.len(), 2);
         assert_eq!(decoded.observations[0].prefix_hash, "hit");
         assert_eq!(decoded.observations[0].ttl_class, TtlClass::Ephemeral1h);
-        assert_eq!(decoded.observations[0].expires_at_unix_secs, now + 3_000);
+        assert_eq!(decoded.observations[0].expires_at_unix_secs, now + 3_570);
         assert_eq!(decoded.observations[1].prefix_hash, "write");
         assert_eq!(decoded.observations[1].ttl_class, TtlClass::Ephemeral5m);
         assert_eq!(decoded.observations[1].expires_at_unix_secs, now + 270);
         assert!(cache.upserts().is_empty());
+    }
+
+    #[test]
+    fn hit_observation_uses_sliding_ttl_from_now() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000224").unwrap();
+        let now = 1_800_000_000;
+        let near_expiry = now + 30;
+        let cache = Arc::new(
+            RecordingPromptCacheObservationCache::new(vec![warm_entry(
+                "hit",
+                TtlClass::Ephemeral5m,
+                near_expiry,
+                1,
+            )])
+            .with_clock_now(now),
+        );
+        let context = PromptCacheObservationContext {
+            upstream_id,
+            canonical_model_id: TEST_MODEL.to_owned(),
+            cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
+            warm_entries_at_decision: vec![warm_entry(
+                "hit",
+                TtlClass::Ephemeral5m,
+                near_expiry,
+                1,
+            )],
+            cache: cache.clone(),
+        };
+
+        let decoded = decode_prompt_cache_observations_pure(
+            &context,
+            PromptCacheUsage {
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 2_400,
+            },
+            now,
+        );
+
+        assert_eq!(decoded.dropped_below_threshold, 0);
+        assert_eq!(decoded.observations.len(), 1);
+        let observation = &decoded.observations[0];
+        assert_eq!(observation.prefix_hash, "hit");
+        assert_eq!(observation.ttl_class, TtlClass::Ephemeral5m);
+        assert_eq!(
+            observation.kind,
+            DecodedPromptCacheObservationKind::Hit,
+            "cache_read>0 must produce a Hit observation"
+        );
+        assert_eq!(
+            observation.expires_at_unix_secs,
+            now + 270,
+            "Hit observation must carry a fresh `now + ttl - grace` (Ephemeral5m -> 300 - 30) so the sliding-TTL semantics of Anthropic's prompt cache are reflected in cc-lb's observation store; regression guard for the router false-cold bug"
+        );
+        assert!(
+            observation.expires_at_unix_secs > near_expiry,
+            "sliding refresh must strictly extend the near-expiry stored value ({near_expiry}); got {}",
+            observation.expires_at_unix_secs
+        );
+    }
+
+    #[test]
+    fn hit_observation_honors_configured_grace_margin() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000225").unwrap();
+        let now = 1_800_000_000;
+        let cache = Arc::new(
+            RecordingPromptCacheObservationCache::new(vec![warm_entry(
+                "hit",
+                TtlClass::Ephemeral5m,
+                now + 30,
+                1,
+            )])
+            .with_clock_now(now)
+            .with_grace_secs(60),
+        );
+        let context = PromptCacheObservationContext {
+            upstream_id,
+            canonical_model_id: TEST_MODEL.to_owned(),
+            cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
+            warm_entries_at_decision: vec![warm_entry("hit", TtlClass::Ephemeral5m, now + 30, 1)],
+            cache: cache.clone(),
+        };
+
+        let decoded = decode_prompt_cache_observations_pure(
+            &context,
+            PromptCacheUsage {
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 2_400,
+            },
+            now,
+        );
+
+        assert_eq!(decoded.observations.len(), 1);
+        assert_eq!(
+            decoded.observations[0].expires_at_unix_secs,
+            now + 240,
+            "grace_secs=60 must be applied end-to-end: expected now + 300 - 60"
+        );
     }
 
     #[test]
@@ -4153,6 +4262,7 @@ mod tests {
         upserts: Mutex<Vec<RecordedPromptCacheUpsert>>,
         refreshes: Mutex<Vec<String>>,
         clock_now: u64,
+        grace_secs: u64,
     }
 
     impl RecordingPromptCacheObservationCache {
@@ -4162,11 +4272,17 @@ mod tests {
                 upserts: Mutex::new(Vec::new()),
                 refreshes: Mutex::new(Vec::new()),
                 clock_now: 0,
+                grace_secs: 30,
             }
         }
 
         fn with_clock_now(mut self, clock_now: u64) -> Self {
             self.clock_now = clock_now;
+            self
+        }
+
+        fn with_grace_secs(mut self, grace_secs: u64) -> Self {
+            self.grace_secs = grace_secs;
             self
         }
 
@@ -4229,6 +4345,10 @@ mod tests {
                 .expect("refreshes lock")
                 .push(prefix_hash.to_owned());
             true
+        }
+
+        fn grace_margin_secs(&self) -> u64 {
+            self.grace_secs
         }
 
         fn clock_now_unix_secs(&self) -> u64 {
@@ -4308,6 +4428,10 @@ mod tests {
             _now_unix_secs: u64,
         ) -> bool {
             false
+        }
+
+        fn grace_margin_secs(&self) -> u64 {
+            30
         }
 
         fn clock_now_unix_secs(&self) -> u64 {

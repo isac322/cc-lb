@@ -950,6 +950,10 @@ mod tests {
             true
         }
 
+        fn grace_margin_secs(&self) -> u64 {
+            30
+        }
+
         fn clock_now_unix_secs(&self) -> u64 {
             0
         }
