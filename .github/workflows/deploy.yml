@@ -41,11 +41,9 @@ jobs:
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.4
-      - name: Install kubeconform
-        run: |
-          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz
-          sudo mv kubeconform /usr/local/bin/
-          kubeconform -v
+      - uses: bmuschko/setup-kubeconform@v1
+        with:
+          kubeconform-version: '0.8.0'
 
       - name: Helm lint (sqlite defaults)
         run: helm lint "$CHART" --set secrets.masterKey="$LINT_MASTER_KEY"

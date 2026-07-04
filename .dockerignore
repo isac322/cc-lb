@@ -1,46 +1,51 @@
-# Build context hygiene for the cc-lb server image.
+# ============================================================================
+# Whitelist build context for the `cc-lb` server image.
 #
-# Keep ALL Cargo.toml / Cargo.lock / crate + plugin + test sources: `cargo build
-# -p cc-lb-server` still needs every workspace member's manifest to resolve the
-# workspace graph, and the tests/*, plugins/* members are declared members.
-# Only exclude large, regenerated, or irrelevant paths.
+# Strategy: ignore EVERYTHING, then re-include only the inputs the build
+# actually consumes. This keeps the context small and deterministic — new files
+# are excluded by default, so nothing leaks in accidentally.
+#
+# If you add a new *compile-time* input (an embedded asset, a codegen source,
+# a new manifest), add a matching `!` rule below and re-verify with a real
+# `docker buildx build`.
+# ============================================================================
 
-# Rust build artifacts (regenerated in-image via cache mounts)
-target/
-**/target/
+# 1) Ignore everything, recursively.
+**
 
-# Node / SPA artifacts (cc-lb-admin/build.rs rebuilds web/dist via bun in-image)
-**/node_modules/
-**/dist/
-**/dist-ssr/
-**/.vite/
+# 2) Cargo workspace graph: every member manifest + the lockfile are required to
+#    resolve the workspace even for `cargo build -p cc-lb-server`.
+!**/Cargo.toml
+!Cargo.lock
+
+# 3) Rust sources and build scripts for every workspace member.
+!**/*.rs
+
+# 4) Toolchain pin + cargo configuration (musl target, linker, rustflags).
+!rust-toolchain.toml
+!.cargo/config.toml
+
+# 5) Compile-time-embedded SQL migrations. The sqlite/postgres storage adapters
+#    embed their `migrations/` dir via `sqlx::migrate!()`, and cc-lb-scheduler
+#    `include_str!()`s its migration SQL. `sqlx::migrate!` reads the whole
+#    directory at compile time, so whitelist all `.sql` rather than guessing.
+!**/*.sql
+
+# 6) cc-lb-admin dashboard SPA sources. `crates/cc-lb-admin/build.rs` builds and
+#    embeds `web/dist` via Bun at compile time, so the web sources must be
+#    present. Its own `node_modules` / build output are (re)generated in-image.
+!crates/cc-lb-admin/web/**
+
+# 7) Re-exclude heavy or generated trees that the broad negations above would
+#    otherwise pull back in. `.dockerignore` does NOT consult `.gitignore`, so a
+#    local `target/` or `node_modules/` on disk must be excluded explicitly, and
+#    these rules come last so they win.
+**/target/**
+**/node_modules/**
+crates/cc-lb-admin/web/dist/**
+crates/cc-lb-admin/web/dist-ssr/**
+crates/cc-lb-admin/web/.vite/**
 **/*.tsbuildinfo
 
-# VCS metadata (build metadata is passed via the GIT_SHA build-arg instead)
-.git/
-.gitignore
-.gitattributes
-
-# CI / tooling / docs — not needed to compile the binary
-.github/
-docs/
-.omo/
-.run/
-.deploy/
-.editorconfig
-.vscode/
-.idea/
-
-# Fuzzing tree is excluded from the workspace and unused by the server build
-fuzz/
-
-# The Docker assets and Helm chart themselves
-Dockerfile
-.dockerignore
-compose.yaml
-deploy/
-
-# Local/editor noise
-*.log
-*.tmp
-**/.DS_Store
+# The fuzz tree is a separate workspace, not built by `-p cc-lb-server`.
+fuzz/**

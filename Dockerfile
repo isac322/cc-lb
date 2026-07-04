@@ -36,8 +36,9 @@ SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 #            .cargo/config.toml rust-lld, which is expected and correct).
 # git:       cc-lb-server/build.rs reads `git rev-parse` (falls back gracefully).
 # libstdc++/libgcc: Bun's runtime dependencies on Alpine.
+# sccache:   optional compiler cache, activated by ARG USE_SCCACHE=1 (CI).
 # hadolint ignore=DL3018
-RUN apk add --no-cache clang lld git libstdc++ libgcc
+RUN apk add --no-cache clang lld git libstdc++ libgcc sccache
 
 # xx scripts (xx-cargo, xx-apk, xx-verify, xx-info, ...).
 COPY --from=xx / /
@@ -62,10 +63,17 @@ COPY . .
 # Build-time metadata / knobs.
 ARG GIT_SHA=""
 ARG SOURCE_DATE_EPOCH=""
-# Cargo feature set for cc-lb-server: "sqlite" (default) or e.g. "sqlite,postgres".
-ARG FEATURES="sqlite"
+# Cargo feature set for cc-lb-server. The default ships BOTH storage backends in
+# one binary; the backend is chosen at runtime via `[storage] kind` in the config
+# ("sqlite" or "postgres"). Override to slim the image to a single backend, e.g.
+# `--build-arg FEATURES=sqlite` or `--build-arg FEATURES=postgres`.
+ARG FEATURES="sqlite,postgres"
 # Set to 1 to skip building the dashboard SPA (ships a placeholder page).
 ARG SKIP_SPA="0"
+# Set to 1 to route rustc through sccache (paired with the /sccache cache mount
+# below). CI enables this for cross-run compiler caching; default off keeps
+# local/release builds dependency-free.
+ARG USE_SCCACHE="0"
 
 # Compile the static musl binary. The cargo download caches (registry/git) and
 # the Bun install cache are reused across builds. The target dir is intentionally
@@ -75,6 +83,7 @@ ARG SKIP_SPA="0"
 RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
     --mount=type=cache,id=bun-${BUILDPLATFORM},sharing=locked,target=/root/.bun/install/cache \
+    --mount=type=cache,id=sccache-${TARGETPLATFORM},sharing=locked,target=/sccache \
 <<EOF
 # A declared ARG is exported into this RUN's env; an empty SOURCE_DATE_EPOCH
 # makes ring's cc/clang C build abort, so drop it unless a real value was passed.
@@ -83,14 +92,16 @@ if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then unset SOURCE_DATE_EPOCH; fi
 export CC_LB_SKIP_WASM_FIXTURE_BUILD=1
 export GIT_SHA="${GIT_SHA}"
 if [ "${SKIP_SPA}" = "1" ]; then export CC_LB_ADMIN_SKIP_SPA=1; fi
+if [ "${USE_SCCACHE}" = "1" ]; then export RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache CARGO_INCREMENTAL=0; fi
 
 xx-cargo build --release --locked \
   -p cc-lb-server \
   --no-default-features --features "${FEATURES}" \
   --target-dir /src/target
+if [ "${USE_SCCACHE}" = "1" ]; then sccache --show-stats; fi
 
 triple="$(xx-cargo --print-target-triple)"
-# Copy the binary out of the (ephemeral) cache-mounted target dir into a layer.
+# Copy the binary out of the ephemeral target dir into the thin /out layer.
 install -Dm0755 "/src/target/${triple}/release/cc-lb" /out/cc-lb
 xx-verify --static /out/cc-lb
 
@@ -113,7 +124,7 @@ CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
 # ---- Final: distroless static (DEFAULT target) ----
 # Ships /etc/passwd, a nonroot user (65532), /tmp, and CA certs — a safe,
 # debuggable base while staying ~2 MB over the static binary.
-FROM gcr.io/distroless/static-debian12:nonroot AS distroless
+FROM gcr.io/distroless/static-debian13:nonroot AS distroless
 COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
 USER 65532:65532
 EXPOSE 8080 9090 9091
