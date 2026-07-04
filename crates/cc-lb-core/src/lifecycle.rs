@@ -1245,6 +1245,7 @@ impl Lifecycle {
             Err(LimitRejectionErr { response, info }) => {
                 let status = response.status();
                 if let Some(o) = observer.as_ref() {
+                    let proxy_setup_ms = duration_to_ms(started.elapsed());
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
                         event_id: o.event_id().to_owned(),
                         decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
@@ -1255,6 +1256,7 @@ impl Lifecycle {
                             limit_violation: info.limit_violation,
                         },
                     });
+                    o.set_termination_timings(None, None, Some(proxy_setup_ms), None, None);
                     o.set_terminal(status, error_codes::LIMIT_REJECTED);
                     o.finish();
                 }
