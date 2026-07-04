@@ -2894,7 +2894,9 @@ fn request_cache_metadata_from_value(
     value: Option<&Value>,
 ) -> RequestCacheMetadata {
     let thread_id = header_to_string(headers, "x-claude-code-session-id")
-        .or_else(|| header_to_string(headers, "x-claude-session-id"));
+        .or_else(|| header_to_string(headers, "x-claude-session-id"))
+        .or_else(|| header_to_string(headers, "x-session-affinity"))
+        .or_else(|| header_to_string(headers, "x-session-id"));
     let Some(value) = value else {
         return RequestCacheMetadata {
             thread_id,
@@ -4094,6 +4096,34 @@ mod tests {
         assert_eq!(hash.len(), 64);
         assert_eq!(hash, metadata.cache_breakpoints[2].prefix_hash);
         assert!(!hash.contains("secret"));
+    }
+
+    #[test]
+    fn request_cache_metadata_uses_opencode_session_affinity_as_thread_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-session-affinity"),
+            HeaderValue::from_static("opencode-session-123"),
+        );
+        let body = Bytes::from_static(br#"{"model":"claude-sonnet-4-5"}"#);
+
+        let metadata = request_cache_metadata(&headers, &body);
+
+        assert_eq!(metadata.thread_id.as_deref(), Some("opencode-session-123"));
+    }
+
+    #[test]
+    fn request_cache_metadata_uses_opencode_x_session_id_as_thread_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-session-id"),
+            HeaderValue::from_static("opencode-session-456"),
+        );
+        let body = Bytes::from_static(br#"{"model":"claude-sonnet-4-5"}"#);
+
+        let metadata = request_cache_metadata(&headers, &body);
+
+        assert_eq!(metadata.thread_id.as_deref(), Some("opencode-session-456"));
     }
 
     #[test]
