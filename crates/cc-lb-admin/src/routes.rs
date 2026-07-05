@@ -121,6 +121,7 @@ pub fn build_router(state: AdminState) -> Router {
         .merge(crate::v1::oauth::router())
         .merge(crate::v1::principals::router())
         .merge(crate::v1::keys::router())
+        .merge(crate::v1::router::router())
         .merge(crate::v1::status::router())
         .merge(crate::v1::upstreams::router())
         .route_layer(middleware::from_fn_with_state(
