@@ -295,14 +295,6 @@ impl DynamicViewBuilder {
         self
     }
 
-    pub fn global_observability_hooks_arc(
-        mut self,
-        global_observability_hooks: Arc<[Arc<dyn ObservabilityHook>]>,
-    ) -> Self {
-        self.global_observability_hooks = Some(global_observability_hooks);
-        self
-    }
-
     pub fn error_normalizer(mut self, error_normalizer: Arc<ErrorNormalizer>) -> Self {
         self.error_normalizer = Some(error_normalizer);
         self
