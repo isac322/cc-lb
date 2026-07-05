@@ -1011,6 +1011,12 @@ async fn build_app_with_storage_inner(
     let (event_fanout_shutdown_tx, event_fanout_shutdown_rx) = watch::channel(false);
     let mut event_fanout_tasks = Vec::new();
     let mut internal_partials_state = None;
+    // Shared with AdminState so the SSE handler subscribes to the same broadcast
+    // the StorageTailPoller feeds. Kept live for the InMemory transport too —
+    // AdminState holds one Sender clone so the channel never closes, and no
+    // poller produces on it (finals arrive via the local bus in that mode).
+    let storage_tail_tx: tokio::sync::broadcast::Sender<cc_lb_core::StorageTailUpdate> =
+        tokio::sync::broadcast::channel(cc_lb_admin::events::DEFAULT_STORAGE_TAIL_CAPACITY).0;
     #[cfg(not(feature = "postgres"))]
     {
         let _ = &event_fanout_shutdown_rx;
@@ -1070,10 +1076,9 @@ async fn build_app_with_storage_inner(
                     event_fanout_shutdown_rx.clone(),
                 ));
 
-                let (storage_tail_tx, _) = tokio::sync::broadcast::channel(4096);
                 event_fanout_tasks.push(cc_lb_core::StorageTailPoller::spawn(
                     storage.clone(),
-                    storage_tail_tx,
+                    storage_tail_tx.clone(),
                     Duration::from_millis(config.event_bus.storage_tail_poll_interval_ms.max(1)),
                     event_fanout_shutdown_rx.clone(),
                 ));
@@ -1531,7 +1536,7 @@ async fn build_app_with_storage_inner(
             .or_else(|| std::env::var(&config.admin.token_env).ok()),
         start_time,
         event_bus: Some(event_bus.clone()),
-        storage_tail: cc_lb_admin::events::storage_tail_channel(),
+        storage_tail: storage_tail_tx,
         clock: clock.clone(),
     };
     let reload_task = config_watcher.clone().map(spawn_reload_watcher);

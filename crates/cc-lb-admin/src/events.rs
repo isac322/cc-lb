@@ -54,11 +54,7 @@ pub struct EventsDeltaQuery {
     pub filters: StreamFilters,
 }
 
-#[derive(Debug, Clone)]
-pub struct StorageTailUpdate {
-    pub cursor: u64,
-    pub event: RequestEvent,
-}
+pub use cc_lb_core::StorageTailUpdate;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RecentEventsPayload {
