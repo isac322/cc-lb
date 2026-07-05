@@ -10,7 +10,6 @@
 //! See `docs.anthropic.com/en/api/messages-streaming` for the event catalog
 //! and `anthropic-sdk-typescript`/`MessageDeltaUsage` for the field schema.
 
-use cc_lb_storage_api::RequestEvent;
 use serde_json::Value;
 
 const UPSTREAM_ERROR_MESSAGE_MAX_BYTES: usize = 1024;
@@ -43,22 +42,6 @@ pub(crate) struct UsageCounts {
     /// flip `present=true` early enough for the dashboard to see motion before
     /// the final `message_delta` arrives.
     pub(crate) estimated_thinking_progress: u64,
-}
-
-impl UsageCounts {
-    #[allow(dead_code)]
-    pub(crate) fn apply_extras_to(&self, event: &mut RequestEvent) {
-        if !self.present {
-            return;
-        }
-        event.thinking_tokens = (self.thinking_tokens > 0).then_some(self.thinking_tokens);
-        event.web_search_requests =
-            (self.web_search_requests > 0).then_some(self.web_search_requests);
-        event.web_fetch_requests = (self.web_fetch_requests > 0).then_some(self.web_fetch_requests);
-        event.service_tier = self.service_tier.clone();
-        event.inference_geo = self.inference_geo.clone();
-        event.iterations = self.iterations.clone();
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
