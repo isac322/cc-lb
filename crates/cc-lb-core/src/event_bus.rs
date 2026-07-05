@@ -17,12 +17,12 @@
 use std::sync::{Arc, Mutex};
 
 use cc_lb_lifecycle::LifecycleEvent;
-use cc_lb_storage_api::RequestEvent;
+use cc_lb_storage_api::{RequestEvent, RequestEventPartial};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 
 /// Default capacity for the broadcast channel powering admin SSE subscribers.
-pub const DEFAULT_BROADCAST_CAPACITY: usize = 1024;
+pub const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
 
 /// Default capacity for the lifecycle-event broadcast channel.
 ///
@@ -75,33 +75,66 @@ impl RequestEventPhase {
     }
 }
 
-/// Wire envelope carried by [`RequestEventBus::publish`].
+/// Terminal snapshot carried by [`RequestEventUpdate::Final`].
+///
+/// `cursor` is the storage-assigned opaque monotonic position of the row
+/// (SQLite `id` or Postgres `seq`) returned by
+/// [`RequestEventStore::append_request_event`]. The SSE handler uses it as
+/// the SSE `id:` value so `Last-Event-ID` reconnection works structurally.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RequestEventUpdate {
-    pub phase: RequestEventPhase,
+pub struct FinalRequestEventUpdate {
     pub event: RequestEvent,
+    pub cursor: u64,
+}
+
+/// Wire envelope carried by [`RequestEventBus::publish`]. Adjacent-tagged
+/// discriminated union: `{"phase":"partial","payload":{...}}` or
+/// `{"phase":"final","payload":{"event":{...},"cursor":123}}`.
+///
+/// See `.omo/plans/dashboard-live-tail-redesign.md` §3.3 for wire format
+/// rationale.
+// Both variants intentionally hold their payload inline: the enum lives in a
+// tokio broadcast slot pool with `broadcast_capacity` slots (default 4096) so
+// slot size × capacity ≈ a few MB per bus. Boxing either variant would trade
+// that fixed memory for a heap allocation on every publish (2500+ /s under
+// load), which is the far hotter path. Bus count is O(1) per admin server, so
+// the memory ceiling is acceptable.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "phase", content = "payload", rename_all = "snake_case")]
+pub enum RequestEventUpdate {
+    Partial(RequestEventPartial),
+    Final(FinalRequestEventUpdate),
 }
 
 impl RequestEventUpdate {
-    pub fn partial(event: RequestEvent) -> Self {
-        Self {
-            phase: RequestEventPhase::Partial,
-            event,
-        }
+    pub fn partial(snapshot: RequestEventPartial) -> Self {
+        Self::Partial(snapshot)
     }
 
-    /// Construct a `Final` update.
-    ///
     /// Trailing underscore avoids the `final` reserved keyword.
-    pub fn final_(event: RequestEvent) -> Self {
-        Self {
-            phase: RequestEventPhase::Final,
-            event,
+    pub fn final_(event: RequestEvent, cursor: u64) -> Self {
+        Self::Final(FinalRequestEventUpdate { event, cursor })
+    }
+
+    pub fn phase(&self) -> RequestEventPhase {
+        match self {
+            Self::Partial(_) => RequestEventPhase::Partial,
+            Self::Final(_) => RequestEventPhase::Final,
         }
     }
 
     pub fn is_final(&self) -> bool {
-        matches!(self.phase, RequestEventPhase::Final)
+        matches!(self, Self::Final(_))
+    }
+
+    pub fn event_id(&self) -> &str {
+        match self {
+            Self::Partial(snapshot) => &snapshot.event_id,
+            Self::Final(FinalRequestEventUpdate { event, .. }) => {
+                event.event_id.as_deref().unwrap_or("")
+            }
+        }
     }
 }
 
@@ -139,6 +172,42 @@ pub trait RequestEventBus: Send + Sync + 'static {
     fn publish_lifecycle(&self, event: LifecycleEvent);
 
     fn subscribe_lifecycle(&self) -> LifecycleBusReceiver;
+}
+
+#[async_trait::async_trait]
+pub trait EventFanout: Send + Sync {
+    async fn publish_partial(&self, update: RequestEventUpdate) -> Result<(), BusError>;
+
+    fn subscribe(&self) -> BusReceiver;
+}
+
+#[derive(Clone)]
+pub struct InMemoryFanout {
+    bus: InMemoryBus,
+}
+
+impl InMemoryFanout {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            bus: InMemoryBus::with_capacity(capacity),
+        }
+    }
+
+    pub fn bus(&self) -> InMemoryBus {
+        self.bus.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl EventFanout for InMemoryFanout {
+    async fn publish_partial(&self, update: RequestEventUpdate) -> Result<(), BusError> {
+        self.bus.publish(update);
+        Ok(())
+    }
+
+    fn subscribe(&self) -> BusReceiver {
+        RequestEventBus::subscribe(&self.bus)
+    }
 }
 
 /// Default single-process implementation.
@@ -762,8 +831,22 @@ mod tests {
         RequestEvent {
             ts: 1_700_000_000,
             request_id: request_id.to_string(),
+            event_id: Some(format!("event-{request_id}")),
             status: 200,
             duration_ms: 42,
+            ..Default::default()
+        }
+    }
+
+    fn sample_partial(request_id: &str) -> RequestEventPartial {
+        RequestEventPartial {
+            event_id: format!("event-{request_id}"),
+            request_id: request_id.to_owned(),
+            ts: 1_700_000_000,
+            ts_ms: 1_700_000_000_000,
+            last_update_ms: 1_700_000_000_000,
+            elapsed_ms: 0,
+            stream: false,
             ..Default::default()
         }
     }
@@ -775,21 +858,21 @@ mod tests {
             panic!("InMemoryBus should yield InMemory receiver");
         };
 
-        bus.publish(RequestEventUpdate::partial(sample_event("req-1")));
-        bus.publish(RequestEventUpdate::final_(sample_event("req-2")));
+        bus.publish(RequestEventUpdate::partial(sample_partial("req-1")));
+        bus.publish(RequestEventUpdate::final_(sample_event("req-2"), 2));
 
         let sse_a = rx_sse.recv().await.expect("sse partial");
         let sse_b = rx_sse.recv().await.expect("sse final");
-        assert_eq!(sse_a.phase, RequestEventPhase::Partial);
-        assert_eq!(sse_a.event.request_id, "req-1");
-        assert_eq!(sse_b.phase, RequestEventPhase::Final);
-        assert_eq!(sse_b.event.request_id, "req-2");
+        assert_eq!(sse_a.phase(), RequestEventPhase::Partial);
+        assert_eq!(sse_a.event_id(), "event-req-1");
+        assert_eq!(sse_b.phase(), RequestEventPhase::Final);
+        assert_eq!(sse_b.event_id(), "event-req-2");
     }
 
     #[tokio::test]
     async fn publish_with_no_subscribers_is_noop() {
         let bus = InMemoryBus::new();
-        bus.publish(RequestEventUpdate::final_(sample_event("orphan")));
+        bus.publish(RequestEventUpdate::final_(sample_event("orphan"), 1));
     }
 
     #[tokio::test]
@@ -798,9 +881,9 @@ mod tests {
         let BusReceiver::InMemory(mut rx) = bus.subscribe() else {
             panic!("InMemoryBus should yield InMemory receiver");
         };
-        bus.publish(RequestEventUpdate::final_(sample_event("a")));
-        bus.publish(RequestEventUpdate::final_(sample_event("b")));
-        bus.publish(RequestEventUpdate::final_(sample_event("c")));
+        bus.publish(RequestEventUpdate::final_(sample_event("a"), 1));
+        bus.publish(RequestEventUpdate::final_(sample_event("b"), 2));
+        bus.publish(RequestEventUpdate::final_(sample_event("c"), 3));
 
         let err = rx.recv().await.expect_err("expected Lagged");
         match err {

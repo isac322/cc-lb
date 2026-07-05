@@ -238,6 +238,149 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
+/// In-flight snapshot of an active request, emitted by the lifecycle event
+/// assembler while the request is still executing (before finalization).
+///
+/// The dashboard uses partials to render live request rows that update as the
+/// request progresses (streaming, incremental usage, live cost estimate).
+/// Partials are **memory-only**: they are not persisted to storage. Only the
+/// final [`RequestEvent`] row is durable.
+///
+/// Fields are a strict subset of [`RequestEvent`] limited to what is
+/// meaningful before the request finalizes. Terminal-only fields (final
+/// `status`, `duration_ms`, `error_code`, `routing_trace`, `internal_errors`,
+/// `iterations`, `cache_breakpoints`, and detailed stream timing) are
+/// intentionally excluded to keep partial payloads compact.
+///
+/// See `.omo/plans/dashboard-live-tail-redesign.md` §3.4 for the field
+/// classification rationale.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RequestEventPartial {
+    pub event_id: String,
+    pub request_id: String,
+    pub ts: u64,
+    pub ts_ms: u64,
+    /// Millisecond timestamp of the most recent lifecycle event merged into
+    /// this snapshot. Client uses this for orphan-eviction and freshness UX.
+    pub last_update_ms: u64,
+    /// Milliseconds since `ts_ms`. Rendered as the running duration in the
+    /// dashboard until finalization replaces it with the exact `duration_ms`.
+    pub elapsed_ms: u64,
+    pub stream: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<RequestEventUpstream>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// HTTP status observed from upstream response headers, if received.
+    /// Distinct from final client-visible `status` on [`RequestEvent`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_response_status: Option<u16>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens_5m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens_1h: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search_requests: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_fetch_requests: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_geo: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_input_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_output_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_creation_5m_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_creation_1h_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_read_micros: Option<i64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control_block_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_prefix_hash: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_reserve_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulkhead_wait_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_reused: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_ttfb_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_body_chunk_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestEventStreamFilters {
+    pub principal_id: Option<String>,
+    pub model: Option<String>,
+    pub upstream: Option<RequestEventUpstream>,
+    pub upstream_id: Option<Uuid>,
+    pub status_class: Option<StatusClass>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusClass {
+    TwoXx,
+    ThreeXx,
+    FourXx,
+    FiveXx,
+}
+
+impl StatusClass {
+    pub fn matches(self, status: u16) -> bool {
+        match self {
+            Self::TwoXx => (200..=299).contains(&status),
+            Self::ThreeXx => (300..=399).contains(&status),
+            Self::FourXx => (400..=499).contains(&status),
+            Self::FiveXx => (500..=599).contains(&status),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestEventUpstream {

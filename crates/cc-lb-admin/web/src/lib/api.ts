@@ -278,29 +278,75 @@ export interface DashboardUsageResponse {
   observed: boolean;
 }
 
-export interface RequestEventUpdate {
-  phase: 'partial' | 'final';
-  event: RequestEvent;
-}
-
-/**
- * Runtime validation for SSE frames from `/admin/events/stream`. Mirrors the
- * Rust `RequestEventUpdate` wire envelope (see
- * `crates/cc-lb-core/src/event_bus.rs`). Only the invariants the consumer
- * relies on for routing/dedup (`phase`, `event.request_id`) are strictly
- * validated; the rest of `event` is passed through as `unknown` and cast to
- * `RequestEvent` at the boundary — schema drift on non-invariant fields is
- * tolerated so a backend adding a new metric never breaks the live tail.
- */
-export const RequestEventUpdateSchema = z.looseObject({
-  phase: z.enum(['partial', 'final']),
-  event: z.looseObject({
-    request_id: z.string().min(1),
-    ts: z.number().nullable(),
-    status: z.number(),
-    duration_ms: z.number(),
-  }),
+export const RequestEventPartialSchema = z.looseObject({
+  event_id: z.string().min(1),
+  request_id: z.string().min(1),
+  ts: z.number().nullable(),
+  ts_ms: z.number().nullable(),
+  last_update_ms: z.number().nullable().optional(),
+  elapsed_ms: z.number().nullable().optional(),
+  stream: z.boolean().nullable().optional(),
+  principal_id: z.string().nullable().optional(),
+  principal_kind: z.string().nullable().optional(),
+  key_id: z.string().nullable().optional(),
+  upstream: z.string().nullable().optional(),
+  upstream_id: z.string().nullable().optional(),
+  upstream_name: z.string().nullable().optional(),
+  model: z.string().nullable().optional(),
+  upstream_response_status: z.number().nullable().optional(),
+  input_tokens: z.number().nullable().optional(),
+  output_tokens: z.number().nullable().optional(),
+  cache_creation_input_tokens: z.number().nullable().optional(),
+  cache_creation_input_tokens_5m: z.number().nullable().optional(),
+  cache_creation_input_tokens_1h: z.number().nullable().optional(),
+  cache_read_input_tokens: z.number().nullable().optional(),
+  thinking_tokens: z.number().nullable().optional(),
+  web_search_requests: z.number().nullable().optional(),
+  web_fetch_requests: z.number().nullable().optional(),
+  service_tier: z.string().nullable().optional(),
+  inference_geo: z.string().nullable().optional(),
+  cost_usd_micros: z.number().nullable().optional(),
+  cost_input_micros: z.number().nullable().optional(),
+  cost_output_micros: z.number().nullable().optional(),
+  cost_cache_creation_5m_micros: z.number().nullable().optional(),
+  cost_cache_creation_1h_micros: z.number().nullable().optional(),
+  cost_cache_read_micros: z.number().nullable().optional(),
+  cache_control_block_count: z.number().nullable().optional(),
+  cache_prefix_hash: z.string().nullable().optional(),
+  auth_ms: z.number().nullable().optional(),
+  route_ms: z.number().nullable().optional(),
+  limit_reserve_ms: z.number().nullable().optional(),
+  bulkhead_wait_ms: z.number().nullable().optional(),
+  dns_ms: z.number().nullable().optional(),
+  connect_ms: z.number().nullable().optional(),
+  connection_reused: z.boolean().nullable().optional(),
+  shape_ms: z.number().nullable().optional(),
+  sign_ms: z.number().nullable().optional(),
+  upstream_ttfb_ms: z.number().nullable().optional(),
+  first_body_chunk_ms: z.number().nullable().optional(),
 });
+
+export const FinalRequestEventUpdateSchema = z.object({
+  event: z.any(),
+  cursor: z.number(),
+});
+
+export const RequestEventUpdateSchema = z.discriminatedUnion('phase', [
+  z.object({
+    phase: z.literal('partial'),
+    payload: RequestEventPartialSchema,
+  }),
+  z.object({
+    phase: z.literal('final'),
+    payload: FinalRequestEventUpdateSchema,
+  }),
+]);
+
+export type RequestEventPartial = z.infer<typeof RequestEventPartialSchema>;
+export type FinalRequestEventUpdate = z.infer<
+  typeof FinalRequestEventUpdateSchema
+>;
+export type RequestEventUpdate = z.infer<typeof RequestEventUpdateSchema>;
 
 /**
  * Async-iterate typed `RequestEventUpdate` frames from the admin SSE stream.
@@ -350,10 +396,7 @@ export async function* streamRequestEventUpdates(
         }
         continue;
       }
-      yield {
-        phase: parsed.data.phase,
-        event: parsed.data.event as RequestEvent,
-      };
+      yield parsed.data;
     }
   } finally {
     signal.removeEventListener('abort', onAbort);
@@ -393,6 +436,7 @@ export interface RequestEvent {
   cost_cache_creation_1h_micros?: number;
   cost_cache_read_micros?: number;
   duration_ms: number;
+  elapsed_ms?: number | null;
   proxy_setup_ms?: number;
   shape_ms?: number;
   sign_ms?: number;

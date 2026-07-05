@@ -644,10 +644,17 @@ async fn lqa_4a_admin_sse_stream_emits_final_request_event_update() {
     let response = post_happy(&server).await;
 
     assert_eq!(response.status, 200);
-    let frame = next_sse_data(&mut reader).await;
+    // The live-tail redesign (plan §3.9) precedes the final frame with a cursor
+    // bookmark, optional partial snapshots, and heartbeats. Skip everything that
+    // is not phase="final" so this test continues to assert on the terminal row.
+    let frame = loop {
+        let frame = next_sse_data(&mut reader).await;
+        if frame["phase"] == "final" {
+            break frame;
+        }
+    };
     eprintln!("admin sse frame: {frame}");
-    assert_eq!(frame["phase"], "final");
-    let event = &frame["event"];
+    let event = &frame["payload"]["event"];
     assert_eq!(event["status"], 200);
     assert!(event["input_tokens"].as_i64().unwrap_or_default() > 0);
     assert!(event["output_tokens"].as_i64().unwrap_or_default() > 0);

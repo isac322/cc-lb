@@ -41,6 +41,7 @@ http.workspace = true
 http-body-util.workspace = true
 hex.workspace = true
 humantime = "2.3"
+metrics.workspace = true
 bytes.workspace = true
 base64.workspace = true
 hyper = { workspace = true, features = ["client", "http1"] }
@@ -74,5 +75,4 @@ cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 apalis-postgres = "^1.0.0-rc.8"
 apalis-sqlite = "^1.0.0-rc.8"
 metrics-exporter-prometheus.workspace = true
-metrics.workspace = true
 scheduler-sqlx = { package = "sqlx", version = "=0.8.6", default-features = false, features = ["chrono", "json", "migrate", "postgres", "runtime-tokio", "sqlite", "tls-rustls-ring", "uuid"] }

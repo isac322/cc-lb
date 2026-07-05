@@ -45,9 +45,12 @@ chrono.workspace = true
 metrics.workspace = true
 parking_lot = "0.12"
 rand = "0.10"
+reqwest.workspace = true
+secrecy.workspace = true
 serde_json.workspace = true
 sonic-rs.workspace = true
 sha2 = "0.11"
+sqlx.workspace = true
 subtle = "2.6.1"
 thiserror.workspace = true
 tiktoken-rs = "0.12"
@@ -64,6 +67,7 @@ zstd.workspace = true
 [dev-dependencies]
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 insta.workspace = true
+proptest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true, features = ["util"] }

@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import type { RequestEvent } from '../../../lib/api';
-import { fmtN, fmtUsd } from '../../../lib/format';
+import { fmtN, formatCostMicros } from '../../../lib/format';
 import { type ActiveSliceControl, PieChart, type PieSlice } from './PieChart';
 import { SLICE_COLORS } from './sliceColors';
 
@@ -56,10 +56,10 @@ export function buildCostSlices(event: RequestEvent): PieSlice[] {
       label: r.label,
       value: r.costMicros,
       color: r.color,
-      primary: fmtUsd(r.costMicros),
+      primary: formatCostMicros(r.costMicros),
       secondary:
         r.tokens != null && r.tokens > 0 ? `${fmtN(r.tokens)} tk` : undefined,
-      aria: `${r.label} · ${fmtUsd(r.costMicros)}${r.tokens != null && r.tokens > 0 ? ` · ${fmtN(r.tokens)} tokens` : ''}`,
+      aria: `${r.label} · ${formatCostMicros(r.costMicros)}${r.tokens != null && r.tokens > 0 ? ` · ${fmtN(r.tokens)} tokens` : ''}`,
     }));
 }
 
@@ -84,7 +84,7 @@ export function CostPie({
   return (
     <PieChart
       slices={slices}
-      totalPrimary={fmtUsd(totalUsd)}
+      totalPrimary={formatCostMicros(totalUsd)}
       totalSecondary={totalSecondary}
       ariaLabel="Cost breakdown"
       emptyMessage="No cost"

@@ -142,14 +142,20 @@ where
             ..Default::default()
         };
 
-        storage
+        let first_cursor = storage
             .append_request_event(&first)
             .await
             .context("first write must succeed (no partial-index match error)")?;
-        storage
+        let second_cursor = storage
             .append_request_event(&second)
             .await
             .context("second write with same event_id must succeed (ON CONFLICT DO NOTHING)")?;
+        ensure!(
+            first_cursor == second_cursor,
+            "duplicate event_id should return existing cursor: first {}, second {}",
+            first_cursor,
+            second_cursor
+        );
 
         let read_back = storage.query_request_events(0, u64::MAX, 10).await?;
         ensure!(

@@ -373,7 +373,7 @@ impl AuditStore for MemoryStorage {
 
 #[async_trait]
 impl RequestEventStore for MemoryStorage {
-    async fn append_request_event(&self, _event: &RequestEvent) -> StorageResult<()> {
+    async fn append_request_event(&self, _event: &RequestEvent) -> StorageResult<u64> {
         unsupported()
     }
 

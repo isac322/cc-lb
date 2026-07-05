@@ -52,8 +52,11 @@ pub mod lifecycle_rate_limit_header_subscriber;
 pub mod lifecycle_subscription_quota_subscriber;
 #[cfg(not(loom))]
 pub mod limit_state_writer;
+pub mod metrics_labels;
 #[cfg(not(loom))]
 pub mod model_resolution;
+#[cfg(not(loom))]
+pub mod pg_notify_fanout;
 pub mod plan_capacity;
 #[allow(dead_code)]
 mod rate_limit_headers;
@@ -63,6 +66,8 @@ pub mod request_timing;
 mod sse_error_frame;
 #[cfg(not(loom))]
 mod sse_relay;
+#[cfg(not(loom))]
+pub mod storage_tail_poller;
 #[cfg(not(loom))]
 pub mod subscription_metadata_hook;
 #[cfg(not(loom))]
@@ -124,8 +129,9 @@ pub use event_bus::{
     BusError, BusReceiver, DEFAULT_BROADCAST_CAPACITY, DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY,
     DEFAULT_LIFECYCLE_BROADCAST_CAPACITY, DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY,
     DEFAULT_LIFECYCLE_PRICING_CAPACITY, DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY,
-    DEFAULT_LIFECYCLE_WRITER_CAPACITY, InMemoryBus, LifecycleBusReceiver, RequestEventBus,
-    RequestEventPhase, RequestEventUpdate, new_in_memory_bus, record_dashboard_sse_lagged,
+    DEFAULT_LIFECYCLE_WRITER_CAPACITY, EventFanout, InMemoryBus, InMemoryFanout,
+    LifecycleBusReceiver, RequestEventBus, RequestEventPhase, RequestEventUpdate,
+    new_in_memory_bus, record_dashboard_sse_lagged,
 };
 #[cfg(not(loom))]
 pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop};
@@ -178,6 +184,14 @@ pub use lifecycle_subscription_quota_subscriber::{
 pub use limit_state_writer::{
     PrincipalLimitStateEnqueueError, PrincipalLimitStateSink, start_principal_limit_state_writer,
 };
+pub use metrics_labels::{
+    NotifyDropReason, NotifyHttpOutcome, NotifySentOutcome, PartialTrigger, ResetReason,
+};
+#[cfg(not(loom))]
+pub use pg_notify_fanout::{
+    DEFAULT_PG_NOTIFY_CHANNEL, PARTIAL_NOTIFY_MPSC_CAPACITY, PartialRetentionCache, PgListener,
+    PgNotifier, PgNotifyFanout,
+};
 pub use rate_limit_headers::{
     UnifiedQuotaObservation, clamp_utilization_fraction, parse_anthropic_unified_headers,
     percent_to_utilization_fraction,
@@ -188,6 +202,8 @@ pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
 pub use sse_relay::{
     PromptCacheObservationEventEmitter, RelayError, SseBatchConfig, SseRelay, StreamingUsage,
 };
+#[cfg(not(loom))]
+pub use storage_tail_poller::{StorageTailPoller, StorageTailUpdate};
 #[cfg(not(loom))]
 pub use subscription_metadata_hook::{
     MetadataHookEnqueueError, MetadataHookHandle, MetadataHookRequest, MetadataRefreshEnqueue,
