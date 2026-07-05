@@ -2495,7 +2495,7 @@ fn execute_filter_pipeline(
                     upstream_id: output.kept_upstream_ids.first().copied(),
                     reason: Some(output.reason.clone()),
                     duration_us: duration_to_us(stage_elapsed),
-                    subscription_preference: None,
+                    subscription_preference: output.subscription_preference.clone(),
                 });
                 current = keep_filter_candidates(&current, &output.kept_upstream_ids);
             }
@@ -2538,6 +2538,7 @@ fn execute_filter_pipeline(
 struct ValidatedOutput {
     kept_upstream_ids: Vec<Uuid>,
     reason: String,
+    subscription_preference: Option<cc_lb_plugin_api::SubscriptionPreferenceTrace>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -2596,6 +2597,7 @@ fn validate_filter_output(
     Ok(ValidatedOutput {
         kept_upstream_ids: out.kept_upstream_ids.clone(),
         reason: out.reason.clone(),
+        subscription_preference: out.subscription_preference.clone(),
     })
 }
 

@@ -191,16 +191,30 @@ fn evaluate(
         }
     }
 
+    let all_assessments: Vec<cc_lb_plugin_api::CandidateUrgency> = buckets
+        .iter()
+        .flat_map(|bucket| bucket.iter())
+        .map(|a| cc_lb_plugin_api::CandidateUrgency {
+            upstream_id: a.candidate.upstream_id,
+            tier: tier_to_plugin_api(a.tier),
+            urgency: a.urgency,
+        })
+        .collect();
+
     for bucket in buckets.iter() {
         if bucket.is_empty() {
             continue;
         }
         let winner = pick_within_tier(bucket, ctx, config);
+        let trace = cc_lb_plugin_api::SubscriptionPreferenceTrace {
+            chosen_tier: tier_to_plugin_api(winner.tier),
+            candidates: all_assessments,
+        };
         return FilterOutput {
             kept_upstream_ids: vec![winner.candidate.upstream_id],
             reason: SUBSCRIPTION_ALIVE_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
-            subscription_preference: None,
+            subscription_preference: Some(trace),
         };
     }
 
@@ -245,6 +259,15 @@ enum Tier {
     PartialBase = 1,
     Overage = 2,
     UnknownProbe = 3,
+}
+
+fn tier_to_plugin_api(tier: Tier) -> cc_lb_plugin_api::SubscriptionTier {
+    match tier {
+        Tier::KnownBase => cc_lb_plugin_api::SubscriptionTier::KnownBase,
+        Tier::PartialBase => cc_lb_plugin_api::SubscriptionTier::PartialBase,
+        Tier::Overage => cc_lb_plugin_api::SubscriptionTier::Overage,
+        Tier::UnknownProbe => cc_lb_plugin_api::SubscriptionTier::UnknownProbe,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
