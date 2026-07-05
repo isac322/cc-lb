@@ -1569,9 +1569,7 @@ async fn build_app_with_storage_inner(
         drain_controller: drain_controller.clone(),
         aead: aead.clone(),
         storage: storage.clone(),
-        scheduler_backend: scheduler_lazy_handle.clone(),
         dynamic_view: dynamic_view.clone(),
-        key_store: Some(key_store.clone()),
         builtin_authn: Some(builtin_authn.clone()),
         clock: clock.clone(),
     };
@@ -2022,11 +2020,7 @@ struct ProxyState {
     drain_controller: DrainController,
     aead: Arc<AeadService>,
     storage: Arc<dyn Storage>,
-    #[allow(dead_code)]
-    scheduler_backend: crate::scheduler_factory::SchedulerBackend,
     dynamic_view: Arc<DynamicViewHolder>,
-    #[allow(dead_code)]
-    key_store: Option<Arc<KeyStore>>,
     builtin_authn: Option<Arc<BuiltinAuthn>>,
     clock: ClockHandle,
 }
