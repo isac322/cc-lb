@@ -102,7 +102,15 @@ pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
 
 /// Salt for the weighted-rendezvous hash. Bumped as a version stamp when the
 /// selection algorithm changes shape; older salts must never be reused.
-const RENDEZVOUS_SALT: &str = "cc-lb:subscription-preference:v3:weighted-rendezvous:2026-07-04";
+///
+/// v4 (2026-07-05): WRH now hashes over the request's `thread_id` (session
+/// identifier) rather than `request_id`. Prior v3 keyed WRH on `request_id`,
+/// which is unique per request and therefore treated every turn of a long
+/// conversation as an independent random draw — routing them to different
+/// upstreams and destroying prompt-cache affinity (each turn paid the full
+/// cache-creation cost instead of a cache read). See production incident
+/// 2026-07-05 06:24 UTC on session `ses_0d40d66f8...` for the trace.
+const RENDEZVOUS_SALT: &str = "cc-lb:subscription-preference:v4:weighted-rendezvous:2026-07-05";
 
 // -- Config knobs (compiled defaults today; expose per-principal later). ----
 
@@ -601,7 +609,7 @@ fn wrh_key(
 ) -> WrhKey {
     let hash = rendezvous_hash(
         config.rendezvous_hash_salt,
-        &ctx.request_id,
+        wrh_session_key(ctx),
         assessment.candidate.upstream_id,
     );
     let weight = if uniform { 1.0 } else { assessment.urgency };
@@ -645,7 +653,18 @@ fn hash_to_open_unit(hash: u64) -> f64 {
 // step spreads any local input change across all 64 output bits, restoring
 // the "independent uniforms per candidate" property WRH requires.
 
-fn rendezvous_hash(salt: &str, request_id: &str, upstream_id: Uuid) -> u64 {
+/// Session-stable input for WRH: prefer `thread_id` so every turn of a
+/// multi-turn conversation lands on the same upstream (cache affinity).
+/// Fall back to `request_id` for stateless calls that carry no session
+/// header, keeping legacy behaviour for warmup / one-shot requests.
+fn wrh_session_key(ctx: &RequestContext) -> &str {
+    match ctx.thread_id.as_deref() {
+        Some(id) if !id.is_empty() => id,
+        _ => ctx.request_id.as_str(),
+    }
+}
+
+fn rendezvous_hash(salt: &str, session_key: &str, upstream_id: Uuid) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let fnv_prime: u64 = 0x100_0000_01b3;
     let mix = |h: &mut u64, byte: u8| {
@@ -656,7 +675,7 @@ fn rendezvous_hash(salt: &str, request_id: &str, upstream_id: Uuid) -> u64 {
         mix(&mut h, b);
     }
     mix(&mut h, 0);
-    for &b in request_id.as_bytes() {
+    for &b in session_key.as_bytes() {
         mix(&mut h, b);
     }
     mix(&mut h, 0);

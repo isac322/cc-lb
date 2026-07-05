@@ -31,6 +31,7 @@ impl UpstreamDialect for BodyDialect {
 async fn sign_does_not_modify_body() {
     let ctx = RequestContext {
         request_id: "req-2".to_owned(),
+        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),

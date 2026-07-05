@@ -21,6 +21,7 @@ pub fn request_context(
 ) -> RequestContext {
     RequestContext {
         request_id: "req-direct-identity".to_owned(),
+        thread_id: None,
         downstream_headers,
         method,
         path: path.to_owned(),

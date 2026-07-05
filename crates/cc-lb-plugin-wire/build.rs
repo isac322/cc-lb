@@ -53,12 +53,12 @@ fn main() {
         SchemaEntry {
             impl_generics: "",
             ty: "FilterRequest",
-            descriptor: "FilterRequest{body:Box<[u8]>,candidates:Box<[UpstreamCandidate]>,headers:Box<[Header]>,method:Box<str>,path:Box<str>,principal:Principal,query:Option<Box<str>>,request_id:Box<str>}",
+            descriptor: "FilterRequest{body:Box<[u8]>,candidates:Box<[UpstreamCandidate]>,headers:Box<[Header]>,method:Box<str>,path:Box<str>,principal:Principal,query:Option<Box<str>>,request_id:Box<str>,thread_id:Option<Box<str>>}",
         },
         SchemaEntry {
             impl_generics: "<'a>",
             ty: "FilterRequestRef<'a>",
-            descriptor: "FilterRequestRef{body:&[u8],candidates:&[UpstreamCandidateRef],headers:&[HeaderRef],method:&str,path:&str,principal:PrincipalRef,query:Option<QueryRef>,request_id:&str}",
+            descriptor: "FilterRequestRef{body:&[u8],candidates:&[UpstreamCandidateRef],headers:&[HeaderRef],method:&str,path:&str,principal:PrincipalRef,query:Option<QueryRef>,request_id:&str,thread_id:Option<QueryRef>}",
         },
         SchemaEntry {
             impl_generics: "<'a>",

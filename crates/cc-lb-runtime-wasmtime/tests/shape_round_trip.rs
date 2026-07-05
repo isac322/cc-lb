@@ -67,6 +67,7 @@ fn fixture_request() -> RequestContext {
     );
     RequestContext {
         request_id: "req-shape".to_owned(),
+        thread_id: None,
         downstream_headers: headers,
         method: Method::POST,
         path: "/v1/messages".to_owned(),
