@@ -71,6 +71,7 @@ async fn sign_loads_api_key_from_storage_key() {
 
     let ctx = RequestContext {
         request_id: "req-internal-key-storage-test".to_owned(),
+        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),

@@ -222,8 +222,10 @@ fn host_to_wire_request(
         })
         .collect();
     let query_ref = ctx.query.as_deref().map(|s| QueryRef { value: s });
+    let thread_id_ref = ctx.thread_id.as_deref().map(|s| QueryRef { value: s });
     let request = FilterRequestRef {
         request_id: ctx.request_id.as_str(),
+        thread_id: thread_id_ref,
         method: ctx.method.as_str(),
         path: ctx.path.as_str(),
         query: query_ref,
@@ -755,6 +757,7 @@ mod tests {
         );
         RequestContext {
             request_id: "req-123".to_owned(),
+            thread_id: None,
             downstream_headers: headers,
             method: http::Method::POST,
             path: "/v1/messages".to_owned(),

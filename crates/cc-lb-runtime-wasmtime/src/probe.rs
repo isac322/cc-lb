@@ -77,6 +77,7 @@ fn probe_observe_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRuntimeError> 
 fn sample_filter_request() -> FilterRequest {
     FilterRequest {
         request_id: Box::from("probe-req-1"),
+        thread_id: None,
         method: Box::from("POST"),
         path: Box::from("/v1/messages"),
         query: None,

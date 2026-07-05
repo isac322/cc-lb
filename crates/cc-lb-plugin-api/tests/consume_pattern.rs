@@ -56,6 +56,7 @@ impl Signer for DummySigner {
 fn signer_seals_by_consuming_shaped_request() {
     let ctx = RequestContext {
         request_id: "req-1".to_owned(),
+        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
@@ -115,6 +116,7 @@ fn controlled_builder_cannot_be_fabricated_by_normal_callers() {
 
     let ctx = RequestContext {
         request_id: "req-2".to_owned(),
+        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),

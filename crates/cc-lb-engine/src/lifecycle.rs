@@ -864,6 +864,7 @@ impl Lifecycle {
             .unwrap_or_else(|| format!("preview-{}", Uuid::new_v4()));
         let ctx = RequestContext {
             request_id,
+            thread_id: cache_metadata.thread_id.clone(),
             downstream_headers: input.headers,
             method: http::Method::POST,
             path: "/v1/messages".to_owned(),
@@ -1023,6 +1024,7 @@ impl Lifecycle {
         } else {
             String::new()
         };
+        ctx.thread_id = cache_metadata.thread_id.clone();
 
         let auth_start = Instant::now();
         let success = if let Some(success) = self
@@ -1866,6 +1868,7 @@ impl Lifecycle {
 
         let ctx = RequestContext {
             request_id,
+            thread_id: None,
             downstream_headers: {
                 strip_hop_by_hop(&mut parts.headers);
                 parts.headers
