@@ -5,11 +5,11 @@ use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use super::metrics::{record_http_fetch, record_queue_usage};
+use super::metrics::{record_http_fetch, record_pg_listener_reconnect, record_queue_usage};
 use super::notifier::DEFAULT_PG_NOTIFY_CHANNEL;
 use super::protocol::TruncatedPartialNotifyOwned;
 use crate::event_bus::{RequestEventBus, RequestEventUpdate};
-use crate::metrics_labels::NotifyHttpOutcome;
+use crate::metrics_labels::{NotifyHttpOutcome, PgListenerReconnectReason};
 
 const HTTP_FETCH_TIMEOUT: Duration = Duration::from_secs(3);
 const QUEUE_USAGE_POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -65,7 +65,9 @@ impl PgListener {
             let mut listener = match sqlx::postgres::PgListener::connect_with(&self.pg_pool).await {
                 Ok(listener) => listener,
                 Err(error) => {
-                    tracing::warn!(%error, "pg notify listener connect failed");
+                    let reason = PgListenerReconnectReason::ConnectFailed;
+                    record_pg_listener_reconnect(reason);
+                    tracing::warn!(%error, reason = reason.as_str(), "pg notify listener connect failed");
                     tokio::select! {
                         _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
                         changed = shutdown_rx.changed() => {
@@ -76,7 +78,9 @@ impl PgListener {
                 }
             };
             if let Err(error) = listener.listen(&self.channel).await {
-                tracing::warn!(%error, channel = %self.channel, "pg notify listen failed");
+                let reason = PgListenerReconnectReason::SubscribeFailed;
+                record_pg_listener_reconnect(reason);
+                tracing::warn!(%error, reason = reason.as_str(), channel = %self.channel, "pg notify listen failed");
                 continue;
             }
 
@@ -88,11 +92,18 @@ impl PgListener {
                         }
                     }
                     _ = queue_usage_interval.tick() => record_queue_usage(&self.pg_pool).await,
-                    notification = listener.recv() => {
+                    notification = listener.try_recv() => {
                         match notification {
-                            Ok(notification) => self.handle_payload(notification.payload()).await,
+                            Ok(Some(notification)) => self.handle_payload(notification.payload()).await,
+                            Ok(None) => {
+                                let reason = PgListenerReconnectReason::RecvFailed;
+                                record_pg_listener_reconnect(reason);
+                                tracing::warn!(reason = reason.as_str(), "pg notify listener recv connection lost; reconnected");
+                            }
                             Err(error) => {
-                                tracing::warn!(%error, "pg notify listener recv failed; reconnecting");
+                                let reason = PgListenerReconnectReason::RecvFailed;
+                                record_pg_listener_reconnect(reason);
+                                tracing::warn!(%error, reason = reason.as_str(), "pg notify listener recv failed; reconnecting");
                                 break;
                             }
                         }

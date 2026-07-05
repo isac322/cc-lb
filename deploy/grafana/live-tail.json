@@ -472,6 +472,40 @@
             "tooltip": { "mode": "multi", "sort": "desc" },
             "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }
           }
+        },
+        {
+          "id": 14,
+          "type": "timeseries",
+          "title": "PG listener reconnects",
+          "description": "sse_pg_listener_reconnects_total{reason}. Backs alert LiveTailPgListenerReconnectStorm (warn @ 0.1/s over 5m for 10m).",
+          "gridPos": { "x": 0, "y": 33, "w": 24, "h": 6 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (reason) (rate(sse_pg_listener_reconnects_total[$rate_window]))",
+              "legendFormat": "{{reason}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "cps",
+              "decimals": 3,
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "fillOpacity": 10
+              },
+              "color": { "mode": "palette-classic" }
+            }
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+          },
+          "links": [
+            { "title": "Alert: LiveTailPgListenerReconnectStorm", "url": "" }
+          ]
         }
       ]
     }

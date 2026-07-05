@@ -9,9 +9,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use cc_lb_admin::internal_partials::{InternalPartialsState, router as internal_partials_router};
-use cc_lb_core::event_bus::{BusReceiver, InMemoryBus, RequestEventBus, RequestEventUpdate};
-use cc_lb_core::{PartialRetentionCache, PgListener, PgNotifier};
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventPartial};
+use cc_lb_contract::{BusReceiver, RequestEventBus, RequestEventPartial, RequestEventUpdate};
+use cc_lb_engine::{ClockHandle, InMemoryBus, PartialRetentionCache, PgListener, PgNotifier, SystemClock};
+use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_postgres::PostgresStorage;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use secrecy::SecretString;
@@ -154,7 +154,7 @@ fn metrics_handle() -> &'static PrometheusHandle {
 }
 
 async fn reset_request_event_tables(database_url: &str) -> TestResult<()> {
-    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+    let clock: ClockHandle = Arc::new(SystemClock);
     let pool = pg_pool(database_url, 1).await?;
     let storage = PostgresStorage::new(pool.clone(), clock);
     storage.initialize(BackendKind::Postgres).await?;

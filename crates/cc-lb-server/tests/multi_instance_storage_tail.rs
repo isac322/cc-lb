@@ -11,6 +11,7 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::{
     Config, DownstreamAuthMode, EventBusTransport, PostgresPoolConfig, StorageConfig,
 };
+use cc_lb_engine::{ClockHandle, SystemClock};
 use cc_lb_server::app::{App, build_app_with_storage, seed_app_testing_storage};
 use cc_lb_storage_api::{BackendKind, ManagedKeyStore, MetaStore, RequestEvent, RequestEventStore};
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
@@ -88,7 +89,7 @@ fn postgres_test_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 async fn reset_request_event_tables(database_url: &str) -> TestResult<()> {
-    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+    let clock: ClockHandle = Arc::new(SystemClock);
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(database_url)
@@ -109,7 +110,7 @@ async fn reset_request_event_tables(database_url: &str) -> TestResult<()> {
 }
 
 async fn build_running_app(database_url: &str, label: &'static str) -> TestResult<RunningApp> {
-    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+    let clock: ClockHandle = Arc::new(SystemClock);
     let pool = PgPoolOptions::new()
         .max_connections(8)
         .connect(database_url)

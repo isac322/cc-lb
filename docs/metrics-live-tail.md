@@ -1,6 +1,6 @@
 # Dashboard Live-Tail Metrics
 
-This is the canonical metric inventory for the dashboard live-tail redesign. Label values are backed by `cc_lb_core::metrics_labels` where the label vocabulary is finite.
+This is the canonical metric inventory for the dashboard live-tail redesign. Label values are backed by `cc_lb_engine::metrics_labels` where the label vocabulary is finite.
 
 | Metric | Type | Labels | Description | Expected steady state |
 | --- | --- | --- | --- | --- |
@@ -18,6 +18,7 @@ This is the canonical metric inventory for the dashboard live-tail redesign. Lab
 | `sse_storage_tail_backlog_rows` | Gauge | none | Rows found in the latest storage-tail poll. | Usually 0 between bursts; sustained high values mean poll interval or storage is lagging. |
 | `sse_partial_notify_sent_total` | Counter | `outcome=sent|truncated_sent|failed` | PG NOTIFY partial publish outcomes. | `sent` dominates; `truncated_sent` only for large partial payloads; `failed` should be zero. |
 | `sse_partial_notify_dropped_total` | Counter | `reason=queue_full|queue_closed|serialize_error|pg_error` | Partial updates dropped before or during PG NOTIFY publication. | Always zero. |
+| `sse_pg_listener_reconnects_total` | Counter | `reason=connect_failed|subscribe_failed|recv_failed` | PG listener reconnect attempts after initial connection, LISTEN subscribe, or receive failures. | Always zero in steady state; sustained growth means the listener is in a reconnect storm or Postgres is unstable. |
 | `sse_notify_http_fetches_total` | Counter | `outcome=success|not_found|unauthorized|timeout|network_error` | HTTP fallback fetch outcomes for truncated NOTIFY partial payloads. | Usually zero; `success` may rise with large partials; all failure outcomes should be zero. |
 | `sse_notify_queue_usage_ratio` | Gauge | none | Value returned by `pg_notification_queue_usage()`. | Below 0.30 warning threshold; below 0.50 critical threshold. |
 | `cc_lb_dropped_events_total` | Counter | `reason=lifecycle_assembler_full|sse_lagged|...` | Shared bounded-queue drop metric used by live-tail overflow alerts. | `reason="lifecycle_assembler_full"` must stay zero. |
@@ -27,5 +28,6 @@ This is the canonical metric inventory for the dashboard live-tail redesign. Lab
 - Reset reasons are `ResetReason::{BackfillCap, BusLagged, StorageError}`.
 - Partial triggers are `PartialTrigger::{RequestStarted, RouteCompleted, UpstreamResponseStarted, UsageObserved, StreamCompleted, RequestTerminated}`.
 - Notify drop reasons are `NotifyDropReason::{QueueFull, QueueClosed, SerializeError, PgError}`.
+- PG listener reconnect reasons are `PgListenerReconnectReason::{ConnectFailed, SubscribeFailed, RecvFailed}`.
 - Notify sent outcomes are `NotifySentOutcome::{Sent, TruncatedSent, Failed}`.
 - Notify HTTP outcomes are `NotifyHttpOutcome::{Success, NotFound, Unauthorized, Timeout, NetworkError}`.

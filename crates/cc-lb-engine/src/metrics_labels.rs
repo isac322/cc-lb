@@ -76,6 +76,25 @@ impl NotifyDropReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PgListenerReconnectReason {
+    ConnectFailed,
+    SubscribeFailed,
+    RecvFailed,
+}
+
+impl PgListenerReconnectReason {
+    pub const ALL: [Self; 3] = [Self::ConnectFailed, Self::SubscribeFailed, Self::RecvFailed];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ConnectFailed => "connect_failed",
+            Self::SubscribeFailed => "subscribe_failed",
+            Self::RecvFailed => "recv_failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotifySentOutcome {
     Sent,
     TruncatedSent,
@@ -156,6 +175,13 @@ mod tests {
                 .map(|reason| reason.as_str())
                 .collect::<Vec<_>>(),
             ["queue_full", "queue_closed", "serialize_error", "pg_error"]
+        );
+        assert_eq!(
+            PgListenerReconnectReason::ALL
+                .iter()
+                .map(|reason| reason.as_str())
+                .collect::<Vec<_>>(),
+            ["connect_failed", "subscribe_failed", "recv_failed"]
         );
         assert_eq!(
             NotifySentOutcome::ALL

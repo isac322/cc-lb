@@ -54,3 +54,12 @@ groups:
         annotations:
           summary: cc-lb live-tail storage tail lag is high
           description: p95 storage-tail lag is above 1000 ms for 5 minutes.
+
+      - alert: LiveTailPgListenerReconnectStorm
+        expr: rate(sse_pg_listener_reconnects_total[5m]) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: cc-lb live-tail PG listener is reconnecting repeatedly
+          description: PG listener reconnect attempts exceed 0.1 per second for 10 minutes.

@@ -201,7 +201,8 @@ pub use limit_state_writer::{
     PrincipalLimitStateEnqueueError, PrincipalLimitStateSink, start_principal_limit_state_writer,
 };
 pub use metrics_labels::{
-    NotifyDropReason, NotifyHttpOutcome, NotifySentOutcome, PartialTrigger, ResetReason,
+    NotifyDropReason, NotifyHttpOutcome, NotifySentOutcome, PartialTrigger,
+    PgListenerReconnectReason, ResetReason,
 };
 #[cfg(not(loom))]
 pub use pg_notify_fanout::{

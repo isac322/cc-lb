@@ -68,6 +68,7 @@ zstd.workspace = true
 [dev-dependencies]
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 insta.workspace = true
+metrics-exporter-prometheus.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
