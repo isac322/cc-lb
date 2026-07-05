@@ -647,9 +647,19 @@ async fn lqa_4a_admin_sse_stream_emits_final_request_event_update() {
     // The live-tail redesign (plan §3.9) precedes the final frame with a cursor
     // bookmark, optional partial snapshots, and heartbeats. Skip everything that
     // is not phase="final" so this test continues to assert on the terminal row.
+    //
+    // The SSE stream also carries `phase="final"` frames unrelated to this POST:
+    // `common::spawn_test_server` runs a `GET /v1/models` readiness probe (see
+    // `wait_for_proxy_ready`) that goes through the lifecycle pipeline and
+    // publishes its own terminal frame with no model, no usage, and no cost —
+    // sometimes still in flight (via backfill or the live bus) when this test
+    // subscribes. Filter on `model == HAPPY_MODEL` so we assert on the frame
+    // produced by `post_happy` rather than the readiness probe.
     let frame = loop {
         let frame = next_sse_data(&mut reader).await;
-        if frame["phase"] == "final" {
+        if frame["phase"] == "final"
+            && frame["payload"]["event"]["model"].as_str() == Some(HAPPY_MODEL)
+        {
             break frame;
         }
     };
@@ -660,11 +670,7 @@ async fn lqa_4a_admin_sse_stream_emits_final_request_event_update() {
     assert!(event["output_tokens"].as_i64().unwrap_or_default() > 0);
     assert!(event["cost_usd_micros"].as_i64().unwrap_or_default() > 0);
     assert_eq!(event["upstream_name"], "fake_anthropic");
-    assert!(
-        event["model"]
-            .as_str()
-            .is_some_and(|model| !model.is_empty())
-    );
+    assert_eq!(event["model"], HAPPY_MODEL);
 }
 
 #[tokio::test]
