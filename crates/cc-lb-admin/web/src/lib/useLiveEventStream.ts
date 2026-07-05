@@ -23,6 +23,7 @@ export type ConnectionStatus =
 
 export interface LiveEventStreamState {
   eventsMap: LiveEventMap;
+  version: number;
   status: ConnectionStatus;
   lastActivityAt: number | null;
   lastCursor: string | null;
@@ -52,9 +53,10 @@ export function useLiveEventStream(
   const statusRef = useRef<ConnectionStatus>('idle');
   const malformedFrameCountRef = useRef(0);
 
-  // Force re-render when eventsMap changes
-  const [, setTick] = useState(0);
-  const forceUpdate = () => setTick((t) => t + 1);
+  // Version counter published on every successful upsert so downstream
+  // useMemo deps re-run when the mutated Map ref changes contents.
+  const [version, setVersion] = useState(0);
+  const forceUpdate = () => setVersion((t) => t + 1);
 
   const updateStatus = (newStatus: ConnectionStatus) => {
     statusRef.current = newStatus;
@@ -341,6 +343,7 @@ export function useLiveEventStream(
 
   return {
     eventsMap: eventsMapRef.current,
+    version,
     status,
     lastActivityAt,
     lastCursor,

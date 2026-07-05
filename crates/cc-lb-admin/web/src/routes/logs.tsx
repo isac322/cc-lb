@@ -113,7 +113,7 @@ function LogsPage() {
     return out.sort(
       (a, b) => (eventTime(b)?.getTime() ?? 0) - (eventTime(a)?.getTime() ?? 0),
     );
-  }, [live.eventsMap, recent.data, recent.isPlaceholderData]);
+  }, [live.eventsMap, live.version, recent.data, recent.isPlaceholderData]);
 
   const recentLiveIds = useMemo(
     () =>
@@ -122,7 +122,7 @@ function LogsPage() {
           .slice(0, 20)
           .map((e) => e.event.event_id ?? e.event.request_id),
       ),
-    [live.eventsMap],
+    [live.eventsMap, live.version],
   );
 
   const setFilter = (key: keyof typeof filters, value: string) => {
