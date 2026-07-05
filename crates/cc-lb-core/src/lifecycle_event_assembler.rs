@@ -954,7 +954,6 @@ fn finalize_base(
         internal_errors: partial.internal_errors.clone(),
         iterations: partial.usage.iterations.clone(),
         event_id: Some(partial.event_id.clone()),
-        ..Default::default()
     }
 }
 

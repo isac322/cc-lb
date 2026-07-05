@@ -205,6 +205,11 @@ pub async fn handle_events_stream(
     Sse::new(stream).into_response()
 }
 
+// `Update` holds an inline `RequestEventUpdate` for the same reason the enum
+// itself keeps its payload inline (see `RequestEventUpdate` in cc-lb-core):
+// this value is stack-only per recv, boxing would trade an alloc-per-message
+// for no memory ceiling win.
+#[allow(clippy::large_enum_variant)]
 enum BusUpdateResult {
     Update(RequestEventUpdate),
     Lagged(u64),
@@ -415,13 +420,12 @@ fn heartbeat_event(cursor: u64) -> Event {
 }
 
 fn final_event_id(event: &RequestEvent) -> Option<&str> {
-    event.event_id.as_deref().or_else(|| {
-        if event.request_id.is_empty() {
-            None
-        } else {
-            Some(event.request_id.as_str())
-        }
-    })
+    let request_id_fallback = if event.request_id.is_empty() {
+        None
+    } else {
+        Some(event.request_id.as_str())
+    };
+    event.event_id.as_deref().or(request_id_fallback)
 }
 
 fn record_sse_reconnect() {

@@ -778,6 +778,7 @@ function OverviewPage() {
     return () => obs.disconnect();
   }, [events.hasNextPage, events.isFetchingNextPage, events.fetchNextPage]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: live.eventsMap is a stable Map ref mutated in place by useLiveEventStream; live.version is bumped on every upsert so it is the real re-run trigger.
   const recentRows = useMemo(() => {
     const historical = events.data?.pages.flatMap((p) => p.events) ?? [];
     const seen = new Set<string>();
@@ -801,6 +802,7 @@ function OverviewPage() {
     );
   }, [live.eventsMap, live.version, events.data]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: same rationale — live.version is the mutation counter for the stable eventsMap ref.
   const recentLiveIds = useMemo(
     () =>
       new Set(

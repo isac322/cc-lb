@@ -86,6 +86,7 @@ function LogsPage() {
     return () => obs.disconnect();
   }, [recent.hasNextPage, recent.isFetchingNextPage, recent.fetchNextPage]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: live.eventsMap is a stable Map ref mutated in place by useLiveEventStream; live.version is bumped on every upsert so it is the real re-run trigger.
   const rows = useMemo(() => {
     // While filters change, `recent.data` still holds the previous filter's
     // pages (queryClient default `placeholderData: keepPreviousData`). Treat
@@ -115,6 +116,7 @@ function LogsPage() {
     );
   }, [live.eventsMap, live.version, recent.data, recent.isPlaceholderData]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: same rationale — live.version is the mutation counter for the stable eventsMap ref.
   const recentLiveIds = useMemo(
     () =>
       new Set(

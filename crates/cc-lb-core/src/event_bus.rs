@@ -93,6 +93,13 @@ pub struct FinalRequestEventUpdate {
 ///
 /// See `.omo/plans/dashboard-live-tail-redesign.md` §3.3 for wire format
 /// rationale.
+// Both variants intentionally hold their payload inline: the enum lives in a
+// tokio broadcast slot pool with `broadcast_capacity` slots (default 4096) so
+// slot size × capacity ≈ a few MB per bus. Boxing either variant would trade
+// that fixed memory for a heap allocation on every publish (2500+ /s under
+// load), which is the far hotter path. Bus count is O(1) per admin server, so
+// the memory ceiling is acceptable.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "phase", content = "payload", rename_all = "snake_case")]
 pub enum RequestEventUpdate {
