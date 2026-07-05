@@ -41,6 +41,7 @@ pub const DEFAULT_LIFECYCLE_SUBSCRIPTION_QUOTA_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_LIMIT_REJECTION_AUDIT_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_API_KEY_METRICS_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_CACHE_HIT_MISS_CAPACITY: usize = 4096;
+pub const DEFAULT_LIFECYCLE_ROUTING_TIER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_PROMPT_CACHE_DRIFT_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY: usize = 4096;
 
@@ -112,6 +113,7 @@ struct InMemoryBusInner {
     lifecycle_limit_rejection_audit_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_api_key_metrics_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_cache_hit_miss_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
+    lifecycle_routing_tier_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_prompt_cache_drift_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_prompt_cache_observation_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
 }
@@ -142,6 +144,7 @@ impl InMemoryBus {
                 lifecycle_limit_rejection_audit_tx: Mutex::new(None),
                 lifecycle_api_key_metrics_tx: Mutex::new(None),
                 lifecycle_cache_hit_miss_tx: Mutex::new(None),
+                lifecycle_routing_tier_tx: Mutex::new(None),
                 lifecycle_prompt_cache_drift_tx: Mutex::new(None),
                 lifecycle_prompt_cache_observation_tx: Mutex::new(None),
             }),
@@ -293,6 +296,17 @@ impl InMemoryBus {
         rx
     }
 
+    pub fn attach_lifecycle_routing_tier(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        let mut guard = self
+            .inner
+            .lifecycle_routing_tier_tx
+            .lock()
+            .expect("event bus lifecycle routing tier mutex poisoned");
+        *guard = Some(tx);
+        rx
+    }
+
     pub fn attach_lifecycle_prompt_cache_drift(
         &self,
         capacity: usize,
@@ -426,6 +440,14 @@ impl RequestEventBus for InMemoryBus {
                 .lifecycle_cache_hit_miss_tx
                 .lock()
                 .expect("event bus lifecycle cache hit/miss mutex poisoned");
+            guard.clone()
+        };
+        let routing_tier_tx = {
+            let guard = self
+                .inner
+                .lifecycle_routing_tier_tx
+                .lock()
+                .expect("event bus lifecycle routing tier mutex poisoned");
             guard.clone()
         };
         let prompt_cache_drift_tx = {
@@ -617,6 +639,22 @@ impl RequestEventBus for InMemoryBus {
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     tracing::debug!("lifecycle cache hit/miss subscriber mpsc closed");
+                }
+            }
+        }
+        if let Some(tx) = routing_tier_tx {
+            match tx.try_send(event.clone()) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(dropped)) => {
+                    record_dropped_events_by("lifecycle_routing_tier_full", 1);
+                    tracing::warn!(
+                        kind = dropped.kind(),
+                        event_id = %dropped.event_id(),
+                        "lifecycle routing tier subscriber mpsc full; dropping event (tier metric may be missing)",
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::debug!("lifecycle routing tier subscriber mpsc closed");
                 }
             }
         }

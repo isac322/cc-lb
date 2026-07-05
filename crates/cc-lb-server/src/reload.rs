@@ -474,6 +474,11 @@ fn summarize_lifecycle_subscriber_restart_required(
             new_config.lifecycle_cache_hit_miss_subscriber.enabled,
         ),
         (
+            "lifecycle_routing_tier_subscriber.enabled",
+            current.lifecycle_routing_tier_subscriber.enabled,
+            new_config.lifecycle_routing_tier_subscriber.enabled,
+        ),
+        (
             "lifecycle_prompt_cache_drift_subscriber.enabled",
             current.lifecycle_prompt_cache_drift_subscriber.enabled,
             new_config.lifecycle_prompt_cache_drift_subscriber.enabled,

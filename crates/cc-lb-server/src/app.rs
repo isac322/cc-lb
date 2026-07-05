@@ -1027,6 +1027,13 @@ async fn build_app_with_storage_inner(
     } else {
         None
     };
+    let lifecycle_routing_tier_rx = if config.lifecycle_routing_tier_subscriber.enabled {
+        Some(in_memory_bus.attach_lifecycle_routing_tier(
+            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ROUTING_TIER_CAPACITY,
+        ))
+    } else {
+        None
+    };
     let lifecycle_prompt_cache_drift_rx = if config.lifecycle_prompt_cache_drift_subscriber.enabled
     {
         Some(in_memory_bus.attach_lifecycle_prompt_cache_drift(
@@ -1184,6 +1191,9 @@ async fn build_app_with_storage_inner(
     let lifecycle_cache_hit_miss_subscriber_handle = lifecycle_cache_hit_miss_rx.map(|rx| {
         cc_lb_engine::spawn_lifecycle_cache_hit_miss_subscriber(rx, Arc::clone(&metrics_hook))
     });
+    let lifecycle_routing_tier_subscriber_handle = lifecycle_routing_tier_rx.map(|rx| {
+        cc_lb_engine::spawn_lifecycle_routing_tier_subscriber(rx, Arc::clone(&metrics_hook))
+    });
     let lifecycle_prompt_cache_drift_subscriber_handle =
         lifecycle_prompt_cache_drift_rx.map(|rx| {
             cc_lb_engine::spawn_lifecycle_prompt_cache_drift_subscriber(
@@ -1253,6 +1263,11 @@ async fn build_app_with_storage_inner(
         tokio::sync::Mutex<Option<cc_lb_engine::CacheHitMissSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(
         lifecycle_cache_hit_miss_subscriber_handle,
+    ));
+    let lifecycle_routing_tier_subscriber_slot: Arc<
+        tokio::sync::Mutex<Option<cc_lb_engine::RoutingTierSubscriberHandle>>,
+    > = Arc::new(tokio::sync::Mutex::new(
+        lifecycle_routing_tier_subscriber_handle,
     ));
     let lifecycle_prompt_cache_drift_subscriber_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::PromptCacheDriftSubscriberHandle>>,
@@ -1459,6 +1474,18 @@ async fn build_app_with_storage_inner(
             let cache_hit_miss_slot = cache_hit_miss_slot.clone();
             async move {
                 let mut guard = cache_hit_miss_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let routing_tier_slot = lifecycle_routing_tier_subscriber_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let routing_tier_slot = routing_tier_slot.clone();
+            async move {
+                let mut guard = routing_tier_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }

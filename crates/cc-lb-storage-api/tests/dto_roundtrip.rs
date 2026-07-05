@@ -423,6 +423,7 @@ fn batch_b_wire_snapshots_are_stable() {
                 upstream_id: Some(Uuid::from_u128(0x22222222222222222222222222222222)),
                 reason: Some("selected".to_owned()),
                 duration_us: 321,
+                subscription_preference: None,
             }],
             terminal_decision: Some(TerminalDecision {
                 upstream_id: Some(Uuid::from_u128(0x33333333333333333333333333333333)),

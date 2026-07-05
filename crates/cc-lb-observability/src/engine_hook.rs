@@ -33,4 +33,14 @@ impl EngineMetricsHook for MetricsCrateHook {
     fn record_dropped_events_by(&self, reason: &str, count: u64) {
         crate::increment_dropped_events_by(reason, count);
     }
+
+    fn record_routing_tier_selection(&self, tier: &str, upstream: &str, principal_id: &str) {
+        metrics::counter!(
+            "cc_lb_routing_tier_selections_total",
+            "tier" => tier.to_owned(),
+            "upstream" => upstream.to_owned(),
+            "principal_id" => principal_id.to_owned()
+        )
+        .increment(1);
+    }
 }
