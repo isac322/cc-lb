@@ -178,6 +178,7 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
         assembler_rx,
         Arc::clone(&storage) as Arc<dyn StorageTrait>,
         Some(Arc::clone(&bus) as Arc<dyn RequestEventBus>),
+        Arc::new(cc_lb_contract::NoopMetricsHook),
     );
     let limit_engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),

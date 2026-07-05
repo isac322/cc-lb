@@ -9,8 +9,10 @@
 use std::sync::Arc;
 
 use cc_lb_config::LifecyclePromptCacheObservationSubscriberConfig;
-use cc_lb_contract::{LifecycleEvent, PromptCacheObservationKindWire, PromptCacheObservationWire};
-use cc_lb_observability::{cache_observation_dropped_reason, inc_cache_observation_dropped};
+use cc_lb_contract::{
+    EngineMetricsHook, LifecycleEvent, PromptCacheObservationKindWire, PromptCacheObservationWire,
+};
+use cc_lb_observability::cache_observation_dropped_reason;
 use cc_lb_plugin_api::types::TtlClass;
 use cc_lb_storage_api::{PromptCacheObservationRecord, TtlClass as StorageTtlClass};
 use tokio::sync::{mpsc, oneshot};
@@ -41,9 +43,17 @@ pub fn spawn_lifecycle_prompt_cache_observation_subscriber(
     config: LifecyclePromptCacheObservationSubscriberConfig,
     cache: Arc<dyn PromptCacheObservationCacheLike>,
     sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
+    metrics: Arc<dyn EngineMetricsHook>,
 ) -> PromptCacheObservationSubscriberHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(subscriber_loop(rx, config, cache, sink, shutdown_rx));
+    let join = tokio::spawn(subscriber_loop(
+        rx,
+        config,
+        cache,
+        sink,
+        metrics,
+        shutdown_rx,
+    ));
     PromptCacheObservationSubscriberHandle { shutdown_tx, join }
 }
 
@@ -52,23 +62,30 @@ async fn subscriber_loop(
     config: LifecyclePromptCacheObservationSubscriberConfig,
     cache: Arc<dyn PromptCacheObservationCacheLike>,
     sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
+    metrics: Arc<dyn EngineMetricsHook>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     loop {
         tokio::select! {
             biased;
-            event = rx.recv() => {
-                match event {
-                    Some(event) => handle_event(&config, cache.as_ref(), sink.as_deref(), event),
-                    None => break,
+                event = rx.recv() => {
+                    match event {
+                        Some(event) => handle_event(&config, cache.as_ref(), sink.as_deref(), metrics.as_ref(), event),
+                        None => break,
+                    }
                 }
-            }
             _ = &mut shutdown => break,
         }
     }
 
     while let Ok(event) = rx.try_recv() {
-        handle_event(&config, cache.as_ref(), sink.as_deref(), event);
+        handle_event(
+            &config,
+            cache.as_ref(),
+            sink.as_deref(),
+            metrics.as_ref(),
+            event,
+        );
     }
 }
 
@@ -76,6 +93,7 @@ fn handle_event(
     config: &LifecyclePromptCacheObservationSubscriberConfig,
     cache: &dyn PromptCacheObservationCacheLike,
     sink: Option<&dyn PromptCacheObservationSinkLike>,
+    metrics: &dyn EngineMetricsHook,
     event: LifecycleEvent,
 ) {
     let LifecycleEvent::PromptCacheObservationsProduced {
@@ -93,10 +111,15 @@ fn handle_event(
         return;
     }
     increment_drop_metric(
+        metrics,
         cache_observation_dropped_reason::BELOW_THRESHOLD,
         dropped_below_threshold,
     );
-    increment_drop_metric(cache_observation_dropped_reason::ABORT, dropped_aborted);
+    increment_drop_metric(
+        metrics,
+        cache_observation_dropped_reason::ABORT,
+        dropped_aborted,
+    );
     if observations.is_empty() {
         return;
     }
@@ -172,9 +195,9 @@ fn ttl_to_storage(t: TtlClass) -> StorageTtlClass {
     }
 }
 
-fn increment_drop_metric(reason: &'static str, count: u32) {
+fn increment_drop_metric(metrics: &dyn EngineMetricsHook, reason: &'static str, count: u32) {
     for _ in 0..count {
-        inc_cache_observation_dropped(reason);
+        metrics.record_cache_observation_dropped(reason);
     }
 }
 
@@ -183,12 +206,16 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use cc_lb_contract::EventId;
+    use cc_lb_contract::{EngineMetricsHook, EventId, NoopMetricsHook};
     use cc_lb_plugin_api::types::WarmCacheEntry;
 
     use super::*;
 
     const TEST_MODEL: &str = "claude-sonnet-4-5-20250929";
+
+    fn noop_metrics() -> Arc<dyn EngineMetricsHook> {
+        Arc::new(NoopMetricsHook)
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn success_event_upserts_and_enqueues_observations() {
@@ -200,6 +227,7 @@ mod tests {
             LifecyclePromptCacheObservationSubscriberConfig::default(),
             cache.clone(),
             Some(sink.clone()),
+            noop_metrics(),
         );
 
         tx.send(success_event(1))
@@ -229,6 +257,7 @@ mod tests {
             LifecyclePromptCacheObservationSubscriberConfig::default(),
             cache.clone(),
             Some(sink.clone()),
+            noop_metrics(),
         );
 
         tx.send(LifecycleEvent::PromptCacheObservationsProduced {

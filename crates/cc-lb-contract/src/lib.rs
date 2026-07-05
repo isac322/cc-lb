@@ -73,6 +73,29 @@ pub trait AuditSink: Send + Sync {
     fn sink_audit(&self, entry: AuditEntry);
 }
 
+pub trait EngineMetricsHook: Send + Sync {
+    fn record_cache_hit(&self, upstream: &str, model: &str);
+
+    fn record_cache_miss(&self, upstream: &str, model: &str);
+
+    fn record_cache_observation_dropped(&self, reason: &str);
+
+    fn record_dropped_events_by(&self, reason: &str, count: u64);
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoopMetricsHook;
+
+impl EngineMetricsHook for NoopMetricsHook {
+    fn record_cache_hit(&self, _upstream: &str, _model: &str) {}
+
+    fn record_cache_miss(&self, _upstream: &str, _model: &str) {}
+
+    fn record_cache_observation_dropped(&self, _reason: &str) {}
+
+    fn record_dropped_events_by(&self, _reason: &str, _count: u64) {}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicaIdentity {
     pub id: Uuid,

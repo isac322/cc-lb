@@ -714,6 +714,8 @@ async fn build_app_with_storage_inner(
 ) -> Result<App, BuildError> {
     let scheduler_lazy_handle = opened_scheduler.lazy_handle();
     let server_state = Arc::new(ServerStateHandle::new_starting());
+    let metrics_hook: Arc<dyn cc_lb_contract::EngineMetricsHook> =
+        Arc::new(cc_lb_observability::MetricsCrateHook);
     let key_store = Arc::new(KeyStore::new(managed_store));
     let price_catalog = cc_lb_pricing::global_catalog().clone();
     let (price_catalog_install_cancel, price_catalog_install_task) =
@@ -725,9 +727,13 @@ async fn build_app_with_storage_inner(
         );
     let (sink, audit_writer_task) = spawn_audit_writer(storage.clone(), 1024);
     let audit_sink = Some(Arc::new(sink));
-    let (upstream_rate_limit_sink, upstream_rate_limit_receiver) = UpstreamRateLimitSink::new();
-    let upstream_rate_limit_writer_task =
-        start_upstream_rate_limit_writer(storage.clone(), upstream_rate_limit_receiver);
+    let (upstream_rate_limit_sink, upstream_rate_limit_receiver) =
+        UpstreamRateLimitSink::with_metrics(Arc::clone(&metrics_hook));
+    let upstream_rate_limit_writer_task = start_upstream_rate_limit_writer(
+        storage.clone(),
+        upstream_rate_limit_receiver,
+        Arc::clone(&metrics_hook),
+    );
     let (subscription_quota_sink, subscription_quota_receiver) =
         SubscriptionQuotaSink::with_capacity(
             config.subscription_quota.writer_channel_capacity as usize,
@@ -1126,7 +1132,12 @@ async fn build_app_with_storage_inner(
     let lifecycle_event_logger_handle =
         cc_lb_engine::spawn_lifecycle_event_logger(lifecycle_event_logger_rx);
     let lifecycle_event_assembler_handle = lifecycle_assembler_rx.map(|rx| {
-        cc_lb_engine::spawn_request_event_assembler(rx, storage.clone(), Some(event_bus.clone()))
+        cc_lb_engine::spawn_request_event_assembler(
+            rx,
+            storage.clone(),
+            Some(event_bus.clone()),
+            Arc::clone(&metrics_hook),
+        )
     });
     let lifecycle_hook_adapter_handle = lifecycle_hook_adapter_rx.map(|rx| {
         let hooks = initial_view.global_observability_hooks.to_vec();
@@ -1165,13 +1176,15 @@ async fn build_app_with_storage_inner(
         });
     let lifecycle_api_key_metrics_subscriber_handle = lifecycle_api_key_metrics_rx
         .map(|rx| cc_lb_engine::spawn_lifecycle_api_key_metrics_subscriber(rx, event_bus.clone()));
-    let lifecycle_cache_hit_miss_subscriber_handle =
-        lifecycle_cache_hit_miss_rx.map(cc_lb_engine::spawn_lifecycle_cache_hit_miss_subscriber);
+    let lifecycle_cache_hit_miss_subscriber_handle = lifecycle_cache_hit_miss_rx.map(|rx| {
+        cc_lb_engine::spawn_lifecycle_cache_hit_miss_subscriber(rx, Arc::clone(&metrics_hook))
+    });
     let lifecycle_prompt_cache_drift_subscriber_handle =
         lifecycle_prompt_cache_drift_rx.map(|rx| {
             cc_lb_engine::spawn_lifecycle_prompt_cache_drift_subscriber(
                 rx,
                 config.prompt_cache_shadow.enabled,
+                Arc::clone(&metrics_hook),
             )
         });
     let lifecycle_prompt_cache_observation_subscriber_handle =
@@ -1185,6 +1198,7 @@ async fn build_app_with_storage_inner(
                         config.lifecycle_prompt_cache_observation_subscriber.clone(),
                         cache,
                         initial_view.prompt_cache_observation_sink_opt().cloned(),
+                        Arc::clone(&metrics_hook),
                     )
                 })
         });

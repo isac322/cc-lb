@@ -50,11 +50,12 @@ pub fn dropped_events_total() -> u64 {
     DROPPED_EVENTS_TOTAL.load(Ordering::Relaxed)
 }
 
-pub fn increment_dropped_events(reason: &'static str) {
+pub fn increment_dropped_events(reason: &str) {
     increment_dropped_events_by(reason, 1);
 }
 
-pub fn increment_dropped_events_by(reason: &'static str, amount: u64) {
+pub fn increment_dropped_events_by(reason: &str, amount: u64) {
     DROPPED_EVENTS_TOTAL.fetch_add(amount, Ordering::Relaxed);
-    metrics::counter!("cc_lb_dropped_events_total", "reason" => reason).increment(amount);
+    metrics::counter!("cc_lb_dropped_events_total", "reason" => reason.to_owned())
+        .increment(amount);
 }

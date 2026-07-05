@@ -3,11 +3,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cc_lb_contract::{
-    AuthInfo,
-    CostBreakdown as LifecycleCostBreakdown, EventId, LifecycleEvent, ParseInfo,
-    RequestCacheBreakpoint, RequestCacheState, RequestEventBus, RequestEventPartial,
-    RequestEventUpdate, RequestEventUpstream, RouteInfo, TerminationReason,
-    UsageSnapshot,
+    AuthInfo, CostBreakdown as LifecycleCostBreakdown, EngineMetricsHook, EventId,
+    LifecycleEvent, ParseInfo, RequestCacheBreakpoint, RequestCacheState,
+    RequestEventBus, RequestEventPartial, RequestEventUpdate, RequestEventUpstream,
+    RouteInfo, TerminationReason, UsageSnapshot,
 };
 use cc_lb_plugin_api::{InternalError, RoutingTrace};
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
@@ -21,7 +20,7 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// After receiving `RequestTerminated`, the assembler holds the partial for
 /// this grace period so that late `CacheObserved` events (emitted by a separate
-/// subscriber task) can still merge into the row. Pricing is computed inline.
+/// subscriber task) can still merge into the row.
 /// See RFC-0002 synthesis analysis for the ordering rationale.
 const FINALIZATION_GRACE: Duration = Duration::from_millis(200);
 
@@ -49,11 +48,13 @@ pub fn spawn_request_event_assembler(
     rx: mpsc::Receiver<LifecycleEvent>,
     storage: Arc<dyn RequestEventStore>,
     bus: Option<Arc<dyn RequestEventBus>>,
+    metrics: Arc<dyn EngineMetricsHook>,
 ) -> RequestEventAssemblerHandle {
     spawn_with_config(
         rx,
         storage,
         bus,
+        metrics,
         DEFAULT_ASSEMBLER_MAP_CAP,
         DEFAULT_ASSEMBLER_TTL,
     )
@@ -63,11 +64,20 @@ pub fn spawn_with_config(
     rx: mpsc::Receiver<LifecycleEvent>,
     storage: Arc<dyn RequestEventStore>,
     bus: Option<Arc<dyn RequestEventBus>>,
+    metrics: Arc<dyn EngineMetricsHook>,
     map_cap: usize,
     ttl: Duration,
 ) -> RequestEventAssemblerHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(assembler_loop(rx, storage, bus, map_cap, ttl, shutdown_rx));
+    let join = tokio::spawn(assembler_loop(
+        rx,
+        storage,
+        bus,
+        metrics,
+        map_cap,
+        ttl,
+        shutdown_rx,
+    ));
     RequestEventAssemblerHandle { shutdown_tx, join }
 }
 
@@ -383,6 +393,7 @@ async fn assembler_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     storage: Arc<dyn RequestEventStore>,
     bus: Option<Arc<dyn RequestEventBus>>,
+    metrics: Arc<dyn EngineMetricsHook>,
     map_cap: usize,
     ttl: Duration,
     mut shutdown: oneshot::Receiver<()>,
@@ -398,30 +409,39 @@ async fn assembler_loop(
     loop {
         tokio::select! {
             biased;
-            event = rx.recv() => {
-                match event {
-                    Some(event) => handle_event(&*storage, bus.as_deref(), &mut partials, map_cap, event).await,
-                    None => break,
+                event = rx.recv() => {
+                    match event {
+                        Some(event) => handle_event(&*storage, bus.as_deref(), metrics.as_ref(), &mut partials, map_cap, event).await,
+                        None => break,
+                    }
                 }
-            }
-            _ = finalization_tick.tick() => {
-                flush_expired_terminations(&*storage, bus.as_deref(), &mut partials).await;
-            }
+                _ = finalization_tick.tick() => {
+                    flush_expired_terminations(&*storage, bus.as_deref(), metrics.as_ref(), &mut partials).await;
+                }
             _ = sweeper.tick() => sweep_orphans(&mut partials, ttl),
             _ = &mut shutdown => break,
         }
     }
 
     while let Ok(event) = rx.try_recv() {
-        handle_event(&*storage, bus.as_deref(), &mut partials, map_cap, event).await;
+        handle_event(
+            &*storage,
+            bus.as_deref(),
+            metrics.as_ref(),
+            &mut partials,
+            map_cap,
+            event,
+        )
+        .await;
     }
-    force_flush_terminations(&*storage, bus.as_deref(), &mut partials).await;
+    force_flush_terminations(&*storage, bus.as_deref(), metrics.as_ref(), &mut partials).await;
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn write_finalized_rows(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
+    metrics_hook: &dyn EngineMetricsHook,
     event_id: &EventId,
     partial: &Partial,
     reason: &TerminationReason,
@@ -449,10 +469,7 @@ async fn write_finalized_rows(
                 lifecycle_event_id = %event_id,
                 "lifecycle event assembler: failed to persist row",
             );
-            cc_lb_observability::increment_dropped_events_by(
-                "lifecycle_assembler_storage_error",
-                1,
-            );
+            metrics_hook.record_dropped_events_by("lifecycle_assembler_storage_error", 1);
         }
     }
 }
@@ -460,6 +477,7 @@ async fn write_finalized_rows(
 async fn flush_expired_terminations(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
+    metrics: &dyn EngineMetricsHook,
     partials: &mut HashMap<EventId, Partial>,
 ) {
     let now = Instant::now();
@@ -486,6 +504,7 @@ async fn flush_expired_terminations(
             write_finalized_rows(
                 storage,
                 bus,
+                metrics,
                 &event_id,
                 &partial,
                 &term.reason,
@@ -501,6 +520,7 @@ async fn flush_expired_terminations(
 async fn force_flush_terminations(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
+    metrics: &dyn EngineMetricsHook,
     partials: &mut HashMap<EventId, Partial>,
 ) {
     let pending: Vec<EventId> = partials
@@ -516,6 +536,7 @@ async fn force_flush_terminations(
             write_finalized_rows(
                 storage,
                 bus,
+                metrics,
                 &event_id,
                 &partial,
                 &term.reason,
@@ -531,6 +552,7 @@ async fn force_flush_terminations(
 async fn handle_event(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
+    metrics: &dyn EngineMetricsHook,
     partials: &mut HashMap<EventId, Partial>,
     map_cap: usize,
     event: LifecycleEvent,
@@ -571,6 +593,7 @@ async fn handle_event(
             write_finalized_rows(
                 storage,
                 bus,
+                metrics,
                 &event_id,
                 &partial,
                 reason,
@@ -605,6 +628,7 @@ async fn handle_event(
             write_finalized_rows(
                 storage,
                 bus,
+                metrics,
                 &event_id,
                 &partial,
                 &termination.reason,
@@ -656,6 +680,7 @@ async fn handle_event(
         write_finalized_rows(
             storage,
             bus,
+            metrics,
             &event_id,
             &partial,
             &term.reason,
@@ -979,8 +1004,9 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use cc_lb_contract::{
-        AuthFailure, CostBreakdown, HeaderSnapshot, ParseFailure, RequestEventPhase, RouteInfo,
-        StreamError, StreamSuccess, UsageSource,
+        AuthFailure, CostBreakdown, EngineMetricsHook, HeaderSnapshot, NoopMetricsHook,
+        ParseFailure, RequestEventPhase, RouteInfo, StreamError, StreamSuccess,
+        UsageSource,
     };
     use cc_lb_storage_api::{RequestEvent, StorageResult};
     use metrics::{Counter, CounterFn, Key, KeyName, Metadata, Recorder, SharedString, Unit};
@@ -1090,11 +1116,15 @@ mod tests {
         s.to_owned()
     }
 
+    fn noop_metrics() -> Arc<dyn EngineMetricsHook> {
+        Arc::new(NoopMetricsHook)
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn success_terminated_persists_row() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), None);
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-1"),
@@ -1145,7 +1175,7 @@ mod tests {
     async fn stream_error_terminated_carries_error_type_and_message() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), None);
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-2"),
@@ -1194,7 +1224,7 @@ mod tests {
     async fn parse_failed_terminated_still_persists_error_code() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), None);
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-3"),
@@ -1237,7 +1267,7 @@ mod tests {
     async fn terminated_without_partial_writes_orphan_row() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), None);
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
 
         tx.send(LifecycleEvent::RequestTerminated {
             event_id: eid("orphan-terminated"),
@@ -1279,7 +1309,7 @@ mod tests {
         );
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), None);
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
         let event_id = eid("orphan-before-started");
 
         tx.send(LifecycleEvent::RequestTerminated {
@@ -1351,6 +1381,7 @@ mod tests {
             rx,
             store.clone(),
             Some(bus.clone() as Arc<dyn RequestEventBus>),
+            noop_metrics(),
         );
 
         tx.send(LifecycleEvent::RequestStarted {
@@ -1411,6 +1442,7 @@ mod tests {
             rx,
             store.clone(),
             Some(bus.clone() as Arc<dyn RequestEventBus>),
+            noop_metrics(),
         );
 
         tx.send(LifecycleEvent::RequestStarted {
@@ -1547,6 +1579,7 @@ mod tests {
             rx,
             store.clone(),
             Some(bus.clone() as Arc<dyn RequestEventBus>),
+            noop_metrics(),
         );
         let delayed_bus = bus.clone();
         let delayed_pricing = tokio::spawn(async move {

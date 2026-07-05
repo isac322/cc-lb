@@ -948,6 +948,7 @@ name = "cc-lb-observability"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "cc-lb-contract",
  "cc-lb-plugin-api",
  "http",
  "insta",

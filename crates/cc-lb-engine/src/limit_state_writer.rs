@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use cc_lb_contract::{EngineMetricsHook, NoopMetricsHook};
 use cc_lb_storage_api::PrincipalLimitState;
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
@@ -9,9 +10,10 @@ use crate::api_keys::limit_engine::LimitEngine;
 
 pub const DEFAULT_PRINCIPAL_LIMIT_STATE_CHANNEL_CAPACITY: usize = 1024;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PrincipalLimitStateSink {
     tx: Sender<PrincipalLimitState>,
+    metrics: Arc<dyn EngineMetricsHook>,
 }
 
 #[derive(Debug, Error)]
@@ -24,13 +26,26 @@ pub enum PrincipalLimitStateEnqueueError {
 
 impl PrincipalLimitStateSink {
     pub fn new() -> (Self, Receiver<PrincipalLimitState>) {
-        Self::with_capacity(DEFAULT_PRINCIPAL_LIMIT_STATE_CHANNEL_CAPACITY)
+        Self::with_metrics(Arc::new(NoopMetricsHook))
+    }
+
+    pub fn with_metrics(
+        metrics: Arc<dyn EngineMetricsHook>,
+    ) -> (Self, Receiver<PrincipalLimitState>) {
+        Self::with_capacity_and_metrics(DEFAULT_PRINCIPAL_LIMIT_STATE_CHANNEL_CAPACITY, metrics)
     }
 
     pub fn with_capacity(capacity: usize) -> (Self, Receiver<PrincipalLimitState>) {
+        Self::with_capacity_and_metrics(capacity, Arc::new(NoopMetricsHook))
+    }
+
+    pub fn with_capacity_and_metrics(
+        capacity: usize,
+        metrics: Arc<dyn EngineMetricsHook>,
+    ) -> (Self, Receiver<PrincipalLimitState>) {
         let bounded_capacity = capacity.max(1);
         let (tx, rx) = mpsc::channel(bounded_capacity);
-        (Self { tx }, rx)
+        (Self { tx, metrics }, rx)
     }
 
     pub fn enqueue(
@@ -40,11 +55,12 @@ impl PrincipalLimitStateSink {
         match self.tx.try_send(state) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
-                cc_lb_observability::increment_dropped_events_by("limit_state_full", 1);
+                self.metrics.record_dropped_events_by("limit_state_full", 1);
                 Err(PrincipalLimitStateEnqueueError::Full)
             }
             Err(TrySendError::Closed(_)) => {
-                cc_lb_observability::increment_dropped_events_by("limit_state_closed", 1);
+                self.metrics
+                    .record_dropped_events_by("limit_state_closed", 1);
                 Err(PrincipalLimitStateEnqueueError::Closed)
             }
         }

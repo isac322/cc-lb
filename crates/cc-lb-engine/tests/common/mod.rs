@@ -528,6 +528,7 @@ impl TestLifecycleBus {
             rx,
             storage as Arc<dyn cc_lb_storage_api::RequestEventStore>,
             Some(bus_arc),
+            Arc::new(cc_lb_contract::NoopMetricsHook),
         ));
         self
     }

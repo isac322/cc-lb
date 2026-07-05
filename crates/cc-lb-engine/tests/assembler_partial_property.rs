@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use cc_lb_contract::{BusReceiver, RequestEventBus, RequestEventUpdate};
+use cc_lb_contract::{BusReceiver, NoopMetricsHook, RequestEventBus, RequestEventUpdate};
 use cc_lb_engine::InMemoryBus;
 use cc_lb_contract::{
     EventId, HeaderSnapshot, LifecycleEvent, ParseInfo, RouteInfo, StreamSuccess,
@@ -303,6 +303,7 @@ fn run_events(events: Vec<LifecycleEvent>) -> (Vec<RequestEvent>, Vec<RequestEve
             rx,
             store.clone(),
             Some(bus.clone() as Arc<dyn RequestEventBus>),
+            Arc::new(NoopMetricsHook),
         );
         for event in events {
             tx.send(event).await.expect("send lifecycle event");

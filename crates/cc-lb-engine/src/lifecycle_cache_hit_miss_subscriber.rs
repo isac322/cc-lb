@@ -6,10 +6,10 @@
 //! `event_id`; fires on termination when cache tokens indicate a hit.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::{EventId, LifecycleEvent};
-use cc_lb_observability::{inc_cache_hit, inc_cache_miss};
+use cc_lb_contract::{EngineMetricsHook, EventId, LifecycleEvent};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -35,9 +35,11 @@ impl CacheHitMissSubscriberHandle {
 
 pub fn spawn_lifecycle_cache_hit_miss_subscriber(
     rx: mpsc::Receiver<LifecycleEvent>,
+    metrics: Arc<dyn EngineMetricsHook>,
 ) -> CacheHitMissSubscriberHandle {
     spawn_with_config(
         rx,
+        metrics,
         DEFAULT_CACHE_HIT_MISS_MAP_CAP,
         DEFAULT_CACHE_HIT_MISS_TTL,
     )
@@ -45,11 +47,12 @@ pub fn spawn_lifecycle_cache_hit_miss_subscriber(
 
 pub fn spawn_with_config(
     rx: mpsc::Receiver<LifecycleEvent>,
+    metrics: Arc<dyn EngineMetricsHook>,
     map_cap: usize,
     ttl: Duration,
 ) -> CacheHitMissSubscriberHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(subscriber_loop(rx, map_cap, ttl, shutdown_rx));
+    let join = tokio::spawn(subscriber_loop(rx, metrics, map_cap, ttl, shutdown_rx));
     CacheHitMissSubscriberHandle { shutdown_tx, join }
 }
 
@@ -74,6 +77,7 @@ impl Partial {
 
 async fn subscriber_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
+    metrics: Arc<dyn EngineMetricsHook>,
     map_cap: usize,
     ttl: Duration,
     mut shutdown: oneshot::Receiver<()>,
@@ -85,31 +89,36 @@ async fn subscriber_loop(
 
     loop {
         tokio::select! {
-            biased;
-            event = rx.recv() => {
-                match event {
-                    Some(event) => handle_event(&mut partials, map_cap, event),
-                    None => break,
+                biased;
+                event = rx.recv() => {
+                    match event {
+                        Some(event) => handle_event(metrics.as_ref(), &mut partials, map_cap, event),
+                        None => break,
+                    }
                 }
-            }
             _ = sweeper.tick() => sweep_orphans(&mut partials, ttl),
             _ = &mut shutdown => break,
         }
     }
 
     while let Ok(event) = rx.try_recv() {
-        handle_event(&mut partials, map_cap, event);
+        handle_event(metrics.as_ref(), &mut partials, map_cap, event);
     }
 }
 
-fn handle_event(partials: &mut HashMap<EventId, Partial>, map_cap: usize, event: LifecycleEvent) {
+fn handle_event(
+    metrics: &dyn EngineMetricsHook,
+    partials: &mut HashMap<EventId, Partial>,
+    map_cap: usize,
+    event: LifecycleEvent,
+) {
     let now = Instant::now();
     let event_id = event.event_id().clone();
 
     if let LifecycleEvent::RequestTerminated { client_status, .. } = &event {
         let status = *client_status;
         if let Some(partial) = partials.remove(&event_id) {
-            emit_metric(&partial, status);
+            emit_metric(metrics, &partial, status);
         } else {
             metrics::counter!(
                 "cc_lb_contract_cache_hit_miss_events_total",
@@ -164,7 +173,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
     }
 }
 
-fn emit_metric(partial: &Partial, status: u16) {
+fn emit_metric(metrics_hook: &dyn EngineMetricsHook, partial: &Partial, status: u16) {
     if status != 200 {
         return;
     }
@@ -183,9 +192,9 @@ fn emit_metric(partial: &Partial, status: u16) {
     let raw_model = partial.model.as_deref().unwrap_or("");
     let model = canonical_model_id(raw_model);
     if partial.cache_read_input_tokens > 0 {
-        inc_cache_hit(upstream, model);
+        metrics_hook.record_cache_hit(upstream, model);
     } else {
-        inc_cache_miss(upstream, model);
+        metrics_hook.record_cache_miss(upstream, model);
     }
     metrics::counter!(
         "cc_lb_contract_cache_hit_miss_events_total",
@@ -228,8 +237,8 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 mod tests {
     use super::*;
     use cc_lb_contract::{
-        ParseInfo, RequestCacheBreakpoint, RequestCacheBreakpointSource, RouteInfo,
-        TerminationReason, UsageSnapshot, UsageSource,
+        EngineMetricsHook, NoopMetricsHook, ParseInfo, RequestCacheBreakpoint,
+        RequestCacheBreakpointSource, RouteInfo, TerminationReason, UsageSnapshot, UsageSource,
     };
     use uuid::Uuid;
 
@@ -247,6 +256,10 @@ mod tests {
             prefix_hash: "prefix-a".into(),
             prefix_token_count: 1_200,
         }
+    }
+
+    fn noop_metrics() -> Arc<dyn EngineMetricsHook> {
+        Arc::new(NoopMetricsHook)
     }
 
     fn parse_completed(event_id: &str) -> LifecycleEvent {
@@ -294,7 +307,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn terminated_after_usage_sequence_records_cache_hit_metric() {
         let (tx, rx) = mpsc::channel(16);
-        let handle = spawn_lifecycle_cache_hit_miss_subscriber(rx);
+        let handle = spawn_lifecycle_cache_hit_miss_subscriber(rx, noop_metrics());
 
         tx.send(parse_completed("cache-a")).await.unwrap();
         tx.send(route_completed("cache-a")).await.unwrap();
@@ -316,7 +329,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn terminated_without_usage_shuts_down_cleanly() {
         let (tx, rx) = mpsc::channel(16);
-        let handle = spawn_lifecycle_cache_hit_miss_subscriber(rx);
+        let handle = spawn_lifecycle_cache_hit_miss_subscriber(rx, noop_metrics());
 
         tx.send(parse_completed("cache-b")).await.unwrap();
         tx.send(route_completed("cache-b")).await.unwrap();
