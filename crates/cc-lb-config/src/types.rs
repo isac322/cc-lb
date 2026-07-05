@@ -88,6 +88,8 @@ pub struct Config {
     #[serde(default)]
     pub lifecycle_cache_hit_miss_subscriber: LifecycleCacheHitMissSubscriberConfig,
     #[serde(default)]
+    pub lifecycle_routing_tier_subscriber: LifecycleRoutingTierSubscriberConfig,
+    #[serde(default)]
     pub lifecycle_prompt_cache_drift_subscriber: LifecyclePromptCacheDriftSubscriberConfig,
     #[serde(default)]
     pub lifecycle_prompt_cache_observation_subscriber:
@@ -822,6 +824,19 @@ pub struct LifecycleCacheHitMissSubscriberConfig {
 }
 
 impl Default for LifecycleCacheHitMissSubscriberConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LifecycleRoutingTierSubscriberConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for LifecycleRoutingTierSubscriberConfig {
     fn default() -> Self {
         Self { enabled: true }
     }

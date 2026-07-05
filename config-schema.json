@@ -144,6 +144,12 @@
         "enabled": true
       }
     },
+    "lifecycle_routing_tier_subscriber": {
+      "$ref": "#/$defs/LifecycleRoutingTierSubscriberConfig",
+      "default": {
+        "enabled": true
+      }
+    },
     "lifecycle_subscription_quota_subscriber": {
       "$ref": "#/$defs/LifecycleSubscriptionQuotaSubscriberConfig",
       "default": {
@@ -701,6 +707,15 @@
       }
     },
     "LifecycleRateLimitHeaderSubscriberConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "LifecycleRoutingTierSubscriberConfig": {
       "type": "object",
       "properties": {
         "enabled": {

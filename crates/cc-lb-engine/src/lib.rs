@@ -54,6 +54,7 @@ pub mod lifecycle_prompt_cache_drift_subscriber;
 pub mod lifecycle_prompt_cache_observation_subscriber;
 #[cfg(not(loom))]
 pub mod lifecycle_rate_limit_header_subscriber;
+pub mod lifecycle_routing_tier_subscriber;
 #[cfg(not(loom))]
 pub mod lifecycle_subscription_quota_subscriber;
 #[cfg(not(loom))]
@@ -187,6 +188,9 @@ pub use lifecycle_prompt_cache_observation_subscriber::{
 #[cfg(not(loom))]
 pub use lifecycle_rate_limit_header_subscriber::{
     RateLimitHeaderSubscriberHandle, spawn_lifecycle_rate_limit_header_subscriber,
+};
+pub use lifecycle_routing_tier_subscriber::{
+    RoutingTierSubscriberHandle, spawn_lifecycle_routing_tier_subscriber,
 };
 #[cfg(not(loom))]
 pub use lifecycle_subscription_quota_subscriber::{
