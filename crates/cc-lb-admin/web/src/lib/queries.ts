@@ -47,6 +47,24 @@ import {
   type UpstreamOAuthStatusResponse,
 } from './api';
 
+import { usePolledData } from './usePolledData';
+
+export const POLLING_INTERVALS = {
+  SUMMARY_MS: 5_000,
+  USAGE_MS: 5_000,
+  QUOTA_LATEST_MS: 5_000,
+  QUOTA_AGGREGATE_MS: 30_000,
+  QUOTA_ANALYSIS_MS: 120_000,
+  QUOTA_SERIES_MS: 30_000,
+  QUOTA_POOL_HISTORY_MS: 30_000,
+  STATUS_MS: 15_000,
+  UPSTREAMS_MS: 30_000,
+  PLUGIN_STATUS_MS: 15_000,
+  WARMUP_SUMMARY_MS: 30_000,
+  UPSTREAM_SUB_META_MS: 30_000,
+  RECENT_EVENTS_MS: 10_000,
+};
+
 export interface UpstreamStatus {
   last_apply_error: string | null;
   last_apply_at_unix_secs: number | null;
@@ -251,21 +269,25 @@ export function useHealth() {
   });
 }
 export function useStatus() {
-  return useQuery({
-    queryKey: qk.status,
-    queryFn: () => getJson<StatusResponse>('/admin/v1/status'),
-    refetchInterval: 15_000,
-  });
+  return usePolledData(
+    {
+      queryKey: qk.status,
+      queryFn: () => getJson<StatusResponse>('/admin/v1/status'),
+    },
+    POLLING_INTERVALS.STATUS_MS,
+  );
 }
 export function useSummary(range: string) {
-  return useQuery({
-    queryKey: qk.summary(range),
-    queryFn: () =>
-      getJson<DashboardSummaryResponse>(
-        `/admin/dashboard/summary?range=${encodeURIComponent(range)}`,
-      ),
-    refetchInterval: 5_000,
-  });
+  return usePolledData(
+    {
+      queryKey: qk.summary(range),
+      queryFn: () =>
+        getJson<DashboardSummaryResponse>(
+          `/admin/dashboard/summary?range=${encodeURIComponent(range)}`,
+        ),
+    },
+    POLLING_INTERVALS.SUMMARY_MS,
+  );
 }
 export function useUsage(
   range: string,
@@ -273,28 +295,32 @@ export function useUsage(
   group: 'none' | 'model' | 'principal' | 'upstream',
   upstreamId?: string,
 ) {
-  return useQuery({
-    queryKey: qk.usage(range, step, group, upstreamId),
-    queryFn: () => {
-      const params = new URLSearchParams({
-        range,
-        step,
-        group_by: group,
-      });
-      if (upstreamId) params.set('upstream_id', upstreamId);
-      return getJson<DashboardUsageResponse>(
-        `/admin/usage?${params.toString()}`,
-      );
+  return usePolledData(
+    {
+      queryKey: qk.usage(range, step, group, upstreamId),
+      queryFn: () => {
+        const params = new URLSearchParams({
+          range,
+          step,
+          group_by: group,
+        });
+        if (upstreamId) params.set('upstream_id', upstreamId);
+        return getJson<DashboardUsageResponse>(
+          `/admin/usage?${params.toString()}`,
+        );
+      },
     },
-    refetchInterval: 5_000,
-  });
+    POLLING_INTERVALS.USAGE_MS,
+  );
 }
 export function useUpstreams() {
-  return useQuery({
-    queryKey: qk.upstreams,
-    queryFn: () => getJson<UpstreamListResp>('/admin/v1/upstreams'),
-    refetchInterval: 30_000,
-  });
+  return usePolledData(
+    {
+      queryKey: qk.upstreams,
+      queryFn: () => getJson<UpstreamListResp>('/admin/v1/upstreams'),
+    },
+    POLLING_INTERVALS.UPSTREAMS_MS,
+  );
 }
 export function usePrincipals() {
   return useQuery({
@@ -348,23 +374,33 @@ export function useRouterTerminalStrategy(principalId: string | null) {
 export function useRecentEvents(filters: Record<string, string | undefined>) {
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(filters)) if (v) params.set(k, v);
-  return useQuery({
-    queryKey: qk.events(filters),
-    queryFn: () =>
-      getJson<RecentEventsPayload>(`/admin/events/recent?${params.toString()}`),
-    refetchInterval: 10_000,
-  });
+  return usePolledData(
+    {
+      queryKey: qk.events(filters),
+      queryFn: () =>
+        getJson<RecentEventsPayload>(
+          `/admin/events/recent?${params.toString()}`,
+        ),
+    },
+    POLLING_INTERVALS.RECENT_EVENTS_MS,
+  );
 }
 export function useRecentEventsInfinite(
   filters: Record<string, string | undefined>,
 ) {
   return useInfiniteQuery({
     queryKey: [...qk.events(filters), 'infinite'],
-    initialPageParam: undefined as number | undefined,
+    initialPageParam: undefined as
+      | { ts_ms: number; event_id: string }
+      | undefined,
     queryFn: async ({ pageParam }) => {
       const params = new URLSearchParams();
       for (const [k, v] of Object.entries(filters)) if (v) params.set(k, v);
-      if (pageParam != null) params.set('until_unix_secs', String(pageParam));
+      // TODO: Server-side needs matching change for until_ts_ms and until_event_id (Part 3)
+      if (pageParam != null) {
+        params.set('until_ts_ms', String(pageParam.ts_ms));
+        params.set('until_event_id', pageParam.event_id);
+      }
       params.set('limit', '200');
       return getJson<RecentEventsPayload>(
         `/admin/events/recent?${params.toString()}`,
@@ -374,27 +410,32 @@ export function useRecentEventsInfinite(
       const evs = last.events;
       if (!evs.length || evs.length < (last.limit ?? 200)) return undefined;
       const oldest = evs[evs.length - 1];
-      const ts =
-        oldest.ts ??
-        (oldest.ts_ms != null ? Math.floor(oldest.ts_ms / 1000) : null);
-      return ts != null ? ts - 1 : undefined;
+      const ts_ms =
+        oldest.ts_ms ?? (oldest.ts != null ? oldest.ts * 1000 : null);
+      const event_id = oldest.event_id ?? oldest.request_id;
+      if (ts_ms != null && event_id != null) {
+        return { ts_ms, event_id };
+      }
+      return undefined;
     },
   });
 }
 
 function upsertLiveRequestEvent(
   acc: RequestEvent[],
-  { event }: RequestEventUpdate,
+  update: RequestEventUpdate,
   cap: number,
 ): RequestEvent[] {
+  const event =
+    update.phase === 'final' ? update.payload.event : update.payload;
   const key = event.event_id ?? event.request_id;
   const idx = acc.findIndex((e) => (e.event_id ?? e.request_id) === key);
   if (idx >= 0) {
     const out = acc.slice();
-    out[idx] = event;
+    out[idx] = event as RequestEvent;
     return out;
   }
-  return [event, ...acc].slice(0, cap);
+  return [event as RequestEvent, ...acc].slice(0, cap);
 }
 
 export function useLiveRequestEvents(enabled: boolean, cap = 500) {
@@ -464,15 +505,17 @@ export function useUpstreamOAuthStatus(id: string | null | undefined) {
   });
 }
 export function useUpstreamSubscriptionMetadata(upstreamId: string) {
-  return useQuery({
-    queryKey: qk.upstreamSubscriptionMetadata(upstreamId),
-    queryFn: () =>
-      getJson<SubscriptionMetadataResponse>(
-        `/admin/v1/upstreams/${upstreamId}/subscription-metadata`,
-      ),
-    enabled: !!upstreamId,
-    refetchInterval: 30_000,
-  });
+  return usePolledData(
+    {
+      queryKey: qk.upstreamSubscriptionMetadata(upstreamId),
+      queryFn: () =>
+        getJson<SubscriptionMetadataResponse>(
+          `/admin/v1/upstreams/${upstreamId}/subscription-metadata`,
+        ),
+      enabled: !!upstreamId,
+    },
+    POLLING_INTERVALS.UPSTREAM_SUB_META_MS,
+  );
 }
 export function useTriggerSubscriptionMetadataRefresh() {
   const qc = useQueryClient();
@@ -488,11 +531,13 @@ export function useTriggerSubscriptionMetadataRefresh() {
   });
 }
 export function usePluginStatus() {
-  return useQuery({
-    queryKey: qk.pluginStatus,
-    queryFn: () => getJson<PluginsStatusResponse>('/admin/status'),
-    refetchInterval: 15_000,
-  });
+  return usePolledData(
+    {
+      queryKey: qk.pluginStatus,
+      queryFn: () => getJson<PluginsStatusResponse>('/admin/status'),
+    },
+    POLLING_INTERVALS.PLUGIN_STATUS_MS,
+  );
 }
 export function useConfigCurrent() {
   return useQuery({
@@ -534,14 +579,16 @@ export function useSubscriptionQuotaLatest(params: {
   if (params.maxStalenessSecs !== undefined)
     searchParams.set('max_staleness_secs', String(params.maxStalenessSecs));
 
-  return useQuery({
-    queryKey: qk.subscriptionQuotaLatest(params),
-    queryFn: () =>
-      getJson<LatestResponse>(
-        `/admin/v1/subscription-quotas/latest?${searchParams.toString()}`,
-      ),
-    refetchInterval: params.refetchInterval ?? 5_000,
-  });
+  return usePolledData(
+    {
+      queryKey: qk.subscriptionQuotaLatest(params),
+      queryFn: () =>
+        getJson<LatestResponse>(
+          `/admin/v1/subscription-quotas/latest?${searchParams.toString()}`,
+        ),
+    },
+    params.refetchInterval ?? POLLING_INTERVALS.QUOTA_LATEST_MS,
+  );
 }
 
 export function useSubscriptionQuotaSeries(params: {
@@ -567,14 +614,16 @@ export function useSubscriptionQuotaSeries(params: {
       String(params.maxPointsPerSeries),
     );
 
-  return useQuery({
-    queryKey: qk.subscriptionQuotaSeries(params),
-    queryFn: () =>
-      getJson<SeriesResponse>(
-        `/admin/v1/subscription-quotas/series?${searchParams.toString()}`,
-      ),
-    refetchInterval: 30_000,
-  });
+  return usePolledData(
+    {
+      queryKey: qk.subscriptionQuotaSeries(params),
+      queryFn: () =>
+        getJson<SeriesResponse>(
+          `/admin/v1/subscription-quotas/series?${searchParams.toString()}`,
+        ),
+    },
+    POLLING_INTERVALS.QUOTA_SERIES_MS,
+  );
 }
 
 export function useSubscriptionQuotaAnalysis(params: {
@@ -591,14 +640,16 @@ export function useSubscriptionQuotaAnalysis(params: {
   searchParams.set('since_unix_secs', String(params.sinceUnixSecs));
   searchParams.set('until_unix_secs', String(params.untilUnixSecs));
 
-  return useQuery({
-    queryKey: qk.subscriptionQuotaAnalysis(params),
-    queryFn: () =>
-      getJson<AnalysisResponse>(
-        `/admin/v1/subscription-quotas/analysis?${searchParams.toString()}`,
-      ),
-    refetchInterval: 120_000,
-  });
+  return usePolledData(
+    {
+      queryKey: qk.subscriptionQuotaAnalysis(params),
+      queryFn: () =>
+        getJson<AnalysisResponse>(
+          `/admin/v1/subscription-quotas/analysis?${searchParams.toString()}`,
+        ),
+    },
+    POLLING_INTERVALS.QUOTA_ANALYSIS_MS,
+  );
 }
 
 export function useSubscriptionQuotaAggregate(params: {
@@ -614,14 +665,16 @@ export function useSubscriptionQuotaAggregate(params: {
   if (params.maxStalenessSecs !== undefined)
     searchParams.set('max_staleness_secs', String(params.maxStalenessSecs));
 
-  return useQuery({
-    queryKey: qk.subscriptionQuotaAggregate(params),
-    queryFn: () =>
-      getJson<AggregateResponse>(
-        `/admin/v1/subscription-quotas/aggregate?${searchParams.toString()}`,
-      ),
-    refetchInterval: 30_000,
-  });
+  return usePolledData(
+    {
+      queryKey: qk.subscriptionQuotaAggregate(params),
+      queryFn: () =>
+        getJson<AggregateResponse>(
+          `/admin/v1/subscription-quotas/aggregate?${searchParams.toString()}`,
+        ),
+    },
+    POLLING_INTERVALS.QUOTA_AGGREGATE_MS,
+  );
 }
 
 export function useSubscriptionQuotaPoolHistory(params: {
@@ -636,14 +689,16 @@ export function useSubscriptionQuotaPoolHistory(params: {
   if (params.untilUnixSecs !== undefined)
     searchParams.set('until_unix_secs', String(params.untilUnixSecs));
 
-  return useQuery({
-    queryKey: qk.subscriptionQuotaPoolHistory(params),
-    queryFn: () =>
-      getJson<PoolHistoryResponse>(
-        `/admin/v1/subscription-quotas/pool-history?${searchParams.toString()}`,
-      ),
-    refetchInterval: 30_000,
-  });
+  return usePolledData(
+    {
+      queryKey: qk.subscriptionQuotaPoolHistory(params),
+      queryFn: () =>
+        getJson<PoolHistoryResponse>(
+          `/admin/v1/subscription-quotas/pool-history?${searchParams.toString()}`,
+        ),
+    },
+    POLLING_INTERVALS.QUOTA_POOL_HISTORY_MS,
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1293,14 +1348,16 @@ export const warmupKeys = {
 };
 
 export function useWarmupSummary(upstreamId: string) {
-  return useQuery({
-    queryKey: warmupKeys.summary(upstreamId),
-    queryFn: () =>
-      getJson<WarmupSummary>(`/admin/v1/upstreams/${upstreamId}/warmup`),
-    enabled: Boolean(upstreamId),
-    refetchInterval: 30_000,
-    staleTime: 15_000,
-  });
+  return usePolledData(
+    {
+      queryKey: warmupKeys.summary(upstreamId),
+      queryFn: () =>
+        getJson<WarmupSummary>(`/admin/v1/upstreams/${upstreamId}/warmup`),
+      enabled: Boolean(upstreamId),
+      staleTime: 15_000,
+    },
+    POLLING_INTERVALS.WARMUP_SUMMARY_MS,
+  );
 }
 
 export function useWarmupAttempts(

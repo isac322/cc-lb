@@ -1,29 +1,35 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cc_lb_lifecycle::{
-    AuthInfo, CacheBreakpointLite, CacheBreakpointSourceLite, CostBreakdown, EventId,
-    LifecycleEvent, ParseInfo, RequestCacheStateLite, RouteInfo, TerminationReason, UsageSnapshot,
+    AuthInfo, CacheBreakpointLite, CacheBreakpointSourceLite,
+    CostBreakdown as LifecycleCostBreakdown, EventId, LifecycleEvent, ParseInfo,
+    RequestCacheStateLite, RouteInfo, TerminationReason, UsageSnapshot,
 };
 use cc_lb_plugin_api::{InternalError, RoutingTrace};
+use cc_lb_pricing::virtual_cost_micros_full;
 use cc_lb_storage_api::types::{
-    RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState, RequestEventUpstream,
+    RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState, RequestEventPartial,
+    RequestEventUpstream,
 };
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use uuid::Uuid;
 
 use crate::event_bus::{RequestEventBus, RequestEventUpdate};
+use crate::lifecycle::{
+    CostBreakdownOptions, cost_breakdown_to_event_options, pricing_upstream_kind_from_label,
+};
+use crate::metrics_labels::PartialTrigger;
 
 pub const DEFAULT_ASSEMBLER_MAP_CAP: usize = 4096;
 pub const DEFAULT_ASSEMBLER_TTL: Duration = Duration::from_secs(300);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// After receiving `RequestTerminated`, the assembler holds the partial for
-/// this grace period so that late `Priced` and `CacheObserved` events (emitted
-/// by their subscribers on separate tasks) can still merge into the row.
+/// this grace period so that late `CacheObserved` events (emitted by a separate
+/// subscriber task) can still merge into the row. Pricing is computed inline.
 /// See RFC-0002 synthesis analysis for the ordering rationale.
 const FINALIZATION_GRACE: Duration = Duration::from_millis(200);
 
@@ -31,6 +37,7 @@ const FINALIZATION_GRACE: Duration = Duration::from_millis(200);
 /// FINALIZATION_GRACE so terminated partials do not sit past their deadline
 /// waiting for the next tick.
 const FINALIZATION_TICK: Duration = Duration::from_millis(20);
+const PARTIAL_USAGE_THROTTLE: Duration = Duration::from_millis(250);
 
 pub struct RequestEventAssemblerHandle {
     shutdown_tx: oneshot::Sender<()>,
@@ -74,9 +81,11 @@ pub fn spawn_with_config(
 
 #[derive(Default)]
 struct Partial {
+    event_id: EventId,
     inserted_at: Option<Instant>,
     request_id: Option<String>,
     ts_ms: u64,
+    last_partial_emit_ts: Option<Instant>,
     stream: bool,
     parse: Option<ParseInfo>,
     auth: Option<AuthInfo>,
@@ -87,7 +96,7 @@ struct Partial {
     stream_success: Option<u64>,
     stream_error_type: Option<String>,
     stream_error_message: Option<String>,
-    cost: Option<CostBreakdown>,
+    cost: Option<LifecycleCostBreakdown>,
     cache_state: Option<RequestCacheState>,
     cache_control_block_count: Option<u64>,
     cache_breakpoints: Vec<RequestCacheBreakpoint>,
@@ -146,8 +155,9 @@ impl TerminationInfo {
 }
 
 impl Partial {
-    fn new(now: Instant) -> Self {
+    fn new(now: Instant, event_id: EventId) -> Self {
         Self {
+            event_id,
             inserted_at: Some(now),
             ..Self::default()
         }
@@ -157,8 +167,224 @@ impl Partial {
         self.inserted_at = Some(now);
     }
 
-    fn orphan() -> Self {
-        Self::default()
+    fn orphan(event_id: EventId) -> Self {
+        Self {
+            event_id,
+            ..Self::default()
+        }
+    }
+
+    fn snapshot_partial(&self, now_ms: u64) -> RequestEventPartial {
+        let (principal_id, key_id, principal_kind) = self
+            .auth
+            .as_ref()
+            .map(|auth| {
+                (
+                    Some(auth.principal_id.clone()),
+                    auth.key_id.clone(),
+                    auth.principal_kind.clone(),
+                )
+            })
+            .unwrap_or_default();
+        let (upstream_id, upstream_name, upstream, route_ms) = self
+            .route
+            .as_ref()
+            .map(|route| {
+                (
+                    Some(route.upstream_id),
+                    Some(route.upstream_name.clone()),
+                    Some(RequestEventUpstream::AnthropicDirect),
+                    route.route_ms,
+                )
+            })
+            .unwrap_or_default();
+        let cost = self.cost_options();
+        let ts_ms = self.ts_ms;
+
+        RequestEventPartial {
+            event_id: self.event_id.clone(),
+            request_id: self
+                .request_id
+                .clone()
+                .unwrap_or_else(|| "req_unknown_shadow".to_owned()),
+            ts: ts_ms / 1_000,
+            ts_ms,
+            last_update_ms: now_ms,
+            elapsed_ms: if ts_ms == 0 {
+                0
+            } else {
+                now_ms.saturating_sub(ts_ms)
+            },
+            stream: self.stream,
+            principal_id,
+            principal_kind,
+            key_id,
+            upstream,
+            upstream_id,
+            upstream_name,
+            model: self.model().map(str::to_owned),
+            upstream_response_status: self.upstream_response_status,
+            input_tokens: self.usage_seen.then_some(self.usage.input_tokens),
+            output_tokens: self.usage_seen.then_some(self.usage.output_tokens),
+            cache_creation_input_tokens: self
+                .usage_seen
+                .then_some(self.usage.cache_creation_input_tokens),
+            cache_creation_input_tokens_5m: (self.usage_seen
+                && self.usage.cache_creation_input_tokens_5m > 0)
+                .then_some(self.usage.cache_creation_input_tokens_5m),
+            cache_creation_input_tokens_1h: (self.usage_seen
+                && self.usage.cache_creation_input_tokens_1h > 0)
+                .then_some(self.usage.cache_creation_input_tokens_1h),
+            cache_read_input_tokens: self
+                .usage_seen
+                .then_some(self.usage.cache_read_input_tokens),
+            thinking_tokens: (self.usage_seen && self.usage.thinking_tokens > 0)
+                .then_some(self.usage.thinking_tokens),
+            web_search_requests: (self.usage_seen && self.usage.web_search_requests > 0)
+                .then_some(self.usage.web_search_requests),
+            web_fetch_requests: (self.usage_seen && self.usage.web_fetch_requests > 0)
+                .then_some(self.usage.web_fetch_requests),
+            service_tier: self.usage.service_tier.clone(),
+            inference_geo: self.usage.inference_geo.clone(),
+            cost_usd_micros: cost.total,
+            cost_input_micros: cost.input,
+            cost_output_micros: cost.output,
+            cost_cache_creation_5m_micros: cost.cache_creation_5m,
+            cost_cache_creation_1h_micros: cost.cache_creation_1h,
+            cost_cache_read_micros: cost.cache_read,
+            cache_control_block_count: self.cache_control_block_count,
+            cache_prefix_hash: self.cache_prefix_hash.clone(),
+            auth_ms: self.auth.as_ref().and_then(|auth| auth.auth_ms),
+            route_ms,
+            limit_reserve_ms: self.limit_reserve_ms,
+            bulkhead_wait_ms: self.bulkhead_wait_ms,
+            dns_ms: self.dns_ms,
+            connect_ms: self.connect_ms,
+            connection_reused: self.connection_reused,
+            shape_ms: self.shape_ms,
+            sign_ms: self.sign_ms,
+            upstream_ttfb_ms: self.upstream_ttfb_ms,
+            first_body_chunk_ms: self.first_body_chunk_ms,
+        }
+    }
+
+    fn model(&self) -> Option<&str> {
+        self.route
+            .as_ref()
+            .and_then(|route| route.model.as_deref())
+            .or_else(|| self.parse.as_ref().and_then(|parse| parse.model.as_deref()))
+    }
+
+    fn cost_options(&self) -> CostBreakdownOptions {
+        self.cost
+            .as_ref()
+            .map(|cost| CostBreakdownOptions {
+                total: cost.total_micros,
+                input: cost.input_micros,
+                output: cost.output_micros,
+                cache_creation_5m: cost.cache_creation_5m_micros,
+                cache_creation_1h: cost.cache_creation_1h_micros,
+                cache_read: cost.cache_read_micros,
+            })
+            .unwrap_or_else(|| self.inline_cost_options())
+    }
+
+    fn inline_cost_options(&self) -> CostBreakdownOptions {
+        if !self.usage_seen {
+            return CostBreakdownOptions::default();
+        }
+        let Some(model) = self.model() else {
+            return CostBreakdownOptions::default();
+        };
+        let upstream_kind = self
+            .route
+            .as_ref()
+            .and_then(|route| route.upstream_kind.as_deref())
+            .and_then(pricing_upstream_kind_from_label);
+        let breakdown = virtual_cost_micros_full(
+            model,
+            self.usage.input_tokens,
+            self.usage.output_tokens,
+            self.usage.cache_creation_input_tokens_5m,
+            self.usage.cache_creation_input_tokens_1h,
+            self.usage.cache_read_input_tokens,
+            upstream_kind,
+        );
+        cost_breakdown_to_event_options(&breakdown)
+    }
+
+    fn usage_partial_due_at(&self, now: Instant) -> bool {
+        self.last_partial_emit_ts
+            .map(|last| now.duration_since(last) > PARTIAL_USAGE_THROTTLE)
+            .unwrap_or(true)
+    }
+
+    fn record_usage_partial_emit_at(&mut self, now: Instant) {
+        self.last_partial_emit_ts = Some(now);
+    }
+}
+
+fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
+    match event {
+        LifecycleEvent::RequestStarted { .. } => Some(PartialTrigger::RequestStarted),
+        LifecycleEvent::RouteCompleted { .. } => Some(PartialTrigger::RouteCompleted),
+        LifecycleEvent::UpstreamResponseStarted { .. } => {
+            Some(PartialTrigger::UpstreamResponseStarted)
+        }
+        LifecycleEvent::UsageObserved { .. } => Some(PartialTrigger::UsageObserved),
+        LifecycleEvent::StreamCompleted { .. } => Some(PartialTrigger::StreamCompleted),
+        LifecycleEvent::RequestTerminated { .. } => Some(PartialTrigger::RequestTerminated),
+        LifecycleEvent::ParseCompleted { .. }
+        | LifecycleEvent::AuthCompleted { .. }
+        | LifecycleEvent::AuthenticationCompleted { .. }
+        | LifecycleEvent::LimitDecision { .. }
+        | LifecycleEvent::UpstreamAttempt { .. }
+        | LifecycleEvent::ProviderErrorObserved { .. }
+        | LifecycleEvent::Priced { .. }
+        | LifecycleEvent::CacheObserved { .. }
+        | LifecycleEvent::PromptCacheObservationsProduced { .. } => None,
+        _ => {
+            tracing::warn!("lifecycle event assembler saw unknown lifecycle event variant");
+            None
+        }
+    }
+}
+
+fn publish_partial(
+    bus: Option<&dyn RequestEventBus>,
+    partial: &Partial,
+    trigger: PartialTrigger,
+    now_ms: u64,
+) {
+    if let Some(bus) = bus {
+        bus.publish(RequestEventUpdate::partial(
+            partial.snapshot_partial(now_ms),
+        ));
+        metrics::counter!("sse_partials_published_total", "trigger" => trigger.as_str())
+            .increment(1);
+    }
+}
+
+fn publish_usage_partial(
+    bus: Option<&dyn RequestEventBus>,
+    partial: &mut Partial,
+    now: Instant,
+    now_ms: u64,
+) {
+    if partial.usage_partial_due_at(now) {
+        if bus.is_some() {
+            partial.record_usage_partial_emit_at(now);
+        }
+        publish_partial(bus, partial, PartialTrigger::UsageObserved, now_ms);
+    } else {
+        metrics::counter!("sse_partials_throttled_total").increment(1);
+    }
+}
+
+fn unix_now_ms() -> u64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis().min(u128::from(u64::MAX)) as u64,
+        Err(_) => 0,
     }
 }
 
@@ -212,12 +438,11 @@ async fn write_finalized_rows(
     duration_ms: u64,
     is_orphan: bool,
 ) {
-    let mut row = finalize_base(partial, reason, client_status, duration_ms, is_orphan);
-    row.event_id = Some(Uuid::now_v7().to_string());
+    let row = finalize_base(partial, reason, client_status, duration_ms, is_orphan);
     match storage.append_request_event(&row).await {
-        Ok(()) => {
+        Ok(cursor) => {
             if let Some(bus) = bus {
-                bus.publish(RequestEventUpdate::final_(row));
+                bus.publish(RequestEventUpdate::final_(row, cursor));
             }
             let outcome = if is_orphan {
                 "written_orphan"
@@ -320,6 +545,7 @@ async fn handle_event(
     event: LifecycleEvent,
 ) {
     let now = Instant::now();
+    let now_ms = unix_now_ms();
     let event_id = event.event_id().clone();
 
     if let LifecycleEvent::RequestTerminated {
@@ -343,13 +569,14 @@ async fn handle_event(
                 "outcome" => "terminated_without_partial"
             )
             .increment(1);
-            let mut partial = Partial::orphan();
+            let mut partial = Partial::orphan(event_id.clone());
             partial.limit_reconcile_ms = *limit_reconcile_ms;
             partial.observability_post_ms = *observability_post_ms;
             partial.proxy_setup_ms = *proxy_setup_ms;
             partial.upstream_body_ms = *upstream_body_ms;
             partial.first_body_chunk_ms = *first_body_chunk_ms;
             partial.internal_errors = internal_errors.clone();
+            publish_partial(bus, &partial, PartialTrigger::RequestTerminated, now_ms);
             write_finalized_rows(
                 storage,
                 bus,
@@ -372,7 +599,6 @@ async fn handle_event(
             partial.first_body_chunk_ms = *first_body_chunk_ms;
         }
         partial.internal_errors = internal_errors.clone();
-        let expects_priced = partial.usage_seen && partial.cost.is_none();
         let expects_cache =
             partial.upstream_response_status.is_some() && partial.cache_state.is_none();
         let termination = TerminationInfo {
@@ -380,9 +606,10 @@ async fn handle_event(
             client_status: *client_status,
             duration_ms: *duration_ms,
             deadline: now + FINALIZATION_GRACE,
-            expects_priced,
+            expects_priced: false,
             expects_cache,
         };
+        publish_partial(bus, &partial, PartialTrigger::RequestTerminated, now_ms);
         if termination.is_ready(&partial) {
             write_finalized_rows(
                 storage,
@@ -403,18 +630,34 @@ async fn handle_event(
         return;
     }
 
-    let partial = partials
-        .entry(event_id.clone())
-        .or_insert_with(|| Partial::new(now));
-    partial.touch(now);
-    merge(partial, event);
-
-    if partial
-        .termination
-        .as_ref()
-        .is_some_and(|t| t.is_ready(partial))
-        && let Some(partial) = partials.remove(&event_id)
+    let trigger = partial_emit_trigger(&event);
     {
+        let partial = partials
+            .entry(event_id.clone())
+            .or_insert_with(|| Partial::new(now, event_id.clone()));
+        partial.touch(now);
+        merge(partial, event);
+
+        if let Some(trigger) = trigger {
+            if trigger == PartialTrigger::UsageObserved {
+                publish_usage_partial(bus, partial, now, now_ms);
+            } else {
+                publish_partial(bus, partial, trigger, now_ms);
+            }
+        }
+    }
+
+    let ready_to_finalize = partials
+        .get(&event_id)
+        .and_then(|partial| {
+            partial
+                .termination
+                .as_ref()
+                .map(|term| term.is_ready(partial))
+        })
+        .unwrap_or(false);
+
+    if ready_to_finalize && let Some(partial) = partials.remove(&event_id) {
         let term = partial
             .termination
             .as_ref()
@@ -627,7 +870,7 @@ fn finalize_base(
             })
             .unwrap_or_default();
 
-    let cost = partial.cost.clone().unwrap_or_default();
+    let cost = partial.cost_options();
     RequestEvent {
         ts: ts_ms / 1_000,
         ts_ms: Some(ts_ms),
@@ -660,12 +903,12 @@ fn finalize_base(
         cache_control_block_count: partial.cache_control_block_count,
         cache_breakpoints: partial.cache_breakpoints.clone(),
         cache_prefix_hash: partial.cache_prefix_hash.clone(),
-        cost_usd_micros: cost.total_micros,
-        cost_input_micros: cost.input_micros,
-        cost_output_micros: cost.output_micros,
-        cost_cache_creation_5m_micros: cost.cache_creation_5m_micros,
-        cost_cache_creation_1h_micros: cost.cache_creation_1h_micros,
-        cost_cache_read_micros: cost.cache_read_micros,
+        cost_usd_micros: cost.total,
+        cost_input_micros: cost.input,
+        cost_output_micros: cost.output,
+        cost_cache_creation_5m_micros: cost.cache_creation_5m,
+        cost_cache_creation_1h_micros: cost.cache_creation_1h,
+        cost_cache_read_micros: cost.cache_read,
         thinking_tokens: (partial.usage.thinking_tokens > 0)
             .then_some(partial.usage.thinking_tokens),
         web_search_requests: (partial.usage.web_search_requests > 0)
@@ -710,6 +953,7 @@ fn finalize_base(
         routing_trace,
         internal_errors: partial.internal_errors.clone(),
         iterations: partial.usage.iterations.clone(),
+        event_id: Some(partial.event_id.clone()),
         ..Default::default()
     }
 }
@@ -781,20 +1025,29 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use cc_lb_lifecycle::{AuthFailure, ParseFailure, StreamError, StreamSuccess};
+    use cc_lb_lifecycle::{
+        AuthFailure, CostBreakdown, HeaderSnapshot, ParseFailure, RouteInfo, StreamError,
+        StreamSuccess, UsageSource,
+    };
     use cc_lb_storage_api::{RequestEvent, StorageResult};
-    use std::sync::Mutex as StdMutex;
+    use metrics::{Counter, CounterFn, Key, KeyName, Metadata, Recorder, SharedString, Unit};
+    use proptest::prelude::*;
+    use std::collections::HashMap as StdHashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    use uuid::Uuid;
 
     #[derive(Default)]
     struct CapturingStore {
         rows: StdMutex<Vec<RequestEvent>>,
+        cursor: AtomicU64,
     }
 
     #[async_trait]
     impl RequestEventStore for CapturingStore {
-        async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<()> {
+        async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<u64> {
             self.rows.lock().unwrap().push(event.clone());
-            Ok(())
+            Ok(self.cursor.fetch_add(1, Ordering::Relaxed) + 1)
         }
 
         async fn query_request_events(
@@ -805,6 +1058,99 @@ mod tests {
         ) -> StorageResult<Vec<RequestEvent>> {
             Ok(Vec::new())
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct CountingRecorder {
+        counts: Arc<StdMutex<StdHashMap<String, u64>>>,
+    }
+
+    #[derive(Clone)]
+    struct CountingCounter {
+        counts: Arc<StdMutex<StdHashMap<String, u64>>>,
+        key: String,
+    }
+
+    impl CounterFn for CountingCounter {
+        fn increment(&self, value: u64) {
+            let mut counts = self.counts.lock().expect("recorder lock");
+            *counts.entry(self.key.clone()).or_insert(0) += value;
+        }
+
+        fn absolute(&self, value: u64) {
+            let mut counts = self.counts.lock().expect("recorder lock");
+            counts.insert(self.key.clone(), value);
+        }
+    }
+
+    impl Recorder for CountingRecorder {
+        fn describe_counter(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {
+        }
+
+        fn describe_gauge(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {}
+
+        fn describe_histogram(
+            &self,
+            _key: KeyName,
+            _unit: Option<Unit>,
+            _description: SharedString,
+        ) {
+        }
+
+        fn register_counter(&self, key: &Key, _metadata: &Metadata<'_>) -> Counter {
+            Counter::from_arc(Arc::new(CountingCounter {
+                counts: Arc::clone(&self.counts),
+                key: key.to_string(),
+            }))
+        }
+
+        fn register_gauge(&self, _key: &Key, _metadata: &Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(&self, _key: &Key, _metadata: &Metadata<'_>) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    impl CountingRecorder {
+        fn count_matching(&self, metric: &str, label_fragment: &str) -> u64 {
+            self.counts
+                .lock()
+                .expect("recorder counts")
+                .iter()
+                .filter(|(key, _)| key.contains(metric) && key.contains(label_fragment))
+                .map(|(_, count)| *count)
+                .sum()
+        }
+    }
+
+    fn install_counting_recorder() -> CountingRecorder {
+        static RECORDER: OnceLock<CountingRecorder> = OnceLock::new();
+        let recorder = RECORDER.get_or_init(CountingRecorder::default).clone();
+        let _ = metrics::set_global_recorder(recorder.clone());
+        recorder
+    }
+
+    fn install_known_pricing_for_tests() {
+        let model = "claude-3-5-sonnet-20241022";
+        let mut models = StdHashMap::new();
+        models.insert(
+            model.to_owned(),
+            cc_lb_pricing::Pricing {
+                model: model.to_owned(),
+                input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(3),
+                output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(15),
+            },
+        );
+        cc_lb_pricing::global_catalog().install_snapshot(cc_lb_pricing::CatalogSnapshot {
+            fetched_at_ms: 1,
+            models,
+            raw_json: Vec::new(),
+            cache_creation_per_million_usd: StdHashMap::new(),
+            cache_read_per_million_usd: StdHashMap::new(),
+            status: cc_lb_pricing::CatalogStatus::Ok,
+        });
     }
 
     fn eid(s: &str) -> EventId {
@@ -992,6 +1338,59 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn request_terminated_before_started_writes_orphan_and_increments_metric() {
+        let recorder = install_counting_recorder();
+        let before = recorder.count_matching(
+            "cc_lb_lifecycle_assembler_rows_total",
+            "terminated_without_partial",
+        );
+        let (tx, rx) = mpsc::channel(16);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None);
+        let event_id = eid("orphan-before-started");
+
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id: event_id.clone(),
+            reason: TerminationReason::Dropped,
+            client_status: 499,
+            duration_ms: 7,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: Some(1),
+            observability_post_ms: Some(2),
+            proxy_setup_ms: Some(3),
+            upstream_body_ms: Some(4),
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::RequestStarted {
+            event_id: event_id.clone(),
+            request_id: "late-start-should-not-reclassify".into(),
+            ts_ms: 1_730_000_000_000,
+            stream: false,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id.as_deref(), Some(event_id.as_str()));
+        assert_eq!(rows[0].request_id, "req_unknown_shadow");
+        assert_eq!(
+            rows[0].error_code.as_deref(),
+            Some("terminal_without_partial")
+        );
+        assert!(
+            recorder.count_matching(
+                "cc_lb_lifecycle_assembler_rows_total",
+                "terminated_without_partial",
+            ) > before
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn ignores_unused_auth_failure_variant() {
         let _ = AuthFailure::AuthenticationFailed {
             http_status: 401,
@@ -1007,7 +1406,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn finalized_row_write_republishes_to_bus_for_admin_sse() {
-        use crate::event_bus::{InMemoryBus, RequestEventPhase};
+        use crate::event_bus::InMemoryBus;
 
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
@@ -1046,17 +1445,270 @@ mod tests {
         drop(tx);
         handle.shutdown().await;
 
-        let update = tokio::time::timeout(Duration::from_millis(200), broadcast_rx.recv())
-            .await
-            .expect("bus update within timeout")
-            .expect("bus receiver did not close");
-        assert_eq!(update.phase, RequestEventPhase::Final);
+        let mut final_update = None;
+        while let Ok(update) = broadcast_rx.try_recv() {
+            if let RequestEventUpdate::Final(update) = update {
+                final_update = Some(update);
+            }
+        }
+        let final_update = final_update.expect("expected final update");
+        assert_eq!(final_update.cursor, 1);
         assert!(
-            update
+            final_update
                 .event
                 .event_id
                 .as_deref()
                 .is_some_and(|id| !id.is_empty())
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_lifecycle_publishes_throttled_partials_and_one_final() {
+        use crate::event_bus::{InMemoryBus, RequestEventPhase};
+
+        let (tx, rx) = mpsc::channel(16);
+        let store = Arc::new(CapturingStore::default());
+        let bus = Arc::new(InMemoryBus::new());
+        let crate::event_bus::BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
+            panic!("expected InMemory receiver");
+        };
+        let event_id = eid("01978c00-0000-7000-8000-000000000002");
+        let handle = spawn_request_event_assembler(
+            rx,
+            store.clone(),
+            Some(bus.clone() as Arc<dyn RequestEventBus>),
+        );
+
+        tx.send(LifecycleEvent::RequestStarted {
+            event_id: event_id.clone(),
+            request_id: "req-live-1".into(),
+            ts_ms: 1_730_000_000_000,
+            stream: true,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::RouteCompleted {
+            event_id: event_id.clone(),
+            result: Ok(RouteInfo {
+                upstream_id: Uuid::nil(),
+                upstream_name: "primary".to_owned(),
+                model: Some("claude-3-5-sonnet-20241022".to_owned()),
+                upstream_kind: Some("anthropic_key".to_owned()),
+                route_ms: Some(7),
+                routing_trace: None,
+                predicted_cache_read_tokens: None,
+            }),
+            routing_trace: None,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::UpstreamResponseStarted {
+            event_id: event_id.clone(),
+            status: 200,
+            headers: HeaderSnapshot::default(),
+            bulkhead_wait_ms: Some(1),
+            dns_ms: Some(2),
+            connect_ms: Some(3),
+            connection_reused: Some(false),
+            shape_ms: Some(4),
+            sign_ms: Some(5),
+            upstream_ttfb_ms: Some(6),
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::UsageObserved {
+            event_id: event_id.clone(),
+            usage: UsageSnapshot {
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_creation_input_tokens: 3,
+                cache_read_input_tokens: 4,
+                ..UsageSnapshot::default()
+            },
+            source: UsageSource::MessageStart,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::UsageObserved {
+            event_id: event_id.clone(),
+            usage: UsageSnapshot {
+                input_tokens: 10,
+                output_tokens: 25,
+                cache_creation_input_tokens: 3,
+                cache_read_input_tokens: 4,
+                ..UsageSnapshot::default()
+            },
+            source: UsageSource::MessageDelta,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::StreamCompleted {
+            event_id: event_id.clone(),
+            result: Ok(StreamSuccess {
+                usage: UsageSnapshot {
+                    input_tokens: 10,
+                    output_tokens: 30,
+                    cache_creation_input_tokens: 3,
+                    cache_read_input_tokens: 4,
+                    ..UsageSnapshot::default()
+                },
+                sse_event_count: 3,
+                first_body_chunk_ms: Some(11),
+                ..StreamSuccess::default()
+            }),
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id: event_id.clone(),
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 123,
+            first_body_chunk_ms: Some(11),
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: Some(12),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let mut updates = Vec::new();
+        while let Ok(update) = broadcast_rx.try_recv() {
+            updates.push(update);
+        }
+
+        let partial_count = updates
+            .iter()
+            .filter(|update| update.phase() == RequestEventPhase::Partial)
+            .count();
+        assert!(
+            (5..=6).contains(&partial_count),
+            "expected 5-6 partials, got {partial_count}: {updates:?}"
+        );
+        let finals: Vec<_> = updates
+            .iter()
+            .filter_map(|update| match update {
+                RequestEventUpdate::Final(final_update) => Some(final_update),
+                RequestEventUpdate::Partial(_) => None,
+            })
+            .collect();
+        assert_eq!(finals.len(), 1);
+        assert_eq!(finals[0].cursor, 1);
+        assert_eq!(finals[0].event.event_id.as_deref(), Some(event_id.as_str()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delayed_pricing_subscriber_does_not_affect_inline_final_cost() {
+        use crate::event_bus::InMemoryBus;
+
+        install_known_pricing_for_tests();
+        let bus = Arc::new(InMemoryBus::new());
+        let rx = bus.attach_lifecycle_assembler(16);
+        let mut pricing_rx = bus.attach_lifecycle_pricing(16);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(
+            rx,
+            store.clone(),
+            Some(bus.clone() as Arc<dyn RequestEventBus>),
+        );
+        let delayed_bus = bus.clone();
+        let delayed_pricing = tokio::spawn(async move {
+            while let Some(event) = pricing_rx.recv().await {
+                if let LifecycleEvent::RequestTerminated { event_id, .. } = event {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    delayed_bus.publish_lifecycle(LifecycleEvent::Priced {
+                        event_id,
+                        cost: CostBreakdown {
+                            total_micros: Some(-999),
+                            input_micros: Some(-999),
+                            output_micros: Some(-999),
+                            cache_creation_5m_micros: None,
+                            cache_creation_1h_micros: None,
+                            cache_read_micros: None,
+                        },
+                    });
+                    break;
+                }
+            }
+        });
+        let event_id = eid("inline-pricing-delay");
+
+        bus.publish_lifecycle(LifecycleEvent::RequestStarted {
+            event_id: event_id.clone(),
+            request_id: "req-inline-pricing-delay".into(),
+            ts_ms: 1_730_000_000_000,
+            stream: false,
+        });
+        bus.publish_lifecycle(LifecycleEvent::RouteCompleted {
+            event_id: event_id.clone(),
+            result: Ok(RouteInfo {
+                upstream_id: Uuid::nil(),
+                upstream_name: "primary".to_owned(),
+                model: Some("claude-3-5-sonnet-20241022".to_owned()),
+                upstream_kind: Some("anthropic_key".to_owned()),
+                route_ms: Some(7),
+                routing_trace: None,
+                predicted_cache_read_tokens: None,
+            }),
+            routing_trace: None,
+        });
+        bus.publish_lifecycle(LifecycleEvent::UsageObserved {
+            event_id: event_id.clone(),
+            usage: UsageSnapshot {
+                input_tokens: 1_000,
+                output_tokens: 500,
+                cache_creation_input_tokens_5m: 25,
+                cache_read_input_tokens: 50,
+                ..UsageSnapshot::default()
+            },
+            source: UsageSource::NonStreamBody,
+        });
+        bus.publish_lifecycle(LifecycleEvent::RequestTerminated {
+            event_id: event_id.clone(),
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 42,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
+        });
+
+        handle.shutdown().await;
+        delayed_pricing.await.expect("delayed pricing task joins");
+
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id.as_deref(), Some(event_id.as_str()));
+        assert!(rows[0].cost_usd_micros.is_some());
+        assert_ne!(rows[0].cost_usd_micros, Some(-999));
+        assert_ne!(rows[0].cost_input_micros, Some(-999));
+        assert_ne!(rows[0].cost_output_micros, Some(-999));
+    }
+
+    proptest! {
+        #[test]
+        fn usage_partial_emit_timestamp_is_monotonic(deltas in prop::collection::vec(0u64..=500, 0..64)) {
+            let mut partial = Partial::new(Instant::now(), eid("prop-usage"));
+            let mut now = Instant::now();
+            let mut previous_emit = partial.last_partial_emit_ts;
+
+            for delta in deltas {
+                now += Duration::from_millis(delta);
+                if partial.usage_partial_due_at(now) {
+                    partial.record_usage_partial_emit_at(now);
+                }
+                if let (Some(previous), Some(current)) = (previous_emit, partial.last_partial_emit_ts) {
+                    prop_assert!(current >= previous);
+                }
+                previous_emit = partial.last_partial_emit_ts;
+            }
+        }
     }
 }

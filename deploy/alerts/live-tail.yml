@@ -1,0 +1,56 @@
+groups:
+  - name: cc-lb-live-tail
+    rules:
+      - alert: LiveTailNotifyQueueUsageHigh
+        expr: sse_notify_queue_usage_ratio > 0.30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: cc-lb live-tail PG NOTIFY queue usage is high
+          description: pg_notification_queue_usage() has stayed above 30% for 5 minutes.
+
+      - alert: LiveTailNotifyQueueUsageHigh
+        expr: sse_notify_queue_usage_ratio > 0.50
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: cc-lb live-tail PG NOTIFY queue usage is critical
+          description: pg_notification_queue_usage() has stayed above 50% for 2 minutes.
+
+      - alert: LiveTailBackfillSpike
+        expr: rate(sse_backfill_rows_total[1m]) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: cc-lb live-tail backfill rows spiked
+          description: SSE backfill is serving more than 1000 rows per second over 1 minute for 5 minutes.
+
+      - alert: LiveTailResetRateHigh
+        expr: rate(sse_reset_events_sent_total[5m]) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: cc-lb live-tail reset rate is high
+          description: Server reset frames exceed 0.5 per second across the cluster for 10 minutes.
+
+      - alert: LiveTailAssemblerMpscOverflow
+        expr: rate(cc_lb_dropped_events_total{reason="lifecycle_assembler_full"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: cc-lb lifecycle assembler queue overflowed
+          description: The lifecycle assembler mpsc queue dropped at least one event.
+
+      - alert: LiveTailStorageTailLag
+        expr: histogram_quantile(0.95, sse_storage_tail_lag_ms) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: cc-lb live-tail storage tail lag is high
+          description: p95 storage-tail lag is above 1000 ms for 5 minutes.

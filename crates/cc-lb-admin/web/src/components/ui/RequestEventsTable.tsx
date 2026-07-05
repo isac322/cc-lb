@@ -1,7 +1,7 @@
 import type React from 'react';
 import { useState } from 'react';
 import { eventTime, type RequestEvent } from '../../lib/api';
-import { fmtUsd, fmtUsdCompact, splitNum } from '../../lib/format';
+import { formatCostMicros, splitNum } from '../../lib/format';
 import { LatencyCell } from './latency/LatencyCell';
 import { cx, Hint, SkeletonRow } from './primitives';
 import { RelativeTime } from './RelativeTime';
@@ -9,8 +9,12 @@ import { RequestEventDrawer } from './RequestEventDrawer';
 
 const DASH = '—';
 
+export type RequestEventWithPhase = RequestEvent & {
+  _phase?: 'partial' | 'final';
+};
+
 interface RequestEventsTableProps {
-  events: RequestEvent[];
+  events: RequestEventWithPhase[];
   principalNameMap: Map<string, string>;
   upstreamNameMap: Map<string, string>;
   loading?: boolean;
@@ -95,63 +99,89 @@ export function RequestEventsTable({
               <SkeletonRow key={i} cols={colCount} />
             ))
           ) : events.length ? (
-            events.map((e) => (
-              <tr
-                key={e.request_id}
-                className={cx(
-                  'border-b border-row hover:bg-overlay-1 cursor-pointer',
-                  liveFlashIds?.has(e.request_id) ? 'flash-in' : '',
-                )}
-                onClick={() => setSelected(e)}
-              >
-                <td className="px-3 py-2 text-text-faint whitespace-nowrap">
-                  <span
-                    className={cx(
-                      'status-dot mr-2',
-                      e.status >= 500
-                        ? 'danger'
-                        : e.status >= 400
-                          ? 'warn'
-                          : 'ok',
-                    )}
-                  />
-                  <RelativeTime compact ts={eventTime(e)} />
-                </td>
-                {showPrincipal && (
-                  <td className="px-3 py-2 whitespace-nowrap truncate max-w-[160px]">
-                    {(e.principal_id && principalNameMap.get(e.principal_id)) ??
-                      e.principal_id ??
-                      DASH}
-                  </td>
-                )}
-                {showUpstream && (
-                  <td className="px-3 py-2 whitespace-nowrap truncate max-w-[180px]">
-                    {upstreamNameMap.get(e.upstream ?? '') ??
-                      e.upstream_name ??
-                      e.upstream ??
-                      DASH}
-                  </td>
-                )}
-                <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
-                  {e.model ?? DASH}
-                </td>
-                <td
+            events.map((e) => {
+              const isPartial = e._phase === 'partial';
+              const key = e.event_id ?? e.request_id;
+              return (
+                <tr
+                  key={key}
                   className={cx(
-                    'px-3 py-2 text-right tabular-nums whitespace-nowrap',
-                    e.status >= 500
-                      ? 'text-red-400'
-                      : e.status >= 400
-                        ? 'text-amber-400'
-                        : 'text-green-400',
+                    'border-b border-row hover:bg-overlay-1 cursor-pointer',
+                    liveFlashIds?.has(key) ? 'flash-in' : '',
                   )}
+                  onClick={() => setSelected(e)}
                 >
-                  {e.status}
-                </td>
-                <LatencyCell event={e} />
-                {showTokens && <TokenCell event={e} />}
-                {showCost && <CostCell event={e} />}
-              </tr>
-            ))
+                  <td className="px-3 py-2 text-text-faint whitespace-nowrap">
+                    <span
+                      className={cx(
+                        'status-dot mr-2',
+                        isPartial
+                          ? 'neutral animate-pulse'
+                          : e.status >= 500
+                            ? 'danger'
+                            : e.status >= 400
+                              ? 'warn'
+                              : 'ok',
+                      )}
+                    />
+                    <RelativeTime compact ts={eventTime(e)} />
+                  </td>
+                  {showPrincipal && (
+                    <td className="px-3 py-2 whitespace-nowrap truncate max-w-[160px]">
+                      {(e.principal_id &&
+                        principalNameMap.get(e.principal_id)) ??
+                        e.principal_id ??
+                        DASH}
+                    </td>
+                  )}
+                  {showUpstream && (
+                    <td className="px-3 py-2 whitespace-nowrap truncate max-w-[180px]">
+                      {upstreamNameMap.get(e.upstream ?? '') ??
+                        e.upstream_name ??
+                        e.upstream ??
+                        DASH}
+                    </td>
+                  )}
+                  <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
+                    {e.model ?? DASH}
+                  </td>
+                  <td
+                    className={cx(
+                      'px-3 py-2 text-right tabular-nums whitespace-nowrap',
+                      isPartial
+                        ? 'text-text-faint'
+                        : e.status >= 500
+                          ? 'text-red-400'
+                          : e.status >= 400
+                            ? 'text-amber-400'
+                            : 'text-green-400',
+                    )}
+                  >
+                    {isPartial ? (
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="w-3 h-3 border-2 border-text-faint border-t-transparent rounded-full animate-spin" />
+                        In progress
+                      </span>
+                    ) : (
+                      e.status
+                    )}
+                  </td>
+                  <LatencyCell
+                    event={e as RequestEvent}
+                    isPartial={isPartial}
+                  />
+                  {showTokens && (
+                    <TokenCell
+                      event={e as RequestEvent}
+                      isPartial={isPartial}
+                    />
+                  )}
+                  {showCost && (
+                    <CostCell event={e as RequestEvent} isPartial={isPartial} />
+                  )}
+                </tr>
+              );
+            })
           ) : (
             <tr>
               <td
@@ -236,7 +266,13 @@ function hitRatioPercent(b: TokenBreakdown): number {
   return Math.round((b.cr / denom) * 100);
 }
 
-function TokenCell({ event }: { event: RequestEvent }) {
+function TokenCell({
+  event,
+  isPartial,
+}: {
+  event: RequestEvent;
+  isPartial?: boolean;
+}) {
   const b = tokenBreakdown(event);
   const hit = hitRatioPercent(b);
   const inp = splitNum(totalInputTokens(b));
@@ -281,7 +317,12 @@ function TokenCell({ event }: { event: RequestEvent }) {
       onClick={(e) => e.stopPropagation()}
     >
       <Hint label={popover}>
-        <div className="px-3 py-2 cursor-help block">
+        <div
+          className={cx(
+            'px-3 py-2 cursor-help block',
+            isPartial ? 'animate-pulse' : '',
+          )}
+        >
           <div className="flex items-baseline justify-end tabular-nums leading-tight">
             <span className="shrink-0 w-[4ch] text-right text-sky-400">
               {inp.value}
@@ -356,56 +397,62 @@ function costBreakdown(e: RequestEvent): CostBreakdownT {
   return { input, output, cc_5m, cc_1h, cr, total, hasComponents };
 }
 
-function CostCell({ event }: { event: RequestEvent }) {
+function CostCell({
+  event,
+  isPartial,
+}: {
+  event: RequestEvent;
+  isPartial?: boolean;
+}) {
   const c = costBreakdown(event);
 
   // No cost data at all: render plain dash, no popover.
   if (event.cost_usd_micros == null && !c.hasComponents) {
     return (
       <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap text-text-faint">
-        {DASH}
+        {isPartial ? <span className="animate-pulse">Est. —</span> : DASH}
       </td>
     );
   }
 
   const popover = (
     <BreakdownPopover
-      title="Cost"
+      title={isPartial ? 'Estimated Cost' : 'Cost'}
       rows={[
         {
           label: 'Input',
           value: c.input,
           color: 'bg-sky-400',
-          fmt: fmtUsd,
+          fmt: formatCostMicros,
         },
         {
           label: 'Output',
           value: c.output,
           color: 'bg-violet-400',
-          fmt: fmtUsd,
+          fmt: formatCostMicros,
         },
         {
           label: 'Cache create 5m',
           value: c.cc_5m,
           color: 'bg-amber-400',
-          fmt: fmtUsd,
+          fmt: formatCostMicros,
         },
         {
           label: 'Cache create 1h',
           value: c.cc_1h,
           color: 'bg-amber-700',
-          fmt: fmtUsd,
+          fmt: formatCostMicros,
         },
         {
           label: 'Cache read',
           value: c.cr,
           color: 'bg-emerald-400',
-          fmt: fmtUsd,
+          fmt: formatCostMicros,
         },
       ]}
       footer={
         c.hasComponents && c.total > 0
-          ? { label: 'Total', value: c.total, fmt: fmtUsd }
+          ? { label: 'Total', value: c.total, fmt: formatCostMicros }
           : null
       }
     />
@@ -417,9 +464,16 @@ function CostCell({ event }: { event: RequestEvent }) {
       onClick={(e) => e.stopPropagation()}
     >
       <Hint label={popover}>
-        <div className="px-3 py-2 cursor-help block">
+        <div
+          className={cx(
+            'px-3 py-2 cursor-help block',
+            isPartial ? 'animate-pulse' : '',
+          )}
+        >
           <div className="text-right tabular-nums leading-tight">
-            {fmtUsdCompact(c.total)}
+            {isPartial
+              ? `Est. ${formatCostMicros(c.total)}`
+              : formatCostMicros(c.total)}
           </div>
           {c.hasComponents ? (
             <Sparkline

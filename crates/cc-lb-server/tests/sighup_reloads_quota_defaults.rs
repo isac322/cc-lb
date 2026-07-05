@@ -47,6 +47,7 @@ async fn sighup_reloads_body_defaults() {
         warmup_dialect_dispatcher: None,
         subscription_metadata_hook: None,
         event_bus: None,
+        storage_tail: cc_lb_admin::events::storage_tail_channel(),
         start_time: std::time::Instant::now(),
         clock: Arc::new(cc_lb_core::SystemClock),
     });

@@ -44,6 +44,7 @@ fn test_state(storage: Arc<Storage>, audit_sink: Option<AuditWriterSink>) -> Adm
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus: None,
+        storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock: Arc::new(cc_lb_core::SystemClock),
     }
 }

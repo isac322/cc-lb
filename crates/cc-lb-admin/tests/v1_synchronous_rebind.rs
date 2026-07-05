@@ -165,6 +165,7 @@ async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus: None,
+        storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock: Arc::new(cc_lb_core::SystemClock),
     };
     let app = router(state);

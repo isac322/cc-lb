@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 
-use cc_lb_storage_api::{RequestEvent, RequestEventUpstream, Storage, StorageError};
+use cc_lb_storage_api::{
+    RequestEvent, RequestEventStreamFilters, RequestEventUpstream, StatusClass, Storage,
+    StorageError,
+};
 use serde::Serialize;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 pub const DEFAULT_RECENT_EVENTS_LIMIT: usize = 100;
@@ -9,10 +13,23 @@ pub const MAX_RECENT_EVENTS_LIMIT: usize = 500;
 pub const RECENT_EVENTS_PULL_INFLATION_FACTOR: usize = 10;
 pub const MAX_RECENT_EVENTS_PULL_LIMIT: usize = 5_000;
 
+/// Upper bound on how many events a single reconnect may replay from storage.
+///
+/// Chosen to comfortably cover the largest expected live-tail gap
+/// (browser-throttled tab returning after several minutes on a busy proxy)
+/// while keeping the per-connect storage scan bounded. Clients dedup by
+/// `event_id` so mild overshoot is harmless.
+pub const BACKFILL_MAX_EVENTS: usize = 500;
+pub const DEFAULT_STORAGE_TAIL_CAPACITY: usize = 4096;
+
+const DEFAULT_DELTA_EVENTS_LIMIT: usize = 500;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentEventsParams {
     pub since_unix_secs: u64,
     pub until_unix_secs: u64,
+    pub until_ts_ms: Option<u64>,
+    pub until_event_id: Option<String>,
     pub limit: usize,
     pub principal_id: Option<String>,
     pub model: Option<String>,
@@ -26,15 +43,21 @@ pub struct StreamFilters {
     pub principal_id: Option<String>,
     pub model: Option<String>,
     pub upstream: Option<RequestEventUpstream>,
+    pub upstream_id: Option<Uuid>,
     pub status_class: Option<StatusClass>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatusClass {
-    TwoXx,
-    ThreeXx,
-    FourXx,
-    FiveXx,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventsDeltaQuery {
+    pub since_cursor: u64,
+    pub limit: usize,
+    pub filters: StreamFilters,
+}
+
+#[derive(Debug, Clone)]
+pub struct StorageTailUpdate {
+    pub cursor: u64,
+    pub event: RequestEvent,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,10 +68,19 @@ pub struct RecentEventsPayload {
     pub limit: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct EventsDeltaPayload {
+    pub events: Vec<RequestEvent>,
+    pub next_cursor: u64,
+    pub exhausted: bool,
+}
+
 #[derive(Debug)]
 pub enum EventsError {
     InvalidSinceUnixSecs,
     InvalidUntilUnixSecs,
+    InvalidUntilTsMs,
+    InvalidSinceCursor,
     InvalidLimit,
     LimitTooLarge,
     InvalidUpstreamId,
@@ -72,6 +104,18 @@ pub fn parse_recent_params(
             .map_err(|_| EventsError::InvalidUntilUnixSecs)?,
         None => u64::MAX,
     };
+    let until_ts_ms = map
+        .get("until_ts_ms")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| EventsError::InvalidUntilTsMs)
+        })
+        .transpose()?;
+    let until_event_id = map
+        .get("until_event_id")
+        .filter(|value| !value.is_empty())
+        .cloned();
     let limit = match map.get("limit") {
         Some(value) => value
             .parse::<usize>()
@@ -89,17 +133,77 @@ pub fn parse_recent_params(
     Ok(RecentEventsParams {
         since_unix_secs,
         until_unix_secs,
+        until_ts_ms,
+        until_event_id,
         limit,
         principal_id: filters.principal_id,
         model: filters.model,
-        upstream_id: match map.get("upstream_id") {
-            Some(value) => {
-                Some(Uuid::parse_str(value).map_err(|_| EventsError::InvalidUpstreamId)?)
-            }
-            None => None,
-        },
+        upstream_id: filters.upstream_id,
         upstream: filters.upstream,
         status_class: filters.status_class,
+    })
+}
+
+pub fn parse_delta_query(map: &HashMap<String, String>) -> Result<EventsDeltaQuery, EventsError> {
+    let since_cursor = map
+        .get("since_cursor")
+        .ok_or(EventsError::InvalidSinceCursor)?
+        .parse::<u64>()
+        .map_err(|_| EventsError::InvalidSinceCursor)?;
+    let limit = match map.get("limit") {
+        Some(value) => value
+            .parse::<u16>()
+            .map_err(|_| EventsError::InvalidLimit)?
+            .into(),
+        None => DEFAULT_DELTA_EVENTS_LIMIT,
+    };
+    if limit == 0 {
+        return Err(EventsError::InvalidLimit);
+    }
+
+    Ok(EventsDeltaQuery {
+        since_cursor,
+        limit: limit.min(DEFAULT_DELTA_EVENTS_LIMIT),
+        filters: parse_stream_filters(map)?,
+    })
+}
+
+pub fn parse_last_event_id(header: Option<&str>) -> Option<u64> {
+    header.and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+pub fn sse_id_from_cursor(cursor: u64) -> String {
+    cursor.to_string()
+}
+
+pub fn storage_tail_channel() -> broadcast::Sender<StorageTailUpdate> {
+    let (tx, _) = broadcast::channel(DEFAULT_STORAGE_TAIL_CAPACITY);
+    tx
+}
+
+pub async fn build_delta_events_payload(
+    storage: &dyn Storage,
+    query: &EventsDeltaQuery,
+) -> Result<EventsDeltaPayload, EventsError> {
+    let cursor_hi = storage.current_request_event_cursor().await?;
+    let rows = storage
+        .query_request_events_between_cursors(
+            query.since_cursor,
+            cursor_hi,
+            query.limit,
+            &query.filters.storage_filters(),
+        )
+        .await?;
+    let next_cursor = rows
+        .last()
+        .map(|(cursor, _)| *cursor)
+        .unwrap_or(query.since_cursor);
+    let exhausted = rows.len() < query.limit;
+    let events = rows.into_iter().map(|(_, event)| event).collect();
+    Ok(EventsDeltaPayload {
+        events,
+        next_cursor,
+        exhausted,
     })
 }
 
@@ -109,6 +213,12 @@ pub fn parse_stream_filters(map: &HashMap<String, String>) -> Result<StreamFilte
         model: map.get("model").cloned(),
         upstream: match map.get("upstream") {
             Some(value) => Some(parse_upstream(value)?),
+            None => None,
+        },
+        upstream_id: match map.get("upstream_id") {
+            Some(value) => {
+                Some(Uuid::parse_str(value).map_err(|_| EventsError::InvalidUpstreamId)?)
+            }
             None => None,
         },
         status_class: match map.get("status_class") {
@@ -134,6 +244,11 @@ pub fn apply_filters_to_event(event: &RequestEvent, filters: &StreamFilters) -> 
     {
         return false;
     }
+    if let Some(upstream_id) = filters.upstream_id
+        && event.upstream_id != Some(upstream_id)
+    {
+        return false;
+    }
     if let Some(status_class) = filters.status_class
         && !status_class.matches(event.status)
     {
@@ -153,9 +268,10 @@ pub async fn build_recent_events_payload(
         .query_recent_request_events(params.since_unix_secs, params.until_unix_secs, pull_limit)
         .await?;
     events.retain(|event| apply_filters_to_event(event, &filters));
-    if let Some(upstream_id) = params.upstream_id {
-        events.retain(|event| event.upstream_id == Some(upstream_id));
-    }
+    events.retain(|event| {
+        before_recent_cursor(event, params.until_ts_ms, params.until_event_id.as_deref())
+    });
+    events.sort_by(compare_recent_events_desc);
     events.truncate(params.limit);
     let count = events.len();
 
@@ -174,18 +290,20 @@ impl RecentEventsParams {
             principal_id: self.principal_id.clone(),
             model: self.model.clone(),
             upstream: self.upstream,
+            upstream_id: self.upstream_id,
             status_class: self.status_class,
         }
     }
 }
 
-impl StatusClass {
-    fn matches(self, status: u16) -> bool {
-        match self {
-            Self::TwoXx => (200..=299).contains(&status),
-            Self::ThreeXx => (300..=399).contains(&status),
-            Self::FourXx => (400..=499).contains(&status),
-            Self::FiveXx => (500..=599).contains(&status),
+impl StreamFilters {
+    pub fn storage_filters(&self) -> RequestEventStreamFilters {
+        RequestEventStreamFilters {
+            principal_id: self.principal_id.clone(),
+            model: self.model.clone(),
+            upstream: self.upstream,
+            upstream_id: self.upstream_id,
+            status_class: self.status_class,
         }
     }
 }
@@ -195,6 +313,8 @@ impl EventsError {
         match self {
             Self::InvalidSinceUnixSecs => "invalid_since_unix_secs",
             Self::InvalidUntilUnixSecs => "invalid_until_unix_secs",
+            Self::InvalidUntilTsMs => "invalid_until_ts_ms",
+            Self::InvalidSinceCursor => "invalid_since_cursor",
             Self::InvalidLimit => "invalid_limit",
             Self::LimitTooLarge => "limit_too_large",
             Self::InvalidUpstreamId => "invalid_upstream_id",
@@ -226,4 +346,35 @@ fn parse_status_class(value: &str) -> Result<StatusClass, EventsError> {
         "5xx" => Ok(StatusClass::FiveXx),
         _ => Err(EventsError::InvalidStatusClass),
     }
+}
+
+fn before_recent_cursor(
+    event: &RequestEvent,
+    until_ts_ms: Option<u64>,
+    until_event_id: Option<&str>,
+) -> bool {
+    let Some(until_ts_ms) = until_ts_ms else {
+        return true;
+    };
+    let event_ts_ms = event_ts_ms(event);
+    if event_ts_ms != until_ts_ms {
+        return event_ts_ms < until_ts_ms;
+    }
+    until_event_id.is_some_and(|cursor_id| event_identity(event) < cursor_id)
+}
+
+fn compare_recent_events_desc(left: &RequestEvent, right: &RequestEvent) -> std::cmp::Ordering {
+    event_ts_ms(right)
+        .cmp(&event_ts_ms(left))
+        .then_with(|| event_identity(right).cmp(event_identity(left)))
+}
+
+fn event_ts_ms(event: &RequestEvent) -> u64 {
+    event
+        .ts_ms
+        .unwrap_or_else(|| event.ts.saturating_mul(1_000))
+}
+
+fn event_identity(event: &RequestEvent) -> &str {
+    event.event_id.as_deref().unwrap_or(&event.request_id)
 }

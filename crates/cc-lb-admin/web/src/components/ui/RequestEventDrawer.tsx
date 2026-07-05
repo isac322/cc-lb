@@ -1,7 +1,7 @@
 import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { Copy, X } from 'lucide-react';
 import type { ReactNode } from 'react';
-import { eventTime, type RequestEvent } from '../../lib/api';
+import { eventTime } from '../../lib/api';
 import { fmtBytes, fmtMs, statusTone } from '../../lib/format';
 import { useCopyButton } from '../../lib/useCopyButton';
 import { LatencyTimeline } from './latency/LatencyTimeline';
@@ -13,12 +13,14 @@ import { TokenPie } from './usage/TokenPie';
 
 const DASH = '—';
 
+import type { RequestEventWithPhase } from './RequestEventsTable';
+
 export function RequestEventDrawer({
   event,
   principalName,
   onClose,
 }: {
-  event: RequestEvent | null;
+  event: RequestEventWithPhase | null;
   principalName: string | null;
   onClose: () => void;
 }) {
@@ -56,7 +58,7 @@ function RequestDetail({
   principalName,
   onClose,
 }: {
-  event: RequestEvent;
+  event: RequestEventWithPhase;
   principalName: string | null;
   onClose: () => void;
 }) {
@@ -71,6 +73,7 @@ function RequestDetail({
     event.body_bytes != null;
 
   const principalLabel = principalName ?? event.principal_id ?? DASH;
+  const isPartial = event._phase === 'partial';
 
   return (
     <>
@@ -91,6 +94,11 @@ function RequestDetail({
             >
               <Copy className="w-3 h-3" />
             </button>
+            {isPartial && (
+              <Badge tone="neutral" className="animate-pulse">
+                Live
+              </Badge>
+            )}
           </div>
           <div className="text-sm truncate">
             {principalLabel} → {event.upstream_name ?? event.upstream ?? DASH}
@@ -172,7 +180,14 @@ function RequestDetail({
             <KvRow
               label="Status"
               value={
-                <Badge tone={statusTone(event.status)}>{event.status}</Badge>
+                isPartial ? (
+                  <span className="inline-flex items-center gap-1.5 text-text-faint">
+                    <span className="w-3 h-3 border-2 border-text-faint border-t-transparent rounded-full animate-spin" />
+                    In progress
+                  </span>
+                ) : (
+                  <Badge tone={statusTone(event.status)}>{event.status}</Badge>
+                )
               }
             />
             {event.error_code ? (
@@ -194,7 +209,7 @@ function RequestDetail({
               <TokenPie event={event} control={usageControl} />
             </DetailSection>
           ) : null}
-          <DetailSection title="Cost">
+          <DetailSection title={isPartial ? 'Estimated Cost' : 'Cost'}>
             <CostPie event={event} control={usageControl} />
           </DetailSection>
         </div>
@@ -209,9 +224,15 @@ function RequestDetail({
         <DetailSection title="Latency">
           <div className="flex items-center justify-between text-[11px] mb-2">
             <span className="text-text-faint">Total</span>
-            <MonoNum>{fmtMs(event.duration_ms)}</MonoNum>
+            <MonoNum>
+              {isPartial
+                ? event.elapsed_ms != null
+                  ? fmtMs(event.elapsed_ms)
+                  : DASH
+                : fmtMs(event.duration_ms)}
+            </MonoNum>
           </div>
-          <LatencyTimeline event={event} />
+          <LatencyTimeline event={event} isPartial={isPartial} />
         </DetailSection>
       </div>
     </>

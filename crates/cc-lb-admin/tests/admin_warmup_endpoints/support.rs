@@ -104,6 +104,7 @@ fn test_state(
         admin_token: Some(TEST_TOKEN.to_owned()),
         start_time: std::time::Instant::now(),
         event_bus: None,
+        storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock,
     }
 }

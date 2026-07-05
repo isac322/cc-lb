@@ -49,6 +49,13 @@
         "window_secs": 10
       }
     },
+    "cluster": {
+      "$ref": "#/$defs/ClusterConfig",
+      "default": {
+        "token_env": "CC_LB_CLUSTER_TOKEN",
+        "token_env_optional": true
+      }
+    },
     "dns": {
       "$ref": "#/$defs/DnsConfig",
       "default": {
@@ -65,6 +72,17 @@
     "egress": {
       "$ref": "#/$defs/EgressConfig",
       "default": {}
+    },
+    "event_bus": {
+      "$ref": "#/$defs/EventBusConfig",
+      "default": {
+        "broadcast_capacity": 4096,
+        "partial_retention_max_entries": 10000,
+        "partial_retention_ttl_secs": 300,
+        "pg_notify_channel": "cc_lb_events_partial",
+        "storage_tail_poll_interval_ms": 250,
+        "transport": "in_memory"
+      }
     },
     "lifecycle_api_key_metrics_subscriber": {
       "$ref": "#/$defs/LifecycleApiKeyMetricsSubscriberConfig",
@@ -458,6 +476,26 @@
         }
       }
     },
+    "ClusterConfig": {
+      "type": "object",
+      "properties": {
+        "instance_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token_env": {
+          "type": "string",
+          "default": "CC_LB_CLUSTER_TOKEN"
+        },
+        "token_env_optional": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
     "DnsConfig": {
       "type": "object",
       "properties": {
@@ -534,6 +572,51 @@
           }
         }
       }
+    },
+    "EventBusConfig": {
+      "type": "object",
+      "properties": {
+        "broadcast_capacity": {
+          "type": "integer",
+          "format": "uint",
+          "default": 4096,
+          "minimum": 0
+        },
+        "partial_retention_max_entries": {
+          "type": "integer",
+          "format": "uint",
+          "default": 10000,
+          "minimum": 0
+        },
+        "partial_retention_ttl_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
+        },
+        "pg_notify_channel": {
+          "type": "string",
+          "default": "cc_lb_events_partial"
+        },
+        "storage_tail_poll_interval_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 250,
+          "minimum": 0
+        },
+        "transport": {
+          "$ref": "#/$defs/EventBusTransport",
+          "default": "in_memory"
+        }
+      },
+      "additionalProperties": false
+    },
+    "EventBusTransport": {
+      "type": "string",
+      "enum": [
+        "in_memory",
+        "pg_notify"
+      ]
     },
     "LifecycleApiKeyMetricsSubscriberConfig": {
       "type": "object",

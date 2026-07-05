@@ -34,6 +34,12 @@ pub const DEFAULT_FILES_CAP_BYTES: u64 = 100 * 1024 * 1024;
 pub const DEFAULT_OAUTH_AEAD_KEY_ENV: &str = "CC_LB_MASTER_KEY";
 pub const DEFAULT_ADMIN_TOKEN_ENV: &str = "CC_LB_ADMIN_TOKEN";
 pub const DEFAULT_SQLITE_PATH: &str = "/var/lib/cc-lb/storage.sqlite";
+pub const DEFAULT_EVENT_BUS_BROADCAST_CAPACITY: usize = 4096;
+pub const DEFAULT_CLUSTER_TOKEN_ENV: &str = "CC_LB_CLUSTER_TOKEN";
+pub const DEFAULT_STORAGE_TAIL_POLL_INTERVAL_MS: u64 = 250;
+pub const DEFAULT_PG_NOTIFY_CHANNEL: &str = "cc_lb_events_partial";
+pub const DEFAULT_PARTIAL_RETENTION_TTL_SECS: u64 = 300;
+pub const DEFAULT_PARTIAL_RETENTION_MAX_ENTRIES: usize = 10_000;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -51,6 +57,10 @@ pub struct Config {
     pub aead: AeadConfig,
     pub observability: ObservabilityConfig,
     pub admin: AdminConfig,
+    #[serde(default)]
+    pub event_bus: EventBusConfig,
+    #[serde(default)]
+    pub cluster: ClusterConfig,
     pub oauth: OAuthConfig,
     #[serde(default)]
     pub subscription_quota: SubscriptionQuotaConfig,
@@ -259,6 +269,65 @@ impl Default for PriceCatalogConfig {
             url: default_price_catalog_url(),
             refresh_interval: default_price_catalog_refresh_interval(),
             cache_path: default_price_catalog_cache_path(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EventBusTransport {
+    #[default]
+    InMemory,
+    PgNotify,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct EventBusConfig {
+    #[serde(default = "default_event_bus_broadcast_capacity")]
+    pub broadcast_capacity: usize,
+    #[serde(default)]
+    pub transport: EventBusTransport,
+    #[serde(default = "default_storage_tail_poll_interval_ms")]
+    pub storage_tail_poll_interval_ms: u64,
+    #[serde(default = "default_pg_notify_channel")]
+    pub pg_notify_channel: String,
+    #[serde(default = "default_partial_retention_ttl_secs")]
+    pub partial_retention_ttl_secs: u64,
+    #[serde(default = "default_partial_retention_max_entries")]
+    pub partial_retention_max_entries: usize,
+}
+
+impl Default for EventBusConfig {
+    fn default() -> Self {
+        Self {
+            broadcast_capacity: DEFAULT_EVENT_BUS_BROADCAST_CAPACITY,
+            transport: EventBusTransport::InMemory,
+            storage_tail_poll_interval_ms: DEFAULT_STORAGE_TAIL_POLL_INTERVAL_MS,
+            pg_notify_channel: DEFAULT_PG_NOTIFY_CHANNEL.to_owned(),
+            partial_retention_ttl_secs: DEFAULT_PARTIAL_RETENTION_TTL_SECS,
+            partial_retention_max_entries: DEFAULT_PARTIAL_RETENTION_MAX_ENTRIES,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClusterConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_url: Option<String>,
+    #[serde(default = "default_cluster_token_env")]
+    pub token_env: String,
+    #[serde(default = "default_true")]
+    pub token_env_optional: bool,
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        Self {
+            instance_url: None,
+            token_env: DEFAULT_CLUSTER_TOKEN_ENV.to_owned(),
+            token_env_optional: true,
         }
     }
 }
@@ -1098,6 +1167,30 @@ fn default_files_cap_bytes() -> u64 {
     DEFAULT_FILES_CAP_BYTES
 }
 
+fn default_event_bus_broadcast_capacity() -> usize {
+    DEFAULT_EVENT_BUS_BROADCAST_CAPACITY
+}
+
+fn default_storage_tail_poll_interval_ms() -> u64 {
+    DEFAULT_STORAGE_TAIL_POLL_INTERVAL_MS
+}
+
+fn default_pg_notify_channel() -> String {
+    DEFAULT_PG_NOTIFY_CHANNEL.to_owned()
+}
+
+fn default_partial_retention_ttl_secs() -> u64 {
+    DEFAULT_PARTIAL_RETENTION_TTL_SECS
+}
+
+fn default_partial_retention_max_entries() -> usize {
+    DEFAULT_PARTIAL_RETENTION_MAX_ENTRIES
+}
+
+fn default_cluster_token_env() -> String {
+    DEFAULT_CLUSTER_TOKEN_ENV.to_owned()
+}
+
 fn default_request_header_secs() -> u64 {
     TimeoutsConfig::default().request_header_secs
 }
@@ -1427,6 +1520,95 @@ upstream_kind = "anthropic_key"
         let none_mode = config.downstream_auth.none_mode.expect("none mode config");
         assert_eq!(none_mode.principal_id, "anon");
         assert_eq!(none_mode.upstream_kind, NoneModeUpstreamKind::AnthropicKey);
+    }
+
+    #[test]
+    fn event_bus_defaults_and_pg_notify_stub_deserialize() {
+        let default_config = Config::default();
+        assert_eq!(
+            default_config.event_bus.broadcast_capacity,
+            DEFAULT_EVENT_BUS_BROADCAST_CAPACITY
+        );
+        assert_eq!(
+            default_config.event_bus.transport,
+            EventBusTransport::InMemory
+        );
+        assert_eq!(
+            default_config.event_bus.storage_tail_poll_interval_ms,
+            DEFAULT_STORAGE_TAIL_POLL_INTERVAL_MS
+        );
+        assert_eq!(
+            default_config.event_bus.pg_notify_channel,
+            DEFAULT_PG_NOTIFY_CHANNEL
+        );
+
+        let config = load_config(
+            r#"
+[storage]
+kind = "postgres"
+url = "postgres://localhost/cc_lb"
+
+[event_bus]
+broadcast_capacity = 8192
+transport = "pg_notify"
+storage_tail_poll_interval_ms = 125
+pg_notify_channel = "cc_lb_events_partial_custom"
+partial_retention_ttl_secs = 60
+partial_retention_max_entries = 256
+
+[cluster]
+instance_url = "http://127.0.0.1:9090"
+
+[api_keys]
+"#,
+        )
+        .expect("config should load");
+
+        assert_eq!(config.event_bus.broadcast_capacity, 8192);
+        assert_eq!(config.event_bus.transport, EventBusTransport::PgNotify);
+        assert_eq!(config.event_bus.storage_tail_poll_interval_ms, 125);
+        assert_eq!(
+            config.event_bus.pg_notify_channel,
+            "cc_lb_events_partial_custom"
+        );
+        assert_eq!(config.event_bus.partial_retention_ttl_secs, 60);
+        assert_eq!(config.event_bus.partial_retention_max_entries, 256);
+    }
+
+    #[test]
+    fn pg_notify_requires_postgres_and_instance_url() {
+        let sqlite_error = load_config(
+            r#"
+[event_bus]
+transport = "pg_notify"
+
+[cluster]
+instance_url = "http://127.0.0.1:9090"
+
+[api_keys]
+"#,
+        )
+        .expect_err("sqlite pg_notify should fail validation");
+        assert!(
+            sqlite_error
+                .to_string()
+                .contains("requires postgres storage")
+        );
+
+        let missing_url = load_config(
+            r#"
+[storage]
+kind = "postgres"
+url = "postgres://localhost/cc_lb"
+
+[event_bus]
+transport = "pg_notify"
+
+[api_keys]
+"#,
+        )
+        .expect_err("pg_notify without instance_url should fail validation");
+        assert!(missing_url.to_string().contains("cluster.instance_url"));
     }
 
     #[test]

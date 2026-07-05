@@ -148,6 +148,7 @@ pub async fn spawn_admin_server_with_clock(clock: ClockHandle) -> SpawnedAdminSe
         admin_token: Some("test-token".to_owned()),
         start_time: std::time::Instant::now(),
         event_bus: None,
+        storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock,
     };
     SpawnedAdminServer {
