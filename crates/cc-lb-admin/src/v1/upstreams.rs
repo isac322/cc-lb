@@ -13,15 +13,17 @@ use axum::{
 };
 use bytes::Bytes;
 use cc_lb_aead::{AeadEncryptedField, OAuthTokenBundle};
-use cc_lb_engine::anthropic_compat::{
+use cc_lb_clock::Clock;
+use cc_lb_control::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
+use cc_lb_control::anthropic_metadata::make_metadata_http_client;
+use cc_lb_control::{AuditEntry, AuditPayload, run_metadata_refresh};
 use cc_lb_engine::warmup_attempts::{
     WarmupAttemptExecution, WarmupAttemptExecutionResult, execute_warmup_attempt,
 };
 use cc_lb_engine::{
-    AuditEntry, AuditPayload, Clock, UnifiedQuotaObservation, make_metadata_http_client,
-    observe_subscription_quota_headers, parse_anthropic_unified_headers, run_metadata_refresh,
+    UnifiedQuotaObservation, observe_subscription_quota_headers, parse_anthropic_unified_headers,
 };
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
@@ -1596,10 +1598,10 @@ mod tests {
     use axum::body::{Body as AxumBody, to_bytes};
     use cc_lb_aead::AeadService;
     use cc_lb_config::Config;
-    use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
-    use cc_lb_engine::api_keys::limit_engine::LimitEngine;
-    use cc_lb_engine::api_keys::principal_view::PrincipalView;
-    use cc_lb_engine::{
+    use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
+    use cc_lb_control::api_keys::limit_engine::LimitEngine;
+    use cc_lb_control::api_keys::principal_view::PrincipalView;
+    use cc_lb_control::{
         DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
     };
     use cc_lb_plugin_api::{
@@ -1835,7 +1837,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("storage dir");
         let database_url = format!("sqlite://{}", dir.path().join("upstreams.sqlite").display());
         let storage =
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
                 .await
                 .expect("storage opens");
         storage
@@ -1850,7 +1852,7 @@ mod tests {
             aead: aead.clone(),
             limit_engine: LimitEngine::new(
                 Arc::new(KeyConcurrencyManager::new()),
-                Arc::new(cc_lb_engine::SystemClock),
+                Arc::new(cc_lb_clock::SystemClock),
             ),
             lifecycle: None,
             subscription_metadata_hook: None,
@@ -1866,7 +1868,7 @@ mod tests {
             start_time: std::time::Instant::now(),
             event_bus: None,
             storage_tail: crate::events::storage_tail_channel(),
-            clock: Arc::new(cc_lb_engine::SystemClock),
+            clock: Arc::new(cc_lb_clock::SystemClock),
         };
         TestContext {
             _dir: dir,

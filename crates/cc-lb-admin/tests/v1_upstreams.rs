@@ -11,7 +11,7 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
-use cc_lb_engine::AuditWriterSink;
+use cc_lb_control::AuditWriterSink;
 use cc_lb_storage_api::AuditStore;
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http_body_util::BodyExt;
@@ -45,7 +45,7 @@ fn test_state(storage: Arc<Storage>, audit_sink: Option<AuditWriterSink>) -> Adm
         start_time: std::time::Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_engine::SystemClock),
+        clock: Arc::new(cc_lb_clock::SystemClock),
     }
 }
 
@@ -267,7 +267,7 @@ async fn update_without_if_match_returns_428_precondition_required() {
 #[tokio::test]
 async fn enable_disable_emits_audit_and_persists_state() {
     let (_dir, storage) = new_store().await;
-    let (audit_sink, audit_writer) = cc_lb_engine::spawn_audit_writer(storage.clone(), 64);
+    let (audit_sink, audit_writer) = cc_lb_control::spawn_audit_writer(storage.clone(), 64);
     let app = router(test_state(storage.clone(), Some(audit_sink)));
     let created = create(app.clone(), "primary").await;
     let id = body(&created)["id"].as_str().unwrap();

@@ -13,10 +13,11 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cc_lb_aead::{AeadEncryptedField, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_engine::anthropic_compat::{
+use cc_lb_control::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
-use cc_lb_engine::{AuditEntry, AuditPayload, fetch_metadata_only, make_metadata_http_client};
+use cc_lb_control::anthropic_metadata::make_metadata_http_client;
+use cc_lb_control::{AuditEntry, AuditPayload, fetch_metadata_only};
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};

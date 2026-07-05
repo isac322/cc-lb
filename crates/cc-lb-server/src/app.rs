@@ -804,14 +804,16 @@ async fn build_app_with_storage_inner(
     let limit_engine = LimitEngine::new(concurrent_mgr, clock.clone());
     limit_engine.startup_replay(storage.clone()).await;
     let limit_reservation_ttl_handle = Some(
-        cc_lb_engine::api_keys::limit_engine::spawn_reservation_ttl_sweeper(
+        cc_lb_control::api_keys::limit_engine::spawn_reservation_ttl_sweeper(
             limit_engine.clone(),
             std::time::Duration::from_secs(config.limit_reservation_ttl.ttl_secs.max(1)),
             std::time::Duration::from_secs(config.limit_reservation_ttl.tick_secs.max(1)),
         ),
     );
     let limit_reservation_ttl_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_engine::api_keys::limit_engine::ReservationTtlSweeperHandle>>,
+        tokio::sync::Mutex<
+            Option<cc_lb_control::api_keys::limit_engine::ReservationTtlSweeperHandle>,
+        >,
     > = Arc::new(tokio::sync::Mutex::new(limit_reservation_ttl_handle));
     let builtin_authn = Arc::new(BuiltinAuthn::new(
         config.downstream_auth.mode.clone(),
@@ -824,7 +826,7 @@ async fn build_app_with_storage_inner(
 
     let replica_identity = {
         match replica::load_or_create_replica_id(&data_dir) {
-            Ok(id) => Some(cc_lb_engine::ReplicaIdentity { id }),
+            Ok(id) => Some(cc_lb_contract::ReplicaIdentity { id }),
             Err(e) => {
                 tracing::warn!(error = %e, "failed to load or create replica ID; proceeding without it");
                 None
@@ -952,42 +954,44 @@ async fn build_app_with_storage_inner(
     let notify_listener_task = Some(tokio::spawn(async move {
         notify_listener.run().await;
     }));
-    let in_memory_bus = cc_lb_engine::InMemoryBus::with_capacity(config.event_bus.broadcast_capacity);
-    let lifecycle_event_logger_rx =
-        in_memory_bus.attach_lifecycle_writer(cc_lb_engine::DEFAULT_LIFECYCLE_WRITER_CAPACITY);
-    let lifecycle_assembler_rx = Some(
-        in_memory_bus.attach_lifecycle_assembler(cc_lb_engine::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY),
-    );
+    let in_memory_bus = cc_lb_control::InMemoryBus::with_capacity(config.event_bus.broadcast_capacity);
+    let lifecycle_event_logger_rx = in_memory_bus
+        .attach_lifecycle_writer(cc_lb_control::event_bus::DEFAULT_LIFECYCLE_WRITER_CAPACITY);
+    let lifecycle_assembler_rx = Some(in_memory_bus.attach_lifecycle_assembler(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY,
+    ));
     let lifecycle_hook_adapter_rx = if config.lifecycle_hook_adapter.enabled {
-        Some(
-            in_memory_bus
-                .attach_lifecycle_hook_adapter(cc_lb_engine::DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY),
-        )
+        Some(in_memory_bus.attach_lifecycle_hook_adapter(
+            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY,
+        ))
     } else {
         None
     };
-    let lifecycle_pricing_rx = if config.lifecycle_pricing_subscriber.enabled {
-        Some(in_memory_bus.attach_lifecycle_pricing(cc_lb_engine::DEFAULT_LIFECYCLE_PRICING_CAPACITY))
-    } else {
-        None
-    };
+    let lifecycle_pricing_rx =
+        if config.lifecycle_pricing_subscriber.enabled {
+            Some(in_memory_bus.attach_lifecycle_pricing(
+                cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PRICING_CAPACITY,
+            ))
+        } else {
+            None
+        };
     let lifecycle_limit_reconcile_rx = if config.lifecycle_limit_reconcile_subscriber.enabled {
         Some(in_memory_bus.attach_lifecycle_limit_reconcile(
-            cc_lb_engine::event_bus::DEFAULT_LIFECYCLE_LIMIT_RECONCILE_CAPACITY,
+            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_LIMIT_RECONCILE_CAPACITY,
         ))
     } else {
         None
     };
     let lifecycle_cache_obs_rx = if config.lifecycle_cache_observation_subscriber.enabled {
         Some(in_memory_bus.attach_lifecycle_cache_observation(
-            cc_lb_engine::event_bus::DEFAULT_LIFECYCLE_CACHE_OBS_CAPACITY,
+            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_CACHE_OBS_CAPACITY,
         ))
     } else {
         None
     };
     let lifecycle_rate_limit_header_rx = if config.lifecycle_rate_limit_header_subscriber.enabled {
         Some(in_memory_bus.attach_lifecycle_rate_limit_header(
-            cc_lb_engine::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
+            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
         ))
     } else {
         None
@@ -995,7 +999,7 @@ async fn build_app_with_storage_inner(
     let lifecycle_subscription_quota_rx = if config.lifecycle_subscription_quota_subscriber.enabled
     {
         Some(in_memory_bus.attach_lifecycle_subscription_quota(
-            cc_lb_engine::event_bus::DEFAULT_LIFECYCLE_SUBSCRIPTION_QUOTA_CAPACITY,
+            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_SUBSCRIPTION_QUOTA_CAPACITY,
         ))
     } else {
         None
@@ -1003,21 +1007,21 @@ async fn build_app_with_storage_inner(
     let lifecycle_limit_rejection_audit_rx =
         if config.lifecycle_limit_rejection_audit_subscriber.enabled && audit_sink.is_some() {
             Some(in_memory_bus.attach_lifecycle_limit_rejection_audit(
-                cc_lb_engine::event_bus::DEFAULT_LIFECYCLE_LIMIT_REJECTION_AUDIT_CAPACITY,
+                cc_lb_control::event_bus::DEFAULT_LIFECYCLE_LIMIT_REJECTION_AUDIT_CAPACITY,
             ))
         } else {
             None
         };
     let lifecycle_api_key_metrics_rx = if config.lifecycle_api_key_metrics_subscriber.enabled {
         Some(in_memory_bus.attach_lifecycle_api_key_metrics(
-            cc_lb_engine::event_bus::DEFAULT_LIFECYCLE_API_KEY_METRICS_CAPACITY,
+            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_API_KEY_METRICS_CAPACITY,
         ))
     } else {
         None
     };
     let lifecycle_cache_hit_miss_rx = if config.lifecycle_cache_hit_miss_subscriber.enabled {
         Some(in_memory_bus.attach_lifecycle_cache_hit_miss(
-            cc_lb_engine::event_bus::DEFAULT_LIFECYCLE_CACHE_HIT_MISS_CAPACITY,
+            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_CACHE_HIT_MISS_CAPACITY,
         ))
     } else {
         None
@@ -1025,7 +1029,7 @@ async fn build_app_with_storage_inner(
     let lifecycle_prompt_cache_drift_rx = if config.lifecycle_prompt_cache_drift_subscriber.enabled
     {
         Some(in_memory_bus.attach_lifecycle_prompt_cache_drift(
-            cc_lb_engine::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_DRIFT_CAPACITY,
+            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_DRIFT_CAPACITY,
         ))
     } else {
         None
@@ -1036,7 +1040,7 @@ async fn build_app_with_storage_inner(
             && initial_view.prompt_cache_observation_cache_opt().is_some()
         {
             Some(in_memory_bus.attach_lifecycle_prompt_cache_observation(
-                cc_lb_engine::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY,
+                cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY,
             ))
         } else {
             None

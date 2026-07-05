@@ -11,7 +11,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use cc_lb_engine::{AuditEntry, AuditPayload};
+use cc_lb_control::{AuditEntry, AuditPayload};
 use cc_lb_plugin_wire::schema::HookKind;
 use cc_lb_runtime_wasmtime::{ModuleInspection, WasmtimeRuntime, WasmtimeRuntimeError};
 use cc_lb_storage_api::{

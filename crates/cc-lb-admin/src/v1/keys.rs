@@ -5,9 +5,9 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_engine::AuditEntry;
-use cc_lb_engine::api_keys::key_store::CreateParams;
-use cc_lb_engine::api_keys::secret;
+use cc_lb_control::AuditEntry;
+use cc_lb_control::api_keys::key_store::CreateParams;
+use cc_lb_control::api_keys::secret;
 use cc_lb_storage_api::types::{KeyStatus, PrincipalKindLite, UpstreamKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;

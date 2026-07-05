@@ -8,14 +8,13 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use cc_lb_admin::{AdminState, CurrentConfig, DynamicViewRebinder, router};
 use cc_lb_config::Config;
-use cc_lb_engine::api_keys::principal_view::PrincipalView;
-use cc_lb_engine::{
-    ApiKeyAwareSignerFactory, ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamStatusEntry,
-    UpstreamStatusSnapshot,
+use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_control::{
+    ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
 use cc_lb_plugin_api::{
-    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, SignerFactory, Upstream,
-    UpstreamCandidate,
+    ApiKeyAwareSignerFactory, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
+    SignerFactory, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
@@ -152,7 +151,7 @@ async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
         start_time: std::time::Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_engine::SystemClock),
+        clock: Arc::new(cc_lb_clock::SystemClock),
     };
     let app = router(state);
 

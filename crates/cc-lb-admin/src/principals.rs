@@ -10,8 +10,8 @@ use humantime::parse_duration;
 use serde::{Deserialize, Serialize};
 
 use crate::{AdminState, management::ManagementError};
-use cc_lb_engine::Clock;
-use cc_lb_engine::api_keys::limit_engine::{IdentityFilter, PrincipalLimitsSnapshot};
+use cc_lb_clock::Clock;
+use cc_lb_control::api_keys::limit_engine::{IdentityFilter, PrincipalLimitsSnapshot};
 use cc_lb_storage_api::{StorageError, UsageRollup, UsageRollupResolution};
 
 #[derive(Debug, Clone, Deserialize)]

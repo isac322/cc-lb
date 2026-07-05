@@ -6,7 +6,7 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
-use cc_lb_engine::api_keys::key_store::KeyStore;
+use cc_lb_control::api_keys::key_store::KeyStore;
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,7 +33,7 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         start_time: Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_engine::SystemClock),
+        clock: Arc::new(cc_lb_clock::SystemClock),
     }
 }
 

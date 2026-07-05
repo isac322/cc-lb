@@ -4,8 +4,8 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use cc_lb_admin::{AdminState, router};
+use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::Config;
-use cc_lb_engine::{ClockHandle, TestClock};
 use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::warmup_attempts::{
     WarmupAttemptCursor, WarmupAttemptOutcome, WarmupAttemptRecord, WarmupAttemptTrigger,
@@ -114,7 +114,7 @@ async fn seed_attempts(
     upstream_id: Uuid,
     upstream_spec_revision: u64,
     dialect_plugin: &UpstreamWarmupDialectPlugin,
-    clock: &dyn cc_lb_engine::Clock,
+    clock: &dyn cc_lb_clock::Clock,
 ) -> Vec<WarmupAttemptRecord> {
     let now = i64::try_from(cc_lb_engine::clock::unix_secs(clock.now())).unwrap_or(i64::MAX);
     let plugin_snapshot = serde_json::to_value(dialect_plugin).expect("plugin serializes");

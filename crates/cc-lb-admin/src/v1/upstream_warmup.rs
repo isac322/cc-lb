@@ -122,12 +122,11 @@ pub(crate) async fn get_upstream_warmup(
         )
         .await?;
     let next_scheduled_at_unix_secs = next_scheduled_at_unix_secs(&state, upstream_id).await?;
-    let now_unix_secs =
-        i64::try_from(cc_lb_engine::unix_secs(state.clock.now())).map_err(|_| {
-            WarmupReadError::Internal {
-                detail: "clock now overflowed i64 unix seconds".to_owned(),
-            }
-        })?;
+    let now_unix_secs = i64::try_from(cc_lb_clock::unix_secs(state.clock.now())).map_err(|_| {
+        WarmupReadError::Internal {
+            detail: "clock now overflowed i64 unix seconds".to_owned(),
+        }
+    })?;
     let cutoff_unix_secs = now_unix_secs
         .checked_sub(RECENT_SUMMARY_WINDOW_SECS)
         .ok_or_else(|| WarmupReadError::Internal {

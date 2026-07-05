@@ -5,7 +5,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_engine::{AuditEntry, AuditPayload};
+use cc_lb_control::{AuditEntry, AuditPayload};
 use cc_lb_plugin_api::TerminalStrategy;
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::{

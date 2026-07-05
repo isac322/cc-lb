@@ -27,11 +27,13 @@ use cc_lb_config::{Config, RestartRequiredField};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use serde::Serialize;
 
+use cc_lb_clock::ClockHandle;
 use cc_lb_contract::RequestEventBus;
-use cc_lb_engine::{
-    AuditWriterSink, ClockHandle, DynamicView, DynamicViewHolder, Lifecycle, MetadataHookHandle,
+use cc_lb_control::{
+    AuditWriterSink, DynamicView, DynamicViewHolder, MetadataHookHandle,
     api_keys::{key_store::KeyStore, limit_engine::LimitEngine},
 };
+use cc_lb_engine::Lifecycle;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{Storage, UpstreamRecord};
 

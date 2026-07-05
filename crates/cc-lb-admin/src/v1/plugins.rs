@@ -7,7 +7,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_engine::{AuditEntry, AuditPayload};
+use cc_lb_control::{AuditEntry, AuditPayload};
 use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainConflictReason,

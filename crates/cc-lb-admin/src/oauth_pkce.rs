@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use cc_lb_engine::Clock;
+use cc_lb_clock::Clock;
 use cc_lb_oauth_protocol::{
     ExistingTokenParts, parse_token_endpoint_response, refreshed_token_parts,
 };
