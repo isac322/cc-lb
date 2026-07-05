@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-api-v0.5.0...cc-lb-plugin-api-v0.6.0) - 2026-07-05
+
+### Other
+
+- *(routing)* drop unused round-robin/least-connections terminal strategies ([#319](https://github.com/isac322/cc-lb/pull/319))
+
 ## [0.4.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-api-v0.3.0...cc-lb-plugin-api-v0.4.0) - 2026-07-03
 
 ### Added
