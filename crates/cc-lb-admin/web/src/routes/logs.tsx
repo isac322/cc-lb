@@ -15,12 +15,12 @@ import {
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { eventTime, type RequestEvent } from '../lib/api';
 import {
-  useLiveRequestEvents,
   usePrincipalNameMap,
   useRecentEventsInfinite,
   useUpstreamNameMap,
   useUpstreams,
 } from '../lib/queries';
+import { useLiveEventStream } from '../lib/useLiveEventStream';
 
 const logsSearchSchema = z.object({
   principal_id: z.string().optional(),
@@ -48,13 +48,29 @@ function LogsPage() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLTableRowElement>(null);
 
-  const live = useLiveRequestEvents(tailing);
-  const liveRows = live.data ?? [];
-  const tailStatus: 'idle' | 'live' | 'down' = !tailing
-    ? 'idle'
-    : live.isError
-      ? 'down'
-      : 'live';
+  const live = useLiveEventStream(tailing ? filters : { __disabled: '1' });
+  const liveRows = Array.from(live.eventsMap.values()).map((v) => v.event);
+  const tailStatus = tailing ? live.status : 'idle';
+
+  const statusLabel = {
+    idle: 'Off',
+    connecting: 'Connecting…',
+    live: 'Live',
+    stale: 'Stale',
+    reconnecting: 'Reconnecting…',
+    hidden: 'Paused',
+    error: 'Offline',
+  }[tailStatus];
+
+  const statusColor = {
+    idle: 'neutral',
+    connecting: 'info',
+    live: 'ok',
+    stale: 'warn',
+    reconnecting: 'warn',
+    hidden: 'neutral',
+    error: 'danger',
+  }[tailStatus];
 
   useEffect(() => {
     const el = sentinelRef.current;
@@ -70,6 +86,7 @@ function LogsPage() {
     return () => obs.disconnect();
   }, [recent.hasNextPage, recent.isFetchingNextPage, recent.fetchNextPage]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: live.eventsMap is a stable Map ref mutated in place by useLiveEventStream; live.version is bumped on every upsert so it is the real re-run trigger.
   const rows = useMemo(() => {
     // While filters change, `recent.data` still holds the previous filter's
     // pages (queryClient default `placeholderData: keepPreviousData`). Treat
@@ -79,27 +96,35 @@ function LogsPage() {
       ? []
       : (recent.data?.pages.flatMap((p) => p.events) ?? []);
     const seen = new Set<string>();
-    const out: RequestEvent[] = [];
-    for (const ev of liveRows) {
-      if (!seen.has(ev.request_id)) {
-        seen.add(ev.request_id);
-        out.push(ev);
+    const out: (RequestEvent & { _phase?: 'partial' | 'final' })[] = [];
+    for (const { phase, event: ev } of live.eventsMap.values()) {
+      const key = ev.event_id ?? ev.request_id;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push({ ...(ev as RequestEvent), _phase: phase });
       }
     }
     for (const ev of historical) {
-      if (!seen.has(ev.request_id)) {
-        seen.add(ev.request_id);
-        out.push(ev);
+      const key = ev.event_id ?? ev.request_id;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push({ ...ev, _phase: 'final' });
       }
     }
     return out.sort(
       (a, b) => (eventTime(b)?.getTime() ?? 0) - (eventTime(a)?.getTime() ?? 0),
     );
-  }, [liveRows, recent.data, recent.isPlaceholderData]);
+  }, [live.eventsMap, live.version, recent.data, recent.isPlaceholderData]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: same rationale — live.version is the mutation counter for the stable eventsMap ref.
   const recentLiveIds = useMemo(
-    () => new Set(liveRows.slice(0, 20).map((e) => e.request_id)),
-    [liveRows],
+    () =>
+      new Set(
+        Array.from(live.eventsMap.values())
+          .slice(0, 20)
+          .map((e) => e.event.event_id ?? e.event.request_id),
+      ),
+    [live.eventsMap, live.version],
   );
 
   const setFilter = (key: keyof typeof filters, value: string) => {
@@ -133,14 +158,13 @@ function LogsPage() {
                 <span
                   className={cx(
                     'status-dot',
-                    tailStatus === 'live'
-                      ? 'live'
-                      : tailStatus === 'down'
-                        ? 'danger'
-                        : 'neutral',
+                    statusColor,
+                    tailStatus === 'connecting' || tailStatus === 'reconnecting'
+                      ? 'animate-pulse'
+                      : '',
                   )}
                 />
-                <span>{tailStatus}</span>
+                <span>{statusLabel}</span>
               </span>
             ) : null}
           </span>

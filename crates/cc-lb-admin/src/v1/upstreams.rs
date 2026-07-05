@@ -1881,6 +1881,7 @@ mod tests {
             admin_token: None,
             start_time: std::time::Instant::now(),
             event_bus: None,
+            storage_tail: crate::events::storage_tail_channel(),
             clock: Arc::new(cc_lb_core::SystemClock),
         };
         TestContext {

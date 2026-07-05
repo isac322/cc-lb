@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{
+    Arc, Mutex, MutexGuard,
+    atomic::{AtomicU64, Ordering},
+};
 
 use async_trait::async_trait;
 use cc_lb_storage_api as storage_api;
@@ -8,6 +11,7 @@ use cc_lb_storage_api as storage_api;
 #[derive(Default)]
 pub struct TestStorage {
     request_events: Mutex<Vec<storage_api::RequestEvent>>,
+    request_event_cursor: AtomicU64,
     config_draft: Mutex<storage_api::ConfigDraftState>,
     killswitch_enabled: Mutex<bool>,
 }
@@ -17,7 +21,7 @@ impl TestStorage {
         Arc::new(Self::default())
     }
 
-    pub fn as_storage(self: &Arc<Self>) -> Arc<dyn storage_api::Storage> {
+    pub fn as_request_event_store(self: &Arc<Self>) -> Arc<dyn storage_api::RequestEventStore> {
         self.clone()
     }
 }
@@ -51,9 +55,9 @@ impl storage_api::RequestEventStore for TestStorage {
     async fn append_request_event(
         &self,
         event: &storage_api::RequestEvent,
-    ) -> storage_api::StorageResult<()> {
+    ) -> storage_api::StorageResult<u64> {
         lock_or_storage_error(&self.request_events)?.push(event.clone());
-        Ok(())
+        Ok(self.request_event_cursor.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
     async fn query_request_events(
@@ -70,6 +74,68 @@ impl storage_api::RequestEventStore for TestStorage {
         events.truncate(limit);
         Ok(events)
     }
+
+    async fn current_request_event_cursor(&self) -> storage_api::StorageResult<u64> {
+        Ok(self.request_event_cursor.load(Ordering::Relaxed))
+    }
+
+    async fn query_request_events_between_cursors(
+        &self,
+        after: u64,
+        until: u64,
+        limit: usize,
+        filters: &storage_api::RequestEventStreamFilters,
+    ) -> storage_api::StorageResult<Vec<(u64, storage_api::RequestEvent)>> {
+        let rows = lock_or_storage_error(&self.request_events)?
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                let cursor = u64::try_from(index).ok()?.saturating_add(1);
+                if cursor > after
+                    && cursor <= until
+                    && request_event_matches_filters(event, filters)
+                {
+                    Some((cursor, event.clone()))
+                } else {
+                    None
+                }
+            })
+            .take(limit.min(500))
+            .collect();
+        Ok(rows)
+    }
+}
+
+fn request_event_matches_filters(
+    event: &storage_api::RequestEvent,
+    filters: &storage_api::RequestEventStreamFilters,
+) -> bool {
+    if let Some(principal_id) = filters.principal_id.as_deref()
+        && event.principal_id.as_deref() != Some(principal_id)
+    {
+        return false;
+    }
+    if let Some(model) = filters.model.as_deref()
+        && event.model.as_deref() != Some(model)
+    {
+        return false;
+    }
+    if let Some(upstream) = filters.upstream
+        && event.upstream != Some(upstream)
+    {
+        return false;
+    }
+    if let Some(upstream_id) = filters.upstream_id
+        && event.upstream_id != Some(upstream_id)
+    {
+        return false;
+    }
+    if let Some(status_class) = filters.status_class
+        && !status_class.matches(event.status)
+    {
+        return false;
+    }
+    true
 }
 
 #[async_trait]

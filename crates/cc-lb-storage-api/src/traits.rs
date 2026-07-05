@@ -49,7 +49,8 @@ pub trait AuditStore: Send + Sync {
 
 #[async_trait]
 pub trait RequestEventStore: Send + Sync {
-    async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<()>;
+    /// Idempotent insert. On duplicate `event_id`, returns the existing row's cursor via a SELECT fallback. This is load-bearing for retry semantics.
+    async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<u64>;
 
     async fn query_request_events(
         &self,
@@ -86,6 +87,25 @@ pub trait RequestEventStore: Send + Sync {
         Err(StorageError::Fatal {
             message: "prune_request_events_before is not implemented for this storage backend"
                 .to_owned(),
+        })
+    }
+
+    async fn current_request_event_cursor(&self) -> StorageResult<u64> {
+        Err(StorageError::Fatal {
+            message: "current_request_event_cursor not implemented".to_owned(),
+        })
+    }
+
+    async fn query_request_events_between_cursors(
+        &self,
+        after: u64,
+        until: u64,
+        limit: usize,
+        filters: &RequestEventStreamFilters,
+    ) -> StorageResult<Vec<(u64, RequestEvent)>> {
+        let _ = (after, until, limit, filters);
+        Err(StorageError::Fatal {
+            message: "query_request_events_between_cursors not implemented".to_owned(),
         })
     }
 }

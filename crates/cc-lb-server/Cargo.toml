@@ -79,8 +79,10 @@ oauth2.workspace = true
 parking_lot = "0.12"
 nix = { version = "0.31.3", features = ["resource"] }
 rand = { version = "0.10", features = ["std", "std_rng"] }
+reqwest.workspace = true
 rustls = { workspace = true, default-features = false, features = ["std", "ring", "tls12"] }
 rustls-pemfile = "2"
+secrecy.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sonic-rs.workspace = true

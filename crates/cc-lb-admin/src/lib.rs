@@ -4,6 +4,7 @@ pub mod dashboard;
 pub mod dashboard_routes;
 pub mod events;
 pub mod events_routes;
+pub mod internal_partials;
 pub mod management;
 mod oauth_pkce;
 pub mod principals;
@@ -98,6 +99,7 @@ pub struct AdminState {
     pub admin_token: Option<String>,
     pub start_time: std::time::Instant,
     pub event_bus: Option<Arc<dyn RequestEventBus>>,
+    pub storage_tail: tokio::sync::broadcast::Sender<events::StorageTailUpdate>,
     pub clock: ClockHandle,
 }
 

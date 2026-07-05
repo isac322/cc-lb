@@ -1,5 +1,47 @@
 import { describe, expect, it } from 'vitest';
-import { fmtChartTooltipTs, fmtMsCompact } from './format';
+import {
+  fmtChartTooltipTs,
+  fmtMsCompact,
+  formatBigInteger,
+  formatCostMicros,
+} from './format';
+
+describe('formatBigInteger', () => {
+  it('returns dash for null/undefined', () => {
+    expect(formatBigInteger(null)).toBe('—');
+    expect(formatBigInteger(undefined)).toBe('—');
+  });
+  it('returns dash for non-finite', () => {
+    expect(formatBigInteger(Number.NaN)).toBe('—');
+    expect(formatBigInteger(Number.POSITIVE_INFINITY)).toBe('—');
+  });
+  it('returns dash for overflow', () => {
+    expect(formatBigInteger(2 ** 53)).toBe('—');
+  });
+  it('formats normal numbers', () => {
+    expect(formatBigInteger(1234567)).toBe('1,234,567');
+  });
+});
+
+describe('formatCostMicros', () => {
+  it('returns dash for null/undefined', () => {
+    expect(formatCostMicros(null)).toBe('—');
+    expect(formatCostMicros(undefined)).toBe('—');
+  });
+  it('returns dash for negative', () => {
+    expect(formatCostMicros(-12345)).toBe('—');
+  });
+  it('returns dash for non-finite', () => {
+    expect(formatCostMicros(Number.NaN)).toBe('—');
+    expect(formatCostMicros(Number.POSITIVE_INFINITY)).toBe('—');
+  });
+  it('returns dash for overflow', () => {
+    expect(formatCostMicros(2 ** 53)).toBe('—');
+  });
+  it('formats positive values as USD', () => {
+    expect(formatCostMicros(1234567)).toBe('$1.2346');
+  });
+});
 
 describe('fmtMsCompact', () => {
   it('returns dash for null', () => {

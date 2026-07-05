@@ -8,7 +8,9 @@ mod wasmtime;
 
 pub use legacy::{migrate_legacy_storage_toml, validate_raw_toml};
 
-use crate::{Config, ConfigError, DEFAULT_SQLITE_PATH, DownstreamAuthMode, StorageConfig};
+use crate::{
+    Config, ConfigError, DEFAULT_SQLITE_PATH, DownstreamAuthMode, EventBusTransport, StorageConfig,
+};
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("{field}: {message}")]
@@ -30,8 +32,33 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_downstream_auth(config)?;
     validate_tls(config)?;
     validate_storage(config)?;
+    validate_event_bus(config)?;
     validate_oauth(config)?;
     wasmtime::validate_wasmtime_runtime(config)?;
+    Ok(())
+}
+
+fn validate_event_bus(config: &Config) -> Result<(), ValidationError> {
+    if !matches!(config.event_bus.transport, EventBusTransport::PgNotify) {
+        return Ok(());
+    }
+    if matches!(config.storage, StorageConfig::Sqlite { .. }) {
+        return Err(ValidationError::new(
+            "event_bus.transport",
+            "pg_notify transport requires postgres storage",
+        ));
+    }
+    if config
+        .cluster
+        .instance_url
+        .as_deref()
+        .is_none_or(str::is_empty)
+    {
+        return Err(ValidationError::new(
+            "cluster.instance_url",
+            "cluster.instance_url is required when event_bus.transport=pg_notify",
+        ));
+    }
     Ok(())
 }
 

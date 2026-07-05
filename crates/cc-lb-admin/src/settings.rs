@@ -506,6 +506,8 @@ fn reject_unknown_top_level_keys(value: &Value) -> Result<(), String> {
         "lifecycle_cache_hit_miss_subscriber",
         "lifecycle_prompt_cache_drift_subscriber",
         "lifecycle_prompt_cache_observation_subscriber",
+        "event_bus",
+        "cluster",
     ];
     let allowed: BTreeSet<&str> = allowed.into_iter().collect();
     let unknown: Vec<&str> = object

@@ -19,7 +19,7 @@ use axum::http::{HeaderName, Request, Response, StatusCode};
 use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, DownstreamAuthMode, TlsConfig};
+use cc_lb_config::{Config, DownstreamAuthMode, EventBusTransport, TlsConfig};
 use cc_lb_core::{
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
     CircuitBreakerDispatch, ClockHandle, DynamicView, DynamicViewBuilder, DynamicViewHolder,
@@ -108,6 +108,8 @@ pub struct App {
     audit_writer_task: Option<JoinHandle<()>>,
     upstream_rate_limit_writer_task: Option<JoinHandle<()>>,
     subscription_quota_writer_task: Option<JoinHandle<()>>,
+    event_fanout_shutdown_tx: Option<watch::Sender<bool>>,
+    event_fanout_tasks: Vec<JoinHandle<()>>,
     signals: signal::SignalHandle,
     drain_controller: DrainController,
     tls_state: Option<Arc<TlsState>>,
@@ -159,6 +161,10 @@ pub enum BuildError {
     StorageKeyMissing { env: String },
     #[error("storage master key must be 32 bytes encoded as 64 hex characters")]
     InvalidStorageKey,
+    #[error("cluster token env {env} is missing")]
+    ClusterTokenMissing { env: String },
+    #[error("pg_notify transport requires postgres storage pool")]
+    PgNotifyPoolUnavailable,
 }
 
 impl App {
@@ -193,6 +199,8 @@ impl App {
             audit_writer_task,
             upstream_rate_limit_writer_task,
             subscription_quota_writer_task,
+            event_fanout_shutdown_tx,
+            event_fanout_tasks,
             signals,
             drain_controller: _,
             tls_state,
@@ -275,6 +283,12 @@ impl App {
             await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
         if let Some(task) = subscription_quota_writer_task {
+            await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        }
+        if let Some(tx) = event_fanout_shutdown_tx {
+            let _ = tx.send(true);
+        }
+        for task in event_fanout_tasks {
             await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
         proxy_result?;
@@ -905,7 +919,7 @@ async fn build_app_with_storage_inner(
     let notify_listener_task = Some(tokio::spawn(async move {
         notify_listener.run().await;
     }));
-    let in_memory_bus = cc_lb_core::InMemoryBus::new();
+    let in_memory_bus = cc_lb_core::InMemoryBus::with_capacity(config.event_bus.broadcast_capacity);
     let lifecycle_event_logger_rx =
         in_memory_bus.attach_lifecycle_writer(cc_lb_core::DEFAULT_LIFECYCLE_WRITER_CAPACITY);
     let lifecycle_assembler_rx = Some(
@@ -994,7 +1008,94 @@ async fn build_app_with_storage_inner(
         } else {
             None
         };
-    let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(in_memory_bus);
+    let (event_fanout_shutdown_tx, event_fanout_shutdown_rx) = watch::channel(false);
+    let mut event_fanout_tasks = Vec::new();
+    let mut internal_partials_state = None;
+    // Shared with AdminState so the SSE handler subscribes to the same broadcast
+    // the StorageTailPoller feeds. Kept live for the InMemory transport too —
+    // AdminState holds one Sender clone so the channel never closes, and no
+    // poller produces on it (finals arrive via the local bus in that mode).
+    let storage_tail_tx: tokio::sync::broadcast::Sender<cc_lb_core::StorageTailUpdate> =
+        tokio::sync::broadcast::channel(cc_lb_admin::events::DEFAULT_STORAGE_TAIL_CAPACITY).0;
+    #[cfg(not(feature = "postgres"))]
+    {
+        let _ = &event_fanout_shutdown_rx;
+        let _ = &mut event_fanout_tasks;
+        let _ = &mut internal_partials_state;
+    }
+    let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = match config.event_bus.transport {
+        EventBusTransport::InMemory => Arc::new(in_memory_bus.clone()),
+        EventBusTransport::PgNotify => {
+            #[cfg(not(feature = "postgres"))]
+            {
+                return Err(BuildError::StorageFactory(
+                    crate::storage_factory::StorageFactoryError::FeatureDisabled {
+                        backend: "postgres".to_owned(),
+                    },
+                ));
+            }
+            #[cfg(feature = "postgres")]
+            {
+                let pg_pool = storage_factory::open_pg_fanout_pool(&config.storage)
+                    .await?
+                    .ok_or(BuildError::PgNotifyPoolUnavailable)?;
+                let cluster_token = load_cluster_token(&config)?;
+                let retention = cc_lb_core::PartialRetentionCache::new(
+                    Duration::from_secs(config.event_bus.partial_retention_ttl_secs.max(1)),
+                    config.event_bus.partial_retention_max_entries,
+                );
+                let (notify_tx, notify_rx) =
+                    tokio::sync::mpsc::channel(cc_lb_core::PARTIAL_NOTIFY_MPSC_CAPACITY);
+                let instance_url = config
+                    .cluster
+                    .instance_url
+                    .clone()
+                    .ok_or(BuildError::PgNotifyPoolUnavailable)?;
+
+                event_fanout_tasks.push(cc_lb_core::PgNotifier::spawn_with_channel(
+                    pg_pool.clone(),
+                    notify_rx,
+                    retention.clone(),
+                    instance_url,
+                    config.event_bus.pg_notify_channel.clone(),
+                    event_fanout_shutdown_rx.clone(),
+                ));
+
+                let listener_bus: Arc<dyn cc_lb_core::RequestEventBus> =
+                    Arc::new(in_memory_bus.clone());
+                let http_client = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(3))
+                    .build()
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                event_fanout_tasks.push(cc_lb_core::PgListener::spawn_with_channel(
+                    pg_pool,
+                    listener_bus,
+                    http_client,
+                    secrecy::SecretString::from(cluster_token.clone()),
+                    config.event_bus.pg_notify_channel.clone(),
+                    event_fanout_shutdown_rx.clone(),
+                ));
+
+                event_fanout_tasks.push(cc_lb_core::StorageTailPoller::spawn(
+                    storage.clone(),
+                    storage_tail_tx.clone(),
+                    Duration::from_millis(config.event_bus.storage_tail_poll_interval_ms.max(1)),
+                    event_fanout_shutdown_rx.clone(),
+                ));
+
+                internal_partials_state =
+                    Some(cc_lb_admin::internal_partials::InternalPartialsState {
+                        retention,
+                        cluster_token,
+                    });
+
+                Arc::new(cc_lb_core::PgNotifyFanout::new(
+                    in_memory_bus.clone(),
+                    notify_tx,
+                ))
+            }
+        }
+    };
     let lifecycle_event_logger_handle =
         cc_lb_core::spawn_lifecycle_event_logger(lifecycle_event_logger_rx);
     let lifecycle_event_assembler_handle = lifecycle_assembler_rx.map(|rx| {
@@ -1435,6 +1536,7 @@ async fn build_app_with_storage_inner(
             .or_else(|| std::env::var(&config.admin.token_env).ok()),
         start_time,
         event_bus: Some(event_bus.clone()),
+        storage_tail: storage_tail_tx,
         clock: clock.clone(),
     };
     let reload_task = config_watcher.clone().map(spawn_reload_watcher);
@@ -1443,7 +1545,7 @@ async fn build_app_with_storage_inner(
 
     Ok(App {
         router: app_router(state, config.timeouts.upstream_total_secs),
-        admin_router: admin_router(admin_state, server_state.clone()),
+        admin_router: admin_router(admin_state, server_state.clone(), internal_partials_state),
         proxy_addr: config.listener.proxy_addr,
         admin_addr: config.listener.admin_addr,
         reload_task,
@@ -1459,6 +1561,8 @@ async fn build_app_with_storage_inner(
         audit_writer_task: Some(audit_writer_task),
         upstream_rate_limit_writer_task: Some(upstream_rate_limit_writer_task),
         subscription_quota_writer_task: Some(subscription_quota_writer_task),
+        event_fanout_shutdown_tx: Some(event_fanout_shutdown_tx),
+        event_fanout_tasks,
         signals,
         drain_controller,
         tls_state,
@@ -1745,6 +1849,13 @@ fn spawn_reload_watcher(config_watcher: Arc<ConfigWatcher>) -> JoinHandle<()> {
     config_watcher.spawn_file_watcher()
 }
 
+#[cfg(feature = "postgres")]
+fn load_cluster_token(config: &Config) -> Result<String, BuildError> {
+    std::env::var(&config.cluster.token_env).map_err(|_| BuildError::ClusterTokenMissing {
+        env: config.cluster.token_env.clone(),
+    })
+}
+
 struct InMemoryCurrentConfig {
     process_start_config: Arc<Config>,
     current: ArcSwap<Config>,
@@ -1992,10 +2103,18 @@ struct AdminServerStateBody {
     state: ServerState,
 }
 
-fn admin_router(admin_state: AdminState, server_state: Arc<ServerStateHandle>) -> Router {
+fn admin_router(
+    admin_state: AdminState,
+    server_state: Arc<ServerStateHandle>,
+    internal_partials_state: Option<cc_lb_admin::internal_partials::InternalPartialsState>,
+) -> Router {
     let _ = admin_state.admin_token.clone();
-    let admin_router = cc_lb_admin::router(admin_state)
-        .merge(server_state_router(server_state))
+    let mut admin_router =
+        cc_lb_admin::router(admin_state).merge(server_state_router(server_state));
+    if let Some(state) = internal_partials_state {
+        admin_router = admin_router.merge(cc_lb_admin::internal_partials::router(state));
+    }
+    let admin_router = admin_router
         // Admin surface only — proxy_router stays uncompressed to keep SSE
         // bodies streaming and skip CPU on the hot data plane. ETagged
         // static assets skip dynamic compression to keep strong ETags valid.

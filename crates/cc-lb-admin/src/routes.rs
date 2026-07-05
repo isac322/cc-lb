@@ -96,6 +96,10 @@ pub fn build_router(state: AdminState) -> Router {
             get(crate::events_routes::handle_recent_events),
         )
         .route(
+            "/admin/v1/events/delta",
+            get(crate::events_routes::handle_events_delta),
+        )
+        .route(
             "/admin/v1/events/stream",
             get(crate::events_routes::handle_events_stream),
         )
