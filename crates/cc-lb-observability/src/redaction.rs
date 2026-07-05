@@ -421,6 +421,7 @@ fn upsert_truncation_marker(trace: &mut RoutingTrace, removed_stages: usize) {
             "routing trace truncated; removed {removed_stages} stage(s)"
         )),
         duration_us: 0,
+        subscription_preference: None,
     };
 
     if trace

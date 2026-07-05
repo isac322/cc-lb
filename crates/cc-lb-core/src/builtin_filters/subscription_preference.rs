@@ -177,6 +177,7 @@ fn evaluate(
             kept_upstream_ids: collect_kind(candidates, UpstreamKind::AnthropicApiKey),
             reason: NO_SUBSCRIPTION_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
         };
     }
 
@@ -199,6 +200,7 @@ fn evaluate(
             kept_upstream_ids: vec![winner.candidate.upstream_id],
             reason: SUBSCRIPTION_ALIVE_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
         };
     }
 
@@ -207,12 +209,14 @@ fn evaluate(
             kept_upstream_ids: collect_kind(candidates, UpstreamKind::AnthropicApiKey),
             reason: API_KEY_FALLBACK_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
         }
     } else {
         FilterOutput {
             kept_upstream_ids: collect_kind(candidates, UpstreamKind::AnthropicOauth),
             reason: NO_API_KEY_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
         }
     }
 }

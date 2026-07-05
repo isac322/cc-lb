@@ -279,6 +279,7 @@ impl FilterPlugin for IndexKeepingFilter {
             kept_upstream_ids,
             reason,
             per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
         })
     }
 

@@ -352,6 +352,7 @@ impl FilterPlugin for KeepIdsFilter {
             kept_upstream_ids: self.kept_upstream_ids.clone(),
             reason: "candidate-builder pipeline kept survivors".to_owned(),
             per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
         })
     }
 

@@ -14,11 +14,13 @@ fn filter_output_equality() {
         kept_upstream_ids: vec![Uuid::new_v4()],
         reason: "allowed".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
     };
     let output2 = FilterOutput {
         kept_upstream_ids: output1.kept_upstream_ids.clone(),
         reason: "allowed".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
     };
     assert_eq!(output1, output2);
 }
@@ -31,11 +33,13 @@ fn filter_output_inequality_different_ids() {
         kept_upstream_ids: vec![id1],
         reason: "allowed".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
     };
     let output2 = FilterOutput {
         kept_upstream_ids: vec![id2],
         reason: "allowed".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
     };
     assert_ne!(output1, output2);
 }
@@ -47,11 +51,13 @@ fn filter_output_inequality_different_reason() {
         kept_upstream_ids: vec![id],
         reason: "allowed".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
     };
     let output2 = FilterOutput {
         kept_upstream_ids: vec![id],
         reason: "rejected".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
     };
     assert_ne!(output1, output2);
 }
@@ -63,6 +69,7 @@ fn filter_output_debug_formatting() {
         kept_upstream_ids: vec![id],
         reason: "test reason".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
     };
     let debug_str = format!("{:?}", output);
     assert!(debug_str.contains("FilterOutput"));
@@ -76,6 +83,7 @@ fn filter_output_clone() {
         kept_upstream_ids: vec![id],
         reason: "original".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
     };
     let cloned = output.clone();
     assert_eq!(output, cloned);
@@ -133,6 +141,7 @@ impl FilterPlugin for AllowAllFilter {
             kept_upstream_ids: ids,
             reason: "all candidates allowed".to_string(),
             per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
         })
     }
 
@@ -163,6 +172,7 @@ impl FilterPlugin for SelectiveFilter {
             kept_upstream_ids: filtered,
             reason: "filtered to production upstreams".to_string(),
             per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
         })
     }
 

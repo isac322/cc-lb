@@ -413,6 +413,7 @@ impl FilterPlugin for KeepFilter {
             kept_upstream_ids: self.kept_upstream_ids.clone(),
             reason: "kept terminal candidates".to_owned(),
             per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
         })
     }
 

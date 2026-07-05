@@ -55,6 +55,7 @@ impl FilterPlugin for CacheAffinityFilter {
             kept_upstream_ids,
             reason: reason.to_owned(),
             per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
         })
     }
 

@@ -2473,6 +2473,7 @@ fn execute_filter_pipeline(
                             upstream_id: current.first().map(|candidate| candidate.upstream_id),
                             reason: Some(message.clone()),
                             duration_us: duration_to_us(stage_elapsed),
+                            subscription_preference: None,
                         });
                         internal_errors.push(InternalError {
                             stage: InternalErrorStage::RouterFilter,
@@ -2494,6 +2495,7 @@ fn execute_filter_pipeline(
                     upstream_id: output.kept_upstream_ids.first().copied(),
                     reason: Some(output.reason.clone()),
                     duration_us: duration_to_us(stage_elapsed),
+                    subscription_preference: None,
                 });
                 current = keep_filter_candidates(&current, &output.kept_upstream_ids);
             }
@@ -2515,6 +2517,7 @@ fn execute_filter_pipeline(
                     upstream_id: current.first().map(|candidate| candidate.upstream_id),
                     reason: Some(message.clone()),
                     duration_us: duration_to_us(stage_elapsed),
+                    subscription_preference: None,
                 });
                 internal_errors.push(InternalError {
                     stage: InternalErrorStage::Router,

@@ -750,6 +750,52 @@ pub enum TerminalStrategy {
     Random,
 }
 
+/// Tier assigned by the subscription-preference filter to a candidate upstream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionTier {
+    /// All relevant base quota windows are fresh positive signals.
+    KnownBase,
+    /// At least one base window is a positive signal but not all — partial visibility.
+    PartialBase,
+    /// Base quotas are exhausted but extra-usage / overage is available and usable.
+    Overage,
+    /// No signal at all: sending the request would probe the upstream's real state.
+    UnknownProbe,
+}
+
+/// Per-candidate weighted-rendezvous-hash urgency score and tier for one
+/// subscription-preference selection.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CandidateUrgency {
+    /// Upstream identifier this urgency was computed for.
+    pub upstream_id: Uuid,
+    /// Tier the candidate was assessed into.
+    pub tier: SubscriptionTier,
+    /// WRH urgency weight. Higher values are more likely to win selection.
+    pub urgency: f64,
+}
+
+impl PartialEq for CandidateUrgency {
+    fn eq(&self, other: &Self) -> bool {
+        self.upstream_id == other.upstream_id
+            && self.tier == other.tier
+            && self.urgency.total_cmp(&other.urgency).is_eq()
+    }
+}
+
+impl Eq for CandidateUrgency {}
+
+/// Structured trace payload emitted by the subscription-preference filter,
+/// exposing the winning tier and per-candidate WRH urgency scores.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionPreferenceTrace {
+    /// Tier the winning candidate was selected from.
+    pub chosen_tier: SubscriptionTier,
+    /// One entry per candidate that participated in tier assessment.
+    pub candidates: Vec<CandidateUrgency>,
+}
+
 /// Decision made at a single routing stage.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StageDecision {
@@ -764,6 +810,10 @@ pub struct StageDecision {
     /// Time spent executing this routing stage, in microseconds.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub duration_us: u64,
+    /// Optional filter-specific trace payload. Only the built-in
+    /// subscription-preference filter populates this today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription_preference: Option<SubscriptionPreferenceTrace>,
 }
 
 fn is_zero_u64(value: &u64) -> bool {
