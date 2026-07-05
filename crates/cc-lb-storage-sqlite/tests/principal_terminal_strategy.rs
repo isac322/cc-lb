@@ -15,7 +15,7 @@ async fn migration_normalizes_legacy_removed_terminal_strategies_to_first_pick()
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
     let round_robin_id = Uuid::from_u128(1);

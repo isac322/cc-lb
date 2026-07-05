@@ -51,7 +51,7 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
     let storage = Arc::new(cc_lb_storage_postgres::PostgresStorage::new(
         storage_pool.clone(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     ));
     storage.initialize(BackendKind::Postgres).await?;
 
@@ -94,7 +94,7 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
             stores: stores_from_storage(storage.clone()),
             aead,
             oauth_cfg,
-            clock: Arc::new(cc_lb_core::SystemClock),
+            clock: Arc::new(cc_lb_clock::SystemClock),
         },
         replica_id: Uuid::new_v4(),
         metadata_hook: None,

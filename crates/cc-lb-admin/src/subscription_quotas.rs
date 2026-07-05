@@ -9,10 +9,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use cc_lb_core::{
-    Clock, DynamicViewHolder,
-    plan_capacity::{PRO_CAPACITY_RATIO, plan_capacity_ratio},
-};
+use cc_lb_clock::Clock;
+use cc_lb_control::DynamicViewHolder;
+use cc_lb_engine::plan_capacity::{PRO_CAPACITY_RATIO, plan_capacity_ratio};
 use cc_lb_plugin_api::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaHistoryStore,
@@ -2412,7 +2411,7 @@ fn internal_error(error: &str) -> Response {
 }
 
 fn now_unix_millis(clock: &dyn Clock) -> u64 {
-    cc_lb_core::clock::unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
+    cc_lb_engine::clock::unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]

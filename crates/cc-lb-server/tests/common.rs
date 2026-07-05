@@ -11,7 +11,7 @@ use cc_lb_storage_api::{
     types::{PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
 };
 
-use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_sqlite::open_sqlite;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
@@ -282,9 +282,12 @@ async fn seed_storage(
 ) -> Option<ManagedTestKey> {
     let database_url = format!("sqlite://{}", storage_path.display());
     let storage = std::sync::Arc::new(
-        open_sqlite(&database_url, std::sync::Arc::new(cc_lb_core::SystemClock))
-            .await
-            .expect("test storage opens"),
+        open_sqlite(
+            &database_url,
+            std::sync::Arc::new(cc_lb_engine::SystemClock),
+        )
+        .await
+        .expect("test storage opens"),
     );
     storage
         .initialize(BackendKind::Sqlite)
@@ -337,7 +340,7 @@ async fn seed_storage(
                 )
                 .await
                 .expect("seed managed key");
-            let (key_id, _) = cc_lb_core::api_keys::secret::parse(plaintext.expose())
+            let (key_id, _) = cc_lb_engine::api_keys::secret::parse(plaintext.expose())
                 .expect("generated key parses");
             Some(ManagedTestKey {
                 key_id,

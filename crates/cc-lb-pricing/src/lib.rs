@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod lifecycle_pricing_subscriber;
 pub mod loader;
 
 use std::collections::HashMap;
@@ -9,6 +10,9 @@ use std::sync::{Arc, OnceLock};
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 
+pub use lifecycle_pricing_subscriber::{
+    PricingSubscriberHandle, spawn_lifecycle_pricing_subscriber,
+};
 pub use loader::{FetchedCatalog, LiteLlmLoader, LoaderError, PriceCatalogStatus};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -35,7 +39,7 @@ pub enum PricingStatus {
 /// `total_micros == input + output + cache_creation_5m + cache_creation_1h + cache_read`.
 /// When `pricing_status == Unknown`, all numeric fields are 0.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CostBreakdown {
+pub struct ComputedCostBreakdown {
     pub input_micros: i64,
     pub output_micros: i64,
     pub cache_creation_5m_micros: i64,
@@ -45,7 +49,7 @@ pub struct CostBreakdown {
     pub pricing_status: PricingStatus,
 }
 
-impl CostBreakdown {
+impl ComputedCostBreakdown {
     pub const fn unknown() -> Self {
         Self {
             input_micros: 0,
@@ -65,6 +69,22 @@ impl CostBreakdown {
                 PricingStatus::Unknown => None,
             },
             pricing_status: self.pricing_status,
+        }
+    }
+}
+
+impl From<ComputedCostBreakdown> for cc_lb_contract::CostBreakdown {
+    fn from(breakdown: ComputedCostBreakdown) -> Self {
+        match breakdown.pricing_status {
+            PricingStatus::Known => Self {
+                total_micros: Some(breakdown.total_micros),
+                input_micros: Some(breakdown.input_micros),
+                output_micros: Some(breakdown.output_micros),
+                cache_creation_5m_micros: Some(breakdown.cache_creation_5m_micros),
+                cache_creation_1h_micros: Some(breakdown.cache_creation_1h_micros),
+                cache_read_micros: Some(breakdown.cache_read_micros),
+            },
+            PricingStatus::Unknown => Self::default(),
         }
     }
 }
@@ -238,12 +258,12 @@ pub fn virtual_cost_micros_full(
     cache_creation_1h_input: u64,
     cache_read_input: u64,
     upstream_kind: Option<UpstreamKind>,
-) -> CostBreakdown {
+) -> ComputedCostBreakdown {
     let normalized = normalize_model_id(model, upstream_kind);
     let snapshot = global_catalog().current();
     let Some(pricing) = snapshot.models.get(&normalized) else {
         record_missing_price_field(&normalized, "model");
-        return CostBreakdown::unknown();
+        return ComputedCostBreakdown::unknown();
     };
 
     let cc_5m_price = snapshot
@@ -291,7 +311,7 @@ pub fn virtual_cost_micros_full(
         .saturating_add(cc1_i)
         .saturating_add(cr_i);
 
-    CostBreakdown {
+    ComputedCostBreakdown {
         input_micros: input_i,
         output_micros: output_i,
         cache_creation_5m_micros: cc5_i,
@@ -478,7 +498,7 @@ mod tests {
         global_catalog().install_snapshot(CatalogSnapshot::empty_cost_disabled());
 
         let breakdown = virtual_cost_micros_full("missing-model", 1, 1, 1, 1, 1, None);
-        assert_eq!(breakdown, CostBreakdown::unknown());
+        assert_eq!(breakdown, ComputedCostBreakdown::unknown());
         assert_eq!(breakdown.into_estimate().micros_usd, None);
         assert_eq!(
             breakdown.into_estimate().pricing_status,
@@ -589,7 +609,7 @@ mod tests {
 
     #[test]
     fn into_estimate_round_trips_total_when_known() {
-        let breakdown = CostBreakdown {
+        let breakdown = ComputedCostBreakdown {
             input_micros: 1,
             output_micros: 2,
             cache_creation_5m_micros: 3,

@@ -13,7 +13,7 @@ async fn sqlite_main_storage_and_apalis_setup_share_file_without_migration_colli
     let database_url = format!("sqlite://{}", database_path.display());
 
     let main_storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
             .await
             .expect("main sqlite storage opens");
     main_storage
@@ -33,7 +33,7 @@ async fn sqlite_main_storage_and_apalis_setup_share_file_without_migration_colli
     let opened_scheduler = open_scheduler_storage(
         &storage_config,
         &SchedulerConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect("scheduler storage opens after main migrations using derived sqlite file");

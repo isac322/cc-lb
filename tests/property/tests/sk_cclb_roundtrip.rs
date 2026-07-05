@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cc_lb_core::api_keys::secret::{compute_verify_hash, generate_new, parse, verify_secret};
+use cc_lb_engine::api_keys::secret::{compute_verify_hash, generate_new, parse, verify_secret};
 use proptest::prelude::*;
 
 static ROUNDTRIP_CASE_COUNT_LOGGED: AtomicBool = AtomicBool::new(false);

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_core::clock::{ClockHandle, TestClock, unix_secs};
+use cc_lb_engine::clock::{ClockHandle, TestClock, unix_secs};
 use cc_lb_plugin_api::types::TtlClass;
 use cc_lb_server::prompt_cache_observation_cache::PromptCacheObservationCache;
 use uuid::Uuid;

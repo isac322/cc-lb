@@ -41,7 +41,7 @@ async fn low_ulimit_preflight_still_succeeds() {
         "preflight-ulimit",
         "CC_LB_TEST_MASTER_KEY_PREFLIGHT_ULIMIT",
     );
-    let clock: cc_lb_core::ClockHandle = std::sync::Arc::new(cc_lb_core::SystemClock);
+    let clock: cc_lb_engine::ClockHandle = std::sync::Arc::new(cc_lb_engine::SystemClock);
     let report = preflight::run(&config, PreflightOptions { skip_bind: true }, clock.clone())
         .await
         .unwrap();

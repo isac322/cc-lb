@@ -176,7 +176,7 @@ async fn build_running_app(
     upstream_addr: SocketAddr,
     label: &'static str,
 ) -> TestResult<RunningApp> {
-    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
     let pool = PgPoolOptions::new()
         .max_connections(16)
         .connect(&database_url)
@@ -247,9 +247,9 @@ fn test_config(database_url: &str) -> Config {
 }
 
 async fn seed_test_principal(storage: &dyn StorageTrait) -> TestResult<()> {
-    use cc_lb_core::Clock as _;
+    use cc_lb_engine::Clock as _;
 
-    let clock = cc_lb_core::SystemClock;
+    let clock = cc_lb_engine::SystemClock;
     let now = clock
         .now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -274,7 +274,7 @@ async fn seed_test_principal(storage: &dyn StorageTrait) -> TestResult<()> {
 }
 
 async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
-    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(database_url)

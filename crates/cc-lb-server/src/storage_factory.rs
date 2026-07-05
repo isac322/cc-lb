@@ -57,7 +57,7 @@ pub async fn open_storage(
     config: &StorageConfig,
     _aead: Arc<AeadService>,
     _master_key: [u8; 32],
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 ) -> Result<OpenedStorage, StorageFactoryError> {
     match config {
         StorageConfig::Postgres {
@@ -115,7 +115,7 @@ fn map_init_error(
 #[cfg(not(feature = "sqlite"))]
 async fn open_sqlite(
     _path: &Path,
-    _clock: cc_lb_core::ClockHandle,
+    _clock: cc_lb_engine::ClockHandle,
 ) -> Result<OpenedStorage, StorageFactoryError> {
     Err(StorageFactoryError::FeatureDisabled {
         backend: "sqlite".to_owned(),
@@ -125,7 +125,7 @@ async fn open_sqlite(
 #[cfg(feature = "sqlite")]
 async fn open_sqlite(
     path: &Path,
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 ) -> Result<OpenedStorage, StorageFactoryError> {
     let database_url = format!("sqlite://{}", path.display());
     let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, clock)
@@ -149,7 +149,7 @@ async fn open_sqlite(
 async fn open_postgres(
     _url: &str,
     _pool: &cc_lb_config::PostgresPoolConfig,
-    _clock: cc_lb_core::ClockHandle,
+    _clock: cc_lb_engine::ClockHandle,
 ) -> Result<OpenedStorage, StorageFactoryError> {
     Err(StorageFactoryError::FeatureDisabled {
         backend: "postgres".to_owned(),
@@ -167,7 +167,7 @@ async fn probe_postgres_connection_impl(_url: &str) -> Result<(), StorageFactory
 async fn open_postgres(
     url: &str,
     pool_config: &cc_lb_config::PostgresPoolConfig,
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 ) -> Result<OpenedStorage, StorageFactoryError> {
     let pool = open_postgres_pool(url, pool_config).await?;
 

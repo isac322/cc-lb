@@ -30,7 +30,7 @@ macro, `to_vec`/`to_string` serialization — stays on `serde_json`.
 Rationale for the split:
 
 1. **Byte-parity of hashes.** `cache_prefix_hash*` in
-   `crates/cc-lb-core/src/lifecycle.rs` SHA-256-hashes a serialized
+   `crates/cc-lb-engine/src/lifecycle.rs` SHA-256-hashes a serialized
    `serde_json::Map`. `serde_json` (without the `preserve_order` feature)
    uses `BTreeMap`, so keys are emitted in sorted order regardless of
    insertion order. `sonic_rs::Object` preserves insertion order. Swapping
@@ -58,20 +58,20 @@ Rationale for the split:
 
 | File | Sites | Reason |
 | --- | --- | --- |
-| `crates/cc-lb-core/src/sse_relay.rs` | 2 | Per-SSE-event usage decode + fallback full-body decode |
-| `crates/cc-lb-core/src/usage_parser.rs` | 3 | SSE `accumulate_sse_usage`, non-stream `usage_from_json_body`, mid-stream error detection |
-| `crates/cc-lb-core/src/lifecycle.rs` | 1 | New `parse_body_json` helper; the main request handler now parses `ctx.body_bytes` **exactly once** and threads the cached `Option<Value>` to `request_cache_metadata_from_value`, `extract_model`, and `reserve_limit` / `LimitRequest::from_value`. Previously the same body was re-parsed up to 5× per request. |
-| `crates/cc-lb-core/src/error_normalizer.rs` | 1 | Upstream event-data JSON |
+| `crates/cc-lb-engine/src/sse_relay.rs` | 2 | Per-SSE-event usage decode + fallback full-body decode |
+| `crates/cc-lb-engine/src/usage_parser.rs` | 3 | SSE `accumulate_sse_usage`, non-stream `usage_from_json_body`, mid-stream error detection |
+| `crates/cc-lb-engine/src/lifecycle.rs` | 1 | New `parse_body_json` helper; the main request handler now parses `ctx.body_bytes` **exactly once** and threads the cached `Option<Value>` to `request_cache_metadata_from_value`, `extract_model`, and `reserve_limit` / `LimitRequest::from_value`. Previously the same body was re-parsed up to 5× per request. |
+| `crates/cc-lb-engine/src/error_normalizer.rs` | 1 | Upstream event-data JSON |
 | `crates/cc-lb-server/src/scheduler_dispatch/usage.rs` | 1 | OAuth usage rollup body |
 
 Cross-check command:
 
 ```
 rg 'serde_json::(from_slice|from_str)' \
-  crates/cc-lb-core/src/sse_relay.rs \
-  crates/cc-lb-core/src/usage_parser.rs \
-  crates/cc-lb-core/src/lifecycle.rs \
-  crates/cc-lb-core/src/error_normalizer.rs \
+  crates/cc-lb-engine/src/sse_relay.rs \
+  crates/cc-lb-engine/src/usage_parser.rs \
+  crates/cc-lb-engine/src/lifecycle.rs \
+  crates/cc-lb-engine/src/error_normalizer.rs \
   crates/cc-lb-server/src/scheduler_dispatch/usage.rs
 ```
 
@@ -122,7 +122,7 @@ remain.
 
 ## Verification
 
-- Existing unit tests (`cc-lb-core` `usage_parser`, `sse_relay`,
+- Existing unit tests (`cc-lb-engine` `usage_parser`, `sse_relay`,
   `lifecycle`, `error_normalizer`) exercise all migrated call sites and
   must remain green — they are the byte-parity assertion for parsing.
 - Existing `request_cache_metadata` tests

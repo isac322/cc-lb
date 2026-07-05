@@ -10,7 +10,7 @@ publish = false
 async-stream.workspace = true
 axum.workspace = true
 bytes.workspace = true
-cc-lb-core = { path = "../../crates/cc-lb-core" }
+cc-lb-engine = { path = "../../crates/cc-lb-engine" }
 cc-lb-plugin-api = { path = "../../crates/cc-lb-plugin-api" }
 http.workspace = true
 http-body-util.workspace = true

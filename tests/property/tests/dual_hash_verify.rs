@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use cc_lb_core::api_keys::secret::{compute_index_hash, compute_verify_hash, verify_secret};
+use cc_lb_engine::api_keys::secret::{compute_index_hash, compute_verify_hash, verify_secret};
 use proptest::prelude::*;
 
 proptest! {

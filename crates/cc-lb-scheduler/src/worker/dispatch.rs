@@ -65,7 +65,7 @@ mod tests {
     use std::time::Duration;
 
     use apalis::prelude::Data;
-    use cc_lb_core::clock::SystemClock;
+    use cc_lb_clock::SystemClock;
 
     use crate::error::SchedulerError;
     use crate::jobs::metadata_refresh::MetadataRefreshJob;

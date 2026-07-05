@@ -1,7 +1,7 @@
 use apalis_core::backend::codec::Codec as _;
 use apalis_core::backend::{Backend, TaskSink, TaskSinkError};
 use apalis_core::task::Task;
-use cc_lb_core::clock::{Clock, ClockHandle, unix_secs};
+use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 use futures_util::stream::{self, BoxStream};
 use futures_util::{Stream, StreamExt as _};
 use sqlx::SqlitePool;

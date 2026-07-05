@@ -1,6 +1,6 @@
 #![no_main]
 
-use cc_lb_core::strip_hop_by_hop;
+use cc_lb_engine::strip_hop_by_hop;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use libfuzzer_sys::fuzz_target;
 

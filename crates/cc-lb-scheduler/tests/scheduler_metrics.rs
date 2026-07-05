@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use apalis::prelude::{IntervalStrategy, StrategyBuilder, TaskSink};
+use cc_lb_clock::SystemClock;
 use cc_lb_config::SchedulerConfig;
-use cc_lb_core::clock::SystemClock;
 use cc_lb_scheduler::jobs::apalis_housekeeping::ApalisHousekeepingJob;
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;

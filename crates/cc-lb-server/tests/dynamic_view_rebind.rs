@@ -3,7 +3,7 @@ use std::sync::Arc;
 use cc_lb_aead::AeadService;
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_core::{ApplyStatus, DynamicView};
+use cc_lb_engine::{ApplyStatus, DynamicView};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::{
@@ -36,7 +36,7 @@ fn stores(storage: Arc<SqliteStorage>) -> Stores {
 async fn storage_fixture() -> (tempfile::TempDir, Arc<SqliteStorage>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!("sqlite://{}", dir.path().join("test.sqlite").display());
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
         .await
         .expect("storage");
     storage
@@ -103,7 +103,7 @@ async fn build(
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect("dynamic view builds")
@@ -121,11 +121,11 @@ async fn principals_delete_rebuild_removes_deleted_and_increments_generation() {
     assert_eq!(view.generation, 1);
     assert_eq!(
         view.principal_view.principal_status("principal-a"),
-        cc_lb_core::api_keys::principal_view::PrincipalStatus::Active
+        cc_lb_engine::api_keys::principal_view::PrincipalStatus::Active
     );
     assert_eq!(
         view.principal_view.principal_status("principal-b"),
-        cc_lb_core::api_keys::principal_view::PrincipalStatus::Active
+        cc_lb_engine::api_keys::principal_view::PrincipalStatus::Active
     );
 
     PrincipalStore::soft_delete(&*storage, principal_a.id, principal_a.revision, 2)
@@ -136,11 +136,11 @@ async fn principals_delete_rebuild_removes_deleted_and_increments_generation() {
     assert_eq!(view.generation, 2);
     assert_eq!(
         view.principal_view.principal_status("principal-a"),
-        cc_lb_core::api_keys::principal_view::PrincipalStatus::Missing
+        cc_lb_engine::api_keys::principal_view::PrincipalStatus::Missing
     );
     assert_eq!(
         view.principal_view.principal_status("principal-b"),
-        cc_lb_core::api_keys::principal_view::PrincipalStatus::Active
+        cc_lb_engine::api_keys::principal_view::PrincipalStatus::Active
     );
 }
 

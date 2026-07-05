@@ -8,7 +8,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use cc_lb_config::{Config, DownstreamAuthMode, NoneModeConfig, StorageConfig};
-use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_pricing::{
     CatalogSnapshot, CatalogStatus, Pricing, UpstreamKind as PricingUpstreamKind, UsdPerMillion,
     global_catalog,
@@ -549,7 +549,7 @@ impl StartedServer {
     async fn start(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
         let proxy_addr = config.listener.proxy_addr;
         let admin_addr = config.listener.admin_addr;
-        let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+        let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
         let app = build_app(config, clock).await?;
         let signal = app.signal_handle();
         let task = tokio::spawn(async move { app.start().await });
@@ -840,8 +840,8 @@ fn seed_price_catalog() {
 }
 
 fn now_secs() -> u64 {
-    use cc_lb_core::Clock as _;
-    let clock = cc_lb_core::SystemClock;
+    use cc_lb_engine::Clock as _;
+    let clock = cc_lb_engine::SystemClock;
     clock
         .now()
         .duration_since(UNIX_EPOCH)
@@ -1013,7 +1013,7 @@ async fn seed_runtime_state_full_v2(
             },
         )
         .await?;
-    let (key_id, _) = cc_lb_core::api_keys::secret::parse(plaintext.expose())?;
+    let (key_id, _) = cc_lb_engine::api_keys::secret::parse(plaintext.expose())?;
     Ok((plaintext.expose().to_owned(), key_id))
 }
 
@@ -1047,7 +1047,7 @@ fn base_config_with_mode(
 
 async fn sqlite_storage(path: &Path) -> Result<Arc<SqliteStorage>, Box<dyn std::error::Error>> {
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock)).await?;
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock)).await?;
     storage.initialize(BackendKind::Sqlite).await?;
     Ok(Arc::new(storage))
 }

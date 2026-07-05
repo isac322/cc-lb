@@ -429,7 +429,7 @@ mod tests {
             let storage = cc_lb_storage_postgres::PostgresStorage::new_with_listener_pool(
                 pool.clone(),
                 listener_pool.clone(),
-                Arc::new(cc_lb_core::SystemClock),
+                Arc::new(cc_lb_engine::SystemClock),
             );
             Ok(Some(Self {
                 schema,

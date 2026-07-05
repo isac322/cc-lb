@@ -8,19 +8,19 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, PromptCacheShadowConfig};
-use cc_lb_core::api_keys::principal_view::{
+use cc_lb_dialect_anthropic::AnthropicDirectDialect;
+use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
     RouterPipelineCache,
 };
-use cc_lb_core::builtin_filters::cache_affinity::CacheAffinityFilter;
-use cc_lb_core::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_core::clock::unix_secs;
-use cc_lb_core::plan_capacity::{PlanInfo, plan_capacity_ratio};
-use cc_lb_core::{
-    ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
-    UpstreamStatusEntry, UpstreamStatusSnapshot, make_default_dispatcher,
+use cc_lb_engine::builtin_filters::cache_affinity::CacheAffinityFilter;
+use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
+use cc_lb_engine::clock::unix_secs;
+use cc_lb_engine::plan_capacity::{PlanInfo, plan_capacity_ratio};
+use cc_lb_engine::{
+    ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamRateLimitCache, UpstreamStatusEntry,
+    UpstreamStatusSnapshot,
 };
-use cc_lb_dialect_anthropic::AnthropicDirectDialect;
 use cc_lb_plugin_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, FilterPlugin, PluginManifest,
     Principal, RateLimitObservation, RequestContext, RouteDecision, RouteError, RouterPlugin,
@@ -42,7 +42,7 @@ use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
-use cc_lb_core::lifecycle::PromptCacheObservationSinkLike;
+use cc_lb_engine::PromptCacheObservationSinkLike;
 
 use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
 use crate::prompt_cache_observation_sink::{
@@ -180,7 +180,7 @@ pub async fn build_dynamic_view(
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
     subscription_quota_routing_max_staleness_secs: u64,
     config: &cc_lb_config::Config,
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 ) -> Result<Arc<DynamicView>, RebindError> {
     let upstreams = list_upstreams(stores).await?;
     let all_upstream_ids = upstreams
@@ -275,7 +275,6 @@ pub async fn build_dynamic_view(
         lazy_refresher,
         clock.clone(),
     ));
-    let dispatcher = make_default_dispatcher(50);
     let snapshot = Arc::new(UpstreamStatusSnapshot {
         entries: statuses,
         applied_at_unix_secs: unix_secs(clock.now()),
@@ -286,9 +285,7 @@ pub async fn build_dynamic_view(
     let mut builder = DynamicViewBuilder::new(current_generation)
         .signer_factory(signer_factory)
         .global_router(global_router)
-        .dispatcher(dispatcher)
         .global_observability_hooks(Vec::new())
-        .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(principal_view)
         .upstream_status_snapshot(snapshot)
         .upstream_rate_limit_cache(upstream_rate_limit_cache)
@@ -309,7 +306,7 @@ pub async fn build_dynamic_view(
 
 fn new_prompt_cache_observation_cache(
     config: &PromptCacheShadowConfig,
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 ) -> Arc<PromptCacheObservationCache> {
     Arc::new(PromptCacheObservationCache::new_with_debounce(
         clock,
@@ -868,7 +865,7 @@ struct DbCompositeSignerFactory {
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     downstream_api_key: Option<String>,
     router_chosen_upstream_name: Option<String>,
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 }
 
 impl DbCompositeSignerFactory {
@@ -877,7 +874,7 @@ impl DbCompositeSignerFactory {
         upstream_store: Arc<dyn UpstreamStore>,
         aead: Arc<AeadService>,
         lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
-        clock: cc_lb_core::ClockHandle,
+        clock: cc_lb_engine::ClockHandle,
     ) -> Self {
         Self {
             upstreams,
@@ -907,7 +904,7 @@ impl DbCompositeSignerFactory {
     }
 }
 
-impl cc_lb_core::ApiKeyAwareSignerFactory for DbCompositeSignerFactory {
+impl cc_lb_engine::ApiKeyAwareSignerFactory for DbCompositeSignerFactory {
     fn with_router_choice(
         &self,
         api_key: String,
@@ -997,7 +994,7 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
 mod tests {
     use std::collections::BTreeSet;
 
-    use cc_lb_core::clock::{Clock, TestClock};
+    use cc_lb_engine::clock::{Clock, TestClock};
     use cc_lb_plugin_api::types::TtlClass as PluginTtlClass;
     use cc_lb_storage_api::{
         BackendKind, MetaStore, PromptCacheObservationRecord, TtlClass as StorageTtlClass,
@@ -1082,7 +1079,7 @@ mod tests {
                 .display()
         );
         let storage =
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
                 .await
                 .expect("storage");
         storage.initialize(BackendKind::Sqlite).await.unwrap();
@@ -1141,7 +1138,7 @@ mod tests {
         data_dir: &Path,
         config: cc_lb_config::Config,
     ) -> Arc<DynamicView> {
-        let clock: cc_lb_core::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let clock: cc_lb_engine::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         build_dynamic_view(
             stores,
             &AnthropicOAuthConfig::default(),

@@ -9,18 +9,16 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use bytes::Bytes;
 use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig, router};
+use cc_lb_clock::{ClockHandle, SystemClock};
 use cc_lb_config::Config;
-use cc_lb_core::api_keys::{
+use cc_lb_control::api_keys::{
     concurrent_guard::KeyConcurrencyManager, key_store::KeyStore, limit_engine::LimitEngine,
     principal_view::PrincipalView,
 };
-use cc_lb_core::{
-    ApiKeyAwareSignerFactory, ClockHandle, DispatchError, DynamicViewBuilder, DynamicViewHolder,
-    ErrorNormalizer, SystemClock, UpstreamDispatch, UpstreamStatusSnapshot,
-};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot};
 use cc_lb_plugin_api::{
-    ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    SignedRequest, SignerFactory, Upstream, UpstreamCandidate,
+    ApiKeyAwareSignerFactory, ObservabilityHook, Principal, RequestContext, RouteDecision,
+    RouteError, RouterPlugin, SignerFactory, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -96,9 +94,9 @@ pub fn test_state_with_clock(
     ));
     let dynamic_view = dynamic_view_holder(principal_view);
     let key_store = storage.clone().map(key_store);
-    let event_bus: Option<Arc<dyn cc_lb_core::RequestEventBus>> = storage
-        .as_ref()
-        .map(|_| Arc::new(cc_lb_core::InMemoryBus::new()) as Arc<dyn cc_lb_core::RequestEventBus>);
+    let event_bus: Option<Arc<dyn cc_lb_contract::RequestEventBus>> = storage.as_ref().map(|_| {
+        Arc::new(cc_lb_engine::InMemoryBus::new()) as Arc<dyn cc_lb_contract::RequestEventBus>
+    });
     AdminState {
         storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
         key_store,
@@ -178,9 +176,7 @@ fn dynamic_view_holder(principal_view: Arc<PrincipalView>) -> Arc<DynamicViewHol
         DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(NoopSignerFactory))
             .global_router(Arc::new(NoopRouter))
-            .dispatcher(Arc::new(NoopDispatch))
             .global_observability_hooks(Vec::<Arc<dyn ObservabilityHook>>::new())
-            .error_normalizer(Arc::new(ErrorNormalizer::new()))
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build(),
@@ -223,18 +219,6 @@ impl RouterPlugin for NoopRouter {
         Err(RouteError::NoRoute {
             reason: "noop test router".to_owned(),
         })
-    }
-}
-
-struct NoopDispatch;
-
-#[async_trait]
-impl UpstreamDispatch for NoopDispatch {
-    async fn dispatch(
-        &self,
-        _request: SignedRequest,
-    ) -> Result<http::Response<Body>, DispatchError> {
-        Ok(http::Response::new(Body::empty()))
     }
 }
 

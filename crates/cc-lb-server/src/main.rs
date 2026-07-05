@@ -120,7 +120,7 @@ fn version_requested() -> bool {
 fn run() -> Result<(), RunError> {
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).map_err(RunError::Cli)?;
-    let clock: cc_lb_core::ClockHandle = std::sync::Arc::new(cc_lb_core::SystemClock);
+    let clock: cc_lb_engine::ClockHandle = std::sync::Arc::new(cc_lb_engine::SystemClock);
 
     match cli.command {
         Some(Command::Serve {
@@ -169,7 +169,7 @@ fn run() -> Result<(), RunError> {
 }
 
 async fn run_list_abandoned_chain_entries(
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 ) -> Result<(), DoctorError> {
     let path = doctor_storage_path();
     if !path.exists() {

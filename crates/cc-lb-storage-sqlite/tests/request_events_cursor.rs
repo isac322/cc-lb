@@ -18,7 +18,7 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
     storage
@@ -101,7 +101,7 @@ async fn cursor_pages_cover_two_hundred_rows_without_gaps_or_duplicates() {
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
     storage

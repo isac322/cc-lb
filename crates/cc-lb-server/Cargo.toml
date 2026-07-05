@@ -12,7 +12,7 @@ default = ["sqlite"]
 sqlite = [
     "cc-lb-scheduler/sqlite",
     "cc-lb-admin/sqlite",
-    "cc-lb-core/sqlite",
+    "cc-lb-engine/sqlite",
     "cc-lb-signer-anthropic-key/sqlite",
     "cc-lb-signer-anthropic-oauth/sqlite",
     "dep:apalis-codec",
@@ -24,7 +24,7 @@ sqlite = [
 postgres = [
     "cc-lb-scheduler/postgres",
     "cc-lb-admin/postgres",
-    "cc-lb-core/postgres",
+    "cc-lb-engine/postgres",
     "cc-lb-signer-anthropic-key/postgres",
     "cc-lb-signer-anthropic-oauth/postgres",
     "dep:apalis-postgres",
@@ -53,7 +53,9 @@ chrono.workspace = true
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-admin = { version = "0.1.0", path = "../cc-lb-admin", default-features = false }
 cc-lb-config = { path = "../cc-lb-config" }
-cc-lb-core = { path = "../cc-lb-core" }
+cc-lb-contract = { workspace = true }
+cc-lb-control = { path = "../cc-lb-control" }
+cc-lb-engine = { path = "../cc-lb-engine" }
 cc-lb-dialect-anthropic = { path = "../cc-lb-dialect-anthropic" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }

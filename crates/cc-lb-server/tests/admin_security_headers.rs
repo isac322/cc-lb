@@ -117,7 +117,7 @@ fn assert_security_headers_absent(response: &Response) {
 
 #[tokio::test]
 async fn admin_responses_include_browser_security_headers() {
-    let clock: cc_lb_core::ClockHandle = std::sync::Arc::new(cc_lb_core::SystemClock);
+    let clock: cc_lb_engine::ClockHandle = std::sync::Arc::new(cc_lb_engine::SystemClock);
     let app = build_app_for_testing(Config::default(), clock.clone())
         .await
         .unwrap();
@@ -158,7 +158,7 @@ async fn admin_responses_include_browser_security_headers() {
 
 #[tokio::test]
 async fn proxy_responses_omit_admin_browser_security_headers() {
-    let clock: cc_lb_core::ClockHandle = std::sync::Arc::new(cc_lb_core::SystemClock);
+    let clock: cc_lb_engine::ClockHandle = std::sync::Arc::new(cc_lb_engine::SystemClock);
     let app = build_app_for_testing(Config::default(), clock.clone())
         .await
         .unwrap();

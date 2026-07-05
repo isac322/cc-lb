@@ -17,7 +17,7 @@ fn restart_required_field_warns() {
         &config_path,
         reload_common::load_config(&config_path),
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     );
     reload_common::write_config(&config_path, 100, proxy_b);
 
@@ -55,7 +55,7 @@ fn reload_does_not_warn_per_principal_path_change() {
         &config_path,
         reload_common::load_config(&config_path),
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     );
     reload_common::write_config_with_principal_plugins(
         &config_path,

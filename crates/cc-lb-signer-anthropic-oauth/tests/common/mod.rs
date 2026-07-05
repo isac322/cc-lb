@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
-use cc_lb_core::clock::{Clock, ClockHandle, SystemClock, TestClock, unix_secs};
+use cc_lb_clock::{Clock, ClockHandle, SystemClock, TestClock, unix_secs};
 use cc_lb_plugin_api::{
     Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder, Upstream,
     UpstreamDialect, shape_request,

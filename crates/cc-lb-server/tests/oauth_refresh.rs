@@ -10,8 +10,8 @@ use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::{
     AnthropicOAuthConfig, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind,
 };
-use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_core::{Clock, ClockHandle, DynamicViewHolder, Lifecycle, LifecycleConfig, TestClock};
+use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_engine::{Clock, ClockHandle, DynamicViewHolder, Lifecycle, LifecycleConfig, TestClock};
 use cc_lb_oauth_protocol::{
     ExistingTokenParts, TokenEndpointResponse, parse_token_endpoint_response,
     refresh_token_form_body, refreshed_token_parts,
@@ -289,6 +289,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
             fixture.clock.clone(),
         )),
         Arc::new(DynamicViewHolder::new(view)),
+        cc_lb_engine::make_default_dispatcher(50),
         LifecycleConfig::default(),
         fixture.clock.clone(),
     );

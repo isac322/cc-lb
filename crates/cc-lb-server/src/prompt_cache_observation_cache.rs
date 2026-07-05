@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
-use cc_lb_core::clock::{ClockHandle, unix_secs};
-use cc_lb_core::lifecycle::PromptCacheObservationCacheLike;
+use cc_lb_engine::clock::{ClockHandle, unix_secs};
+use cc_lb_engine::lifecycle::PromptCacheObservationCacheLike;
 use cc_lb_plugin_api::types::{TtlClass, WarmCacheEntry};
 use cc_lb_storage_api::{PromptCacheObservationStore, StorageResult};
 use parking_lot::RwLock;
 use uuid::Uuid;
 
-pub const HASH_SCHEMA_VERSION: u8 = cc_lb_core::lifecycle::HASH_SCHEMA_VERSION;
+pub const HASH_SCHEMA_VERSION: u8 = cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
 
 const DEFAULT_WARM_SET_CAP: usize = 32;
 const DEFAULT_REFRESH_DEBOUNCE_SECS: u64 = 60;
@@ -284,7 +284,7 @@ fn ttl_matches_request(request_ttl: TtlClass, entry_ttl: TtlClass) -> bool {
 #[cfg(test)]
 pub(crate) mod tests {
     use async_trait::async_trait;
-    use cc_lb_core::clock::{Clock, ClockHandle, TestClock};
+    use cc_lb_engine::clock::{Clock, ClockHandle, TestClock};
     use cc_lb_storage_api::{
         PromptCacheObservationRecord, PromptCacheObservationStore, StorageResult,
         TtlClass as StorageTtlClass,

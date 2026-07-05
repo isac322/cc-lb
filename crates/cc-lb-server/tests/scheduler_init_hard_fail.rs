@@ -69,7 +69,8 @@ fn app_config(storage: StorageConfig) -> Config {
 async fn open_main_sqlite(path: &Path) -> TestResult<Arc<cc_lb_storage_sqlite::SqliteStorage>> {
     let database_url = format!("sqlite://{}", path.display());
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock)).await?,
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+            .await?,
     );
     storage.initialize(BackendKind::Sqlite).await?;
     Ok(storage)
@@ -79,7 +80,7 @@ async fn build_failing_app(
     config: Config,
     main_storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
 ) -> BuildError {
-    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
     let managed_store: Arc<dyn ManagedKeyStore> = main_storage.clone();
     let storage: Arc<dyn StorageTrait> = main_storage;
     match build_app_with_storage(
