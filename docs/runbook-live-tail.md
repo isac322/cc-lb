@@ -14,6 +14,10 @@ Import [`deploy/grafana/live-tail.json`](../deploy/grafana/live-tail.json) into 
 
 The dashboard's tripwire row (collapsed by default) covers `sse_malformed_frames_total`, `sse_lagged` drops, PG NOTIFY send/drop outcomes, HTTP fallback outcomes, and storage tail poll cadence. Expand it during an incident to eliminate whole classes of causes at a glance.
 
+## Load Testing
+
+Use [`docs/live-tail-load-testing.md`](live-tail-load-testing.md) for the live-tail load harness. The CI-safe smoke command is `bash tests/load/live-tail-soak.sh smoke`; the manual primary gate is `bash tests/load/live-tail-soak.sh --profile soak`. The harness is mock-only and must never be pointed at the real Anthropic API.
+
 ## Event Identity
 
 `event_id` is now the single lifecycle-generated identity for each request. It is generated at request start and carried through partial snapshots, final storage rows, SSE messages, storage tail delivery, and PG NOTIFY fanout.
