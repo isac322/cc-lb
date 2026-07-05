@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cc_lb_engine::{Body, Bulkhead, BulkheadConfig, DispatchError, UpstreamDispatch};
+use cc_lb_engine::{Body, Bulkhead, BulkheadRuntimeConfig, DispatchError, UpstreamDispatch};
 use cc_lb_plugin_api::SignedRequest;
 use http::Response;
 use tokio::sync::Notify;
@@ -18,7 +18,7 @@ async fn cancelling_execute_drops_guard_and_releases_permit()
     let hold = Arc::new(HoldDispatch::default());
     let bulkhead = Bulkhead::new(
         "anthropic-direct",
-        BulkheadConfig {
+        BulkheadRuntimeConfig {
             max_conns_per_upstream: 1,
             semaphore_permits: 1,
             acquire_timeout: Duration::from_secs(1),

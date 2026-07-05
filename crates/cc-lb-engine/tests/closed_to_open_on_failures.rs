@@ -1,13 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_engine::{BreakerConfig, BreakerState, CircuitBreaker, TestClock};
+use cc_lb_engine::{BreakerRuntimeConfig, BreakerState, CircuitBreaker, TestClock};
 
 #[test]
 fn five_failures_within_window_open_breaker() -> Result<(), Box<dyn std::error::Error>> {
     let breaker = CircuitBreaker::new(
         "bedrock",
-        BreakerConfig {
+        BreakerRuntimeConfig {
             failures_to_open: 5,
             failure_window: Duration::from_secs(10),
             half_open_after: Duration::from_secs(30),

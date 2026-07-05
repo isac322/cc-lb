@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use cc_lb_engine::{Body, Bulkhead, BulkheadConfig, DispatchError, UpstreamDispatch};
+use cc_lb_engine::{Body, Bulkhead, BulkheadRuntimeConfig, DispatchError, UpstreamDispatch};
 use cc_lb_plugin_api::SignedRequest;
 use http::{Response, StatusCode};
 
@@ -21,7 +21,7 @@ async fn semaphore_caps_concurrency_at_ten() -> Result<(), Box<dyn std::error::E
     });
     let bulkhead = Bulkhead::new(
         "anthropic-direct",
-        BulkheadConfig {
+        BulkheadRuntimeConfig {
             max_conns_per_upstream: 10,
             semaphore_permits: 10,
             acquire_timeout: Duration::from_secs(2),

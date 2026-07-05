@@ -1,7 +1,8 @@
-//! cc-lb-control: admin/control-plane runtime primitives.
+//! Control-plane primitives for admin APIs, dynamic views, audit output, and metadata refresh.
 //!
-//! Currently a skeleton crate; content will be moved from cc-lb-engine
-//! in a subsequent restructure batch.
+//! This crate owns operator-facing services and subscribers that coordinate
+//! stored configuration, API keys, audit records, and runtime status without
+//! depending on the data-plane engine crate.
 
 pub mod anthropic_compat;
 pub mod anthropic_metadata;

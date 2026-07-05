@@ -12,7 +12,7 @@ use http::StatusCode;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::audit_writer::{AuditEntry, AuditWriterSink};
+use cc_lb_control::audit_writer::{AuditEntry, AuditWriterSink};
 
 pub struct LimitRejectionAuditSubscriberHandle {
     shutdown_tx: oneshot::Sender<()>,
@@ -164,6 +164,7 @@ fn system_time_unix_secs(t: SystemTime) -> u64 {
 mod tests {
     use super::*;
     use cc_lb_contract::{LimitRequestSummary, LimitSubject, RouteSummary};
+    use cc_lb_control::audit_writer::spawn_audit_writer;
     use cc_lb_storage_api::{
         AuditEntry as StoredAuditEntry, AuditStore, StorageError, StorageResult,
     };
@@ -208,8 +209,7 @@ mod tests {
     async fn rejected_limit_decision_enqueues_audit_entry() {
         let (tx, rx) = mpsc::channel(16);
         let audit_store = Arc::new(RecordingAuditStore::default());
-        let (audit_sink, audit_join) =
-            crate::audit_writer::spawn_audit_writer(audit_store.clone(), 16);
+        let (audit_sink, audit_join) = spawn_audit_writer(audit_store.clone(), 16);
         let handle = spawn_lifecycle_limit_rejection_audit_subscriber(rx, Arc::new(audit_sink));
 
         tx.send(LifecycleEvent::LimitDecision {
@@ -254,8 +254,7 @@ mod tests {
     async fn rejected_limit_decision_without_violation_is_skipped() {
         let (tx, rx) = mpsc::channel(16);
         let audit_store = Arc::new(RecordingAuditStore::default());
-        let (audit_sink, audit_join) =
-            crate::audit_writer::spawn_audit_writer(audit_store.clone(), 16);
+        let (audit_sink, audit_join) = spawn_audit_writer(audit_store.clone(), 16);
         let handle = spawn_lifecycle_limit_rejection_audit_subscriber(rx, Arc::new(audit_sink));
 
         tx.send(LifecycleEvent::LimitDecision {

@@ -663,7 +663,6 @@ async fn lqa_4a_admin_sse_stream_emits_final_request_event_update() {
             break frame;
         }
     };
-    eprintln!("admin sse frame: {frame}");
     let event = &frame["payload"]["event"];
     assert_eq!(event["status"], 200);
     assert!(event["input_tokens"].as_i64().unwrap_or_default() > 0);

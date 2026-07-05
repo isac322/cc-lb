@@ -21,9 +21,9 @@ use axum::routing::{any, get, post};
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DownstreamAuthMode, EventBusTransport, TlsConfig};
 use cc_lb_engine::{
-    BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
-    CircuitBreakerDispatch, ClockHandle, DynamicView, DynamicViewBuilder, DynamicViewHolder,
-    HopByHopStripLayer, Lifecycle, LifecycleConfig, SubscriptionQuotaSink,
+    BreakerRegistry, BreakerRuntimeConfig, BulkheadDispatch, BulkheadRegistry,
+    BulkheadRuntimeConfig, CircuitBreakerDispatch, ClockHandle, DynamicView, DynamicViewBuilder,
+    DynamicViewHolder, HopByHopStripLayer, Lifecycle, LifecycleConfig, SubscriptionQuotaSink,
     SubscriptionQuotaWriterConfig, UpstreamDispatch, UpstreamRateLimitSink,
     anthropic_error_response,
     api_keys::{
@@ -954,7 +954,8 @@ async fn build_app_with_storage_inner(
     let notify_listener_task = Some(tokio::spawn(async move {
         notify_listener.run().await;
     }));
-    let in_memory_bus = cc_lb_control::InMemoryBus::with_capacity(config.event_bus.broadcast_capacity);
+    let in_memory_bus =
+        cc_lb_control::InMemoryBus::with_capacity(config.event_bus.broadcast_capacity);
     let lifecycle_event_logger_rx = in_memory_bus
         .attach_lifecycle_writer(cc_lb_control::event_bus::DEFAULT_LIFECYCLE_WRITER_CAPACITY);
     let lifecycle_assembler_rx = Some(in_memory_bus.attach_lifecycle_assembler(
@@ -1174,9 +1175,9 @@ async fn build_app_with_storage_inner(
         });
     let lifecycle_limit_rejection_audit_subscriber_handle = lifecycle_limit_rejection_audit_rx
         .and_then(|rx| {
-            audit_sink
-                .clone()
-                .map(|sink| cc_lb_engine::spawn_lifecycle_limit_rejection_audit_subscriber(rx, sink))
+            audit_sink.clone().map(|sink| {
+                cc_lb_engine::spawn_lifecycle_limit_rejection_audit_subscriber(rx, sink)
+            })
         });
     let lifecycle_api_key_metrics_subscriber_handle = lifecycle_api_key_metrics_rx
         .map(|rx| cc_lb_engine::spawn_lifecycle_api_key_metrics_subscriber(rx, event_bus.clone()));
@@ -2614,17 +2615,8 @@ fn dispatcher(
     config: &Config,
     clock: ClockHandle,
 ) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistry>) {
-    let bulkhead_config = BulkheadConfig {
-        max_conns_per_upstream: config.bulkhead.max_conns_per_upstream,
-        semaphore_permits: config.bulkhead.semaphore_per_upstream,
-        acquire_timeout: Duration::from_secs(1),
-    };
-    let breaker_config = BreakerConfig {
-        failures_to_open: config.circuit_breaker.failures_to_open,
-        failure_window: Duration::from_secs(config.circuit_breaker.window_secs.max(1)),
-        half_open_after: Duration::from_secs(config.circuit_breaker.half_open_after_secs.max(1)),
-        half_open_max_in_flight: 1,
-    };
+    let bulkhead_config = BulkheadRuntimeConfig::from(config.bulkhead.clone());
+    let breaker_config = BreakerRuntimeConfig::from(config.circuit_breaker.clone());
     let upstream_name = Arc::new(|request: &cc_lb_plugin_api::SignedRequest| {
         request
             .url()

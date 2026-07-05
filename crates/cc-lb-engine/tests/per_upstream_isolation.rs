@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_engine::{
-    Body, BulkheadConfig, BulkheadRegistry, DispatchError, ExecuteError, UpstreamDispatch,
+    Body, BulkheadRegistry, BulkheadRuntimeConfig, DispatchError, ExecuteError, UpstreamDispatch,
 };
 use cc_lb_plugin_api::SignedRequest;
 use http::{Response, StatusCode};
@@ -18,7 +18,7 @@ use common::signed_request;
 async fn saturated_upstream_does_not_block_other_upstreams()
 -> Result<(), Box<dyn std::error::Error>> {
     let registry = BulkheadRegistry::new();
-    let config = BulkheadConfig {
+    let config = BulkheadRuntimeConfig {
         max_conns_per_upstream: 1,
         semaphore_permits: 1,
         acquire_timeout: Duration::from_millis(10),

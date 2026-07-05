@@ -35,14 +35,14 @@ impl BreakerState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BreakerConfig {
+pub struct BreakerRuntimeConfig {
     pub failures_to_open: u32,
     pub failure_window: Duration,
     pub half_open_after: Duration,
     pub half_open_max_in_flight: u32,
 }
 
-impl Default for BreakerConfig {
+impl Default for BreakerRuntimeConfig {
     fn default() -> Self {
         Self {
             failures_to_open: 5,
@@ -53,7 +53,16 @@ impl Default for BreakerConfig {
     }
 }
 
-pub type CircuitBreakerConfig = BreakerConfig;
+impl From<cc_lb_config::CircuitBreakerConfig> for BreakerRuntimeConfig {
+    fn from(config: cc_lb_config::CircuitBreakerConfig) -> Self {
+        Self {
+            failures_to_open: config.failures_to_open,
+            failure_window: Duration::from_secs(config.window_secs.max(1)),
+            half_open_after: Duration::from_secs(config.half_open_after_secs.max(1)),
+            half_open_max_in_flight: 1,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum BreakerError {
@@ -65,7 +74,7 @@ pub enum BreakerError {
 
 pub struct CircuitBreaker {
     pub upstream_name: String,
-    pub config: BreakerConfig,
+    pub config: BreakerRuntimeConfig,
     pub state: ArcSwap<BreakerState>,
     pub failures: AtomicU32,
     pub last_failure_ts: AtomicU64,
@@ -77,7 +86,7 @@ pub struct CircuitBreaker {
 impl CircuitBreaker {
     pub fn new(
         upstream_name: impl Into<String>,
-        config: BreakerConfig,
+        config: BreakerRuntimeConfig,
         clock: ClockHandle,
     ) -> Arc<Self> {
         register_circuit_breaker_metrics();
@@ -309,7 +318,7 @@ impl BreakerRegistry {
     pub fn breaker(
         &self,
         upstream_name: impl Into<String>,
-        config: BreakerConfig,
+        config: BreakerRuntimeConfig,
         clock: ClockHandle,
     ) -> Arc<CircuitBreaker> {
         let upstream_name = upstream_name.into();
@@ -345,7 +354,7 @@ impl BreakerRegistry {
 pub struct CircuitBreakerDispatch {
     inner: Arc<dyn UpstreamDispatch>,
     registry: Arc<BreakerRegistry>,
-    config: BreakerConfig,
+    config: BreakerRuntimeConfig,
     upstream_name: Arc<dyn Fn(&SignedRequest) -> String + Send + Sync>,
     clock: ClockHandle,
 }
@@ -354,7 +363,7 @@ impl CircuitBreakerDispatch {
     pub fn new(
         inner: Arc<dyn UpstreamDispatch>,
         registry: Arc<BreakerRegistry>,
-        config: BreakerConfig,
+        config: BreakerRuntimeConfig,
         upstream_name: Arc<dyn Fn(&SignedRequest) -> String + Send + Sync>,
         clock: ClockHandle,
     ) -> Self {
@@ -420,7 +429,7 @@ mod tests {
     fn evict_removes_entry() {
         let registry = BreakerRegistry::new();
         let clock = Arc::new(SystemClock);
-        let _breaker = registry.breaker("test-upstream", BreakerConfig::default(), clock);
+        let _breaker = registry.breaker("test-upstream", BreakerRuntimeConfig::default(), clock);
         assert!(registry.get("test-upstream").is_some());
 
         let removed = registry.evict("test-upstream");
@@ -439,7 +448,7 @@ mod tests {
     async fn drain_after_grace_period() {
         let registry = BreakerRegistry::new();
         let clock = Arc::new(SystemClock);
-        let _breaker = registry.breaker("test-upstream", BreakerConfig::default(), clock);
+        let _breaker = registry.breaker("test-upstream", BreakerRuntimeConfig::default(), clock);
         assert!(registry.get("test-upstream").is_some());
 
         let start = std::time::Instant::now();
@@ -463,7 +472,8 @@ mod tests {
             let clock = Arc::clone(&clock);
             let handle = tokio::spawn(async move {
                 let upstream_name = format!("upstream-{}", i);
-                let _breaker = reg_clone.breaker(&upstream_name, BreakerConfig::default(), clock);
+                let _breaker =
+                    reg_clone.breaker(&upstream_name, BreakerRuntimeConfig::default(), clock);
                 tokio::time::sleep(Duration::from_millis(1)).await;
                 reg_clone.evict(&upstream_name)
             });
@@ -476,7 +486,8 @@ mod tests {
             let handle = tokio::spawn(async move {
                 let upstream_name = format!("upstream-{}", i);
                 tokio::time::sleep(Duration::from_millis(2)).await;
-                let _breaker = reg_clone.breaker(&upstream_name, BreakerConfig::default(), clock);
+                let _breaker =
+                    reg_clone.breaker(&upstream_name, BreakerRuntimeConfig::default(), clock);
                 true
             });
             handles.push(handle);

@@ -29,10 +29,20 @@ const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 static REGISTER_BULKHEAD_METRICS: Once = Once::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BulkheadConfig {
+pub struct BulkheadRuntimeConfig {
     pub max_conns_per_upstream: u32,
     pub semaphore_permits: u32,
     pub acquire_timeout: Duration,
+}
+
+impl From<cc_lb_config::BulkheadConfig> for BulkheadRuntimeConfig {
+    fn from(config: cc_lb_config::BulkheadConfig) -> Self {
+        Self {
+            max_conns_per_upstream: config.max_conns_per_upstream,
+            semaphore_permits: config.semaphore_per_upstream,
+            acquire_timeout: Duration::from_secs(1),
+        }
+    }
 }
 
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
@@ -54,13 +64,13 @@ pub struct Bulkhead {
     pub semaphore: Arc<Semaphore>,
     pub in_flight: AtomicU32,
     pub client: Arc<dyn UpstreamDispatch>,
-    pub config: BulkheadConfig,
+    pub config: BulkheadRuntimeConfig,
 }
 
 impl Bulkhead {
     pub fn new(
         upstream_name: impl Into<String>,
-        config: BulkheadConfig,
+        config: BulkheadRuntimeConfig,
         dispatcher: Arc<dyn UpstreamDispatch>,
     ) -> Arc<Self> {
         register_bulkhead_metrics();
@@ -150,7 +160,7 @@ impl BulkheadRegistry {
     pub fn bulkhead(
         &self,
         upstream_name: impl Into<String>,
-        config: BulkheadConfig,
+        config: BulkheadRuntimeConfig,
     ) -> Arc<Bulkhead> {
         self.bulkhead_with_factory(upstream_name, config, || {
             make_default_dispatcher(config.max_conns_per_upstream as usize)
@@ -160,7 +170,7 @@ impl BulkheadRegistry {
     pub fn bulkhead_with_dispatcher(
         &self,
         upstream_name: impl Into<String>,
-        config: BulkheadConfig,
+        config: BulkheadRuntimeConfig,
         dispatcher: Arc<dyn UpstreamDispatch>,
     ) -> Arc<Bulkhead> {
         self.bulkhead_with_factory(upstream_name, config, || dispatcher)
@@ -169,7 +179,7 @@ impl BulkheadRegistry {
     pub fn bulkhead_with_factory<F>(
         &self,
         upstream_name: impl Into<String>,
-        config: BulkheadConfig,
+        config: BulkheadRuntimeConfig,
         dispatcher_factory: F,
     ) -> Arc<Bulkhead>
     where
@@ -191,7 +201,7 @@ impl BulkheadRegistry {
 
 pub struct BulkheadDispatch {
     registry: Arc<BulkheadRegistry>,
-    config: BulkheadConfig,
+    config: BulkheadRuntimeConfig,
     upstream_name: Arc<dyn Fn(&SignedRequest) -> String + Send + Sync>,
     dispatcher_factory: Arc<dyn Fn(usize) -> Arc<dyn UpstreamDispatch> + Send + Sync>,
 }
@@ -199,7 +209,7 @@ pub struct BulkheadDispatch {
 impl BulkheadDispatch {
     pub fn new(
         registry: Arc<BulkheadRegistry>,
-        config: BulkheadConfig,
+        config: BulkheadRuntimeConfig,
         upstream_name: Arc<dyn Fn(&SignedRequest) -> String + Send + Sync>,
     ) -> Self {
         Self::with_dispatcher_factory(
@@ -212,7 +222,7 @@ impl BulkheadDispatch {
 
     pub fn with_dispatcher_factory(
         registry: Arc<BulkheadRegistry>,
-        config: BulkheadConfig,
+        config: BulkheadRuntimeConfig,
         upstream_name: Arc<dyn Fn(&SignedRequest) -> String + Send + Sync>,
         dispatcher_factory: Arc<dyn Fn(usize) -> Arc<dyn UpstreamDispatch> + Send + Sync>,
     ) -> Self {
@@ -468,7 +478,7 @@ mod tests {
     fn bulkhead_for_test(semaphore_permits: u32) -> Arc<Bulkhead> {
         Bulkhead::new(
             "test-upstream",
-            BulkheadConfig {
+            BulkheadRuntimeConfig {
                 max_conns_per_upstream: semaphore_permits,
                 semaphore_permits,
                 acquire_timeout: Duration::from_secs(1),

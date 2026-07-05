@@ -3,10 +3,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cc_lb_contract::{
-    AuthInfo, CostBreakdown as LifecycleCostBreakdown, EngineMetricsHook, EventId,
-    LifecycleEvent, ParseInfo, RequestCacheBreakpoint, RequestCacheState,
-    RequestEventBus, RequestEventPartial, RequestEventUpdate, RequestEventUpstream,
-    RouteInfo, TerminationReason, UsageSnapshot,
+    AuthInfo, CostBreakdown as LifecycleCostBreakdown, EngineMetricsHook, EventId, LifecycleEvent,
+    ParseInfo, RequestCacheBreakpoint, RequestCacheState, RequestEventBus, RequestEventPartial,
+    RequestEventUpdate, RequestEventUpstream, RouteInfo, TerminationReason, UsageSnapshot,
 };
 use cc_lb_plugin_api::{InternalError, RoutingTrace};
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
@@ -613,6 +612,8 @@ async fn handle_event(
             partial.first_body_chunk_ms = *first_body_chunk_ms;
         }
         partial.internal_errors = internal_errors.clone();
+        let expects_priced =
+            partial.usage_seen && partial.model().is_some() && partial.cost.is_none();
         let expects_cache =
             partial.upstream_response_status.is_some() && partial.cache_state.is_none();
         let termination = TerminationInfo {
@@ -620,7 +621,7 @@ async fn handle_event(
             client_status: *client_status,
             duration_ms: *duration_ms,
             deadline: now + FINALIZATION_GRACE,
-            expects_priced: false,
+            expects_priced,
             expects_cache,
         };
         publish_partial(bus, &partial, PartialTrigger::RequestTerminated, now_ms);
@@ -1005,8 +1006,7 @@ mod tests {
     use async_trait::async_trait;
     use cc_lb_contract::{
         AuthFailure, CostBreakdown, EngineMetricsHook, HeaderSnapshot, NoopMetricsHook,
-        ParseFailure, RequestEventPhase, RouteInfo, StreamError, StreamSuccess,
-        UsageSource,
+        ParseFailure, RequestEventPhase, RouteInfo, StreamError, StreamSuccess, UsageSource,
     };
     use cc_lb_storage_api::{RequestEvent, StorageResult};
     use metrics::{Counter, CounterFn, Key, KeyName, Metadata, Recorder, SharedString, Unit};
@@ -1110,7 +1110,6 @@ mod tests {
         let _ = metrics::set_global_recorder(recorder.clone());
         recorder
     }
-
 
     fn eid(s: &str) -> EventId {
         s.to_owned()

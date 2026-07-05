@@ -3,11 +3,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use cc_lb_contract::{BusReceiver, NoopMetricsHook, RequestEventBus, RequestEventUpdate};
-use cc_lb_engine::InMemoryBus;
 use cc_lb_contract::{
     EventId, HeaderSnapshot, LifecycleEvent, ParseInfo, RouteInfo, StreamSuccess,
     TerminationReason, UsageSnapshot, UsageSource,
 };
+use cc_lb_engine::InMemoryBus;
 use cc_lb_storage_api::{
     RequestEvent, RequestEventStore, RequestEventStreamFilters, StorageResult,
 };

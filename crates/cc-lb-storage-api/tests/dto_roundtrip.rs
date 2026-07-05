@@ -2,7 +2,7 @@
 #![recursion_limit = "256"]
 
 use cc_lb_contract::CostBreakdown;
-use cc_lb_engine::event_bus::{RequestEventPhase, RequestEventUpdate};
+use cc_lb_engine::event_bus::RequestEventUpdate;
 use cc_lb_plugin_api::{
     InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace,
     types::{StageDecision, TerminalDecision, TerminalStrategy},

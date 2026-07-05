@@ -11,7 +11,7 @@ use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_engine::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::instrumented_connector::InstrumentedHttpsConnector;
 use cc_lb_engine::{
-    Body, BulkheadConfig, BulkheadDispatch, BulkheadRegistry, CachingDnsConnector,
+    Body, BulkheadDispatch, BulkheadRegistry, BulkheadRuntimeConfig, CachingDnsConnector,
     DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY, DispatchError, DnsResolveFuture, DnsResolver,
     DnsResolverConfig, DynamicViewBuilder, DynamicViewHolder, InMemoryBus, Lifecycle,
     LifecycleConfig, RequestEventAssemblerHandle, UpstreamDispatch, spawn_request_event_assembler,
@@ -325,7 +325,7 @@ fn instrumented_bulkhead_dispatcher(
     max_idle_per_host: usize,
 ) -> Arc<dyn UpstreamDispatch> {
     let inner = instrumented_dispatcher(resolver, max_idle_per_host);
-    let config = BulkheadConfig {
+    let config = BulkheadRuntimeConfig {
         max_conns_per_upstream: max_idle_per_host as u32,
         semaphore_permits,
         acquire_timeout: Duration::from_secs(2),

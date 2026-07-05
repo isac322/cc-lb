@@ -1,14 +1,13 @@
-//! Lifecycle event vocabulary for the cc-lb request pipeline.
+//! Contract types and traits shared by cc-lb runtime layers.
 //!
-//! This crate defines [`LifecycleEvent`], the fixed set of typed events every
-//! request emits over the [`RequestEventBus`] lifecycle stream. Subscribers (Admin SSE, Pricing, CacheObservation,
-//! ObservabilityHook adapter, RequestEventAssembler) correlate events by
-//! [`EventId`] and materialise the persisted `request_events_v1` row.
+//! This crate owns the event vocabulary, DTOs, and hook traits exchanged between
+//! the data-plane engine, control-plane subscribers, storage adapters, and
+//! dashboard/API projections. It has no storage or engine runtime dependency.
 //!
 //! # Design goals
 //!
-//! - **Types + trait definitions.** No I/O or runtime execution.
-//!   Owns serde-ready DTOs and channel endpoint types (via tokio-sync feature).
+//! - **Types + trait definitions.** No storage, engine runtime, or request
+//!   execution. Owns serde-ready DTOs, hook traits, and channel endpoint types.
 //! - **`#[non_exhaustive]`.** Adding a new event variant or extending an
 //!   existing struct field must not require a major version bump of the
 //!   consumer crates.

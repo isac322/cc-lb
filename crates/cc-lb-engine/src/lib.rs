@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+//! cc-lb data-plane engine for request routing, dispatch, lifecycle production, and runtime subscribers.
 
 #[cfg(not(loom))]
 pub mod anthropic_compat {
@@ -10,13 +11,6 @@ pub mod anthropic_metadata {
 }
 pub mod api_keys {
     pub use cc_lb_control::api_keys::*;
-}
-pub mod audit_payload {
-    pub use cc_lb_control::audit_payload::*;
-}
-#[cfg(not(loom))]
-pub mod audit_writer {
-    pub use cc_lb_control::audit_writer::*;
 }
 #[cfg(not(loom))]
 pub mod builtin_filters;
@@ -30,10 +24,6 @@ pub mod clock;
 mod dns_cache;
 #[cfg(not(loom))]
 mod drain;
-#[cfg(not(loom))]
-pub mod dynamic_view {
-    pub use cc_lb_control::dynamic_view::*;
-}
 #[cfg(not(loom))]
 mod error_format;
 #[cfg(not(loom))]
@@ -106,16 +96,23 @@ pub mod usage_pruner;
 pub mod warmup_attempts;
 #[cfg(not(loom))]
 pub use anthropic_metadata::make_metadata_http_client;
-pub use audit_payload::AuditPayload;
-#[cfg(not(loom))]
-pub use audit_writer::{AuditDropped, AuditEntry, AuditWriterSink, spawn_audit_writer};
 #[cfg(not(loom))]
 pub use bulkhead::{
-    Bulkhead, BulkheadConfig, BulkheadDispatch, BulkheadError, BulkheadRegistry, ExecuteError,
-    make_default_dispatcher, make_http_dispatcher_with_connector,
+    Bulkhead, BulkheadDispatch, BulkheadError, BulkheadRegistry, BulkheadRuntimeConfig,
+    ExecuteError, make_default_dispatcher, make_http_dispatcher_with_connector,
 };
 #[cfg(not(loom))]
 pub use cc_lb_contract::ReplicaIdentity;
+pub use cc_lb_control::audit_payload::AuditPayload;
+#[cfg(not(loom))]
+pub use cc_lb_control::audit_writer::{
+    AuditDropped, AuditEntry, AuditWriterSink, spawn_audit_writer,
+};
+#[cfg(not(loom))]
+pub use cc_lb_control::dynamic_view::{
+    ApplyStatus, DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamRateLimitCache,
+    UpstreamStatusEntry, UpstreamStatusSnapshot,
+};
 #[cfg(not(loom))]
 pub use cc_lb_control::{
     NoopSubscriptionQuotaCache, PromptCacheObservationCacheLike,
@@ -125,8 +122,8 @@ pub use cc_lb_control::{
 pub use cc_lb_plugin_api::ApiKeyAwareSignerFactory;
 #[cfg(not(loom))]
 pub use circuit_breaker::{
-    BreakerConfig, BreakerError, BreakerRegistry, BreakerState, CircuitBreaker,
-    CircuitBreakerConfig, CircuitBreakerDispatch, Permit,
+    BreakerError, BreakerRegistry, BreakerRuntimeConfig, BreakerState, CircuitBreaker,
+    CircuitBreakerDispatch, Permit,
 };
 #[cfg(not(loom))]
 pub use clock::{Clock, ClockHandle, SystemClock, TestClock, unix_millis, unix_secs};
@@ -140,11 +137,6 @@ pub use dns_cache::{
 };
 #[cfg(not(loom))]
 pub use drain::{DrainController, proxy_drain_middleware};
-#[cfg(not(loom))]
-pub use dynamic_view::{
-    ApplyStatus, DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamRateLimitCache,
-    UpstreamStatusEntry, UpstreamStatusSnapshot,
-};
 #[cfg(not(loom))]
 pub use error_format::{anthropic_error_body, anthropic_error_response};
 #[cfg(not(loom))]
@@ -160,8 +152,8 @@ pub use event_bus::{
 pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop};
 #[cfg(not(loom))]
 pub use lifecycle::{
-    Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig, LimitCostEstimator,
-    LimitSubject, LimitSubjectProvider, ProxyError, RequestKind, UpstreamDispatch,
+    AuthLimitSubject, Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig,
+    LimitCostEstimator, LimitSubjectProvider, ProxyError, RequestKind, UpstreamDispatch,
     build_candidates, observe_rate_limits, observe_subscription_quota_headers,
     parse_request_cache_breakpoints,
 };

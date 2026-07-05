@@ -2,13 +2,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use cc_lb_engine::{BreakerConfig, BreakerError, CircuitBreaker, TestClock};
+use cc_lb_engine::{BreakerError, BreakerRuntimeConfig, CircuitBreaker, TestClock};
 
 #[test]
 fn open_breaker_returns_error_without_calling_upstream() -> Result<(), Box<dyn std::error::Error>> {
     let breaker = CircuitBreaker::new(
         "bedrock",
-        BreakerConfig {
+        BreakerRuntimeConfig {
             failures_to_open: 1,
             failure_window: Duration::from_secs(10),
             half_open_after: Duration::from_secs(30),

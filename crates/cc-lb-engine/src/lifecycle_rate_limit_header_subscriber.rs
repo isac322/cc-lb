@@ -18,9 +18,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::dynamic_view::UpstreamRateLimitCache;
 use crate::lifecycle::observe_rate_limits;
 use crate::upstream_rate_limit_events::UpstreamRateLimitSink;
+use cc_lb_control::dynamic_view::UpstreamRateLimitCache;
 
 pub const DEFAULT_RATE_LIMIT_HEADER_MAP_CAP: usize = 4096;
 pub const DEFAULT_RATE_LIMIT_HEADER_TTL: Duration = Duration::from_secs(300);

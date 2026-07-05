@@ -44,9 +44,6 @@ use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as Li
 use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
 use crate::clock::{Clock, ClockHandle, unix_millis};
-use crate::dynamic_view::{
-    DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
-};
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::ErrorNormalizer;
 use crate::hop_by_hop::strip_hop_by_hop;
@@ -65,6 +62,9 @@ use crate::usage_parser::{
     self, UsageCounts, accumulate_sse_usage, sse_event_name, usage_from_json_body,
 };
 use cc_lb_contract::{ReplicaIdentity, RequestEventBus};
+use cc_lb_control::dynamic_view::{
+    DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
+};
 pub use cc_lb_control::{
     PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
     PromptCacheObservationSinkLike, SubscriptionQuotaCacheLike,
@@ -525,7 +525,7 @@ pub trait LimitSubjectProvider: Send + Sync {
         ctx: &RequestContext,
         principal: &Principal,
         authn_success: &AuthnSuccess,
-    ) -> Option<LimitSubject>;
+    ) -> Option<AuthLimitSubject>;
 }
 
 pub trait LimitCostEstimator: Send + Sync {
@@ -539,7 +539,7 @@ pub trait LimitCostEstimator: Send + Sync {
 }
 
 #[derive(Clone, Debug)]
-pub struct LimitSubject {
+pub struct AuthLimitSubject {
     pub principal_id: String,
     pub key_id: String,
     pub record: StoredApiKeyRecord,
@@ -559,7 +559,7 @@ struct LimitRejectionErr {
 }
 
 struct StaticLimitSubjectProvider {
-    subject: LimitSubject,
+    subject: AuthLimitSubject,
 }
 
 #[async_trait]
@@ -569,7 +569,7 @@ impl LimitSubjectProvider for StaticLimitSubjectProvider {
         _ctx: &RequestContext,
         _principal: &Principal,
         _authn_success: &AuthnSuccess,
-    ) -> Option<LimitSubject> {
+    ) -> Option<AuthLimitSubject> {
         Some(self.subject.clone())
     }
 }
@@ -581,10 +581,10 @@ impl LimitSubjectProvider for BuiltinAuthn {
         _ctx: &RequestContext,
         _principal: &Principal,
         authn_success: &AuthnSuccess,
-    ) -> Option<LimitSubject> {
+    ) -> Option<AuthLimitSubject> {
         let mut record = authn_success.record.clone();
         record.key_hash_b64 = authn_success.key_id.clone();
-        Some(LimitSubject {
+        Some(AuthLimitSubject {
             principal_id: authn_success.principal_id.clone(),
             key_id: authn_success.key_id.clone(),
             record,
@@ -930,7 +930,7 @@ impl Lifecycle {
         self.with_limit_engine(
             limit_engine,
             Arc::new(StaticLimitSubjectProvider {
-                subject: LimitSubject {
+                subject: AuthLimitSubject {
                     principal_id,
                     key_id,
                     record,
@@ -2828,7 +2828,7 @@ impl LimitRequest {
 }
 
 struct ActiveLimit {
-    subject: LimitSubject,
+    subject: AuthLimitSubject,
     request: LimitRequest,
     reservation: Option<LimitReservation>,
 }
