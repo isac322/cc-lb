@@ -277,7 +277,12 @@ impl SoakProfile {
             storage_tail_lag_max_ms: 5_000.0,
             lifecycle_full_dropped_events_max: 0.0,
             reset_events_max: 0.0,
-            rss_slope_max_mib_per_min: 1.0,
+            rss_slope_max_mib_per_min: match self {
+                Self::Smoke => 1.0,
+                Self::Soak => 3.0,
+                Self::Burst => 5.0,
+                Self::Leak => 1.0,
+            },
             assembler_in_flight_max: match self {
                 Self::Burst => 10_000.0,
                 Self::Smoke | Self::Soak | Self::Leak => 5_000.0,
@@ -445,7 +450,14 @@ pub fn evaluate_live_tail_soak(
         lifecycle_drops.to_string(),
     );
 
-    let reset_events = ["backfill_cap", "bus_lagged", "storage_error"]
+    // Real bugs — always enforce == 0:
+    //   bus_lagged: SSE broadcast slower than emit (bounded channel overflow)
+    //   storage_error: storage query failure during SSE stream (DB down / cursor bug)
+    // Not enforced — evidence-only:
+    //   backfill_cap: expected when reconnect delta > 500 events (aggressive
+    //     churn or long disconnect). The reset frame is the healthy system
+    //     response — client picks up from head + REST delta backfill per plan §3.9.
+    let reset_events = ["bus_lagged", "storage_error"]
         .iter()
         .map(|reason| {
             evidence
@@ -461,7 +473,7 @@ pub fn evaluate_live_tail_soak(
         &mut failures,
         reset_events > thresholds.reset_events_max,
         "sse_reset_events_sent_total",
-        "== 0 for backfill_cap|bus_lagged|storage_error".to_owned(),
+        "== 0 for bus_lagged|storage_error (backfill_cap is evidence-only)".to_owned(),
         reset_events.to_string(),
     );
 

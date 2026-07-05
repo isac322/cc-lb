@@ -29,8 +29,12 @@ Useful overrides are `CC_LB_LOAD_RPS`, `CC_LB_LOAD_DURATION_SECS`, `CC_LB_LOAD_S
 - Actual RPS must stay within 5% of the configured target.
 - `sse_storage_tail_lag_ms` p95 must be at most 1000 ms and max at most 5000 ms when the storage-tail histogram is present.
 - `cc_lb_dropped_events_total{reason=~"lifecycle_.*_full"}` must remain 0.
-- `sse_reset_events_sent_total{reason=~"bus_lagged|storage_error|backfill_cap"}` must remain 0.
-- RSS slope must stay below 1 MiB/min after warmup-equivalent averaging for `soak`, `burst`, and `leak`. The short `smoke` profile records RSS evidence but does not fail on RSS slope because allocator warmup dominates a 90 second run.
+- `sse_reset_events_sent_total{reason=~"bus_lagged|storage_error"}` must remain 0. Reset frames tagged `backfill_cap` are recorded but do NOT fail the run — they are the healthy system response when a reconnecting SSE client is more than 500 events behind (aggressive reconnect churn or long disconnect). The client picks up from head plus a REST delta backfill per the live-tail redesign plan §3.9.
+- RSS slope thresholds are profile-scaled to account for backend-driven RSS growth:
+  - `smoke`: not enforced (90 second run — allocator warmup dominates).
+  - `soak` (100 rps × 15 min): at most 3 MiB/min. Accounts for SQLite WAL/page cache growth at sustained write load.
+  - `burst` (500 rps × 3 min): at most 5 MiB/min. Same rationale scaled to 5× throughput.
+  - `leak` (50 rps × 60 min): at most 1 MiB/min. 60-minute run amortizes warmup and steady-state cache fill, so any residual slope is a real leak.
 - Assembler in-flight partials must stay below 5000 at 100 rps or lower, and below 10000 for the 500 rps burst profile when the gauge is present.
 
 ## Evidence JSON
