@@ -35,7 +35,7 @@ pub struct WarmupDialectDispatchParams<'a> {
     pub lazy_refresher: Arc<LazyRefresher>,
     pub upstream: &'a UpstreamRecord,
     pub http: &'a WarmupHttpClient,
-    pub clock: cc_lb_core::ClockHandle,
+    pub clock: cc_lb_engine::ClockHandle,
 }
 
 #[derive(Debug, Error)]

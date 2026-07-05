@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, Config};
-use cc_lb_core::DynamicViewHolder;
-use cc_lb_core::clock::ClockHandle;
+use cc_lb_engine::DynamicViewHolder;
+use cc_lb_engine::clock::ClockHandle;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{ChangeChannel, ChangeEvent, RuntimeChangeNotifier};
 use tokio::sync::broadcast;

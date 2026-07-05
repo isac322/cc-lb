@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cc_lb_core::{Clock, ClockHandle, unix_secs};
+use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_storage_api::{
     ManagedKeyStore, StorageError, StorageResult,
     types::{
@@ -717,7 +717,7 @@ mod tests {
             PostgresManagedKeyStore::new(
                 self.pool.clone(),
                 Arc::new(retry::RetryPolicy::default()),
-                Arc::new(cc_lb_core::SystemClock),
+                Arc::new(cc_lb_clock::SystemClock),
             )
         }
 

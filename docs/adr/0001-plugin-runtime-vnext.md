@@ -83,4 +83,4 @@ Items the review consensus deferred as over-engineering (under cc-lb's pre-launc
 
 - Detailed design: [docs/rfc/0001-plugin-runtime-vnext.md](../rfc/0001-plugin-runtime-vnext.md)
 - Current implementation: `crates/cc-lb-runtime-extism/`
-- Preserved primitives: `crates/cc-lb-core/src/dynamic_view.rs`, `crates/cc-lb-core/src/api_keys/principal_view.rs`, `crates/cc-lb-server/src/dynamic_view_builder.rs`, `crates/cc-lb-server/src/reconcile.rs`.
+- Preserved primitives: `crates/cc-lb-engine/src/dynamic_view.rs`, `crates/cc-lb-engine/src/api_keys/principal_view.rs`, `crates/cc-lb-server/src/dynamic_view_builder.rs`, `crates/cc-lb-server/src/reconcile.rs`.

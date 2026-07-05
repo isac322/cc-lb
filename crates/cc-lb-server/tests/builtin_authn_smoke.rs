@@ -4,11 +4,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
-use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_core::api_keys::principal_view::PrincipalView;
-use cc_lb_core::{
+use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_engine::api_keys::principal_view::PrincipalView;
+use cc_lb_engine::{
     ApiKeyAwareSignerFactory, Body, DispatchError, DynamicViewBuilder, DynamicViewHolder,
-    ErrorNormalizer, Lifecycle, LifecycleConfig, UpstreamDispatch,
+    Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
     DialectError, ObservabilityHook, Principal, RequestContext, RetryDecision, RouteDecision,
@@ -38,8 +38,11 @@ async fn none_mode_terminal_selects_bound_principal_upstream() {
             upstream_kind: NoneModeUpstreamKind::AnthropicKey,
         }),
         None,
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     ));
+    let dispatcher = Arc::new(RecordingDispatcher {
+        state: state.clone(),
+    });
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(RecordingSignerFactory {
             state: state.clone(),
@@ -47,11 +50,7 @@ async fn none_mode_terminal_selects_bound_principal_upstream() {
         .global_router(Arc::new(RecordingFallbackRouter {
             state: state.clone(),
         }))
-        .dispatcher(Arc::new(RecordingDispatcher {
-            state: state.clone(),
-        }))
         .global_observability_hooks(Vec::<Arc<dyn ObservabilityHook>>::new())
-        .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(principal_view)
         .upstream_records(vec![
             api_key_upstream(second_id, "second", "http://second.local/"),
@@ -61,8 +60,9 @@ async fn none_mode_terminal_selects_bound_principal_upstream() {
     let lifecycle = Lifecycle::new_with_dynamic_view(
         authn,
         Arc::new(DynamicViewHolder::new(view)),
+        dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     );
 
     let response = lifecycle

@@ -1,7 +1,7 @@
 use std::str::FromStr as _;
 use std::sync::Arc;
 
-use cc_lb_core::clock::SystemClock;
+use cc_lb_clock::SystemClock;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::jobs::watchdog::{WatchdogEntityKind, run_entity_watchdog};
 use cc_lb_scheduler::worker::{

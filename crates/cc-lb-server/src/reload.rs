@@ -9,8 +9,8 @@ use cc_lb_admin::{DynamicViewRebinder, LastReloadStatus, ReloadOutcome};
 use cc_lb_config::{
     Config, ConfigError, RestartRequiredField, StorageConfig, WasmtimeAllocationStrategy,
 };
-use cc_lb_core::DynamicViewHolder;
-use cc_lb_core::clock::{ClockHandle, unix_secs};
+use cc_lb_engine::DynamicViewHolder;
+use cc_lb_engine::clock::{ClockHandle, unix_secs};
 use notify::{Event, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::StorageResult;
+pub use cc_lb_contract::{Limit, LimitKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -10,24 +11,6 @@ pub enum PrincipalKind {
     Machine,
     Human,
     Admin,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LimitKind {
-    Requests,
-    InputTokens,
-    OutputTokens,
-    TotalTokens,
-    CostUsd,
-    Concurrent,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Limit {
-    pub kind: LimitKind,
-    pub window_secs: u64,
-    pub cap_micros: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

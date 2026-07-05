@@ -28,7 +28,10 @@ tokio-util.workspace = true
 rust-embed.workspace = true
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-aead = { path = "../cc-lb-aead" }
-cc-lb-core = { path = "../cc-lb-core" }
+cc-lb-clock = { path = "../cc-lb-clock" }
+cc-lb-contract = { workspace = true }
+cc-lb-control = { path = "../cc-lb-control" }
+cc-lb-engine = { path = "../cc-lb-engine" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-scheduler = { path = "../cc-lb-scheduler", default-features = false }

@@ -34,7 +34,7 @@ async fn run_test(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(
         fixture.pool.clone(),
-        std::sync::Arc::new(cc_lb_core::SystemClock),
+        std::sync::Arc::new(cc_lb_clock::SystemClock),
     );
     storage.initialize(BackendKind::Postgres).await?;
 

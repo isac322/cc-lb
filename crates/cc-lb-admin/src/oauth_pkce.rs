@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use cc_lb_core::Clock;
+use cc_lb_clock::Clock;
 use cc_lb_oauth_protocol::{
     ExistingTokenParts, parse_token_endpoint_response, refreshed_token_parts,
 };
@@ -127,7 +127,7 @@ pub(crate) async fn complete_pkce_flow(
         &state_token,
         &handshake.verifier,
         &handshake.redirect_uri,
-        cc_lb_core::clock::unix_secs(clock.now()),
+        cc_lb_engine::clock::unix_secs(clock.now()),
     )
     .await
 }

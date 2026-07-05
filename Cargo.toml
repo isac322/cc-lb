@@ -2,6 +2,7 @@
 members = [
     "crates/cc-lb-pricing",
     "crates/cc-lb-storage-sqlite",
+    "crates/cc-lb-control",
     "crates/cc-lb-*",
     "plugins/router/cache-aware-wasmtime",
     "plugins/test-fixtures/wasmtime-shape-passthrough",
@@ -30,7 +31,7 @@ rust-version = "1.96.0"
 cc-lb-plugin-api = { version = "0.7", path = "crates/cc-lb-plugin-api" }
 
 # Internal, unpublished — RFC-0002 event-driven lifecycle vocabulary.
-cc-lb-lifecycle = { path = "crates/cc-lb-lifecycle", version = "0.1.0" }
+cc-lb-contract = { path = "crates/cc-lb-contract", version = "0.1.0" }
 
 cc-lb-runtime-wasmtime    = { path = "crates/cc-lb-runtime-wasmtime", version = "0.1.1" }
 cc-lb-plugin-wire = { version = "0.3", path = "crates/cc-lb-plugin-wire" }

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_core::{SseBatchConfig, SseRelay};
+use cc_lb_engine::{SseBatchConfig, SseRelay};
 use cc_lb_plugin_api::{
     DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext,
     ShapedRequest, ShapedRequestBuilder, Upstream, UpstreamDialect,

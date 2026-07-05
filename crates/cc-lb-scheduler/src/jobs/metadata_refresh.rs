@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use apalis_core::task::{Task, builder::TaskBuilder};
 use cc_lb_aead::AeadService;
-use cc_lb_core::anthropic_compat::{
+use cc_lb_clock::ClockHandle;
+use cc_lb_engine::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
-use cc_lb_core::anthropic_metadata::MetadataHttpClient;
-use cc_lb_core::clock::ClockHandle;
+use cc_lb_engine::anthropic_metadata::MetadataHttpClient;
 use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, Storage, StorageError, UpstreamRecord, UpstreamStore,
 };
@@ -131,7 +131,7 @@ impl CoreMetadataRefreshRunner {
         Self::with_client(
             storage,
             aead,
-            cc_lb_core::make_metadata_http_client(),
+            cc_lb_engine::make_metadata_http_client(),
             cancel,
             clock,
         )
@@ -174,7 +174,7 @@ impl MetadataRefreshRunner for CoreMetadataRefreshRunner {
             })?
             .access_token;
         let user_agent = self.user_agent().await?;
-        cc_lb_core::subscription_metadata_hook::run_metadata_refresh(
+        cc_lb_engine::subscription_metadata_hook::run_metadata_refresh(
             self.storage.clone(),
             &self.client,
             upstream.id,

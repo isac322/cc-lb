@@ -1,4 +1,4 @@
-use cc_lb_core::UnifiedQuotaObservation;
+use cc_lb_engine::UnifiedQuotaObservation;
 use cc_lb_server::warmup::execute::{
     WarmupAttemptExecution, WarmupAttemptExecutionResult, execute_warmup_attempt,
 };
@@ -18,7 +18,7 @@ use uuid::Uuid;
 async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
     let storage = cc_lb_storage_sqlite::open_sqlite(
         "sqlite::memory:",
-        std::sync::Arc::new(cc_lb_core::SystemClock),
+        std::sync::Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect("sqlite opens");

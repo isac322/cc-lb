@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use cc_lb_core::clock::{Clock, unix_secs};
+use cc_lb_clock::{Clock, unix_secs};
 use cc_lb_storage_api::OAuthCredentials;
 use oauth2::{AuthUrl, ClientId, PkceCodeChallenge, TokenUrl};
 use secrecy::{ExposeSecret, SecretString};

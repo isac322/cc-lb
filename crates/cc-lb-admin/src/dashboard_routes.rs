@@ -41,7 +41,7 @@ pub(crate) async fn handle_dashboard_summary(
     match build_dashboard_summary(
         storage.as_ref(),
         range,
-        cc_lb_core::clock::unix_secs(state.clock.now()),
+        cc_lb_engine::clock::unix_secs(state.clock.now()),
     )
     .await
     {
@@ -102,7 +102,7 @@ pub(crate) async fn handle_dashboard_usage(
         step,
         group_by,
         upstream_id,
-        cc_lb_core::clock::unix_secs(state.clock.now()),
+        cc_lb_engine::clock::unix_secs(state.clock.now()),
     )
     .await
     {

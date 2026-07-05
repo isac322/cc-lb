@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens};
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_core::DynamicViewHolder;
+use cc_lb_engine::DynamicViewHolder;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::notify_listener::{NotifyListener, NotifyListenerParams};
@@ -217,7 +217,7 @@ async fn fixture() -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("notify.sqlite");
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
         .await
         .expect("storage opens");
     cc_lb_storage_api::MetaStore::initialize(&storage, BackendKind::Sqlite)
@@ -250,7 +250,7 @@ async fn fixture() -> Fixture {
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
         &cc_lb_config::Config::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect("initial dynamic view builds");
@@ -285,7 +285,7 @@ async fn spawn_listener(
         subscription_quota_cache: Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         subscription_quota_routing_max_staleness_secs: 1800,
         config: Arc::new(cc_lb_config::Config::default()),
-        clock: Arc::new(cc_lb_core::SystemClock),
+        clock: Arc::new(cc_lb_engine::SystemClock),
     }));
     let task = tokio::spawn(async move {
         listener.run().await;

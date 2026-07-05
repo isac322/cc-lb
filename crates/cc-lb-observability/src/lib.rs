@@ -4,6 +4,7 @@
 
 #[path = "metrics.rs"]
 mod cclb_metrics;
+mod engine_hook;
 mod hook;
 mod init;
 pub mod lifecycle_metrics;
@@ -13,6 +14,7 @@ mod trace_layer;
 
 pub use cc_lb_plugin_api::{ObservabilityError, ObservabilityHook, ObserveEvent};
 pub use cclb_metrics::{prometheus14_metric_definitions, touch_prometheus14_metrics};
+pub use engine_hook::MetricsCrateHook;
 pub use hook::{
     BoundedChannelHook, DEFAULT_HOOK_CHANNEL_CAPACITY, dropped_events_total,
     increment_dropped_events_by,

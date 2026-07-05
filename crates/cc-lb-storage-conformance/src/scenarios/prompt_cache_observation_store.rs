@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
-use cc_lb_core::{ClockHandle, clock::unix_secs};
+use cc_lb_engine::{ClockHandle, clock::unix_secs};
 use cc_lb_storage_api::{PromptCacheObservationRecord, PromptCacheObservationStore, TtlClass};
 use uuid::Uuid;
 

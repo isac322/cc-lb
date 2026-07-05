@@ -4,7 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use cc_lb_core::PartialRetentionCache;
+use cc_lb_engine::PartialRetentionCache;
 
 const CLUSTER_TOKEN_HEADER: &str = "x-cluster-token";
 

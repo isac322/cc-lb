@@ -392,7 +392,7 @@ pub fn register_metrics() {
         "TLS certificate reload attempts by outcome."
     );
     metrics::describe_counter!(
-        "cc_lb_lifecycle_events_total",
+        "cc_lb_contract_events_total",
         Unit::Count,
         "Total lifecycle events emitted by event kind."
     );

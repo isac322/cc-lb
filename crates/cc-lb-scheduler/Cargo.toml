@@ -31,7 +31,8 @@ apalis-postgres = { version = "=1.0.0-rc.8", optional = true }
 apalis-sqlite = { version = "=1.0.0-rc.8", optional = true }
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-config = { path = "../cc-lb-config" }
-cc-lb-core = { path = "../cc-lb-core" }
+cc-lb-clock = { path = "../cc-lb-clock" }
+cc-lb-engine = { path = "../cc-lb-engine" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 chrono = { workspace = true }

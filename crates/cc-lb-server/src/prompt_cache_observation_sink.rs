@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use cc_lb_core::lifecycle::{PromptCacheObservationEnqueueError, PromptCacheObservationSinkLike};
+use cc_lb_engine::lifecycle::{PromptCacheObservationEnqueueError, PromptCacheObservationSinkLike};
 use cc_lb_observability::{
     cache_observation_dropped_reason, inc_cache_observation_dropped,
     inc_cache_observation_write_failed,

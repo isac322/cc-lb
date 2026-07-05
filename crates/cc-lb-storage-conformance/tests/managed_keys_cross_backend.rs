@@ -2,7 +2,7 @@
 
 use std::{str::FromStr, sync::Arc};
 
-use cc_lb_core::{ClockHandle, SystemClock};
+use cc_lb_engine::{ClockHandle, SystemClock};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_conformance::scenarios::managed_keys::managed_keys_cross_backend_equivalence;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage, adapter::retry};

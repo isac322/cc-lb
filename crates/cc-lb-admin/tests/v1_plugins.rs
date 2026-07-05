@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use cc_lb_config::Config;
-use cc_lb_core::spawn_audit_writer;
+use cc_lb_control::spawn_audit_writer;
 use cc_lb_storage_api::{
     AuditStore, BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
     PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,

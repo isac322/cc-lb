@@ -5,8 +5,8 @@ use std::time::Duration;
 use apalis::layers::catch_panic::CatchPanicLayer;
 use apalis::prelude::{IntervalStrategy, StrategyBuilder, WorkerBuilder, WorkerError};
 use cc_lb_aead::AeadService;
+use cc_lb_clock::SystemClock;
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_core::clock::SystemClock;
 use cc_lb_scheduler::middleware::TraceparentLayer;
 use cc_lb_scheduler::retry::RetryClass;
 use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, SchedulerBackend, SqliteSchedulerStorage};
@@ -32,7 +32,7 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
     let fake = FakeAnthropic::spawn().await?;
     let storage_url = format!("sqlite://{}", dir.path().join("runtime.sqlite").display());
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&storage_url, Arc::new(cc_lb_core::SystemClock)).await?,
+        cc_lb_storage_sqlite::open_sqlite(&storage_url, Arc::new(cc_lb_clock::SystemClock)).await?,
     );
     storage.initialize(BackendKind::Sqlite).await?;
     let scheduler_url = format!("sqlite://{}", dir.path().join("scheduler.sqlite").display());
@@ -84,7 +84,7 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
             stores: stores_from_storage(storage.clone()),
             aead,
             oauth_cfg,
-            clock: Arc::new(cc_lb_core::SystemClock),
+            clock: Arc::new(cc_lb_clock::SystemClock),
         },
         replica_id: Uuid::new_v4(),
         metadata_hook: None,

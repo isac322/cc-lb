@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 axum = "0.8"
 bytes = "1"
-cc-lb-core = { path = "../crates/cc-lb-core" }
+cc-lb-engine = { path = "../crates/cc-lb-engine" }
 cc-lb-plugin-api = { path = "../crates/cc-lb-plugin-api" }
 http = "1"
 http-body-util = "0.1"

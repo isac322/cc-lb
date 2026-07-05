@@ -12,7 +12,7 @@ const TEST_KEY_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123
 
 #[tokio::test]
 async fn sqlite_scheduler_init_failure_aborts_app_build() {
-    let clock: cc_lb_core::ClockHandle = std::sync::Arc::new(cc_lb_core::SystemClock);
+    let clock: cc_lb_engine::ClockHandle = std::sync::Arc::new(cc_lb_engine::SystemClock);
     let _env = EnvGuard::set(TEST_KEY_ENV, TEST_KEY_HEX);
     let directory = tempfile::tempdir().expect("tempdir is created");
     let storage_path = directory.path().join("cc-lb.sqlite");
@@ -38,7 +38,7 @@ async fn postgres_scheduler_init_failure_aborts_app_build() {
     use cc_lb_server::app::build_app_with_storage;
     use cc_lb_storage_api::{BackendKind, ManagedKeyStore, MetaStore, Storage as StorageTrait};
 
-    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
     let directory = tempfile::tempdir().expect("tempdir is created");
     let sqlite_url = format!(
         "sqlite://{}",

@@ -1,7 +1,7 @@
 cc-lb-aead
 cc-lb-admin
 cc-lb-config
-cc-lb-core
+cc-lb-engine
 cc-lb-dialect-anthropic
 cc-lb-dialect-bedrock
 cc-lb-dialect-vertex

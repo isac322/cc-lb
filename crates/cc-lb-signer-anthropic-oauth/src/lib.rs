@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, OAuthTokenBundle};
-use cc_lb_core::clock::{Clock, ClockHandle, unix_secs};
+use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
     SignerFactory, SigningCapability, Upstream, UpstreamError,
@@ -973,7 +973,7 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
     use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-    use cc_lb_core::clock::TestClock;
+    use cc_lb_clock::TestClock;
     use cc_lb_plugin_api::{
         RequestContext, Upstream, UpstreamDialect, shape_request, sign_request,
     };

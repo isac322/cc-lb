@@ -16,7 +16,7 @@ path = "terminal_observation.rs"
 
 [dev-dependencies]
 cc-lb-config = { path = "../../crates/cc-lb-config" }
-cc-lb-core = { path = "../../crates/cc-lb-core" }
+cc-lb-engine = { path = "../../crates/cc-lb-engine" }
 cc-lb-pricing = { path = "../../crates/cc-lb-pricing" }
 cc-lb-server = { path = "../../crates/cc-lb-server" }
 cc-lb-storage-api = { path = "../../crates/cc-lb-storage-api" }

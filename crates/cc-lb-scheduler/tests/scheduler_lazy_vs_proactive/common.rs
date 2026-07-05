@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_core::clock::{Clock, SystemClock, unix_secs};
+use cc_lb_clock::{Clock, SystemClock, unix_secs};
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{

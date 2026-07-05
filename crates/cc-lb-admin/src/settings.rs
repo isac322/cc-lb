@@ -209,10 +209,10 @@ fn strip_schema_defaults(value: &mut Value) {
 
 pub async fn get_draft(
     storage: &dyn Storage,
-    clock: &dyn cc_lb_core::Clock,
+    clock: &dyn cc_lb_clock::Clock,
 ) -> Result<ConfigDraftResponse, SettingsError> {
     let state = storage.get_config_draft().await?;
-    if invalid_draft_expired(&state, cc_lb_core::clock::unix_secs(clock.now())) {
+    if invalid_draft_expired(&state, cc_lb_clock::unix_secs(clock.now())) {
         let revision = state.revision;
         let _ = storage
             .put_config_draft(ConfigDraftState::default(), revision)

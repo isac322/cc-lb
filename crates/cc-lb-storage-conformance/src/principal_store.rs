@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use cc_lb_core::{ClockHandle, SystemClock};
+use cc_lb_engine::{ClockHandle, SystemClock};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 #[cfg(feature = "postgres")]
 use cc_lb_storage_postgres::PostgresStorage;

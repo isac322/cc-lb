@@ -338,8 +338,8 @@ Under cc-lb's pre-launch state and first-party trusted plugin assumption, baking
 ### Preserved cc-lb primitives
 
 - `cc-lb-plugin-api/src/traits.rs` trait shapes — `FilterPlugin`, `UpstreamDialect`, `ObservabilityHook`, `Signer`, `SignerFactory`, `PluginRuntime`. (Only addition: `slot_key(&self) -> SlotKey` on `FilterPlugin`.)
-- `cc-lb-core/src/dynamic_view.rs::DynamicViewHolder = ArcSwap<DynamicView>`.
-- `cc-lb-core/src/api_keys/principal_view.rs::PrincipalSpecCached` and its `resolved_pipeline / resolved_dialect / resolved_hooks`.
+- `cc-lb-engine/src/dynamic_view.rs::DynamicViewHolder = ArcSwap<DynamicView>`.
+- `cc-lb-engine/src/api_keys/principal_view.rs::PrincipalSpecCached` and its `resolved_pipeline / resolved_dialect / resolved_hooks`.
 - Per-principal staging in `cc-lb-server/src/dynamic_view_builder.rs::build_principal_chains`.
 - DB polling and revision-hash rebuild in `cc-lb-server/src/reconcile.rs`.
 - `ArcSwap` config swap in `cc-lb-server/src/reload.rs::ConfigWatcher`.
@@ -382,7 +382,7 @@ Under cc-lb's pre-launch state and first-party trusted plugin assumption, baking
 ### Modified cc-lb code
 
 - `cc-lb-plugin-api/src/traits.rs`: trait signatures unchanged. Add `slot_key(&self) -> SlotKey` to `FilterPlugin`.
-- `cc-lb-core/src/lifecycle.rs::execute_filter_pipeline`: call-site identical. Traps handled by the existing branch.
+- `cc-lb-engine/src/lifecycle.rs::execute_filter_pipeline`: call-site identical. Traps handled by the existing branch.
 - `cc-lb-server/src/dynamic_view_builder.rs::build_principal_chains`: only the runtime call goes through `WasmtimeRuntime` (trait identical).
 - `cc-lb-server/src/reconcile.rs`, `reload.rs`, `tls.rs`: unchanged.
 - `Cargo.toml`: add `wasmtime = "46"` dependency; once the transition is complete, remove `extism = ...`.
@@ -502,8 +502,8 @@ Comparison (preserving the m0046 estimate):
 - Internal:
   - `crates/cc-lb-runtime-extism/src/plugin_wrap.rs` — current dispatch cost.
   - `crates/cc-lb-runtime-extism/src/lib.rs` — current ArcSwap + stage/commit.
-  - `crates/cc-lb-core/src/dynamic_view.rs` — DynamicViewHolder.
-  - `crates/cc-lb-core/src/api_keys/principal_view.rs` — PrincipalSpecCached.
+  - `crates/cc-lb-engine/src/dynamic_view.rs` — DynamicViewHolder.
+  - `crates/cc-lb-engine/src/api_keys/principal_view.rs` — PrincipalSpecCached.
   - `crates/cc-lb-server/src/dynamic_view_builder.rs` — build_principal_chains.
   - `benches/extism_sse_overhead/src/main.rs` — 1ms p99 threshold.
   - `tests/load/baseline.json` — performance baseline.
