@@ -843,16 +843,17 @@ impl Lifecycle {
         candidates: &[UpstreamCandidate],
     ) -> TerminalDecision {
         let upstream_id = match strategy {
-            TerminalStrategy::Random if !candidates.is_empty() => {
-                let mut rng = self.rng.lock().expect("terminal rng lock");
-                let index = rng.random_range(..candidates.len());
-                Some(candidates[index].upstream_id)
-            }
-            TerminalStrategy::FirstPick
-            | TerminalStrategy::Random
-            | TerminalStrategy::RoundRobin
-            | TerminalStrategy::LeastConnections => {
+            TerminalStrategy::FirstPick => {
                 candidates.first().map(|candidate| candidate.upstream_id)
+            }
+            TerminalStrategy::Random => {
+                if candidates.is_empty() {
+                    None
+                } else {
+                    let mut rng = self.rng.lock().expect("terminal rng lock");
+                    let index = rng.random_range(..candidates.len());
+                    Some(candidates[index].upstream_id)
+                }
             }
         };
 

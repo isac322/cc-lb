@@ -511,8 +511,6 @@ fn terminal_strategy_json(strategy: &TerminalStrategy) -> &'static str {
     match strategy {
         TerminalStrategy::FirstPick => "first-pick",
         TerminalStrategy::Random => "random",
-        TerminalStrategy::RoundRobin => "round-robin",
-        TerminalStrategy::LeastConnections => "least-connections",
     }
 }
 

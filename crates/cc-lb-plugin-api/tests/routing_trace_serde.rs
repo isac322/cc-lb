@@ -38,12 +38,7 @@ fn per_candidate_reason_serde_roundtrip() {
 
 #[test]
 fn terminal_strategy_serde_roundtrip_and_default() {
-    let strategies = vec![
-        TerminalStrategy::FirstPick,
-        TerminalStrategy::Random,
-        TerminalStrategy::RoundRobin,
-        TerminalStrategy::LeastConnections,
-    ];
+    let strategies = vec![TerminalStrategy::FirstPick, TerminalStrategy::Random];
 
     for strategy in strategies {
         let json = serde_json::to_string(&strategy).unwrap();
@@ -55,6 +50,9 @@ fn terminal_strategy_serde_roundtrip_and_default() {
 
     let default_json = serde_json::to_string(&TerminalStrategy::FirstPick).unwrap();
     assert_eq!(default_json, r#""first-pick""#);
+
+    assert!(serde_json::from_str::<TerminalStrategy>(r#""round-robin""#).is_err());
+    assert!(serde_json::from_str::<TerminalStrategy>(r#""least-connections""#).is_err());
 }
 
 #[test]
@@ -132,13 +130,13 @@ fn terminal_decision_serde_roundtrip() {
     let upstream_id = Uuid::new_v4();
     let decision = TerminalDecision {
         upstream_id: Some(upstream_id),
-        strategy: TerminalStrategy::RoundRobin,
+        strategy: TerminalStrategy::Random,
     };
 
     let json = serde_json::to_string(&decision).unwrap();
     let decoded: TerminalDecision = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded.upstream_id, Some(upstream_id));
-    assert_eq!(decoded.strategy, TerminalStrategy::RoundRobin);
+    assert_eq!(decoded.strategy, TerminalStrategy::Random);
 }
 
 #[test]
@@ -256,7 +254,7 @@ fn complex_routing_trace_with_multiple_stages() {
         stages,
         terminal_decision: Some(TerminalDecision {
             upstream_id: Some(upstream_ids[2]),
-            strategy: TerminalStrategy::LeastConnections,
+            strategy: TerminalStrategy::Random,
         }),
     };
 

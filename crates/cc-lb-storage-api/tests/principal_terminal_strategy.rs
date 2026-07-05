@@ -79,12 +79,7 @@ fn principal_record_router_terminal_strategy_serialization_roundtrip() {
 
 #[test]
 fn principal_record_router_terminal_strategy_all_variants() {
-    let strategies = vec![
-        TerminalStrategy::FirstPick,
-        TerminalStrategy::Random,
-        TerminalStrategy::RoundRobin,
-        TerminalStrategy::LeastConnections,
-    ];
+    let strategies = vec![TerminalStrategy::FirstPick, TerminalStrategy::Random];
 
     for strategy in strategies {
         let record = PrincipalRecord {

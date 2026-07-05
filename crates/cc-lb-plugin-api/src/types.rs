@@ -748,10 +748,6 @@ pub enum TerminalStrategy {
     FirstPick,
     /// Select a router plugin at random.
     Random,
-    /// Round-robin selection.
-    RoundRobin,
-    /// Least connections strategy.
-    LeastConnections,
 }
 
 /// Decision made at a single routing stage.
