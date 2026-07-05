@@ -215,7 +215,7 @@ run_mode() {
     streaming)
       body="$SCRIPT_DIR/stream-req.json"
       requests=${CC_LB_LOAD_STREAMING_REQUESTS:-120}
-      concurrency=${CC_LB_LOAD_STREAMING_CONCURRENCY:-16}
+      concurrency=${CC_LB_LOAD_STREAMING_CONCURRENCY:-8}
       warmup=${CC_LB_LOAD_STREAMING_WARMUP:-16}
       ;;
     *) fail "unsupported mode: $mode" ;;
