@@ -169,6 +169,31 @@ impl RequestKind {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PreviewRouteInput {
+    pub principal_id: String,
+    /// Drives WRH tiebreak in `subscription-preference`. When `None`, a random
+    /// `preview-<uuid>` id is generated so repeated calls do not collide.
+    pub request_id: Option<String>,
+    pub headers: HeaderMap,
+    pub body_bytes: Bytes,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreviewRouteOutcome {
+    pub trace: RoutingTrace,
+    pub winner_upstream_id: Option<Uuid>,
+    pub winner_upstream_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Error)]
+pub enum PreviewRouteError {
+    #[error("principal not found: {0}")]
+    PrincipalNotFound(String),
+    #[error("router pipeline instantiation error: {0}")]
+    PipelineInstantiationError(String),
+}
+
 pub fn build_candidates(
     view: &DynamicView,
     principal_id: &str,
@@ -861,6 +886,98 @@ impl Lifecycle {
             upstream_id,
             strategy,
         }
+    }
+
+    pub fn preview_route(
+        &self,
+        input: PreviewRouteInput,
+    ) -> Result<PreviewRouteOutcome, PreviewRouteError> {
+        let view = self.dynamic_view.load();
+        let principal_spec = view
+            .principal_view
+            .get(&input.principal_id)
+            .ok_or_else(|| PreviewRouteError::PrincipalNotFound(input.principal_id.clone()))?;
+        let resolved_pipeline = principal_spec.resolved_pipeline(None);
+        if let Some(err) = &resolved_pipeline.instantiation_error {
+            return Err(PreviewRouteError::PipelineInstantiationError(
+                err.as_ref().to_owned(),
+            ));
+        }
+
+        let body_value = sonic_rs::from_slice::<Value>(&input.body_bytes).ok();
+        let cache_metadata = request_cache_metadata_from_value(&input.headers, body_value.as_ref());
+        let (cache_breakpoints, canonical_model_id) =
+            if view.prompt_cache_observation_cache_opt().is_some()
+                && self.config.prompt_cache_shadow.enabled
+            {
+                (
+                    cache_metadata.plugin_cache_breakpoints(),
+                    cache_metadata.canonical_model_id.clone(),
+                )
+            } else {
+                (Vec::new(), String::new())
+            };
+
+        let request_id = input
+            .request_id
+            .clone()
+            .unwrap_or_else(|| format!("preview-{}", Uuid::new_v4()));
+        let ctx = RequestContext {
+            request_id,
+            downstream_headers: input.headers,
+            method: http::Method::POST,
+            path: "/v1/messages".to_owned(),
+            query: None,
+            body_bytes: input.body_bytes,
+            cache_breakpoints,
+            canonical_model_id,
+        };
+        let principal = Principal {
+            id: input.principal_id,
+            kind: PrincipalKind::ApiKey,
+            claims: serde_json::Map::new(),
+        };
+
+        let candidates = build_candidates(
+            &view,
+            &principal.id,
+            RequestKind::AnthropicMessages,
+            &ctx.canonical_model_id,
+            &ctx.cache_breakpoints,
+            &*self.clock,
+        );
+        let pipeline_result = execute_filter_pipeline(
+            &resolved_pipeline.user_filters,
+            &ctx,
+            &principal,
+            candidates,
+            None,
+        );
+        let terminal_decision = self.select_terminal_upstream(
+            resolved_pipeline.terminal.clone(),
+            &pipeline_result.candidates,
+        );
+        let winner_upstream_id = terminal_decision.upstream_id;
+        let winner_upstream_name = winner_upstream_id.and_then(|id| {
+            pipeline_result
+                .candidates
+                .iter()
+                .find(|candidate| candidate.upstream_id == id)
+                .map(|candidate| candidate.name.clone())
+                .or_else(|| {
+                    view.upstreams_snapshot()
+                        .iter()
+                        .find(|record| record.id == id)
+                        .map(|record| record.name.clone())
+                })
+        });
+        let trace = pipeline_result.routing_trace(terminal_decision);
+
+        Ok(PreviewRouteOutcome {
+            trace,
+            winner_upstream_id,
+            winner_upstream_name,
+        })
     }
 
     pub fn with_static_limit_subject(
