@@ -1112,6 +1112,68 @@ fn example_snapshot_four_upstreams_produces_expected_wrh_distribution() {
 }
 
 // =============================================================================
+// Section K — SubscriptionPreferenceTrace attachment
+// =============================================================================
+
+#[test]
+fn known_base_win_attaches_trace_with_chosen_tier() {
+    let a = healthy_oauth("a", 1);
+    let b = healthy_oauth("b", 2);
+    let output = filter_for_model(&[a.clone(), b.clone()], MODEL_AGNOSTIC);
+
+    let trace = output
+        .subscription_preference
+        .expect("KnownBase win must attach subscription_preference trace");
+    assert_eq!(
+        trace.chosen_tier,
+        cc_lb_plugin_api::SubscriptionTier::KnownBase
+    );
+    assert_eq!(trace.candidates.len(), 2);
+    for candidate in &trace.candidates {
+        assert_eq!(
+            candidate.tier,
+            cc_lb_plugin_api::SubscriptionTier::KnownBase
+        );
+        assert!(
+            candidate.urgency > 0.0,
+            "KnownBase candidate urgency must be positive, got {}",
+            candidate.urgency
+        );
+    }
+}
+
+#[test]
+fn no_subscription_returns_no_trace() {
+    let key = api_key("only-api-key", 1);
+    let output = filter_for_model(&[key], MODEL_AGNOSTIC);
+    assert!(
+        output.subscription_preference.is_none(),
+        "no-subscription path must not attach a trace"
+    );
+}
+
+#[test]
+fn all_oauth_hard_negative_no_api_key_fails_open_without_trace() {
+    let a = oauth_with(
+        "dead-a",
+        1,
+        vec![fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build()],
+    );
+    let b = oauth_with(
+        "dead-b",
+        2,
+        vec![fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build()],
+    );
+    let output = filter_for_model(&[a, b], MODEL_AGNOSTIC);
+
+    assert_eq!(output.reason, NO_API_KEY_REASON);
+    assert!(
+        output.subscription_preference.is_none(),
+        "fail-open path must not attach a trace"
+    );
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 

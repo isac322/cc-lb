@@ -298,6 +298,7 @@ impl FilterPlugin for RecordingFilter {
             kept_upstream_ids: self.kept_upstream_ids.clone(),
             reason: format!("{} kept {}", self.name, self.kept_upstream_ids.len()),
             per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
         })
     }
 
