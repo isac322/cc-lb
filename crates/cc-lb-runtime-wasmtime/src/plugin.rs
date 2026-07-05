@@ -329,6 +329,7 @@ fn wire_to_host_output(
         kept_upstream_ids,
         reason: reasons.join("; "),
         per_candidate_reasons,
+        subscription_preference: None,
     })
 }
 

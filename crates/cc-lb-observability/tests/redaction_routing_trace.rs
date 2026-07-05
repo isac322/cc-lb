@@ -15,6 +15,7 @@ fn routing_trace_reason_secrets_are_redacted() {
             upstream_id: None,
             reason: Some("selected after token=plain-secret and sk-ant-oat01-deadbeef".to_owned()),
             duration_us: 0,
+            subscription_preference: None,
         }],
         terminal_decision: Some(TerminalDecision {
             upstream_id: None,
@@ -83,6 +84,7 @@ fn routing_trace_cap_removes_tail_stages_and_adds_marker() {
                 upstream_id: None,
                 reason: Some(format!("decision-{index}-{}", "x".repeat(350))),
                 duration_us: 0,
+                subscription_preference: None,
             })
             .collect(),
         terminal_decision: Some(TerminalDecision {

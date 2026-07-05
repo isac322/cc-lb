@@ -8,8 +8,8 @@ use uuid::Uuid;
 use crate::errors::{DialectError, ObservabilityError, RouteError, SignerError, UpstreamError};
 use crate::types::{
     ObserveEvent, PerCandidateReason, Principal, RequestContext, RetryDecision, RouteDecision,
-    ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, SlotKey, Upstream,
-    UpstreamCandidate,
+    ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, SlotKey,
+    SubscriptionPreferenceTrace, Upstream, UpstreamCandidate,
 };
 
 /// Filter plugin output containing upstream selection results and per-candidate reasons.
@@ -21,6 +21,10 @@ pub struct FilterOutput {
     pub reason: String,
     /// Per-candidate filtering reasons.
     pub per_candidate_reasons: Vec<PerCandidateReason>,
+    /// Optional structured trace payload from host filters that expose
+    /// subscription-preference tier / urgency scoring for downstream metrics
+    /// and dashboards. Wasm filters leave this `None`.
+    pub subscription_preference: Option<SubscriptionPreferenceTrace>,
 }
 
 /// Filter plugin errors returned by [`FilterPlugin`].

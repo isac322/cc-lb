@@ -279,6 +279,7 @@ impl FilterPlugin for RecordingFilter {
             kept_upstream_ids: vec![],
             reason: format!("{} rejected all candidates", self.name),
             per_candidate_reasons: vec![],
+            subscription_preference: None,
         })
     }
 

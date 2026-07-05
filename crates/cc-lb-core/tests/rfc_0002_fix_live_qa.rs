@@ -241,6 +241,7 @@ impl FilterPlugin for KeepFilter {
             kept_upstream_ids: self.kept_upstream_ids.clone(),
             reason: "drop-all removed every candidate".to_owned(),
             per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
         })
     }
 
