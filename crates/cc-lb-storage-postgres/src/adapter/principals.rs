@@ -4,6 +4,7 @@ use cc_lb_storage_api::{
     StorageResult, validate_identifier,
 };
 use chrono::{DateTime, Utc};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sqlx::{AssertSqlSafe, Row};
 use uuid::Uuid;
@@ -354,15 +355,26 @@ fn principal_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PrincipalReco
         )?,
         created_at_unix_secs: datetime_to_unix_secs(created_at, "principal.created_at")?,
         updated_at_unix_secs: datetime_to_unix_secs(updated_at, "principal.updated_at")?,
-        router_terminal_strategy: serde_json::from_value(Value::String(
-            router_terminal_strategy.clone(),
-        ))
-        .map_err(|error| StorageError::Corrupted {
-            message: format!(
-                "invalid principal router_terminal_strategy {router_terminal_strategy}: {error}"
-            ),
-        })?,
+        router_terminal_strategy: terminal_strategy_from_db_value(&router_terminal_strategy),
     })
+}
+
+fn terminal_strategy_from_db_value<T>(value: &str) -> T
+where
+    T: DeserializeOwned + Default,
+{
+    match serde_json::from_value(Value::String(value.to_owned())) {
+        Ok(strategy) => strategy,
+        Err(error) => {
+            tracing::warn!(
+                storage_backend = "postgres",
+                router_terminal_strategy = %value,
+                %error,
+                "unexpected principal router_terminal_strategy; defaulting to first-pick"
+            );
+            T::default()
+        }
+    }
 }
 
 fn terminal_strategy_to_db_value(strategy: &impl serde::Serialize) -> StorageResult<String> {

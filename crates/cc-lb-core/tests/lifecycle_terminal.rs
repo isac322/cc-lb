@@ -35,6 +35,21 @@ use common::{
     messages_request,
 };
 
+#[test]
+fn terminal_strategy_exhaustive_match_covers_supported_variants() {
+    let labels = [TerminalStrategy::FirstPick, TerminalStrategy::Random]
+        .map(terminal_strategy_label_for_exhaustive_test);
+
+    assert_eq!(labels, ["first-pick", "random"]);
+}
+
+fn terminal_strategy_label_for_exhaustive_test(strategy: TerminalStrategy) -> &'static str {
+    match strategy {
+        TerminalStrategy::FirstPick => "first-pick",
+        TerminalStrategy::Random => "random",
+    }
+}
+
 #[tokio::test]
 async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dyn std::error::Error>>
 {
