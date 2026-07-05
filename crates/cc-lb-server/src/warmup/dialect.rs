@@ -138,6 +138,7 @@ pub async fn dispatch_warmup_with_dialect(
     });
     let ctx = RequestContext {
         request_id: Uuid::new_v4().to_string(),
+        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),

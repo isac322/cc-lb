@@ -1809,6 +1809,7 @@ mod tests {
     fn shaped_request() -> ShapedRequest {
         let ctx = RequestContext {
             request_id: "req-1".to_owned(),
+            thread_id: None,
             downstream_headers: HeaderMap::new(),
             method: Method::POST,
             path: "/v1/messages".to_owned(),

@@ -222,6 +222,7 @@ fn allow_all_filter_execution() {
     let filter = AllowAllFilter;
     let ctx = RequestContext {
         request_id: "req-1".to_string(),
+        thread_id: None,
         downstream_headers: http::HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_string(),
@@ -281,6 +282,7 @@ fn selective_filter_execution() {
     let filter = SelectiveFilter;
     let ctx = RequestContext {
         request_id: "req-2".to_string(),
+        thread_id: None,
         downstream_headers: http::HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_string(),
@@ -339,6 +341,7 @@ fn error_filter_execution() {
     let filter = ErrorProducingFilter;
     let ctx = RequestContext {
         request_id: "req-3".to_string(),
+        thread_id: None,
         downstream_headers: http::HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_string(),

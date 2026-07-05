@@ -39,6 +39,7 @@ fn header(name: &str, value: &str) -> Header {
 fn filter_request_round_trips() {
     let req = FilterRequest {
         request_id: Box::from("req-1"),
+        thread_id: None,
         method: Box::from("POST"),
         path: Box::from("/v1/messages"),
         query: None,
@@ -91,6 +92,7 @@ fn filter_request_ref_encodes_to_owned_wire() {
     }];
     let req_ref = FilterRequestRef {
         request_id: "req-1",
+        thread_id: None,
         method: "POST",
         path: "/v1/messages",
         query: None,

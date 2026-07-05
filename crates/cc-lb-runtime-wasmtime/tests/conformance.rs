@@ -78,6 +78,7 @@ fn request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRequest {
         .into_boxed_slice();
     FilterRequest {
         request_id: Box::from("req"),
+        thread_id: None,
         method: Box::from("POST"),
         path: Box::from("/v1/messages"),
         query: None,

@@ -400,6 +400,16 @@ pub enum CredentialStrategy {
 pub struct RequestContext {
     /// Stable request identifier used for logs, audit rows, and upstream traceability.
     pub request_id: String,
+    /// Session / thread identifier that stays constant across multiple requests
+    /// belonging to the same conversation. Populated at request parse time
+    /// from `x-claude-code-session-id` and friends. `None` for stateless
+    /// requests that do not carry a session header.
+    ///
+    /// Filters that need cache-affinity (e.g. subscription routing) MUST
+    /// prefer this over `request_id` as their per-session hash input so that
+    /// all requests belonging to the same conversation land on the same
+    /// upstream and reuse the Anthropic prompt cache.
+    pub thread_id: Option<String>,
     /// Downstream request headers after hop-by-hop stripping.
     pub downstream_headers: HeaderMap,
     /// Downstream HTTP method.
@@ -1182,6 +1192,7 @@ mod tests {
     fn request_context_cache_fields_roundtrip() {
         let ctx_empty = RequestContext {
             request_id: "req-1".to_owned(),
+            thread_id: None,
             downstream_headers: HeaderMap::new(),
             method: Method::POST,
             path: "/v1/messages".to_owned(),
@@ -1205,6 +1216,7 @@ mod tests {
         };
         let ctx_populated = RequestContext {
             request_id: "req-2".to_owned(),
+            thread_id: None,
             downstream_headers: HeaderMap::new(),
             method: Method::POST,
             path: "/v1/messages".to_owned(),
@@ -1239,6 +1251,7 @@ mod tests {
     fn request_context_cache_breakpoints_default_on_missing_fields() {
         let ctx = RequestContext {
             request_id: "test".to_owned(),
+            thread_id: None,
             downstream_headers: HeaderMap::new(),
             method: Method::GET,
             path: "/test".to_owned(),

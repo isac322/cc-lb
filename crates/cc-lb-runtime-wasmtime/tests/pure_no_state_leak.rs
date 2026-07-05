@@ -37,6 +37,7 @@ fn request() -> FilterRequest {
     use cc_lb_plugin_wire::Claim;
     FilterRequest {
         request_id: Box::from("leak-probe"),
+        thread_id: None,
         method: Box::from("POST"),
         path: Box::from("/v1/messages"),
         query: None,

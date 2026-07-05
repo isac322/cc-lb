@@ -1174,6 +1174,113 @@ fn all_oauth_hard_negative_no_api_key_fails_open_without_trace() {
 }
 
 // =============================================================================
+// Session-affinity regressions (guard the 2026-07-05 fix that keyed WRH on
+// thread_id instead of request_id — see subscription_preference.rs
+// RENDEZVOUS_SALT v4 docstring for the incident trace).
+// =============================================================================
+
+#[test]
+fn same_thread_id_pins_all_turns_of_a_session_to_one_upstream() {
+    // Given: four healthy live-snapshot upstreams (same fixture as the WRH
+    //   distribution golden), so the pre-fix code would have random-picked
+    //   a different upstream on every synthetic request_id.
+    // When: 200 requests share one thread_id but carry different request_ids
+    //   (mimicking successive turns of a real opencode session).
+    // Then: every pick must land on the same upstream (cache-affinity
+    //   contract) — otherwise the prompt cache is torn every turn.
+    let candidates = vec![
+        example_snapshot_example_org(),
+        example_snapshot_example_peer(),
+        example_snapshot_example_secondary_max(),
+        example_snapshot_runbear(),
+    ];
+    let filter = SubscriptionPreferenceFilter::new();
+    let principal = principal();
+    let thread_id = "ses_example00000000";
+    let mut winners: Vec<Uuid> = Vec::new();
+    for i in 0..200 {
+        let ctx = ctx_with_thread_id(MODEL_AGNOSTIC, &format!("req-{i}"), thread_id);
+        let output = filter.filter(&ctx, &principal, &candidates).unwrap();
+        winners.push(*output.kept_upstream_ids.first().unwrap());
+    }
+    let first = winners[0];
+    assert!(
+        winners.iter().all(|w| *w == first),
+        "expected all 200 turns of the same thread_id to pin to one upstream; got {} distinct winners",
+        winners
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    );
+}
+
+#[test]
+fn different_thread_ids_still_spread_across_upstreams() {
+    // Given: same four healthy candidates as the golden distribution test.
+    // When: each trial carries a distinct thread_id (i.e. distinct opencode
+    //   sessions), so WRH gets a fresh independent draw per session.
+    // Then: the aggregate distribution must still cover multiple upstreams —
+    //   proving the fix keeps cross-session load spread while pinning
+    //   within-session traffic.
+    let candidates = vec![
+        example_snapshot_example_org(),
+        example_snapshot_example_peer(),
+        example_snapshot_example_secondary_max(),
+        example_snapshot_runbear(),
+    ];
+    let filter = SubscriptionPreferenceFilter::new();
+    let principal = principal();
+    let mut winners: HashMap<Uuid, usize> = HashMap::new();
+    for i in 0..2000 {
+        let ctx = ctx_with_thread_id(MODEL_AGNOSTIC, "req-fixed", &format!("ses_synthetic_{i}"));
+        let output = filter.filter(&ctx, &principal, &candidates).unwrap();
+        *winners
+            .entry(*output.kept_upstream_ids.first().unwrap())
+            .or_insert(0) += 1;
+    }
+    assert!(
+        winners.len() >= 3,
+        "expected WRH to spread across ≥3 upstreams over 2000 distinct sessions; landed on {} upstreams",
+        winners.len()
+    );
+    let min_share = winners.values().copied().min().unwrap_or(0) as f64 / 2000.0;
+    assert!(
+        min_share >= 0.03,
+        "no upstream should be starved across sessions; min share was {min_share}",
+    );
+}
+
+#[test]
+fn missing_thread_id_falls_back_to_request_id() {
+    // Given: two healthy oauth upstreams, and a ctx where thread_id is
+    //   unset (mimicking a stateless / warmup / non-opencode client).
+    // When: the same ctx (same request_id, no thread_id) is filtered twice.
+    // Then: the winner must be deterministic (fallback path is stable),
+    //   proving that removing the thread_id header does not regress the
+    //   old behaviour that the previous tests already cover.
+    let candidates = vec![healthy_oauth("a", 1), healthy_oauth("b", 2)];
+    let filter = SubscriptionPreferenceFilter::new();
+    let principal = principal();
+    let ctx = ctx_with_request_id(MODEL_AGNOSTIC, "req-stateless");
+    let w1 = *filter
+        .filter(&ctx, &principal, &candidates)
+        .unwrap()
+        .kept_upstream_ids
+        .first()
+        .unwrap();
+    let w2 = *filter
+        .filter(&ctx, &principal, &candidates)
+        .unwrap()
+        .kept_upstream_ids
+        .first()
+        .unwrap();
+    assert_eq!(
+        w1, w2,
+        "fallback path must be deterministic for a fixed request_id"
+    );
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 
@@ -1210,6 +1317,21 @@ fn ctx(canonical_model: &str) -> RequestContext {
 fn ctx_with_request_id(canonical_model: &str, request_id: &str) -> RequestContext {
     RequestContext {
         request_id: request_id.to_owned(),
+        thread_id: None,
+        downstream_headers: http::HeaderMap::new(),
+        method: Method::POST,
+        path: "/v1/messages".to_owned(),
+        query: None,
+        body_bytes: Bytes::new(),
+        cache_breakpoints: Vec::new(),
+        canonical_model_id: canonical_model.to_owned(),
+    }
+}
+
+fn ctx_with_thread_id(canonical_model: &str, request_id: &str, thread_id: &str) -> RequestContext {
+    RequestContext {
+        request_id: request_id.to_owned(),
+        thread_id: Some(thread_id.to_owned()),
         downstream_headers: http::HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),

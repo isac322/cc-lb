@@ -162,6 +162,7 @@ pub struct HeaderRef<'a> {
 #[rkyv(derive(Debug))]
 pub struct FilterRequest {
     pub request_id: Box<str>,
+    pub thread_id: Option<Box<str>>,
     pub method: Box<str>,
     pub path: Box<str>,
     pub query: Option<Box<str>>,
@@ -179,6 +180,7 @@ pub struct FilterRequest {
 pub struct FilterRequestRef<'a> {
     #[rkyv(with = InlineAsBox)]
     pub request_id: &'a str,
+    pub thread_id: Option<QueryRef<'a>>,
     #[rkyv(with = InlineAsBox)]
     pub method: &'a str,
     #[rkyv(with = InlineAsBox)]
