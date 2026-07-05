@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-api-v0.7.0...cc-lb-plugin-api-v0.8.0) - 2026-07-05
+
+### Fixed
+
+- *(routing)* key subscription-preference WRH on thread_id instead of request_id ([#322](https://github.com/isac322/cc-lb/pull/322))
+
 ## [0.4.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-api-v0.3.0...cc-lb-plugin-api-v0.4.0) - 2026-07-03
 
 ### Added
