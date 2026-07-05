@@ -1,0 +1,29 @@
+groups:
+  - name: cc-lb-routing-anomaly
+    rules:
+      - alert: RoutingUpstreamFunneling
+        expr: |
+          (
+            sum by (tier, upstream) (rate(cc_lb_routing_tier_selections_total[15m]))
+            / ignoring(upstream) group_left
+            sum by (tier) (rate(cc_lb_routing_tier_selections_total[15m]))
+          ) > 0.7
+          and on(tier) (
+            sum by (tier) (rate(cc_lb_routing_tier_selections_total[15m])) > 2
+          )
+        for: 10m
+        labels:
+          severity: warning
+          category: routing-anomaly
+        annotations:
+          summary: cc-lb routing tier '{{ $labels.tier }}' is funneling to upstream '{{ $labels.upstream }}'
+          description: |
+            Upstream '{{ $labels.upstream }}' is capturing {{ $value | humanizePercentage }} of routing
+            decisions in tier '{{ $labels.tier }}' over the last 15 minutes (threshold 70%).
+            This is a regression signal for the weighted-rendezvous within-tier distribution shipped
+            in PR #312. Investigate:
+              1. Query cc_lb_routing_tier_selections_total{tier="{{ $labels.tier }}"} to see the current spread.
+              2. POST /admin/v1/router/preview with a known request_id to inspect the RoutingTrace
+                 and the SubscriptionPreferenceTrace urgency values driving the selection.
+              3. Check per-upstream subscription quotas at /admin/v1/subscription-quotas/latest for
+                 stale or zero-remaining windows that could distort urgency.
