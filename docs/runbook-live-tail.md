@@ -1,5 +1,19 @@
 # Dashboard Live-Tail Runbook
 
+## Dashboard
+
+Import [`deploy/grafana/live-tail.json`](../deploy/grafana/live-tail.json) into Grafana (uid `cc-lb-live-tail`) — see [`docs/live-tail-dashboard.md`](live-tail-dashboard.md). Every alert below has a matching panel on that dashboard so a paged operator can click through to a chart already scoped to the failing signal:
+
+| Alert | Dashboard panel |
+| --- | --- |
+| `LiveTailNotifyQueueUsageHigh` / `Critical` | *PG NOTIFY queue usage* (bar gauge, warn/crit thresholds baked in) |
+| `LiveTailBackfillSpike` | *Backfill rows/s* (timeseries with 1000 rows/s red threshold) |
+| `LiveTailResetRateHigh` | *Reset rate by reason* (stacked timeseries by `reason` label) |
+| `LiveTailAssemblerMpscOverflow` | *Assembler overflow (should be 0)* (stat, red on any nonzero) |
+| `LiveTailStorageTailLag` | *Storage tail lag p95* (timeseries with p95 + p99 lines and 1000 ms red threshold) |
+
+The dashboard's tripwire row (collapsed by default) covers `sse_malformed_frames_total`, `sse_lagged` drops, PG NOTIFY send/drop outcomes, HTTP fallback outcomes, and storage tail poll cadence. Expand it during an incident to eliminate whole classes of causes at a glance.
+
 ## Event Identity
 
 `event_id` is now the single lifecycle-generated identity for each request. It is generated at request start and carried through partial snapshots, final storage rows, SSE messages, storage tail delivery, and PG NOTIFY fanout.

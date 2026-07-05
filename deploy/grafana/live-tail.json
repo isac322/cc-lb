@@ -1,0 +1,479 @@
+{
+  "id": null,
+  "uid": "cc-lb-live-tail",
+  "title": "cc-lb — Live-tail Health",
+  "tags": ["cc-lb", "live-tail", "sse"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "label": "Datasource",
+        "query": "prometheus",
+        "refresh": 1,
+        "hide": 0,
+        "current": {}
+      },
+      {
+        "name": "rate_window",
+        "type": "custom",
+        "label": "Rate window",
+        "query": "1m,5m,15m",
+        "options": [
+          { "text": "1m", "value": "1m", "selected": false },
+          { "text": "5m", "value": "5m", "selected": true },
+          { "text": "15m", "value": "15m", "selected": false }
+        ],
+        "current": { "text": "5m", "value": "5m", "selected": true },
+        "hide": 0
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "Alerts",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "enable": true,
+        "iconColor": "red",
+        "expr": "ALERTS{alertstate=\"firing\", alertname=~\"LiveTail.*\"}",
+        "titleFormat": "{{alertname}} ({{severity}})",
+        "textFormat": "{{summary}}"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Live-tail Health",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Partials published",
+      "description": "Rate of partial request-event snapshots published by the lifecycle assembler. Zero here means the request-in-flight signal is offline.",
+      "gridPos": { "x": 0, "y": 1, "w": 4, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(sse_partials_published_total[$rate_window]))",
+          "legendFormat": "partials/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "decimals": 2,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "text", "value": null }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "SSE reconnects",
+      "description": "SSE client connection attempts (new + reconnect). Baseline steady state.",
+      "gridPos": { "x": 4, "y": 1, "w": 4, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(sse_reconnects_total[$rate_window])) * 60",
+          "legendFormat": "reconnects/min"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cpm",
+          "decimals": 2,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "text", "value": null }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Assembler overflow (should be 0)",
+      "description": "Lifecycle assembler mpsc drop rate. Backs alert LiveTailAssemblerMpscOverflow (critical).",
+      "gridPos": { "x": 8, "y": 1, "w": 4, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cc_lb_dropped_events_total{reason=\"lifecycle_assembler_full\"}[$rate_window]))",
+          "legendFormat": "drops/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "decimals": 3,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.0001 }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "links": [
+        { "title": "Alert: LiveTailAssemblerMpscOverflow", "url": "" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "bargauge",
+      "title": "PG NOTIFY queue usage",
+      "description": "pg_notification_queue_usage() ratio. Warn @ 30% (LiveTailNotifyQueueUsageHigh), Crit @ 50% (LiveTailNotifyQueueUsageCritical).",
+      "gridPos": { "x": 12, "y": 1, "w": 12, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sse_notify_queue_usage_ratio",
+          "legendFormat": "queue usage"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.30 },
+              { "color": "red", "value": 0.50 }
+            ]
+          }
+        }
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "valueMode": "color",
+        "showUnfilled": true,
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Reset rate by reason",
+      "description": "sum by (reason) rate(sse_reset_events_sent_total). Backs alert LiveTailResetRateHigh (warn @ 0.5/s over 5m).",
+      "gridPos": { "x": 0, "y": 6, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (rate(sse_reset_events_sent_total[$rate_window]))",
+          "legendFormat": "{{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 15,
+            "stacking": { "mode": "normal", "group": "A" }
+          },
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max", "lastNotNull"]
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Backfill rows/s",
+      "description": "rate(sse_backfill_rows_total). Backs alert LiveTailBackfillSpike (warn @ 1000 rows/s over 1m for 5m).",
+      "gridPos": { "x": 12, "y": 6, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(sse_backfill_rows_total[$rate_window])",
+          "legendFormat": "rows/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "rps",
+          "decimals": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 15
+          },
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1000 }
+            ]
+          }
+        }
+      },
+      "options": {
+        "tooltip": { "mode": "single", "sort": "none" },
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Storage tail lag p95 (ms)",
+      "description": "histogram_quantile(0.95, sum by (le) (rate(sse_storage_tail_lag_ms_bucket[5m]))). Backs alert LiveTailStorageTailLag (warn @ 1000 ms p95 for 5m).",
+      "gridPos": { "x": 0, "y": 13, "w": 24, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(sse_storage_tail_lag_ms_bucket[$rate_window])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(sse_storage_tail_lag_ms_bucket[$rate_window])))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 10
+          },
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1000 }
+            ]
+          }
+        }
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] }
+      }
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "Zero-tripwires (empty = healthy)",
+      "collapsed": true,
+      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 1 },
+      "panels": [
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "SSE malformed frames / lagged clients",
+          "description": "sse_malformed_frames_total (server-side serialize failure) and cc_lb_dropped_events_total{reason=\"sse_lagged\"} (client fell behind broadcast).",
+          "gridPos": { "x": 0, "y": 21, "w": 12, "h": 6 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "rate(sse_malformed_frames_total[$rate_window])",
+              "legendFormat": "malformed frames"
+            },
+            {
+              "refId": "B",
+              "expr": "rate(cc_lb_dropped_events_total{reason=\"sse_lagged\"}[$rate_window])",
+              "legendFormat": "sse_lagged drops"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "cps",
+              "decimals": 3,
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "fillOpacity": 15
+              },
+              "color": { "mode": "palette-classic" }
+            }
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }
+          }
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "PG NOTIFY partial outcomes",
+          "description": "Send outcome (sent/truncated_sent/failed) and drop reason (queue_full/queue_closed/serialize_error/pg_error).",
+          "gridPos": { "x": 12, "y": 21, "w": 12, "h": 6 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (outcome) (rate(sse_partial_notify_sent_total[$rate_window]))",
+              "legendFormat": "sent:{{outcome}}"
+            },
+            {
+              "refId": "B",
+              "expr": "sum by (reason) (rate(sse_partial_notify_dropped_total[$rate_window]))",
+              "legendFormat": "dropped:{{reason}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "cps",
+              "decimals": 3,
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "fillOpacity": 10
+              },
+              "color": { "mode": "palette-classic" }
+            }
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }
+          }
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "HTTP partial fallback outcomes",
+          "description": "sse_notify_http_fetches_total{outcome}. Non-zero here means partials exceeded NOTIFY size limit and we fetched over HTTP.",
+          "gridPos": { "x": 0, "y": 27, "w": 12, "h": 6 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (outcome) (rate(sse_notify_http_fetches_total[$rate_window]))",
+              "legendFormat": "{{outcome}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "cps",
+              "decimals": 3,
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "fillOpacity": 10
+              },
+              "color": { "mode": "palette-classic" }
+            }
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }
+          }
+        },
+        {
+          "id": 13,
+          "type": "timeseries",
+          "title": "Storage tail poll cadence + backlog",
+          "description": "sse_storage_tail_polls_total (poll rate) and sse_storage_tail_backlog_rows (rows found per poll). Non-zero backlog steady state indicates the poller is behind the writer.",
+          "gridPos": { "x": 12, "y": 27, "w": 12, "h": 6 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "rate(sse_storage_tail_polls_total[$rate_window])",
+              "legendFormat": "polls/s"
+            },
+            {
+              "refId": "B",
+              "expr": "sse_storage_tail_backlog_rows",
+              "legendFormat": "backlog rows"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 1,
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "fillOpacity": 10
+              },
+              "color": { "mode": "palette-classic" }
+            }
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }
+          }
+        }
+      ]
+    }
+  ]
+}
