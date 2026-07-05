@@ -29,7 +29,13 @@ export interface LiveEventStreamState {
   lastCursor: string | null;
   error: Error | null;
   malformedFrameCount: number;
+  permanentFailure: boolean;
+  permanentFailureSince: number | null;
+  reconnectAttempts: number;
+  forceReconnect: () => void;
 }
+
+const PERMANENT_FAILURE_THRESHOLD_MS = 300_000;
 
 export function useLiveEventStream(
   filters: Record<string, string | undefined>,
@@ -42,6 +48,11 @@ export function useLiveEventStream(
   const [lastActivityAt, setLastActivityAt] = useState<number | null>(null);
   const [lastCursor, setLastCursor] = useState<string | null>(null);
   const [malformedFrameCount, setMalformedFrameCount] = useState(0);
+  const [permanentFailure, setPermanentFailure] = useState(false);
+  const [permanentFailureSince, setPermanentFailureSince] = useState<
+    number | null
+  >(null);
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
 
   // We use refs for mutable state that doesn't need to trigger re-renders immediately
   // or needs to be accessed in callbacks without stale closures.
@@ -52,6 +63,19 @@ export function useLiveEventStream(
   const lastActivityAtRef = useRef<number | null>(null);
   const statusRef = useRef<ConnectionStatus>('idle');
   const malformedFrameCountRef = useRef(0);
+  const permanentFailureRef = useRef(false);
+  const permanentFailureSinceRef = useRef<number | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+
+  const clearReconnectTimeout = () => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+  };
 
   // Version counter published on every successful upsert so downstream
   // useMemo deps re-run when the mutated Map ref changes contents.
@@ -131,6 +155,7 @@ export function useLiveEventStream(
   }, []);
 
   const connect = async (isBackfill = false) => {
+    clearReconnectTimeout();
     if (clientRef.current) {
       clientRef.current.close();
     }
@@ -201,12 +226,41 @@ export function useLiveEventStream(
       onConnect: () => {
         updateStatus('connecting');
         setError(null);
+        permanentFailureRef.current = false;
+        setPermanentFailure(false);
+        permanentFailureSinceRef.current = null;
+        setPermanentFailureSince(null);
+        reconnectAttemptsRef.current = 0;
+        setReconnectAttempts(0);
       },
       onDisconnect: () => {
         updateStatus('reconnecting');
       },
       onScheduleReconnect: () => {
         updateStatus('reconnecting');
+        reconnectAttemptsRef.current += 1;
+        setReconnectAttempts(reconnectAttemptsRef.current);
+
+        if (permanentFailureSinceRef.current === null) {
+          permanentFailureSinceRef.current = Date.now();
+          setPermanentFailureSince(permanentFailureSinceRef.current);
+        }
+
+        const duration = Date.now() - permanentFailureSinceRef.current;
+        if (duration >= PERMANENT_FAILURE_THRESHOLD_MS) {
+          permanentFailureRef.current = true;
+          setPermanentFailure(true);
+
+          if (clientRef.current) {
+            clientRef.current.close();
+            clientRef.current = null;
+            reconnectTimeoutRef.current = setTimeout(() => {
+              if (statusRef.current === 'reconnecting') {
+                connect();
+              }
+            }, 60_000);
+          }
+        }
       },
       onMessage: (msg) => {
         if (isBackfilling) {
@@ -310,6 +364,7 @@ export function useLiveEventStream(
     }
 
     return () => {
+      clearReconnectTimeout();
       if (clientRef.current) {
         clientRef.current.close();
         clientRef.current = null;
@@ -341,6 +396,12 @@ export function useLiveEventStream(
     };
   }, []);
 
+  const forceReconnect = () => {
+    clearReconnectTimeout();
+    updateStatus('reconnecting');
+    connect();
+  };
+
   return {
     eventsMap: eventsMapRef.current,
     version,
@@ -349,5 +410,9 @@ export function useLiveEventStream(
     lastCursor,
     error,
     malformedFrameCount,
+    permanentFailure,
+    permanentFailureSince,
+    reconnectAttempts,
+    forceReconnect,
   };
 }
