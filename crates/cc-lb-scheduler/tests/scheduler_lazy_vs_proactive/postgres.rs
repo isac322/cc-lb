@@ -15,7 +15,10 @@ use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParam
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use sqlx::postgres::PgPoolOptions;
 use storage_sqlx::postgres::PgPoolOptions as StoragePgPoolOptions;
-use testcontainers_modules::{postgres::Postgres, testcontainers::runners::AsyncRunner};
+use testcontainers_modules::{
+    postgres::Postgres,
+    testcontainers::{ImageExt, runners::AsyncRunner},
+};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -210,7 +213,7 @@ where
             return Ok(());
         }
     };
-    let container = match Postgres::default().start().await {
+    let container = match Postgres::default().with_tag("18-alpine").start().await {
         Ok(container) => container,
         Err(error) => {
             eprintln!(
