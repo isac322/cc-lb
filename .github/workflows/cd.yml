@@ -35,7 +35,11 @@ permissions: {}
 jobs:
   publish:
     name: build & push image
-    runs-on: ubuntu-latest
+    # Must be arm64: from an x86_64 (musl) host the build host's triple equals
+    # the x86_64-musl target, so .cargo/config.toml's static-musl linker leaks
+    # into host proc-macro builds and they fail to link. xx cross-compiles all
+    # four target arches from arm64 with no QEMU (docker-build runs on arm64 too).
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: write

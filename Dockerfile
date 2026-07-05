@@ -36,7 +36,8 @@ SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 #            .cargo/config.toml rust-lld, which is expected and correct).
 # git:       cc-lb-server/build.rs reads `git rev-parse` (falls back gracefully).
 # libstdc++/libgcc: Bun's runtime dependencies on Alpine.
-# sccache:   optional compiler cache, activated by ARG USE_SCCACHE=1 (CI).
+# sccache:   compiler cache; enabled when the GHA cache secrets are mounted (CI).
+#            Needs >=0.10 for the v2 Actions cache API — apk ships 0.15.
 # hadolint ignore=DL3018
 RUN apk add --no-cache clang lld git libstdc++ libgcc sccache
 
@@ -70,10 +71,6 @@ ARG SOURCE_DATE_EPOCH=""
 ARG FEATURES="sqlite,postgres"
 # Set to 1 to skip building the dashboard SPA (ships a placeholder page).
 ARG SKIP_SPA="0"
-# Set to 1 to route rustc through sccache (paired with the /sccache cache mount
-# below). CI enables this for cross-run compiler caching; default off keeps
-# local/release builds dependency-free.
-ARG USE_SCCACHE="0"
 
 # Compile the static musl binary. The cargo download caches (registry/git) and
 # the Bun install cache are reused across builds. The target dir is intentionally
@@ -83,7 +80,8 @@ ARG USE_SCCACHE="0"
 RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
     --mount=type=cache,id=bun-${BUILDPLATFORM},sharing=locked,target=/root/.bun/install/cache \
-    --mount=type=cache,id=sccache-${TARGETPLATFORM},sharing=locked,target=/sccache \
+    --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,required=false \
+    --mount=type=secret,id=ACTIONS_RESULTS_URL,required=false \
 <<EOF
 # A declared ARG is exported into this RUN's env; an empty SOURCE_DATE_EPOCH
 # makes ring's cc/clang C build abort, so drop it unless a real value was passed.
@@ -92,13 +90,27 @@ if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then unset SOURCE_DATE_EPOCH; fi
 export CC_LB_SKIP_WASM_FIXTURE_BUILD=1
 export GIT_SHA="${GIT_SHA}"
 if [ "${SKIP_SPA}" = "1" ]; then export CC_LB_ADMIN_SKIP_SPA=1; fi
-if [ "${USE_SCCACHE}" = "1" ]; then export RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache CARGO_INCREMENTAL=0; fi
+
+# sccache with the GitHub Actions cache backend = a persistent, cross-run
+# compiler cache shared with the runner's cache server. Fail-open: without the
+# runtime token (local builds, or the cd publish job) sccache stays off and the
+# build proceeds uncached rather than failing. SCCACHE_IGNORE_SERVER_IO_ERROR
+# keeps a mid-build cache-server hiccup (e.g. token expiry) non-fatal.
+ACTIONS_RUNTIME_TOKEN="$(cat /run/secrets/ACTIONS_RUNTIME_TOKEN 2>/dev/null || true)"
+ACTIONS_RESULTS_URL="$(cat /run/secrets/ACTIONS_RESULTS_URL 2>/dev/null || true)"
+if [ -n "${ACTIONS_RUNTIME_TOKEN}" ] && [ -n "${ACTIONS_RESULTS_URL}" ]; then
+  export ACTIONS_RUNTIME_TOKEN ACTIONS_RESULTS_URL
+  export RUSTC_WRAPPER=sccache SCCACHE_GHA_ENABLED=on SCCACHE_IGNORE_SERVER_IO_ERROR=1 CARGO_INCREMENTAL=0
+  echo "sccache: GHA cache backend enabled"
+else
+  echo "sccache: no GHA cache token, compiling uncached"
+fi
 
 xx-cargo build --release --locked \
   -p cc-lb-server \
   --no-default-features --features "${FEATURES}" \
   --target-dir /src/target
-if [ "${USE_SCCACHE}" = "1" ]; then sccache --show-stats; fi
+if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats; sccache --stop-server || true; fi
 
 triple="$(xx-cargo --print-target-triple)"
 # Copy the binary out of the ephemeral target dir into the thin /out layer.

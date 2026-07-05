@@ -24,27 +24,50 @@ concurrency:
 
 jobs:
   build:
-    # Self-hosted: sccache's /sccache BuildKit cache mount lives in the builder
-    # (dind), so warm rebuilds reuse it as long as that builder survives between
-    # jobs. A GitHub-hosted runner gets a fresh builder every run and could never
-    # warm it.
+    # Self-hosted arm64: xx cross-compiles every target arch from arm64 with no
+    # QEMU, and only here can the build reach the in-cluster sccache/GHA cache
+    # server (a GitHub-hosted runner can't see arc-systems.svc).
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
 
+      # sccache's GHA backend reads ACTIONS_RESULTS_URL + ACTIONS_RUNTIME_TOKEN,
+      # which the runtime doesn't expose to plain steps. Re-export them (the ARC
+      # runner names its in-cluster cache server CUSTOM_ACTIONS_RESULTS_URL) so
+      # they can be handed to BuildKit as secrets below.
+      - name: Expose GHA cache runtime for sccache
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || process.env.CUSTOM_ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      # network=host lets the compile reach the in-cluster cache server over the
+      # pod network (.svc.cluster.local is in the dind's NO_PROXY); the RUN-step
+      # host network needs the network.host entitlement, allowed on both the
+      # builder (buildkitd-flags) and the build (allow: below).
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+          buildkitd-flags: --allow-insecure-entitlement network.host
+
       # GIT_SHA / SOURCE_DATE_EPOCH are pinned to stable values on purpose: this
       # never-published verification image doesn't need a real commit sha, and
-      # stable build metadata maximises sccache reuse (same trick the host cargo
-      # jobs use via setup-rust-cache's stable-build-metadata).
-      - name: Build image (cross-compile, sccache)
-        run: |
-          docker buildx build \
-            --load \
-            --build-arg USE_SCCACHE=1 \
-            --build-arg GIT_SHA=0000000 \
-            --build-arg SOURCE_DATE_EPOCH=0 \
-            -t cc-lb:ci \
-            .
+      # stable build metadata maximises sccache reuse.
+      - name: Build image (cross-compile, sccache GHA backend)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          network: host
+          allow: network.host
+          tags: cc-lb:ci
+          build-args: |
+            GIT_SHA=0000000
+            SOURCE_DATE_EPOCH=0
+          secrets: |
+            ACTIONS_RUNTIME_TOKEN=${{ env.ACTIONS_RUNTIME_TOKEN }}
+            ACTIONS_RESULTS_URL=${{ env.ACTIONS_RESULTS_URL }}
 
       # A successful build already proves both storage backends compile (default
       # FEATURES=sqlite,postgres); this just confirms the static binary runs.
