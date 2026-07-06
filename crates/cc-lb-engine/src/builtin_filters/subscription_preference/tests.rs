@@ -6,7 +6,7 @@
 //! - B — Base-window classification state machine (fresh vs stale, disabled)
 //! - C — Reset semantics
 //! - D — Overage / extra_usage assessment
-//! - E — Model relevance (5h + 7d + 7d_sonnet, always excludes 7d_opus)
+//! - E — Model relevance (5h + 7d, excludes unstable model-specific windows)
 //! - F — Urgency numerics (headroom exponent, remaining_secs, max over windows)
 //! - G — Capacity multiplier (Pro / team_standard / cap saturation / overage)
 //! - H — WRH selection: uniform fallback, single candidate, determinism, spread
@@ -24,6 +24,8 @@ const SONNET_MODEL: &str = "claude-sonnet-4-5-20250929";
 const OPUS_MODEL: &str = "claude-opus-4-8-20250514";
 const HAIKU_MODEL: &str = "claude-haiku-4-5-20251001";
 const MODEL_AGNOSTIC: &str = "claude-3-5-haiku-default";
+const WINDOW_SEVEN_DAY_SONNET: &str = "7d_sonnet";
+const WINDOW_SEVEN_DAY_OPUS: &str = "7d_opus";
 
 const T0_SECS: u64 = 1_700_000_000;
 
@@ -356,9 +358,9 @@ fn extra_usage_stale_ignored_no_block() {
 // =============================================================================
 
 #[test]
-fn sonnet_request_includes_7d_sonnet_window() {
-    let dead = oauth_with(
-        "dead",
+fn sonnet_request_excludes_7d_sonnet_window() {
+    let sonnet_alive = oauth_with(
+        "sonnet",
         1,
         vec![
             fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
@@ -370,8 +372,9 @@ fn sonnet_request_includes_7d_sonnet_window() {
         ],
     );
     let key = api_key("k", 2);
-    let output = filter_for_model(&[dead, key.clone()], SONNET_MODEL);
-    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
+    let output = filter_for_model(&[sonnet_alive.clone(), key], SONNET_MODEL);
+    assert_eq!(output.kept_upstream_ids, vec![sonnet_alive.upstream_id]);
+    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
 }
 
 #[test]
@@ -1174,29 +1177,17 @@ fn all_oauth_hard_negative_no_api_key_fails_open_without_trace() {
 }
 
 // =============================================================================
-// Session-affinity regressions (guard the 2026-07-05 fix that keyed WRH on
-// thread_id instead of request_id — see subscription_preference.rs
-// RENDEZVOUS_SALT v4 docstring for the incident trace).
+// Session-affinity regressions (guard the v8 policy that keys WRH on non-empty
+// thread_id with request_id fallback; see ADR 0005).
 // =============================================================================
 
 #[test]
-fn same_thread_id_does_not_pin_when_cache_affinity_did_not_narrow_candidates() {
-    // v6 boundary: subscription-preference no longer treats `thread_id` as a
-    // routing signal. If a warm-cache session reached subscription with
-    // multiple cache-equivalent candidates, `cache_affinity`'s max-ranker
-    // has already done its job — subscription may pick any of them. If the
-    // pool is cache-cold, subscription must spread over `request_id` so a
-    // truly-idle session does not deterministically re-pick the same
-    // (now-cold) upstream turn after turn (the 2026-07-06 02:34-02:48 UTC
-    // sticky-cold incident on `ses_0d40d66f8...`).
-    //
-    // Given: four healthy live-snapshot upstreams presented WITHOUT any
-    //   cache_score (cache_affinity would passthrough) and one thread_id
-    //   shared across 200 turns with distinct request_ids.
-    // When: subscription-preference filters each turn independently.
-    // Then: winners must spread across multiple upstreams — the thread_id
-    //   is ignored, request_id entropy drives WRH, and the session no
-    //   longer clumps on one cold upstream.
+fn same_thread_id_pins_when_request_ids_vary() {
+    // Given: four healthy live-snapshot upstreams and one non-empty thread_id
+    // shared across 200 turns with distinct request_ids.
+    // When: subscription-preference filters each turn.
+    // Then: v8 keys WRH on thread_id, so all turns pin to the same upstream
+    // and the trace records ThreadId as the key source.
     let candidates = vec![
         live_snapshot_bear_max(),
         live_snapshot_isac_personal(),
@@ -1205,7 +1196,7 @@ fn same_thread_id_does_not_pin_when_cache_affinity_did_not_narrow_candidates() {
     ];
     let filter = SubscriptionPreferenceFilter::new();
     let principal = principal();
-    let thread_id = "ses_0d40d66f8ffezC7gUXysWIv4cz";
+    let thread_id = "thread-prod-cache-redacted";
     let mut winners: HashMap<Uuid, usize> = HashMap::new();
     for i in 0..2000 {
         let ctx = ctx_with_thread_id(MODEL_AGNOSTIC, &format!("req-{i}"), thread_id);
@@ -1216,22 +1207,18 @@ fn same_thread_id_does_not_pin_when_cache_affinity_did_not_narrow_candidates() {
             .expect("subscription-alive path must emit trace");
         assert_eq!(
             trace.wrh_key_source,
-            WrhKeySource::RequestId,
-            "v6 subscription must key on request_id regardless of thread_id"
+            WrhKeySource::ThreadId,
+            "v8 subscription must key WRH on a non-empty thread_id"
         );
         *winners
             .entry(*output.kept_upstream_ids.first().unwrap())
             .or_insert(0) += 1;
     }
-    assert!(
-        winners.len() >= 3,
-        "cold-fallback must spread same-thread turns across ≥3 upstreams; landed on {} upstreams",
+    assert_eq!(
+        winners.len(),
+        1,
+        "same-thread turns must pin to one upstream; landed on {} upstreams",
         winners.len()
-    );
-    let min_share = winners.values().copied().min().unwrap_or(0) as f64 / 2000.0;
-    assert!(
-        min_share >= 0.03,
-        "no upstream should be starved when subscription keys off request_id; min share was {min_share}",
     );
 }
 
@@ -1239,7 +1226,7 @@ fn same_thread_id_does_not_pin_when_cache_affinity_did_not_narrow_candidates() {
 fn different_request_ids_spread_across_upstreams() {
     // Given: same four healthy candidates as the golden distribution test.
     // When: each trial carries a distinct request_id (thread_id absent),
-    //   so v6 WRH gets a fresh independent per-request key.
+    //   so v8 WRH falls back to a fresh independent per-request key.
     // Then: the aggregate distribution must cover multiple upstreams —
     //   proving pure-request-id keying keeps load spread across the pool.
     let candidates = vec![
@@ -1260,7 +1247,7 @@ fn different_request_ids_spread_across_upstreams() {
     }
     assert!(
         winners.len() >= 3,
-        "expected WRH to spread across ≥3 upstreams over 2000 distinct request_ids; landed on {} upstreams",
+        "expected request_id fallback WRH to spread across ≥3 upstreams over 2000 distinct request_ids; landed on {} upstreams",
         winners.len()
     );
     let min_share = winners.values().copied().min().unwrap_or(0) as f64 / 2000.0;
@@ -1601,12 +1588,9 @@ fn rendezvous_salt_embeds_declared_version() {
 }
 
 #[test]
-fn wrh_key_source_is_request_id_even_when_thread_id_present_v6() {
-    // v6 invariant: subscription-preference never keys on `thread_id`.
-    // Session-scoped pinning is delegated to `cache_affinity`'s
-    // max-cache ranker; subscription only carries per-request WRH.
-    // Trace must reflect that even when the request carries a
-    // populated thread_id.
+fn wrh_key_source_is_thread_id_when_thread_id_present_v8() {
+    // v8 invariant: subscription-preference keys WRH on non-empty thread_id
+    // and records that source in the trace.
     let filter = SubscriptionPreferenceFilter::new();
     let candidates = vec![
         healthy_oauth_candidate("upstream-a", 1),
@@ -1619,8 +1603,8 @@ fn wrh_key_source_is_request_id_even_when_thread_id_present_v6() {
         .expect("subscription-alive path must emit trace");
     assert_eq!(
         trace.wrh_key_source,
-        WrhKeySource::RequestId,
-        "v6 subscription must key on request_id regardless of thread_id"
+        WrhKeySource::ThreadId,
+        "v8 subscription must key on thread_id when present"
     );
     assert_eq!(
         trace.rendezvous_salt_version.as_deref(),
@@ -1704,6 +1688,47 @@ fn previous_tier_is_not_shared_across_threads() {
     assert!(
         trace_b1.previous_tier.is_none(),
         "thread-B first turn must not see thread-A's tier record"
+    );
+}
+
+#[test]
+fn oversized_thread_id_uses_bounded_routing_key() {
+    // Given: a caller-controlled session id much larger than the routing key cap.
+    let filter = SubscriptionPreferenceFilter::new();
+    let candidates = vec![
+        healthy_oauth_candidate("upstream-a", 1),
+        healthy_oauth_candidate("upstream-b", 2),
+    ];
+    let principal = principal();
+    let oversized_thread_id = "session-".repeat(MAX_THREAD_ROUTING_KEY_BYTES);
+
+    // When: two turns use the same oversized session id.
+    let first = filter
+        .filter(
+            &ctx_with_thread_id(SONNET_MODEL, "req-long-1", &oversized_thread_id),
+            &principal,
+            &candidates,
+        )
+        .unwrap();
+    let first_trace = first.subscription_preference.expect("first trace present");
+    let second = filter
+        .filter(
+            &ctx_with_thread_id(SONNET_MODEL, "req-long-2", &oversized_thread_id),
+            &principal,
+            &candidates,
+        )
+        .unwrap();
+    let second_trace = second
+        .subscription_preference
+        .expect("second trace present");
+
+    // Then: routing still treats it as ThreadId, but memory stores only a digest key.
+    assert_eq!(first_trace.wrh_key_source, WrhKeySource::ThreadId);
+    assert_eq!(second_trace.previous_tier, Some(first_trace.chosen_tier));
+    assert_eq!(filter.tier_memory().len(), 1);
+    assert_eq!(
+        filter.tier_memory().max_key_len(),
+        Some(HASHED_THREAD_ROUTING_KEY_PREFIX.len() + 64)
     );
 }
 

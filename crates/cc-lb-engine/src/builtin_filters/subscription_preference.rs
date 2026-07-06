@@ -30,8 +30,8 @@
 //!
 //! ## Windows
 //!
-//! Base: `5h`, `7d`, plus `7d_sonnet` on sonnet requests. `7d_opus` is
-//! deliberately ignored (Anthropic ships the label without a real quota).
+//! Base: `5h` and `7d`. Model-specific `7d_sonnet` and `7d_opus` labels are
+//! deliberately ignored because they are not stable enough to drive routing.
 //! `unified` is not itself an exhaustion window; its top-level flags
 //! (`overage_in_use`, `fallback_available`, `extra_usage_*`) enrich the
 //! overage assessment.
@@ -50,6 +50,8 @@ use cc_lb_plugin_api::{
     SubscriptionQuotaDataState, SubscriptionTier as PublicTier, UpstreamCandidate, UpstreamKind,
 };
 use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -67,9 +69,6 @@ pub(crate) const NO_SUBSCRIPTION_REASON: &str = "keep:no_subscription_candidates
 
 pub(crate) const WINDOW_FIVE_HOUR: &str = "5h";
 pub(crate) const WINDOW_SEVEN_DAY: &str = "7d";
-pub(crate) const WINDOW_SEVEN_DAY_SONNET: &str = "7d_sonnet";
-#[allow(dead_code)]
-pub(crate) const WINDOW_SEVEN_DAY_OPUS: &str = "7d_opus";
 pub(crate) const WINDOW_OVERAGE: &str = "overage";
 pub(crate) const WINDOW_UNIFIED: &str = "unified";
 
@@ -105,16 +104,39 @@ pub(crate) const OVERAGE_REMAINING_NOMINAL_SECS: u64 = 30 * 86_400;
 /// read.
 pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
 
+/// Maximum raw `thread_id` bytes accepted as an in-memory routing key. Longer
+/// caller-controlled values are hashed before WRH and TierMemory use them, so
+/// entry count and key bytes are both bounded.
+const MAX_THREAD_ROUTING_KEY_BYTES: usize = 256;
+
+const HASHED_THREAD_ROUTING_KEY_PREFIX: &str = "sha256:";
+
+/// A challenger must beat the current threaded owner by this score ratio for
+/// consecutive observations before a non-forced handoff. Lower WRH scores win.
+const SWITCH_SCORE_MARGIN: f64 = 1.25;
+
+/// Number of consecutive margin wins required before switching a threaded
+/// owner. This prevents one transient score crossing from seeding a new cache.
+const SUCCESSOR_CONVERGENCE_OBSERVATIONS: u8 = 2;
+
 /// Short version tag identifying the WRH salt/algorithm shape. Embedded in
 /// [`RENDEZVOUS_SALT`] and surfaced on `SubscriptionPreferenceTrace.rendezvous_salt_version`
 /// so trace queries can distinguish upstream-mix shifts caused by an
 /// algorithm/salt change from those caused by upstream or quota state
 /// changes. Bumped in lockstep with `RENDEZVOUS_SALT` — a `debug_assert`
 /// in `tests::rendezvous_salt_embeds_version` guards the invariant.
-pub(crate) const SALT_VERSION: &str = "v7";
+pub(crate) const SALT_VERSION: &str = "v8";
 
 /// Salt for the weighted-rendezvous hash. Bumped as a version stamp when the
 /// selection algorithm changes shape; older salts must never be reused.
+///
+/// v8 (2026-07-06): WRH is keyed on non-empty `thread_id`, falling back to
+/// `request_id` only for stateless requests. Fresh base windows with
+/// `allowed_warning`, or with `allowed` plus finite utilization at/above a
+/// finite `surpassed_threshold`, remain selectable but demote the candidate
+/// from KnownBase to PartialBase. Threaded requests keep a per-thread owner and
+/// require a converged challenger before non-forced handoff. See
+/// docs/adr/0005-thread-keyed-subscription-preference-with-warning-demotion.md.
 ///
 /// v7 (2026-07-06): WRH is keyed on `request_id` and the per-candidate
 /// weight is `quota_urgency * exp(CACHE_LOG_BOOST * cache_ratio)`, where
@@ -145,7 +167,8 @@ pub(crate) const SALT_VERSION: &str = "v7";
 /// v4 (2026-07-05): keyed WRH on `thread_id` so multi-turn sessions pinned
 /// while the prompt cache stayed warm. Deployed by PR #322 after the
 /// 2026-07-05 06:24 UTC scatter incident.
-const RENDEZVOUS_SALT: &str = "cc-lb:subscription-preference:v7:cache-weighted-wrh:2026-07-06";
+const RENDEZVOUS_SALT: &str =
+    "cc-lb:subscription-preference:v8:thread-keyed-warning-demote:2026-07-06";
 
 /// Exponent coefficient on the cache-weighted WRH multiplier.
 /// `cache_weight_multiplier_i = exp(CACHE_LOG_BOOST * cache_ratio_i)` sits on
@@ -164,30 +187,43 @@ pub const CACHE_LOG_BOOST: f64 = 9.574_063_128_362_267;
 
 // -- Tier memory (per-filter, per-DynamicView). -----------------------------
 
-/// Retention window for a `thread_id`'s last observed `SubscriptionTier`.
+/// Retention window for a thread's last routing state.
 /// Chosen to comfortably cover a typical multi-turn conversation without
 /// pinning stale sessions in memory forever.
 const TIER_MEMORY_TTL: Duration = Duration::from_secs(30 * 60);
 
-/// Upper bound on the number of `thread_id -> TierEntry` records the
+/// Upper bound on the number of thread routing-state records the
 /// per-filter memory keeps at once. When both this bound is hit AND all
 /// existing records are fresh (no TTL evictions available), new insertions
-/// are dropped rather than evicting a live record. This trades observability
-/// completeness for a hard memory bound — the tier-flip signal is best-effort
-/// and a dropped insertion just means the affected `thread_id`'s next trace
-/// will show `previous_tier: None` even though a prior turn occurred.
+/// are dropped rather than evicting a live record. This trades owner-memory
+/// completeness for hard entry-count bounds: a dropped insertion falls back to
+/// formula selection until another record can be accepted.
 const TIER_MEMORY_CAP: usize = 10_000;
 
 struct TierEntry {
     tier: PublicTier,
+    owner_upstream_id: Option<Uuid>,
+    pending_successor: Option<PendingSuccessor>,
     expires_at: Instant,
 }
 
-/// Per-filter map from `thread_id` to the tier that filter previously
-/// assessed the same session into. Shared by every `evaluate` call the
-/// same `SubscriptionPreferenceFilter` instance handles; a `DynamicView`
-/// rebuild replaces the filter (and therefore wipes the map) — acceptable
-/// because this is best-effort observability, not routing correctness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingSuccessor {
+    upstream_id: Uuid,
+    observations: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TierEntrySnapshot {
+    tier: PublicTier,
+    owner_upstream_id: Option<Uuid>,
+}
+
+/// Per-filter map from normalized thread routing key to previous tier, owner,
+/// and pending successor. Shared by every `evaluate` call the same
+/// `SubscriptionPreferenceFilter` instance handles; a `DynamicView` rebuild
+/// replaces the filter and clears owner memory, after which routing falls back
+/// to the cache-weighted WRH formula until the next owner is observed.
 pub struct TierMemory {
     cap: usize,
     ttl: Duration,
@@ -211,16 +247,7 @@ impl TierMemory {
     /// record has not aged past `ttl`. Returns `None` for absent, expired,
     /// or empty `thread_id`.
     pub fn get(&self, thread_id: &str, now: Instant) -> Option<PublicTier> {
-        if thread_id.is_empty() {
-            return None;
-        }
-        let map = self.inner.lock();
-        let entry = map.get(thread_id)?;
-        if entry.expires_at > now {
-            Some(entry.tier)
-        } else {
-            None
-        }
+        self.snapshot(thread_id, now).map(|entry| entry.tier)
     }
 
     /// Insert or refresh the tier for `thread_id`. Best-effort: when the
@@ -228,13 +255,43 @@ impl TierMemory {
     /// key is dropped rather than evicting a live entry. Empty
     /// `thread_id` is a no-op.
     pub fn insert(&self, thread_id: &str, tier: PublicTier, now: Instant) {
+        self.insert_owner(thread_id, tier, None, now);
+    }
+
+    fn snapshot(&self, thread_id: &str, now: Instant) -> Option<TierEntrySnapshot> {
+        if thread_id.is_empty() {
+            return None;
+        }
+        let thread_key = normalized_thread_routing_key(thread_id);
+        let map = self.inner.lock();
+        let entry = map.get(thread_key.as_ref())?;
+        if entry.expires_at > now {
+            Some(TierEntrySnapshot {
+                tier: entry.tier,
+                owner_upstream_id: entry.owner_upstream_id,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn insert_owner(
+        &self,
+        thread_id: &str,
+        tier: PublicTier,
+        owner_upstream_id: Option<Uuid>,
+        now: Instant,
+    ) {
         if thread_id.is_empty() {
             return;
         }
+        let thread_key = normalized_thread_routing_key(thread_id);
         let mut map = self.inner.lock();
         let expires_at = now + self.ttl;
-        if let Some(entry) = map.get_mut(thread_id) {
+        if let Some(entry) = map.get_mut(thread_key.as_ref()) {
             entry.tier = tier;
+            entry.owner_upstream_id = owner_upstream_id;
+            entry.pending_successor = None;
             entry.expires_at = expires_at;
             return;
         }
@@ -244,12 +301,114 @@ impl TierMemory {
         if map.len() >= self.cap {
             return;
         }
-        map.insert(thread_id.to_owned(), TierEntry { tier, expires_at });
+        map.insert(
+            thread_key.into_owned(),
+            TierEntry {
+                tier,
+                owner_upstream_id,
+                pending_successor: None,
+                expires_at,
+            },
+        );
+    }
+
+    fn choose_thread_owner(
+        &self,
+        thread_id: &str,
+        tier: PublicTier,
+        formula_winner: Uuid,
+        incumbent: Option<ThreadIncumbent>,
+        now: Instant,
+    ) -> Uuid {
+        if thread_id.is_empty() {
+            return formula_winner;
+        }
+        let thread_key = normalized_thread_routing_key(thread_id);
+        let mut map = self.inner.lock();
+        let expires_at = now + self.ttl;
+        let Some(entry) = map
+            .get_mut(thread_key.as_ref())
+            .filter(|entry| entry.expires_at > now)
+        else {
+            if map.len() >= self.cap {
+                map.retain(|_, e| e.expires_at > now);
+            }
+            if map.len() < self.cap {
+                map.insert(
+                    thread_key.into_owned(),
+                    TierEntry {
+                        tier,
+                        owner_upstream_id: Some(formula_winner),
+                        pending_successor: None,
+                        expires_at,
+                    },
+                );
+            }
+            return formula_winner;
+        };
+
+        if entry.tier != tier {
+            entry.tier = tier;
+            entry.owner_upstream_id = Some(formula_winner);
+            entry.pending_successor = None;
+            entry.expires_at = expires_at;
+            return formula_winner;
+        }
+
+        let Some(incumbent) = incumbent else {
+            entry.tier = tier;
+            entry.owner_upstream_id = Some(formula_winner);
+            entry.pending_successor = None;
+            entry.expires_at = expires_at;
+            return formula_winner;
+        };
+
+        if incumbent.upstream_id == formula_winner {
+            entry.tier = tier;
+            entry.owner_upstream_id = Some(incumbent.upstream_id);
+            entry.pending_successor = None;
+            entry.expires_at = expires_at;
+            return incumbent.upstream_id;
+        }
+
+        if !incumbent.challenger_beats_margin {
+            entry.tier = tier;
+            entry.owner_upstream_id = Some(incumbent.upstream_id);
+            entry.pending_successor = None;
+            entry.expires_at = expires_at;
+            return incumbent.upstream_id;
+        }
+
+        let observations = match entry.pending_successor {
+            Some(pending) if pending.upstream_id == formula_winner => pending.observations + 1,
+            Some(_) | None => 1,
+        };
+        if observations >= SUCCESSOR_CONVERGENCE_OBSERVATIONS {
+            entry.tier = tier;
+            entry.owner_upstream_id = Some(formula_winner);
+            entry.pending_successor = None;
+            entry.expires_at = expires_at;
+            formula_winner
+        } else {
+            entry.tier = tier;
+            entry.owner_upstream_id = Some(incumbent.upstream_id);
+            entry.pending_successor = Some(PendingSuccessor {
+                upstream_id: formula_winner,
+                observations,
+            });
+            entry.expires_at = expires_at;
+            incumbent.upstream_id
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.inner.lock().len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn max_key_len(&self) -> Option<usize> {
+        self.inner.lock().keys().map(String::len).max()
     }
 }
 
@@ -408,19 +567,69 @@ fn evaluate(
         })
         .collect();
 
-    let session_thread_id: Option<&str> = ctx.thread_id.as_deref().filter(|id| !id.is_empty());
-    let wrh_key_source = WrhKeySource::RequestId;
+    let session_thread_key = ctx
+        .thread_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .map(normalized_thread_routing_key);
+    let routing_key = session_thread_key
+        .as_deref()
+        .unwrap_or(ctx.request_id.as_str());
+    let wrh_key_source = match session_thread_key.as_ref() {
+        Some(_) => WrhKeySource::ThreadId,
+        None => WrhKeySource::RequestId,
+    };
 
     for bucket in buckets.iter() {
         if bucket.is_empty() {
             continue;
         }
-        let winner = pick_within_tier(bucket, ctx, config);
-        let chosen_tier = tier_to_plugin_api(winner.tier);
-        let previous_tier = session_thread_id.and_then(|thread_id| tier_memory.get(thread_id, now));
-        if let Some(thread_id) = session_thread_id {
-            tier_memory.insert(thread_id, chosen_tier, now);
-        }
+        let selection = pick_within_tier(bucket, routing_key, config);
+        let formula_winner = selection.winner;
+        let chosen_tier = tier_to_plugin_api(formula_winner.tier);
+        let previous_entry = session_thread_key
+            .as_deref()
+            .and_then(|thread_id| tier_memory.snapshot(thread_id, now));
+        let previous_tier = previous_entry.map(|entry| entry.tier);
+        let incumbent = previous_entry
+            .and_then(|entry| entry.owner_upstream_id)
+            .and_then(|owner_id| {
+                bucket
+                    .iter()
+                    .find(|assessment| assessment.candidate.upstream_id == owner_id)
+            })
+            .map(|owner| {
+                let challenger_key = wrh_key(
+                    formula_winner,
+                    routing_key,
+                    config,
+                    selection.uniform,
+                    selection.max_cache_tokens,
+                );
+                let incumbent_key = wrh_key(
+                    owner,
+                    routing_key,
+                    config,
+                    selection.uniform,
+                    selection.max_cache_tokens,
+                );
+                ThreadIncumbent {
+                    upstream_id: owner.candidate.upstream_id,
+                    challenger_beats_margin: formula_winner.candidate.upstream_id
+                        != owner.candidate.upstream_id
+                        && challenger_key.score * SWITCH_SCORE_MARGIN <= incumbent_key.score,
+                }
+            });
+        let kept_upstream_id = match session_thread_key.as_deref() {
+            Some(thread_id) => tier_memory.choose_thread_owner(
+                thread_id,
+                chosen_tier,
+                formula_winner.candidate.upstream_id,
+                incumbent,
+                now,
+            ),
+            None => formula_winner.candidate.upstream_id,
+        };
 
         let trace = cc_lb_plugin_api::SubscriptionPreferenceTrace {
             chosen_tier,
@@ -430,7 +639,7 @@ fn evaluate(
             rendezvous_salt_version: Some(SALT_VERSION.to_owned()),
         };
         return FilterOutput {
-            kept_upstream_ids: vec![winner.candidate.upstream_id],
+            kept_upstream_ids: vec![kept_upstream_id],
             reason: SUBSCRIPTION_ALIVE_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: Some(trace),
@@ -457,12 +666,29 @@ fn evaluate(
     }
 }
 
-fn relevant_base_windows(canonical_model: &str) -> Vec<&'static str> {
-    let mut windows = vec![WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY];
-    if canonical_model.contains("sonnet") {
-        windows.push(WINDOW_SEVEN_DAY_SONNET);
+fn relevant_base_windows(_canonical_model: &str) -> Vec<&'static str> {
+    vec![WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY]
+}
+
+fn normalized_thread_routing_key(thread_id: &str) -> Cow<'_, str> {
+    if thread_id.len() <= MAX_THREAD_ROUTING_KEY_BYTES {
+        return Cow::Borrowed(thread_id);
     }
-    windows
+
+    let mut hasher = Sha256::new();
+    hasher.update(RENDEZVOUS_SALT.as_bytes());
+    hasher.update([0]);
+    hasher.update(thread_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut key = String::with_capacity(HASHED_THREAD_ROUTING_KEY_PREFIX.len() + 64);
+    key.push_str(HASHED_THREAD_ROUTING_KEY_PREFIX);
+    for byte in digest {
+        let high = usize::from(byte >> 4);
+        let low = usize::from(byte & 0x0f);
+        key.push(char::from(b"0123456789abcdef"[high]));
+        key.push(char::from(b"0123456789abcdef"[low]));
+    }
+    Cow::Owned(key)
 }
 
 fn collect_kind(candidates: &[UpstreamCandidate], kind: UpstreamKind) -> Vec<Uuid> {
@@ -495,6 +721,7 @@ fn tier_to_plugin_api(tier: Tier) -> cc_lb_plugin_api::SubscriptionTier {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BaseSignal {
     CurrentPositive,
+    WarningPositive,
     HardNegative,
     Unknown,
 }
@@ -514,6 +741,12 @@ struct Assessment<'a> {
     urgency: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ThreadIncumbent {
+    upstream_id: Uuid,
+    challenger_beats_margin: bool,
+}
+
 // -- Candidate assessment. --------------------------------------------------
 
 fn assess_candidate<'a>(
@@ -526,6 +759,7 @@ fn assess_candidate<'a>(
     let multiplier = capacity_multiplier(candidate);
 
     let mut positive_count = 0u32;
+    let mut warning_positive_count = 0u32;
     let mut hard_negative_count = 0u32;
     let mut base_urgency = 0.0f64;
     for &window in base_windows {
@@ -534,6 +768,16 @@ fn assess_candidate<'a>(
         match signal {
             BaseSignal::CurrentPositive => {
                 positive_count += 1;
+                if let Some(contribution) =
+                    window_urgency_contribution(snapshot, now_secs, multiplier)
+                    && contribution > base_urgency
+                {
+                    base_urgency = contribution;
+                }
+            }
+            BaseSignal::WarningPositive => {
+                positive_count += 1;
+                warning_positive_count += 1;
                 if let Some(contribution) =
                     window_urgency_contribution(snapshot, now_secs, multiplier)
                     && contribution > base_urgency
@@ -557,7 +801,11 @@ fn assess_candidate<'a>(
             return None;
         }
     } else if positive_count == total && total > 0 {
-        (Tier::KnownBase, base_urgency)
+        if warning_positive_count > 0 {
+            (Tier::PartialBase, base_urgency)
+        } else {
+            (Tier::KnownBase, base_urgency)
+        }
     } else if positive_count > 0 {
         (Tier::PartialBase, base_urgency)
     } else if config.unknown_probe_enabled {
@@ -639,9 +887,23 @@ fn classify_base_snapshot(
             if snap.disabled_reason.is_some() {
                 return BaseSignal::HardNegative;
             }
+            if let Some(util) = snap.utilization
+                && util.is_finite()
+                && util >= 1.0
+            {
+                return BaseSignal::HardNegative;
+            }
+            let allowed_surpassed_threshold = match (snap.utilization, snap.surpassed_threshold) {
+                (Some(util), Some(threshold)) => {
+                    util.is_finite() && threshold.is_finite() && util >= threshold
+                }
+                (Some(_), None) | (None, Some(_)) | (None, None) => false,
+            };
             match snap.status.as_deref() {
                 Some("rejected") => BaseSignal::HardNegative,
-                Some("allowed") | Some("allowed_warning") => BaseSignal::CurrentPositive,
+                Some("allowed_warning") => BaseSignal::WarningPositive,
+                Some("allowed") if allowed_surpassed_threshold => BaseSignal::WarningPositive,
+                Some("allowed") => BaseSignal::CurrentPositive,
                 Some(_) | None => utilization_signal(snap.utilization),
             }
         }
@@ -781,16 +1043,18 @@ fn candidate_estimated_now(candidate: &UpstreamCandidate) -> u64 {
 
 // -- Weighted-rendezvous selection. -----------------------------------------
 
+struct TierSelection<'a, 'b> {
+    winner: &'b Assessment<'a>,
+    uniform: bool,
+    max_cache_tokens: u32,
+}
+
 fn pick_within_tier<'a, 'b>(
     bucket: &'b [Assessment<'a>],
-    ctx: &RequestContext,
+    routing_key: &str,
     config: &FilterConfig,
-) -> &'b Assessment<'a> {
+) -> TierSelection<'a, 'b> {
     debug_assert!(!bucket.is_empty());
-    if bucket.len() == 1 {
-        return &bucket[0];
-    }
-
     let total_urgency: f64 = bucket.iter().map(|a| a.urgency).sum();
     let uniform = total_urgency < EPSILON;
     let max_cache_tokens: u32 = bucket
@@ -799,16 +1063,28 @@ fn pick_within_tier<'a, 'b>(
         .max()
         .unwrap_or(0);
 
+    if bucket.len() == 1 {
+        return TierSelection {
+            winner: &bucket[0],
+            uniform,
+            max_cache_tokens,
+        };
+    }
+
     let mut best_index = 0usize;
-    let mut best_key = wrh_key(&bucket[0], ctx, config, uniform, max_cache_tokens);
+    let mut best_key = wrh_key(&bucket[0], routing_key, config, uniform, max_cache_tokens);
     for (i, assessment) in bucket.iter().enumerate().skip(1) {
-        let key = wrh_key(assessment, ctx, config, uniform, max_cache_tokens);
+        let key = wrh_key(assessment, routing_key, config, uniform, max_cache_tokens);
         if compare_wrh_key(&key, &best_key) == Ordering::Less {
             best_index = i;
             best_key = key;
         }
     }
-    &bucket[best_index]
+    TierSelection {
+        winner: &bucket[best_index],
+        uniform,
+        max_cache_tokens,
+    }
 }
 
 /// Read-token count on a bucket assessment. Collapses `None` cache_score and
@@ -846,14 +1122,14 @@ struct WrhKey {
 
 fn wrh_key(
     assessment: &Assessment<'_>,
-    ctx: &RequestContext,
+    routing_key: &str,
     config: &FilterConfig,
     uniform: bool,
     max_cache_tokens: u32,
 ) -> WrhKey {
     let hash = rendezvous_hash(
         config.rendezvous_hash_salt,
-        ctx.request_id.as_str(),
+        routing_key,
         assessment.candidate.upstream_id,
     );
     let quota_weight = if uniform { 1.0 } else { assessment.urgency };
@@ -890,7 +1166,7 @@ fn hash_to_open_unit(hash: u64) -> f64 {
     ((top53 as f64) + 0.5) / ((1u64 << 53) as f64)
 }
 
-// -- Rendezvous hash (FNV-1a 64 over salt || request_id || upstream_id,
+// -- Rendezvous hash (FNV-1a 64 over salt || routing key || upstream_id,
 // with a Murmur3 fmix64 avalanche finalizer). ------------------------------
 //
 // FNV-1a alone has weak avalanche: two inputs differing in one trailing byte
@@ -900,7 +1176,7 @@ fn hash_to_open_unit(hash: u64) -> f64 {
 // step spreads any local input change across all 64 output bits, restoring
 // the "independent uniforms per candidate" property WRH requires.
 
-fn rendezvous_hash(salt: &str, session_key: &str, upstream_id: Uuid) -> u64 {
+fn rendezvous_hash(salt: &str, routing_key: &str, upstream_id: Uuid) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let fnv_prime: u64 = 0x100_0000_01b3;
     let mix = |h: &mut u64, byte: u8| {
@@ -911,7 +1187,7 @@ fn rendezvous_hash(salt: &str, session_key: &str, upstream_id: Uuid) -> u64 {
         mix(&mut h, b);
     }
     mix(&mut h, 0);
-    for &b in session_key.as_bytes() {
+    for &b in routing_key.as_bytes() {
         mix(&mut h, b);
     }
     mix(&mut h, 0);
