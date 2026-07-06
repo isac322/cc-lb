@@ -10,8 +10,8 @@ use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_config::PromptCacheShadowConfig;
 use cc_lb_plugin_api::types::{
-    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheScore, StageDecision,
-    TerminalDecision, TtlClass, WarmCacheEntry,
+    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CachePricingSummary, CacheScore,
+    StageDecision, TerminalDecision, TtlClass, WarmCacheEntry,
 };
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, FilterError, FilterOutput, InternalError, InternalErrorKind,
@@ -201,7 +201,7 @@ fn build_cache_score(
     request_breakpoints: &[CacheBreakpoint],
     warm_entries: &[WarmCacheEntry],
 ) -> Option<CacheScore> {
-    if warm_entries.is_empty() {
+    if request_breakpoints.is_empty() {
         return None;
     }
 
@@ -250,6 +250,52 @@ fn build_cache_score(
         confidence: if longest_match.is_some() { 1.0 } else { 0.0 },
         ambiguity_reason: None,
     })
+}
+
+fn cache_pricing_summary_for_model(model: &str) -> CachePricingSummary {
+    if model.is_empty() {
+        return CachePricingSummary {
+            status: "unknown".to_owned(),
+            input_micros_per_million: None,
+            cache_creation_5m_micros_per_million: None,
+            cache_creation_1h_micros_per_million: None,
+            cache_read_micros_per_million: None,
+        };
+    }
+
+    let normalized = cc_lb_pricing::normalize_model_id(model, None);
+    let snapshot = cc_lb_pricing::global_catalog().current();
+    let input = snapshot
+        .models
+        .get(&normalized)
+        .map(|pricing| pricing.input_per_million_usd.as_micros_usd());
+    let cache_creation_5m = snapshot
+        .cache_creation_per_million_usd
+        .get(&normalized)
+        .map(|price| price.as_micros_usd());
+    let cache_creation_1h = cache_creation_5m.map(cache_creation_1h_micros_from_5m);
+    let cache_read = snapshot
+        .cache_read_per_million_usd
+        .get(&normalized)
+        .map(|price| price.as_micros_usd());
+    let status = if input.is_some() && cache_creation_5m.is_some() && cache_read.is_some() {
+        "known"
+    } else {
+        "unknown"
+    };
+
+    CachePricingSummary {
+        status: status.to_owned(),
+        input_micros_per_million: input,
+        cache_creation_5m_micros_per_million: cache_creation_5m,
+        cache_creation_1h_micros_per_million: cache_creation_1h,
+        cache_read_micros_per_million: cache_read,
+    }
+}
+
+fn cache_creation_1h_micros_from_5m(cache_creation_5m_micros: u64) -> u64 {
+    let micros = (u128::from(cache_creation_5m_micros) * 8 + 2) / 5;
+    micros.try_into().unwrap_or(u64::MAX)
 }
 
 fn saturating_u64_to_u32(value: u64) -> u32 {
@@ -872,6 +918,7 @@ impl Lifecycle {
             body_bytes: input.body_bytes,
             cache_breakpoints,
             canonical_model_id,
+            cache_pricing: cache_pricing_summary_for_model(&cache_metadata.canonical_model_id),
         };
         let principal = Principal {
             id: input.principal_id,
@@ -1024,6 +1071,7 @@ impl Lifecycle {
         } else {
             String::new()
         };
+        ctx.cache_pricing = cache_pricing_summary_for_model(&ctx.canonical_model_id);
         ctx.thread_id = cache_metadata.thread_id.clone();
 
         let auth_start = Instant::now();
@@ -1879,6 +1927,7 @@ impl Lifecycle {
             body_bytes: body,
             cache_breakpoints: Vec::new(),
             canonical_model_id: String::new(),
+            cache_pricing: CachePricingSummary::default(),
         };
         (ctx, body_too_large)
     }
@@ -3707,7 +3756,7 @@ mod tests {
     }
 
     #[test]
-    fn build_candidates_no_warm_returns_none() {
+    fn build_candidates_no_warm_returns_cold_creation_estimate() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000202").unwrap();
         let view = cache_score_view(
             upstream_id,
@@ -3724,7 +3773,19 @@ mod tests {
             &crate::clock::SystemClock,
         );
 
-        assert_eq!(candidates[0].cache_score, None);
+        assert_eq!(
+            candidates[0].cache_score,
+            Some(CacheScore {
+                predicted_cache_read_tokens: 0,
+                predicted_cache_creation_tokens_5m: 100,
+                predicted_cache_creation_tokens_1h: 0,
+                predicted_uncached_input_tokens: 0,
+                predicted_expires_at_unix_secs: None,
+                matched_breakpoint_index: None,
+                confidence: 0.0,
+                ambiguity_reason: None,
+            })
+        );
     }
 
     #[test]

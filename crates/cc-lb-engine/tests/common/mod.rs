@@ -418,6 +418,7 @@ pub async fn signed_request(base_url: &str) -> SignedRequest {
         body_bytes: Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
         cache_breakpoints: Vec::new(),
         canonical_model_id: String::new(),
+        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "principal-test".to_owned(),
