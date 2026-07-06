@@ -406,11 +406,11 @@ function CostCell({
 }) {
   const c = costBreakdown(event);
 
-  // No cost data at all: render plain dash, no popover.
-  if (event.cost_usd_micros == null && !c.hasComponents) {
+  // No cost data at all and not partial: render plain dash, no popover.
+  if (!isPartial && event.cost_usd_micros == null && !c.hasComponents) {
     return (
       <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap text-text-faint">
-        {isPartial ? <span className="animate-pulse">Est. —</span> : DASH}
+        {DASH}
       </td>
     );
   }
@@ -418,6 +418,8 @@ function CostCell({
   const popover = (
     <BreakdownPopover
       title={isPartial ? 'Estimated Cost' : 'Cost'}
+      showZeroRows={true}
+      isPartial={isPartial}
       rows={[
         {
           label: 'Input',
@@ -450,11 +452,7 @@ function CostCell({
           fmt: formatCostMicros,
         },
       ]}
-      footer={
-        c.hasComponents && c.total > 0
-          ? { label: 'Total', value: c.total, fmt: formatCostMicros }
-          : null
-      }
+      footer={{ label: 'Total', value: c.total, fmt: formatCostMicros }}
     />
   );
 
@@ -472,7 +470,7 @@ function CostCell({
         >
           <div className="text-right tabular-nums leading-tight">
             {isPartial
-              ? `Est. ${formatCostMicros(c.total)}`
+              ? `Est. ${c.total > 0 ? formatCostMicros(c.total) : '—'}`
               : formatCostMicros(c.total)}
           </div>
           {c.hasComponents ? (
@@ -534,12 +532,16 @@ function BreakdownPopover({
   title,
   rows,
   footer,
+  showZeroRows,
+  isPartial,
 }: {
   title: string;
   rows: PopoverRow[];
   footer?: { label: string; value: number; fmt: (v: number) => string } | null;
+  showZeroRows?: boolean;
+  isPartial?: boolean;
 }) {
-  const visible = rows.filter((r) => r.value > 0);
+  const visible = showZeroRows ? rows : rows.filter((r) => r.value > 0);
   const total = rows.reduce((a, r) => a + r.value, 0);
   return (
     <div className="min-w-[200px] font-mono">
@@ -552,10 +554,14 @@ function BreakdownPopover({
         <div className="flex flex-col gap-1">
           {visible.map((r) => {
             const pct = total > 0 ? Math.round((r.value / total) * 100) : 0;
+            const isZero = r.value <= 0;
             return (
               <div
                 key={r.label}
-                className="flex items-center gap-2 text-[11px]"
+                className={cx(
+                  'flex items-center gap-2 text-[11px]',
+                  isZero ? 'opacity-50' : '',
+                )}
               >
                 <span
                   className={cx('h-2 w-2 rounded-full shrink-0', r.color)}
@@ -564,10 +570,10 @@ function BreakdownPopover({
                   {r.label}
                 </span>
                 <span className="tabular-nums text-text w-14 text-right">
-                  {r.fmt(r.value)}
+                  {isZero && isPartial ? '—' : r.fmt(r.value)}
                 </span>
                 <span className="tabular-nums text-text-faint w-9 text-right">
-                  {pct}%
+                  {isZero ? '—' : `${pct}%`}
                 </span>
               </div>
             );
@@ -579,7 +585,7 @@ function BreakdownPopover({
           <span className="h-2 w-2 shrink-0" />
           <span className="text-text-faint flex-1">{footer.label}</span>
           <span className="tabular-nums text-text w-14 text-right">
-            {footer.fmt(footer.value)}
+            {isPartial && footer.value <= 0 ? '—' : footer.fmt(footer.value)}
           </span>
           <span className="w-9" />
         </div>

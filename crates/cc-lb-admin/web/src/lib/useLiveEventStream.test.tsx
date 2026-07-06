@@ -110,4 +110,73 @@ describe('useLiveEventStream', () => {
     expect(result.current.status).toBe('error');
     expect(result.current.error?.message).toBe('Unauthorized');
   });
+
+  it('tracks permanent failure after 5 minutes of reconnecting', () => {
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useLiveEventStream({}), { wrapper });
+
+    const createEventSourceMock = vi.mocked(createEventSource);
+    const options = createEventSourceMock.mock.calls[0][0] as unknown as {
+      onScheduleReconnect: (info: { delay: number }) => void;
+      onConnect: () => void;
+    };
+
+    expect(result.current.permanentFailure).toBe(false);
+    expect(result.current.reconnectAttempts).toBe(0);
+
+    act(() => {
+      options.onScheduleReconnect({ delay: 1000 });
+    });
+
+    expect(result.current.status).toBe('reconnecting');
+    expect(result.current.reconnectAttempts).toBe(1);
+    expect(result.current.permanentFailure).toBe(false);
+
+    act(() => {
+      vi.advanceTimersByTime(300_000);
+      options.onScheduleReconnect({ delay: 1000 });
+    });
+
+    expect(result.current.reconnectAttempts).toBe(2);
+    expect(result.current.permanentFailure).toBe(true);
+    expect(result.current.permanentFailureSince).not.toBeNull();
+
+    act(() => {
+      options.onConnect();
+    });
+
+    expect(result.current.permanentFailure).toBe(false);
+    expect(result.current.permanentFailureSince).toBeNull();
+    expect(result.current.reconnectAttempts).toBe(0);
+  });
+
+  it('forceReconnect resets the retry timer and attempts to connect', () => {
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useLiveEventStream({}), { wrapper });
+
+    const createEventSourceMock = vi.mocked(createEventSource);
+    const options = createEventSourceMock.mock.calls[0][0] as unknown as {
+      onScheduleReconnect: (info: { delay: number }) => void;
+    };
+
+    act(() => {
+      options.onScheduleReconnect({ delay: 1000 });
+      vi.advanceTimersByTime(300_000);
+      options.onScheduleReconnect({ delay: 1000 });
+    });
+
+    expect(result.current.permanentFailure).toBe(true);
+    const initialCallCount = createEventSourceMock.mock.calls.length;
+
+    act(() => {
+      result.current.forceReconnect();
+    });
+
+    expect(createEventSourceMock.mock.calls.length).toBe(initialCallCount + 1);
+    expect(result.current.status).toBe('reconnecting');
+  });
 });

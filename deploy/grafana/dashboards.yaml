@@ -1,0 +1,13 @@
+apiVersion: 1
+
+providers:
+  - name: cc-lb
+    orgId: 1
+    folder: cc-lb
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards/cc-lb
+      foldersFromFilesStructure: false

@@ -10,7 +10,7 @@ groups:
           summary: cc-lb live-tail PG NOTIFY queue usage is high
           description: pg_notification_queue_usage() has stayed above 30% for 5 minutes.
 
-      - alert: LiveTailNotifyQueueUsageHigh
+      - alert: LiveTailNotifyQueueUsageCritical
         expr: sse_notify_queue_usage_ratio > 0.50
         for: 2m
         labels:
@@ -47,10 +47,19 @@ groups:
           description: The lifecycle assembler mpsc queue dropped at least one event.
 
       - alert: LiveTailStorageTailLag
-        expr: histogram_quantile(0.95, sse_storage_tail_lag_ms) > 1000
+        expr: histogram_quantile(0.95, sum by (le) (rate(sse_storage_tail_lag_ms_bucket[5m]))) > 1000
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: cc-lb live-tail storage tail lag is high
           description: p95 storage-tail lag is above 1000 ms for 5 minutes.
+
+      - alert: LiveTailPgListenerReconnectStorm
+        expr: rate(sse_pg_listener_reconnects_total[5m]) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: cc-lb live-tail PG listener is reconnecting repeatedly
+          description: PG listener reconnect attempts exceed 0.1 per second for 10 minutes.

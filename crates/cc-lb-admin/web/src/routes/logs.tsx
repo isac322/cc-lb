@@ -1,8 +1,9 @@
 import { Toggle as BaseToggle } from '@base-ui/react/toggle';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
-import { Download, RefreshCw, X, Zap } from 'lucide-react';
+import { AlertTriangle, Download, RefreshCw, X, Zap } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { z } from 'zod';
+import { LiveTailFailureBanner } from '../components/LiveTailFailureBanner';
 import {
   Button,
   Card,
@@ -50,7 +51,11 @@ function LogsPage() {
 
   const live = useLiveEventStream(tailing ? filters : { __disabled: '1' });
   const liveRows = Array.from(live.eventsMap.values()).map((v) => v.event);
-  const tailStatus = tailing ? live.status : 'idle';
+  const tailStatus = tailing
+    ? live.permanentFailure
+      ? 'failed'
+      : live.status
+    : 'idle';
 
   const statusLabel = {
     idle: 'Off',
@@ -60,6 +65,7 @@ function LogsPage() {
     reconnecting: 'Reconnecting…',
     hidden: 'Paused',
     error: 'Offline',
+    failed: 'Failed',
   }[tailStatus];
 
   const statusColor = {
@@ -70,6 +76,7 @@ function LogsPage() {
     reconnecting: 'warn',
     hidden: 'neutral',
     error: 'danger',
+    failed: 'danger',
   }[tailStatus];
 
   useEffect(() => {
@@ -145,6 +152,12 @@ function LogsPage() {
 
   return (
     <FullPage>
+      <LiveTailFailureBanner
+        permanentFailure={live.permanentFailure}
+        permanentFailureSince={live.permanentFailureSince}
+        reconnectAttempts={live.reconnectAttempts}
+        onRetry={live.forceReconnect}
+      />
       <Section
         title="Live Logs"
         className="flex-1 min-h-0"
@@ -155,16 +168,29 @@ function LogsPage() {
             </span>
             {tailing ? (
               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] uppercase tracking-wider border border-subtle rounded-sm">
+                {tailStatus === 'failed' ? (
+                  <AlertTriangle className="w-3 h-3 text-[color:var(--color-danger)]" />
+                ) : (
+                  <span
+                    className={cx(
+                      'status-dot',
+                      statusColor,
+                      tailStatus === 'connecting' ||
+                        tailStatus === 'reconnecting'
+                        ? 'animate-pulse'
+                        : '',
+                    )}
+                  />
+                )}
                 <span
-                  className={cx(
-                    'status-dot',
-                    statusColor,
-                    tailStatus === 'connecting' || tailStatus === 'reconnecting'
-                      ? 'animate-pulse'
-                      : '',
-                  )}
-                />
-                <span>{statusLabel}</span>
+                  className={
+                    tailStatus === 'failed'
+                      ? 'text-[color:var(--color-danger)] font-bold'
+                      : ''
+                  }
+                >
+                  {statusLabel}
+                </span>
               </span>
             ) : null}
           </span>
