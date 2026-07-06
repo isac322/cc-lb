@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate, StorageError,
-    StorageResult, validate_identifier,
+    CacheKeepaliveConfig, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore,
+    PrincipalUpdate, StorageError, StorageResult, validate_identifier,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -23,8 +23,13 @@ impl PrincipalStore for SqliteStorage {
         let allowed_models = serde_json::to_string(&input.allowed_models)?;
         let allowed_upstreams = serde_json::to_string(&input.allowed_upstreams)?;
         let default_limits = serde_json::to_string(&input.default_limits)?;
+        let cache_keepalive_json = input
+            .cache_keepalive
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let row = sqlx::query(
-            "INSERT INTO principals_v1 (id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, revision, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?, 'first-pick', 0, ?, ?) RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at",
+            "INSERT INTO principals_v1 (id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, revision, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?, 'first-pick', ?, 0, ?, ?) RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at",
         )
         .bind(id.to_string())
         .bind(input.name)
@@ -32,6 +37,7 @@ impl PrincipalStore for SqliteStorage {
         .bind(allowed_models)
         .bind(allowed_upstreams)
         .bind(default_limits)
+        .bind(cache_keepalive_json)
         .bind(now)
         .bind(now)
         .fetch_one(self.pool())
@@ -42,7 +48,7 @@ impl PrincipalStore for SqliteStorage {
 
     async fn get_by_id(&self, id: Uuid) -> StorageResult<Option<PrincipalRecord>> {
         let row = sqlx::query(
-            "SELECT id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at FROM principals_v1 WHERE id = ?",
+            "SELECT id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at FROM principals_v1 WHERE id = ?",
         )
         .bind(id.to_string())
         .fetch_optional(self.pool())
@@ -53,7 +59,7 @@ impl PrincipalStore for SqliteStorage {
 
     async fn get_by_name(&self, name: &str) -> StorageResult<Option<PrincipalRecord>> {
         let row = sqlx::query(
-            "SELECT id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at FROM principals_v1 WHERE name = ?",
+            "SELECT id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at FROM principals_v1 WHERE name = ?",
         )
         .bind(name)
         .fetch_optional(self.pool())
@@ -72,7 +78,7 @@ impl PrincipalStore for SqliteStorage {
             return Ok(Vec::new());
         }
         let rows = sqlx::query(
-            "SELECT id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at FROM principals_v1 WHERE (? OR deleted_at IS NULL) ORDER BY name ASC LIMIT ? OFFSET ?",
+            "SELECT id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at FROM principals_v1 WHERE (? OR deleted_at IS NULL) ORDER BY name ASC LIMIT ? OFFSET ?",
         )
         .bind(include_deleted)
         .bind(usize_to_i64(limit, "principal.limit")?)
@@ -110,6 +116,8 @@ impl PrincipalStore for SqliteStorage {
             .router_terminal_strategy
             .map(|strategy| terminal_strategy_to_db_value(&strategy))
             .transpose()?;
+        let (update_cache_keepalive, cache_keepalive_json) =
+            cache_keepalive_binding(update.cache_keepalive.as_ref())?;
         update_principal(
             self,
             id,
@@ -121,6 +129,8 @@ impl PrincipalStore for SqliteStorage {
             allowed_upstreams,
             default_limits,
             router_terminal_strategy,
+            update_cache_keepalive,
+            cache_keepalive_json,
             false,
             None,
             None,
@@ -148,6 +158,8 @@ impl PrincipalStore for SqliteStorage {
             None,
             false,
             None,
+            false,
+            None,
             None,
         )
         .await
@@ -162,7 +174,7 @@ impl PrincipalStore for SqliteStorage {
         let now = u64_to_i64(now_unix_secs, "principal.deleted_at")?;
         let mut tx = self.begin_immediate().await?;
         let row = sqlx::query(
-            "UPDATE principals_v1 SET deleted_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ? AND deleted_at IS NULL RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at",
+            "UPDATE principals_v1 SET deleted_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ? AND deleted_at IS NULL RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at",
         )
         .bind(now)
         .bind(now)
@@ -212,7 +224,7 @@ impl PrincipalStore for SqliteStorage {
     ) -> StorageResult<Option<PrincipalRecord>> {
         let applied_at = u64_to_i64(applied_at_unix_secs, "principal.last_apply_at")?;
         let row = sqlx::query(
-            "UPDATE principals_v1 SET last_apply_error = ?, last_apply_at = ? WHERE id = ? RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at",
+            "UPDATE principals_v1 SET last_apply_error = ?, last_apply_at = ? WHERE id = ? RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at",
         )
         .bind(error)
         .bind(applied_at)
@@ -236,6 +248,8 @@ async fn update_principal(
     allowed_upstreams: Option<String>,
     default_limits: Option<String>,
     router_terminal_strategy: Option<String>,
+    update_cache_keepalive: bool,
+    cache_keepalive_json: Option<String>,
     update_last_apply_error: bool,
     last_apply_error: Option<String>,
     last_apply_at: Option<i64>,
@@ -248,12 +262,13 @@ async fn update_principal(
                 allowed_upstreams = COALESCE(?, allowed_upstreams),
                 default_limits = COALESCE(?, default_limits),
                 router_terminal_strategy = COALESCE(?, router_terminal_strategy),
+                cache_keepalive_json = CASE WHEN ? THEN ? ELSE cache_keepalive_json END,
                 last_apply_error = CASE WHEN ? THEN ? ELSE last_apply_error END,
                 last_apply_at = COALESCE(?, last_apply_at),
                 revision = revision + 1,
                 updated_at = ?
           WHERE id = ? AND revision = ?
-          RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at",
+          RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at",
     )
     .bind(name)
     .bind(enabled)
@@ -261,6 +276,8 @@ async fn update_principal(
     .bind(allowed_upstreams)
     .bind(default_limits)
     .bind(router_terminal_strategy)
+    .bind(update_cache_keepalive)
+    .bind(cache_keepalive_json)
     .bind(update_last_apply_error)
     .bind(last_apply_error)
     .bind(last_apply_at)
@@ -271,6 +288,16 @@ async fn update_principal(
     .await
     .map_err(map_sqlite_error)?;
     optional_updated_principal(storage, id, row).await
+}
+
+fn cache_keepalive_binding(
+    update: Option<&Option<CacheKeepaliveConfig>>,
+) -> StorageResult<(bool, Option<String>)> {
+    match update {
+        None => Ok((false, None)),
+        Some(None) => Ok((true, None)),
+        Some(Some(cfg)) => Ok((true, Some(serde_json::to_string(cfg)?))),
+    }
 }
 
 async fn optional_updated_principal(
@@ -374,6 +401,13 @@ fn principal_from_row(row: SqliteRow) -> StorageResult<PrincipalRecord> {
     let last_apply_at = row
         .try_get::<Option<i64>, _>("last_apply_at")
         .map_err(map_sqlx_error)?;
+    let cache_keepalive_json = row
+        .try_get::<Option<String>, _>("cache_keepalive_json")
+        .map_err(map_sqlx_error)?;
+    let cache_keepalive = cache_keepalive_json
+        .as_deref()
+        .map(serde_json::from_str::<CacheKeepaliveConfig>)
+        .transpose()?;
     Ok(PrincipalRecord {
         id: Uuid::parse_str(&id).map_err(|error| StorageError::Corrupted {
             message: format!("invalid principal id {id}: {error}"),
@@ -395,6 +429,7 @@ fn principal_from_row(row: SqliteRow) -> StorageResult<PrincipalRecord> {
         created_at_unix_secs: i64_to_u64(created_at, "principal.created_at")?,
         updated_at_unix_secs: i64_to_u64(updated_at, "principal.updated_at")?,
         router_terminal_strategy: terminal_strategy_from_db_value(&router_terminal_strategy),
+        cache_keepalive,
     })
 }
 
