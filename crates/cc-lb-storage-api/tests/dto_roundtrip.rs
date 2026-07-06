@@ -311,6 +311,7 @@ backend = 'sqlite'"
             window_secs: 60,
             cap_micros: 1000,
         }],
+        cache_keepalive: None,
     });
 }
 
