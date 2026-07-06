@@ -170,7 +170,6 @@ where
 
 fn is_refreshable(upstream: &UpstreamRecord) -> bool {
     upstream.kind == UpstreamKind::AnthropicOauth
-        && (upstream.enabled || upstream.warmup_enabled)
         && upstream.deleted_at_unix_secs.is_none()
         && upstream.oauth_credentials.is_some()
 }
