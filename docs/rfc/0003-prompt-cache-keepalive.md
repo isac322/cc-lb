@@ -55,8 +55,8 @@ storm during idle nights.
    be side-effect-free with respect to the response the client sees.
    Errors log and drop the session, never propagate.
 6. **Fail closed on ambiguity.** When the classifier cannot decide, the
-   default is to *not* fire a keep-alive (with an opt-in LLM judge for
-   principals that want the extra recall).
+   current release does *not* fire a keep-alive. The LLM judge config is
+   reserved for a future implementation and is rejected while unimplemented.
 
 ## Non-goals
 
@@ -148,7 +148,7 @@ dropped, `output_config.format` removed, `tool_choice` in `{tool, any}`
 coerced to `{auto}`. These are the combinations Anthropic rejects with
 `invalid_request_error` when `max_tokens: 0` is set.
 
-### Classifier — `HeuristicClassifier` + optional LLM judge
+### Classifier — `HeuristicClassifier`
 
 Applied on the *response* body of every real completed request. Returns
 `UserTurn`, `AgentInTurn`, or `Ambiguous`. See ADR 0004 for the full
@@ -169,9 +169,9 @@ mapping table. Key rules:
   `treat_end_turn_as_ambiguous` opts in).
 - `stop_reason == "max_tokens" | "stop_sequence"` → **Ambiguous**.
 
-`Ambiguous` responses fall back to the LLM judge if one is configured;
-otherwise they behave like `UserTurn` (fail-safe: prefer eviction over
-paying for a wasted refresh).
+`Ambiguous` responses behave like `UserTurn` in this release (fail-safe:
+prefer eviction over paying for a wasted refresh). The `llm_judge` field is
+reserved for a future implementation; the admin API rejects non-null values.
 
 ### Scheduler — `KeepaliveScheduler`
 
@@ -235,15 +235,17 @@ means `None` for legacy rows and for new principals that omit the field.
 
 ### Provider gating
 
-v1 fires keep-alives only against direct Anthropic upstreams. Other
-providers are silently skipped at snapshot time:
+v1 fires keep-alives only against direct Anthropic OAuth upstreams.
+`AnthropicApiKey` is disabled until storage-backed keep-alive signing lands;
+downstream proxy keys are never replayed to Anthropic. Other providers are
+skipped at fire time:
 
 - **Bedrock, Vertex, OpenRouter:** `max_tokens: 0` schema behavior is
   untested / disallowed. OpenRouter's schema requires `max_tokens >= 1`.
   We do not attempt the request.
 - **Detection point:** the upstream record's `kind` is inspected in the
-  dispatcher; unsupported upstreams return `Error("provider gated")` and
-  the session is cancelled with `reason=UpstreamGone`.
+  dispatcher; unsupported upstreams return a dispatch error and the session
+  is cancelled with `reason=UpstreamGone`.
 
 ## Configuration
 
@@ -262,14 +264,8 @@ config surface is JSON persisted through the admin API):
 - `classifier: ClassifierConfig`
   - `extra_wait_for_user_tools: Vec<String>` (default `[]`).
   - `treat_end_turn_as_ambiguous: bool` (default `false`).
-  - `llm_judge: Option<LlmJudgeConfig>` (default `None`).
-- `llm_judge`
-  - `provider`, `model`, `api_key_secret_ref`, `base_url`,
-    `response_format`, `last_n_messages` (default 4), `max_tokens`
-    (default 128), `temperature` (default 0.0), `timeout_secs` (default 5).
-  - Providers routed through the `genai` crate (native Anthropic, OpenAI,
-    Gemini, Groq, DeepSeek, Ollama, Together, Fireworks; and `Zai` /
-    `Kimi` / `Moonshot` for GLM / Kimi models).
+  - `llm_judge: Option<LlmJudgeConfig>` (default `None`, reserved for a future
+    implementation; non-null values are rejected by the admin API).
 
 Admin API additions: `POST /admin/v1/principals` and
 `PATCH /admin/v1/principals/{id}` accept `cache_keepalive`;
@@ -283,8 +279,8 @@ Prometheus metrics (all labelled by `principal_id` at minimum):
 - `cc_lb_cache_keepalive_scheduled_total{principal_id, ttl}`
 - `cc_lb_cache_keepalive_fired_total{principal_id, ttl, result=hit|miss|error}`
 - `cc_lb_cache_keepalive_cancelled_total{principal_id, reason=new_request|no_cache_control|max_refreshes|max_duration|user_turn_detected|shutdown|upstream_gone|snapshot_too_large}`
-- `cc_lb_cache_keepalive_classifier_decisions_total{decision, source=heuristic|llm}`
-- `cc_lb_cache_keepalive_llm_latency_seconds` (histogram)
+- `cc_lb_cache_keepalive_classifier_decisions_total{decision, source=heuristic}` (`source=llm` reserved)
+- `cc_lb_cache_keepalive_llm_latency_seconds` (reserved histogram; zero samples in this release)
 - `cc_lb_cache_keepalive_active_sessions{principal_id}` (gauge)
 
 Existing per-request `cache_read_input_tokens` telemetry naturally
@@ -302,11 +298,9 @@ reflects success without new event schema.
    establishes automatically on the next real successful request.
 3. **Classifier drift.** New Anthropic clients may adopt tool names we do
    not know. Mitigation: `extra_wait_for_user_tools` is per-principal,
-   plus `treat_end_turn_as_ambiguous` for principals that would rather
-   pay the LLM-judge cost than miss keep-alives.
-4. **Cost of the LLM judge.** For `Ambiguous` cases only, and with
-   `max_tokens: 128` and 5 s timeout by default. Anticipated cost < $0.001
-   per judged decision.
+   plus `treat_end_turn_as_ambiguous` for future judge-backed principals.
+4. **Unimplemented LLM judge.** Mitigation: the admin API rejects non-null
+   `llm_judge`, and any legacy stored value fails closed as `UserTurn`.
 5. **Race between cancel and fire.** Guarded by the generation counter:
    the scheduled task re-locks the entry and returns without dispatching
    if generations no longer match.
@@ -345,6 +339,6 @@ reflects success without new event schema.
 - Do we want a shorter default `max_total_duration` for principals whose
   workload is bursty (single-shot completions dominated)? Deferred until
   after production canary data lands.
-- Should the LLM judge default to Anthropic Haiku for the
-  `same-vendor-cheap-model` argument, or default off? Current plan
-  defaults `llm_judge = None` and requires operators to opt in.
+- Should the future LLM judge default to Anthropic Haiku for the
+  `same-vendor-cheap-model` argument, or default off? Current release
+  reserves `llm_judge` and rejects non-null values.

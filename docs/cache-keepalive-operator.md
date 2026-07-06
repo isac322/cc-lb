@@ -12,10 +12,10 @@ Design references:
 
 ## Scope and provider gating
 
-v1 fires keep-alives only against **direct Anthropic upstreams**
-(`AnthropicKey`, `AnthropicOAuth`). All other upstream kinds are silently
-skipped at fire time and the session is cancelled with
-`reason=upstream_gone`:
+v1 fires keep-alives only against **direct Anthropic OAuth upstreams**.
+`AnthropicApiKey` is disabled until storage-backed keep-alive signing lands;
+downstream proxy keys are never replayed to Anthropic. All other upstream kinds
+are skipped at fire time and the session is cancelled with `reason=upstream_gone`:
 
 - **Bedrock, Vertex:** `max_tokens: 0` behavior is unverified.
 - **OpenRouter:** schema requires `max_tokens >= 1`.
@@ -39,8 +39,8 @@ defaults; every field is optional except `enabled`.
 | `max_total_duration_secs` | `14400` (4 h) | Wall-clock cap from first schedule. |
 | `snapshot_max_bytes` | `524288` (512 KiB) | Shaped body larger than this is not tracked. |
 | `classifier.extra_wait_for_user_tools` | `[]` | Extra tool names to treat as "wait for user" on top of the built-in list. |
-| `classifier.treat_end_turn_as_ambiguous` | `false` | Route `stop_reason: end_turn` through the LLM judge. Opt-in for self-loop agents. |
-| `classifier.llm_judge` | `null` | Optional small-LLM judge for Ambiguous classifier decisions. Documented separately. |
+| `classifier.treat_end_turn_as_ambiguous` | `false` | Treat `stop_reason: end_turn` as ambiguous. Because the LLM judge is reserved for a future release, ambiguous decisions currently fail closed as user-turn. |
+| `classifier.llm_judge` | `null` | Reserved for a future small-LLM judge. The admin API rejects non-null values in this release. |
 
 The built-in wait-for-user tool allow-list matches Claude Code, Cline,
 Roo, Aider, Continue, OpenCode, OpenHands, and Cursor:
@@ -93,11 +93,12 @@ Prometheus surface:
     ones drain.
 - `cc_lb_cache_keepalive_classifier_decisions_total{decision, source}` —
   every classifier verdict. `decision` is `"user_turn"`, `"agent_in_turn"`,
-  or `"ambiguous"`. `source` is `"heuristic"` or `"llm"`. Not labelled by
-  `principal_id` — aggregate over the whole process.
-- `cc_lb_cache_keepalive_llm_latency_seconds` — histogram of the optional
-  LLM judge's end-to-end call time. Zero samples when no principal has
-  `classifier.llm_judge` configured. Not labelled by `principal_id`.
+  or `"ambiguous"`. `source` is currently `"heuristic"`; `"llm"` is reserved
+  for the future judge implementation. Not labelled by `principal_id` —
+  aggregate over the whole process.
+- `cc_lb_cache_keepalive_llm_latency_seconds` — reserved histogram for the
+  future LLM judge. It has zero samples in this release because non-null
+  `classifier.llm_judge` is rejected by the admin API.
 - `cc_lb_cache_keepalive_active_sessions{principal_id}` — gauge of
   currently-scheduled sessions.
 
@@ -112,8 +113,8 @@ Interpretation shortcuts:
   fits within the configured `refresh_lead_time_5m_secs` /
   `refresh_lead_time_1h_secs` (fires must land inside the TTL window,
   not after).
-- `fired_total{result=error}` spiking = a real upstream problem, not a
-  feature bug. Investigate the upstream error log.
+- `fired_total{result=error}` spiking = an unsupported upstream kind,
+  upstream outage, or provider error. Investigate the upstream error log.
 - `cancelled_total{reason=snapshot_too_large}` = a principal's shaped
   request bodies are above 512 KiB. Raise `snapshot_max_bytes` on that
   principal, or accept that these sessions are not tracked.

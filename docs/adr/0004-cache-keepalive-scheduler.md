@@ -88,7 +88,7 @@ Alternatives rejected:
 - **Piggyback on the next real user message.** By definition the user has
   not sent one yet.
 
-### 3. Turn classifier: heuristic stop-reason + content-block table, with an optional LLM judge for the two ambiguous stop reasons
+### 3. Turn classifier: heuristic stop-reason + content-block table, with fail-closed ambiguous responses
 
 **Chosen** because empirical review of Anthropic client behavior across
 Claude Code, Cline, Roo, Aider, Continue, OpenCode, OpenHands, and Cursor
@@ -125,14 +125,10 @@ RFC-0003; the salient rules are:
 - **`max_tokens` / `stop_sequence` → Ambiguous.**
 - **`null` / unknown → UserTurn** (fail-safe).
 
-`Ambiguous` responses either route to the configured LLM judge or, if none
-is configured, default to `UserTurn` (fail-safe: better to lose a
-warm-cache and re-write than to spend money on a wasted fire).
-
-The LLM judge is deliberately provider-agnostic via the `genai` crate so
-principals can point it at a cheap same-vendor model (Anthropic Haiku,
-Kimi K2 Turbo, GLM 4.5, Gemini Flash-Lite) without cc-lb needing to add
-one adapter per provider.
+`Ambiguous` responses default to `UserTurn` in this release (fail-safe:
+better to lose a warm-cache and re-write than to spend money on a wasted
+fire). The `llm_judge` config field is reserved for a future provider-agnostic
+judge and is rejected by the admin API while it is unimplemented.
 
 ## Consequences
 
