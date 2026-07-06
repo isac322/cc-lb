@@ -56,3 +56,30 @@ export function getUpstreamColor(upstreamId: string): {
   const index = Math.abs(hash) % UPSTREAM_COLORS.length;
   return UPSTREAM_COLORS[index]!;
 }
+
+// FNV-1a: better hue distribution than djb2 for short opaque session ids.
+function fnv1aHash(input: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+export interface SessionColor {
+  fg: string;
+  bg: string;
+  border: string;
+  hue: number;
+}
+
+export function getSessionColor(sessionId: string): SessionColor {
+  const hue = fnv1aHash(sessionId) % 360;
+  return {
+    hue,
+    fg: `hsl(${hue} 55% 62%)`,
+    bg: `hsl(${hue} 55% 50% / 0.12)`,
+    border: `hsl(${hue} 45% 50% / 0.35)`,
+  };
+}

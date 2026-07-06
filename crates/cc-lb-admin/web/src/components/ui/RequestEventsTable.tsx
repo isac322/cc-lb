@@ -1,6 +1,7 @@
 import type React from 'react';
 import { useState } from 'react';
 import { eventTime, type RequestEvent } from '../../lib/api';
+import { getSessionColor } from '../../lib/colors';
 import { formatCostMicros, splitNum, statusTone } from '../../lib/format';
 import { LatencyCell } from './latency/LatencyCell';
 import { cx, Hint, SkeletonRow } from './primitives';
@@ -32,6 +33,7 @@ interface RequestEventsTableProps {
   columns?: {
     principal?: boolean;
     upstream?: boolean;
+    session?: boolean;
     cost?: boolean;
     tokens?: boolean;
   };
@@ -60,15 +62,17 @@ export function RequestEventsTable({
   const [selected, setSelected] = useState<RequestEvent | null>(null);
   const showPrincipal = columns?.principal ?? true;
   const showUpstream = columns?.upstream ?? true;
+  const showSession = columns?.session ?? true;
   const showTokens = columns?.tokens ?? true;
   const showCost = columns?.cost ?? true;
 
   // Always shown: Timestamp, Model, Status, Latency (4)
-  // Toggleable: Principal, Upstream, Tokens, Cost (up to 4)
+  // Toggleable: Principal, Upstream, Session, Tokens, Cost (up to 5)
   const colCount =
     4 +
     (showPrincipal ? 1 : 0) +
     (showUpstream ? 1 : 0) +
+    (showSession ? 1 : 0) +
     (showTokens ? 1 : 0) +
     (showCost ? 1 : 0);
 
@@ -89,6 +93,9 @@ export function RequestEventsTable({
               <th className="text-left px-3 py-2 whitespace-nowrap">
                 Upstream
               </th>
+            )}
+            {showSession && (
+              <th className="text-left px-3 py-2 whitespace-nowrap">Session</th>
             )}
             <th className="text-left px-3 py-2 whitespace-nowrap">Model</th>
             <th className="text-right px-3 py-2 whitespace-nowrap">Status</th>
@@ -148,6 +155,11 @@ export function RequestEventsTable({
                         e.upstream_name ??
                         e.upstream ??
                         DASH}
+                    </td>
+                  )}
+                  {showSession && (
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <SessionChip sessionId={e.thread_id ?? null} />
                     </td>
                   )}
                   <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
@@ -227,6 +239,36 @@ export function RequestEventsTable({
         onClose={() => setSelected(null)}
       />
     </>
+  );
+}
+
+// ─── Session chip ────────────────────────────────────────────────────────────
+
+export function SessionChip({ sessionId }: { sessionId: string | null }) {
+  if (!sessionId) {
+    return <span className="text-text-faint">{DASH}</span>;
+  }
+  const color = getSessionColor(sessionId);
+  const short =
+    sessionId.length <= 8
+      ? sessionId
+      : `${sessionId.slice(0, 3)}…${sessionId.slice(-4)}`;
+  return (
+    <span
+      title={sessionId}
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm border text-[10px] font-mono tabular-nums leading-none"
+      style={{
+        backgroundColor: color.bg,
+        color: color.fg,
+        borderColor: color.border,
+      }}
+    >
+      <span
+        className="h-1.5 w-1.5 rounded-full shrink-0"
+        style={{ backgroundColor: color.fg }}
+      />
+      {short}
+    </span>
   );
 }
 

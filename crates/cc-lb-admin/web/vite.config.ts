@@ -4,6 +4,8 @@ import { TanStackRouterVite } from '@tanstack/router-plugin/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
 
+const ADMIN_TARGET = process.env.CC_LB_ADMIN_URL ?? 'http://127.0.0.1:8001';
+
 export default defineConfig({
   // TanStackRouterVite MUST run before @vitejs/plugin-react.
   plugins: [
@@ -16,26 +18,17 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      '/admin/v1': { target: 'http://127.0.0.1:8001', changeOrigin: true },
-      '/admin/events': { target: 'http://127.0.0.1:8001', changeOrigin: true },
-      '/admin/health': { target: 'http://127.0.0.1:8001', changeOrigin: true },
-      '/admin/dashboard': {
-        target: 'http://127.0.0.1:8001',
-        changeOrigin: true,
-      },
-      '/admin/usage': { target: 'http://127.0.0.1:8001', changeOrigin: true },
-      '/admin/audit': { target: 'http://127.0.0.1:8001', changeOrigin: true },
-      '/admin/credentials': {
-        target: 'http://127.0.0.1:8001',
-        changeOrigin: true,
-      },
-      '/admin/oauth': { target: 'http://127.0.0.1:8001', changeOrigin: true },
-      '/admin/config': { target: 'http://127.0.0.1:8001', changeOrigin: true },
-      '/admin/status': { target: 'http://127.0.0.1:8001', changeOrigin: true },
-      '/admin/killswitch': {
-        target: 'http://127.0.0.1:8001',
-        changeOrigin: true,
-      },
+      '/admin/v1': { target: ADMIN_TARGET, changeOrigin: true },
+      '/admin/events': { target: ADMIN_TARGET, changeOrigin: true },
+      '/admin/health': { target: ADMIN_TARGET, changeOrigin: true },
+      '/admin/dashboard': { target: ADMIN_TARGET, changeOrigin: true },
+      '/admin/usage': { target: ADMIN_TARGET, changeOrigin: true },
+      '/admin/audit': { target: ADMIN_TARGET, changeOrigin: true },
+      '/admin/credentials': { target: ADMIN_TARGET, changeOrigin: true },
+      '/admin/oauth': { target: ADMIN_TARGET, changeOrigin: true },
+      '/admin/config': { target: ADMIN_TARGET, changeOrigin: true },
+      '/admin/status': { target: ADMIN_TARGET, changeOrigin: true },
+      '/admin/killswitch': { target: ADMIN_TARGET, changeOrigin: true },
     },
   },
   test: {

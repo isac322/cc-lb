@@ -7,6 +7,7 @@ import { useCopyButton } from '../../lib/useCopyButton';
 import { LatencyTimeline } from './latency/LatencyTimeline';
 import { Badge, Hint } from './primitives';
 import { RelativeTime } from './RelativeTime';
+import { SessionChip } from './RequestEventsTable';
 import { CostPie } from './usage/CostPie';
 import { useActiveSlice } from './usage/PieChart';
 import { TokenPie } from './usage/TokenPie';
@@ -171,6 +172,26 @@ function RequestDetail({
                     </span>
                   ) : null}
                 </span>
+              }
+            />
+            <KvRow
+              label="Session"
+              value={
+                event.thread_id ? (
+                  <span className="flex items-center gap-1 justify-end">
+                    <SessionChip sessionId={event.thread_id} />
+                    <button
+                      type="button"
+                      aria-label="Copy session id"
+                      className="text-text-faint hover:text-text"
+                      onClick={() => copy(event.thread_id ?? '', 'Session ID')}
+                    >
+                      <Copy className="w-3 h-3" />
+                    </button>
+                  </span>
+                ) : (
+                  DASH
+                )
               }
             />
             <KvRow
