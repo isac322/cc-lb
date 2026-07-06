@@ -1815,7 +1815,7 @@ function DetailView({
                 cost: true,
                 tokens: true,
               }}
-              minWidthClass="min-w-[820px]"
+              minWidthClass="min-w-[920px]"
               emptyTitle="No recent requests for this upstream"
             />
           </div>

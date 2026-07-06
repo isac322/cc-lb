@@ -292,6 +292,7 @@ export const RequestEventPartialSchema = z.looseObject({
   upstream: z.string().nullable().optional(),
   upstream_id: z.string().nullable().optional(),
   upstream_name: z.string().nullable().optional(),
+  thread_id: z.string().nullable().optional(),
   model: z.string().nullable().optional(),
   upstream_response_status: z.number().nullable().optional(),
   input_tokens: z.number().nullable().optional(),
@@ -414,6 +415,7 @@ export interface RequestEvent {
   principal_kind?: string;
   upstream?: string;
   upstream_name?: string;
+  thread_id?: string | null;
   model?: string;
   status: number;
   upstream_error_type?: string;

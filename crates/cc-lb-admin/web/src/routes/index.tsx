@@ -1166,7 +1166,7 @@ function OverviewPage() {
               sentinelRef={sentinelRef}
               loadingMore={events.isFetchingNextPage}
               hasMore={events.hasNextPage}
-              minWidthClass="min-w-[980px]"
+              minWidthClass="min-w-[1080px]"
               emptyTitle="No recent requests"
             />
           </div>
