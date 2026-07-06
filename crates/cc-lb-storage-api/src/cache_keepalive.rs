@@ -73,8 +73,8 @@ pub struct ClassifierConfig {
     pub treat_end_turn_as_ambiguous: bool,
 
     /// Optional small-LLM judge for Ambiguous classifier decisions.
-    /// If None, Ambiguous is treated as AgentInTurn (bias toward keeping
-    /// the cache warm — false-positive cost is small).
+    /// If None, Ambiguous defaults to UserTurn (fail-safe: prefer eviction
+    /// over paying for a wasted refresh). See docs/rfc/0003 §Classifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_judge: Option<LlmJudgeConfig>,
 }
