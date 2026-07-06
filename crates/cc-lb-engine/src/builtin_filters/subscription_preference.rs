@@ -43,12 +43,17 @@
 //! - Stale + `rejected` + future reset: hard negative (rejection still live).
 //! - Stale + `rejected` + past reset: unknown (rejection expired).
 
+use cc_lb_plugin_api::types::WrhKeySource;
 use cc_lb_plugin_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, FilterError,
     FilterOutput, FilterPlugin, Principal, RequestContext, SubscriptionQuotaCandidateSnapshot,
-    SubscriptionQuotaDataState, UpstreamCandidate, UpstreamKind,
+    SubscriptionQuotaDataState, SubscriptionTier as PublicTier, UpstreamCandidate, UpstreamKind,
 };
+use parking_lot::Mutex;
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 // -- Reason strings surfaced on FilterOutput.reason (log/audit surface). -----
@@ -100,6 +105,14 @@ pub(crate) const OVERAGE_REMAINING_NOMINAL_SECS: u64 = 30 * 86_400;
 /// read.
 pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
 
+/// Short version tag identifying the WRH salt/algorithm shape. Embedded in
+/// [`RENDEZVOUS_SALT`] and surfaced on `SubscriptionPreferenceTrace.rendezvous_salt_version`
+/// so trace queries can distinguish upstream-mix shifts caused by an
+/// algorithm/salt change from those caused by upstream or quota state
+/// changes. Bumped in lockstep with `RENDEZVOUS_SALT` — a `debug_assert`
+/// in `tests::rendezvous_salt_embeds_version` guards the invariant.
+pub(crate) const SALT_VERSION: &str = "v4";
+
 /// Salt for the weighted-rendezvous hash. Bumped as a version stamp when the
 /// selection algorithm changes shape; older salts must never be reused.
 ///
@@ -111,6 +124,116 @@ pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
 /// cache-creation cost instead of a cache read). See production incident
 /// 2026-07-05 06:24 UTC on session `ses_0d40d66f8...` for the trace.
 const RENDEZVOUS_SALT: &str = "cc-lb:subscription-preference:v4:weighted-rendezvous:2026-07-05";
+
+// -- Tier memory (per-filter, per-DynamicView). -----------------------------
+
+/// Retention window for a `thread_id`'s last observed `SubscriptionTier`.
+/// Chosen to comfortably cover a typical multi-turn conversation without
+/// pinning stale sessions in memory forever.
+const TIER_MEMORY_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// Upper bound on the number of `thread_id -> TierEntry` records the
+/// per-filter memory keeps at once. When both this bound is hit AND all
+/// existing records are fresh (no TTL evictions available), new insertions
+/// are dropped rather than evicting a live record. This trades observability
+/// completeness for a hard memory bound — the tier-flip signal is best-effort
+/// and a dropped insertion just means the affected `thread_id`'s next trace
+/// will show `previous_tier: None` even though a prior turn occurred.
+const TIER_MEMORY_CAP: usize = 10_000;
+
+struct TierEntry {
+    tier: PublicTier,
+    expires_at: Instant,
+}
+
+/// Per-filter map from `thread_id` to the tier that filter previously
+/// assessed the same session into. Shared by every `evaluate` call the
+/// same `SubscriptionPreferenceFilter` instance handles; a `DynamicView`
+/// rebuild replaces the filter (and therefore wipes the map) — acceptable
+/// because this is best-effort observability, not routing correctness.
+pub struct TierMemory {
+    cap: usize,
+    ttl: Duration,
+    inner: Mutex<HashMap<String, TierEntry>>,
+}
+
+impl TierMemory {
+    pub fn new() -> Self {
+        Self::with_cap_and_ttl(TIER_MEMORY_CAP, TIER_MEMORY_TTL)
+    }
+
+    pub fn with_cap_and_ttl(cap: usize, ttl: Duration) -> Self {
+        Self {
+            cap,
+            ttl,
+            inner: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Return the last tier this memory saw for `thread_id`, provided the
+    /// record has not aged past `ttl`. Returns `None` for absent, expired,
+    /// or empty `thread_id`.
+    pub fn get(&self, thread_id: &str, now: Instant) -> Option<PublicTier> {
+        if thread_id.is_empty() {
+            return None;
+        }
+        let map = self.inner.lock();
+        let entry = map.get(thread_id)?;
+        if entry.expires_at > now {
+            Some(entry.tier)
+        } else {
+            None
+        }
+    }
+
+    /// Insert or refresh the tier for `thread_id`. Best-effort: when the
+    /// map is at cap AND all existing entries are still fresh, the new
+    /// key is dropped rather than evicting a live entry. Empty
+    /// `thread_id` is a no-op.
+    pub fn insert(&self, thread_id: &str, tier: PublicTier, now: Instant) {
+        if thread_id.is_empty() {
+            return;
+        }
+        let mut map = self.inner.lock();
+        let expires_at = now + self.ttl;
+        if let Some(entry) = map.get_mut(thread_id) {
+            entry.tier = tier;
+            entry.expires_at = expires_at;
+            return;
+        }
+        if map.len() >= self.cap {
+            map.retain(|_, e| e.expires_at > now);
+        }
+        if map.len() >= self.cap {
+            return;
+        }
+        map.insert(
+            thread_id.to_owned(),
+            TierEntry { tier, expires_at },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.inner.lock().len()
+    }
+}
+
+impl Default for TierMemory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for TierMemory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TierMemory")
+            .field("cap", &self.cap)
+            .field("ttl", &self.ttl)
+            .field("entries", &self.inner.lock().len())
+            .finish()
+    }
+}
 
 // -- Config knobs (compiled defaults today; expose per-principal later). ----
 
@@ -135,11 +258,23 @@ impl Default for FilterConfig {
 // -- Public plugin type. ----------------------------------------------------
 
 #[derive(Clone, Debug, Default)]
-pub struct SubscriptionPreferenceFilter;
+pub struct SubscriptionPreferenceFilter {
+    tier_memory: Arc<TierMemory>,
+}
 
 impl SubscriptionPreferenceFilter {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_tier_memory(tier_memory: Arc<TierMemory>) -> Self {
+        Self { tier_memory }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tier_memory(&self) -> &Arc<TierMemory> {
+        &self.tier_memory
     }
 }
 
@@ -151,7 +286,13 @@ impl FilterPlugin for SubscriptionPreferenceFilter {
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
         let config = FilterConfig::default();
-        Ok(evaluate(ctx, candidates, &config))
+        Ok(evaluate(
+            ctx,
+            candidates,
+            &config,
+            &self.tier_memory,
+            Instant::now(),
+        ))
     }
 
     fn plugin_id(&self) -> Uuid {
@@ -169,6 +310,8 @@ fn evaluate(
     ctx: &RequestContext,
     candidates: &[UpstreamCandidate],
     config: &FilterConfig,
+    tier_memory: &TierMemory,
+    now: Instant,
 ) -> FilterOutput {
     let canonical_model = ctx.canonical_model_id.as_str();
     let base_windows = relevant_base_windows(canonical_model);
@@ -186,6 +329,7 @@ fn evaluate(
             reason: NO_SUBSCRIPTION_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
+            cache_affinity: None,
         };
     }
 
@@ -209,20 +353,41 @@ fn evaluate(
         })
         .collect();
 
+    let session_thread_id: Option<&str> = ctx
+        .thread_id
+        .as_deref()
+        .filter(|id| !id.is_empty());
+    let wrh_key_source = if session_thread_id.is_some() {
+        WrhKeySource::ThreadId
+    } else {
+        WrhKeySource::RequestId
+    };
+
     for bucket in buckets.iter() {
         if bucket.is_empty() {
             continue;
         }
         let winner = pick_within_tier(bucket, ctx, config);
+        let chosen_tier = tier_to_plugin_api(winner.tier);
+        let previous_tier = session_thread_id
+            .and_then(|thread_id| tier_memory.get(thread_id, now));
+        if let Some(thread_id) = session_thread_id {
+            tier_memory.insert(thread_id, chosen_tier, now);
+        }
+
         let trace = cc_lb_plugin_api::SubscriptionPreferenceTrace {
-            chosen_tier: tier_to_plugin_api(winner.tier),
+            chosen_tier,
             candidates: all_assessments,
+            wrh_key_source,
+            previous_tier,
+            rendezvous_salt_version: Some(SALT_VERSION.to_owned()),
         };
         return FilterOutput {
             kept_upstream_ids: vec![winner.candidate.upstream_id],
             reason: SUBSCRIPTION_ALIVE_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: Some(trace),
+            cache_affinity: None,
         };
     }
 
@@ -232,6 +397,7 @@ fn evaluate(
             reason: API_KEY_FALLBACK_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
+            cache_affinity: None,
         }
     } else {
         FilterOutput {
@@ -239,6 +405,7 @@ fn evaluate(
             reason: NO_API_KEY_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
+            cache_affinity: None,
         }
     }
 }

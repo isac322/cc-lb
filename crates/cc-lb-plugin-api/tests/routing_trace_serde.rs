@@ -101,6 +101,7 @@ fn stage_decision_serde_roundtrip() {
         reason: Some("selected_by_policy".to_owned()),
         duration_us: 42,
         subscription_preference: None,
+        cache_affinity: None,
     };
 
     let json = serde_json::to_string(&decision).unwrap();
@@ -118,6 +119,7 @@ fn stage_decision_with_none_fields() {
         reason: None,
         duration_us: 0,
         subscription_preference: None,
+        cache_affinity: None,
     };
 
     let json = serde_json::to_string(&decision).unwrap();
@@ -161,6 +163,7 @@ fn routing_trace_serde_roundtrip() {
                 reason: None,
                 duration_us: 0,
                 subscription_preference: None,
+                cache_affinity: None,
             },
             StageDecision {
                 stage_name: "router".to_owned(),
@@ -168,6 +171,7 @@ fn routing_trace_serde_roundtrip() {
                 reason: Some("healthy".to_owned()),
                 duration_us: 7,
                 subscription_preference: None,
+                cache_affinity: None,
             },
         ],
         terminal_decision: Some(TerminalDecision {
@@ -252,6 +256,7 @@ fn complex_routing_trace_with_multiple_stages() {
             reason: Some(format!("reason_{}", i)),
             duration_us: i as u64,
             subscription_preference: None,
+            cache_affinity: None,
         });
     }
 

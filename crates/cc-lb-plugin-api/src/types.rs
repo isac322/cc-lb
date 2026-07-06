@@ -796,6 +796,34 @@ impl PartialEq for CandidateUrgency {
 
 impl Eq for CandidateUrgency {}
 
+/// Source of the per-session hash key that the subscription-preference filter's
+/// Weighted Rendezvous Hash used to break ties within the winning tier.
+///
+/// Emitted on [`SubscriptionPreferenceTrace`] so downstream trace consumers can
+/// distinguish "this turn stayed on the same upstream because the session
+/// (thread) id kept its WRH seed stable" from "this turn drew an independent
+/// random upstream because no session id was available and the request id was
+/// used as fallback." A run where multiple consecutive turns of the same
+/// conversation show `request_id` here is the primary regression signature of
+/// the 2026-07-05 incident that motivated PR #322 (WRH thread-id fix) and its
+/// follow-up observability issue #340.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WrhKeySource {
+    /// Filter used `RequestContext::thread_id` (populated from headers such as
+    /// `x-claude-code-session-id`). Turns sharing this key pin to the same
+    /// upstream and reuse the Anthropic prompt cache.
+    ThreadId,
+    /// Filter fell back to `RequestContext::request_id` because no session
+    /// identifier was available or the value was empty. Each request draws an
+    /// independent random upstream at the WRH step; safe for stateless traffic
+    /// but destroys prompt-cache affinity across turns of the same
+    /// conversation. Default so that historical trace rows deserialize into a
+    /// safe, backwards-compatible value.
+    #[default]
+    RequestId,
+}
+
 /// Structured trace payload emitted by the subscription-preference filter,
 /// exposing the winning tier and per-candidate WRH urgency scores.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -804,6 +832,73 @@ pub struct SubscriptionPreferenceTrace {
     pub chosen_tier: SubscriptionTier,
     /// One entry per candidate that participated in tier assessment.
     pub candidates: Vec<CandidateUrgency>,
+    /// Which `RequestContext` field the filter fed into the Weighted
+    /// Rendezvous Hash to break ties within `chosen_tier`. Defaults to
+    /// [`WrhKeySource::RequestId`] when absent so trace payloads written
+    /// before this field existed deserialize cleanly and land on the same
+    /// value that request-id keying used historically.
+    #[serde(default)]
+    pub wrh_key_source: WrhKeySource,
+    /// Tier the same `thread_id` was previously assessed into during a
+    /// prior request on this proxy instance, when known. `None` for the
+    /// first turn of a session, for stateless requests (no `thread_id`),
+    /// after a `DynamicView` rebuild wipes tier memory, and after the
+    /// per-thread tier record ages out or is evicted by the tier-memory
+    /// bound. Used to distinguish legitimate tier transitions
+    /// (`KnownBase -> Overage` on a genuine quota flip) from spurious
+    /// upstream churn in trace queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_tier: Option<SubscriptionTier>,
+    /// Version label of the WRH salt/algorithm that produced this trace.
+    /// Bumped when the selection algorithm changes shape so a shift in
+    /// upstream mix can be attributed to an algorithm change vs. an
+    /// upstream/quota state change. `None` for trace payloads written
+    /// before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendezvous_salt_version: Option<String>,
+}
+
+/// Per-candidate cache-affinity trace row. Emitted by the built-in
+/// `cache_affinity` filter so a stored `routing_trace` retains enough state
+/// to reconstruct why a candidate was kept or dropped without re-running
+/// the filter.
+///
+/// Fields intentionally stay raw (no `never_warm` / `cache_expired`
+/// derived labels) because the filter itself does not consult TTLs when
+/// deciding to keep or drop — it only checks that
+/// `predicted_cache_read_tokens` is greater than zero. Trace consumers
+/// can compute their own labels from
+/// `(kept, predicted_cache_read_tokens, predicted_expires_at_unix_secs)`
+/// against the surrounding request timestamp.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheAffinityCandidate {
+    /// Upstream identifier this trace row describes.
+    pub upstream_id: Uuid,
+    /// `true` when the candidate survived the filter and was passed to the
+    /// next stage. `false` when the filter dropped it (only possible when
+    /// at least one peer candidate was a cache hit).
+    pub kept: bool,
+    /// Predicted prompt-cache read tokens from the cache-score subsystem.
+    /// `Some(0)` means a score was computed but nothing would replay from
+    /// cache; `None` means no cache score was available for this candidate.
+    /// Consumers derive "warm" as `Some(n) if n > 0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_cache_read_tokens: Option<u32>,
+    /// Predicted cache expiry (unix seconds) from the cache-score subsystem
+    /// when known. Consumers derive "cache expired at trace time" by
+    /// comparing against the request event's timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_expires_at_unix_secs: Option<u64>,
+}
+
+/// Structured trace payload emitted by the built-in cache-affinity filter,
+/// exposing which candidates were kept versus dropped and the cache-score
+/// signals that drove the decision.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheAffinityTrace {
+    /// One entry per candidate the filter observed, in the order the
+    /// filter received them.
+    pub candidates: Vec<CacheAffinityCandidate>,
 }
 
 /// Decision made at a single routing stage.
@@ -824,6 +919,11 @@ pub struct StageDecision {
     /// subscription-preference filter populates this today.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription_preference: Option<SubscriptionPreferenceTrace>,
+    /// Optional cache-affinity trace payload. Only the built-in
+    /// `cache_affinity` filter populates this today; user-defined
+    /// wasm filters leave it `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_affinity: Option<CacheAffinityTrace>,
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -1262,5 +1362,44 @@ mod tests {
         };
         assert!(ctx.cache_breakpoints.is_empty());
         assert!(ctx.canonical_model_id.is_empty());
+    }
+
+    #[test]
+    fn wrh_key_source_default_is_request_id() {
+        assert_eq!(WrhKeySource::default(), WrhKeySource::RequestId);
+    }
+
+    #[test]
+    fn wrh_key_source_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&WrhKeySource::ThreadId).unwrap(),
+            "\"thread_id\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WrhKeySource::RequestId).unwrap(),
+            "\"request_id\""
+        );
+        let decoded: WrhKeySource = serde_json::from_str("\"thread_id\"").unwrap();
+        assert_eq!(decoded, WrhKeySource::ThreadId);
+    }
+
+    #[test]
+    fn subscription_preference_trace_deserializes_legacy_payload() {
+        let legacy = r#"{"chosen_tier":"known_base","candidates":[]}"#;
+        let decoded: SubscriptionPreferenceTrace = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.chosen_tier, SubscriptionTier::KnownBase);
+        assert!(decoded.candidates.is_empty());
+        assert_eq!(decoded.wrh_key_source, WrhKeySource::RequestId);
+        assert!(decoded.previous_tier.is_none());
+        assert!(decoded.rendezvous_salt_version.is_none());
+    }
+
+    #[test]
+    fn stage_decision_deserializes_legacy_payload_without_cache_affinity() {
+        let legacy = r#"{"stage_name":"cache_affinity"}"#;
+        let decoded: StageDecision = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.stage_name, "cache_affinity");
+        assert!(decoded.cache_affinity.is_none());
+        assert!(decoded.subscription_preference.is_none());
     }
 }

@@ -1,3 +1,4 @@
+use cc_lb_plugin_api::types::{CacheAffinityCandidate, CacheAffinityTrace};
 use cc_lb_plugin_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, FilterError, FilterOutput,
     FilterPlugin, Principal, RequestContext, UpstreamCandidate,
@@ -46,16 +47,39 @@ impl FilterPlugin for CacheAffinityFilter {
     ) -> Result<FilterOutput, FilterError> {
         let has_hit = candidates.iter().any(is_cache_hit);
         let reason = if has_hit { HIT_REASON } else { MISS_REASON };
-        let kept_upstream_ids = candidates
-            .iter()
-            .filter(|candidate| !has_hit || is_cache_hit(candidate))
-            .map(|candidate| candidate.upstream_id)
-            .collect::<Vec<_>>();
+        let mut kept_upstream_ids = Vec::with_capacity(candidates.len());
+        let mut trace_rows = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let kept = !has_hit || is_cache_hit(candidate);
+            if kept {
+                kept_upstream_ids.push(candidate.upstream_id);
+            }
+            trace_rows.push(CacheAffinityCandidate {
+                upstream_id: candidate.upstream_id,
+                kept,
+                predicted_cache_read_tokens: candidate
+                    .cache_score
+                    .as_ref()
+                    .map(|score| score.predicted_cache_read_tokens),
+                predicted_expires_at_unix_secs: candidate
+                    .cache_score
+                    .as_ref()
+                    .and_then(|score| score.predicted_expires_at_unix_secs),
+            });
+        }
+        let cache_affinity = if trace_rows.is_empty() {
+            None
+        } else {
+            Some(CacheAffinityTrace {
+                candidates: trace_rows,
+            })
+        };
         Ok(FilterOutput {
             kept_upstream_ids,
             reason: reason.to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
+            cache_affinity,
         })
     }
 
@@ -93,6 +117,12 @@ mod tests {
         assert_eq!(output.kept_upstream_ids, vec![warm.upstream_id]);
         assert_eq!(output.reason, HIT_REASON);
         assert!(output.per_candidate_reasons.is_empty());
+        let trace = output.cache_affinity.expect("hit path must emit trace");
+        assert_eq!(trace.candidates.len(), 2);
+        assert!(trace.candidates[0].kept);
+        assert_eq!(trace.candidates[0].predicted_cache_read_tokens, Some(10));
+        assert!(!trace.candidates[1].kept);
+        assert_eq!(trace.candidates[1].predicted_cache_read_tokens, Some(0));
     }
 
     #[test]
@@ -107,6 +137,13 @@ mod tests {
         );
         assert_eq!(output.reason, MISS_REASON);
         assert!(output.per_candidate_reasons.is_empty());
+        let trace = output
+            .cache_affinity
+            .expect("miss path must emit trace with per-candidate rows");
+        assert_eq!(trace.candidates.len(), 2);
+        assert!(trace.candidates.iter().all(|row| row.kept));
+        assert_eq!(trace.candidates[0].predicted_cache_read_tokens, Some(0));
+        assert_eq!(trace.candidates[1].predicted_cache_read_tokens, None);
     }
 
     #[test]
@@ -116,6 +153,7 @@ mod tests {
         assert!(output.kept_upstream_ids.is_empty());
         assert_eq!(output.reason, MISS_REASON);
         assert!(output.per_candidate_reasons.is_empty());
+        assert!(output.cache_affinity.is_none());
     }
 
     #[test]
@@ -130,6 +168,35 @@ mod tests {
         );
         assert_eq!(output.reason, HIT_REASON);
         assert!(output.per_candidate_reasons.is_empty());
+        let trace = output
+            .cache_affinity
+            .expect("all-warm path must emit trace");
+        assert_eq!(trace.candidates.len(), 2);
+        assert!(trace.candidates.iter().all(|row| row.kept));
+    }
+
+    #[test]
+    fn trace_surfaces_predicted_expiry_and_missing_score() {
+        let mut warm = candidate("warm", 10);
+        if let Some(score) = warm.cache_score.as_mut() {
+            score.predicted_expires_at_unix_secs = Some(1_700_000_500);
+        }
+        let cold_no_score = candidate_without_score("cold");
+        let output = filter(&[warm.clone(), cold_no_score.clone()]);
+
+        let trace = output
+            .cache_affinity
+            .expect("mixed pool must emit trace");
+        assert_eq!(
+            trace.candidates[0].predicted_expires_at_unix_secs,
+            Some(1_700_000_500)
+        );
+        assert_eq!(
+            trace.candidates[1].predicted_cache_read_tokens,
+            None,
+            "candidate without cache_score must serialize as None, not Some(0)"
+        );
+        assert_eq!(trace.candidates[1].predicted_expires_at_unix_secs, None);
     }
 
     fn filter(candidates: &[UpstreamCandidate]) -> FilterOutput {

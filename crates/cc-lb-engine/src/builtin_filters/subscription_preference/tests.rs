@@ -1522,3 +1522,298 @@ fn blank_snapshot(
         upgrade_paths: None,
     }
 }
+
+// =============================================================================
+// Section K — Observability trace (issue #340): wrh_key_source, previous_tier,
+// rendezvous_salt_version, tier memory bounds
+// =============================================================================
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use cc_lb_plugin_api::SubscriptionTier;
+
+fn healthy_oauth_candidate(name: &str, id_seed: u8) -> UpstreamCandidate {
+    oauth_with(
+        name,
+        id_seed,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .status("allowed")
+                .util(0.10)
+                .reset_at(T0_SECS + 3_600)
+                .build(),
+            fresh(WINDOW_SEVEN_DAY)
+                .status("allowed")
+                .util(0.10)
+                .reset_at(T0_SECS + 604_800)
+                .build(),
+        ],
+    )
+}
+
+#[test]
+fn rendezvous_salt_embeds_declared_version() {
+    let embed = format!(":{SALT_VERSION}:");
+    assert!(
+        RENDEZVOUS_SALT.contains(&embed),
+        "RENDEZVOUS_SALT `{RENDEZVOUS_SALT}` must embed SALT_VERSION `{SALT_VERSION}` verbatim; \
+         they are bumped together per the salt-version invariant",
+    );
+}
+
+#[test]
+fn wrh_key_source_is_thread_id_when_thread_id_present() {
+    let filter = SubscriptionPreferenceFilter::new();
+    let candidates = vec![
+        healthy_oauth_candidate("upstream-a", 1),
+        healthy_oauth_candidate("upstream-b", 2),
+    ];
+    let ctx = ctx_with_thread_id(SONNET_MODEL, "req-1", "thread-A");
+    let output = filter.filter(&ctx, &principal(), &candidates).unwrap();
+    let trace = output
+        .subscription_preference
+        .expect("subscription-alive path must emit trace");
+    assert_eq!(trace.wrh_key_source, WrhKeySource::ThreadId);
+    assert_eq!(
+        trace.rendezvous_salt_version.as_deref(),
+        Some(SALT_VERSION),
+        "trace must stamp the current WRH salt version so post-hoc queries can \
+         distinguish algorithm changes from state changes"
+    );
+}
+
+#[test]
+fn wrh_key_source_falls_back_to_request_id_when_thread_id_absent() {
+    let filter = SubscriptionPreferenceFilter::new();
+    let candidates = vec![
+        healthy_oauth_candidate("upstream-a", 1),
+        healthy_oauth_candidate("upstream-b", 2),
+    ];
+    let ctx = ctx_with_request_id(SONNET_MODEL, "req-1");
+    let output = filter.filter(&ctx, &principal(), &candidates).unwrap();
+    let trace = output.subscription_preference.expect("trace present");
+    assert_eq!(trace.wrh_key_source, WrhKeySource::RequestId);
+}
+
+#[test]
+fn wrh_key_source_falls_back_to_request_id_when_thread_id_is_empty_string() {
+    let filter = SubscriptionPreferenceFilter::new();
+    let candidates = vec![
+        healthy_oauth_candidate("upstream-a", 1),
+        healthy_oauth_candidate("upstream-b", 2),
+    ];
+    let ctx = ctx_with_thread_id(SONNET_MODEL, "req-1", "");
+    let output = filter.filter(&ctx, &principal(), &candidates).unwrap();
+    let trace = output.subscription_preference.expect("trace present");
+    assert_eq!(
+        trace.wrh_key_source,
+        WrhKeySource::RequestId,
+        "empty thread_id must be treated as absent so an upstream that \
+         populates the header with an empty string does not accidentally pin"
+    );
+}
+
+#[test]
+fn previous_tier_is_none_on_first_turn_and_populated_on_second_turn() {
+    let filter = SubscriptionPreferenceFilter::new();
+    let candidates = vec![
+        healthy_oauth_candidate("upstream-a", 1),
+        healthy_oauth_candidate("upstream-b", 2),
+    ];
+    let principal = principal();
+    let ctx_turn_1 = ctx_with_thread_id(SONNET_MODEL, "req-1", "thread-A");
+    let out_1 = filter.filter(&ctx_turn_1, &principal, &candidates).unwrap();
+    let trace_1 = out_1.subscription_preference.expect("turn-1 trace present");
+    assert!(
+        trace_1.previous_tier.is_none(),
+        "first turn on a thread has no prior tier record"
+    );
+
+    let ctx_turn_2 = ctx_with_thread_id(SONNET_MODEL, "req-2", "thread-A");
+    let out_2 = filter.filter(&ctx_turn_2, &principal, &candidates).unwrap();
+    let trace_2 = out_2.subscription_preference.expect("turn-2 trace present");
+    assert_eq!(
+        trace_2.previous_tier,
+        Some(trace_1.chosen_tier),
+        "second turn on same thread must surface the tier the previous turn saw"
+    );
+}
+
+#[test]
+fn previous_tier_is_not_shared_across_threads() {
+    let filter = SubscriptionPreferenceFilter::new();
+    let candidates = vec![
+        healthy_oauth_candidate("upstream-a", 1),
+        healthy_oauth_candidate("upstream-b", 2),
+    ];
+    let principal = principal();
+    let ctx_a1 = ctx_with_thread_id(SONNET_MODEL, "req-a1", "thread-A");
+    let _ = filter.filter(&ctx_a1, &principal, &candidates).unwrap();
+
+    let ctx_b1 = ctx_with_thread_id(SONNET_MODEL, "req-b1", "thread-B");
+    let out_b1 = filter.filter(&ctx_b1, &principal, &candidates).unwrap();
+    let trace_b1 = out_b1.subscription_preference.expect("trace present");
+    assert!(
+        trace_b1.previous_tier.is_none(),
+        "thread-B first turn must not see thread-A's tier record"
+    );
+}
+
+#[test]
+fn stateless_requests_never_populate_previous_tier() {
+    let filter = SubscriptionPreferenceFilter::new();
+    let candidates = vec![
+        healthy_oauth_candidate("upstream-a", 1),
+        healthy_oauth_candidate("upstream-b", 2),
+    ];
+    let principal = principal();
+    for i in 0..5 {
+        let ctx = ctx_with_request_id(SONNET_MODEL, &format!("req-{i}"));
+        let out = filter.filter(&ctx, &principal, &candidates).unwrap();
+        let trace = out.subscription_preference.expect("trace present");
+        assert!(
+            trace.previous_tier.is_none(),
+            "iteration {i}: stateless (no thread_id) request must never surface previous_tier",
+        );
+    }
+    assert_eq!(
+        filter.tier_memory().len(),
+        0,
+        "tier memory must not record entries for stateless requests"
+    );
+}
+
+// ---- TierMemory unit tests ----
+
+#[test]
+fn tier_memory_insert_get_roundtrip() {
+    let mem = TierMemory::new();
+    let now = Instant::now();
+    mem.insert("thread-A", SubscriptionTier::KnownBase, now);
+    assert_eq!(
+        mem.get("thread-A", now),
+        Some(SubscriptionTier::KnownBase)
+    );
+    assert!(mem.get("thread-B", now).is_none());
+}
+
+#[test]
+fn tier_memory_insert_ignores_empty_thread_id() {
+    let mem = TierMemory::new();
+    let now = Instant::now();
+    mem.insert("", SubscriptionTier::KnownBase, now);
+    assert_eq!(mem.len(), 0);
+    assert!(mem.get("", now).is_none());
+}
+
+#[test]
+fn tier_memory_ttl_expiry_returns_none_after_deadline() {
+    let mem = TierMemory::with_cap_and_ttl(16, Duration::from_secs(30));
+    let base = Instant::now();
+    mem.insert("thread-A", SubscriptionTier::Overage, base);
+    assert_eq!(mem.get("thread-A", base), Some(SubscriptionTier::Overage));
+    assert_eq!(
+        mem.get("thread-A", base + Duration::from_secs(29)),
+        Some(SubscriptionTier::Overage),
+        "within TTL window the record must remain visible"
+    );
+    assert!(
+        mem.get("thread-A", base + Duration::from_secs(30)).is_none(),
+        "at TTL boundary the record must age out"
+    );
+    assert!(
+        mem.get("thread-A", base + Duration::from_secs(60)).is_none()
+    );
+}
+
+#[test]
+fn tier_memory_reinsert_refreshes_ttl() {
+    let mem = TierMemory::with_cap_and_ttl(16, Duration::from_secs(10));
+    let t0 = Instant::now();
+    mem.insert("thread-A", SubscriptionTier::KnownBase, t0);
+    let t1 = t0 + Duration::from_secs(5);
+    mem.insert("thread-A", SubscriptionTier::PartialBase, t1);
+    let t2 = t0 + Duration::from_secs(12);
+    assert_eq!(
+        mem.get("thread-A", t2),
+        Some(SubscriptionTier::PartialBase),
+        "re-insert must extend the deadline to t1+ttl and swap the stored tier"
+    );
+}
+
+#[test]
+fn tier_memory_at_cap_with_all_fresh_entries_drops_new_key() {
+    let mem = TierMemory::with_cap_and_ttl(2, Duration::from_secs(60));
+    let now = Instant::now();
+    mem.insert("thread-A", SubscriptionTier::KnownBase, now);
+    mem.insert("thread-B", SubscriptionTier::KnownBase, now);
+    assert_eq!(mem.len(), 2);
+    mem.insert("thread-C", SubscriptionTier::KnownBase, now);
+    assert_eq!(
+        mem.len(),
+        2,
+        "cap must be preserved when all existing entries are still fresh"
+    );
+    assert!(
+        mem.get("thread-C", now).is_none(),
+        "the new key must be dropped, not evict a live record"
+    );
+    assert_eq!(
+        mem.get("thread-A", now),
+        Some(SubscriptionTier::KnownBase),
+        "existing fresh records must survive the failed insert"
+    );
+}
+
+#[test]
+fn tier_memory_at_cap_evicts_expired_before_accepting_new_key() {
+    let mem = TierMemory::with_cap_and_ttl(2, Duration::from_secs(10));
+    let t0 = Instant::now();
+    mem.insert("thread-A", SubscriptionTier::KnownBase, t0);
+    mem.insert("thread-B", SubscriptionTier::KnownBase, t0);
+    assert_eq!(mem.len(), 2);
+    let after_expiry = t0 + Duration::from_secs(15);
+    mem.insert("thread-C", SubscriptionTier::KnownBase, after_expiry);
+    assert_eq!(
+        mem.get("thread-C", after_expiry),
+        Some(SubscriptionTier::KnownBase),
+        "when existing entries are stale the sweep must free space for the new key"
+    );
+}
+
+#[test]
+fn tier_memory_reinsert_at_cap_updates_in_place_without_dropping() {
+    let mem = TierMemory::with_cap_and_ttl(2, Duration::from_secs(60));
+    let now = Instant::now();
+    mem.insert("thread-A", SubscriptionTier::KnownBase, now);
+    mem.insert("thread-B", SubscriptionTier::KnownBase, now);
+    mem.insert("thread-A", SubscriptionTier::Overage, now);
+    assert_eq!(mem.len(), 2);
+    assert_eq!(
+        mem.get("thread-A", now),
+        Some(SubscriptionTier::Overage),
+        "re-inserting an existing key must never trigger the cap-full drop path"
+    );
+}
+
+#[test]
+fn evaluate_shares_tier_memory_across_calls_through_arc() {
+    let memory = Arc::new(TierMemory::new());
+    let filter_a = SubscriptionPreferenceFilter::with_tier_memory(Arc::clone(&memory));
+    let filter_b = SubscriptionPreferenceFilter::with_tier_memory(Arc::clone(&memory));
+    let candidates = vec![
+        healthy_oauth_candidate("upstream-a", 1),
+        healthy_oauth_candidate("upstream-b", 2),
+    ];
+    let principal = principal();
+    let ctx = ctx_with_thread_id(SONNET_MODEL, "req-1", "thread-shared");
+    let _ = filter_a.filter(&ctx, &principal, &candidates).unwrap();
+    let ctx2 = ctx_with_thread_id(SONNET_MODEL, "req-2", "thread-shared");
+    let out2 = filter_b.filter(&ctx2, &principal, &candidates).unwrap();
+    let trace2 = out2.subscription_preference.expect("trace present");
+    assert!(
+        trace2.previous_tier.is_some(),
+        "two filter handles sharing an Arc<TierMemory> must observe each other's writes"
+    );
+}
