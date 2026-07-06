@@ -2,8 +2,8 @@
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, Principal, PrincipalKind, RequestContext,
-    TerminalStrategy, UpstreamCandidate, UpstreamKind,
+    CachePricingSummary, FilterError, FilterOutput, FilterPlugin, Principal, PrincipalKind,
+    RequestContext, TerminalStrategy, UpstreamCandidate, UpstreamKind,
 };
 use http::Method;
 use uuid::Uuid;
@@ -240,6 +240,7 @@ fn allow_all_filter_execution() {
         body_bytes: Bytes::new(),
         cache_breakpoints: Vec::new(),
         canonical_model_id: "claude-3-sonnet".to_string(),
+        cache_pricing: CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "principal-1".to_string(),
@@ -300,6 +301,7 @@ fn selective_filter_execution() {
         body_bytes: Bytes::new(),
         cache_breakpoints: Vec::new(),
         canonical_model_id: "claude-3-sonnet".to_string(),
+        cache_pricing: CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "principal-2".to_string(),
@@ -359,6 +361,7 @@ fn error_filter_execution() {
         body_bytes: Bytes::new(),
         cache_breakpoints: Vec::new(),
         canonical_model_id: "claude-3-sonnet".to_string(),
+        cache_pricing: CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "principal-3".to_string(),

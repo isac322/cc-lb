@@ -336,6 +336,33 @@ pub struct CacheScore {
     pub ambiguity_reason: Option<String>,
 }
 
+/// Model-specific cache/input pricing exposed to router plugins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachePricingSummary {
+    /// Pricing availability status, currently `known` or `unknown`.
+    pub status: String,
+    /// Base input token price in micros USD per million tokens.
+    pub input_micros_per_million: Option<u64>,
+    /// 5-minute cache creation token price in micros USD per million tokens.
+    pub cache_creation_5m_micros_per_million: Option<u64>,
+    /// 1-hour cache creation token price in micros USD per million tokens.
+    pub cache_creation_1h_micros_per_million: Option<u64>,
+    /// Cache read token price in micros USD per million tokens.
+    pub cache_read_micros_per_million: Option<u64>,
+}
+
+impl Default for CachePricingSummary {
+    fn default() -> Self {
+        Self {
+            status: "unknown".to_owned(),
+            input_micros_per_million: None,
+            cache_creation_5m_micros_per_million: None,
+            cache_creation_1h_micros_per_million: None,
+            cache_read_micros_per_million: None,
+        }
+    }
+}
+
 /// Available upstream candidate for routing decisions.
 ///
 /// The router receives a list of available upstream candidates sorted by
@@ -424,6 +451,9 @@ pub struct RequestContext {
     pub cache_breakpoints: Vec<CacheBreakpoint>,
     /// Canonical model identifier resolved from the request.
     pub canonical_model_id: String,
+    /// Pricing summary for the canonical model, loaded by the host from the
+    /// in-memory price catalog before router plugins run.
+    pub cache_pricing: CachePricingSummary,
 }
 
 /// Request produced by an upstream dialect before credentials are applied.
@@ -777,51 +807,53 @@ pub enum SubscriptionTier {
 /// Per-candidate weighted-rendezvous-hash urgency score and tier for one
 /// subscription-preference selection.
 ///
-/// Under salt v7 the `urgency` field is aliased to `effective_weight` so a
+/// Under salt v9 the `urgency` field is aliased to `effective_weight` so a
 /// consumer that only reads `urgency` still sees the current selection
-/// weight. The new fields (`quota_urgency`, `predicted_cache_read_tokens`,
-/// `cache_ratio`, `cache_weight_multiplier`, `effective_weight`) expose the
-/// four components of the cache-weighted WRH computation individually so
-/// operator queries can distinguish quota-driven changes from cache-driven
-/// changes. See docs/rfc/0003-cache-weighted-subscription-preference.md.
-///
-/// All new fields default to zero so v6-shape trace rows deserialize
-/// cleanly into a `CandidateUrgency` that reports "no cache signal, no
-/// v7 boost."
+/// weight. Component fields expose the quota, cache, warning, and pricing
+/// inputs so operator queries can distinguish quota-driven changes from
+/// cache-cost-driven owner retention.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CandidateUrgency {
     /// Upstream identifier this urgency was computed for.
     pub upstream_id: Uuid,
     /// Tier the candidate was assessed into.
     pub tier: SubscriptionTier,
-    /// WRH selection weight actually used to score this candidate. Under
-    /// v7 this equals `effective_weight`; kept as a stable alias so legacy
-    /// trace consumers that only read `urgency` still see the current
-    /// value.
+    /// WRH selection weight actually used to score this candidate.
     pub urgency: f64,
     /// Pre-boost quota urgency component
-    /// (`capacity_multiplier * (1 - util)^2 / remaining_secs`). Defaults to
-    /// zero on v6-shape rows.
+    /// (`capacity_multiplier * (1 - util)^2 / remaining_secs`).
     #[serde(default)]
     pub quota_urgency: f64,
-    /// Cache signal input from `cache_score.predicted_cache_read_tokens`.
-    /// Zero when the candidate has no cache_score or reports zero
-    /// predicted read tokens.
+    /// Predicted input tokens that can be read from cache.
     #[serde(default)]
     pub predicted_cache_read_tokens: u32,
+    /// Predicted input tokens that would be written to 5-minute cache.
+    #[serde(default)]
+    pub predicted_cache_creation_tokens_5m: u32,
+    /// Predicted input tokens that would be written to 1-hour cache.
+    #[serde(default)]
+    pub predicted_cache_creation_tokens_1h: u32,
+    /// Predicted input tokens that are neither read from nor written to cache.
+    #[serde(default)]
+    pub predicted_uncached_input_tokens: u32,
     /// Ratio of `predicted_cache_read_tokens` to the maximum observed in
     /// this candidate's tier bucket. Ranges `[0.0, 1.0]`; zero when the
     /// bucket max is zero.
-    #[serde(default)]
     pub cache_ratio: f64,
     /// `exp(CACHE_LOG_BOOST * cache_ratio)`. Ranges from 1.0 (cold) up to
     /// `exp(CACHE_LOG_BOOST)` (deepest cache in bucket). Multiplied onto
     /// `quota_urgency` to produce `effective_weight`.
-    #[serde(default)]
     pub cache_weight_multiplier: f64,
-    /// Final WRH selection weight: `quota_urgency * cache_weight_multiplier`.
-    /// Under the uniform-fallback branch (all candidates in bucket have
-    /// zero quota_urgency), this equals `cache_weight_multiplier` alone.
+    /// Same-tier multiplier applied when base quota is warning-positive.
+    #[serde(default = "default_warning_multiplier")]
+    pub warning_multiplier: f64,
+    /// Ratio of cache-read savings to estimated cold-input cost.
+    #[serde(default)]
+    pub cache_savings_ratio: f64,
+    /// Estimated input-side cost for this candidate in micros USD.
+    #[serde(default)]
+    pub estimated_input_cost_micros: u64,
+    /// Final WRH weight after quota, cache, and warning multipliers.
     #[serde(default)]
     pub effective_weight: f64,
 }
@@ -833,11 +865,23 @@ impl PartialEq for CandidateUrgency {
             && self.urgency.total_cmp(&other.urgency).is_eq()
             && self.quota_urgency.total_cmp(&other.quota_urgency).is_eq()
             && self.predicted_cache_read_tokens == other.predicted_cache_read_tokens
+            && self.predicted_cache_creation_tokens_5m == other.predicted_cache_creation_tokens_5m
+            && self.predicted_cache_creation_tokens_1h == other.predicted_cache_creation_tokens_1h
+            && self.predicted_uncached_input_tokens == other.predicted_uncached_input_tokens
             && self.cache_ratio.total_cmp(&other.cache_ratio).is_eq()
             && self
                 .cache_weight_multiplier
                 .total_cmp(&other.cache_weight_multiplier)
                 .is_eq()
+            && self
+                .warning_multiplier
+                .total_cmp(&other.warning_multiplier)
+                .is_eq()
+            && self
+                .cache_savings_ratio
+                .total_cmp(&other.cache_savings_ratio)
+                .is_eq()
+            && self.estimated_input_cost_micros == other.estimated_input_cost_micros
             && self
                 .effective_weight
                 .total_cmp(&other.effective_weight)
@@ -846,6 +890,10 @@ impl PartialEq for CandidateUrgency {
 }
 
 impl Eq for CandidateUrgency {}
+
+fn default_warning_multiplier() -> f64 {
+    1.0
+}
 
 /// Source of the per-session hash key that the subscription-preference filter's
 /// Weighted Rendezvous Hash used to break ties within the winning tier.
@@ -884,11 +932,7 @@ pub struct SubscriptionPreferenceTrace {
     /// One entry per candidate that participated in tier assessment.
     pub candidates: Vec<CandidateUrgency>,
     /// Which `RequestContext` field the filter fed into the Weighted
-    /// Rendezvous Hash to break ties within `chosen_tier`. Defaults to
-    /// [`WrhKeySource::RequestId`] when absent so trace payloads written
-    /// before this field existed deserialize cleanly and land on the same
-    /// value that request-id keying used historically.
-    #[serde(default)]
+    /// Rendezvous Hash to break ties within `chosen_tier`.
     pub wrh_key_source: WrhKeySource,
     /// Tier the same `thread_id` was previously assessed into during a
     /// prior request on this proxy instance, when known. `None` for the
@@ -898,15 +942,33 @@ pub struct SubscriptionPreferenceTrace {
     /// bound. Used to distinguish legitimate tier transitions
     /// (`KnownBase -> Overage` on a genuine quota flip) from spurious
     /// upstream churn in trace queries.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_tier: Option<SubscriptionTier>,
     /// Version label of the WRH salt/algorithm that produced this trace.
     /// Bumped when the selection algorithm changes shape so a shift in
     /// upstream mix can be attributed to an algorithm change vs. an
-    /// upstream/quota state change. `None` for trace payloads written
-    /// before this field existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// upstream/quota state change.
     pub rendezvous_salt_version: Option<String>,
+    /// Version label for cache-cost fields in this trace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_cost_basis_version: Option<String>,
+    /// Upstream that won the raw formula before thread-owner retention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula_winner_upstream_id: Option<Uuid>,
+    /// Upstream kept after thread-owner retention and cache-loss gating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_upstream_id: Option<Uuid>,
+    /// Prior owner for this thread, when a same-tier owner existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incumbent_upstream_id: Option<Uuid>,
+    /// Estimated incremental cache cost to switch from incumbent to formula winner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_switch_cache_loss_micros: Option<u64>,
+    /// Pricing/cache availability for the switch-cost estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_loss_status: Option<String>,
+    /// Machine-readable switch-gate outcome reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_gate_reason: Option<String>,
 }
 
 /// Per-candidate cache-affinity trace row. Emitted by the built-in
@@ -1351,6 +1413,7 @@ mod tests {
             body_bytes: Bytes::new(),
             cache_breakpoints: Vec::new(),
             canonical_model_id: String::new(),
+            cache_pricing: CachePricingSummary::default(),
         };
         assert_eq!(ctx_empty.cache_breakpoints.len(), 0);
         assert_eq!(ctx_empty.canonical_model_id, "");
@@ -1375,6 +1438,7 @@ mod tests {
             body_bytes: Bytes::from_static(b"test"),
             cache_breakpoints: vec![breakpoint],
             canonical_model_id: "claude-sonnet-4-5-20250929".to_owned(),
+            cache_pricing: CachePricingSummary::default(),
         };
         assert_eq!(ctx_populated.cache_breakpoints.len(), 1);
         assert_eq!(
@@ -1410,6 +1474,7 @@ mod tests {
             body_bytes: Bytes::new(),
             cache_breakpoints: Vec::new(),
             canonical_model_id: String::new(),
+            cache_pricing: CachePricingSummary::default(),
         };
         assert!(ctx.cache_breakpoints.is_empty());
         assert!(ctx.canonical_model_id.is_empty());
@@ -1435,14 +1500,15 @@ mod tests {
     }
 
     #[test]
-    fn subscription_preference_trace_deserializes_legacy_payload() {
-        let legacy = r#"{"chosen_tier":"known_base","candidates":[]}"#;
-        let decoded: SubscriptionPreferenceTrace = serde_json::from_str(legacy).unwrap();
+    fn subscription_preference_trace_deserializes_current_payload() {
+        let payload = r#"{"chosen_tier":"known_base","candidates":[],"wrh_key_source":"request_id","previous_tier":null,"rendezvous_salt_version":"v9","cache_cost_basis_version":"v1","formula_winner_upstream_id":null,"kept_upstream_id":null,"incumbent_upstream_id":null,"estimated_switch_cache_loss_micros":null,"cache_loss_status":null,"switch_gate_reason":"no_previous_owner"}"#;
+        let decoded: SubscriptionPreferenceTrace = serde_json::from_str(payload).unwrap();
         assert_eq!(decoded.chosen_tier, SubscriptionTier::KnownBase);
         assert!(decoded.candidates.is_empty());
         assert_eq!(decoded.wrh_key_source, WrhKeySource::RequestId);
         assert!(decoded.previous_tier.is_none());
-        assert!(decoded.rendezvous_salt_version.is_none());
+        assert_eq!(decoded.rendezvous_salt_version.as_deref(), Some("v9"));
+        assert_eq!(decoded.cache_cost_basis_version.as_deref(), Some("v1"));
     }
 
     #[test]
