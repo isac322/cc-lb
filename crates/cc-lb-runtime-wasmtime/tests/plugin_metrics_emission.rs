@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cc_lb_plugin_api::SlotKey;
-use cc_lb_plugin_wire::{FilterRequest, Principal, UpstreamCandidate};
+use cc_lb_plugin_wire::{CachePricingSummary, FilterRequest, Principal, UpstreamCandidate};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use rkyv::rancor::Error;
@@ -45,6 +45,14 @@ fn tiny_filter_request() -> FilterRequest {
     FilterRequest {
         request_id: Box::from("metrics-probe"),
         thread_id: None,
+        canonical_model_id: Box::from("claude-test"),
+        cache_pricing: CachePricingSummary {
+            status: Box::from("unknown"),
+            input_micros_per_million: None,
+            cache_creation_5m_micros_per_million: None,
+            cache_creation_1h_micros_per_million: None,
+            cache_read_micros_per_million: None,
+        },
         method: Box::from("POST"),
         path: Box::from("/v1/messages"),
         query: None,
@@ -64,6 +72,9 @@ fn tiny_filter_request() -> FilterRequest {
             kind: Box::from("anthropic_api_key"),
             observed_at_unix_secs: 0,
             predicted_cache_read_tokens: 10,
+            predicted_cache_creation_tokens_5m: 0,
+            predicted_cache_creation_tokens_1h: 0,
+            predicted_uncached_input_tokens: 0,
             plan_capacity_ratio: 1.0,
             organization_type: Box::from(""),
             rate_limit_tier: Box::from(""),

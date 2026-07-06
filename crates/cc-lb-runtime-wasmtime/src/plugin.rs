@@ -27,8 +27,8 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
 use cc_lb_plugin_wire::{
-    ArchivedFilterResponse, ClaimRef, FilterRequestRef, HeaderRef, PrincipalRef, QueryRef,
-    ShapeRequestRef, UpstreamCandidateRef, UpstreamRef,
+    ArchivedFilterResponse, CachePricingSummaryRef, ClaimRef, FilterRequestRef, HeaderRef,
+    PrincipalRef, QueryRef, ShapeRequestRef, UpstreamCandidateRef, UpstreamRef,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
@@ -205,20 +205,30 @@ fn host_to_wire_request(
     let candidate_refs: Vec<UpstreamCandidateRef<'_>> = candidates
         .iter()
         .zip(candidate_id_bufs.iter())
-        .map(|(c, id_str)| UpstreamCandidateRef {
-            upstream_id: id_str.as_str(),
-            name: c.name.as_str(),
-            kind: c.kind.as_str(),
-            observed_at_unix_secs: c.observed_at_unix_secs,
-            predicted_cache_read_tokens: c
-                .cache_score
-                .as_ref()
-                .map(|s| s.predicted_cache_read_tokens)
-                .unwrap_or(0),
-            plan_capacity_ratio: c.plan_capacity_ratio.unwrap_or(1.0),
-            organization_type: c.organization_type.as_deref().unwrap_or(""),
-            rate_limit_tier: c.rate_limit_tier.as_deref().unwrap_or(""),
-            seat_tier: c.seat_tier.as_deref().unwrap_or(""),
+        .map(|(c, id_str)| {
+            let cache_score = c.cache_score.as_ref();
+            UpstreamCandidateRef {
+                upstream_id: id_str.as_str(),
+                name: c.name.as_str(),
+                kind: c.kind.as_str(),
+                observed_at_unix_secs: c.observed_at_unix_secs,
+                predicted_cache_read_tokens: cache_score
+                    .map(|s| s.predicted_cache_read_tokens)
+                    .unwrap_or(0),
+                predicted_cache_creation_tokens_5m: cache_score
+                    .map(|s| s.predicted_cache_creation_tokens_5m)
+                    .unwrap_or(0),
+                predicted_cache_creation_tokens_1h: cache_score
+                    .map(|s| s.predicted_cache_creation_tokens_1h)
+                    .unwrap_or(0),
+                predicted_uncached_input_tokens: cache_score
+                    .map(|s| s.predicted_uncached_input_tokens)
+                    .unwrap_or(0),
+                plan_capacity_ratio: c.plan_capacity_ratio.unwrap_or(1.0),
+                organization_type: c.organization_type.as_deref().unwrap_or(""),
+                rate_limit_tier: c.rate_limit_tier.as_deref().unwrap_or(""),
+                seat_tier: c.seat_tier.as_deref().unwrap_or(""),
+            }
         })
         .collect();
     let query_ref = ctx.query.as_deref().map(|s| QueryRef { value: s });
@@ -226,6 +236,18 @@ fn host_to_wire_request(
     let request = FilterRequestRef {
         request_id: ctx.request_id.as_str(),
         thread_id: thread_id_ref,
+        canonical_model_id: ctx.canonical_model_id.as_str(),
+        cache_pricing: CachePricingSummaryRef {
+            status: ctx.cache_pricing.status.as_str(),
+            input_micros_per_million: ctx.cache_pricing.input_micros_per_million,
+            cache_creation_5m_micros_per_million: ctx
+                .cache_pricing
+                .cache_creation_5m_micros_per_million,
+            cache_creation_1h_micros_per_million: ctx
+                .cache_pricing
+                .cache_creation_1h_micros_per_million,
+            cache_read_micros_per_million: ctx.cache_pricing.cache_read_micros_per_million,
+        },
         method: ctx.method.as_str(),
         path: ctx.path.as_str(),
         query: query_ref,
@@ -766,6 +788,7 @@ mod tests {
             body_bytes: bytes::Bytes::from_static(b"{\"msg\":\"hi\"}"),
             cache_breakpoints: Vec::new(),
             canonical_model_id: "claude-fixture".to_owned(),
+            cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
         }
     }
 
