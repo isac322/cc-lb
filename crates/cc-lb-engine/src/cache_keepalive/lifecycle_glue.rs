@@ -123,7 +123,11 @@ impl LifecycleKeepalive {
                 scheduler.cancel(&session_key, CancelReason::UserTurnDetected);
             }
             super::TurnDecision::Ambiguous if config.classifier.llm_judge.is_some() => {
-                // TODO: Phase 4 dispatches the configured LLM judge asynchronously.
+                tracing::warn!(
+                    target: "cache_keepalive",
+                    principal_id = principal.id.as_str(),
+                    "cache keep-alive llm_judge is configured but unsupported in this release; treating ambiguous response as user turn"
+                );
                 scheduler.cancel(&session_key, CancelReason::UserTurnDetected);
             }
             super::TurnDecision::Ambiguous => {
