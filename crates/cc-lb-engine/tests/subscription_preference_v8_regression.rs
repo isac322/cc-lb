@@ -1,11 +1,17 @@
 use bytes::Bytes;
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_plugin_api::types::CacheScore;
+use cc_lb_plugin_api::types::{CachePricingSummary, CacheScore};
 use cc_lb_plugin_api::{
     FilterPlugin, Principal, PrincipalKind, RequestContext, SubscriptionQuotaCandidateSnapshot,
     SubscriptionQuotaDataState, SubscriptionTier, UpstreamCandidate, UpstreamKind,
 };
+use cc_lb_pricing::{
+    CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion, global_catalog,
+    init_global_catalog,
+};
 use http::Method;
+use std::collections::HashMap;
+use std::sync::Mutex;
 use uuid::Uuid;
 
 const MODEL_AGNOSTIC: &str = "claude-3-5-haiku-default";
@@ -13,6 +19,8 @@ const T0_SECS: u64 = 1_700_000_000;
 const WINDOW_FIVE_HOUR: &str = "5h";
 const WINDOW_SEVEN_DAY: &str = "7d";
 const WINDOW_OVERAGE: &str = "overage";
+
+static PRICE_CATALOG_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn recorded_isac_personal_warning_snapshot_loses_to_clean_known_base_peer() {
@@ -26,23 +34,26 @@ fn recorded_isac_personal_warning_snapshot_loses_to_clean_known_base_peer() {
     // When: subscription-preference assesses both candidates.
     let output = filter(&[isac_personal.clone(), clean_peer.clone()]);
 
-    // Then: warning-demoted isac-personal is PartialBase and loses to the clean
-    // KnownBase peer without being hard-blocked.
+    // Then: warning-positive base remains KnownBase but carries a soft same-tier
+    // warning multiplier rather than a hard tier demotion.
     let trace = output.subscription_preference.expect("trace present");
-    assert_eq!(output.kept_upstream_ids, vec![clean_peer.upstream_id]);
     assert_eq!(trace.chosen_tier, SubscriptionTier::KnownBase);
     assert_eq!(
         candidate_tier(&trace, isac_personal.upstream_id),
-        SubscriptionTier::PartialBase
+        SubscriptionTier::KnownBase
     );
     assert_eq!(
         candidate_tier(&trace, clean_peer.upstream_id),
         SubscriptionTier::KnownBase
     );
+    assert!(
+        candidate_urgency(&trace, isac_personal.upstream_id).warning_multiplier < 1.0,
+        "warning-positive candidate must be softly penalized in KnownBase"
+    );
 }
 
 #[test]
-fn allowed_utilization_at_surpassed_threshold_demotes_to_partial_base() {
+fn allowed_utilization_at_surpassed_threshold_stays_known_base_with_warning_multiplier() {
     // Given: a base window still says allowed but its utilization has crossed
     // the provider-supplied surpassed_threshold.
     let threshold_crossed = oauth_at_t0(
@@ -67,13 +78,16 @@ fn allowed_utilization_at_surpassed_threshold_demotes_to_partial_base() {
     // When: subscription-preference assesses both candidates.
     let output = filter(&[threshold_crossed.clone(), clean_peer.clone()]);
 
-    // Then: the threshold-crossed candidate remains positive but is demoted
-    // below the clean KnownBase peer.
+    // Then: the threshold-crossed candidate remains base-usable in KnownBase,
+    // and warning is expressed as a same-tier multiplier.
     let trace = output.subscription_preference.expect("trace present");
-    assert_eq!(output.kept_upstream_ids, vec![clean_peer.upstream_id]);
     assert_eq!(
         candidate_tier(&trace, threshold_crossed.upstream_id),
-        SubscriptionTier::PartialBase
+        SubscriptionTier::KnownBase
+    );
+    assert!(
+        candidate_urgency(&trace, threshold_crossed.upstream_id).warning_multiplier < 1.0,
+        "threshold-crossed allowed status must be a soft warning signal"
     );
 }
 
@@ -101,14 +115,147 @@ fn warning_only_candidate_remains_selectable_without_clean_peer() {
     // When: subscription-preference has no clean peer available.
     let output = filter(std::slice::from_ref(&warning_only));
 
-    // Then: warning-positive base remains selectable as PartialBase instead of
+    // Then: warning-positive base remains selectable as KnownBase instead of
     // failing open or falling to API key routing.
     let trace = output.subscription_preference.expect("trace present");
     assert_eq!(output.kept_upstream_ids, vec![warning_only.upstream_id]);
-    assert_eq!(trace.chosen_tier, SubscriptionTier::PartialBase);
+    assert_eq!(trace.chosen_tier, SubscriptionTier::KnownBase);
     assert_eq!(
         candidate_tier(&trace, warning_only.upstream_id),
-        SubscriptionTier::PartialBase
+        SubscriptionTier::KnownBase
+    );
+}
+
+#[test]
+fn same_thread_blocks_clean_formula_winner_when_switch_reprime_cost_is_high() {
+    let _guard = PRICE_CATALOG_TEST_LOCK
+        .lock()
+        .expect("price catalog test lock");
+    install_test_pricing();
+
+    let filter = SubscriptionPreferenceFilter::new();
+    let principal = principal();
+    let thread_id = "thread-expensive-reprime";
+    let bear = with_cache_score(
+        recorded_bear_warning_snapshot(),
+        CacheScore {
+            predicted_cache_read_tokens: 516_000,
+            predicted_cache_creation_tokens_5m: 0,
+            predicted_cache_creation_tokens_1h: 0,
+            predicted_uncached_input_tokens: 0,
+            predicted_expires_at_unix_secs: Some(T0_SECS + 300),
+            matched_breakpoint_index: Some(0),
+            confidence: 1.0,
+            ambiguity_reason: None,
+        },
+    );
+    let bh = with_cache_score(
+        recorded_bh_clean_snapshot(),
+        CacheScore {
+            predicted_cache_read_tokens: 0,
+            predicted_cache_creation_tokens_5m: 516_000,
+            predicted_cache_creation_tokens_1h: 0,
+            predicted_uncached_input_tokens: 0,
+            predicted_expires_at_unix_secs: None,
+            matched_breakpoint_index: None,
+            confidence: 1.0,
+            ambiguity_reason: None,
+        },
+    );
+
+    let first = filter
+        .filter(
+            &ctx_with_thread_id("req-1", thread_id),
+            &principal,
+            std::slice::from_ref(&bear),
+        )
+        .expect("filter succeeds");
+    assert_eq!(first.kept_upstream_ids, vec![bear.upstream_id]);
+
+    let risky_bear = with_cache_score(
+        recorded_bear_high_risk_warning_snapshot(),
+        warm_cache_score(516_000),
+    );
+
+    let second = filter
+        .filter(
+            &ctx_with_thread_id("req-2", thread_id),
+            &principal,
+            &[risky_bear.clone(), bh.clone()],
+        )
+        .expect("filter succeeds");
+    let trace = second.subscription_preference.expect("trace present");
+
+    assert_eq!(second.kept_upstream_ids, vec![bear.upstream_id]);
+    assert_eq!(trace.formula_winner_upstream_id, Some(bh.upstream_id));
+    assert_eq!(trace.incumbent_upstream_id, Some(bear.upstream_id));
+    assert_eq!(trace.kept_upstream_id, Some(bear.upstream_id));
+    assert!(
+        trace.estimated_switch_cache_loss_micros.unwrap_or(0) > 2_900_000,
+        "switch should estimate the large incremental cache re-prime cost"
+    );
+    assert_eq!(trace.cache_loss_status.as_deref(), Some("known"));
+    assert_eq!(
+        trace.switch_gate_reason.as_deref(),
+        Some("cache_loss_blocked")
+    );
+}
+
+#[test]
+fn hard_rejected_incumbent_switches_despite_high_reprime_cost() {
+    let _guard = PRICE_CATALOG_TEST_LOCK
+        .lock()
+        .expect("price catalog test lock");
+    install_test_pricing();
+
+    let filter = SubscriptionPreferenceFilter::new();
+    let principal = principal();
+    let thread_id = "thread-hard-reject-bypass";
+    let warm_owner = with_cache_score(clean_known_base("warm-owner", 1), warm_cache_score(516_000));
+    let first = filter
+        .filter(
+            &ctx_with_thread_id("req-1", thread_id),
+            &principal,
+            std::slice::from_ref(&warm_owner),
+        )
+        .expect("filter succeeds");
+    assert_eq!(first.kept_upstream_ids, vec![warm_owner.upstream_id]);
+
+    let rejected_owner = with_cache_score(
+        oauth_at_t0(
+            "warm-owner",
+            1,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .status("rejected")
+                    .util(1.0)
+                    .reset_at(T0_SECS + 3_600)
+                    .build(),
+                fresh(WINDOW_SEVEN_DAY)
+                    .status("allowed")
+                    .util(0.20)
+                    .reset_at(T0_SECS + 604_800)
+                    .build(),
+            ],
+        ),
+        warm_cache_score(516_000),
+    );
+    let cold_peer = with_cache_score(recorded_bh_clean_snapshot(), cold_reprime_score(516_000));
+
+    let second = filter
+        .filter(
+            &ctx_with_thread_id("req-2", thread_id),
+            &principal,
+            &[rejected_owner, cold_peer.clone()],
+        )
+        .expect("filter succeeds");
+    let trace = second.subscription_preference.expect("trace present");
+
+    assert_eq!(second.kept_upstream_ids, vec![cold_peer.upstream_id]);
+    assert_eq!(trace.kept_upstream_id, Some(cold_peer.upstream_id));
+    assert_eq!(
+        trace.switch_gate_reason.as_deref(),
+        Some("no_incumbent_in_tier")
     );
 }
 
@@ -219,18 +366,80 @@ fn candidate_urgency(
         .expect("candidate must be present in trace")
 }
 
-fn with_live_cache(mut candidate: UpstreamCandidate, read_tokens: u32) -> UpstreamCandidate {
-    candidate.cache_score = Some(CacheScore {
+fn with_live_cache(candidate: UpstreamCandidate, read_tokens: u32) -> UpstreamCandidate {
+    with_cache_score(
+        candidate,
+        CacheScore {
+            predicted_cache_read_tokens: read_tokens,
+            predicted_cache_creation_tokens_5m: 0,
+            predicted_cache_creation_tokens_1h: 0,
+            predicted_uncached_input_tokens: 0,
+            predicted_expires_at_unix_secs: None,
+            matched_breakpoint_index: Some(0),
+            confidence: 1.0,
+            ambiguity_reason: None,
+        },
+    )
+}
+
+fn with_cache_score(mut candidate: UpstreamCandidate, score: CacheScore) -> UpstreamCandidate {
+    candidate.cache_score = Some(score);
+    candidate
+}
+
+fn warm_cache_score(read_tokens: u32) -> CacheScore {
+    CacheScore {
         predicted_cache_read_tokens: read_tokens,
         predicted_cache_creation_tokens_5m: 0,
         predicted_cache_creation_tokens_1h: 0,
         predicted_uncached_input_tokens: 0,
-        predicted_expires_at_unix_secs: None,
+        predicted_expires_at_unix_secs: Some(T0_SECS + 300),
         matched_breakpoint_index: Some(0),
         confidence: 1.0,
         ambiguity_reason: None,
-    });
-    candidate
+    }
+}
+
+fn cold_reprime_score(tokens: u32) -> CacheScore {
+    CacheScore {
+        predicted_cache_read_tokens: 0,
+        predicted_cache_creation_tokens_5m: tokens,
+        predicted_cache_creation_tokens_1h: 0,
+        predicted_uncached_input_tokens: 0,
+        predicted_expires_at_unix_secs: None,
+        matched_breakpoint_index: None,
+        confidence: 1.0,
+        ambiguity_reason: None,
+    }
+}
+
+fn install_test_pricing() {
+    let model = MODEL_AGNOSTIC;
+    let pricing = Pricing {
+        model: model.to_owned(),
+        input_per_million_usd: UsdPerMillion::from_whole_usd(5),
+        output_per_million_usd: UsdPerMillion::from_whole_usd(25),
+    };
+    let mut models = HashMap::new();
+    models.insert(model.to_owned(), pricing);
+    let mut cache_creation_per_million_usd = HashMap::new();
+    cache_creation_per_million_usd
+        .insert(model.to_owned(), UsdPerMillion::from_micros_usd(6_250_000));
+    let mut cache_read_per_million_usd = HashMap::new();
+    cache_read_per_million_usd.insert(model.to_owned(), UsdPerMillion::from_micros_usd(500_000));
+    let snapshot = CatalogSnapshot {
+        fetched_at_ms: 1,
+        models,
+        raw_json: b"{}".to_vec(),
+        cache_creation_per_million_usd,
+        cache_read_per_million_usd,
+        status: CatalogStatus::Ok,
+    };
+    let catalog = PriceCatalog::new_empty();
+    catalog.install_snapshot(snapshot.clone());
+    if init_global_catalog(catalog).is_err() {
+        global_catalog().install_snapshot(snapshot);
+    }
 }
 
 fn recorded_isac_personal_warning_snapshot() -> UpstreamCandidate {
@@ -250,6 +459,63 @@ fn recorded_isac_personal_warning_snapshot() -> UpstreamCandidate {
                 .reset_at(T0_SECS + 604_800)
                 .build(),
             fresh(WINDOW_OVERAGE).status("rejected").util(1.0).build(),
+        ],
+    )
+}
+
+fn recorded_bear_warning_snapshot() -> UpstreamCandidate {
+    oauth_at_t0(
+        "bear-max",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .status("allowed_warning")
+                .util(0.80)
+                .reset_at(T0_SECS + 1_386)
+                .build(),
+            fresh(WINDOW_SEVEN_DAY)
+                .status("allowed")
+                .util(0.58)
+                .reset_at(T0_SECS + 262_985)
+                .build(),
+        ],
+    )
+}
+
+fn recorded_bear_high_risk_warning_snapshot() -> UpstreamCandidate {
+    oauth_at_t0(
+        "bear-max",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .status("allowed_warning")
+                .util(0.999)
+                .reset_at(T0_SECS + 15_186)
+                .build(),
+            fresh(WINDOW_SEVEN_DAY)
+                .status("allowed")
+                .util(0.99)
+                .reset_at(T0_SECS + 604_800)
+                .build(),
+        ],
+    )
+}
+
+fn recorded_bh_clean_snapshot() -> UpstreamCandidate {
+    oauth_at_t0(
+        "bh322yoo-max",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .status("allowed")
+                .util(0.50)
+                .reset_at(T0_SECS + 15_186)
+                .build(),
+            fresh(WINDOW_SEVEN_DAY)
+                .status("allowed")
+                .util(0.27)
+                .reset_at(T0_SECS + 468_186)
+                .build(),
         ],
     )
 }
@@ -284,6 +550,7 @@ fn ctx() -> RequestContext {
         body_bytes: Bytes::new(),
         cache_breakpoints: Vec::new(),
         canonical_model_id: MODEL_AGNOSTIC.to_owned(),
+        cache_pricing: test_cache_pricing(),
     }
 }
 
@@ -298,6 +565,17 @@ fn ctx_with_thread_id(request_id: &str, thread_id: &str) -> RequestContext {
         body_bytes: Bytes::new(),
         cache_breakpoints: Vec::new(),
         canonical_model_id: MODEL_AGNOSTIC.to_owned(),
+        cache_pricing: test_cache_pricing(),
+    }
+}
+
+fn test_cache_pricing() -> CachePricingSummary {
+    CachePricingSummary {
+        status: "known".to_owned(),
+        input_micros_per_million: Some(5_000_000),
+        cache_creation_5m_micros_per_million: Some(6_250_000),
+        cache_creation_1h_micros_per_million: Some(10_000_000),
+        cache_read_micros_per_million: Some(500_000),
     }
 }
 
