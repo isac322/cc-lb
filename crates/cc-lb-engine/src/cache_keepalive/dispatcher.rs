@@ -103,6 +103,9 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
             Ok(Some(_)) | Ok(None) => return DispatchOutcome::Error("upstream gone".to_owned()),
             Err(source) => return DispatchOutcome::Error(source.to_string()),
         };
+        if let Err(error) = keepalive_upstream_supported(&upstream) {
+            return DispatchOutcome::Error(error);
+        }
 
         let signed = match self.signed_keepalive_request(snapshot, &upstream).await {
             Ok(signed) => signed,
@@ -117,6 +120,15 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
             Ok(Err(source)) => DispatchOutcome::Error(source),
             Err(source) => DispatchOutcome::Error(source.to_string()),
         }
+    }
+}
+
+fn keepalive_upstream_supported(upstream: &UpstreamRecord) -> Result<(), String> {
+    match upstream.kind {
+        UpstreamKind::AnthropicApiKey => Err(
+            "AnthropicApiKey keep-alive is disabled until storage-backed signing is available; downstream keys cannot be replayed to Anthropic".to_owned(),
+        ),
+        UpstreamKind::AnthropicOauth => Ok(()),
     }
 }
 
@@ -245,33 +257,4 @@ fn body_prefix(body: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn classifies_successful_cache_read_as_hit() {
-        let body = br#"{"content":[],"stop_reason":"max_tokens","usage":{"cache_read_input_tokens":1234,"input_tokens":0,"output_tokens":0}}"#;
-
-        let outcome = classify_success_body(body);
-
-        assert!(matches!(outcome, DispatchOutcome::CacheHit));
-    }
-
-    #[test]
-    fn classifies_zero_cache_read_as_miss() {
-        let body = br#"{"content":[],"stop_reason":"max_tokens","usage":{"cache_read_input_tokens":0,"input_tokens":0,"output_tokens":0}}"#;
-
-        let outcome = classify_success_body(body);
-
-        assert!(matches!(outcome, DispatchOutcome::CacheMiss));
-    }
-
-    #[test]
-    fn classifies_missing_usage_as_miss() {
-        let body = br#"{"content":[],"stop_reason":"max_tokens"}"#;
-
-        let outcome = classify_success_body(body);
-
-        assert!(matches!(outcome, DispatchOutcome::CacheMiss));
-    }
-}
+mod tests;
