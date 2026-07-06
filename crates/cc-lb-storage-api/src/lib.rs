@@ -1,6 +1,7 @@
 #![allow(ambiguous_glob_reexports)]
 
 pub mod anthropic_compatibility_kv;
+pub mod cache_keepalive;
 pub mod error;
 pub mod organization_metadata;
 pub mod plan_tiers;
@@ -23,6 +24,9 @@ pub mod warmup_attempts;
 use async_trait::async_trait;
 
 pub use anthropic_compatibility_kv::*;
+pub use cache_keepalive::{
+    CacheKeepaliveConfig, CacheTtl, ClassifierConfig, JudgeResponseFormat, LlmJudgeConfig,
+};
 
 pub use error::{PluginChainConflictReason, StorageError, StorageResult};
 pub use organization_metadata::*;
