@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-07-04
 - Ships with: PR #312
+- Superseded in part by: ADR 0005, which limits relevant base windows to `5h` and `7d` and ignores `7d_sonnet`/`7d_opus` for routing.
 
 ## Context
 
@@ -70,8 +71,8 @@ Overage-tier candidates use a fixed `OVERAGE_REMAINING_NOMINAL_SECS` denominator
 and skip the capacity multiplier — overage is a fallback, not a rate-limited
 budget window. UnknownProbe candidates use uniform weight.
 
-Base window set is model-aware: always `{5h, 7d}`, plus `7d_sonnet` when the
-request model is Sonnet. `7d_opus` remains excluded because cc-lb outbound
+Base window set was model-aware in this ADR: always `{5h, 7d}`, plus `7d_sonnet` when the
+request model is Sonnet. ADR 0005 supersedes this decision and now uses only `{5h, 7d}` for routing because model-specific 7d labels are unstable. `7d_opus` remains excluded here because cc-lb outbound
 requests currently omit the `x-anthropic-billing-header` (`cc_version` /
 `cc_entrypoint`) tag that Anthropic requires before it will emit
 `anthropic-ratelimit-unified-7d-opus-*` response headers. Header parser at
