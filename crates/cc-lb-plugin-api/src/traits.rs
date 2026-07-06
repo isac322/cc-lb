@@ -7,9 +7,9 @@ use uuid::Uuid;
 
 use crate::errors::{DialectError, ObservabilityError, RouteError, SignerError, UpstreamError};
 use crate::types::{
-    CacheAffinityTrace, ObserveEvent, PerCandidateReason, Principal, RequestContext,
-    RetryDecision, RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest,
-    SigningCapability, SlotKey, SubscriptionPreferenceTrace, Upstream, UpstreamCandidate,
+    CacheAffinityTrace, ObserveEvent, PerCandidateReason, Principal, RequestContext, RetryDecision,
+    RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, SlotKey,
+    SubscriptionPreferenceTrace, Upstream, UpstreamCandidate,
 };
 
 /// Filter plugin output containing upstream selection results and per-candidate reasons.

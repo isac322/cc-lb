@@ -1691,10 +1691,7 @@ fn tier_memory_insert_get_roundtrip() {
     let mem = TierMemory::new();
     let now = Instant::now();
     mem.insert("thread-A", SubscriptionTier::KnownBase, now);
-    assert_eq!(
-        mem.get("thread-A", now),
-        Some(SubscriptionTier::KnownBase)
-    );
+    assert_eq!(mem.get("thread-A", now), Some(SubscriptionTier::KnownBase));
     assert!(mem.get("thread-B", now).is_none());
 }
 
@@ -1719,11 +1716,13 @@ fn tier_memory_ttl_expiry_returns_none_after_deadline() {
         "within TTL window the record must remain visible"
     );
     assert!(
-        mem.get("thread-A", base + Duration::from_secs(30)).is_none(),
+        mem.get("thread-A", base + Duration::from_secs(30))
+            .is_none(),
         "at TTL boundary the record must age out"
     );
     assert!(
-        mem.get("thread-A", base + Duration::from_secs(60)).is_none()
+        mem.get("thread-A", base + Duration::from_secs(60))
+            .is_none()
     );
 }
 

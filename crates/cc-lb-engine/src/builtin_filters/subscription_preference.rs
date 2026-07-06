@@ -207,10 +207,7 @@ impl TierMemory {
         if map.len() >= self.cap {
             return;
         }
-        map.insert(
-            thread_id.to_owned(),
-            TierEntry { tier, expires_at },
-        );
+        map.insert(thread_id.to_owned(), TierEntry { tier, expires_at });
     }
 
     #[cfg(test)]
@@ -353,10 +350,7 @@ fn evaluate(
         })
         .collect();
 
-    let session_thread_id: Option<&str> = ctx
-        .thread_id
-        .as_deref()
-        .filter(|id| !id.is_empty());
+    let session_thread_id: Option<&str> = ctx.thread_id.as_deref().filter(|id| !id.is_empty());
     let wrh_key_source = if session_thread_id.is_some() {
         WrhKeySource::ThreadId
     } else {
@@ -369,8 +363,7 @@ fn evaluate(
         }
         let winner = pick_within_tier(bucket, ctx, config);
         let chosen_tier = tier_to_plugin_api(winner.tier);
-        let previous_tier = session_thread_id
-            .and_then(|thread_id| tier_memory.get(thread_id, now));
+        let previous_tier = session_thread_id.and_then(|thread_id| tier_memory.get(thread_id, now));
         if let Some(thread_id) = session_thread_id {
             tier_memory.insert(thread_id, chosen_tier, now);
         }

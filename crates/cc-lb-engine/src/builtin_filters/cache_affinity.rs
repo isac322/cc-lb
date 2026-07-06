@@ -184,16 +184,13 @@ mod tests {
         let cold_no_score = candidate_without_score("cold");
         let output = filter(&[warm.clone(), cold_no_score.clone()]);
 
-        let trace = output
-            .cache_affinity
-            .expect("mixed pool must emit trace");
+        let trace = output.cache_affinity.expect("mixed pool must emit trace");
         assert_eq!(
             trace.candidates[0].predicted_expires_at_unix_secs,
             Some(1_700_000_500)
         );
         assert_eq!(
-            trace.candidates[1].predicted_cache_read_tokens,
-            None,
+            trace.candidates[1].predicted_cache_read_tokens, None,
             "candidate without cache_score must serialize as None, not Some(0)"
         );
         assert_eq!(trace.candidates[1].predicted_expires_at_unix_secs, None);

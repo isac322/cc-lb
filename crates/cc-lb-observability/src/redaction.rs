@@ -534,7 +534,11 @@ fn cache_affinity_candidate_json_len(candidate: &CacheAffinityCandidate) -> usiz
     let mut len = "{\"upstream_id\":".len()
         + json_string_len(&candidate.upstream_id.to_string())
         + ",\"kept\":".len()
-        + if candidate.kept { "true".len() } else { "false".len() };
+        + if candidate.kept {
+            "true".len()
+        } else {
+            "false".len()
+        };
     if let Some(tokens) = candidate.predicted_cache_read_tokens {
         len += ",\"predicted_cache_read_tokens\":".len() + tokens.to_string().len();
     }
