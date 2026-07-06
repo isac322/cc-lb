@@ -188,7 +188,7 @@ checksum = "e1536e0af43d92eda2b6df260879861e59e913ea60e0b0388ae48ac43138a5ad"
 dependencies = [
  "apalis-core",
  "chrono",
- "cron",
+ "cron 0.16.0",
  "futures-util",
  "serde",
  "ulid",
@@ -839,7 +839,7 @@ dependencies = [
  "loom",
  "metrics",
  "parking_lot",
- "rand 0.10.1",
+ "rand 0.10.2",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -902,7 +902,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "parking_lot",
  "proptest",
- "rand 0.10.1",
+ "rand 0.10.2",
  "reqwest",
  "secrecy",
  "serde",
@@ -1121,7 +1121,7 @@ dependencies = [
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
  "chrono",
- "cron",
+ "cron 0.17.0",
  "fake-anthropic",
  "futures-util",
  "hex",
@@ -1134,7 +1134,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "sqlx 0.8.6",
  "sqlx 0.9.0",
  "tempfile",
  "testcontainers-modules",
@@ -1197,7 +1196,7 @@ dependencies = [
  "notify",
  "oauth2",
  "parking_lot",
- "rand 0.10.1",
+ "rand 0.10.2",
  "reqwest",
  "rustls",
  "rustls-pemfile",
@@ -1823,6 +1822,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cron"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5dcd6f69605c2956916ce24e8af637b754964c9a83f4662d3a2361654cdba09"
+dependencies = [
+ "chrono",
+ "once_cell",
+ "phf",
+ "winnow 0.7.15",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2249,7 +2260,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee93edf3c501f0035bbeffeccfed0b79e14c311f12195ec0e661e114a0f60da4"
 dependencies = [
  "portable-atomic",
- "rand 0.10.1",
+ "rand 0.10.2",
  "web-time",
 ]
 
@@ -2700,7 +2711,7 @@ dependencies = [
  "idna",
  "ipnet",
  "jni",
- "rand 0.10.1",
+ "rand 0.10.2",
  "thiserror 2.0.18",
  "tinyvec",
  "tokio",
@@ -2720,7 +2731,7 @@ dependencies = [
  "jni",
  "once_cell",
  "prefix-trie",
- "rand 0.10.1",
+ "rand 0.10.2",
  "ring",
  "thiserror 2.0.18",
  "tinyvec",
@@ -2745,7 +2756,7 @@ dependencies = [
  "ndk-context",
  "once_cell",
  "parking_lot",
- "rand 0.10.1",
+ "rand 0.10.2",
  "resolv-conf",
  "smallvec",
  "system-configuration",
@@ -2846,9 +2857,9 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "humantime"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
+checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
 
 [[package]]
 name = "humantime-serde"
@@ -4463,9 +4474,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
+checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
@@ -4734,9 +4745,9 @@ dependencies = [
 
 [[package]]
 name = "rkyv"
-version = "0.8.16"
+version = "0.8.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73389e0c99e664f919275ab5b5b0471391fe9a8de61e1dff9b1eaf56a90f16e3"
+checksum = "815cc8a37159a463064825246cadb07961e25cd9885908606f6d08a98d8f8874"
 dependencies = [
  "bytecheck",
  "bytes",
@@ -4753,9 +4764,9 @@ dependencies = [
 
 [[package]]
 name = "rkyv_derive"
-version = "0.8.16"
+version = "0.8.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d2ed0b54125315fb36bd021e82d314d1c126548f871634b483f46b31d13cac6"
+checksum = "c0ed1a78a1b19d184b0daa629dd9a024573173ec7d485b287cb369fb3607cc1c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5708,7 +5719,7 @@ dependencies = [
  "log",
  "md-5 0.11.0",
  "memchr",
- "rand 0.10.1",
+ "rand 0.10.2",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -7641,9 +7652,9 @@ dependencies = [
 
 [[package]]
 name = "xxhash-rust"
-version = "0.8.15"
+version = "0.8.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
+checksum = "4d93c89cdc2d3a63c3ec48ffe926931bdc069eafa8e4402fe6d8f790c9d1e576"
 
 [[package]]
 name = "yansi"
