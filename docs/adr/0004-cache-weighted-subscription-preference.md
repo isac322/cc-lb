@@ -4,6 +4,7 @@
 - Date: 2026-07-06
 - Ships with: PR #350 (rewrite)
 - Supersedes: ADR 0003's within-tier WRH signature; the tier ordering and quota-urgency computation from ADR 0003 stay unchanged.
+- Follow-up: ADR 0005 bumps the salt to v8, restores thread-keyed WRH when `RequestContext.thread_id` is non-empty, and demotes provider warning base snapshots to `PartialBase`; the v7 cache-weighted WRH formula remains the within-tier weight.
 
 ## Context
 
