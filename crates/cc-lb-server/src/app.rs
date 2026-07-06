@@ -30,6 +30,7 @@ use cc_lb_engine::{
         builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
         limit_engine::LimitEngine, principal_view::PrincipalView,
     },
+    cache_keepalive::{AnthropicKeepaliveDispatcher, KeepaliveScheduler},
     make_default_dispatcher, spawn_audit_writer, start_subscription_quota_writer,
     start_upstream_rate_limit_writer,
 };
@@ -563,6 +564,7 @@ pub async fn seed_app_testing_storage(
             }],
             allowed_models: vec!["*".to_owned()],
             allowed_upstreams: vec![],
+            cache_keepalive: None,
         },
         now,
     )
@@ -1308,6 +1310,11 @@ async fn build_app_with_storage_inner(
     > = Arc::new(tokio::sync::Mutex::new(
         lifecycle_prompt_cache_observation_subscriber_handle,
     ));
+    let keepalive_scheduler = KeepaliveScheduler::new(Arc::new(AnthropicKeepaliveDispatcher::new(
+        Arc::clone(&initial_view.signer_factory),
+        Arc::clone(&stores.upstreams),
+        Arc::clone(&dispatcher),
+    )));
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
         dynamic_view_holder.clone(),
@@ -1315,6 +1322,7 @@ async fn build_app_with_storage_inner(
         lifecycle_config,
         clock.clone(),
     );
+    lifecycle = lifecycle.with_keepalive_scheduler(Arc::clone(&keepalive_scheduler));
     lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
     lifecycle = lifecycle.with_limit_cost_estimator(Arc::new(PricingLimitCostEstimator {
         catalog: price_catalog.clone(),
@@ -1447,6 +1455,20 @@ async fn build_app_with_storage_inner(
                 let mut guard = cache_obs_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let keepalive_scheduler = Arc::clone(&keepalive_scheduler);
+        signals.add_shutdown_hook(move || {
+            let keepalive_scheduler = Arc::clone(&keepalive_scheduler);
+            async move {
+                let handle = tokio::spawn(async move {
+                    keepalive_scheduler.shutdown().await;
+                });
+                if let Err(error) = handle.await {
+                    tracing::warn!(error = %error, "cache keepalive scheduler shutdown task failed");
                 }
             }
         });
