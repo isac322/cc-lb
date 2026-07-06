@@ -74,6 +74,29 @@ jobs:
           tool: cargo-deny
       - run: cargo deny check
 
+  promtool:
+    runs-on: oracle4-cc-lb
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install promtool
+        run: |
+          set -euo pipefail
+          if command -v promtool >/dev/null 2>&1; then
+            promtool --version
+            exit 0
+          fi
+          curl -sSL -o /tmp/prometheus.tar.gz \
+            https://github.com/prometheus/prometheus/releases/download/v3.13.0/prometheus-3.13.0.linux-arm64.tar.gz
+          tar -xzf /tmp/prometheus.tar.gz -C /tmp/
+          sudo mv /tmp/prometheus-3.13.0.linux-arm64/promtool /usr/local/bin/promtool
+          promtool --version
+      - name: Check alert rule syntax
+        run: promtool check rules deploy/alerts/*.yml
+      - name: Validate Grafana dashboards
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq python3
+          scripts/validate-grafana-dashboard.sh
+
   nextest-cov:
     runs-on: oracle4-cc-lb
 

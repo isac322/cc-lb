@@ -899,6 +899,7 @@ dependencies = [
  "insta",
  "loom",
  "metrics",
+ "metrics-exporter-prometheus",
  "parking_lot",
  "proptest",
  "rand 0.10.1",

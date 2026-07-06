@@ -5,6 +5,7 @@ import { ToggleGroup as BaseToggleGroup } from '@base-ui/react/toggle-group';
 import { createFileRoute } from '@tanstack/react-router';
 import {
   Activity,
+  AlertTriangle,
   ArrowUpRight,
   Database,
   Gauge,
@@ -24,6 +25,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import { LiveTailFailureBanner } from '../components/LiveTailFailureBanner';
 import {
   Card,
   CardHeader,
@@ -960,6 +962,12 @@ function OverviewPage() {
 
   return (
     <PageContainer>
+      <LiveTailFailureBanner
+        permanentFailure={live.permanentFailure}
+        permanentFailureSince={live.permanentFailureSince}
+        reconnectAttempts={live.reconnectAttempts}
+        onRetry={live.forceReconnect}
+      />
       <div className="flex items-center justify-between mb-2">
         <h1 className="text-lg font-medium">Overview</h1>
         <BaseToggleGroup
@@ -1115,16 +1123,23 @@ function OverviewPage() {
               Live preview — full view on Logs page
               {streamStatus === 'live' ? ' · streaming' : ''}
             </span>
-            <span
-              className={cx(
-                'status-dot',
-                streamStatus === 'live'
-                  ? 'live'
-                  : streamStatus === 'error'
-                    ? 'danger'
-                    : 'neutral',
-              )}
-            />
+            {live.permanentFailure ? (
+              <AlertTriangle className="w-3 h-3 text-[color:var(--color-danger)]" />
+            ) : (
+              <span
+                className={cx(
+                  'status-dot',
+                  streamStatus === 'live'
+                    ? 'live'
+                    : streamStatus === 'error'
+                      ? 'danger'
+                      : streamStatus === 'connecting' ||
+                          streamStatus === 'reconnecting'
+                        ? 'warn animate-pulse'
+                        : 'neutral',
+                )}
+              />
+            )}
           </span>
         }
         action={
