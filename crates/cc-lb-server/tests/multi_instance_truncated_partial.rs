@@ -6,7 +6,7 @@
 
 use std::error::Error;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cc_lb_admin::internal_partials::{InternalPartialsState, router as internal_partials_router};
 use cc_lb_contract::{BusReceiver, RequestEventBus, RequestEventPartial, RequestEventUpdate};
@@ -25,6 +25,8 @@ const CLUSTER_TOKEN: &str = "test-cluster-token";
 const LARGE_PAYLOAD_MIN_BYTES: usize = 7_500;
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(15);
 const NEGATIVE_RECEIVE_TIMEOUT: Duration = Duration::from_millis(500);
+const WARMUP_TIMEOUT: Duration = Duration::from_secs(10);
+const WARMUP_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
 static POSTGRES_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 static METRICS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
@@ -105,10 +107,12 @@ async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
         listener_shutdown_rx,
     );
 
-    let ready = small_partial("listener-ready");
-    let ready_event_id = ready.event_id.clone();
-    producer_tx.send(RequestEventUpdate::Partial(ready)).await?;
-    wait_for_partial(&mut consumer_rx, &ready_event_id, true).await?;
+    publish_until_received(
+        &producer_tx,
+        &mut consumer_rx,
+        small_partial("listener-ready"),
+    )
+    .await?;
 
     let before = labeled_counter_value(handle, metric_name, metric_outcome);
     let partial = large_partial(partial_name);
@@ -172,6 +176,57 @@ async fn pg_pool(database_url: &str, max_connections: u32) -> Result<PgPool, sql
         .max_connections(max_connections)
         .connect(database_url)
         .await
+}
+
+// Postgres LISTEN/NOTIFY only delivers to sessions subscribed at NOTIFY time.
+// `PgListener::spawn` returns before the underlying `LISTEN` runs inside the
+// spawned task, so a single warmup NOTIFY can race the registration and be
+// silently dropped by Postgres. Resend the warmup partial at
+// `WARMUP_PROBE_INTERVAL` until the consumer bus actually observes it — this
+// mirrors `pg_listener_recovery::publish_until_received`.
+async fn publish_until_received(
+    producer_tx: &mpsc::Sender<RequestEventUpdate>,
+    receiver: &mut BusReceiver,
+    partial: RequestEventPartial,
+) -> TestResult<()> {
+    let event_id = partial.event_id.clone();
+    let deadline = Instant::now() + WARMUP_TIMEOUT;
+    while Instant::now() < deadline {
+        producer_tx
+            .send(RequestEventUpdate::Partial(partial.clone()))
+            .await?;
+        if try_receive_matching(receiver, &event_id, WARMUP_PROBE_INTERVAL).await? {
+            return Ok(());
+        }
+    }
+    Err(error(format!(
+        "timed out warming up PgListener delivery for partial {event_id}"
+    )))
+}
+
+async fn try_receive_matching(
+    receiver: &mut BusReceiver,
+    expected_event_id: &str,
+    timeout: Duration,
+) -> TestResult<bool> {
+    let BusReceiver::InMemory(rx) = receiver else {
+        return Err(error("remote bus receiver unsupported in this test"));
+    };
+    match tokio::time::timeout(timeout, async {
+        loop {
+            if let RequestEventUpdate::Partial(partial) = rx.recv().await?
+                && partial.event_id == expected_event_id
+            {
+                return Ok::<(), Box<dyn Error + Send + Sync>>(());
+            }
+        }
+    })
+    .await
+    {
+        Ok(Ok(())) => Ok(true),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Ok(false),
+    }
 }
 
 async fn wait_for_partial(
