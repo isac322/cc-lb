@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use cc_lb_control::dynamic_view::DynamicViewHolder;
 use cc_lb_plugin_api::{
-    ApiKeyAwareSignerFactory, DialectError, Principal, PrincipalKind, RequestContext,
-    ShapedRequest, ShapedRequestBuilder, SignedRequest, Upstream, UpstreamDialect, shape_request,
-    sign_request,
+    DialectError, Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder,
+    SignedRequest, Upstream, UpstreamDialect, shape_request, sign_request,
 };
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
@@ -25,7 +25,7 @@ const DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
 const ERROR_BODY_PREFIX_BYTES: usize = 512;
 
 pub struct AnthropicKeepaliveDispatcher {
-    signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
+    dynamic_view: Arc<DynamicViewHolder>,
     upstream_store: Arc<dyn UpstreamStore>,
     http_client: Arc<dyn UpstreamDispatch>,
     timeout: Duration,
@@ -33,12 +33,12 @@ pub struct AnthropicKeepaliveDispatcher {
 
 impl AnthropicKeepaliveDispatcher {
     pub fn new(
-        signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
+        dynamic_view: Arc<DynamicViewHolder>,
         upstream_store: Arc<dyn UpstreamStore>,
         http_client: Arc<dyn UpstreamDispatch>,
     ) -> Self {
         Self {
-            signer_factory,
+            dynamic_view,
             upstream_store,
             http_client,
             timeout: DISPATCH_TIMEOUT,
@@ -57,6 +57,8 @@ impl AnthropicKeepaliveDispatcher {
     ) -> Result<SignedRequest, String> {
         let upstream_api = direct_anthropic_upstream(upstream)?;
         let signer_factory = self
+            .dynamic_view
+            .load()
             .signer_factory
             .with_router_choice(downstream_api_key(&snapshot.headers), upstream.name.clone());
         let signer = signer_factory
@@ -66,7 +68,9 @@ impl AnthropicKeepaliveDispatcher {
         let keepalive_body = snapshot
             .build_keepalive_body()
             .map_err(|source| source.to_string())?;
-        let shaped = shaped_request_from_snapshot(snapshot, keepalive_body, &upstream_api)?;
+        let target_url = resolve_keepalive_url(snapshot, upstream)?;
+        let shaped =
+            shaped_request_from_snapshot(snapshot, keepalive_body, &upstream_api, target_url)?;
         sign_request(signer.as_ref(), shaped)
             .await
             .map_err(|source| source.to_string())
@@ -126,21 +130,36 @@ fn direct_anthropic_upstream(upstream: &UpstreamRecord) -> Result<Upstream, Stri
     }
 }
 
+fn resolve_keepalive_url(
+    snapshot: &RequestSnapshot,
+    upstream: &UpstreamRecord,
+) -> Result<Url, String> {
+    let Some(base_url) = upstream.base_url.as_ref() else {
+        return Ok(snapshot.url.clone());
+    };
+    let mut resolved = base_url
+        .join(snapshot.url.path())
+        .map_err(|source| format!("resolve keep-alive url: {source}"))?;
+    resolved.set_query(snapshot.url.query());
+    Ok(resolved)
+}
+
 fn shaped_request_from_snapshot(
     snapshot: &RequestSnapshot,
     body: Bytes,
     upstream: &Upstream,
+    target_url: Url,
 ) -> Result<ShapedRequest, String> {
     let dialect = SnapshotDialect {
-        url: snapshot.url.clone(),
+        url: target_url.clone(),
     };
     let ctx = RequestContext {
         request_id: format!("cache-keepalive-{}", snapshot.upstream_id),
         thread_id: None,
         downstream_headers: snapshot.headers.clone(),
         method: snapshot.method.clone(),
-        path: snapshot.url.path().to_owned(),
-        query: snapshot.url.query().map(ToOwned::to_owned),
+        path: target_url.path().to_owned(),
+        query: target_url.query().map(ToOwned::to_owned),
         body_bytes: body,
         cache_breakpoints: Vec::new(),
         canonical_model_id: String::new(),

@@ -1311,7 +1311,7 @@ async fn build_app_with_storage_inner(
         lifecycle_prompt_cache_observation_subscriber_handle,
     ));
     let keepalive_scheduler = KeepaliveScheduler::new(Arc::new(AnthropicKeepaliveDispatcher::new(
-        Arc::clone(&initial_view.signer_factory),
+        Arc::clone(&dynamic_view_holder),
         Arc::clone(&stores.upstreams),
         Arc::clone(&dispatcher),
     )));

@@ -1871,6 +1871,7 @@ impl Lifecycle {
                 cache_metadata: cache_metadata.clone(),
                 upstream_id: resolved_upstream_id,
                 shaped_body,
+                downstream_headers: ctx.downstream_headers.clone(),
             }
         });
         response = self
@@ -2147,6 +2148,7 @@ impl Lifecycle {
                 &context.cache_metadata,
                 context.upstream_id,
                 context.shaped_body,
+                &context.downstream_headers,
             );
         }
         if let Some(o) = observer.as_ref()
@@ -2821,6 +2823,7 @@ impl Lifecycle {
                     &context.cache_metadata,
                     context.upstream_id,
                     context.shaped_body,
+                    &context.downstream_headers,
                 );
             }
             let elapsed_ms = |to: Option<Instant>| {

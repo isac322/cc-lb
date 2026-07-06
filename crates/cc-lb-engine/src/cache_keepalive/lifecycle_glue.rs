@@ -22,6 +22,7 @@ pub(crate) struct LifecycleKeepaliveContext {
     pub(crate) cache_metadata: RequestCacheMetadata,
     pub(crate) upstream_id: Uuid,
     pub(crate) shaped_body: Bytes,
+    pub(crate) downstream_headers: HeaderMap,
 }
 
 #[derive(Clone)]
@@ -41,6 +42,7 @@ impl LifecycleKeepalive {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_response_completed(
         &self,
         request_body: &[u8],
@@ -49,6 +51,7 @@ impl LifecycleKeepalive {
         cache_metadata: &RequestCacheMetadata,
         upstream_id: uuid::Uuid,
         shaped_body: Bytes,
+        downstream_headers: &HeaderMap,
     ) {
         let Some(scheduler) = self.scheduler.as_ref() else {
             return;
@@ -67,9 +70,7 @@ impl LifecycleKeepalive {
         let Some(first_breakpoint) = cache_metadata.cache_breakpoints.first() else {
             return;
         };
-        let Some(ttl) = cache_keepalive_ttl(first_breakpoint.ttl.as_deref()) else {
-            return;
-        };
+        let ttl = CacheTtl::from_ttl_str(first_breakpoint.ttl.as_deref());
         let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
             return;
         };
@@ -80,7 +81,7 @@ impl LifecycleKeepalive {
         let snapshot = match RequestSnapshot::capture(
             url,
             http::Method::POST,
-            HeaderMap::new(),
+            downstream_auth_headers(downstream_headers),
             shaped_body,
             upstream_id,
             ttl,
@@ -197,12 +198,23 @@ fn sse_json_value(raw: &[u8]) -> Option<Value> {
     None
 }
 
-fn cache_keepalive_ttl(ttl: Option<&str>) -> Option<CacheTtl> {
-    match ttl {
-        Some("5m") => Some(CacheTtl::Ttl5m),
-        Some("1h") => Some(CacheTtl::Ttl1h),
-        _ => None,
+const KEEPALIVE_FORWARD_HEADERS: &[&str] = &[
+    "x-api-key",
+    "authorization",
+    "anthropic-version",
+    "anthropic-beta",
+];
+
+fn downstream_auth_headers(headers: &HeaderMap) -> HeaderMap {
+    let mut out = HeaderMap::new();
+    for name in KEEPALIVE_FORWARD_HEADERS {
+        if let Some(value) = headers.get(*name)
+            && let Ok(name) = http::HeaderName::from_bytes(name.as_bytes())
+        {
+            out.insert(name, value.clone());
+        }
     }
+    out
 }
 
 fn cache_keepalive_session_key(
