@@ -555,6 +555,16 @@ fn candidate_urgency_json_len(candidate: &CandidateUrgency) -> usize {
         + tier_json_len(candidate.tier)
         + ",\"urgency\":".len()
         + f64_json_len(candidate.urgency)
+        + ",\"quota_urgency\":".len()
+        + f64_json_len(candidate.quota_urgency)
+        + ",\"predicted_cache_read_tokens\":".len()
+        + candidate.predicted_cache_read_tokens.to_string().len()
+        + ",\"cache_ratio\":".len()
+        + f64_json_len(candidate.cache_ratio)
+        + ",\"cache_weight_multiplier\":".len()
+        + f64_json_len(candidate.cache_weight_multiplier)
+        + ",\"effective_weight\":".len()
+        + f64_json_len(candidate.effective_weight)
         + "}".len()
 }
 

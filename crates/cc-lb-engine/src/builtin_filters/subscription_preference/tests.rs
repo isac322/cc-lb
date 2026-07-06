@@ -1180,14 +1180,23 @@ fn all_oauth_hard_negative_no_api_key_fails_open_without_trace() {
 // =============================================================================
 
 #[test]
-fn same_thread_id_pins_all_turns_of_a_session_to_one_upstream() {
-    // Given: four healthy live-snapshot upstreams (same fixture as the WRH
-    //   distribution golden), so the pre-fix code would have random-picked
-    //   a different upstream on every synthetic request_id.
-    // When: 200 requests share one thread_id but carry different request_ids
-    //   (mimicking successive turns of a real opencode session).
-    // Then: every pick must land on the same upstream (cache-affinity
-    //   contract) — otherwise the prompt cache is torn every turn.
+fn same_thread_id_does_not_pin_when_cache_affinity_did_not_narrow_candidates() {
+    // v6 boundary: subscription-preference no longer treats `thread_id` as a
+    // routing signal. If a warm-cache session reached subscription with
+    // multiple cache-equivalent candidates, `cache_affinity`'s max-ranker
+    // has already done its job — subscription may pick any of them. If the
+    // pool is cache-cold, subscription must spread over `request_id` so a
+    // truly-idle session does not deterministically re-pick the same
+    // (now-cold) upstream turn after turn (the 2026-07-06 02:34-02:48 UTC
+    // sticky-cold incident on `ses_0d40d66f8...`).
+    //
+    // Given: four healthy live-snapshot upstreams presented WITHOUT any
+    //   cache_score (cache_affinity would passthrough) and one thread_id
+    //   shared across 200 turns with distinct request_ids.
+    // When: subscription-preference filters each turn independently.
+    // Then: winners must spread across multiple upstreams — the thread_id
+    //   is ignored, request_id entropy drives WRH, and the session no
+    //   longer clumps on one cold upstream.
     let candidates = vec![
         live_snapshot_bear_max(),
         live_snapshot_isac_personal(),
@@ -1197,31 +1206,42 @@ fn same_thread_id_pins_all_turns_of_a_session_to_one_upstream() {
     let filter = SubscriptionPreferenceFilter::new();
     let principal = principal();
     let thread_id = "ses_0d40d66f8ffezC7gUXysWIv4cz";
-    let mut winners: Vec<Uuid> = Vec::new();
-    for i in 0..200 {
+    let mut winners: HashMap<Uuid, usize> = HashMap::new();
+    for i in 0..2000 {
         let ctx = ctx_with_thread_id(MODEL_AGNOSTIC, &format!("req-{i}"), thread_id);
         let output = filter.filter(&ctx, &principal, &candidates).unwrap();
-        winners.push(*output.kept_upstream_ids.first().unwrap());
+        let trace = output
+            .subscription_preference
+            .as_ref()
+            .expect("subscription-alive path must emit trace");
+        assert_eq!(
+            trace.wrh_key_source,
+            WrhKeySource::RequestId,
+            "v6 subscription must key on request_id regardless of thread_id"
+        );
+        *winners
+            .entry(*output.kept_upstream_ids.first().unwrap())
+            .or_insert(0) += 1;
     }
-    let first = winners[0];
     assert!(
-        winners.iter().all(|w| *w == first),
-        "expected all 200 turns of the same thread_id to pin to one upstream; got {} distinct winners",
-        winners
-            .iter()
-            .collect::<std::collections::HashSet<_>>()
-            .len()
+        winners.len() >= 3,
+        "cold-fallback must spread same-thread turns across ≥3 upstreams; landed on {} upstreams",
+        winners.len()
+    );
+    let min_share = winners.values().copied().min().unwrap_or(0) as f64 / 2000.0;
+    assert!(
+        min_share >= 0.03,
+        "no upstream should be starved when subscription keys off request_id; min share was {min_share}",
     );
 }
 
 #[test]
-fn different_thread_ids_still_spread_across_upstreams() {
+fn different_request_ids_spread_across_upstreams() {
     // Given: same four healthy candidates as the golden distribution test.
-    // When: each trial carries a distinct thread_id (i.e. distinct opencode
-    //   sessions), so WRH gets a fresh independent draw per session.
-    // Then: the aggregate distribution must still cover multiple upstreams —
-    //   proving the fix keeps cross-session load spread while pinning
-    //   within-session traffic.
+    // When: each trial carries a distinct request_id (thread_id absent),
+    //   so v6 WRH gets a fresh independent per-request key.
+    // Then: the aggregate distribution must cover multiple upstreams —
+    //   proving pure-request-id keying keeps load spread across the pool.
     let candidates = vec![
         live_snapshot_bear_max(),
         live_snapshot_isac_personal(),
@@ -1232,7 +1252,7 @@ fn different_thread_ids_still_spread_across_upstreams() {
     let principal = principal();
     let mut winners: HashMap<Uuid, usize> = HashMap::new();
     for i in 0..2000 {
-        let ctx = ctx_with_thread_id(MODEL_AGNOSTIC, "req-fixed", &format!("ses_synthetic_{i}"));
+        let ctx = ctx_with_request_id(MODEL_AGNOSTIC, &format!("req-{i}"));
         let output = filter.filter(&ctx, &principal, &candidates).unwrap();
         *winners
             .entry(*output.kept_upstream_ids.first().unwrap())
@@ -1240,13 +1260,13 @@ fn different_thread_ids_still_spread_across_upstreams() {
     }
     assert!(
         winners.len() >= 3,
-        "expected WRH to spread across ≥3 upstreams over 2000 distinct sessions; landed on {} upstreams",
+        "expected WRH to spread across ≥3 upstreams over 2000 distinct request_ids; landed on {} upstreams",
         winners.len()
     );
     let min_share = winners.values().copied().min().unwrap_or(0) as f64 / 2000.0;
     assert!(
         min_share >= 0.03,
-        "no upstream should be starved across sessions; min share was {min_share}",
+        "no upstream should be starved across per-request draws; min share was {min_share}",
     );
 }
 
@@ -1429,6 +1449,24 @@ fn with_plan(mut candidate: UpstreamCandidate, ratio: f64) -> UpstreamCandidate 
     candidate
 }
 
+/// Attach a live prompt-cache observation with the given
+/// `predicted_cache_read_tokens` to a candidate. Used by v7 crossover
+/// tests to synthesise a bucket where cache-hit depth varies per
+/// candidate; the max within the bucket drives the exponential boost.
+fn with_live_cache(mut candidate: UpstreamCandidate, read_tokens: u32) -> UpstreamCandidate {
+    candidate.cache_score = Some(cc_lb_plugin_api::types::CacheScore {
+        predicted_cache_read_tokens: read_tokens,
+        predicted_cache_creation_tokens_5m: 0,
+        predicted_cache_creation_tokens_1h: 0,
+        predicted_uncached_input_tokens: 0,
+        predicted_expires_at_unix_secs: None,
+        matched_breakpoint_index: Some(0),
+        confidence: 1.0,
+        ambiguity_reason: None,
+    });
+    candidate
+}
+
 #[derive(Clone, Debug)]
 struct SnapBuilder {
     inner: SubscriptionQuotaCandidateSnapshot,
@@ -1563,7 +1601,12 @@ fn rendezvous_salt_embeds_declared_version() {
 }
 
 #[test]
-fn wrh_key_source_is_thread_id_when_thread_id_present() {
+fn wrh_key_source_is_request_id_even_when_thread_id_present_v6() {
+    // v6 invariant: subscription-preference never keys on `thread_id`.
+    // Session-scoped pinning is delegated to `cache_affinity`'s
+    // max-cache ranker; subscription only carries per-request WRH.
+    // Trace must reflect that even when the request carries a
+    // populated thread_id.
     let filter = SubscriptionPreferenceFilter::new();
     let candidates = vec![
         healthy_oauth_candidate("upstream-a", 1),
@@ -1574,7 +1617,11 @@ fn wrh_key_source_is_thread_id_when_thread_id_present() {
     let trace = output
         .subscription_preference
         .expect("subscription-alive path must emit trace");
-    assert_eq!(trace.wrh_key_source, WrhKeySource::ThreadId);
+    assert_eq!(
+        trace.wrh_key_source,
+        WrhKeySource::RequestId,
+        "v6 subscription must key on request_id regardless of thread_id"
+    );
     assert_eq!(
         trace.rendezvous_salt_version.as_deref(),
         Some(SALT_VERSION),
@@ -1814,5 +1861,278 @@ fn evaluate_shares_tier_memory_across_calls_through_arc() {
     assert!(
         trace2.previous_tier.is_some(),
         "two filter handles sharing an Arc<TierMemory> must observe each other's writes"
+    );
+}
+
+// =============================================================================
+// Section L — v7 cache-weighted WRH: exponential cache boost with 99% crossover.
+// See docs/adr/0004-cache-weighted-subscription-preference.md.
+// =============================================================================
+
+use crate::builtin_filters::subscription_preference::CACHE_LOG_BOOST;
+
+const CROSSOVER_TOLERANCE: f64 = 1e-9;
+const FIVE_HOUR_RESET_SECS: u64 = 18_000;
+const SEVEN_DAY_RESET_SECS: u64 = 604_800;
+
+fn healthy_known_base_at_util(name: &str, id_seed: u8, util: f64) -> UpstreamCandidate {
+    oauth_at_t0(
+        name,
+        id_seed,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .status("allowed")
+                .util(util)
+                .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS)
+                .build(),
+            fresh(WINDOW_SEVEN_DAY)
+                .status("allowed")
+                .util(util)
+                .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS)
+                .build(),
+        ],
+    )
+}
+
+fn candidate_urgency_for(
+    trace: &cc_lb_plugin_api::SubscriptionPreferenceTrace,
+    upstream_id: Uuid,
+) -> &cc_lb_plugin_api::CandidateUrgency {
+    trace
+        .candidates
+        .iter()
+        .find(|c| c.upstream_id == upstream_id)
+        .expect("candidate urgency must be present in trace")
+}
+
+fn expected_quota_urgency(util: f64) -> f64 {
+    (1.0 - util).powi(2) / (FIVE_HOUR_RESET_SECS as f64)
+}
+
+fn expected_cache_weight_multiplier(cache_ratio: f64) -> f64 {
+    (CACHE_LOG_BOOST * cache_ratio).exp()
+}
+
+#[test]
+fn warm_low_util_pins_cache_holder() {
+    // Given: bear-max util 0.30 with 250K cache; Runbear util 0.10 with 15K cache.
+    // When: subscription filter scores the candidates.
+    // Then: bear effective_weight ≈ 0.3916, Runbear ≈ 7.99e-5; bear wins ≈99.98% of draws.
+    let bear = with_live_cache(healthy_known_base_at_util("bear-max", 1, 0.30), 250_000);
+    let runbear = with_live_cache(healthy_known_base_at_util("runbear", 2, 0.10), 15_000);
+    let filter = SubscriptionPreferenceFilter::new();
+    let ctx = ctx_with_request_id(MODEL_AGNOSTIC, "req-1");
+    let out = filter
+        .filter(&ctx, &principal(), &[bear.clone(), runbear.clone()])
+        .unwrap();
+    let trace = out.subscription_preference.expect("trace present");
+    let bear_urg = candidate_urgency_for(&trace, bear.upstream_id);
+    let runbear_urg = candidate_urgency_for(&trace, runbear.upstream_id);
+    let bear_expected = expected_quota_urgency(0.30) * expected_cache_weight_multiplier(1.0);
+    let runbear_expected =
+        expected_quota_urgency(0.10) * expected_cache_weight_multiplier(15_000.0 / 250_000.0);
+    assert!(
+        (bear_urg.effective_weight - bear_expected).abs() < CROSSOVER_TOLERANCE,
+        "bear effective_weight {} vs expected {}",
+        bear_urg.effective_weight,
+        bear_expected,
+    );
+    assert!(
+        (runbear_urg.effective_weight - runbear_expected).abs() < CROSSOVER_TOLERANCE,
+        "runbear effective_weight {} vs expected {}",
+        runbear_urg.effective_weight,
+        runbear_expected,
+    );
+    assert!(
+        bear_urg.effective_weight > runbear_urg.effective_weight * 1000.0,
+        "at util 0.30 bear-max must dominate (effective_weight ratio >= 1000×) to win >99.9%"
+    );
+}
+
+#[test]
+fn warm_95_percent_still_pins_cache_holder() {
+    // v7 crossover point ≈ 0.99. At util 0.95 bear-max must still dominate ≈96% win share.
+    let bear = with_live_cache(healthy_known_base_at_util("bear-max", 1, 0.95), 250_000);
+    let runbear = with_live_cache(healthy_known_base_at_util("runbear", 2, 0.10), 15_000);
+    let filter = SubscriptionPreferenceFilter::new();
+    let ctx = ctx_with_request_id(MODEL_AGNOSTIC, "req-1");
+    let out = filter
+        .filter(&ctx, &principal(), &[bear.clone(), runbear.clone()])
+        .unwrap();
+    let trace = out.subscription_preference.expect("trace present");
+    let bear_urg = candidate_urgency_for(&trace, bear.upstream_id);
+    let runbear_urg = candidate_urgency_for(&trace, runbear.upstream_id);
+    let bear_expected = expected_quota_urgency(0.95) * expected_cache_weight_multiplier(1.0);
+    let runbear_expected =
+        expected_quota_urgency(0.10) * expected_cache_weight_multiplier(15_000.0 / 250_000.0);
+    assert!(
+        (bear_urg.effective_weight - bear_expected).abs() < CROSSOVER_TOLERANCE,
+        "bear effective_weight {} vs expected {}",
+        bear_urg.effective_weight,
+        bear_expected,
+    );
+    assert!(
+        (runbear_urg.effective_weight - runbear_expected).abs() < CROSSOVER_TOLERANCE,
+        "runbear effective_weight {} vs expected {}",
+        runbear_urg.effective_weight,
+        runbear_expected,
+    );
+    let ratio = bear_urg.effective_weight / runbear_urg.effective_weight;
+    assert!(
+        ratio > 20.0,
+        "at util 0.95 bear-max effective_weight/runbear ratio must exceed 20 (≈96%+ win); got {ratio}"
+    );
+}
+
+#[test]
+fn warm_99_percent_starts_spreading_at_crossover() {
+    // Calibration target: at bear util 0.99 with cache_ratio 1.0, effective_weight
+    // equals Runbear at util 0.10 with cache_ratio 0.06. |Δ| below crossover
+    // tolerance is the invariant CACHE_LOG_BOOST is calibrated for.
+    let bear = with_live_cache(healthy_known_base_at_util("bear-max", 1, 0.99), 250_000);
+    let runbear = with_live_cache(healthy_known_base_at_util("runbear", 2, 0.10), 15_000);
+    let filter = SubscriptionPreferenceFilter::new();
+    let ctx = ctx_with_request_id(MODEL_AGNOSTIC, "req-1");
+    let out = filter
+        .filter(&ctx, &principal(), &[bear.clone(), runbear.clone()])
+        .unwrap();
+    let trace = out.subscription_preference.expect("trace present");
+    let bear_urg = candidate_urgency_for(&trace, bear.upstream_id);
+    let runbear_urg = candidate_urgency_for(&trace, runbear.upstream_id);
+    assert!(
+        (bear_urg.effective_weight - runbear_urg.effective_weight).abs() < CROSSOVER_TOLERANCE,
+        "at util 0.99 bear-max effective_weight ({}) must equal Runbear ({}) within {}",
+        bear_urg.effective_weight,
+        runbear_urg.effective_weight,
+        CROSSOVER_TOLERANCE,
+    );
+}
+
+#[test]
+fn warm_cache_holder_blocked_spills_to_fresh_quota_peer() {
+    // Given: bear-max carries deep cache but its 5h window is fresh + status=rejected
+    //   (util 1.0), so tier assessment marks it HardNegative with no overage.
+    //   Runbear is KnownBase with light cache.
+    // When: subscription-preference filters.
+    // Then: bear is not present in the KnownBase bucket; Runbear wins outright.
+    let bear = with_live_cache(
+        oauth_at_t0(
+            "bear-max",
+            1,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .status("rejected")
+                    .util(1.0)
+                    .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS)
+                    .build(),
+                fresh(WINDOW_SEVEN_DAY)
+                    .status("rejected")
+                    .util(1.0)
+                    .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS)
+                    .build(),
+            ],
+        ),
+        250_000,
+    );
+    let runbear = with_live_cache(healthy_known_base_at_util("runbear", 2, 0.10), 15_000);
+    let filter = SubscriptionPreferenceFilter::new();
+    let ctx = ctx_with_request_id(MODEL_AGNOSTIC, "req-1");
+    let out = filter
+        .filter(&ctx, &principal(), &[bear.clone(), runbear.clone()])
+        .unwrap();
+    let trace = out.subscription_preference.expect("trace present");
+    assert!(
+        trace
+            .candidates
+            .iter()
+            .all(|c| c.upstream_id != bear.upstream_id),
+        "hard-blocked bear-max must be excluded from the assessed bucket"
+    );
+    assert_eq!(
+        out.kept_upstream_ids,
+        vec![runbear.upstream_id],
+        "with bear-max hard-blocked, Runbear must be the sole winner even though its cache is shallow"
+    );
+}
+
+#[test]
+fn all_cold_reduces_to_pure_quota_wrh_distribution() {
+    // v7 must collapse to v6 uniform-quota behaviour when no candidate has any cache
+    // signal (cache_ratio=0 across the pool → multiplier=1 → effective_weight=quota_urgency).
+    let candidates = vec![
+        live_snapshot_bear_max(),
+        live_snapshot_isac_personal(),
+        live_snapshot_bh322yoo_max(),
+        live_snapshot_runbear(),
+    ];
+    let filter = SubscriptionPreferenceFilter::new();
+    let principal = principal();
+    let ctx = ctx_with_request_id(MODEL_AGNOSTIC, "req-1");
+    let out = filter.filter(&ctx, &principal, &candidates).unwrap();
+    let trace = out.subscription_preference.expect("trace present");
+    for candidate in &trace.candidates {
+        assert_eq!(candidate.predicted_cache_read_tokens, 0);
+        assert_eq!(candidate.cache_ratio, 0.0);
+        assert!(
+            (candidate.cache_weight_multiplier - 1.0).abs() < CROSSOVER_TOLERANCE,
+            "cold candidate must have cache_weight_multiplier=1.0, got {}",
+            candidate.cache_weight_multiplier,
+        );
+        assert!(
+            (candidate.effective_weight - candidate.quota_urgency).abs() < CROSSOVER_TOLERANCE,
+            "cold candidate effective_weight ({}) must equal quota_urgency ({})",
+            candidate.effective_weight,
+            candidate.quota_urgency,
+        );
+    }
+}
+
+#[test]
+fn tier_ordering_never_broken_by_cache_boost() {
+    // A PartialBase candidate with the deepest possible cache must NEVER win over
+    // a KnownBase candidate with no cache. Cache boost operates strictly within tier.
+    let known_base = healthy_known_base_at_util("known-base", 1, 0.10);
+    // PartialBase: 5h fresh+allowed, 7d MISSING (positive_count=1, total=2 → PartialBase).
+    let partial_base = with_live_cache(
+        oauth_at_t0(
+            "partial-base",
+            2,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .status("allowed")
+                    .util(0.10)
+                    .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS)
+                    .build(),
+            ],
+        ),
+        500_000,
+    );
+    let filter = SubscriptionPreferenceFilter::new();
+    let ctx = ctx_with_request_id(MODEL_AGNOSTIC, "req-1");
+    let out = filter
+        .filter(&ctx, &principal(), &[known_base.clone(), partial_base])
+        .unwrap();
+    assert_eq!(
+        out.kept_upstream_ids,
+        vec![known_base.upstream_id],
+        "KnownBase must always beat PartialBase regardless of cache depth"
+    );
+}
+
+#[test]
+fn cache_boost_calibration_at_99_percent() {
+    // Direct assertion of the CACHE_LOG_BOOST calibration target. See ADR 0004.
+    let bear_quota = expected_quota_urgency(0.99);
+    let runbear_quota = expected_quota_urgency(0.10);
+    let bear_effective = bear_quota * expected_cache_weight_multiplier(1.0);
+    let runbear_effective = runbear_quota * expected_cache_weight_multiplier(15_000.0 / 250_000.0);
+    assert!(
+        (bear_effective - runbear_effective).abs() < CROSSOVER_TOLERANCE,
+        "CACHE_LOG_BOOST={} miscalibrated: bear (util=0.99, ratio=1.0) effective_weight {} \
+         must equal Runbear (util=0.10, ratio=0.06) {} within {}",
+        CACHE_LOG_BOOST,
+        bear_effective,
+        runbear_effective,
+        CROSSOVER_TOLERANCE,
     );
 }

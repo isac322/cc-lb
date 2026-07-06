@@ -776,14 +776,54 @@ pub enum SubscriptionTier {
 
 /// Per-candidate weighted-rendezvous-hash urgency score and tier for one
 /// subscription-preference selection.
+///
+/// Under salt v7 the `urgency` field is aliased to `effective_weight` so a
+/// consumer that only reads `urgency` still sees the current selection
+/// weight. The new fields (`quota_urgency`, `predicted_cache_read_tokens`,
+/// `cache_ratio`, `cache_weight_multiplier`, `effective_weight`) expose the
+/// four components of the cache-weighted WRH computation individually so
+/// operator queries can distinguish quota-driven changes from cache-driven
+/// changes. See docs/rfc/0003-cache-weighted-subscription-preference.md.
+///
+/// All new fields default to zero so v6-shape trace rows deserialize
+/// cleanly into a `CandidateUrgency` that reports "no cache signal, no
+/// v7 boost."
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CandidateUrgency {
     /// Upstream identifier this urgency was computed for.
     pub upstream_id: Uuid,
     /// Tier the candidate was assessed into.
     pub tier: SubscriptionTier,
-    /// WRH urgency weight. Higher values are more likely to win selection.
+    /// WRH selection weight actually used to score this candidate. Under
+    /// v7 this equals `effective_weight`; kept as a stable alias so legacy
+    /// trace consumers that only read `urgency` still see the current
+    /// value.
     pub urgency: f64,
+    /// Pre-boost quota urgency component
+    /// (`capacity_multiplier * (1 - util)^2 / remaining_secs`). Defaults to
+    /// zero on v6-shape rows.
+    #[serde(default)]
+    pub quota_urgency: f64,
+    /// Cache signal input from `cache_score.predicted_cache_read_tokens`.
+    /// Zero when the candidate has no cache_score or reports zero
+    /// predicted read tokens.
+    #[serde(default)]
+    pub predicted_cache_read_tokens: u32,
+    /// Ratio of `predicted_cache_read_tokens` to the maximum observed in
+    /// this candidate's tier bucket. Ranges `[0.0, 1.0]`; zero when the
+    /// bucket max is zero.
+    #[serde(default)]
+    pub cache_ratio: f64,
+    /// `exp(CACHE_LOG_BOOST * cache_ratio)`. Ranges from 1.0 (cold) up to
+    /// `exp(CACHE_LOG_BOOST)` (deepest cache in bucket). Multiplied onto
+    /// `quota_urgency` to produce `effective_weight`.
+    #[serde(default)]
+    pub cache_weight_multiplier: f64,
+    /// Final WRH selection weight: `quota_urgency * cache_weight_multiplier`.
+    /// Under the uniform-fallback branch (all candidates in bucket have
+    /// zero quota_urgency), this equals `cache_weight_multiplier` alone.
+    #[serde(default)]
+    pub effective_weight: f64,
 }
 
 impl PartialEq for CandidateUrgency {
@@ -791,6 +831,17 @@ impl PartialEq for CandidateUrgency {
         self.upstream_id == other.upstream_id
             && self.tier == other.tier
             && self.urgency.total_cmp(&other.urgency).is_eq()
+            && self.quota_urgency.total_cmp(&other.quota_urgency).is_eq()
+            && self.predicted_cache_read_tokens == other.predicted_cache_read_tokens
+            && self.cache_ratio.total_cmp(&other.cache_ratio).is_eq()
+            && self
+                .cache_weight_multiplier
+                .total_cmp(&other.cache_weight_multiplier)
+                .is_eq()
+            && self
+                .effective_weight
+                .total_cmp(&other.effective_weight)
+                .is_eq()
     }
 }
 

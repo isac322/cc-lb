@@ -130,15 +130,26 @@ fn routing_trace_cap_respects_extended_stage_payloads() {
         subscription_preference: Some(SubscriptionPreferenceTrace {
             chosen_tier: SubscriptionTier::KnownBase,
             candidates: (0..8u8)
-                .map(|c| CandidateUrgency {
-                    upstream_id: seeded(100 + c),
-                    tier: SubscriptionTier::KnownBase,
-                    urgency: 0.123_456_789 * (c as f64 + 1.0),
+                .map(|c| {
+                    let quota = 0.123_456_789 * (c as f64 + 1.0);
+                    let cache_ratio = c as f64 / 7.0;
+                    let cache_weight_multiplier = (9.574_063_128_362_267_f64 * cache_ratio).exp();
+                    let effective_weight = quota * cache_weight_multiplier;
+                    CandidateUrgency {
+                        upstream_id: seeded(100 + c),
+                        tier: SubscriptionTier::KnownBase,
+                        urgency: effective_weight,
+                        quota_urgency: quota,
+                        predicted_cache_read_tokens: u32::from(c) * 30_000,
+                        cache_ratio,
+                        cache_weight_multiplier,
+                        effective_weight,
+                    }
                 })
                 .collect(),
-            wrh_key_source: WrhKeySource::ThreadId,
+            wrh_key_source: WrhKeySource::RequestId,
             previous_tier: Some(SubscriptionTier::PartialBase),
-            rendezvous_salt_version: Some("v4".to_owned()),
+            rendezvous_salt_version: Some("v7".to_owned()),
         }),
         cache_affinity: None,
     };
@@ -198,17 +209,26 @@ fn subscription_preference_all_fields_survive_serde_roundtrip() {
             upstream_id: Uuid::from_bytes([1; 16]),
             tier: SubscriptionTier::KnownBase,
             urgency: 0.75,
+            quota_urgency: 0.25,
+            predicted_cache_read_tokens: 100_000,
+            cache_ratio: 0.4,
+            cache_weight_multiplier: 3.0,
+            effective_weight: 0.75,
         }],
-        wrh_key_source: WrhKeySource::ThreadId,
+        wrh_key_source: WrhKeySource::RequestId,
         previous_tier: Some(SubscriptionTier::KnownBase),
-        rendezvous_salt_version: Some("v4".to_owned()),
+        rendezvous_salt_version: Some("v7".to_owned()),
     };
     let json = serde_json::to_string(&trace).unwrap();
     let decoded: SubscriptionPreferenceTrace = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded, trace);
-    assert!(json.contains("\"wrh_key_source\":\"thread_id\""));
+    assert!(json.contains("\"wrh_key_source\":\"request_id\""));
     assert!(json.contains("\"previous_tier\":\"known_base\""));
-    assert!(json.contains("\"rendezvous_salt_version\":\"v4\""));
+    assert!(json.contains("\"rendezvous_salt_version\":\"v7\""));
+    assert!(json.contains("\"quota_urgency\":"));
+    assert!(json.contains("\"predicted_cache_read_tokens\":100000"));
+    assert!(json.contains("\"cache_weight_multiplier\":"));
+    assert!(json.contains("\"effective_weight\":"));
 }
 
 #[test]
