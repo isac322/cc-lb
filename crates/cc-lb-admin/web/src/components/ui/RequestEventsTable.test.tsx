@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   RequestEventsTable,
   type RequestEventWithPhase,
+  Sparkline,
 } from './RequestEventsTable';
 
 describe('RequestEventsTable', () => {
@@ -208,6 +209,66 @@ describe('RequestEventsTable', () => {
       const dashes = screen.getAllByText('—');
       // 5 rows + 1 total + 1 cell = 7 dashes
       expect(dashes.length).toBeGreaterThanOrEqual(7);
+    });
+  });
+
+  describe('Sparkline', () => {
+    it('applies Tailwind bg-* utility colors through className', () => {
+      const { container } = render(
+        <Sparkline segments={[{ value: 10, color: 'bg-sky-400' }]} />,
+      );
+
+      const segments = Array.from(container.querySelectorAll('span'));
+
+      expect(segments).toHaveLength(1);
+      expect(segments[0]?.className).toContain('bg-sky-400');
+      expect(segments[0]?.style.backgroundColor).toBe('');
+    });
+
+    it('applies raw CSS colors through inline style', () => {
+      const { container } = render(
+        <Sparkline segments={[{ value: 20, color: '#ff0000' }]} />,
+      );
+
+      const segments = Array.from(container.querySelectorAll('span'));
+
+      expect(segments).toHaveLength(1);
+      expect(segments[0]?.className).not.toContain('#ff0000');
+      expect(segments[0]?.style.backgroundColor).toBe('rgb(255, 0, 0)');
+    });
+
+    it('keeps compound Tailwind bg-* utility colors in className', () => {
+      const compoundColor =
+        'bg-slate-700/30 bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_rgba(255,255,255,0.05)_4px_8px)]';
+      const { container } = render(
+        <Sparkline segments={[{ value: 30, color: compoundColor }]} />,
+      );
+
+      const segments = Array.from(container.querySelectorAll('span'));
+
+      expect(segments).toHaveLength(1);
+      expect(segments[0]?.className).toContain('bg-slate-700/30');
+      expect(segments[0]?.className).toContain(
+        'bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_rgba(255,255,255,0.05)_4px_8px)]',
+      );
+      expect(segments[0]?.style.backgroundColor).toBe('');
+    });
+
+    it('renders empty track when total is zero or negative', () => {
+      const { container } = render(
+        <Sparkline
+          segments={[
+            { value: 0, color: 'bg-sky-400' },
+            { value: -10, color: '#ff0000' },
+          ]}
+        />,
+      );
+
+      const segments = container.querySelectorAll('span');
+      expect(segments).toHaveLength(0);
+
+      const track = container.querySelector('div');
+      expect(track?.className).toContain('bg-overlay-1');
     });
   });
 });

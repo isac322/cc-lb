@@ -557,18 +557,20 @@ export function Sparkline({ segments }: { segments: SparkSegment[] }) {
   }
   return (
     <div className="mt-1 h-1 w-full rounded-full overflow-hidden flex bg-overlay-1">
-      {segments.map((s, i) =>
-        s.value > 0 ? (
+      {segments.map((s, i) => {
+        if (s.value <= 0) return null;
+        const isTailwindBg = /(^|\s)bg-/.test(s.color);
+        return (
           <span
             key={i}
-            className="h-full"
+            className={cx('h-full', isTailwindBg ? s.color : undefined)}
             style={{
               width: `${(s.value / total) * 100}%`,
-              backgroundColor: s.color,
+              backgroundColor: isTailwindBg ? undefined : s.color,
             }}
           />
-        ) : null,
-      )}
+        );
+      })}
     </div>
   );
 }
