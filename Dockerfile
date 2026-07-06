@@ -101,6 +101,10 @@ ACTIONS_RESULTS_URL="$(cat /run/secrets/ACTIONS_RESULTS_URL 2>/dev/null || true)
 if [ -n "${ACTIONS_RUNTIME_TOKEN}" ] && [ -n "${ACTIONS_RESULTS_URL}" ]; then
   export ACTIONS_RUNTIME_TOKEN ACTIONS_RESULTS_URL
   export RUSTC_WRAPPER=sccache SCCACHE_GHA_ENABLED=on SCCACHE_IGNORE_SERVER_IO_ERROR=1 CARGO_INCREMENTAL=0
+  # Disable the server idle-timeout (default 600s). The fat-LTO final link runs
+  # for >10min with no compiler calls, which would otherwise reap the sccache
+  # server mid-build and discard its in-memory stats before --show-stats runs.
+  export SCCACHE_IDLE_TIMEOUT=0
   echo "sccache: GHA cache backend enabled"
 else
   echo "sccache: no GHA cache token, compiling uncached"
