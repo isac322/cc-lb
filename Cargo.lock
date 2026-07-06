@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-plugin-api"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-plugin-wire"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "blake3",
  "rkyv",
