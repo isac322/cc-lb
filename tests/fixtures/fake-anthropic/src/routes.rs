@@ -245,6 +245,8 @@ pub struct AppState {
     last_selected_headers: Mutex<BTreeMap<&'static str, Option<String>>>,
     #[cfg(any(debug_assertions, feature = "debug-endpoints"))]
     injected_usage: Mutex<HashMap<String, InjectedUsage>>,
+    #[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+    default_injected_usage: Mutex<Option<InjectedUsage>>,
 }
 
 #[cfg(any(debug_assertions, feature = "debug-endpoints"))]
@@ -276,6 +278,8 @@ impl AppState {
             ])),
             #[cfg(any(debug_assertions, feature = "debug-endpoints"))]
             injected_usage: Mutex::new(HashMap::new()),
+            #[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+            default_injected_usage: Mutex::new(None),
         }
     }
 
@@ -325,7 +329,9 @@ pub fn app(config: AppConfig) -> Router {
         .route("/__last_request", get(last_request));
 
     #[cfg(any(debug_assertions, feature = "debug-endpoints"))]
-    let router = router.route("/__inject_cache_stats", post(inject_cache_stats));
+    let router = router
+        .route("/__inject_cache_stats", post(inject_cache_stats))
+        .route("/__set_default_cache_stats", post(set_default_cache_stats));
 
     router
         .route("/v1/models", get(list_models))
@@ -351,6 +357,24 @@ async fn inject_cache_stats(
             StatusCode::INTERNAL_SERVER_ERROR,
             "api_error",
             "failed to record injected cache stats",
+        ),
+    }
+}
+
+#[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+async fn set_default_cache_stats(
+    State(state): State<Arc<AppState>>,
+    Json(usage): Json<InjectedUsage>,
+) -> Response {
+    match state.default_injected_usage.lock() {
+        Ok(mut slot) => {
+            *slot = Some(usage);
+            json_response(StatusCode::OK, json!({ "ok": true }))
+        }
+        Err(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "api_error",
+            "failed to record default cache stats",
         ),
     }
 }
@@ -435,7 +459,14 @@ fn response_body_with_injected_usage(
         .injected_usage
         .lock()
         .ok()
-        .and_then(|injected_usage| injected_usage.get(&signature).cloned());
+        .and_then(|injected_usage| injected_usage.get(&signature).cloned())
+        .or_else(|| {
+            state
+                .default_injected_usage
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone())
+        });
 
     if let Some(injected_usage) = injected_usage
         && let Some(usage) = response_body
