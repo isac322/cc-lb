@@ -66,35 +66,33 @@ pub struct ClassifierConfig {
     #[serde(default)]
     pub extra_wait_for_user_tools: Vec<String>,
 
-    /// If true, route `stop_reason: "end_turn"` through the LLM judge as
-    /// well. Only turn on for principals running autonomous/self-loop
-    /// agents that continue after `end_turn`.
+    /// If true, classify `stop_reason: "end_turn"` as Ambiguous as well.
+    /// Because the LLM judge is reserved for a future release, Ambiguous
+    /// currently fails closed as UserTurn.
     #[serde(default)]
     pub treat_end_turn_as_ambiguous: bool,
 
-    /// Optional small-LLM judge for Ambiguous classifier decisions.
-    /// If None, Ambiguous defaults to UserTurn (fail-safe: prefer eviction
-    /// over paying for a wasted refresh). See docs/rfc/0003 §Classifier.
+    /// Reserved for a future small-LLM judge for Ambiguous classifier
+    /// decisions. The admin API rejects non-None values in this release;
+    /// stored legacy values fail closed as UserTurn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_judge: Option<LlmJudgeConfig>,
 }
 
-/// Optional small-LLM judge invoked when the heuristic classifier returns
-/// `Ambiguous`. Runs in the keep-alive background task, never blocks the
-/// user-facing response.
+/// Reserved future small-LLM judge configuration for Ambiguous classifier
+/// decisions. The admin API rejects non-None values in this release, and
+/// any legacy stored value fails closed as UserTurn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmJudgeConfig {
-    /// Provider identifier understood by the `genai` crate.
+    /// Provider identifier for the future judge implementation.
     /// Examples: `"anthropic"`, `"openai"`, `"gemini"`, `"kimi"`,
     /// `"moonshot"`, `"zai"`, `"bigmodel"`, `"custom_openai"`.
     pub provider: String,
 
-    /// Model identifier passed to `genai::Client::exec_chat`.
+    /// Model identifier for the future judge implementation.
     pub model: String,
 
-    /// Opaque reference into the cc-lb secret store. The engine resolves
-    /// this to the raw API key at judge-call time; the raw key never
-    /// leaves storage.
+    /// Opaque reference into the cc-lb secret store for the future judge.
     pub api_key_secret_ref: String,
 
     /// Base URL override for OpenAI-compatible gateways / self-hosted
