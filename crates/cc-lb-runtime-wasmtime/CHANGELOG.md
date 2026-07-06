@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.1.1...cc-lb-runtime-wasmtime-v0.1.2) - 2026-07-06
+
+### Added
+
+- *(observability)* surface subscription-preference tier + WRH urgency in RoutingTrace ([#324](https://github.com/isac322/cc-lb/pull/324))
+
+### Fixed
+
+- *(routing)* key subscription-preference WRH on thread_id instead of request_id ([#322](https://github.com/isac322/cc-lb/pull/322))
+
+### Other
+
+- *(workspace)* Direction Y crate restructure — split cc-lb-core into engine/contract/control ([#317](https://github.com/isac322/cc-lb/pull/317))
+- *(routing)* rewrite subscription-preference filter with weighted-rendezvous selection ([#312](https://github.com/isac322/cc-lb/pull/312))
+
 ## [0.1.1](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.1.0...cc-lb-runtime-wasmtime-v0.1.1) - 2026-07-04
 
 ### Added
