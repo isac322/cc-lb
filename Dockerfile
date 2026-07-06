@@ -105,9 +105,28 @@ if [ -n "${ACTIONS_RUNTIME_TOKEN}" ] && [ -n "${ACTIONS_RESULTS_URL}" ]; then
   # for >10min with no compiler calls, which would otherwise reap the sccache
   # server mid-build and discard its in-memory stats before --show-stats runs.
   export SCCACHE_IDLE_TIMEOUT=0
+  # TEMP DIAGNOSTIC: surface why ghac cache writes do not persist (0% hit rate).
+  export SCCACHE_ERROR_LOG=/tmp/sccache-diag.log SCCACHE_LOG=debug
   echo "sccache: GHA cache backend enabled"
 else
   echo "sccache: no GHA cache token, compiling uncached"
+fi
+
+# TEMP DIAGNOSTIC: probe the ghac write->read round-trip (compile #2 must HIT if
+# the store persisted), dump the reason, then fail fast to skip the release build.
+if [ -n "${RUSTC_WRAPPER:-}" ]; then
+  sccache --stop-server || true
+  printf 'pub fn f() -> u32 { 42 }\n' > /tmp/p.rs
+  echo "=== sccache PROBE compile #1 (expect miss + store) ==="
+  sccache rustc --crate-name p --crate-type lib --edition 2021 /tmp/p.rs --out-dir /tmp/po1 2>&1 | tail -3 || true
+  echo "=== sccache PROBE compile #2 (expect HIT if the store persisted) ==="
+  sccache rustc --crate-name p --crate-type lib --edition 2021 /tmp/p.rs --out-dir /tmp/po2 2>&1 | tail -3 || true
+  echo "=== sccache --show-stats (after 2 identical probes) ==="
+  sccache --show-stats 2>&1 | grep -iE 'request|hit|miss|write|read|location|error|non-cacheable' || true
+  echo "=== sccache debug log (ghac write path) ==="
+  grep -iE 'error|warn|fail|store|put|reserve|commit|http|status|gha|upload|reservoir|refused|dns|resolve|connect' /tmp/sccache-diag.log 2>/dev/null | tail -100 || echo "(no diag log)"
+  echo "=== END sccache PROBE — failing fast for diagnostics ==="
+  exit 1
 fi
 
 xx-cargo build --release --locked \
