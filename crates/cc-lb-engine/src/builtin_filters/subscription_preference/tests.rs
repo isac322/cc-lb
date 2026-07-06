@@ -1332,6 +1332,7 @@ fn ctx_with_request_id(canonical_model: &str, request_id: &str) -> RequestContex
         body_bytes: Bytes::new(),
         cache_breakpoints: Vec::new(),
         canonical_model_id: canonical_model.to_owned(),
+        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     }
 }
 
@@ -1346,6 +1347,7 @@ fn ctx_with_thread_id(canonical_model: &str, request_id: &str, thread_id: &str) 
         body_bytes: Bytes::new(),
         cache_breakpoints: Vec::new(),
         canonical_model_id: canonical_model.to_owned(),
+        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     }
 }
 

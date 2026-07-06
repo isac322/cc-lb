@@ -43,7 +43,7 @@
 //! - Stale + `rejected` + future reset: hard negative (rejection still live).
 //! - Stale + `rejected` + past reset: unknown (rejection expired).
 
-use cc_lb_plugin_api::types::WrhKeySource;
+use cc_lb_plugin_api::types::{CachePricingSummary, WrhKeySource};
 use cc_lb_plugin_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, FilterError,
     FilterOutput, FilterPlugin, Principal, RequestContext, SubscriptionQuotaCandidateSnapshot,
@@ -125,10 +125,15 @@ const SUCCESSOR_CONVERGENCE_OBSERVATIONS: u8 = 2;
 /// algorithm/salt change from those caused by upstream or quota state
 /// changes. Bumped in lockstep with `RENDEZVOUS_SALT` — a `debug_assert`
 /// in `tests::rendezvous_salt_embeds_version` guards the invariant.
-pub(crate) const SALT_VERSION: &str = "v8";
+pub(crate) const SALT_VERSION: &str = "v9";
 
 /// Salt for the weighted-rendezvous hash. Bumped as a version stamp when the
 /// selection algorithm changes shape; older salts must never be reused.
+///
+/// v9 (2026-07-06): warning-positive base windows remain KnownBase with a
+/// same-tier multiplier, and threaded owner handoff is additionally gated by
+/// estimated in-memory cache re-prime cost derived from plugin-visible pricing
+/// and cache-score inputs.
 ///
 /// v8 (2026-07-06): WRH is keyed on non-empty `thread_id`, falling back to
 /// `request_id` only for stateless requests. Fresh base windows with
@@ -168,7 +173,11 @@ pub(crate) const SALT_VERSION: &str = "v8";
 /// while the prompt cache stayed warm. Deployed by PR #322 after the
 /// 2026-07-05 06:24 UTC scatter incident.
 const RENDEZVOUS_SALT: &str =
-    "cc-lb:subscription-preference:v8:thread-keyed-warning-demote:2026-07-06";
+    "cc-lb:subscription-preference:v9:dollar-cache-switch-gate:2026-07-06";
+
+const CACHE_COST_BASIS_VERSION: &str = "v1";
+const WARNING_MULTIPLIER: f64 = 0.20;
+const NORMAL_SWITCH_CACHE_LOSS_BUDGET_MICROS: u64 = 50_000;
 
 /// Exponent coefficient on the cache-weighted WRH multiplier.
 /// `cache_weight_multiplier_i = exp(CACHE_LOG_BOOST * cache_ratio_i)` sits on
@@ -319,9 +328,12 @@ impl TierMemory {
         formula_winner: Uuid,
         incumbent: Option<ThreadIncumbent>,
         now: Instant,
-    ) -> Uuid {
+    ) -> ThreadOwnerDecision {
         if thread_id.is_empty() {
-            return formula_winner;
+            return ThreadOwnerDecision {
+                kept_upstream_id: formula_winner,
+                switch_gate_reason: "stateless_formula_winner",
+            };
         }
         let thread_key = normalized_thread_routing_key(thread_id);
         let mut map = self.inner.lock();
@@ -344,7 +356,10 @@ impl TierMemory {
                     },
                 );
             }
-            return formula_winner;
+            return ThreadOwnerDecision {
+                kept_upstream_id: formula_winner,
+                switch_gate_reason: "no_previous_owner",
+            };
         };
 
         if entry.tier != tier {
@@ -352,7 +367,10 @@ impl TierMemory {
             entry.owner_upstream_id = Some(formula_winner);
             entry.pending_successor = None;
             entry.expires_at = expires_at;
-            return formula_winner;
+            return ThreadOwnerDecision {
+                kept_upstream_id: formula_winner,
+                switch_gate_reason: "tier_changed",
+            };
         }
 
         let Some(incumbent) = incumbent else {
@@ -360,7 +378,10 @@ impl TierMemory {
             entry.owner_upstream_id = Some(formula_winner);
             entry.pending_successor = None;
             entry.expires_at = expires_at;
-            return formula_winner;
+            return ThreadOwnerDecision {
+                kept_upstream_id: formula_winner,
+                switch_gate_reason: "no_incumbent_in_tier",
+            };
         };
 
         if incumbent.upstream_id == formula_winner {
@@ -368,7 +389,10 @@ impl TierMemory {
             entry.owner_upstream_id = Some(incumbent.upstream_id);
             entry.pending_successor = None;
             entry.expires_at = expires_at;
-            return incumbent.upstream_id;
+            return ThreadOwnerDecision {
+                kept_upstream_id: incumbent.upstream_id,
+                switch_gate_reason: "formula_winner_is_incumbent",
+            };
         }
 
         if !incumbent.challenger_beats_margin {
@@ -376,7 +400,21 @@ impl TierMemory {
             entry.owner_upstream_id = Some(incumbent.upstream_id);
             entry.pending_successor = None;
             entry.expires_at = expires_at;
-            return incumbent.upstream_id;
+            return ThreadOwnerDecision {
+                kept_upstream_id: incumbent.upstream_id,
+                switch_gate_reason: "margin_blocked",
+            };
+        }
+
+        if !incumbent.cache_loss_allows_switch {
+            entry.tier = tier;
+            entry.owner_upstream_id = Some(incumbent.upstream_id);
+            entry.pending_successor = None;
+            entry.expires_at = expires_at;
+            return ThreadOwnerDecision {
+                kept_upstream_id: incumbent.upstream_id,
+                switch_gate_reason: incumbent.switch_gate_reason,
+            };
         }
 
         let observations = match entry.pending_successor {
@@ -388,7 +426,10 @@ impl TierMemory {
             entry.owner_upstream_id = Some(formula_winner);
             entry.pending_successor = None;
             entry.expires_at = expires_at;
-            formula_winner
+            ThreadOwnerDecision {
+                kept_upstream_id: formula_winner,
+                switch_gate_reason: "successor_converged",
+            }
         } else {
             entry.tier = tier;
             entry.owner_upstream_id = Some(incumbent.upstream_id);
@@ -397,7 +438,10 @@ impl TierMemory {
                 observations,
             });
             entry.expires_at = expires_at;
-            incumbent.upstream_id
+            ThreadOwnerDecision {
+                kept_upstream_id: incumbent.upstream_id,
+                switch_gate_reason: "successor_pending",
+            }
         }
     }
 
@@ -552,15 +596,26 @@ fn evaluate(
                     cache_ratio_within_bucket(cache_tokens, max_cache_tokens_in_bucket);
                 let cache_weight_multiplier = (CACHE_LOG_BOOST * cache_ratio).exp();
                 let quota_weight = if uniform_fallback { 1.0 } else { a.urgency };
-                let effective_weight = quota_weight * cache_weight_multiplier;
+                let effective_weight =
+                    quota_weight * cache_weight_multiplier * a.warning_multiplier;
+                let estimated_input_cost_micros =
+                    estimate_candidate_input_cost_micros(a.candidate, &ctx.cache_pricing)
+                        .unwrap_or(0);
+                let cache_savings_ratio = cache_savings_ratio(a.candidate, &ctx.cache_pricing);
                 cc_lb_plugin_api::CandidateUrgency {
                     upstream_id: a.candidate.upstream_id,
                     tier: tier_to_plugin_api(a.tier),
                     urgency: effective_weight,
                     quota_urgency: a.urgency,
                     predicted_cache_read_tokens: cache_tokens,
+                    predicted_cache_creation_tokens_5m: candidate_cache_creation_tokens_5m(a),
+                    predicted_cache_creation_tokens_1h: candidate_cache_creation_tokens_1h(a),
+                    predicted_uncached_input_tokens: candidate_uncached_input_tokens(a),
                     cache_ratio,
                     cache_weight_multiplier,
+                    warning_multiplier: a.warning_multiplier,
+                    cache_savings_ratio,
+                    estimated_input_cost_micros,
                     effective_weight,
                 }
             })
@@ -613,14 +668,20 @@ fn evaluate(
                     selection.uniform,
                     selection.max_cache_tokens,
                 );
+                let cache_loss_gate = cache_loss_gate(owner, formula_winner, &ctx.cache_pricing);
                 ThreadIncumbent {
                     upstream_id: owner.candidate.upstream_id,
                     challenger_beats_margin: formula_winner.candidate.upstream_id
                         != owner.candidate.upstream_id
                         && challenger_key.score * SWITCH_SCORE_MARGIN <= incumbent_key.score,
+                    cache_loss_allows_switch: cache_loss_gate.allows_switch,
+                    estimated_switch_cache_loss_micros: cache_loss_gate.estimated_micros,
+                    cache_loss_status: cache_loss_gate.status,
+                    switch_gate_reason: cache_loss_gate.reason,
                 }
             });
-        let kept_upstream_id = match session_thread_key.as_deref() {
+        let incumbent_trace = incumbent;
+        let owner_decision = match session_thread_key.as_deref() {
             Some(thread_id) => tier_memory.choose_thread_owner(
                 thread_id,
                 chosen_tier,
@@ -628,8 +689,12 @@ fn evaluate(
                 incumbent,
                 now,
             ),
-            None => formula_winner.candidate.upstream_id,
+            None => ThreadOwnerDecision {
+                kept_upstream_id: formula_winner.candidate.upstream_id,
+                switch_gate_reason: "stateless_formula_winner",
+            },
         };
+        let kept_upstream_id = owner_decision.kept_upstream_id;
 
         let trace = cc_lb_plugin_api::SubscriptionPreferenceTrace {
             chosen_tier,
@@ -637,6 +702,15 @@ fn evaluate(
             wrh_key_source,
             previous_tier,
             rendezvous_salt_version: Some(SALT_VERSION.to_owned()),
+            cache_cost_basis_version: Some(CACHE_COST_BASIS_VERSION.to_owned()),
+            formula_winner_upstream_id: Some(formula_winner.candidate.upstream_id),
+            kept_upstream_id: Some(kept_upstream_id),
+            incumbent_upstream_id: incumbent_trace.map(|incumbent| incumbent.upstream_id),
+            estimated_switch_cache_loss_micros: incumbent_trace
+                .and_then(|incumbent| incumbent.estimated_switch_cache_loss_micros),
+            cache_loss_status: incumbent_trace
+                .map(|incumbent| incumbent.cache_loss_status.to_owned()),
+            switch_gate_reason: Some(owner_decision.switch_gate_reason.to_owned()),
         };
         return FilterOutput {
             kept_upstream_ids: vec![kept_upstream_id],
@@ -739,12 +813,31 @@ struct Assessment<'a> {
     original_index: usize,
     tier: Tier,
     urgency: f64,
+    warning_multiplier: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct ThreadIncumbent {
     upstream_id: Uuid,
     challenger_beats_margin: bool,
+    cache_loss_allows_switch: bool,
+    estimated_switch_cache_loss_micros: Option<u64>,
+    cache_loss_status: &'static str,
+    switch_gate_reason: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ThreadOwnerDecision {
+    kept_upstream_id: Uuid,
+    switch_gate_reason: &'static str,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CacheLossGate {
+    allows_switch: bool,
+    estimated_micros: Option<u64>,
+    status: &'static str,
+    reason: &'static str,
 }
 
 // -- Candidate assessment. --------------------------------------------------
@@ -801,11 +894,7 @@ fn assess_candidate<'a>(
             return None;
         }
     } else if positive_count == total && total > 0 {
-        if warning_positive_count > 0 {
-            (Tier::PartialBase, base_urgency)
-        } else {
-            (Tier::KnownBase, base_urgency)
-        }
+        (Tier::KnownBase, base_urgency)
     } else if positive_count > 0 {
         (Tier::PartialBase, base_urgency)
     } else if config.unknown_probe_enabled {
@@ -819,6 +908,11 @@ fn assess_candidate<'a>(
         original_index,
         tier,
         urgency,
+        warning_multiplier: if warning_positive_count > 0 {
+            WARNING_MULTIPLIER
+        } else {
+            1.0
+        },
     })
 }
 
@@ -1099,6 +1193,30 @@ fn candidate_cache_read_tokens(assessment: &Assessment<'_>) -> u32 {
         .map_or(0, |score| score.predicted_cache_read_tokens)
 }
 
+fn candidate_cache_creation_tokens_5m(assessment: &Assessment<'_>) -> u32 {
+    assessment
+        .candidate
+        .cache_score
+        .as_ref()
+        .map_or(0, |score| score.predicted_cache_creation_tokens_5m)
+}
+
+fn candidate_cache_creation_tokens_1h(assessment: &Assessment<'_>) -> u32 {
+    assessment
+        .candidate
+        .cache_score
+        .as_ref()
+        .map_or(0, |score| score.predicted_cache_creation_tokens_1h)
+}
+
+fn candidate_uncached_input_tokens(assessment: &Assessment<'_>) -> u32 {
+    assessment
+        .candidate
+        .cache_score
+        .as_ref()
+        .map_or(0, |score| score.predicted_uncached_input_tokens)
+}
+
 /// Cache ratio inside one tier bucket. Returns `0.0` when the bucket has no
 /// positive cache signal so the exponential multiplier collapses to `1.0`
 /// (cold-pool fallback: WRH reduces to pure quota urgency, matching the
@@ -1109,6 +1227,119 @@ fn cache_ratio_within_bucket(candidate_cache_tokens: u32, max_cache_tokens_in_bu
     } else {
         candidate_cache_tokens as f64 / max_cache_tokens_in_bucket as f64
     }
+}
+
+fn estimate_candidate_input_cost_micros(
+    candidate: &UpstreamCandidate,
+    pricing: &CachePricingSummary,
+) -> Option<u64> {
+    let score = candidate.cache_score.as_ref()?;
+    let input_price = pricing.input_micros_per_million?;
+    let cache_creation_5m_price = pricing.cache_creation_5m_micros_per_million?;
+    let cache_creation_1h_price = pricing.cache_creation_1h_micros_per_million?;
+    let cache_read_price = pricing.cache_read_micros_per_million?;
+    Some(
+        micros_for_tokens(score.predicted_uncached_input_tokens, input_price)
+            .saturating_add(micros_for_tokens(
+                score.predicted_cache_creation_tokens_5m,
+                cache_creation_5m_price,
+            ))
+            .saturating_add(micros_for_tokens(
+                score.predicted_cache_creation_tokens_1h,
+                cache_creation_1h_price,
+            ))
+            .saturating_add(micros_for_tokens(
+                score.predicted_cache_read_tokens,
+                cache_read_price,
+            )),
+    )
+}
+
+fn cache_savings_ratio(candidate: &UpstreamCandidate, pricing: &CachePricingSummary) -> f64 {
+    let Some(score) = candidate.cache_score.as_ref() else {
+        return 0.0;
+    };
+    let Some(input_price) = pricing.input_micros_per_million else {
+        return 0.0;
+    };
+    let Some(read_price) = pricing.cache_read_micros_per_million else {
+        return 0.0;
+    };
+    let cold_cost = micros_for_tokens(score.predicted_cache_read_tokens, input_price);
+    if cold_cost == 0 {
+        return 0.0;
+    }
+    let read_cost = micros_for_tokens(score.predicted_cache_read_tokens, read_price);
+    cold_cost.saturating_sub(read_cost) as f64 / cold_cost as f64
+}
+
+fn cache_loss_gate(
+    incumbent: &Assessment<'_>,
+    challenger: &Assessment<'_>,
+    pricing: &CachePricingSummary,
+) -> CacheLossGate {
+    if incumbent.candidate.upstream_id == challenger.candidate.upstream_id {
+        return CacheLossGate {
+            allows_switch: true,
+            estimated_micros: Some(0),
+            status: "known",
+            reason: "formula_winner_is_incumbent",
+        };
+    }
+
+    let read_loss_tokens = candidate_cache_read_tokens(incumbent)
+        .saturating_sub(candidate_cache_read_tokens(challenger));
+    let creation_5m_tokens = candidate_cache_creation_tokens_5m(challenger).max(read_loss_tokens);
+    let creation_1h_tokens = candidate_cache_creation_tokens_1h(challenger);
+    if creation_5m_tokens == 0 && creation_1h_tokens == 0 {
+        return CacheLossGate {
+            allows_switch: true,
+            estimated_micros: Some(0),
+            status: "known",
+            reason: "cache_loss_none",
+        };
+    }
+
+    let Some(cache_creation_5m_price) = pricing.cache_creation_5m_micros_per_million else {
+        return unknown_cache_loss_gate();
+    };
+    let Some(cache_creation_1h_price) = pricing.cache_creation_1h_micros_per_million else {
+        return unknown_cache_loss_gate();
+    };
+    let Some(cache_read_price) = pricing.cache_read_micros_per_million else {
+        return unknown_cache_loss_gate();
+    };
+
+    let delta_5m = cache_creation_5m_price.saturating_sub(cache_read_price);
+    let delta_1h = cache_creation_1h_price.saturating_sub(cache_read_price);
+    let estimated = micros_for_tokens(creation_5m_tokens, delta_5m)
+        .saturating_add(micros_for_tokens(creation_1h_tokens, delta_1h));
+    let allows_switch = estimated <= NORMAL_SWITCH_CACHE_LOSS_BUDGET_MICROS;
+    CacheLossGate {
+        allows_switch,
+        estimated_micros: Some(estimated),
+        status: "known",
+        reason: if allows_switch {
+            "cache_loss_allowed"
+        } else {
+            "cache_loss_blocked"
+        },
+    }
+}
+
+fn unknown_cache_loss_gate() -> CacheLossGate {
+    CacheLossGate {
+        allows_switch: false,
+        estimated_micros: None,
+        status: "unknown",
+        reason: "cache_loss_unknown",
+    }
+}
+
+fn micros_for_tokens(tokens: u32, micros_per_million: u64) -> u64 {
+    (u128::from(tokens) * u128::from(micros_per_million) / 1_000_000)
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 struct WrhKey {
@@ -1135,7 +1366,8 @@ fn wrh_key(
     let quota_weight = if uniform { 1.0 } else { assessment.urgency };
     let cache_tokens = candidate_cache_read_tokens(assessment);
     let cache_ratio = cache_ratio_within_bucket(cache_tokens, max_cache_tokens);
-    let effective_weight = quota_weight * (CACHE_LOG_BOOST * cache_ratio).exp();
+    let effective_weight =
+        quota_weight * (CACHE_LOG_BOOST * cache_ratio).exp() * assessment.warning_multiplier;
     let u = hash_to_open_unit(hash);
     let score = if effective_weight <= 0.0 {
         f64::INFINITY
