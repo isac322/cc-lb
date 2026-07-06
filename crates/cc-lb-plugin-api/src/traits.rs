@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::errors::{DialectError, ObservabilityError, RouteError, SignerError, UpstreamError};
 use crate::types::{
-    ObserveEvent, PerCandidateReason, Principal, RequestContext, RetryDecision, RouteDecision,
-    ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, SlotKey,
+    CacheAffinityTrace, ObserveEvent, PerCandidateReason, Principal, RequestContext, RetryDecision,
+    RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, SlotKey,
     SubscriptionPreferenceTrace, Upstream, UpstreamCandidate,
 };
 
@@ -25,6 +25,11 @@ pub struct FilterOutput {
     /// subscription-preference tier / urgency scoring for downstream metrics
     /// and dashboards. Wasm filters leave this `None`.
     pub subscription_preference: Option<SubscriptionPreferenceTrace>,
+    /// Optional structured trace payload from the built-in cache-affinity
+    /// filter recording which candidates were kept vs dropped and the
+    /// cache-score signals behind that decision. Wasm filters leave this
+    /// `None`; it does not cross the wasm wire boundary.
+    pub cache_affinity: Option<CacheAffinityTrace>,
 }
 
 /// Filter plugin errors returned by [`FilterPlugin`].

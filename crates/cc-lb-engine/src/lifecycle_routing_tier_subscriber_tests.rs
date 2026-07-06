@@ -5,7 +5,7 @@ use cc_lb_contract::{
     EventId, LifecycleEvent, NoopMetricsHook, PrincipalKindLite, RouteFailure, RouteInfo,
     TerminationReason,
 };
-use cc_lb_plugin_api::types::StageDecision;
+use cc_lb_plugin_api::types::{StageDecision, WrhKeySource};
 use cc_lb_plugin_api::{RoutingTrace, SubscriptionPreferenceTrace, SubscriptionTier};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -33,7 +33,11 @@ fn stage(tier: Option<SubscriptionTier>) -> StageDecision {
         subscription_preference: tier.map(|chosen_tier| SubscriptionPreferenceTrace {
             chosen_tier,
             candidates: Vec::new(),
+            wrh_key_source: WrhKeySource::RequestId,
+            previous_tier: None,
+            rendezvous_salt_version: None,
         }),
+        cache_affinity: None,
     }
 }
 

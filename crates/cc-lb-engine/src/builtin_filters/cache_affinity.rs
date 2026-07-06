@@ -1,3 +1,17 @@
+//! Cache-affinity router filter.
+//!
+//! v7 (2026-07-06) recommends omitting this filter from principal router
+//! chains: subscription-preference now computes cache-weighted WRH inline
+//! (see `docs/adr/0004-cache-weighted-subscription-preference.md`), and
+//! running cache_affinity beforehand re-introduces the v6 tier-eviction
+//! spill bug — the max-ranker drops non-max candidates before subscription
+//! can consider them as fallback when the max-cache upstream saturates.
+//!
+//! The filter is retained for chains that explicitly reference
+//! `BUILTIN_CACHE_AFFINITY_ID` and for backwards-compatibility with
+//! `request_events_v1` payloads that carry `cache_affinity` trace rows.
+
+use cc_lb_plugin_api::types::{CacheAffinityCandidate, CacheAffinityTrace};
 use cc_lb_plugin_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, FilterError, FilterOutput,
     FilterPlugin, Principal, RequestContext, UpstreamCandidate,
@@ -5,13 +19,12 @@ use cc_lb_plugin_api::{
 use cc_lb_storage_api::PluginMetadata;
 use uuid::Uuid;
 
-pub const PURPOSE: &str = "Prefer upstreams whose prompt cache is already warm for this request.";
-pub const KEEPS: &str =
-    "Candidates with a positive prefill_cache_score (the upstream has already cached the prefix).";
-pub const DROPS: &str = "Candidates with zero cache score — only when at least one candidate is a cache hit; otherwise nothing is dropped.";
-pub const EMPTY_BEHAVIOR: &str = "Never drops everything. Falls back to passing all candidates through when no cache hit exists.";
+pub const PURPOSE: &str = "Prefer upstreams whose prompt cache is deepest for this request.";
+pub const KEEPS: &str = "Candidates whose `predicted_cache_read_tokens` ties the maximum observed on this pool. Shallow-cache candidates (same shared BP0 hash but no session-specific deeper prefix) are dropped so downstream filters do not scatter a warm session to an upstream that only has the shared prefix.";
+pub const DROPS: &str = "Candidates below the maximum `predicted_cache_read_tokens` — only when at least one candidate has a positive score; otherwise nothing is dropped.";
+pub const EMPTY_BEHAVIOR: &str = "Never drops everything. Falls back to passing all candidates through when every candidate is cache-cold.";
 
-const HIT_REASON: &str = "cache-hit-keep";
+const HIT_REASON: &str = "cache-max-hit-keep";
 const MISS_REASON: &str = "cache-miss-passthrough";
 
 pub fn metadata() -> PluginMetadata {
@@ -21,7 +34,8 @@ pub fn metadata() -> PluginMetadata {
         drops: DROPS.to_owned(),
         empty_behavior: EMPTY_BEHAVIOR.to_owned(),
         examples: vec![
-            "5 candidates, 2 with positive cache score → keep the 2 hits.".to_owned(),
+            "4 candidates, one at 250K (deep session cache) and three at 15K (shared system-prompt only) → keep only the 250K candidate.".to_owned(),
+            "4 candidates all tied at 15K (only the shared system prompt is warm) → keep all 4 and forward to the next filter.".to_owned(),
             "5 candidates, all with zero cache score → pass all 5 through.".to_owned(),
             "Exactly 1 candidate → no change.".to_owned(),
         ],
@@ -44,18 +58,46 @@ impl FilterPlugin for CacheAffinityFilter {
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
-        let has_hit = candidates.iter().any(is_cache_hit);
-        let reason = if has_hit { HIT_REASON } else { MISS_REASON };
-        let kept_upstream_ids = candidates
+        let max_read_tokens = candidates
             .iter()
-            .filter(|candidate| !has_hit || is_cache_hit(candidate))
-            .map(|candidate| candidate.upstream_id)
-            .collect::<Vec<_>>();
+            .map(predicted_read_tokens)
+            .max()
+            .unwrap_or(0);
+        let has_hit = max_read_tokens > 0;
+        let reason = if has_hit { HIT_REASON } else { MISS_REASON };
+        let mut kept_upstream_ids = Vec::with_capacity(candidates.len());
+        let mut trace_rows = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let kept = !has_hit || predicted_read_tokens(candidate) == max_read_tokens;
+            if kept {
+                kept_upstream_ids.push(candidate.upstream_id);
+            }
+            trace_rows.push(CacheAffinityCandidate {
+                upstream_id: candidate.upstream_id,
+                kept,
+                predicted_cache_read_tokens: candidate
+                    .cache_score
+                    .as_ref()
+                    .map(|score| score.predicted_cache_read_tokens),
+                predicted_expires_at_unix_secs: candidate
+                    .cache_score
+                    .as_ref()
+                    .and_then(|score| score.predicted_expires_at_unix_secs),
+            });
+        }
+        let cache_affinity = if trace_rows.is_empty() {
+            None
+        } else {
+            Some(CacheAffinityTrace {
+                candidates: trace_rows,
+            })
+        };
         Ok(FilterOutput {
             kept_upstream_ids,
             reason: reason.to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
+            cache_affinity,
         })
     }
 
@@ -68,11 +110,16 @@ impl FilterPlugin for CacheAffinityFilter {
     }
 }
 
-fn is_cache_hit(candidate: &UpstreamCandidate) -> bool {
+/// Read-token count for max-ranker comparison. `None` cache_score and
+/// `predicted_cache_read_tokens == 0` both collapse to zero: they represent
+/// "this candidate offers no cache-read benefit for this request", so they
+/// tie with each other and are dropped whenever any candidate reports a
+/// positive score.
+fn predicted_read_tokens(candidate: &UpstreamCandidate) -> u32 {
     candidate
         .cache_score
         .as_ref()
-        .is_some_and(|score| score.predicted_cache_read_tokens > 0)
+        .map_or(0, |score| score.predicted_cache_read_tokens)
 }
 
 #[cfg(test)]
@@ -93,6 +140,12 @@ mod tests {
         assert_eq!(output.kept_upstream_ids, vec![warm.upstream_id]);
         assert_eq!(output.reason, HIT_REASON);
         assert!(output.per_candidate_reasons.is_empty());
+        let trace = output.cache_affinity.expect("hit path must emit trace");
+        assert_eq!(trace.candidates.len(), 2);
+        assert!(trace.candidates[0].kept);
+        assert_eq!(trace.candidates[0].predicted_cache_read_tokens, Some(10));
+        assert!(!trace.candidates[1].kept);
+        assert_eq!(trace.candidates[1].predicted_cache_read_tokens, Some(0));
     }
 
     #[test]
@@ -107,6 +160,13 @@ mod tests {
         );
         assert_eq!(output.reason, MISS_REASON);
         assert!(output.per_candidate_reasons.is_empty());
+        let trace = output
+            .cache_affinity
+            .expect("miss path must emit trace with per-candidate rows");
+        assert_eq!(trace.candidates.len(), 2);
+        assert!(trace.candidates.iter().all(|row| row.kept));
+        assert_eq!(trace.candidates[0].predicted_cache_read_tokens, Some(0));
+        assert_eq!(trace.candidates[1].predicted_cache_read_tokens, None);
     }
 
     #[test]
@@ -116,20 +176,69 @@ mod tests {
         assert!(output.kept_upstream_ids.is_empty());
         assert_eq!(output.reason, MISS_REASON);
         assert!(output.per_candidate_reasons.is_empty());
+        assert!(output.cache_affinity.is_none());
     }
 
     #[test]
-    fn all_hit_keeps_all() {
-        let first = candidate("first", 1);
-        let second = candidate("second", 2);
-        let output = filter(&[first.clone(), second.clone()]);
+    fn max_ranker_keeps_only_deepest_positive_score() {
+        // Given: two hits with different read-token counts (mimicking one
+        //   upstream having only the shared BP0 warm and another having
+        //   BP0+BP1+BP2 all warm for this session).
+        // When: the filter runs.
+        // Then: only the deepest candidate survives; the shallow hit is
+        //   dropped and the trace records the drop reason via `kept: false`.
+        let shallow = candidate("shallow", 15_000);
+        let deep = candidate("deep", 250_000);
+        let output = filter(&[shallow.clone(), deep.clone()]);
 
-        assert_eq!(
-            output.kept_upstream_ids,
-            vec![first.upstream_id, second.upstream_id]
-        );
+        assert_eq!(output.kept_upstream_ids, vec![deep.upstream_id]);
         assert_eq!(output.reason, HIT_REASON);
-        assert!(output.per_candidate_reasons.is_empty());
+        let trace = output.cache_affinity.expect("hit path must emit trace");
+        assert_eq!(trace.candidates.len(), 2);
+        assert!(!trace.candidates[0].kept, "shallow hit must be dropped");
+        assert!(trace.candidates[1].kept, "deep hit must be kept");
+    }
+
+    #[test]
+    fn all_hits_tied_at_max_keeps_all() {
+        // Given: two hits at identical read-token counts (mimicking the
+        //   shared-BP0-only case where every upstream has warmed the exact
+        //   same shallow prefix; no candidate carries session-specific
+        //   deeper cache).
+        // When: the filter runs.
+        // Then: both survive so the next filter (subscription_preference)
+        //   can pick among cache-equivalent candidates by quota/urgency.
+        let a = candidate("a", 15_000);
+        let b = candidate("b", 15_000);
+        let output = filter(&[a.clone(), b.clone()]);
+
+        assert_eq!(output.kept_upstream_ids, vec![a.upstream_id, b.upstream_id]);
+        assert_eq!(output.reason, HIT_REASON);
+        let trace = output
+            .cache_affinity
+            .expect("all-tied warm path must emit trace");
+        assert!(trace.candidates.iter().all(|row| row.kept));
+    }
+
+    #[test]
+    fn trace_surfaces_predicted_expiry_and_missing_score() {
+        let mut warm = candidate("warm", 10);
+        if let Some(score) = warm.cache_score.as_mut() {
+            score.predicted_expires_at_unix_secs = Some(1_700_000_500);
+        }
+        let cold_no_score = candidate_without_score("cold");
+        let output = filter(&[warm.clone(), cold_no_score.clone()]);
+
+        let trace = output.cache_affinity.expect("mixed pool must emit trace");
+        assert_eq!(
+            trace.candidates[0].predicted_expires_at_unix_secs,
+            Some(1_700_000_500)
+        );
+        assert_eq!(
+            trace.candidates[1].predicted_cache_read_tokens, None,
+            "candidate without cache_score must serialize as None, not Some(0)"
+        );
+        assert_eq!(trace.candidates[1].predicted_expires_at_unix_secs, None);
     }
 
     fn filter(candidates: &[UpstreamCandidate]) -> FilterOutput {

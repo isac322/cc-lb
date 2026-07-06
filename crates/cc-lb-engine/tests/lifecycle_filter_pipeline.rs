@@ -297,6 +297,7 @@ impl FilterPlugin for RecordingFilter {
             reason: format!("{} kept {}", self.name, self.kept_upstream_ids.len()),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
+            cache_affinity: None,
         })
     }
 

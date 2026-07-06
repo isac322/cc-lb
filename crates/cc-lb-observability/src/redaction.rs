@@ -3,8 +3,9 @@ use std::fmt;
 use std::io::{self, Write};
 
 use cc_lb_plugin_api::types::{
-    CandidateUrgency, MAX_ERROR_MESSAGE_LEN, MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN,
-    StageDecision, SubscriptionPreferenceTrace, SubscriptionTier, TerminalDecision,
+    CacheAffinityCandidate, CacheAffinityTrace, CandidateUrgency, MAX_ERROR_MESSAGE_LEN,
+    MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN, StageDecision, SubscriptionPreferenceTrace,
+    SubscriptionTier, TerminalDecision, WrhKeySource,
 };
 use cc_lb_plugin_api::{InternalError, RoutingTrace, TerminalStrategy};
 use once_cell::sync::Lazy;
@@ -422,6 +423,7 @@ fn upsert_truncation_marker(trace: &mut RoutingTrace, removed_stages: usize) {
         )),
         duration_us: 0,
         subscription_preference: None,
+        cache_affinity: None,
     };
 
     if trace
@@ -490,6 +492,9 @@ fn stage_json_len(stage: &StageDecision) -> usize {
         len += ",\"subscription_preference\":".len()
             + subscription_preference_json_len(subscription_preference);
     }
+    if let Some(cache_affinity) = &stage.cache_affinity {
+        len += ",\"cache_affinity\":".len() + cache_affinity_json_len(cache_affinity);
+    }
 
     len + "}".len()
 }
@@ -503,7 +508,44 @@ fn subscription_preference_json_len(trace: &SubscriptionPreferenceTrace) -> usiz
         }
         len += candidate_urgency_json_len(candidate);
     }
+    len += "]".len();
+    len += ",\"wrh_key_source\":".len() + wrh_key_source_json_len(trace.wrh_key_source);
+    if let Some(previous_tier) = trace.previous_tier {
+        len += ",\"previous_tier\":".len() + tier_json_len(previous_tier);
+    }
+    if let Some(salt_version) = &trace.rendezvous_salt_version {
+        len += ",\"rendezvous_salt_version\":".len() + json_string_len(salt_version);
+    }
+    len + "}".len()
+}
+
+fn cache_affinity_json_len(trace: &CacheAffinityTrace) -> usize {
+    let mut len = "{\"candidates\":[".len();
+    for (index, candidate) in trace.candidates.iter().enumerate() {
+        if index > 0 {
+            len += 1;
+        }
+        len += cache_affinity_candidate_json_len(candidate);
+    }
     len + "]}".len()
+}
+
+fn cache_affinity_candidate_json_len(candidate: &CacheAffinityCandidate) -> usize {
+    let mut len = "{\"upstream_id\":".len()
+        + json_string_len(&candidate.upstream_id.to_string())
+        + ",\"kept\":".len()
+        + if candidate.kept {
+            "true".len()
+        } else {
+            "false".len()
+        };
+    if let Some(tokens) = candidate.predicted_cache_read_tokens {
+        len += ",\"predicted_cache_read_tokens\":".len() + tokens.to_string().len();
+    }
+    if let Some(expires_at) = candidate.predicted_expires_at_unix_secs {
+        len += ",\"predicted_expires_at_unix_secs\":".len() + expires_at.to_string().len();
+    }
+    len + "}".len()
 }
 
 fn candidate_urgency_json_len(candidate: &CandidateUrgency) -> usize {
@@ -513,6 +555,16 @@ fn candidate_urgency_json_len(candidate: &CandidateUrgency) -> usize {
         + tier_json_len(candidate.tier)
         + ",\"urgency\":".len()
         + f64_json_len(candidate.urgency)
+        + ",\"quota_urgency\":".len()
+        + f64_json_len(candidate.quota_urgency)
+        + ",\"predicted_cache_read_tokens\":".len()
+        + candidate.predicted_cache_read_tokens.to_string().len()
+        + ",\"cache_ratio\":".len()
+        + f64_json_len(candidate.cache_ratio)
+        + ",\"cache_weight_multiplier\":".len()
+        + f64_json_len(candidate.cache_weight_multiplier)
+        + ",\"effective_weight\":".len()
+        + f64_json_len(candidate.effective_weight)
         + "}".len()
 }
 
@@ -522,6 +574,13 @@ fn tier_json_len(tier: SubscriptionTier) -> usize {
         SubscriptionTier::PartialBase => "\"partial_base\"".len(),
         SubscriptionTier::Overage => "\"overage\"".len(),
         SubscriptionTier::UnknownProbe => "\"unknown_probe\"".len(),
+    }
+}
+
+fn wrh_key_source_json_len(source: WrhKeySource) -> usize {
+    match source {
+        WrhKeySource::ThreadId => "\"thread_id\"".len(),
+        WrhKeySource::RequestId => "\"request_id\"".len(),
     }
 }
 
