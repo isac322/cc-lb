@@ -227,6 +227,7 @@ fn principal(name: &str, allowed_upstreams: Vec<Uuid>) -> PrincipalRecord {
         created_at_unix_secs: 0,
         updated_at_unix_secs: 0,
         router_terminal_strategy: Default::default(),
+        cache_keepalive: None,
     }
 }
 
