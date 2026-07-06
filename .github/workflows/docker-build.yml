@@ -31,21 +31,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # sccache's GHA backend reads ACTIONS_RESULTS_URL + ACTIONS_RUNTIME_TOKEN,
-      # which the runtime doesn't expose to plain steps. Re-export them (the ARC
-      # runner names its in-cluster cache server CUSTOM_ACTIONS_RESULTS_URL) so
-      # they can be handed to BuildKit as secrets below.
-      - name: Expose GHA cache runtime for sccache
-        uses: actions/github-script@v9
-        with:
-          script: |
-            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || process.env.CUSTOM_ACTIONS_RESULTS_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
-      # network=host lets the compile reach the in-cluster cache server over the
-      # pod network (.svc.cluster.local is in the dind's NO_PROXY); the RUN-step
-      # host network needs the network.host entitlement, allowed on both the
-      # builder (buildkitd-flags) and the build (allow: below).
+      # network=host lets the compile reach the in-cluster Garage S3 store over
+      # the pod network (garage.arc-systems.svc.cluster.local is in the dind's
+      # NO_PROXY); the RUN-step host network needs the network.host entitlement,
+      # allowed on both the builder (buildkitd-flags) and the build (allow: below).
       - uses: docker/setup-buildx-action@v4
         with:
           driver-opts: network=host
@@ -54,7 +43,7 @@ jobs:
       # GIT_SHA / SOURCE_DATE_EPOCH are pinned to stable values on purpose: this
       # never-published verification image doesn't need a real commit sha, and
       # stable build metadata maximises sccache reuse.
-      - name: Build image (cross-compile, sccache GHA backend)
+      - name: Build image (cross-compile, sccache S3 cache)
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -65,9 +54,13 @@ jobs:
           build-args: |
             GIT_SHA=0000000
             SOURCE_DATE_EPOCH=0
+            SCCACHE_BUCKET=sccache
+            SCCACHE_ENDPOINT=garage.arc-systems.svc.cluster.local:3900
+            SCCACHE_REGION=garage
+            SCCACHE_S3_USE_SSL=false
           secrets: |
-            ACTIONS_RUNTIME_TOKEN=${{ env.ACTIONS_RUNTIME_TOKEN }}
-            ACTIONS_RESULTS_URL=${{ env.ACTIONS_RESULTS_URL }}
+            AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+            AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
 
       # A successful build already proves both storage backends compile (default
       # FEATURES=sqlite,postgres); this just confirms the static binary runs.

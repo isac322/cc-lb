@@ -36,8 +36,7 @@ SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 #            .cargo/config.toml rust-lld, which is expected and correct).
 # git:       cc-lb-server/build.rs reads `git rev-parse` (falls back gracefully).
 # libstdc++/libgcc: Bun's runtime dependencies on Alpine.
-# sccache:   compiler cache; enabled when the GHA cache secrets are mounted (CI).
-#            Needs >=0.10 for the v2 Actions cache API — apk ships 0.15.
+# sccache:   compiler cache; enabled when the S3 cache credentials are mounted (CI).
 # hadolint ignore=DL3018
 RUN apk add --no-cache clang lld git libstdc++ libgcc sccache
 
@@ -71,6 +70,13 @@ ARG SOURCE_DATE_EPOCH=""
 ARG FEATURES="sqlite,postgres"
 # Set to 1 to skip building the dashboard SPA (ships a placeholder page).
 ARG SKIP_SPA="0"
+# sccache S3-compatible cache backend (the in-cluster Garage store). Empty by
+# default so local builds and the cd job compile uncached; the docker-build CI
+# workflow passes these plus the AWS_* credential secrets.
+ARG SCCACHE_BUCKET=""
+ARG SCCACHE_ENDPOINT=""
+ARG SCCACHE_REGION=""
+ARG SCCACHE_S3_USE_SSL=""
 
 # Compile the static musl binary. The cargo download caches (registry/git) and
 # the Bun install cache are reused across builds. The target dir is intentionally
@@ -80,8 +86,8 @@ ARG SKIP_SPA="0"
 RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
     --mount=type=cache,id=bun-${BUILDPLATFORM},sharing=locked,target=/root/.bun/install/cache \
-    --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,required=false \
-    --mount=type=secret,id=ACTIONS_RESULTS_URL,required=false \
+    --mount=type=secret,id=AWS_ACCESS_KEY_ID,required=false \
+    --mount=type=secret,id=AWS_SECRET_ACCESS_KEY,required=false \
 <<EOF
 # A declared ARG is exported into this RUN's env; an empty SOURCE_DATE_EPOCH
 # makes ring's cc/clang C build abort, so drop it unless a real value was passed.
@@ -91,45 +97,26 @@ export CC_LB_SKIP_WASM_FIXTURE_BUILD=1
 export GIT_SHA="${GIT_SHA}"
 if [ "${SKIP_SPA}" = "1" ]; then export CC_LB_ADMIN_SKIP_SPA=1; fi
 
-# sccache with the GitHub Actions cache backend = a persistent, cross-run
-# compiler cache shared with the runner's cache server. Fail-open: without the
-# runtime token (local builds, or the cd publish job) sccache stays off and the
-# build proceeds uncached rather than failing. SCCACHE_IGNORE_SERVER_IO_ERROR
-# keeps a mid-build cache-server hiccup (e.g. token expiry) non-fatal.
-ACTIONS_RUNTIME_TOKEN="$(cat /run/secrets/ACTIONS_RUNTIME_TOKEN 2>/dev/null || true)"
-ACTIONS_RESULTS_URL="$(cat /run/secrets/ACTIONS_RESULTS_URL 2>/dev/null || true)"
-if [ -n "${ACTIONS_RUNTIME_TOKEN}" ] && [ -n "${ACTIONS_RESULTS_URL}" ]; then
-  export ACTIONS_RUNTIME_TOKEN ACTIONS_RESULTS_URL
-  # opendal's ghac backend defaults to the legacy v1 Actions cache API (which 404s
-  # on a v2-only cache server); a non-empty ACTIONS_CACHE_SERVICE_V2 selects v2.
-  export ACTIONS_CACHE_SERVICE_V2=true
-  export RUSTC_WRAPPER=sccache SCCACHE_GHA_ENABLED=on SCCACHE_IGNORE_SERVER_IO_ERROR=1 CARGO_INCREMENTAL=0
-  # Disable the server idle-timeout (default 600s). The fat-LTO final link runs
-  # for >10min with no compiler calls, which would otherwise reap the sccache
-  # server mid-build and discard its in-memory stats before --show-stats runs.
+# sccache with an S3-compatible backend (the in-cluster Garage store) = a
+# persistent, cross-run compiler cache. Fail-open: without S3 credentials (local
+# builds, or the GitHub-hosted cd job that can't reach the in-cluster store)
+# sccache stays off and the build compiles uncached rather than failing. The
+# native GHA cache backend is deliberately NOT used here: the in-cluster cache
+# server only speaks the JSON Actions API while sccache/opendal sends protobuf,
+# so it rejects every request (falcondev-oss/github-actions-cache-server#164).
+AWS_ACCESS_KEY_ID="$(cat /run/secrets/AWS_ACCESS_KEY_ID 2>/dev/null || true)"
+AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/AWS_SECRET_ACCESS_KEY 2>/dev/null || true)"
+if [ -n "${AWS_ACCESS_KEY_ID}" ] && [ -n "${AWS_SECRET_ACCESS_KEY}" ] && [ -n "${SCCACHE_BUCKET}" ]; then
+  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+  export SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION SCCACHE_S3_USE_SSL
+  # SCCACHE_IGNORE_SERVER_IO_ERROR keeps a Garage outage non-fatal (compile uncached).
+  export RUSTC_WRAPPER=sccache SCCACHE_IGNORE_SERVER_IO_ERROR=1 CARGO_INCREMENTAL=0
+  # Disable the server idle-timeout (default 600s): the fat-LTO final link runs
+  # >10min with no compiler calls and would otherwise reap the server mid-build.
   export SCCACHE_IDLE_TIMEOUT=0
-  # TEMP DIAGNOSTIC: surface why ghac cache writes do not persist (0% hit rate).
-  export SCCACHE_ERROR_LOG=/tmp/sccache-diag.log SCCACHE_LOG=debug
-  echo "sccache: GHA cache backend enabled"
+  echo "sccache: S3 backend enabled (bucket=${SCCACHE_BUCKET}, endpoint=${SCCACHE_ENDPOINT})"
 else
-  echo "sccache: no GHA cache token, compiling uncached"
-fi
-
-# TEMP DIAGNOSTIC: probe the ghac write->read round-trip (compile #2 must HIT if
-# the store persisted), dump the reason, then fail fast to skip the release build.
-if [ -n "${RUSTC_WRAPPER:-}" ]; then
-  sccache --stop-server || true
-  printf 'pub fn f() -> u32 { 42 }\n' > /tmp/p.rs
-  echo "=== sccache PROBE compile #1 (expect miss + store) ==="
-  sccache rustc --crate-name p --crate-type lib --edition 2021 /tmp/p.rs --out-dir /tmp/po1 2>&1 | tail -3 || true
-  echo "=== sccache PROBE compile #2 (expect HIT if the store persisted) ==="
-  sccache rustc --crate-name p --crate-type lib --edition 2021 /tmp/p.rs --out-dir /tmp/po2 2>&1 | tail -3 || true
-  echo "=== sccache --show-stats (after 2 identical probes) ==="
-  sccache --show-stats 2>&1 | grep -iE 'request|hit|miss|write|read|location|error|non-cacheable' || true
-  echo "=== sccache debug log (ghac write path) ==="
-  grep -iE 'error|warn|fail|store|put|reserve|commit|http|status|gha|upload|reservoir|refused|dns|resolve|connect' /tmp/sccache-diag.log 2>/dev/null | tail -100 || echo "(no diag log)"
-  echo "=== END sccache PROBE — failing fast for diagnostics ==="
-  exit 1
+  echo "sccache: no S3 credentials, compiling uncached"
 fi
 
 xx-cargo build --release --locked \
