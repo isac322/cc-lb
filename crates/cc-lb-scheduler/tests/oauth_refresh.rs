@@ -7,6 +7,7 @@ use cc_lb_scheduler::jobs::oauth_refresh::{
     OAuthRefreshConfig, OAuthRefreshJob, OAuthRefreshJobHandler, RefreshedOAuthTokens,
 };
 use cc_lb_scheduler::retry::JobOutcome;
+use cc_lb_storage_api::upstream::UpstreamKind;
 use uuid::Uuid;
 
 #[path = "oauth_refresh/support.rs"]
@@ -85,6 +86,119 @@ mod jobs {
                     delay: Duration::from_secs(7)
                 }
             );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn disabled_registered_oauth_upstream_refreshes() -> Result<()> {
+            let upstream_id = Uuid::new_v4();
+            let mut upstream = refreshable_record(upstream_id, 4);
+            upstream.enabled = false;
+            upstream.warmup_enabled = false;
+            let upstreams = FakeUpstreams::new(upstream, 5);
+            let handler = OAuthRefreshJobHandler::new(upstreams.clone(), Uuid::new_v4());
+
+            let outcome = handler
+                .handle(
+                    OAuthRefreshJob::new(upstream_id),
+                    1_000,
+                    |_| async {
+                        Ok(RefreshedOAuthTokens {
+                            encrypted_tokens: encrypted_tokens(2),
+                            expires_at_unix_secs: 2_000,
+                        })
+                    },
+                    |_| async { Ok(()) },
+                    |_, _| async { Ok(()) },
+                )
+                .await?;
+
+            assert_eq!(outcome, JobOutcome::Done);
+            assert_eq!(upstreams.complete_calls(), 1);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn deleted_oauth_upstream_skips_refresh() -> Result<()> {
+            let upstream_id = Uuid::new_v4();
+            let mut upstream = refreshable_record(upstream_id, 4);
+            upstream.deleted_at_unix_secs = Some(1_800_000_000);
+            let upstreams = FakeUpstreams::new(upstream, 5);
+            let handler = OAuthRefreshJobHandler::new(upstreams.clone(), Uuid::new_v4());
+
+            let outcome = handler
+                .handle(
+                    OAuthRefreshJob::new(upstream_id),
+                    1_000,
+                    |_| async {
+                        Ok(RefreshedOAuthTokens {
+                            encrypted_tokens: encrypted_tokens(2),
+                            expires_at_unix_secs: 2_000,
+                        })
+                    },
+                    |_| async { Ok(()) },
+                    |_, _| async { Ok(()) },
+                )
+                .await?;
+
+            assert_eq!(outcome, JobOutcome::Skip);
+            assert_eq!(upstreams.complete_calls(), 0);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn missing_oauth_credentials_skip_refresh() -> Result<()> {
+            let upstream_id = Uuid::new_v4();
+            let mut upstream = refreshable_record(upstream_id, 4);
+            upstream.oauth_credentials = None;
+            let upstreams = FakeUpstreams::new(upstream, 5);
+            let handler = OAuthRefreshJobHandler::new(upstreams.clone(), Uuid::new_v4());
+
+            let outcome = handler
+                .handle(
+                    OAuthRefreshJob::new(upstream_id),
+                    1_000,
+                    |_| async {
+                        Ok(RefreshedOAuthTokens {
+                            encrypted_tokens: encrypted_tokens(2),
+                            expires_at_unix_secs: 2_000,
+                        })
+                    },
+                    |_| async { Ok(()) },
+                    |_, _| async { Ok(()) },
+                )
+                .await?;
+
+            assert_eq!(outcome, JobOutcome::Skip);
+            assert_eq!(upstreams.complete_calls(), 0);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn non_oauth_upstream_skips_refresh() -> Result<()> {
+            let upstream_id = Uuid::new_v4();
+            let mut upstream = refreshable_record(upstream_id, 4);
+            upstream.kind = UpstreamKind::AnthropicApiKey;
+            let upstreams = FakeUpstreams::new(upstream, 5);
+            let handler = OAuthRefreshJobHandler::new(upstreams.clone(), Uuid::new_v4());
+
+            let outcome = handler
+                .handle(
+                    OAuthRefreshJob::new(upstream_id),
+                    1_000,
+                    |_| async {
+                        Ok(RefreshedOAuthTokens {
+                            encrypted_tokens: encrypted_tokens(2),
+                            expires_at_unix_secs: 2_000,
+                        })
+                    },
+                    |_| async { Ok(()) },
+                    |_, _| async { Ok(()) },
+                )
+                .await?;
+
+            assert_eq!(outcome, JobOutcome::Skip);
+            assert_eq!(upstreams.complete_calls(), 0);
             Ok(())
         }
     }
