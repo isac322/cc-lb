@@ -100,6 +100,9 @@ ACTIONS_RUNTIME_TOKEN="$(cat /run/secrets/ACTIONS_RUNTIME_TOKEN 2>/dev/null || t
 ACTIONS_RESULTS_URL="$(cat /run/secrets/ACTIONS_RESULTS_URL 2>/dev/null || true)"
 if [ -n "${ACTIONS_RUNTIME_TOKEN}" ] && [ -n "${ACTIONS_RESULTS_URL}" ]; then
   export ACTIONS_RUNTIME_TOKEN ACTIONS_RESULTS_URL
+  # opendal's ghac backend defaults to the legacy v1 Actions cache API (which 404s
+  # on a v2-only cache server); a non-empty ACTIONS_CACHE_SERVICE_V2 selects v2.
+  export ACTIONS_CACHE_SERVICE_V2=true
   export RUSTC_WRAPPER=sccache SCCACHE_GHA_ENABLED=on SCCACHE_IGNORE_SERVER_IO_ERROR=1 CARGO_INCREMENTAL=0
   # Disable the server idle-timeout (default 600s). The fat-LTO final link runs
   # for >10min with no compiler calls, which would otherwise reap the sccache
