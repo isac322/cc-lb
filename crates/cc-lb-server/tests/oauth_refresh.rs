@@ -187,6 +187,7 @@ impl Fixture {
                 allowed_models: Vec::new(),
                 allowed_upstreams: Vec::new(),
                 default_limits: Vec::new(),
+                cache_keepalive: None,
             },
             now_secs(self.clock.as_ref()),
         )
