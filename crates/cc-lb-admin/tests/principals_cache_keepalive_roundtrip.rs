@@ -105,3 +105,73 @@ async fn cache_keepalive_survives_create_get_and_put_clear() {
         get2_body["cache_keepalive"]
     );
 }
+
+#[tokio::test]
+async fn cache_keepalive_rejects_unimplemented_llm_judge_on_create() {
+    let (_dir, storage) = temp_storage().await;
+    let state = test_state(Config::default(), Some(storage));
+
+    let (status, _headers, body, _raw) = authed_json(
+        app(state),
+        "POST",
+        "/admin/v1/principals",
+        Some(json!({
+            "name": "kp-judge-create",
+            "kind": "machine",
+            "cache_keepalive": {
+                "enabled": true,
+                "classifier": {
+                    "llm_judge": {
+                        "provider": "anthropic",
+                        "model": "claude-haiku-4-5",
+                        "api_key_secret_ref": "secret://judge"
+                    }
+                }
+            }
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
+    assert_eq!(body["error"], "unsupported_cache_keepalive_llm_judge");
+    assert_eq!(body["field"], "cache_keepalive.classifier.llm_judge");
+}
+
+#[tokio::test]
+async fn cache_keepalive_rejects_unimplemented_llm_judge_on_update() {
+    let (_dir, storage) = temp_storage().await;
+    let state = test_state(Config::default(), Some(storage));
+    let (created, etag) = create_principal(
+        state.clone(),
+        json!({
+            "name": "kp-judge-update",
+            "kind": "machine",
+            "cache_keepalive": { "enabled": true }
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().expect("principal id").to_owned();
+
+    let (status, body) = authed_put_json(
+        app(state),
+        &format!("/admin/v1/principals/{id}"),
+        &etag,
+        json!({
+            "cache_keepalive": {
+                "enabled": true,
+                "classifier": {
+                    "llm_judge": {
+                        "provider": "anthropic",
+                        "model": "claude-haiku-4-5",
+                        "api_key_secret_ref": "secret://judge"
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
+    assert_eq!(body["error"], "unsupported_cache_keepalive_llm_judge");
+    assert_eq!(body["field"], "cache_keepalive.classifier.llm_judge");
+}
