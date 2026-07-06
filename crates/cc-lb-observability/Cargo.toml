@@ -28,3 +28,4 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"
 [dev-dependencies]
 insta.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
