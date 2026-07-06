@@ -270,6 +270,7 @@ fn principal() -> PrincipalRecord {
         created_at_unix_secs: 0,
         updated_at_unix_secs: 0,
         router_terminal_strategy: TerminalStrategy::FirstPick,
+        cache_keepalive: None,
     }
 }
 
