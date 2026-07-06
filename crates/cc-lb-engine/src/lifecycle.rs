@@ -902,6 +902,7 @@ pub struct Lifecycle {
     subscription_quota_sink: Option<SubscriptionQuotaSink>,
     subscription_metadata_hook: Option<MetadataHookHandle>,
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
+    keepalive_scheduler: Option<Arc<crate::cache_keepalive::KeepaliveScheduler>>,
     clock: ClockHandle,
     rng: Mutex<StdRng>,
 }
@@ -941,6 +942,7 @@ impl Lifecycle {
             subscription_quota_sink: None,
             subscription_metadata_hook: None,
             subscription_quota_cache: None,
+            keepalive_scheduler: None,
             clock,
             rng: Mutex::new(rand::make_rng()),
         }
@@ -965,9 +967,18 @@ impl Lifecycle {
             subscription_quota_sink: None,
             subscription_metadata_hook: None,
             subscription_quota_cache: None,
+            keepalive_scheduler: None,
             clock,
             rng: Mutex::new(rand::make_rng()),
         }
+    }
+
+    pub fn with_keepalive_scheduler(
+        mut self,
+        scheduler: Arc<crate::cache_keepalive::KeepaliveScheduler>,
+    ) -> Self {
+        self.keepalive_scheduler = Some(scheduler);
+        self
     }
 
     pub fn with_terminal_rng_seed(mut self, seed: [u8; 32]) -> Self {
@@ -1233,7 +1244,7 @@ impl Lifecycle {
                 "request body must be valid JSON",
             ));
         }
-        let cache_metadata =
+        let mut cache_metadata =
             request_cache_metadata_from_value(&ctx.downstream_headers, body_view.value());
         if let Some(o) = observer.as_ref() {
             o.emit_lifecycle(cc_lb_contract::LifecycleEvent::ParseCompleted {
@@ -1375,6 +1386,12 @@ impl Lifecycle {
             kind: PrincipalKind::ApiKey,
             claims: serde_json::Map::new(),
         };
+        let track_keepalive_response = self.keepalive_scheduler.is_some()
+            && cached.cache_keepalive().is_some()
+            && !cache_metadata.cache_breakpoints.is_empty();
+        if track_keepalive_response {
+            cache_metadata.request_json = body_view.value().cloned();
+        }
 
         let router_pipeline = cached.resolved_pipeline(None);
         if let Some(error) = router_pipeline.instantiation_error.as_deref() {
@@ -1706,6 +1723,8 @@ impl Lifecycle {
         let proxy_setup_ms = duration_to_ms(dispatch_started.saturating_duration_since(started));
         let mut attempt_timings = AttemptTimings::default();
         let mut internal_errors = pipeline_result.internal_errors.clone();
+        let mut keepalive_shaped_body = None;
+        let mut keepalive_discard_shaped_body = None;
         if let Some(o) = observer.as_ref() {
             o.emit_lifecycle(cc_lb_contract::LifecycleEvent::UpstreamAttempt {
                 event_id: o.event_id().to_owned(),
@@ -1724,6 +1743,11 @@ impl Lifecycle {
                 observer.as_ref(),
                 &mut attempt_timings,
                 &mut internal_errors,
+                if track_keepalive_response {
+                    &mut keepalive_shaped_body
+                } else {
+                    &mut keepalive_discard_shaped_body
+                },
             )
             .await
         {
@@ -1783,6 +1807,11 @@ impl Lifecycle {
                         observer.as_ref(),
                         &mut attempt_timings,
                         &mut internal_errors,
+                        if track_keepalive_response {
+                            &mut keepalive_shaped_body
+                        } else {
+                            &mut keepalive_discard_shaped_body
+                        },
                     )
                     .await
                 {
@@ -1835,6 +1864,15 @@ impl Lifecycle {
         }
 
         let status = response.status();
+        let keepalive_completion = keepalive_shaped_body.take().map(|shaped_body| {
+            crate::cache_keepalive::LifecycleKeepaliveContext {
+                request_body: ctx.body_bytes.clone(),
+                principal: principal.clone(),
+                cache_metadata: cache_metadata.clone(),
+                upstream_id: resolved_upstream_id,
+                shaped_body,
+            }
+        });
         response = self
             .finish_success_response(
                 response,
@@ -1859,6 +1897,7 @@ impl Lifecycle {
                 },
                 prompt_cache_observation_context,
                 observer.clone(),
+                keepalive_completion,
             )
             .await;
         Ok(response)
@@ -1961,6 +2000,7 @@ impl Lifecycle {
         transform_ctx: ResponseTransformContext,
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
         observer: Option<LifecycleContext>,
+        keepalive_completion: Option<crate::cache_keepalive::LifecycleKeepaliveContext>,
     ) -> Response<Body> {
         let mut active_limit = active_limit;
         if active_limit
@@ -1978,6 +2018,7 @@ impl Lifecycle {
                 transform_ctx,
                 prompt_cache_observation_context,
                 observer,
+                keepalive_completion,
             );
             self.attach_limit_headers(&mut response, None);
             return response;
@@ -2048,6 +2089,9 @@ impl Lifecycle {
                 None
             }
         };
+        let response_body_json = semantic_body
+            .as_ref()
+            .and_then(|body| sonic_rs::from_slice::<Value>(body).ok());
         let usage = semantic_body
             .as_ref()
             .map_or_else(UsageCounts::default, |body| usage_from_json_body(body));
@@ -2088,6 +2132,22 @@ impl Lifecycle {
                     buffered_transform_error = Some(error);
                 }
             }
+        }
+        if let (Some(context), Some(response_json)) =
+            (keepalive_completion, response_body_json.as_ref())
+        {
+            crate::cache_keepalive::LifecycleKeepalive::new(
+                self.keepalive_scheduler.clone(),
+                Arc::clone(&self.dynamic_view),
+            )
+            .on_response_completed(
+                &context.request_body,
+                response_json,
+                &context.principal,
+                &context.cache_metadata,
+                context.upstream_id,
+                context.shaped_body,
+            );
         }
         if let Some(o) = observer.as_ref()
             && usage.present
@@ -2287,10 +2347,17 @@ impl Lifecycle {
         observer: Option<&LifecycleContext>,
         timings: &mut AttemptTimings,
         internal_errors: &mut Vec<InternalError>,
+        shaped_body_out: &mut Option<Bytes>,
     ) -> Result<Response<Body>, Box<Response<Body>>> {
         let shape_start = Instant::now();
-        let shaped = match shape_request(route.dialect.as_ref(), ctx, &route.upstream, principal) {
-            Ok(shaped) => shaped,
+        *shaped_body_out = None;
+        let (shaped, capture_shaped_body) = match shape_request(
+            route.dialect.as_ref(),
+            ctx,
+            &route.upstream,
+            principal,
+        ) {
+            Ok(shaped) => (shaped, true),
             Err(source) => {
                 let message = source.to_string();
                 tracing::warn!(%source, "shape_request failed; falling back to raw passthrough");
@@ -2298,10 +2365,16 @@ impl Lifecycle {
                     o.emit_provider_error("shape_error", &message, "dialect");
                 }
                 push_shape_internal_error(internal_errors, &message);
-                raw_passthrough_request(raw_passthrough_base_url, ctx, principal)?
+                (
+                    raw_passthrough_request(raw_passthrough_base_url, ctx, principal)?,
+                    false,
+                )
             }
         };
         timings.shape_ms = Some(duration_to_ms(shape_start.elapsed()));
+        if capture_shaped_body {
+            *shaped_body_out = Some(shaped.body().clone());
+        }
 
         let sign_start = Instant::now();
         let signed = sign_request(signer.as_ref(), shaped)
@@ -2385,6 +2458,7 @@ impl Lifecycle {
         transform_ctx: ResponseTransformContext,
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
         observer: Option<LifecycleContext>,
+        keepalive_completion: Option<crate::cache_keepalive::LifecycleKeepaliveContext>,
     ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
@@ -2406,6 +2480,10 @@ impl Lifecycle {
         let relay_start = Instant::now();
         let limit_engine = self.limit_engine.clone();
         let prompt_cache_shadow_enabled = self.config.prompt_cache_shadow.enabled;
+        let keepalive = crate::cache_keepalive::LifecycleKeepalive::new(
+            self.keepalive_scheduler.clone(),
+            Arc::clone(&self.dynamic_view),
+        );
         let stream = async_stream::stream! {
             let mut usage_decoder = usage_decoder;
             let mut batch_index = 0_u64;
@@ -2421,6 +2499,7 @@ impl Lifecycle {
             let mut prompt_cache_decode = PromptCacheObservationDecodeResult::default();
             let mut prompt_cache_observations_buffered = false;
             let mut prompt_cache_observations_emitted = false;
+            let mut keepalive_response = crate::cache_keepalive::StreamingKeepaliveResponse::default();
             let mut sse_event_count: u64 = 0;
             let mut content_delta_count: u64 = 0;
             let mut ping_count: u64 = 0;
@@ -2493,7 +2572,9 @@ impl Lifecycle {
                                     );
                                 }
                                 sse_event_count = sse_event_count.saturating_add(1);
-                                match sse_event_name(&raw) {
+                                let event_name = sse_event_name(&raw);
+                                keepalive_response.observe(event_name, &raw);
+                                match event_name {
                                     Some(b"message_start") if message_start_at.is_none() => {
                                         message_start_at = Some(now);
                                     }
@@ -2692,6 +2773,7 @@ impl Lifecycle {
                     while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
                         let raw = buffer.drain(..end).collect::<Vec<u8>>();
                         let _ = accumulate_sse_usage(&raw, &mut usage);
+                        keepalive_response.observe(sse_event_name(&raw), &raw);
                         if let Some(o) = observer.as_ref()
                             && usage_parser::detect_mid_stream_error(&raw).is_some()
                         {
@@ -2727,6 +2809,18 @@ impl Lifecycle {
                     context,
                     &prompt_cache_decode,
                     dropped_aborted,
+                );
+            }
+            if let Some(context) = keepalive_completion
+                && let Some(response_json) = keepalive_response.into_value()
+            {
+                keepalive.on_response_completed(
+                    &context.request_body,
+                    &response_json,
+                    &context.principal,
+                    &context.cache_metadata,
+                    context.upstream_id,
+                    context.shaped_body,
                 );
             }
             let elapsed_ms = |to: Option<Instant>| {
@@ -3427,15 +3521,16 @@ pub(crate) use crate::response_transform::{
 };
 
 #[derive(Clone, Default)]
-struct RequestCacheMetadata {
-    thread_id: Option<String>,
+pub(crate) struct RequestCacheMetadata {
+    pub(crate) request_json: Option<Value>,
+    pub(crate) thread_id: Option<String>,
     message_id: Option<String>,
     message_index: Option<u64>,
     message_count: Option<u64>,
     cache_control_block_count: Option<u64>,
     cache_control_message_indices: Vec<u64>,
-    cache_breakpoints: Vec<RequestCacheBreakpoint>,
-    cache_prefix_hash: Option<String>,
+    pub(crate) cache_breakpoints: Vec<RequestCacheBreakpoint>,
+    pub(crate) cache_prefix_hash: Option<String>,
     canonical_model_id: String,
 }
 
@@ -3583,6 +3678,7 @@ fn request_cache_metadata_from_value(
         .map(|breakpoint| breakpoint.prefix_hash.clone());
 
     RequestCacheMetadata {
+        request_json: None,
         thread_id,
         message_id,
         message_index,
@@ -5231,6 +5327,7 @@ mod tests {
             created_at_unix_secs: 0,
             updated_at_unix_secs: 0,
             router_terminal_strategy: Default::default(),
+            cache_keepalive: None,
         }
     }
 
