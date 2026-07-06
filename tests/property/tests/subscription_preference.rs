@@ -340,6 +340,7 @@ fn winner_bytes(
 fn make_context(request_id: &str, model: &str) -> RequestContext {
     RequestContext {
         request_id: request_id.to_owned(),
+        thread_id: None,
         downstream_headers: http::HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
