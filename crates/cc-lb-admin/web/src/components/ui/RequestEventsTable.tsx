@@ -1,13 +1,21 @@
 import type React from 'react';
 import { useState } from 'react';
 import { eventTime, type RequestEvent } from '../../lib/api';
-import { formatCostMicros, splitNum } from '../../lib/format';
+import { formatCostMicros, splitNum, statusTone } from '../../lib/format';
 import { LatencyCell } from './latency/LatencyCell';
 import { cx, Hint, SkeletonRow } from './primitives';
 import { RelativeTime } from './RelativeTime';
 import { RequestEventDrawer } from './RequestEventDrawer';
+import { SLICE_COLORS } from './usage/sliceColors';
 
 const DASH = '—';
+
+const STATUS_TONE_TEXT: Record<'ok' | 'warn' | 'danger' | 'neutral', string> = {
+  ok: 'text-[color:var(--color-ok)]',
+  warn: 'text-[color:var(--color-warn)]',
+  danger: 'text-[color:var(--color-danger)]',
+  neutral: 'text-text',
+};
 
 export type RequestEventWithPhase = RequestEvent & {
   _phase?: 'partial' | 'final';
@@ -150,11 +158,7 @@ export function RequestEventsTable({
                       'px-3 py-2 text-right tabular-nums whitespace-nowrap',
                       isPartial
                         ? 'text-text-faint'
-                        : e.status >= 500
-                          ? 'text-red-400'
-                          : e.status >= 400
-                            ? 'text-amber-400'
-                            : 'text-green-400',
+                        : STATUS_TONE_TEXT[statusTone(e.status)],
                     )}
                   >
                     {isPartial ? (
@@ -282,29 +286,34 @@ function TokenCell({
     <BreakdownPopover
       title="Tokens"
       rows={[
-        { label: 'Input', value: b.input, color: 'bg-sky-400', fmt: fmtTokens },
+        {
+          label: 'Input',
+          value: b.input,
+          color: SLICE_COLORS.input,
+          fmt: fmtTokens,
+        },
         {
           label: 'Output',
           value: b.output,
-          color: 'bg-violet-400',
+          color: SLICE_COLORS.output,
           fmt: fmtTokens,
         },
         {
           label: 'Cache create 5m',
           value: b.cc_5m,
-          color: 'bg-amber-400',
+          color: SLICE_COLORS.cache_create_5m,
           fmt: fmtTokens,
         },
         {
           label: 'Cache create 1h',
           value: b.cc_1h,
-          color: 'bg-amber-700',
+          color: SLICE_COLORS.cache_create_1h,
           fmt: fmtTokens,
         },
         {
           label: 'Cache read',
           value: b.cr,
-          color: 'bg-emerald-400',
+          color: SLICE_COLORS.cache_read,
           fmt: fmtTokens,
         },
       ]}
@@ -356,11 +365,11 @@ function TokenCell({
           </div>
           <Sparkline
             segments={[
-              { value: b.input, color: 'bg-sky-400' },
-              { value: b.output, color: 'bg-violet-400' },
-              { value: b.cc_5m, color: 'bg-amber-400' },
-              { value: b.cc_1h, color: 'bg-amber-700' },
-              { value: b.cr, color: 'bg-emerald-400' },
+              { value: b.input, color: SLICE_COLORS.input },
+              { value: b.output, color: SLICE_COLORS.output },
+              { value: b.cc_5m, color: SLICE_COLORS.cache_create_5m },
+              { value: b.cc_1h, color: SLICE_COLORS.cache_create_1h },
+              { value: b.cr, color: SLICE_COLORS.cache_read },
             ]}
           />
         </div>
@@ -422,31 +431,31 @@ function CostCell({
         {
           label: 'Input',
           value: c.input,
-          color: 'bg-sky-400',
+          color: SLICE_COLORS.input,
           fmt: formatCostMicros,
         },
         {
           label: 'Output',
           value: c.output,
-          color: 'bg-violet-400',
+          color: SLICE_COLORS.output,
           fmt: formatCostMicros,
         },
         {
           label: 'Cache create 5m',
           value: c.cc_5m,
-          color: 'bg-amber-400',
+          color: SLICE_COLORS.cache_create_5m,
           fmt: formatCostMicros,
         },
         {
           label: 'Cache create 1h',
           value: c.cc_1h,
-          color: 'bg-amber-700',
+          color: SLICE_COLORS.cache_create_1h,
           fmt: formatCostMicros,
         },
         {
           label: 'Cache read',
           value: c.cr,
-          color: 'bg-emerald-400',
+          color: SLICE_COLORS.cache_read,
           fmt: formatCostMicros,
         },
       ]}
@@ -478,11 +487,11 @@ function CostCell({
           {c.hasComponents ? (
             <Sparkline
               segments={[
-                { value: c.input, color: 'bg-sky-400' },
-                { value: c.output, color: 'bg-violet-400' },
-                { value: c.cc_5m, color: 'bg-amber-400' },
-                { value: c.cc_1h, color: 'bg-amber-700' },
-                { value: c.cr, color: 'bg-emerald-400' },
+                { value: c.input, color: SLICE_COLORS.input },
+                { value: c.output, color: SLICE_COLORS.output },
+                { value: c.cc_5m, color: SLICE_COLORS.cache_create_5m },
+                { value: c.cc_1h, color: SLICE_COLORS.cache_create_1h },
+                { value: c.cr, color: SLICE_COLORS.cache_read },
               ]}
             />
           ) : (
@@ -512,8 +521,11 @@ export function Sparkline({ segments }: { segments: SparkSegment[] }) {
         s.value > 0 ? (
           <span
             key={i}
-            className={cx('h-full', s.color)}
-            style={{ width: `${(s.value / total) * 100}%` }}
+            className="h-full"
+            style={{
+              width: `${(s.value / total) * 100}%`,
+              backgroundColor: s.color,
+            }}
           />
         ) : null,
       )}
@@ -558,7 +570,8 @@ function BreakdownPopover({
                 className="flex items-center gap-2 text-[11px]"
               >
                 <span
-                  className={cx('h-2 w-2 rounded-full shrink-0', r.color)}
+                  className="h-2 w-2 rounded-full shrink-0"
+                  style={{ backgroundColor: r.color }}
                 />
                 <span className="text-text-muted flex-1 truncate">
                   {r.label}
