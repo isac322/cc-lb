@@ -103,9 +103,27 @@ If an operator keeps a local proxy client key file such as `~/.config/cc-lb/prox
   "name": "principal-name",
   "kind": "user",
   "allowed_models": ["claude-3-5-sonnet-20241022"],
-  "default_limits": []
+  "default_limits": [],
+  "cache_keepalive": {
+    "enabled": true,
+    "refresh_lead_time_5m_secs": 30,
+    "refresh_lead_time_1h_secs": 300,
+    "max_refreshes_per_session": 12,
+    "max_total_duration_secs": 14400,
+    "snapshot_max_bytes": 524288,
+    "classifier": {
+      "extra_wait_for_user_tools": [],
+      "treat_end_turn_as_ambiguous": false
+    }
+  }
 }
 ```
+
+`cache_keepalive` is an optional object. Omit it (or pass `null`) to
+disable the prompt-cache keep-alive feature for this principal. When
+present, `enabled` is required. Full field semantics, defaults, and
+provider-gating rules are documented in
+[docs/cache-keepalive-operator.md](./cache-keepalive-operator.md).
 
 #### PrincipalResponse
 
@@ -117,9 +135,14 @@ If an operator keeps a local proxy client key file such as `~/.config/cc-lb/prox
   "enabled": true,
   "revision": 1,
   "allowed_models": ["claude-3-5-sonnet-20241022"],
-  "default_limits": []
+  "default_limits": [],
+  "cache_keepalive": null
 }
 ```
+
+The `cache_keepalive` field mirrors whatever was persisted on the
+principal, or `null` when unset. `PATCH /admin/v1/principals/{id}` with
+`"cache_keepalive": null` clears the config.
 
 ### Plugins API
 
