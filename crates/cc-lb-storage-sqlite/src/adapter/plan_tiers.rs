@@ -1,3 +1,4 @@
+mod backfill;
 mod codec;
 mod reads;
 mod writes;
@@ -7,10 +8,11 @@ mod test_support;
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    MetadataTierMappingOverrideRecord, PlanTierRatioRecord, PlanTierStore, StorageResult,
-    UpstreamPlanTierRecord,
+    BackfillApplyOutcome, MetadataTierMappingOverrideRecord, PlanTierRatioRecord, PlanTierStore,
+    StorageResult, UpstreamPlanTierRecord,
 };
 use sqlx::Row;
+use uuid::Uuid;
 
 use crate::{SqliteStorage, map_sqlx_error};
 
@@ -158,6 +160,23 @@ impl PlanTierStore for SqliteStorage {
 
         insert_upstream(&mut tx, record).await?;
         tx.commit().await.map_err(map_sqlx_error)
+    }
+
+    async fn backfill_upstream_plan_tier_intervals(
+        &self,
+        upstream_id: Uuid,
+        intervals: &[UpstreamPlanTierRecord],
+        terminal_cap_unix_millis: i64,
+        provenance: &str,
+    ) -> StorageResult<BackfillApplyOutcome> {
+        backfill::apply(
+            self,
+            upstream_id,
+            intervals,
+            terminal_cap_unix_millis,
+            provenance,
+        )
+        .await
     }
 
     async fn list_current_upstream_plan_tiers(&self) -> StorageResult<Vec<UpstreamPlanTierRecord>> {
