@@ -195,7 +195,6 @@ fn assert_required_metric_names(rendered: &str) {
         scheduler_metrics::INIT_FAILURE,
         scheduler_metrics::LAZY_REFRESH_TIMEOUT_TOTAL,
         scheduler_metrics::PRUNE_ROWS_REMOVED_TOTAL,
-        scheduler_metrics::QUOTA_GC_ROWS_REMOVED_TOTAL,
         scheduler_metrics::PRICE_CATALOG_STATUS_TOTAL,
     ] {
         assert!(

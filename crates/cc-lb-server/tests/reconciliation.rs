@@ -12,12 +12,13 @@ use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::reconcile::Reconciler;
 use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, BackendKind, CompatibilityKvRecord, MetaStore,
-    OrganizationMetadataRecord, OrganizationMetadataStore, PluginChainEntry, PluginChainEntryInput,
+    MetadataTierMappingOverrideRecord, OrganizationMetadataRecord, OrganizationMetadataStore,
+    PlanTierRatioRecord, PlanTierStore, PluginChainEntry, PluginChainEntryInput,
     PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
     PrincipalRecord, PrincipalStore, PrincipalUpdate, PromptCacheObservationStore, StorageResult,
     SubscriptionQuotaObservationRecord, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
-    UpstreamCreate, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
-    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
+    UpstreamCreate, UpstreamPlanTierRecord, UpstreamRateLimitObservationRecord,
+    UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
     UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob,
     WasmRegistryEntry, WasmRegistryEntryInput,
 };
@@ -73,6 +74,7 @@ fn stores(storage: Arc<Storage>) -> Arc<Stores> {
         upstream_subscription_quotas: storage.clone(),
         upstream_subscription_metadata: storage.clone(),
         organization_metadata: storage.clone(),
+        plan_tiers: storage.clone(),
         prompt_cache_observations: storage.clone(),
         anthropic_compatibility_kv: storage,
         audit: None,
@@ -311,6 +313,7 @@ async fn cancel_during_tick_is_graceful() {
         upstream_subscription_quotas: Arc::new(EmptySubscriptionQuotaStore),
         upstream_subscription_metadata: Arc::new(EmptyUpstreamSubscriptionMetadataStore),
         organization_metadata: Arc::new(EmptyOrganizationMetadataStore),
+        plan_tiers: Arc::new(EmptyPlanTierStore),
         prompt_cache_observations: Arc::new(EmptyPromptCacheObservationStore),
         anthropic_compatibility_kv: Arc::new(EmptyCompatibilityKvStore),
         audit: None,
@@ -512,19 +515,69 @@ impl UpstreamSubscriptionQuotaStore for EmptySubscriptionQuotaStore {
     ) -> StorageResult<Vec<SubscriptionQuotaSeries>> {
         Ok(Vec::new())
     }
-
-    async fn delete_subscription_quota_before(
-        &self,
-        _cutoff_unix_millis: u64,
-        _batch_size: u32,
-    ) -> StorageResult<u64> {
-        Ok(0)
-    }
 }
 
 struct EmptyPromptCacheObservationStore;
 
 impl PromptCacheObservationStore for EmptyPromptCacheObservationStore {}
+
+struct EmptyPlanTierStore;
+
+#[async_trait]
+impl PlanTierStore for EmptyPlanTierStore {
+    async fn upsert_plan_tier_ratio(&self, _record: &PlanTierRatioRecord) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn list_current_plan_tier_ratios(&self) -> StorageResult<Vec<PlanTierRatioRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_plan_tier_ratios_as_of(
+        &self,
+        _as_of_unix_millis: i64,
+    ) -> StorageResult<Vec<PlanTierRatioRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn upsert_metadata_tier_override(
+        &self,
+        _record: &MetadataTierMappingOverrideRecord,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn list_current_metadata_tier_overrides(
+        &self,
+    ) -> StorageResult<Vec<MetadataTierMappingOverrideRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_metadata_tier_overrides_as_of(
+        &self,
+        _as_of_unix_millis: i64,
+    ) -> StorageResult<Vec<MetadataTierMappingOverrideRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn append_upstream_plan_tier(
+        &self,
+        _record: &UpstreamPlanTierRecord,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn list_current_upstream_plan_tiers(&self) -> StorageResult<Vec<UpstreamPlanTierRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_upstream_plan_tiers_as_of(
+        &self,
+        _as_of_unix_millis: i64,
+    ) -> StorageResult<Vec<UpstreamPlanTierRecord>> {
+        Ok(Vec::new())
+    }
+}
 
 struct EmptyUpstreamSubscriptionMetadataStore;
 

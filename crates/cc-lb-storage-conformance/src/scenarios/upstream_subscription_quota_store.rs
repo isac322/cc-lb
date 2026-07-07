@@ -23,8 +23,6 @@ where
     series_source_merge_merged_collapses_both_sources(Arc::clone(&backend)).await?;
     series_source_merge_header_filters_api(Arc::clone(&backend)).await?;
     series_max_points_per_series_downsamples(Arc::clone(&backend)).await?;
-    delete_before_removes_old_observations(Arc::clone(&backend)).await?;
-    delete_before_does_not_touch_latest_table(Arc::clone(&backend)).await?;
     process_start_marker_persists_with_sample_kind(Arc::clone(&backend)).await?;
     empty_upstream_ids_returns_empty(Arc::clone(&backend)).await?;
     series_filters_observed_at_window(backend).await?;
@@ -274,63 +272,6 @@ scenario!(
         ensure!(
             series[0].buckets.len() <= 10,
             "series should downsample to cap"
-        );
-        Ok(())
-    }
-);
-
-scenario!(
-    delete_before_removes_old_observations,
-    |storage| async move {
-        let upstream = upstream_id(9);
-        let records = (1..=5)
-            .map(|idx| {
-                observation(
-                    upstream,
-                    idx * 100,
-                    idx,
-                    SubscriptionQuotaSource::Header,
-                    0.2,
-                )
-            })
-            .collect::<Vec<_>>();
-        storage.put_subscription_quota_batch(&records).await?;
-        let deleted = storage.delete_subscription_quota_before(300, 10).await?;
-        ensure!(deleted == 2, "delete_before should remove two old rows");
-        let series = storage
-            .list_subscription_quota_series(series_query(
-                upstream,
-                0,
-                600,
-                1,
-                10,
-                SubscriptionQuotaSourceMerge::Header,
-            ))
-            .await?;
-        let remaining = series[0]
-            .buckets
-            .iter()
-            .map(|bucket| bucket.sample_count)
-            .sum::<u32>();
-        ensure!(remaining == 3, "three observations should remain");
-        Ok(())
-    }
-);
-
-scenario!(
-    delete_before_does_not_touch_latest_table,
-    |storage| async move {
-        let upstream = upstream_id(10);
-        let record = observation(upstream, 100, 1, SubscriptionQuotaSource::Header, 0.2);
-        storage.put_subscription_quota(&record).await?;
-        let deleted = storage.delete_subscription_quota_before(500, 10).await?;
-        ensure!(deleted == 1, "raw observation should be deleted");
-        let latest = storage
-            .list_latest_subscription_quota_for_upstreams(&[upstream])
-            .await?;
-        ensure!(
-            latest == [record],
-            "latest sidecar must survive observation GC"
         );
         Ok(())
     }

@@ -281,6 +281,7 @@ pub trait PriceCatalogCache: Send + Sync {
 pub trait Storage:
     AuditStore
     + crate::plugin_registry::PluginRegistryStore
+    + crate::plan_tiers::PlanTierStore
     + crate::pool_quota_history::PoolQuotaHistoryStore
     + crate::principal::PrincipalStore
     + crate::upstream::UpstreamStore
@@ -309,6 +310,7 @@ pub trait Storage:
 impl<T> Storage for T where
     T: AuditStore
         + crate::plugin_registry::PluginRegistryStore
+        + crate::plan_tiers::PlanTierStore
         + crate::pool_quota_history::PoolQuotaHistoryStore
         + crate::principal::PrincipalStore
         + crate::upstream::UpstreamStore

@@ -8,7 +8,7 @@ use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
-        anthropic_compatibility_kv_store, atomicity, organization_metadata_store,
+        anthropic_compatibility_kv_store, atomicity, organization_metadata_store, plan_tier_store,
         plugin_registry_store, price_catalog, principal_store, prompt_cache_observation_store,
         storage_roundtrips, storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
         upstream_rate_limit_store, upstream_subscription_metadata_store,
@@ -213,14 +213,6 @@ upstream_subscription_quota_sqlite_test!(
     series_max_points_per_series_downsamples
 );
 upstream_subscription_quota_sqlite_test!(
-    upstream_subscription_quota_delete_before_removes_old_observations_sqlite,
-    delete_before_removes_old_observations
-);
-upstream_subscription_quota_sqlite_test!(
-    upstream_subscription_quota_delete_before_does_not_touch_latest_table_sqlite,
-    delete_before_does_not_touch_latest_table
-);
-upstream_subscription_quota_sqlite_test!(
     upstream_subscription_quota_process_start_marker_persists_with_sample_kind_sqlite,
     process_start_marker_persists_with_sample_kind
 );
@@ -286,6 +278,11 @@ fn organization_metadata_store_sqlite() {
         "organization_metadata_store",
         organization_metadata_store::run_all,
     );
+}
+
+#[test]
+fn plan_tier_store_sqlite() {
+    run_sqlite_scenario("plan_tier_store", plan_tier_store::run_all);
 }
 
 macro_rules! plugin_registry_sqlite_test {

@@ -4,6 +4,7 @@ pub mod append_ordering;
 pub mod atomicity;
 pub mod managed_keys;
 pub mod organization_metadata_store;
+pub mod plan_tier_store;
 pub use crate::plugin_registry_store;
 pub mod price_catalog;
 pub mod principal_store;

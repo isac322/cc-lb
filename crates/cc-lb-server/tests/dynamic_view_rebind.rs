@@ -7,8 +7,9 @@ use cc_lb_engine::{ApplyStatus, DynamicView};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate,
-    UpstreamStore,
+    BackendKind, MetaStore, OrganizationMetadataRecord, OrganizationMetadataStore, PlanTierStore,
+    PrincipalCreate, PrincipalKind, PrincipalStore, TierResolutionSource, UpstreamCreate,
+    UpstreamStore, UpstreamSubscriptionMetadataRecord, UpstreamSubscriptionMetadataStore,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -27,6 +28,7 @@ fn stores(storage: Arc<SqliteStorage>) -> Stores {
         upstream_subscription_quotas: storage.clone(),
         upstream_subscription_metadata: storage.clone(),
         organization_metadata: storage.clone(),
+        plan_tiers: storage.clone(),
         prompt_cache_observations: storage.clone(),
         anthropic_compatibility_kv: storage,
         audit: None,
@@ -84,6 +86,50 @@ async fn create_api_key_upstream(
     )
     .await
     .expect("upstream created")
+}
+
+async fn attach_plan_metadata(storage: &SqliteStorage, upstream_id: uuid::Uuid) {
+    UpstreamSubscriptionMetadataStore::put_upstream_subscription_metadata(
+        storage,
+        &UpstreamSubscriptionMetadataRecord {
+            upstream_id,
+            organization_uuid: Some("org-max-5x".to_owned()),
+            organization_role: None,
+            workspace_role: None,
+            observed_at_unix_millis: 1_800_000_000_000,
+            last_error: None,
+            raw_roles: None,
+            raw_bootstrap: None,
+        },
+    )
+    .await
+    .expect("subscription metadata stored");
+    OrganizationMetadataStore::put_organization_metadata(
+        storage,
+        &OrganizationMetadataRecord {
+            organization_uuid: "org-max-5x".to_owned(),
+            organization_name: Some("Max 5x Org".to_owned()),
+            organization_type: Some("claude_max".to_owned()),
+            rate_limit_tier: Some("default_claude_max_5x".to_owned()),
+            seat_tier: None,
+            has_extra_usage_enabled: None,
+            billing_type: None,
+            subscription_created_at_unix_secs: None,
+            account_email: None,
+            account_display_name: None,
+            account_uuid: None,
+            overage_credit_amount_minor_units: None,
+            overage_credit_currency: None,
+            overage_credit_granted: None,
+            overage_credit_eligible: None,
+            observed_at_unix_millis: 1_800_000_000_000,
+            last_error: None,
+            raw_profile: None,
+            raw_overage_grant: None,
+        },
+    )
+    .await
+    .expect("organization metadata stored");
 }
 
 async fn build(
@@ -210,4 +256,46 @@ async fn corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active() {
         .expect("load corrupt")
         .expect("corrupt exists");
     assert!(persisted.last_apply_error.is_some());
+}
+
+#[tokio::test]
+async fn plan_info_uses_catalog_ratio_and_reconciles_history() {
+    let (dir, storage) = storage_fixture().await;
+    let stores = stores(storage.clone());
+    let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+    let upstream = create_api_key_upstream(&storage, "max-5x").await;
+    attach_plan_metadata(&storage, upstream.id).await;
+
+    let view = build(&stores, 0, &runtime, dir.path()).await;
+
+    let plan_info = view
+        .plan_info_by_upstream
+        .get(&upstream.id)
+        .expect("upstream plan info");
+    assert_eq!(plan_info.organization_type.as_deref(), Some("claude_max"));
+    assert_eq!(
+        plan_info.rate_limit_tier.as_deref(),
+        Some("default_claude_max_5x")
+    );
+    assert_eq!(plan_info.capacity_ratio, 5.0);
+
+    let history = PlanTierStore::list_current_upstream_plan_tiers(&*storage)
+        .await
+        .expect("plan tier history listed");
+    let resolved = history
+        .iter()
+        .find(|record| record.upstream_id == upstream.id)
+        .expect("upstream tier history");
+    assert_eq!(resolved.organization_uuid.as_deref(), Some("org-max-5x"));
+    assert_eq!(resolved.organization_type.as_deref(), Some("claude_max"));
+    assert_eq!(
+        resolved.rate_limit_tier.as_deref(),
+        Some("default_claude_max_5x")
+    );
+    assert_eq!(resolved.seat_tier, None);
+    assert_eq!(resolved.tier_key.as_deref(), Some("max_5x"));
+    assert_eq!(resolved.resolution_source, TierResolutionSource::Builtin);
+    assert_eq!(resolved.resolved_ratio_snapshot, Some(5.0));
+    assert_eq!(resolved.effective_to_unix_millis, None);
+    assert_eq!(resolved.provenance, "dynamic_view_reconcile");
 }

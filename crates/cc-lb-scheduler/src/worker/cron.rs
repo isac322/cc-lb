@@ -194,9 +194,6 @@ fn singleton_cron_specs(config: &Config, clock: ClockHandle) -> Vec<SingletonCro
     push_singleton_spec(&mut specs, config, &clock, "usage_prune", |_| {
         CronJob::UsagePrune(Default::default())
     });
-    push_singleton_spec(&mut specs, config, &clock, "quota_gc", |_| {
-        CronJob::QuotaGc(Default::default())
-    });
     push_singleton_spec(&mut specs, config, &clock, "prompt_cache_purge", |_| {
         CronJob::PromptCachePurge(Default::default())
     });
