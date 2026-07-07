@@ -228,6 +228,22 @@ pub fn plan_capacity_ratio(
     }
 }
 
+pub fn tier_key_from_seed_ratio(ratio: f64) -> Option<TierKey> {
+    if ratio == TierKey::Pro.seed_pro_relative_ratio() {
+        Some(TierKey::Pro)
+    } else if ratio == TierKey::TeamStandard.seed_pro_relative_ratio() {
+        Some(TierKey::TeamStandard)
+    } else if ratio == TierKey::Max5x.seed_pro_relative_ratio() {
+        Some(TierKey::Max5x)
+    } else if ratio == TierKey::TeamPremium.seed_pro_relative_ratio() {
+        Some(TierKey::TeamPremium)
+    } else if ratio == TierKey::Max20x.seed_pro_relative_ratio() {
+        Some(TierKey::Max20x)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,6 +408,18 @@ mod tests {
         assert_eq!(TierKey::TeamPremium.seed_pro_relative_ratio(), 6.25);
         assert_eq!(TierKey::Max20x.seed_pro_relative_ratio(), 20.0);
         assert!("nope".parse::<TierKey>().is_err());
+    }
+
+    #[test]
+    fn tier_key_from_seed_ratio_accepts_only_canonical_seed_values() {
+        assert_eq!(tier_key_from_seed_ratio(1.0), Some(TierKey::Pro));
+        assert_eq!(tier_key_from_seed_ratio(1.25), Some(TierKey::TeamStandard));
+        assert_eq!(tier_key_from_seed_ratio(5.0), Some(TierKey::Max5x));
+        assert_eq!(tier_key_from_seed_ratio(6.25), Some(TierKey::TeamPremium));
+        assert_eq!(tier_key_from_seed_ratio(20.0), Some(TierKey::Max20x));
+        assert_eq!(tier_key_from_seed_ratio(10.0), None);
+        assert_eq!(tier_key_from_seed_ratio(0.0), None);
+        assert_eq!(tier_key_from_seed_ratio(f64::NAN), None);
     }
 
     fn legacy_plan_capacity_ratio(
