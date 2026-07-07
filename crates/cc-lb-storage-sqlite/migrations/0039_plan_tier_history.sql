@@ -63,8 +63,8 @@ CREATE INDEX IF NOT EXISTS upstream_plan_tier_history_v1_tier_time_idx
 INSERT OR IGNORE INTO plan_tier_ratio_history_v1
     (tier_key, pro_relative_ratio, effective_from_unix_millis, effective_to_unix_millis, provenance, created_at_unix_millis)
 VALUES
-    ('pro', 1.0, 0, NULL, 'migration:0038_plan_tier_history', CAST(strftime('%s','now') AS INTEGER) * 1000),
-    ('team_standard', 1.25, 0, NULL, 'migration:0038_plan_tier_history', CAST(strftime('%s','now') AS INTEGER) * 1000),
-    ('max_5x', 5.0, 0, NULL, 'migration:0038_plan_tier_history', CAST(strftime('%s','now') AS INTEGER) * 1000),
-    ('team_premium', 6.25, 0, NULL, 'migration:0038_plan_tier_history', CAST(strftime('%s','now') AS INTEGER) * 1000),
-    ('max_20x', 20.0, 0, NULL, 'migration:0038_plan_tier_history', CAST(strftime('%s','now') AS INTEGER) * 1000);
+    ('pro', 1.0, 0, NULL, 'migration:0039_plan_tier_history', CAST(strftime('%s','now') AS INTEGER) * 1000),
+    ('team_standard', 1.25, 0, NULL, 'migration:0039_plan_tier_history', CAST(strftime('%s','now') AS INTEGER) * 1000),
+    ('max_5x', 5.0, 0, NULL, 'migration:0039_plan_tier_history', CAST(strftime('%s','now') AS INTEGER) * 1000),
+    ('team_premium', 6.25, 0, NULL, 'migration:0039_plan_tier_history', CAST(strftime('%s','now') AS INTEGER) * 1000),
+    ('max_20x', 20.0, 0, NULL, 'migration:0039_plan_tier_history', CAST(strftime('%s','now') AS INTEGER) * 1000);
