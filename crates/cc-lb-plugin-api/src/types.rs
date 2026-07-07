@@ -807,11 +807,11 @@ pub enum SubscriptionTier {
 /// Per-candidate weighted-rendezvous-hash urgency score and tier for one
 /// subscription-preference selection.
 ///
-/// Under salt v9 the `urgency` field is aliased to `effective_weight` so a
+/// Under salt v10 the `urgency` field is aliased to `effective_weight` so a
 /// consumer that only reads `urgency` still sees the current selection
 /// weight. Component fields expose the quota, cache, warning, and pricing
 /// inputs so operator queries can distinguish quota-driven changes from
-/// cache-cost-driven owner retention.
+/// cache-value-driven WRH selection.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CandidateUrgency {
     /// Upstream identifier this urgency was computed for.
@@ -831,13 +831,14 @@ pub struct CandidateUrgency {
     pub predicted_cache_creation_tokens_1h: u32,
     /// Predicted input tokens that are neither read from nor written to cache.
     pub predicted_uncached_input_tokens: u32,
-    /// Ratio of `predicted_cache_read_tokens` to the maximum observed in
-    /// this candidate's tier bucket. Ranges `[0.0, 1.0]`; zero when the
-    /// bucket max is zero.
+    /// Ratio of net priced cache value to the maximum positive value in this
+    /// candidate's tier bucket. Ranges `[-1.0, 1.0]`; zero when pricing is
+    /// unknown or the bucket has no positive cache value.
     pub cache_ratio: f64,
-    /// `exp(CACHE_LOG_BOOST * cache_ratio)`. Ranges from 1.0 (cold) up to
-    /// `exp(CACHE_LOG_BOOST)` (deepest cache in bucket). Multiplied onto
-    /// `quota_urgency` to produce `effective_weight`.
+    /// `exp(CACHE_LOG_BOOST * cache_ratio)`. Values below 1.0 penalize cache
+    /// whose missing write cost exceeds its read savings; values above 1.0
+    /// boost positive cache value. Multiplied onto `quota_urgency` to produce
+    /// `effective_weight`.
     pub cache_weight_multiplier: f64,
     /// Same-tier multiplier applied when base quota is warning-positive.
     pub warning_multiplier: f64,
