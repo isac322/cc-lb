@@ -49,6 +49,7 @@ fn build_candidates_populates_observations_from_dynamic_view_cache() {
         RequestKind::AnthropicMessages,
         "",
         &[],
+        None,
         &cc_lb_engine::SystemClock,
     );
 
