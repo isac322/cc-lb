@@ -1182,12 +1182,12 @@ fn all_oauth_hard_negative_no_api_key_fails_open_without_trace() {
 // =============================================================================
 
 #[test]
-fn same_thread_id_pins_when_request_ids_vary() {
+fn same_thread_id_without_cache_uses_request_id_and_spreads_when_request_ids_vary() {
     // Given: four healthy live-snapshot upstreams and one non-empty thread_id
-    // shared across 200 turns with distinct request_ids.
-    // When: subscription-preference filters each turn.
-    // Then: v8 keys WRH on thread_id, so all turns pin to the same upstream
-    // and the trace records ThreadId as the key source.
+    // shared across 2000 turns with distinct request_ids.
+    // When: none of the candidates has a priced live-cache value.
+    // Then: same-session identity alone must not pin all-cold routing; the WRH
+    // key falls back to request_id and spreads across the healthy pool.
     let candidates = vec![
         live_snapshot_bear_max(),
         live_snapshot_isac_personal(),
@@ -1207,17 +1207,16 @@ fn same_thread_id_pins_when_request_ids_vary() {
             .expect("subscription-alive path must emit trace");
         assert_eq!(
             trace.wrh_key_source,
-            WrhKeySource::ThreadId,
-            "v8 subscription must key WRH on a non-empty thread_id"
+            WrhKeySource::RequestId,
+            "all-cold subscription routing must ignore thread_id as a pinning key"
         );
         *winners
             .entry(*output.kept_upstream_ids.first().unwrap())
             .or_insert(0) += 1;
     }
-    assert_eq!(
-        winners.len(),
-        1,
-        "same-thread turns must pin to one upstream; landed on {} upstreams",
+    assert!(
+        winners.len() >= 3,
+        "same-thread all-cold turns must spread across request_id WRH; landed on {} upstreams",
         winners.len()
     );
 }
@@ -1287,6 +1286,30 @@ fn missing_thread_id_falls_back_to_request_id() {
     );
 }
 
+#[test]
+fn unknown_cache_pricing_omits_cache_terms_without_cache_boost() {
+    // Given: one candidate advertises a deep live cache, but the request carries
+    // the default unknown pricing snapshot.
+    let cached = with_live_cache(healthy_oauth_candidate("cached", 1), 500_000);
+    let peer = healthy_oauth_candidate("peer", 2);
+
+    // When: subscription-preference scores both candidates.
+    let out = SubscriptionPreferenceFilter::new()
+        .filter(
+            &ctx_with_unknown_cache_pricing(MODEL_AGNOSTIC, "req-unknown-price"),
+            &principal(),
+            &[cached.clone(), peer],
+        )
+        .unwrap();
+
+    // Then: unknown pricing does not become cache_loss_unknown or hidden owner
+    // retention; it simply removes cache economics from the weight.
+    let trace = out.subscription_preference.expect("trace present");
+    let cached_urgency = candidate_urgency_for(&trace, cached.upstream_id);
+    assert_eq!(cached_urgency.cache_ratio, 0.0);
+    assert!((cached_urgency.cache_weight_multiplier - 1.0).abs() < CROSSOVER_TOLERANCE);
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -1332,7 +1355,7 @@ fn ctx_with_request_id(canonical_model: &str, request_id: &str) -> RequestContex
         body_bytes: Bytes::new(),
         cache_breakpoints: Vec::new(),
         canonical_model_id: canonical_model.to_owned(),
-        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
+        cache_pricing: test_cache_pricing(),
     }
 }
 
@@ -1347,7 +1370,24 @@ fn ctx_with_thread_id(canonical_model: &str, request_id: &str, thread_id: &str) 
         body_bytes: Bytes::new(),
         cache_breakpoints: Vec::new(),
         canonical_model_id: canonical_model.to_owned(),
+        cache_pricing: test_cache_pricing(),
+    }
+}
+
+fn ctx_with_unknown_cache_pricing(canonical_model: &str, request_id: &str) -> RequestContext {
+    RequestContext {
         cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
+        ..ctx_with_request_id(canonical_model, request_id)
+    }
+}
+
+fn test_cache_pricing() -> cc_lb_plugin_api::CachePricingSummary {
+    cc_lb_plugin_api::CachePricingSummary {
+        status: "known".to_owned(),
+        input_micros_per_million: Some(5_000_000),
+        cache_creation_5m_micros_per_million: Some(6_250_000),
+        cache_creation_1h_micros_per_million: Some(10_000_000),
+        cache_read_micros_per_million: Some(500_000),
     }
 }
 
@@ -1551,14 +1591,8 @@ fn blank_snapshot(
 }
 
 // =============================================================================
-// Section K — Observability trace (issue #340): wrh_key_source, previous_tier,
-// rendezvous_salt_version, tier memory bounds
+// Section K — Observability trace: wrh_key_source and salt version
 // =============================================================================
-
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use cc_lb_plugin_api::SubscriptionTier;
 
 fn healthy_oauth_candidate(name: &str, id_seed: u8) -> UpstreamCandidate {
     oauth_with(
@@ -1590,23 +1624,26 @@ fn rendezvous_salt_embeds_declared_version() {
 }
 
 #[test]
-fn wrh_key_source_is_thread_id_when_thread_id_present_v8() {
-    // v8 invariant: subscription-preference keys WRH on non-empty thread_id
-    // and records that source in the trace.
+fn wrh_key_source_is_thread_id_when_thread_has_positive_priced_cache_value() {
+    // Given: a threaded request where at least one candidate has priced live-cache value.
     let filter = SubscriptionPreferenceFilter::new();
     let candidates = vec![
-        healthy_oauth_candidate("upstream-a", 1),
+        with_live_cache(healthy_oauth_candidate("upstream-a", 1), 500_000),
         healthy_oauth_candidate("upstream-b", 2),
     ];
+
+    // When: subscription-preference scores the cache-warm bucket.
     let ctx = ctx_with_thread_id(SONNET_MODEL, "req-1", "thread-A");
     let output = filter.filter(&ctx, &principal(), &candidates).unwrap();
     let trace = output
         .subscription_preference
         .expect("subscription-alive path must emit trace");
+
+    // Then: thread_id is used only because current facts include positive cache value.
     assert_eq!(
         trace.wrh_key_source,
         WrhKeySource::ThreadId,
-        "v8 subscription must key on thread_id when present"
+        "cache-warm subscription routing should key on thread_id when present"
     );
     assert_eq!(
         trace.rendezvous_salt_version.as_deref(),
@@ -1648,7 +1685,7 @@ fn wrh_key_source_falls_back_to_request_id_when_thread_id_is_empty_string() {
 }
 
 #[test]
-fn previous_tier_is_none_on_first_turn_and_populated_on_second_turn() {
+fn previous_tier_is_none_on_every_turn() {
     let filter = SubscriptionPreferenceFilter::new();
     let candidates = vec![
         healthy_oauth_candidate("upstream-a", 1),
@@ -1666,11 +1703,7 @@ fn previous_tier_is_none_on_first_turn_and_populated_on_second_turn() {
     let ctx_turn_2 = ctx_with_thread_id(SONNET_MODEL, "req-2", "thread-A");
     let out_2 = filter.filter(&ctx_turn_2, &principal, &candidates).unwrap();
     let trace_2 = out_2.subscription_preference.expect("turn-2 trace present");
-    assert_eq!(
-        trace_2.previous_tier,
-        Some(trace_1.chosen_tier),
-        "second turn on same thread must surface the tier the previous turn saw"
-    );
+    assert!(trace_2.previous_tier.is_none());
 }
 
 #[test]
@@ -1698,7 +1731,7 @@ fn oversized_thread_id_uses_bounded_routing_key() {
     // Given: a caller-controlled session id much larger than the routing key cap.
     let filter = SubscriptionPreferenceFilter::new();
     let candidates = vec![
-        healthy_oauth_candidate("upstream-a", 1),
+        with_live_cache(healthy_oauth_candidate("upstream-a", 1), 500_000),
         healthy_oauth_candidate("upstream-b", 2),
     ];
     let principal = principal();
@@ -1724,14 +1757,9 @@ fn oversized_thread_id_uses_bounded_routing_key() {
         .subscription_preference
         .expect("second trace present");
 
-    // Then: routing still treats it as ThreadId, but memory stores only a digest key.
+    // Then: routing still treats it as ThreadId when cache value is live.
     assert_eq!(first_trace.wrh_key_source, WrhKeySource::ThreadId);
-    assert_eq!(second_trace.previous_tier, Some(first_trace.chosen_tier));
-    assert_eq!(filter.tier_memory().len(), 1);
-    assert_eq!(
-        filter.tier_memory().max_key_len(),
-        Some(HASHED_THREAD_ROUTING_KEY_PREFIX.len() + 64)
-    );
+    assert_eq!(second_trace.wrh_key_source, WrhKeySource::ThreadId);
 }
 
 #[test]
@@ -1751,144 +1779,6 @@ fn stateless_requests_never_populate_previous_tier() {
             "iteration {i}: stateless (no thread_id) request must never surface previous_tier",
         );
     }
-    assert_eq!(
-        filter.tier_memory().len(),
-        0,
-        "tier memory must not record entries for stateless requests"
-    );
-}
-
-// ---- TierMemory unit tests ----
-
-#[test]
-fn tier_memory_insert_get_roundtrip() {
-    let mem = TierMemory::new();
-    let now = Instant::now();
-    mem.insert("thread-A", SubscriptionTier::KnownBase, now);
-    assert_eq!(mem.get("thread-A", now), Some(SubscriptionTier::KnownBase));
-    assert!(mem.get("thread-B", now).is_none());
-}
-
-#[test]
-fn tier_memory_insert_ignores_empty_thread_id() {
-    let mem = TierMemory::new();
-    let now = Instant::now();
-    mem.insert("", SubscriptionTier::KnownBase, now);
-    assert_eq!(mem.len(), 0);
-    assert!(mem.get("", now).is_none());
-}
-
-#[test]
-fn tier_memory_ttl_expiry_returns_none_after_deadline() {
-    let mem = TierMemory::with_cap_and_ttl(16, Duration::from_secs(30));
-    let base = Instant::now();
-    mem.insert("thread-A", SubscriptionTier::Overage, base);
-    assert_eq!(mem.get("thread-A", base), Some(SubscriptionTier::Overage));
-    assert_eq!(
-        mem.get("thread-A", base + Duration::from_secs(29)),
-        Some(SubscriptionTier::Overage),
-        "within TTL window the record must remain visible"
-    );
-    assert!(
-        mem.get("thread-A", base + Duration::from_secs(30))
-            .is_none(),
-        "at TTL boundary the record must age out"
-    );
-    assert!(
-        mem.get("thread-A", base + Duration::from_secs(60))
-            .is_none()
-    );
-}
-
-#[test]
-fn tier_memory_reinsert_refreshes_ttl() {
-    let mem = TierMemory::with_cap_and_ttl(16, Duration::from_secs(10));
-    let t0 = Instant::now();
-    mem.insert("thread-A", SubscriptionTier::KnownBase, t0);
-    let t1 = t0 + Duration::from_secs(5);
-    mem.insert("thread-A", SubscriptionTier::PartialBase, t1);
-    let t2 = t0 + Duration::from_secs(12);
-    assert_eq!(
-        mem.get("thread-A", t2),
-        Some(SubscriptionTier::PartialBase),
-        "re-insert must extend the deadline to t1+ttl and swap the stored tier"
-    );
-}
-
-#[test]
-fn tier_memory_at_cap_with_all_fresh_entries_drops_new_key() {
-    let mem = TierMemory::with_cap_and_ttl(2, Duration::from_secs(60));
-    let now = Instant::now();
-    mem.insert("thread-A", SubscriptionTier::KnownBase, now);
-    mem.insert("thread-B", SubscriptionTier::KnownBase, now);
-    assert_eq!(mem.len(), 2);
-    mem.insert("thread-C", SubscriptionTier::KnownBase, now);
-    assert_eq!(
-        mem.len(),
-        2,
-        "cap must be preserved when all existing entries are still fresh"
-    );
-    assert!(
-        mem.get("thread-C", now).is_none(),
-        "the new key must be dropped, not evict a live record"
-    );
-    assert_eq!(
-        mem.get("thread-A", now),
-        Some(SubscriptionTier::KnownBase),
-        "existing fresh records must survive the failed insert"
-    );
-}
-
-#[test]
-fn tier_memory_at_cap_evicts_expired_before_accepting_new_key() {
-    let mem = TierMemory::with_cap_and_ttl(2, Duration::from_secs(10));
-    let t0 = Instant::now();
-    mem.insert("thread-A", SubscriptionTier::KnownBase, t0);
-    mem.insert("thread-B", SubscriptionTier::KnownBase, t0);
-    assert_eq!(mem.len(), 2);
-    let after_expiry = t0 + Duration::from_secs(15);
-    mem.insert("thread-C", SubscriptionTier::KnownBase, after_expiry);
-    assert_eq!(
-        mem.get("thread-C", after_expiry),
-        Some(SubscriptionTier::KnownBase),
-        "when existing entries are stale the sweep must free space for the new key"
-    );
-}
-
-#[test]
-fn tier_memory_reinsert_at_cap_updates_in_place_without_dropping() {
-    let mem = TierMemory::with_cap_and_ttl(2, Duration::from_secs(60));
-    let now = Instant::now();
-    mem.insert("thread-A", SubscriptionTier::KnownBase, now);
-    mem.insert("thread-B", SubscriptionTier::KnownBase, now);
-    mem.insert("thread-A", SubscriptionTier::Overage, now);
-    assert_eq!(mem.len(), 2);
-    assert_eq!(
-        mem.get("thread-A", now),
-        Some(SubscriptionTier::Overage),
-        "re-inserting an existing key must never trigger the cap-full drop path"
-    );
-}
-
-#[test]
-fn evaluate_shares_tier_memory_across_calls_through_arc() {
-    let memory = Arc::new(TierMemory::new());
-    let filter_a = SubscriptionPreferenceFilter::with_tier_memory(Arc::clone(&memory));
-    let filter_b = SubscriptionPreferenceFilter::with_tier_memory(Arc::clone(&memory));
-    let candidates = vec![
-        healthy_oauth_candidate("upstream-a", 1),
-        healthy_oauth_candidate("upstream-b", 2),
-    ];
-    let principal = principal();
-    let ctx = ctx_with_thread_id(SONNET_MODEL, "req-1", "thread-shared");
-    let _ = filter_a.filter(&ctx, &principal, &candidates).unwrap();
-    let ctx2 = ctx_with_thread_id(SONNET_MODEL, "req-2", "thread-shared");
-    let out2 = filter_b.filter(&ctx2, &principal, &candidates).unwrap();
-    let trace2 = out2.subscription_preference.expect("trace present");
-    assert!(
-        trace2.previous_tier.is_some(),
-        "two filter handles sharing an Arc<TierMemory> must observe each other's writes"
-    );
 }
 
 // =============================================================================
@@ -2083,6 +1973,69 @@ fn warm_cache_holder_blocked_spills_to_fresh_quota_peer() {
 }
 
 #[test]
+fn usage_warm_owner_beats_moderate_quota_disadvantage() {
+    // Given: a warm owner has the same production-shape disadvantage observed in
+    // ses_0c30 (~1.33x lower quota urgency), but strong provider usage lineage.
+    let owner = with_live_cache(
+        healthy_known_base_at_util("isac-personal", 1, 0.22),
+        590_000,
+    );
+    let quota_peer = healthy_known_base_at_util("bear-max", 2, 0.10);
+    let filter = SubscriptionPreferenceFilter::new();
+    let ctx = ctx_with_thread_id(MODEL_AGNOSTIC, "req-1", "ses-warm-owner");
+
+    // When: subscription-preference scores the same warm thread.
+    let out = filter
+        .filter(&ctx, &principal(), &[owner.clone(), quota_peer.clone()])
+        .unwrap();
+    let trace = out.subscription_preference.expect("trace present");
+    let owner_urg = candidate_urgency_for(&trace, owner.upstream_id);
+    let peer_urg = candidate_urgency_for(&trace, quota_peer.upstream_id);
+
+    // Then: cache bonus multiplies the existing quota weight instead of allowing
+    // a modest quota advantage to recreate a hot Anthropic prompt cache elsewhere.
+    assert_eq!(trace.wrh_key_source, WrhKeySource::ThreadId);
+    assert!(
+        peer_urg.quota_urgency / owner_urg.quota_urgency > 1.30,
+        "fixture must preserve the observed moderate quota disadvantage"
+    );
+    assert!(
+        owner_urg.effective_weight > peer_urg.effective_weight,
+        "warm owner effective weight must beat moderate quota disadvantage"
+    );
+    assert_eq!(out.kept_upstream_ids, vec![owner.upstream_id]);
+}
+
+#[test]
+fn severe_quota_pressure_can_override_usage_cache_owner() {
+    // Given: a cache owner is nearly exhausted while a peer has plenty of quota.
+    let owner = with_live_cache(
+        healthy_known_base_at_util("isac-personal", 1, 0.9999),
+        590_000,
+    );
+    let quota_peer = healthy_known_base_at_util("bear-max", 2, 0.10);
+    let filter = SubscriptionPreferenceFilter::new();
+    let ctx = ctx_with_thread_id(MODEL_AGNOSTIC, "req-1", "ses-severe-quota");
+
+    // When: subscription-preference scores the same warm thread.
+    let out = filter
+        .filter(&ctx, &principal(), &[owner.clone(), quota_peer.clone()])
+        .unwrap();
+    let trace = out.subscription_preference.expect("trace present");
+    let owner_urg = candidate_urgency_for(&trace, owner.upstream_id);
+    let peer_urg = candidate_urgency_for(&trace, quota_peer.upstream_id);
+
+    // Then: cache locality is not an absolute v9-style pin; severe quota pressure
+    // can still select the fresh peer.
+    assert_eq!(trace.wrh_key_source, WrhKeySource::ThreadId);
+    assert!(
+        peer_urg.effective_weight > owner_urg.effective_weight,
+        "fresh quota peer must beat a near-exhausted cache owner"
+    );
+    assert_eq!(out.kept_upstream_ids, vec![quota_peer.upstream_id]);
+}
+
+#[test]
 fn all_cold_reduces_to_pure_quota_wrh_distribution() {
     // v7 must collapse to v6 uniform-quota behaviour when no candidate has any cache
     // signal (cache_ratio=0 across the pool → multiplier=1 → effective_weight=quota_urgency).
@@ -2097,6 +2050,7 @@ fn all_cold_reduces_to_pure_quota_wrh_distribution() {
     let ctx = ctx_with_request_id(MODEL_AGNOSTIC, "req-1");
     let out = filter.filter(&ctx, &principal, &candidates).unwrap();
     let trace = out.subscription_preference.expect("trace present");
+    assert_eq!(trace.wrh_key_source, WrhKeySource::RequestId);
     for candidate in &trace.candidates {
         assert_eq!(candidate.predicted_cache_read_tokens, 0);
         assert_eq!(candidate.cache_ratio, 0.0);

@@ -127,7 +127,7 @@ fn warning_only_candidate_remains_selectable_without_clean_peer() {
 }
 
 #[test]
-fn same_thread_blocks_clean_formula_winner_when_switch_reprime_cost_is_high() {
+fn same_thread_uses_formula_winner_without_cache_loss_gate() {
     let _guard = PRICE_CATALOG_TEST_LOCK
         .lock()
         .expect("price catalog test lock");
@@ -186,19 +186,15 @@ fn same_thread_blocks_clean_formula_winner_when_switch_reprime_cost_is_high() {
         .expect("filter succeeds");
     let trace = second.subscription_preference.expect("trace present");
 
-    assert_eq!(second.kept_upstream_ids, vec![bear.upstream_id]);
-    assert_eq!(trace.formula_winner_upstream_id, Some(bh.upstream_id));
-    assert_eq!(trace.incumbent_upstream_id, Some(bear.upstream_id));
-    assert_eq!(trace.kept_upstream_id, Some(bear.upstream_id));
-    assert!(
-        trace.estimated_switch_cache_loss_micros.unwrap_or(0) > 2_900_000,
-        "switch should estimate the large incremental cache re-prime cost"
-    );
-    assert_eq!(trace.cache_loss_status.as_deref(), Some("known"));
     assert_eq!(
-        trace.switch_gate_reason.as_deref(),
-        Some("cache_loss_blocked")
+        second.kept_upstream_ids,
+        vec![trace.formula_winner_upstream_id.unwrap()]
     );
+    assert_eq!(trace.kept_upstream_id, trace.formula_winner_upstream_id);
+    assert_eq!(trace.incumbent_upstream_id, None);
+    assert_eq!(trace.estimated_switch_cache_loss_micros, None);
+    assert_eq!(trace.cache_loss_status, None);
+    assert_eq!(trace.switch_gate_reason.as_deref(), Some("formula_winner"));
 }
 
 #[test]
@@ -253,10 +249,7 @@ fn hard_rejected_incumbent_switches_despite_high_reprime_cost() {
 
     assert_eq!(second.kept_upstream_ids, vec![cold_peer.upstream_id]);
     assert_eq!(trace.kept_upstream_id, Some(cold_peer.upstream_id));
-    assert_eq!(
-        trace.switch_gate_reason.as_deref(),
-        Some("no_incumbent_in_tier")
-    );
+    assert_eq!(trace.switch_gate_reason.as_deref(), Some("formula_winner"));
 }
 
 #[test]
@@ -297,9 +290,8 @@ fn near_full_allowed_quota_remains_smooth_positive_weight() {
 }
 
 #[test]
-fn same_thread_retains_owner_until_successor_converges() {
-    // Given: one stable thread first warms owner-a, then owner-b becomes the
-    // formula winner for two consecutive turns.
+fn same_thread_recomputes_without_successor_convergence() {
+    // Given: one stable thread first routes to owner-a, then cache facts change.
     let filter = SubscriptionPreferenceFilter::new();
     let principal = principal();
     let thread_id = "thread-owner-stability";
@@ -317,7 +309,7 @@ fn same_thread_retains_owner_until_successor_converges() {
     let challenger_a = with_live_cache(clean_known_base("owner-a", 1), 15_000);
     let challenger_b = with_live_cache(clean_known_base("owner-b", 2), 250_000);
 
-    // When: the challenger wins formula scoring once.
+    // When: the formula is evaluated after cache facts change.
     let second = filter
         .filter(
             &ctx_with_thread_id("req-2", thread_id),
@@ -325,11 +317,21 @@ fn same_thread_retains_owner_until_successor_converges() {
             &[challenger_a.clone(), challenger_b.clone()],
         )
         .expect("filter succeeds");
+    let second_trace = second
+        .subscription_preference
+        .expect("second trace present");
 
-    // Then: the incumbent owner is retained and no second cache is seeded yet.
-    assert_eq!(second.kept_upstream_ids, vec![owner_a.upstream_id]);
+    // Then: there is no owner latch or successor-pending delay.
+    assert_eq!(
+        second.kept_upstream_ids,
+        vec![second_trace.formula_winner_upstream_id.unwrap()]
+    );
+    assert_eq!(
+        second_trace.switch_gate_reason.as_deref(),
+        Some("formula_winner")
+    );
 
-    // When: the same challenger wins formula scoring again.
+    // When: the same facts are evaluated again.
     let third = filter
         .filter(
             &ctx_with_thread_id("req-3", thread_id),
@@ -337,9 +339,13 @@ fn same_thread_retains_owner_until_successor_converges() {
             &[challenger_a, challenger_b.clone()],
         )
         .expect("filter succeeds");
+    let third_trace = third.subscription_preference.expect("third trace present");
 
-    // Then: the thread converges to that single deterministic successor.
-    assert_eq!(third.kept_upstream_ids, vec![challenger_b.upstream_id]);
+    // Then: the same formula winner remains the selected upstream.
+    assert_eq!(
+        third.kept_upstream_ids,
+        vec![third_trace.formula_winner_upstream_id.unwrap()]
+    );
 }
 
 fn filter(candidates: &[UpstreamCandidate]) -> cc_lb_plugin_api::FilterOutput {

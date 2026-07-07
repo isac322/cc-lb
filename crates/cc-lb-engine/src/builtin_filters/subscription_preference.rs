@@ -47,15 +47,11 @@ use cc_lb_plugin_api::types::{CachePricingSummary, WrhKeySource};
 use cc_lb_plugin_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, FilterError,
     FilterOutput, FilterPlugin, Principal, RequestContext, SubscriptionQuotaCandidateSnapshot,
-    SubscriptionQuotaDataState, SubscriptionTier as PublicTier, UpstreamCandidate, UpstreamKind,
+    SubscriptionQuotaDataState, UpstreamCandidate, UpstreamKind,
 };
-use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 // -- Reason strings surfaced on FilterOutput.reason (log/audit surface). -----
@@ -104,20 +100,11 @@ pub(crate) const OVERAGE_REMAINING_NOMINAL_SECS: u64 = 30 * 86_400;
 /// read.
 pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
 
-/// Maximum raw `thread_id` bytes accepted as an in-memory routing key. Longer
-/// caller-controlled values are hashed before WRH and TierMemory use them, so
-/// entry count and key bytes are both bounded.
+/// Maximum raw `thread_id` bytes accepted as a cache-warm routing key. Longer
+/// caller-controlled values are hashed before WRH use, so key bytes are bounded.
 const MAX_THREAD_ROUTING_KEY_BYTES: usize = 256;
 
 const HASHED_THREAD_ROUTING_KEY_PREFIX: &str = "sha256:";
-
-/// A challenger must beat the current threaded owner by this score ratio for
-/// consecutive observations before a non-forced handoff. Lower WRH scores win.
-const SWITCH_SCORE_MARGIN: f64 = 1.25;
-
-/// Number of consecutive margin wins required before switching a threaded
-/// owner. This prevents one transient score crossing from seeding a new cache.
-const SUCCESSOR_CONVERGENCE_OBSERVATIONS: u8 = 2;
 
 /// Short version tag identifying the WRH salt/algorithm shape. Embedded in
 /// [`RENDEZVOUS_SALT`] and surfaced on `SubscriptionPreferenceTrace.rendezvous_salt_version`
@@ -125,10 +112,16 @@ const SUCCESSOR_CONVERGENCE_OBSERVATIONS: u8 = 2;
 /// algorithm/salt change from those caused by upstream or quota state
 /// changes. Bumped in lockstep with `RENDEZVOUS_SALT` — a `debug_assert`
 /// in `tests::rendezvous_salt_embeds_version` guards the invariant.
-pub(crate) const SALT_VERSION: &str = "v9";
+pub(crate) const SALT_VERSION: &str = "v10";
 
 /// Salt for the weighted-rendezvous hash. Bumped as a version stamp when the
 /// selection algorithm changes shape; older salts must never be reused.
+///
+/// v10 (2026-07-07): removes hidden threaded owner memory and cache-loss switch
+/// gates. Cache influence is folded into each candidate's WRH weight as
+/// `read_savings - missing_incremental_create_cost`, normalized within the
+/// selected tier. Thread IDs are used as the WRH key only when the current tier
+/// has a positive priced cache value; all-cold routing falls back to request ID.
 ///
 /// v9 (2026-07-06): warning-positive base windows remain KnownBase with a
 /// same-tier multiplier, and threaded owner handoff is additionally gated by
@@ -172,12 +165,10 @@ pub(crate) const SALT_VERSION: &str = "v9";
 /// v4 (2026-07-05): keyed WRH on `thread_id` so multi-turn sessions pinned
 /// while the prompt cache stayed warm. Deployed by PR #322 after the
 /// 2026-07-05 06:24 UTC scatter incident.
-const RENDEZVOUS_SALT: &str =
-    "cc-lb:subscription-preference:v9:dollar-cache-switch-gate:2026-07-06";
+const RENDEZVOUS_SALT: &str = "cc-lb:subscription-preference:v10:symmetric-cache-value:2026-07-07";
 
 const CACHE_COST_BASIS_VERSION: &str = "v1";
 const WARNING_MULTIPLIER: f64 = 0.20;
-const NORMAL_SWITCH_CACHE_LOSS_BUDGET_MICROS: u64 = 50_000;
 
 /// Exponent coefficient on the cache-weighted WRH multiplier.
 /// `cache_weight_multiplier_i = exp(CACHE_LOG_BOOST * cache_ratio_i)` sits on
@@ -193,284 +184,6 @@ const NORMAL_SWITCH_CACHE_LOSS_BUDGET_MICROS: u64 = 50_000;
 /// re-deriving that calibration will shift where the fresh-quota peer starts
 /// winning; test `cache_boost_calibration_at_99_percent` guards the equality.
 pub const CACHE_LOG_BOOST: f64 = 9.574_063_128_362_267;
-
-// -- Tier memory (per-filter, per-DynamicView). -----------------------------
-
-/// Retention window for a thread's last routing state.
-/// Chosen to comfortably cover a typical multi-turn conversation without
-/// pinning stale sessions in memory forever.
-const TIER_MEMORY_TTL: Duration = Duration::from_secs(30 * 60);
-
-/// Upper bound on the number of thread routing-state records the
-/// per-filter memory keeps at once. When both this bound is hit AND all
-/// existing records are fresh (no TTL evictions available), new insertions
-/// are dropped rather than evicting a live record. This trades owner-memory
-/// completeness for hard entry-count bounds: a dropped insertion falls back to
-/// formula selection until another record can be accepted.
-const TIER_MEMORY_CAP: usize = 10_000;
-
-struct TierEntry {
-    tier: PublicTier,
-    owner_upstream_id: Option<Uuid>,
-    pending_successor: Option<PendingSuccessor>,
-    expires_at: Instant,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PendingSuccessor {
-    upstream_id: Uuid,
-    observations: u8,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct TierEntrySnapshot {
-    tier: PublicTier,
-    owner_upstream_id: Option<Uuid>,
-}
-
-/// Per-filter map from normalized thread routing key to previous tier, owner,
-/// and pending successor. Shared by every `evaluate` call the same
-/// `SubscriptionPreferenceFilter` instance handles; a `DynamicView` rebuild
-/// replaces the filter and clears owner memory, after which routing falls back
-/// to the cache-weighted WRH formula until the next owner is observed.
-pub struct TierMemory {
-    cap: usize,
-    ttl: Duration,
-    inner: Mutex<HashMap<String, TierEntry>>,
-}
-
-impl TierMemory {
-    pub fn new() -> Self {
-        Self::with_cap_and_ttl(TIER_MEMORY_CAP, TIER_MEMORY_TTL)
-    }
-
-    pub fn with_cap_and_ttl(cap: usize, ttl: Duration) -> Self {
-        Self {
-            cap,
-            ttl,
-            inner: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Return the last tier this memory saw for `thread_id`, provided the
-    /// record has not aged past `ttl`. Returns `None` for absent, expired,
-    /// or empty `thread_id`.
-    pub fn get(&self, thread_id: &str, now: Instant) -> Option<PublicTier> {
-        self.snapshot(thread_id, now).map(|entry| entry.tier)
-    }
-
-    /// Insert or refresh the tier for `thread_id`. Best-effort: when the
-    /// map is at cap AND all existing entries are still fresh, the new
-    /// key is dropped rather than evicting a live entry. Empty
-    /// `thread_id` is a no-op.
-    pub fn insert(&self, thread_id: &str, tier: PublicTier, now: Instant) {
-        self.insert_owner(thread_id, tier, None, now);
-    }
-
-    fn snapshot(&self, thread_id: &str, now: Instant) -> Option<TierEntrySnapshot> {
-        if thread_id.is_empty() {
-            return None;
-        }
-        let thread_key = normalized_thread_routing_key(thread_id);
-        let map = self.inner.lock();
-        let entry = map.get(thread_key.as_ref())?;
-        if entry.expires_at > now {
-            Some(TierEntrySnapshot {
-                tier: entry.tier,
-                owner_upstream_id: entry.owner_upstream_id,
-            })
-        } else {
-            None
-        }
-    }
-
-    fn insert_owner(
-        &self,
-        thread_id: &str,
-        tier: PublicTier,
-        owner_upstream_id: Option<Uuid>,
-        now: Instant,
-    ) {
-        if thread_id.is_empty() {
-            return;
-        }
-        let thread_key = normalized_thread_routing_key(thread_id);
-        let mut map = self.inner.lock();
-        let expires_at = now + self.ttl;
-        if let Some(entry) = map.get_mut(thread_key.as_ref()) {
-            entry.tier = tier;
-            entry.owner_upstream_id = owner_upstream_id;
-            entry.pending_successor = None;
-            entry.expires_at = expires_at;
-            return;
-        }
-        if map.len() >= self.cap {
-            map.retain(|_, e| e.expires_at > now);
-        }
-        if map.len() >= self.cap {
-            return;
-        }
-        map.insert(
-            thread_key.into_owned(),
-            TierEntry {
-                tier,
-                owner_upstream_id,
-                pending_successor: None,
-                expires_at,
-            },
-        );
-    }
-
-    fn choose_thread_owner(
-        &self,
-        thread_id: &str,
-        tier: PublicTier,
-        formula_winner: Uuid,
-        incumbent: Option<ThreadIncumbent>,
-        now: Instant,
-    ) -> ThreadOwnerDecision {
-        if thread_id.is_empty() {
-            return ThreadOwnerDecision {
-                kept_upstream_id: formula_winner,
-                switch_gate_reason: "stateless_formula_winner",
-            };
-        }
-        let thread_key = normalized_thread_routing_key(thread_id);
-        let mut map = self.inner.lock();
-        let expires_at = now + self.ttl;
-        let Some(entry) = map
-            .get_mut(thread_key.as_ref())
-            .filter(|entry| entry.expires_at > now)
-        else {
-            if map.len() >= self.cap {
-                map.retain(|_, e| e.expires_at > now);
-            }
-            if map.len() < self.cap {
-                map.insert(
-                    thread_key.into_owned(),
-                    TierEntry {
-                        tier,
-                        owner_upstream_id: Some(formula_winner),
-                        pending_successor: None,
-                        expires_at,
-                    },
-                );
-            }
-            return ThreadOwnerDecision {
-                kept_upstream_id: formula_winner,
-                switch_gate_reason: "no_previous_owner",
-            };
-        };
-
-        if entry.tier != tier {
-            entry.tier = tier;
-            entry.owner_upstream_id = Some(formula_winner);
-            entry.pending_successor = None;
-            entry.expires_at = expires_at;
-            return ThreadOwnerDecision {
-                kept_upstream_id: formula_winner,
-                switch_gate_reason: "tier_changed",
-            };
-        }
-
-        let Some(incumbent) = incumbent else {
-            entry.tier = tier;
-            entry.owner_upstream_id = Some(formula_winner);
-            entry.pending_successor = None;
-            entry.expires_at = expires_at;
-            return ThreadOwnerDecision {
-                kept_upstream_id: formula_winner,
-                switch_gate_reason: "no_incumbent_in_tier",
-            };
-        };
-
-        if incumbent.upstream_id == formula_winner {
-            entry.tier = tier;
-            entry.owner_upstream_id = Some(incumbent.upstream_id);
-            entry.pending_successor = None;
-            entry.expires_at = expires_at;
-            return ThreadOwnerDecision {
-                kept_upstream_id: incumbent.upstream_id,
-                switch_gate_reason: "formula_winner_is_incumbent",
-            };
-        }
-
-        if !incumbent.challenger_beats_margin {
-            entry.tier = tier;
-            entry.owner_upstream_id = Some(incumbent.upstream_id);
-            entry.pending_successor = None;
-            entry.expires_at = expires_at;
-            return ThreadOwnerDecision {
-                kept_upstream_id: incumbent.upstream_id,
-                switch_gate_reason: "margin_blocked",
-            };
-        }
-
-        if !incumbent.cache_loss_allows_switch {
-            entry.tier = tier;
-            entry.owner_upstream_id = Some(incumbent.upstream_id);
-            entry.pending_successor = None;
-            entry.expires_at = expires_at;
-            return ThreadOwnerDecision {
-                kept_upstream_id: incumbent.upstream_id,
-                switch_gate_reason: incumbent.switch_gate_reason,
-            };
-        }
-
-        let observations = match entry.pending_successor {
-            Some(pending) if pending.upstream_id == formula_winner => pending.observations + 1,
-            Some(_) | None => 1,
-        };
-        if observations >= SUCCESSOR_CONVERGENCE_OBSERVATIONS {
-            entry.tier = tier;
-            entry.owner_upstream_id = Some(formula_winner);
-            entry.pending_successor = None;
-            entry.expires_at = expires_at;
-            ThreadOwnerDecision {
-                kept_upstream_id: formula_winner,
-                switch_gate_reason: "successor_converged",
-            }
-        } else {
-            entry.tier = tier;
-            entry.owner_upstream_id = Some(incumbent.upstream_id);
-            entry.pending_successor = Some(PendingSuccessor {
-                upstream_id: formula_winner,
-                observations,
-            });
-            entry.expires_at = expires_at;
-            ThreadOwnerDecision {
-                kept_upstream_id: incumbent.upstream_id,
-                switch_gate_reason: "successor_pending",
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.inner.lock().len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn max_key_len(&self) -> Option<usize> {
-        self.inner.lock().keys().map(String::len).max()
-    }
-}
-
-impl Default for TierMemory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Debug for TierMemory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TierMemory")
-            .field("cap", &self.cap)
-            .field("ttl", &self.ttl)
-            .field("entries", &self.inner.lock().len())
-            .finish()
-    }
-}
 
 // -- Config knobs (compiled defaults today; expose per-principal later). ----
 
@@ -494,24 +207,12 @@ impl Default for FilterConfig {
 
 // -- Public plugin type. ----------------------------------------------------
 
-#[derive(Clone, Debug, Default)]
-pub struct SubscriptionPreferenceFilter {
-    tier_memory: Arc<TierMemory>,
-}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SubscriptionPreferenceFilter;
 
 impl SubscriptionPreferenceFilter {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_tier_memory(tier_memory: Arc<TierMemory>) -> Self {
-        Self { tier_memory }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn tier_memory(&self) -> &Arc<TierMemory> {
-        &self.tier_memory
     }
 }
 
@@ -523,13 +224,7 @@ impl FilterPlugin for SubscriptionPreferenceFilter {
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
         let config = FilterConfig::default();
-        Ok(evaluate(
-            ctx,
-            candidates,
-            &config,
-            &self.tier_memory,
-            Instant::now(),
-        ))
+        Ok(evaluate(ctx, candidates, &config))
     }
 
     fn plugin_id(&self) -> Uuid {
@@ -547,8 +242,6 @@ fn evaluate(
     ctx: &RequestContext,
     candidates: &[UpstreamCandidate],
     config: &FilterConfig,
-    tier_memory: &TierMemory,
-    now: Instant,
 ) -> FilterOutput {
     let canonical_model = ctx.canonical_model_id.as_str();
     let base_windows = relevant_base_windows(canonical_model);
@@ -583,25 +276,24 @@ fn evaluate(
     let all_assessments: Vec<cc_lb_plugin_api::CandidateUrgency> = buckets
         .iter()
         .flat_map(|bucket| {
-            let max_cache_tokens_in_bucket: u32 = bucket
-                .iter()
-                .map(candidate_cache_read_tokens)
-                .max()
-                .unwrap_or(0);
+            let max_cache_value_micros =
+                max_positive_cache_value_micros(bucket, &ctx.cache_pricing);
             let total_urgency_in_bucket: f64 = bucket.iter().map(|a| a.urgency).sum();
             let uniform_fallback = total_urgency_in_bucket < EPSILON;
             bucket.iter().map(move |a| {
                 let cache_tokens = candidate_cache_read_tokens(a);
-                let cache_ratio =
-                    cache_ratio_within_bucket(cache_tokens, max_cache_tokens_in_bucket);
-                let cache_weight_multiplier = (CACHE_LOG_BOOST * cache_ratio).exp();
+                let cache_ratio = cache_value_ratio_within_bucket(
+                    candidate_cache_value_micros(a.candidate, &ctx.cache_pricing),
+                    max_cache_value_micros,
+                );
+                let cache_weight_multiplier = cache_weight_multiplier(cache_ratio);
                 let quota_weight = if uniform_fallback { 1.0 } else { a.urgency };
                 let effective_weight =
                     quota_weight * cache_weight_multiplier * a.warning_multiplier;
                 let estimated_input_cost_micros =
                     estimate_candidate_input_cost_micros(a.candidate, &ctx.cache_pricing)
                         .unwrap_or(0);
-                let cache_savings_ratio = cache_savings_ratio(a.candidate, &ctx.cache_pricing);
+                let cache_savings_ratio = cache_read_savings_ratio(a.candidate, &ctx.cache_pricing);
                 cc_lb_plugin_api::CandidateUrgency {
                     upstream_id: a.candidate.upstream_id,
                     tier: tier_to_plugin_api(a.tier),
@@ -627,90 +319,41 @@ fn evaluate(
         .as_deref()
         .filter(|id| !id.is_empty())
         .map(normalized_thread_routing_key);
-    let routing_key = session_thread_key
-        .as_deref()
-        .unwrap_or(ctx.request_id.as_str());
-    let wrh_key_source = match session_thread_key.as_ref() {
-        Some(_) => WrhKeySource::ThreadId,
-        None => WrhKeySource::RequestId,
-    };
 
     for bucket in buckets.iter() {
         if bucket.is_empty() {
             continue;
         }
-        let selection = pick_within_tier(bucket, routing_key, config);
+        let max_cache_value_micros = max_positive_cache_value_micros(bucket, &ctx.cache_pricing);
+        let (routing_key, wrh_key_source) = routing_key_for_bucket(
+            ctx.request_id.as_str(),
+            session_thread_key.as_deref(),
+            max_cache_value_micros,
+        );
+        let selection = pick_within_tier(
+            bucket,
+            routing_key,
+            config,
+            &ctx.cache_pricing,
+            max_cache_value_micros,
+        );
         let formula_winner = selection.winner;
         let chosen_tier = tier_to_plugin_api(formula_winner.tier);
-        let previous_entry = session_thread_key
-            .as_deref()
-            .and_then(|thread_id| tier_memory.snapshot(thread_id, now));
-        let previous_tier = previous_entry.map(|entry| entry.tier);
-        let incumbent = previous_entry
-            .and_then(|entry| entry.owner_upstream_id)
-            .and_then(|owner_id| {
-                bucket
-                    .iter()
-                    .find(|assessment| assessment.candidate.upstream_id == owner_id)
-            })
-            .map(|owner| {
-                let challenger_key = wrh_key(
-                    formula_winner,
-                    routing_key,
-                    config,
-                    selection.uniform,
-                    selection.max_cache_tokens,
-                );
-                let incumbent_key = wrh_key(
-                    owner,
-                    routing_key,
-                    config,
-                    selection.uniform,
-                    selection.max_cache_tokens,
-                );
-                let cache_loss_gate = cache_loss_gate(owner, formula_winner, &ctx.cache_pricing);
-                ThreadIncumbent {
-                    upstream_id: owner.candidate.upstream_id,
-                    challenger_beats_margin: formula_winner.candidate.upstream_id
-                        != owner.candidate.upstream_id
-                        && challenger_key.score * SWITCH_SCORE_MARGIN <= incumbent_key.score,
-                    cache_loss_allows_switch: cache_loss_gate.allows_switch,
-                    estimated_switch_cache_loss_micros: cache_loss_gate.estimated_micros,
-                    cache_loss_status: cache_loss_gate.status,
-                    switch_gate_reason: cache_loss_gate.reason,
-                }
-            });
-        let incumbent_trace = incumbent;
-        let owner_decision = match session_thread_key.as_deref() {
-            Some(thread_id) => tier_memory.choose_thread_owner(
-                thread_id,
-                chosen_tier,
-                formula_winner.candidate.upstream_id,
-                incumbent,
-                now,
-            ),
-            None => ThreadOwnerDecision {
-                kept_upstream_id: formula_winner.candidate.upstream_id,
-                switch_gate_reason: "stateless_formula_winner",
-            },
-        };
-        let kept_upstream_id = owner_decision.kept_upstream_id;
+        let kept_upstream_id = formula_winner.candidate.upstream_id;
 
         let trace = cc_lb_plugin_api::SubscriptionPreferenceTrace {
             chosen_tier,
             candidates: all_assessments,
             wrh_key_source,
-            previous_tier,
+            previous_tier: None,
             rendezvous_salt_version: Some(SALT_VERSION.to_owned()),
             cache_cost_basis_version: Some(CACHE_COST_BASIS_VERSION.to_owned()),
             formula_winner_upstream_id: Some(formula_winner.candidate.upstream_id),
             kept_upstream_id: Some(kept_upstream_id),
-            incumbent_upstream_id: incumbent_trace.map(|incumbent| incumbent.upstream_id),
-            estimated_switch_cache_loss_micros: incumbent_trace
-                .and_then(|incumbent| incumbent.estimated_switch_cache_loss_micros),
-            cache_loss_status: incumbent_trace
-                .map(|incumbent| incumbent.cache_loss_status.to_owned()),
-            switch_gate_reason: Some(owner_decision.switch_gate_reason.to_owned()),
+            incumbent_upstream_id: None,
+            estimated_switch_cache_loss_micros: None,
+            cache_loss_status: None,
+            switch_gate_reason: Some("formula_winner".to_owned()),
         };
         return FilterOutput {
             kept_upstream_ids: vec![kept_upstream_id],
@@ -765,6 +408,20 @@ fn normalized_thread_routing_key(thread_id: &str) -> Cow<'_, str> {
     Cow::Owned(key)
 }
 
+fn routing_key_for_bucket<'a>(
+    request_id: &'a str,
+    session_thread_key: Option<&'a str>,
+    max_cache_value_micros: i64,
+) -> (&'a str, WrhKeySource) {
+    if let Some(thread_key) = session_thread_key
+        && max_cache_value_micros > 0
+    {
+        (thread_key, WrhKeySource::ThreadId)
+    } else {
+        (request_id, WrhKeySource::RequestId)
+    }
+}
+
 fn collect_kind(candidates: &[UpstreamCandidate], kind: UpstreamKind) -> Vec<Uuid> {
     candidates
         .iter()
@@ -814,30 +471,6 @@ struct Assessment<'a> {
     tier: Tier,
     urgency: f64,
     warning_multiplier: f64,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct ThreadIncumbent {
-    upstream_id: Uuid,
-    challenger_beats_margin: bool,
-    cache_loss_allows_switch: bool,
-    estimated_switch_cache_loss_micros: Option<u64>,
-    cache_loss_status: &'static str,
-    switch_gate_reason: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ThreadOwnerDecision {
-    kept_upstream_id: Uuid,
-    switch_gate_reason: &'static str,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct CacheLossGate {
-    allows_switch: bool,
-    estimated_micros: Option<u64>,
-    status: &'static str,
-    reason: &'static str,
 }
 
 // -- Candidate assessment. --------------------------------------------------
@@ -1139,36 +772,41 @@ fn candidate_estimated_now(candidate: &UpstreamCandidate) -> u64 {
 
 struct TierSelection<'a, 'b> {
     winner: &'b Assessment<'a>,
-    uniform: bool,
-    max_cache_tokens: u32,
 }
 
 fn pick_within_tier<'a, 'b>(
     bucket: &'b [Assessment<'a>],
     routing_key: &str,
     config: &FilterConfig,
+    pricing: &CachePricingSummary,
+    max_cache_value_micros: i64,
 ) -> TierSelection<'a, 'b> {
     debug_assert!(!bucket.is_empty());
     let total_urgency: f64 = bucket.iter().map(|a| a.urgency).sum();
     let uniform = total_urgency < EPSILON;
-    let max_cache_tokens: u32 = bucket
-        .iter()
-        .map(candidate_cache_read_tokens)
-        .max()
-        .unwrap_or(0);
 
     if bucket.len() == 1 {
-        return TierSelection {
-            winner: &bucket[0],
-            uniform,
-            max_cache_tokens,
-        };
+        return TierSelection { winner: &bucket[0] };
     }
 
     let mut best_index = 0usize;
-    let mut best_key = wrh_key(&bucket[0], routing_key, config, uniform, max_cache_tokens);
+    let mut best_key = wrh_key(
+        &bucket[0],
+        routing_key,
+        config,
+        uniform,
+        pricing,
+        max_cache_value_micros,
+    );
     for (i, assessment) in bucket.iter().enumerate().skip(1) {
-        let key = wrh_key(assessment, routing_key, config, uniform, max_cache_tokens);
+        let key = wrh_key(
+            assessment,
+            routing_key,
+            config,
+            uniform,
+            pricing,
+            max_cache_value_micros,
+        );
         if compare_wrh_key(&key, &best_key) == Ordering::Less {
             best_index = i;
             best_key = key;
@@ -1176,8 +814,6 @@ fn pick_within_tier<'a, 'b>(
     }
     TierSelection {
         winner: &bucket[best_index],
-        uniform,
-        max_cache_tokens,
     }
 }
 
@@ -1217,16 +853,34 @@ fn candidate_uncached_input_tokens(assessment: &Assessment<'_>) -> u32 {
         .map_or(0, |score| score.predicted_uncached_input_tokens)
 }
 
-/// Cache ratio inside one tier bucket. Returns `0.0` when the bucket has no
-/// positive cache signal so the exponential multiplier collapses to `1.0`
-/// (cold-pool fallback: WRH reduces to pure quota urgency, matching the
-/// v6 all-cold behaviour tests already lock in).
-fn cache_ratio_within_bucket(candidate_cache_tokens: u32, max_cache_tokens_in_bucket: u32) -> f64 {
-    if max_cache_tokens_in_bucket == 0 {
+fn max_positive_cache_value_micros(
+    bucket: &[Assessment<'_>],
+    pricing: &CachePricingSummary,
+) -> i64 {
+    bucket
+        .iter()
+        .filter_map(|assessment| candidate_cache_value_micros(assessment.candidate, pricing))
+        .filter(|value| *value > 0)
+        .max()
+        .unwrap_or(0)
+}
+
+fn cache_value_ratio_within_bucket(
+    candidate_cache_value: Option<i64>,
+    max_cache_value: i64,
+) -> f64 {
+    let Some(value) = candidate_cache_value else {
+        return 0.0;
+    };
+    if max_cache_value <= 0 {
         0.0
     } else {
-        candidate_cache_tokens as f64 / max_cache_tokens_in_bucket as f64
+        ((value as f64) / (max_cache_value as f64)).clamp(-1.0, 1.0)
     }
+}
+
+fn cache_weight_multiplier(cache_value_ratio: f64) -> f64 {
+    (CACHE_LOG_BOOST * cache_value_ratio).exp()
 }
 
 fn estimate_candidate_input_cost_micros(
@@ -1255,7 +909,7 @@ fn estimate_candidate_input_cost_micros(
     )
 }
 
-fn cache_savings_ratio(candidate: &UpstreamCandidate, pricing: &CachePricingSummary) -> f64 {
+fn cache_read_savings_ratio(candidate: &UpstreamCandidate, pricing: &CachePricingSummary) -> f64 {
     let Some(score) = candidate.cache_score.as_ref() else {
         return 0.0;
     };
@@ -1273,67 +927,38 @@ fn cache_savings_ratio(candidate: &UpstreamCandidate, pricing: &CachePricingSumm
     cold_cost.saturating_sub(read_cost) as f64 / cold_cost as f64
 }
 
-fn cache_loss_gate(
-    incumbent: &Assessment<'_>,
-    challenger: &Assessment<'_>,
+fn candidate_cache_value_micros(
+    candidate: &UpstreamCandidate,
     pricing: &CachePricingSummary,
-) -> CacheLossGate {
-    if incumbent.candidate.upstream_id == challenger.candidate.upstream_id {
-        return CacheLossGate {
-            allows_switch: true,
-            estimated_micros: Some(0),
-            status: "known",
-            reason: "formula_winner_is_incumbent",
-        };
-    }
+) -> Option<i64> {
+    let score = candidate.cache_score.as_ref()?;
+    let input_price = pricing.input_micros_per_million?;
+    let cache_creation_5m_price = pricing.cache_creation_5m_micros_per_million?;
+    let cache_creation_1h_price = pricing.cache_creation_1h_micros_per_million?;
+    let cache_read_price = pricing.cache_read_micros_per_million?;
 
-    let read_loss_tokens = candidate_cache_read_tokens(incumbent)
-        .saturating_sub(candidate_cache_read_tokens(challenger));
-    let creation_5m_tokens = candidate_cache_creation_tokens_5m(challenger).max(read_loss_tokens);
-    let creation_1h_tokens = candidate_cache_creation_tokens_1h(challenger);
-    if creation_5m_tokens == 0 && creation_1h_tokens == 0 {
-        return CacheLossGate {
-            allows_switch: true,
-            estimated_micros: Some(0),
-            status: "known",
-            reason: "cache_loss_none",
-        };
-    }
-
-    let Some(cache_creation_5m_price) = pricing.cache_creation_5m_micros_per_million else {
-        return unknown_cache_loss_gate();
-    };
-    let Some(cache_creation_1h_price) = pricing.cache_creation_1h_micros_per_million else {
-        return unknown_cache_loss_gate();
-    };
-    let Some(cache_read_price) = pricing.cache_read_micros_per_million else {
-        return unknown_cache_loss_gate();
-    };
-
-    let delta_5m = cache_creation_5m_price.saturating_sub(cache_read_price);
-    let delta_1h = cache_creation_1h_price.saturating_sub(cache_read_price);
-    let estimated = micros_for_tokens(creation_5m_tokens, delta_5m)
-        .saturating_add(micros_for_tokens(creation_1h_tokens, delta_1h));
-    let allows_switch = estimated <= NORMAL_SWITCH_CACHE_LOSS_BUDGET_MICROS;
-    CacheLossGate {
-        allows_switch,
-        estimated_micros: Some(estimated),
-        status: "known",
-        reason: if allows_switch {
-            "cache_loss_allowed"
-        } else {
-            "cache_loss_blocked"
-        },
-    }
+    let cold_read_cost = micros_for_tokens(score.predicted_cache_read_tokens, input_price);
+    let cached_read_cost = micros_for_tokens(score.predicted_cache_read_tokens, cache_read_price);
+    let read_savings = cold_read_cost.saturating_sub(cached_read_cost);
+    let create_cost = micros_for_tokens(
+        score.predicted_cache_creation_tokens_5m,
+        cache_creation_5m_price,
+    )
+    .saturating_add(micros_for_tokens(
+        score.predicted_cache_creation_tokens_1h,
+        cache_creation_1h_price,
+    ));
+    Some(saturating_i128_to_i64(
+        i128::from(read_savings) - i128::from(create_cost),
+    ))
 }
 
-fn unknown_cache_loss_gate() -> CacheLossGate {
-    CacheLossGate {
-        allows_switch: false,
-        estimated_micros: None,
-        status: "unknown",
-        reason: "cache_loss_unknown",
-    }
+fn saturating_i128_to_i64(value: i128) -> i64 {
+    i64::try_from(value).unwrap_or(if value.is_negative() {
+        i64::MIN
+    } else {
+        i64::MAX
+    })
 }
 
 fn micros_for_tokens(tokens: u32, micros_per_million: u64) -> u64 {
@@ -1356,7 +981,8 @@ fn wrh_key(
     routing_key: &str,
     config: &FilterConfig,
     uniform: bool,
-    max_cache_tokens: u32,
+    pricing: &CachePricingSummary,
+    max_cache_value_micros: i64,
 ) -> WrhKey {
     let hash = rendezvous_hash(
         config.rendezvous_hash_salt,
@@ -1364,10 +990,12 @@ fn wrh_key(
         assessment.candidate.upstream_id,
     );
     let quota_weight = if uniform { 1.0 } else { assessment.urgency };
-    let cache_tokens = candidate_cache_read_tokens(assessment);
-    let cache_ratio = cache_ratio_within_bucket(cache_tokens, max_cache_tokens);
+    let cache_ratio = cache_value_ratio_within_bucket(
+        candidate_cache_value_micros(assessment.candidate, pricing),
+        max_cache_value_micros,
+    );
     let effective_weight =
-        quota_weight * (CACHE_LOG_BOOST * cache_ratio).exp() * assessment.warning_multiplier;
+        quota_weight * cache_weight_multiplier(cache_ratio) * assessment.warning_multiplier;
     let u = hash_to_open_unit(hash);
     let score = if effective_weight <= 0.0 {
         f64::INFINITY
