@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cc_lb_plugin_api::SubscriptionQuotaCandidateSnapshot;
-use cc_lb_plugin_api::types::{TtlClass, WarmCacheEntry};
+use cc_lb_plugin_api::types::{CacheScore, TtlClass, WarmCacheEntry};
 use cc_lb_storage_api::SubscriptionQuotaObservationRecord;
 use cc_lb_storage_api::types::{ApiKeyMutation, PrincipalLimitState, StoredApiKeyRecord};
 use uuid::Uuid;
@@ -54,6 +54,28 @@ pub trait PromptCacheObservationCacheLike: Send + Sync {
         ttl_class: TtlClass,
         now_unix_secs: u64,
     ) -> bool;
+
+    fn thread_usage_score(
+        &self,
+        _upstream_id: Uuid,
+        _canonical_model: &str,
+        _thread_id: &str,
+        _now_unix_secs: u64,
+    ) -> Option<CacheScore> {
+        None
+    }
+
+    fn record_thread_usage(
+        &self,
+        _upstream_id: Uuid,
+        _canonical_model: &str,
+        _thread_id: &str,
+        _cache_read_input_tokens: u64,
+        _cache_creation_input_tokens_5m: u64,
+        _cache_creation_input_tokens_1h: u64,
+        _now_unix_secs: u64,
+    ) {
+    }
 
     fn grace_margin_secs(&self) -> u64;
 
