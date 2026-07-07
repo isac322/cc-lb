@@ -11,10 +11,11 @@ use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
         anthropic_compatibility_kv_store, organization_metadata_store, plan_tier_store,
-        plugin_registry_store, price_catalog, principal_store, prompt_cache_observation_store,
-        storage_roundtrips, storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
-        upstream_rate_limit_store, upstream_subscription_metadata_store,
-        upstream_subscription_quota_store, warmup_attempts_store,
+        plan_tier_store_backfill, plugin_registry_store, price_catalog, principal_store,
+        prompt_cache_observation_store, storage_roundtrips, storage_roundtrips_cache_split,
+        storage_roundtrips_latency_stages, upstream_rate_limit_store,
+        upstream_subscription_metadata_store, upstream_subscription_quota_store,
+        warmup_attempts_store,
     },
 };
 use cc_lb_storage_postgres::PostgresStorage;
@@ -295,6 +296,14 @@ fn organization_metadata_store_postgres() {
 #[test]
 fn plan_tier_store_postgres() {
     run_postgres_scenario("plan_tier_store", plan_tier_store::run_all);
+}
+
+#[test]
+fn plan_tier_store_backfill_postgres() {
+    run_postgres_scenario(
+        "plan_tier_store_backfill",
+        plan_tier_store_backfill::upstream_tier_backfill_intervals,
+    );
 }
 
 macro_rules! prompt_cache_observation_postgres_test {
