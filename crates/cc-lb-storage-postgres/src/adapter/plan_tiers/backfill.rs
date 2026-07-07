@@ -20,7 +20,7 @@ pub(super) async fn apply(
         &lock_key,
     )
     .await?;
-    let has_provenance = sqlx::query_scalar::<_, i64>(
+    let has_provenance = sqlx::query_scalar::<_, i32>(
         "SELECT 1 FROM upstream_plan_tier_history_v1 WHERE upstream_id = $1 AND provenance = $2 LIMIT 1",
     )
     .bind(upstream_id)
