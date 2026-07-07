@@ -516,6 +516,30 @@ fn subscription_preference_json_len(trace: &SubscriptionPreferenceTrace) -> usiz
     if let Some(salt_version) = &trace.rendezvous_salt_version {
         len += ",\"rendezvous_salt_version\":".len() + json_string_len(salt_version);
     }
+    if let Some(cache_cost_basis_version) = &trace.cache_cost_basis_version {
+        len += ",\"cache_cost_basis_version\":".len() + json_string_len(cache_cost_basis_version);
+    }
+    if let Some(formula_winner_upstream_id) = trace.formula_winner_upstream_id {
+        len += ",\"formula_winner_upstream_id\":".len()
+            + json_string_len(&formula_winner_upstream_id.to_string());
+    }
+    if let Some(kept_upstream_id) = trace.kept_upstream_id {
+        len += ",\"kept_upstream_id\":".len() + json_string_len(&kept_upstream_id.to_string());
+    }
+    if let Some(incumbent_upstream_id) = trace.incumbent_upstream_id {
+        len += ",\"incumbent_upstream_id\":".len()
+            + json_string_len(&incumbent_upstream_id.to_string());
+    }
+    if let Some(estimated_switch_cache_loss_micros) = trace.estimated_switch_cache_loss_micros {
+        len += ",\"estimated_switch_cache_loss_micros\":".len()
+            + estimated_switch_cache_loss_micros.to_string().len();
+    }
+    if let Some(cache_loss_status) = &trace.cache_loss_status {
+        len += ",\"cache_loss_status\":".len() + json_string_len(cache_loss_status);
+    }
+    if let Some(switch_gate_reason) = &trace.switch_gate_reason {
+        len += ",\"switch_gate_reason\":".len() + json_string_len(switch_gate_reason);
+    }
     len + "}".len()
 }
 
@@ -559,10 +583,28 @@ fn candidate_urgency_json_len(candidate: &CandidateUrgency) -> usize {
         + f64_json_len(candidate.quota_urgency)
         + ",\"predicted_cache_read_tokens\":".len()
         + candidate.predicted_cache_read_tokens.to_string().len()
+        + ",\"predicted_cache_creation_tokens_5m\":".len()
+        + candidate
+            .predicted_cache_creation_tokens_5m
+            .to_string()
+            .len()
+        + ",\"predicted_cache_creation_tokens_1h\":".len()
+        + candidate
+            .predicted_cache_creation_tokens_1h
+            .to_string()
+            .len()
+        + ",\"predicted_uncached_input_tokens\":".len()
+        + candidate.predicted_uncached_input_tokens.to_string().len()
         + ",\"cache_ratio\":".len()
         + f64_json_len(candidate.cache_ratio)
         + ",\"cache_weight_multiplier\":".len()
         + f64_json_len(candidate.cache_weight_multiplier)
+        + ",\"warning_multiplier\":".len()
+        + f64_json_len(candidate.warning_multiplier)
+        + ",\"cache_savings_ratio\":".len()
+        + f64_json_len(candidate.cache_savings_ratio)
+        + ",\"estimated_input_cost_micros\":".len()
+        + candidate.estimated_input_cost_micros.to_string().len()
         + ",\"effective_weight\":".len()
         + f64_json_len(candidate.effective_weight)
         + "}".len()
