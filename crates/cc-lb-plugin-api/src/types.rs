@@ -822,19 +822,14 @@ pub struct CandidateUrgency {
     pub urgency: f64,
     /// Pre-boost quota urgency component
     /// (`capacity_multiplier * (1 - util)^2 / remaining_secs`).
-    #[serde(default)]
     pub quota_urgency: f64,
     /// Predicted input tokens that can be read from cache.
-    #[serde(default)]
     pub predicted_cache_read_tokens: u32,
     /// Predicted input tokens that would be written to 5-minute cache.
-    #[serde(default)]
     pub predicted_cache_creation_tokens_5m: u32,
     /// Predicted input tokens that would be written to 1-hour cache.
-    #[serde(default)]
     pub predicted_cache_creation_tokens_1h: u32,
     /// Predicted input tokens that are neither read from nor written to cache.
-    #[serde(default)]
     pub predicted_uncached_input_tokens: u32,
     /// Ratio of `predicted_cache_read_tokens` to the maximum observed in
     /// this candidate's tier bucket. Ranges `[0.0, 1.0]`; zero when the
@@ -845,16 +840,12 @@ pub struct CandidateUrgency {
     /// `quota_urgency` to produce `effective_weight`.
     pub cache_weight_multiplier: f64,
     /// Same-tier multiplier applied when base quota is warning-positive.
-    #[serde(default = "default_warning_multiplier")]
     pub warning_multiplier: f64,
     /// Ratio of cache-read savings to estimated cold-input cost.
-    #[serde(default)]
     pub cache_savings_ratio: f64,
     /// Estimated input-side cost for this candidate in micros USD.
-    #[serde(default)]
     pub estimated_input_cost_micros: u64,
     /// Final WRH weight after quota, cache, and warning multipliers.
-    #[serde(default)]
     pub effective_weight: f64,
 }
 
@@ -890,10 +881,6 @@ impl PartialEq for CandidateUrgency {
 }
 
 impl Eq for CandidateUrgency {}
-
-fn default_warning_multiplier() -> f64 {
-    1.0
-}
 
 /// Source of the per-session hash key that the subscription-preference filter's
 /// Weighted Rendezvous Hash used to break ties within the winning tier.
@@ -1057,7 +1044,6 @@ pub struct TerminalDecision {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RoutingTrace {
     /// Sequence of stage decisions made during routing.
-    #[serde(default)]
     pub stages: Vec<StageDecision>,
     /// Final terminal routing decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
