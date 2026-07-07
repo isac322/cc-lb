@@ -66,6 +66,8 @@ pub enum TierResolutionSource {
     Override,
     /// Matched the built-in `classify_plan_tier` logic.
     Builtin,
+    /// Inferred from historical pool quota contributor ratio blobs.
+    Backfill,
     /// Not recognized by either; surfaced for human attention.
     Unknown,
 }
@@ -75,9 +77,23 @@ impl TierResolutionSource {
         match self {
             TierResolutionSource::Override => "override",
             TierResolutionSource::Builtin => "builtin",
+            TierResolutionSource::Backfill => "backfill",
             TierResolutionSource::Unknown => "unknown",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackfillApplyCounts {
+    pub inserted: u64,
+    pub skipped_zero_dur: u64,
+    pub capped: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BackfillApplyOutcome {
+    Skipped,
+    Applied(BackfillApplyCounts),
 }
 
 /// A row in the per-upstream resolved-tier history
@@ -152,6 +168,14 @@ pub trait PlanTierStore: Send + Sync {
     /// open row and insert the new one.
     async fn append_upstream_plan_tier(&self, record: &UpstreamPlanTierRecord)
     -> StorageResult<()>;
+
+    async fn backfill_upstream_plan_tier_intervals(
+        &self,
+        upstream_id: Uuid,
+        intervals: &[UpstreamPlanTierRecord],
+        terminal_cap_unix_millis: i64,
+        provenance: &str,
+    ) -> StorageResult<BackfillApplyOutcome>;
 
     async fn list_current_upstream_plan_tiers(&self) -> StorageResult<Vec<UpstreamPlanTierRecord>>;
 

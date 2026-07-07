@@ -11,16 +11,17 @@ use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::reconcile::Reconciler;
 use cc_lb_storage_api::{
-    AnthropicCompatibilityKvStore, BackendKind, CompatibilityKvRecord, MetaStore,
-    MetadataTierMappingOverrideRecord, OrganizationMetadataRecord, OrganizationMetadataStore,
-    PlanTierRatioRecord, PlanTierStore, PluginChainEntry, PluginChainEntryInput,
-    PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
-    PrincipalRecord, PrincipalStore, PrincipalUpdate, PromptCacheObservationStore, StorageResult,
-    SubscriptionQuotaObservationRecord, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
-    UpstreamCreate, UpstreamPlanTierRecord, UpstreamRateLimitObservationRecord,
-    UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
-    UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob,
-    WasmRegistryEntry, WasmRegistryEntryInput,
+    AnthropicCompatibilityKvStore, BackendKind, BackfillApplyOutcome, CompatibilityKvRecord,
+    MetaStore, MetadataTierMappingOverrideRecord, OrganizationMetadataRecord,
+    OrganizationMetadataStore, PlanTierRatioRecord, PlanTierStore, PluginChainEntry,
+    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlot,
+    PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
+    PromptCacheObservationStore, StorageResult, SubscriptionQuotaObservationRecord,
+    SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery, UpstreamCreate, UpstreamPlanTierRecord,
+    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionMetadataRecord, UpstreamSubscriptionMetadataStore,
+    UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob, WasmRegistryEntry,
+    WasmRegistryEntryInput,
 };
 
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
@@ -565,6 +566,16 @@ impl PlanTierStore for EmptyPlanTierStore {
         _record: &UpstreamPlanTierRecord,
     ) -> StorageResult<()> {
         Ok(())
+    }
+
+    async fn backfill_upstream_plan_tier_intervals(
+        &self,
+        _upstream_id: Uuid,
+        _intervals: &[UpstreamPlanTierRecord],
+        _terminal_cap_unix_millis: i64,
+        _provenance: &str,
+    ) -> StorageResult<BackfillApplyOutcome> {
+        Ok(BackfillApplyOutcome::Skipped)
     }
 
     async fn list_current_upstream_plan_tiers(&self) -> StorageResult<Vec<UpstreamPlanTierRecord>> {
