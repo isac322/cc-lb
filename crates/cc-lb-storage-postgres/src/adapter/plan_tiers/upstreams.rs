@@ -5,7 +5,7 @@ use sqlx::Row;
 
 use crate::{adapter::PostgresStorage, error_map::map_sqlx_error};
 
-const UPSTREAM_PLAN_TIER_LOCK_CLASSID: i32 = 69_003;
+pub(super) const UPSTREAM_PLAN_TIER_LOCK_CLASSID: i32 = 69_003;
 
 pub(super) async fn append(
     storage: &PostgresStorage,
@@ -114,7 +114,7 @@ pub(super) async fn list_as_of(
     rows.into_iter().map(row_to_record).collect()
 }
 
-fn row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<UpstreamPlanTierRecord> {
+pub(super) fn row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<UpstreamPlanTierRecord> {
     let source_text = row
         .try_get::<String, _>("resolution_source")
         .map_err(map_sqlx_error)?;
@@ -171,17 +171,40 @@ fn open_row_matches(
             == record.seat_tier)
 }
 
-fn validate_tier_key(record: &UpstreamPlanTierRecord) -> StorageResult<()> {
-    match (record.resolution_source, record.tier_key.is_some()) {
-        (TierResolutionSource::Unknown, false)
-        | (TierResolutionSource::Override, true)
-        | (TierResolutionSource::Builtin, true) => Ok(()),
-        (TierResolutionSource::Unknown, true) => Err(invalid_tier_key(
-            "must be absent when resolution_source is unknown",
-        )),
-        (TierResolutionSource::Override, false) | (TierResolutionSource::Builtin, false) => Err(
-            invalid_tier_key("must be present when resolution_source is override or builtin"),
-        ),
+pub(super) fn validate_tier_key(record: &UpstreamPlanTierRecord) -> StorageResult<()> {
+    match record.resolution_source {
+        TierResolutionSource::Unknown => {
+            if record.tier_key.is_some() {
+                return Err(invalid_tier_key(
+                    "must be absent when resolution_source is unknown",
+                ));
+            }
+            if record.resolved_ratio_snapshot.is_some() {
+                return Err(StorageError::InvalidInput {
+                    field: "upstream_plan_tier.resolved_ratio_snapshot".to_owned(),
+                    reason: "must be absent when resolution_source is unknown".to_owned(),
+                });
+            }
+            Ok(())
+        }
+        TierResolutionSource::Override
+        | TierResolutionSource::Builtin
+        | TierResolutionSource::Backfill => {
+            if record.tier_key.is_none() {
+                return Err(invalid_tier_key(
+                    "must be present when resolution_source is override, builtin, or backfill",
+                ));
+            }
+            if record.resolved_ratio_snapshot.is_none() {
+                return Err(StorageError::InvalidInput {
+                    field: "upstream_plan_tier.resolved_ratio_snapshot".to_owned(),
+                    reason:
+                        "must be present when resolution_source is override, builtin, or backfill"
+                            .to_owned(),
+                });
+            }
+            Ok(())
+        }
     }
 }
 
@@ -189,6 +212,7 @@ fn source_from_str(value: &str) -> StorageResult<TierResolutionSource> {
     match value {
         "override" => Ok(TierResolutionSource::Override),
         "builtin" => Ok(TierResolutionSource::Builtin),
+        "backfill" => Ok(TierResolutionSource::Backfill),
         "unknown" => Ok(TierResolutionSource::Unknown),
         other => Err(StorageError::Corrupted {
             message: format!("unknown tier resolution source: {other}"),
