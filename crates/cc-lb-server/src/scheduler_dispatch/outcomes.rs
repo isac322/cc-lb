@@ -1,5 +1,6 @@
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::apalis_housekeeping::ApalisHousekeepingJobResult;
+use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJobOutcome;
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJobOutcome;
 use cc_lb_scheduler::jobs::price_catalog::PriceCatalogRefreshJobResult;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeJobResult;
@@ -12,6 +13,17 @@ pub(super) fn metadata_outcome(outcome: MetadataRefreshJobOutcome) -> SchedulerR
         MetadataRefreshJobOutcome::Applied => JobOutcome::Done,
         MetadataRefreshJobOutcome::Stale => JobOutcome::Noop,
         MetadataRefreshJobOutcome::UpstreamRemoved => JobOutcome::Skip,
+    })
+}
+
+pub(super) fn cache_keepalive_outcome(
+    outcome: CacheKeepaliveJobOutcome,
+) -> SchedulerResult<JobOutcome> {
+    Ok(match outcome {
+        CacheKeepaliveJobOutcome::Ready => JobOutcome::Noop,
+        CacheKeepaliveJobOutcome::Missing
+        | CacheKeepaliveJobOutcome::Stale
+        | CacheKeepaliveJobOutcome::AlreadyTerminal => JobOutcome::Noop,
     })
 }
 

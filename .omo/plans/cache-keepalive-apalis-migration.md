@@ -18,6 +18,12 @@ Your next move: run the implementation plan only after the ADR/plan critic wave 
 
 > TL;DR (machine): Large/high-risk Rust migration: Apalis transport + durable generation fence + TTL-anchor fix + AEAD payload storage, with tests-first phases and no proxy-path behavior regressions.
 
+Current audit closeout status:
+
+- Audit blockers addressed: durable Apalis enqueue/worker path now has focused server tests without the old in-memory scheduler; initial and post-hit enqueue failure paths terminalize the committed generation; Postgres conformance covers concurrent real-request generation bumps and stale-CAS hit reschedule behavior.
+- Still not a full final acceptance pass: spawned/process-level enabled OAuth, streaming `message_start` E2E, reboot/process worker stress, shutdown leak checks, and the full DB-failure isolation matrix remain open under Tasks 11-13.
+- Evidence updated in `.omo/evidence/cache-keepalive-apalis-migration/verification-summary.md` and task files 3, 6, 11, 12, and 13.
+
 ## Scope
 
 ### Must have
@@ -83,6 +89,7 @@ Your next move: run the implementation plan only after the ADR/plan critic wave 
   - `lsp_diagnostics` on every changed Rust file after each edit batch.
 - Evidence path: `.omo/evidence/cache-keepalive-apalis-migration/` with one evidence file per todo. Evidence must include command, exit code, and the key assertion or failure mode proven.
 - Proxy-path QA: run `proxy-e2e-qa` after implementation because lifecycle scheduling and dispatch affect client-visible proxy semantics even when response bytes must remain unchanged.
+- QA database rule: never run verification against the current/live cc-lb database in place. Before any SQLite or Postgres QA/e2e/stress step that needs existing cc-lb data, create a separate snapshot/clone database in `.omo/evidence/cache-keepalive-apalis-migration/` or `/tmp`, point the process under test at that snapshot, and record evidence that the source database was not mutated. For SQLite this means copying the database file before use; for Postgres this means a separate test database/schema restored/cloned from a dump or fixture. If a snapshot cannot be created safely, mark that QA row BLOCKED rather than using the current DB directly.
 
 ## Execution strategy
 
@@ -112,7 +119,7 @@ Wave 1 is storage foundation and can split SQLite/Postgres/store-trait work afte
 
 > Implementation + Test = ONE todo. Never separate.
 
-- [ ] 1. Define durable keepalive session records and store API
+- [x] 1. Define durable keepalive session records and store API
   What to do / Must NOT do: Add storage-api types for `CacheKeepaliveSession`, optional `CacheKeepalivePayload`, status enum, generation fence operations, and store trait methods. Include fields: `session_key_hash`, `principal_id`, `upstream_id`, `generation`, `refresh_count`, `first_scheduled_at`, `cache_anchor_at`, `ttl`, `status`, `expires_at`, `created_at`, `updated_at`, current job key or generation id, enqueue state, and encrypted payload reference/blob. Define reset/preserve semantics: new real request resets `refresh_count` and `first_scheduled_at`; self-refresh increments `refresh_count` and preserves the duration anchor while updating the cache anchor. Do not put SQLx, Apalis, or engine-specific dispatch types in the API.
   Parallelization: Wave 1 | Blocked by: none | Blocks: 2, 3, 4, 5, 6
   References: `crates/cc-lb-storage-api/src/cache_keepalive.rs`; `docs/adr/0004-cache-keepalive-scheduler.md` Sections 1', 4, 5; `.omo/ulw-research/20260708-apalis-keepalive-migration-consensus/SYNTHESIS.md`
@@ -120,7 +127,7 @@ Wave 1 is storage foundation and can split SQLite/Postgres/store-trait work afte
   QA scenarios: `cargo test -p cc-lb-storage-api cache_keepalive`; Evidence `.omo/evidence/cache-keepalive-apalis-migration/task-1-storage-api.md`
   Commit: Y | `feat(storage-api): define durable cache keepalive session state`
 
-- [ ] 2. Add SQLite migrations and store implementation
+- [x] 2. Add SQLite migrations and store implementation
   What to do / Must NOT do: Add SQLite migration `0042_cache_keepalive_sessions.sql` for `cache_keepalive_sessions` and, if using a side table, `cache_keepalive_payloads`. Implement the store operations using SQLite transactions and WAL-friendly short writes. Do not use network-filesystem assumptions; follow SQLite locking rules.
   Parallelization: Wave 1 | Blocked by: 1 | Blocks: 5, 8, 13 | Can parallelize with: 3
   References: `crates/cc-lb-storage-sqlite/migrations/0041_principals_cache_keepalive.sql`; `AGENTS.md` SQLite rules; `docs/adr/0004-cache-keepalive-scheduler.md` Section 1'
@@ -128,12 +135,13 @@ Wave 1 is storage foundation and can split SQLite/Postgres/store-trait work afte
   QA scenarios: `cargo test -p cc-lb-storage-sqlite cache_keepalive`; Evidence `.omo/evidence/cache-keepalive-apalis-migration/task-2-sqlite.md`
   Commit: Y | `feat(sqlite): persist cache keepalive session fences`
 
-- [ ] 3. Add Postgres migrations and store implementation
+- [x] 3. Add Postgres migrations and store implementation
   What to do / Must NOT do: Add Postgres migration `0072_cache_keepalive_sessions.sql` with indexes for due/expiry/purge queries and status/generation lookup. Implement transactionally equivalent store operations. Do not depend on SQLite-only behavior.
   Parallelization: Wave 1 | Blocked by: 1 | Blocks: 5, 8, 13 | Can parallelize with: 2
   References: `crates/cc-lb-storage-postgres/migrations/0071_principals_cache_keepalive.sql`; `docs/scheduler.md` pool isolation; `docs/adr/0004-cache-keepalive-scheduler.md` Section 1'
   Acceptance criteria (agent-executable): Postgres conformance tests prove the same semantics as SQLite, including concurrent generation bumps and transaction isolation around stale rows.
   QA scenarios: `cargo test -p cc-lb-storage-postgres cache_keepalive` with a safe local `DATABASE_URL`; Evidence `.omo/evidence/cache-keepalive-apalis-migration/task-3-postgres.md`
+  Closeout note: `cargo test -p cc-lb-storage-postgres cache_keepalive` passed against isolated `CI_POSTGRES_URL` schema and now includes concurrent real-request generation bumps plus concurrent stale-CAS hit-reschedule coverage.
   Commit: Y | `feat(postgres): persist cache keepalive session fences`
 
 - [ ] 4. Replace in-engine timer dependency with an enqueue port and cache anchor model
@@ -158,6 +166,7 @@ Wave 1 is storage foundation and can split SQLite/Postgres/store-trait work afte
   References: `crates/cc-lb-scheduler/src/jobs/metadata_refresh.rs`; `crates/cc-lb-scheduler/src/retry.rs`; `docs/scheduler.md`; `docs/adr/0004-cache-keepalive-scheduler.md` Section 1'
   Acceptance criteria (agent-executable): unit tests cover fresh hit reschedule from the hit's new anchor, miss terminal no retry, stale pre-check no-op, stale post-check no reschedule, stale post-dispatch terminal update no-op, real-request race between post-check and update, decrypt failure terminal no-op, unsupported provider terminal no-op.
   QA scenarios: `cargo test -p cc-lb-scheduler cache_keepalive`; Evidence `.omo/evidence/cache-keepalive-apalis-migration/task-6-apalis-job.md`
+  Closeout note: focused server tests now prove the durable Apalis happy path without the old in-memory scheduler: persisted session/payload plus Apalis job, worker decrypt/re-sign/dispatch, and hit reschedule through the durable pusher. This remains unchecked because the full terminal/race matrix in the acceptance criteria is not fully covered here.
   Commit: Y | `feat(scheduler): run cache keepalive jobs through Apalis`
 
 - [ ] 7. Wire streaming `message_start` anchor capture into lifecycle enqueue
@@ -168,7 +177,7 @@ Wave 1 is storage foundation and can split SQLite/Postgres/store-trait work afte
   QA scenarios: `cargo test -p cc-lb-engine lifecycle_keepalive_anchor`; Evidence `.omo/evidence/cache-keepalive-apalis-migration/task-7-message-start-anchor.md`
   Commit: Y | `fix(keepalive): anchor refresh timing to message_start`
 
-- [ ] 8. Add keepalive cleanup and retention path
+- [x] 8. Add keepalive cleanup and retention path
   What to do / Must NOT do: Add a dedicated cleanup job or extend a prompt-cache purge-style singleton to remove expired sessions, orphan payloads, terminal keepalive Apalis rows, and stale old `Pending` jobs. Do not rely on ordinary multi-day Apalis housekeeping for prompt payload ciphertext. Never delete `Queued`/`Running` rows.
   Parallelization: Wave 4 | Blocked by: 2, 3, 5, 6 | Blocks: 13 | Can parallelize with: 9, 10
   References: `crates/cc-lb-scheduler/src/jobs/apalis_housekeeping.rs`; `docs/adr/0004-cache-keepalive-scheduler.md` Sections 1', 5
@@ -176,7 +185,7 @@ Wave 1 is storage foundation and can split SQLite/Postgres/store-trait work afte
   QA scenarios: `cargo test -p cc-lb-scheduler cache_keepalive_cleanup`; Evidence `.omo/evidence/cache-keepalive-apalis-migration/task-8-cleanup.md`
   Commit: Y | `feat(scheduler): purge expired cache keepalive state`
 
-- [ ] 9. Add metrics/admin redaction for durable keepalive
+- [x] 9. Add metrics/admin redaction for durable keepalive
   What to do / Must NOT do: Preserve existing `cc_lb_cache_keepalive_*` metrics and add/extend outcomes for `stale`, `noop`, `decrypt_failed`, `hit`, `miss`, `error`, and cancellation reasons. Ensure `cclb_scheduler_*` job metrics identify `CacheKeepaliveJob` without plaintext. Admin scheduler failures must show job type, hashed session/idempotency, status, and sanitized reason only. Do not expose encrypted payload blobs unless explicitly redacted and bounded.
   Parallelization: Wave 4 | Blocked by: 4, 6 | Blocks: 13 | Can parallelize with: 8, 10
   References: `crates/cc-lb-engine/src/cache_keepalive/metrics.rs`; `crates/cc-lb-scheduler/src/scheduler_metrics.rs`; `crates/cc-lb-scheduler/src/admin.rs`; `docs/adr/0004-cache-keepalive-scheduler.md` Consequences
@@ -184,7 +193,7 @@ Wave 1 is storage foundation and can split SQLite/Postgres/store-trait work afte
   QA scenarios: `cargo test -p cc-lb-scheduler scheduler_admin_cache_keepalive`; `cargo test -p cc-lb-engine cache_keepalive_metrics`; Evidence `.omo/evidence/cache-keepalive-apalis-migration/task-9-observability.md`
   Commit: Y | `feat(observability): report durable cache keepalive outcomes safely`
 
-- [ ] 10. Update operator and scheduler docs
+- [x] 10. Update operator and scheduler docs
   What to do / Must NOT do: Update `docs/scheduler.md` job table with `CacheKeepaliveJob`; update `docs/cache-keepalive-operator.md` to correct the old completion+4m30s wording and document message-start anchoring, Apalis transport, durable session fence, storage boundary, payload encryption, purge behavior, and metrics. Update RFC-0003 only if the implementation PR includes a doc consistency pass; otherwise link to amended ADR as the superseding decision. Do not leave stale "No DB persistence" or "Coordination across replicas is a non-goal" claims unqualified for GA.
   Parallelization: Wave 4 | Blocked by: ADR, 6 | Blocks: 13 | Can parallelize with: 8, 9
   References: `docs/scheduler.md`; `docs/cache-keepalive-operator.md`; `docs/rfc/0003-prompt-cache-keepalive.md`; `docs/adr/0004-cache-keepalive-scheduler.md`
@@ -198,22 +207,24 @@ Wave 1 is storage foundation and can split SQLite/Postgres/store-trait work afte
   References: `crates/cc-lb-server/src/app.rs`; `crates/cc-lb-engine/src/lifecycle.rs`; `docs/adr/0004-cache-keepalive-scheduler.md` Section 1'
   Acceptance criteria (agent-executable): server starts with feature disabled; enabled principal creates no scheduler dependency cycle; shutdown does not leak workers; fence write failure, payload encrypt/store failure, and enqueue failure return original response unchanged and leave no permanently active jobless session.
   QA scenarios: targeted server integration tests; Evidence `.omo/evidence/cache-keepalive-apalis-migration/task-11-server-wiring.md`
+  Closeout note: focused tests now cover durable enqueuer wiring and both initial/post-hit enqueue failure terminalization. This remains unchecked because shutdown leak checks, fence-write failure isolation, and payload encrypt/store failure isolation are still open.
   Commit: Y | `feat(server): wire durable cache keepalive scheduling`
 
 - [ ] 12. Run proxy-path end-to-end QA
-  What to do / Must NOT do: Verify client-visible proxy semantics do not regress. Test disabled principal, no-cache-control request, enabled Anthropic OAuth request, streaming long response with `message_start`, and enqueue failure. Do not use real production services; use existing local test harness/mocks unless explicitly approved.
+  What to do / Must NOT do: Verify client-visible proxy semantics do not regress. Test disabled principal, no-cache-control request, enabled Anthropic OAuth request, streaming long response with `message_start`, and enqueue failure. Do not use real production services; use existing local test harness/mocks unless explicitly approved. Do not point the proxy QA run at the current/live cc-lb DB directly; create and use a separate DB snapshot/clone and prove the source DB was not mutated.
   Parallelization: Wave 5 | Blocked by: 11 | Blocks: 13
   References: `docs/adr/0004-cache-keepalive-scheduler.md`; `proxy-e2e-qa` skill acceptance criteria
-  Acceptance criteria (agent-executable): response bytes/status/headers are unchanged for disabled/no-op paths; enabled path enqueues asynchronously; failure to enqueue does not fail proxy response.
+  Acceptance criteria (agent-executable): response bytes/status/headers are unchanged for disabled/no-op paths; enabled path enqueues asynchronously; failure to enqueue does not fail proxy response; QA evidence names the snapshot DB path or cloned Postgres database and records that the original cc-lb DB was not used for writes.
   QA scenarios: run proxy e2e harness with SQLite; Evidence `.omo/evidence/cache-keepalive-apalis-migration/task-12-proxy-e2e.md`
   Commit: Y | `test(proxy): cover durable cache keepalive request path`
 
 - [ ] 13. Run parity, race, reboot, and secrecy stress suite
-  What to do / Must NOT do: Run the required acceptance suite: replace-pending, queued-stale-no-op, running-race post-check, hit-reschedules-until-max-caps, hit reschedules from the latest synthetic hit anchor, miss/error terminal no-retry, concurrent schedules/idempotency collapse, SQLite/Postgres parity, reboot durability, payload secrecy/AAD tamper, DB-failure isolation, TTL-anchor long streaming response, decrypt failure and unsupported provider terminal no-op. DB-failure isolation must enumerate fence write failure, payload encrypt/store failure, Apalis enqueue conflict, enqueue-after-fence-success failure, fence-commit-after-enqueue-success failure, worker pre-check DB failure, worker post-dispatch CAS DB failure, and cleanup DB failure. Do not rerun CI to force green; investigate any flake root cause.
+  What to do / Must NOT do: Run the required acceptance suite: replace-pending, queued-stale-no-op, running-race post-check, hit-reschedules-until-max-caps, hit reschedules from the latest synthetic hit anchor, miss/error terminal no-retry, concurrent schedules/idempotency collapse, SQLite/Postgres parity, reboot durability, payload secrecy/AAD tamper, DB-failure isolation, TTL-anchor long streaming response, decrypt failure and unsupported provider terminal no-op. DB-failure isolation must enumerate fence write failure, payload encrypt/store failure, Apalis enqueue conflict, enqueue-after-fence-success failure, fence-commit-after-enqueue-success failure, worker pre-check DB failure, worker post-dispatch CAS DB failure, and cleanup DB failure. Do not rerun CI to force green; investigate any flake root cause. Do not run stress/parity/reboot QA against the current/live cc-lb DB in place; snapshot/clone to a separate QA DB first and capture the snapshot receipt.
   Parallelization: Final implementation wave | Blocked by: 2, 3, 8, 9, 11, 12 | Blocks: final release
   References: `AGENTS.md` CI flake handling; `.omo/ulw-research/20260708-apalis-keepalive-migration-consensus/SYNTHESIS.md`; `.omo/ulw-research/20260708-anthropic-cache-ttl/verify-cache-ttl.md`
-  Acceptance criteria (agent-executable): all required tests pass on SQLite; Postgres suite passes against safe local test DB; stress evidence records race budgets and no plaintext leakage.
+  Acceptance criteria (agent-executable): all required tests pass on SQLite; Postgres suite passes against safe local test DB; stress evidence records race budgets and no plaintext leakage; every DB-backed QA artifact identifies the isolated snapshot/clone DB and states how live/current DB mutation was prevented.
   QA scenarios: targeted cargo test invocations plus stress loops; Evidence `.omo/evidence/cache-keepalive-apalis-migration/task-13-final-stress.md`
+  Closeout note: focused verification, builds, durable-worker tests, partial enqueue failure tests, and Postgres concurrency/CAS checks passed. This remains unchecked because the full process-level stress/reboot/E2E/DB-failure matrix was not run.
   Commit: Y | `test(keepalive): prove durable scheduler race invariants`
 
 ## Final verification wave

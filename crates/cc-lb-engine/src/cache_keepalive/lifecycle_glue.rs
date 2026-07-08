@@ -1,5 +1,8 @@
+use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_control::dynamic_view::DynamicViewHolder;
 use cc_lb_plugin_api::Principal;
@@ -16,6 +19,53 @@ use crate::lifecycle::RequestCacheMetadata;
 use super::{CancelReason, HeuristicClassifier, KeepaliveScheduler, RequestSnapshot, SessionKey};
 
 #[derive(Clone)]
+pub struct CacheKeepaliveEnqueueRequest {
+    pub session_key_hash: String,
+    pub principal_id: String,
+    pub upstream_id: Uuid,
+    pub cache_anchor_age: Duration,
+    pub params: super::ScheduleParams,
+    pub snapshot: RequestSnapshot,
+}
+
+#[derive(Clone, Debug)]
+pub struct CacheKeepaliveCancelRequest {
+    pub session_key_hash: String,
+    pub principal_id: String,
+    pub reason: CancelReason,
+}
+
+impl fmt::Debug for CacheKeepaliveEnqueueRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CacheKeepaliveEnqueueRequest")
+            .field("session_key_hash", &self.session_key_hash)
+            .field("principal_id", &self.principal_id)
+            .field("upstream_id", &self.upstream_id)
+            .field("cache_anchor_age", &self.cache_anchor_age)
+            .field("params", &self.params)
+            .field("snapshot", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("cache keepalive enqueue failed: {0}")]
+pub struct CacheKeepaliveEnqueueError(pub String);
+
+#[async_trait]
+pub trait CacheKeepaliveEnqueuer: Send + Sync {
+    async fn enqueue_cache_keepalive(
+        &self,
+        request: CacheKeepaliveEnqueueRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError>;
+
+    async fn cancel_cache_keepalive(
+        &self,
+        request: CacheKeepaliveCancelRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError>;
+}
+
+#[derive(Clone)]
 pub(crate) struct LifecycleKeepaliveContext {
     pub(crate) request_body: Bytes,
     pub(crate) principal: Principal,
@@ -28,22 +78,25 @@ pub(crate) struct LifecycleKeepaliveContext {
 #[derive(Clone)]
 pub(crate) struct LifecycleKeepalive {
     scheduler: Option<Arc<KeepaliveScheduler>>,
+    enqueuer: Option<Arc<dyn CacheKeepaliveEnqueuer>>,
     dynamic_view: Arc<DynamicViewHolder>,
 }
 
 impl LifecycleKeepalive {
     pub(crate) fn new(
         scheduler: Option<Arc<KeepaliveScheduler>>,
+        enqueuer: Option<Arc<dyn CacheKeepaliveEnqueuer>>,
         dynamic_view: Arc<DynamicViewHolder>,
     ) -> Self {
         Self {
             scheduler,
+            enqueuer,
             dynamic_view,
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn on_response_completed(
+    pub(crate) async fn on_response_completed(
         &self,
         request_body: &[u8],
         response_body_json: &serde_json::Value,
@@ -52,10 +105,11 @@ impl LifecycleKeepalive {
         upstream_id: uuid::Uuid,
         shaped_body: Bytes,
         downstream_headers: &HeaderMap,
+        cache_anchor_age: Duration,
     ) {
-        let Some(scheduler) = self.scheduler.as_ref() else {
+        if self.scheduler.is_none() && self.enqueuer.is_none() {
             return;
-        };
+        }
         let _ = request_body;
         let view = self.dynamic_view.load();
         let Some(cached) = view.principal_view.get(&principal.id) else {
@@ -96,7 +150,9 @@ impl LifecycleKeepalive {
                     max,
                     "skipping cache keep-alive snapshot: shaped body exceeds cap"
                 );
-                if !scheduler.cancel(&session_key, CancelReason::SnapshotTooLarge) {
+                if !self.scheduler.as_ref().is_some_and(|scheduler| {
+                    scheduler.cancel(&session_key, CancelReason::SnapshotTooLarge)
+                }) {
                     super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
                 }
                 return;
@@ -113,14 +169,35 @@ impl LifecycleKeepalive {
         };
         let classifier = HeuristicClassifier::new(&config.classifier);
         match classifier.classify(request_json, response_body_json) {
-            super::TurnDecision::AgentInTurn => scheduler.schedule_or_replace(
-                session_key,
-                snapshot,
-                super::ScheduleParams::from(config, ttl),
-                principal_name,
-            ),
+            super::TurnDecision::AgentInTurn => {
+                let params =
+                    super::ScheduleParams::from_cache_anchor_age(config, ttl, cache_anchor_age);
+                if let Some(enqueuer) = self.enqueuer.as_ref()
+                    && let Err(error) = enqueuer
+                        .enqueue_cache_keepalive(CacheKeepaliveEnqueueRequest {
+                            session_key_hash: session_key.to_string(),
+                            principal_id: principal.id.clone(),
+                            upstream_id,
+                            cache_anchor_age,
+                            params: params.clone(),
+                            snapshot: (*snapshot).clone(),
+                        })
+                        .await
+                {
+                    tracing::warn!(
+                        target: "cache_keepalive",
+                        principal_id = principal.id.as_str(),
+                        %error,
+                        "durable cache keep-alive enqueue failed"
+                    );
+                }
+                if let Some(scheduler) = self.scheduler.as_ref() {
+                    scheduler.schedule_or_replace(session_key, snapshot, params, principal_name);
+                }
+            }
             super::TurnDecision::UserTurn => {
-                scheduler.cancel(&session_key, CancelReason::UserTurnDetected);
+                self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
+                    .await;
             }
             super::TurnDecision::Ambiguous if config.classifier.llm_judge.is_some() => {
                 tracing::warn!(
@@ -128,11 +205,41 @@ impl LifecycleKeepalive {
                     principal_id = principal.id.as_str(),
                     "cache keep-alive llm_judge is configured but unsupported in this release; treating ambiguous response as user turn"
                 );
-                scheduler.cancel(&session_key, CancelReason::UserTurnDetected);
+                self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
+                    .await;
             }
             super::TurnDecision::Ambiguous => {
-                scheduler.cancel(&session_key, CancelReason::UserTurnDetected);
+                self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
+                    .await;
             }
+        }
+    }
+
+    async fn cancel_session(
+        &self,
+        session_key: &SessionKey,
+        principal: &Principal,
+        reason: CancelReason,
+    ) {
+        if let Some(scheduler) = self.scheduler.as_ref() {
+            scheduler.cancel(session_key, reason);
+        }
+        if let Some(enqueuer) = self.enqueuer.as_ref()
+            && let Err(error) = enqueuer
+                .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+                    session_key_hash: session_key.to_string(),
+                    principal_id: principal.id.clone(),
+                    reason,
+                })
+                .await
+        {
+            tracing::warn!(
+                target: "cache_keepalive",
+                principal_id = principal.id.as_str(),
+                reason = reason.as_str(),
+                %error,
+                "durable cache keep-alive cancellation failed"
+            );
         }
     }
 }
@@ -202,12 +309,7 @@ fn sse_json_value(raw: &[u8]) -> Option<Value> {
     None
 }
 
-const KEEPALIVE_FORWARD_HEADERS: &[&str] = &[
-    "x-api-key",
-    "authorization",
-    "anthropic-version",
-    "anthropic-beta",
-];
+const KEEPALIVE_FORWARD_HEADERS: &[&str] = &["anthropic-version", "anthropic-beta"];
 
 fn downstream_auth_headers(headers: &HeaderMap) -> HeaderMap {
     let mut out = HeaderMap::new();
@@ -245,4 +347,59 @@ fn cache_keepalive_principal_uuid(principal_id: &str) -> Uuid {
 
 fn keepalive_snapshot_url() -> Option<Url> {
     Url::parse("https://api.anthropic.com/v1/messages").ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::HeaderValue;
+
+    #[test]
+    fn downstream_auth_headers_preserves_protocol_headers_without_auth_secrets() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret-key"));
+        headers.insert("authorization", HeaderValue::from_static("Bearer secret"));
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        headers.insert("anthropic-beta", HeaderValue::from_static("prompt-caching"));
+
+        let forwarded = downstream_auth_headers(&headers);
+
+        assert!(forwarded.get("x-api-key").is_none());
+        assert!(forwarded.get("authorization").is_none());
+        assert_eq!(
+            forwarded.get("anthropic-version"),
+            Some(&HeaderValue::from_static("2023-06-01"))
+        );
+        assert_eq!(
+            forwarded.get("anthropic-beta"),
+            Some(&HeaderValue::from_static("prompt-caching"))
+        );
+    }
+
+    #[test]
+    fn streaming_message_start_becomes_response_body_for_classifier() {
+        let mut response = StreamingKeepaliveResponse::default();
+        response.observe(
+            Some(b"message_start"),
+            b"event: message_start\ndata: {\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"cache_read_input_tokens\":2}}}\n\n",
+        );
+        response.observe(
+            Some(b"message_delta"),
+            b"event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+        );
+
+        let value = response.into_value().expect("message_start captured");
+
+        assert_eq!(
+            value.get("stop_reason"),
+            Some(&Value::String("tool_use".to_owned()))
+        );
+        assert_eq!(
+            value
+                .get("usage")
+                .and_then(|usage| usage.get("cache_read_input_tokens"))
+                .and_then(Value::as_i64),
+            Some(2)
+        );
+    }
 }

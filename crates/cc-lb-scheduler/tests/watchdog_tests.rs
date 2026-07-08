@@ -199,6 +199,7 @@ impl Fixture {
             args: entity_job(kind, upstream_id),
             idempotency_key: Some(key.clone()),
             run_at_unix_secs: Some(RUN_AT_UNIX_SECS),
+            max_attempts: None,
         };
         self.backend.push_adaptive_task(task).await?;
         sqlx::query(

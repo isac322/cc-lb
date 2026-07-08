@@ -23,8 +23,20 @@ pub struct ScheduleParams {
 
 impl ScheduleParams {
     pub fn from(config: &CacheKeepaliveConfig, ttl: CacheTtl) -> Self {
+        Self::from_cache_anchor_age(config, ttl, Duration::ZERO)
+    }
+
+    pub fn from_cache_anchor_age(
+        config: &CacheKeepaliveConfig,
+        ttl: CacheTtl,
+        cache_anchor_age: Duration,
+    ) -> Self {
+        let refresh_delay = Duration::from_secs(config.refresh_delay_secs(ttl));
         Self {
-            delay: Duration::from_secs(config.refresh_delay_secs(ttl)),
+            delay: refresh_delay
+                .checked_sub(cache_anchor_age)
+                .unwrap_or(Duration::from_secs(1))
+                .max(Duration::from_secs(1)),
             max_refreshes: config.max_refreshes_per_session,
             max_total_duration_secs: config.max_total_duration_secs,
         }
@@ -37,8 +49,9 @@ pub trait KeepaliveDispatcher: Send + Sync + 'static {
 }
 
 pub enum DispatchOutcome {
-    CacheHit,
+    CacheHit { cache_anchor_age: Duration },
     CacheMiss,
+    UnsupportedProvider(String),
     Error(String),
 }
 
@@ -220,9 +233,15 @@ impl KeepaliveScheduler {
             return;
         }
         match outcome {
-            DispatchOutcome::CacheHit => {
+            DispatchOutcome::CacheHit { cache_anchor_age } => {
                 metrics::record_fired(&principal_name, ttl_label, "hit");
                 self.increment_refresh_count(&key, expected_generation);
+                let mut params = params;
+                params.delay = params
+                    .delay
+                    .checked_sub(cache_anchor_age)
+                    .unwrap_or(Duration::from_secs(1))
+                    .max(Duration::from_secs(1));
                 self.install_entry(
                     key,
                     snapshot,
@@ -233,6 +252,11 @@ impl KeepaliveScheduler {
             }
             DispatchOutcome::CacheMiss => {
                 metrics::record_fired(&principal_name, ttl_label, "miss");
+                self.cancel(&key, CancelReason::UpstreamGone);
+            }
+            DispatchOutcome::UnsupportedProvider(err) => {
+                warn!(target: "cache_keepalive", session = %key, error = %err, "keep-alive dispatch skipped unsupported provider");
+                metrics::record_fired(&principal_name, ttl_label, "unsupported_provider");
                 self.cancel(&key, CancelReason::UpstreamGone);
             }
             DispatchOutcome::Error(err) => {
@@ -336,6 +360,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn schedule_params_subtract_cache_anchor_age_from_refresh_delay() {
+        let config = CacheKeepaliveConfig {
+            enabled: true,
+            refresh_lead_time_5m_secs: 30,
+            refresh_lead_time_1h_secs: 300,
+            max_refreshes_per_session: 12,
+            max_total_duration_secs: 14400,
+            snapshot_max_bytes: 524_288,
+            classifier: Default::default(),
+        };
+
+        let params = ScheduleParams::from_cache_anchor_age(
+            &config,
+            CacheTtl::Ttl5m,
+            Duration::from_secs(120),
+        );
+
+        assert_eq!(params.delay, Duration::from_secs(150));
+    }
+
+    #[test]
+    fn schedule_params_saturates_when_anchor_age_exceeds_refresh_delay() {
+        let config = CacheKeepaliveConfig {
+            enabled: true,
+            refresh_lead_time_5m_secs: 30,
+            refresh_lead_time_1h_secs: 300,
+            max_refreshes_per_session: 12,
+            max_total_duration_secs: 14400,
+            snapshot_max_bytes: 524_288,
+            classifier: Default::default(),
+        };
+
+        let params = ScheduleParams::from_cache_anchor_age(
+            &config,
+            CacheTtl::Ttl5m,
+            Duration::from_secs(300),
+        );
+
+        assert_eq!(params.delay, Duration::from_secs(1));
+    }
+
     fn key() -> SessionKey {
         SessionKey::from_thread_id(Uuid::nil(), "session-1")
     }
@@ -382,9 +448,15 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn cache_hit_reschedules_up_to_max_refreshes() {
         let dispatcher = Arc::new(CountingDispatcher::with_outcomes(vec![
-            DispatchOutcome::CacheHit,
-            DispatchOutcome::CacheHit,
-            DispatchOutcome::CacheHit,
+            DispatchOutcome::CacheHit {
+                cache_anchor_age: Duration::ZERO,
+            },
+            DispatchOutcome::CacheHit {
+                cache_anchor_age: Duration::ZERO,
+            },
+            DispatchOutcome::CacheHit {
+                cache_anchor_age: Duration::ZERO,
+            },
         ]));
         let scheduler = KeepaliveScheduler::new(dispatcher.clone());
         let mut p = params(1);

@@ -10,6 +10,9 @@ use crate::worker::{
     ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, CronJob, SchedulerBackend, SchedulerPushTask,
 };
 
+const FAILURE_SUMMARY_MAX_CHARS: usize = 256;
+const REDACTED_FAILURE_SUMMARY: &str = "<redacted>";
+
 #[derive(Clone, Debug)]
 pub struct SchedulerAdminHandle {
     backend: SchedulerBackend,
@@ -293,13 +296,48 @@ fn failure_from_parts(
     Ok(SchedulerFailure {
         id,
         job_type,
-        payload_summary: idempotency_key.unwrap_or_default(),
-        last_error: last_result.unwrap_or_default(),
+        payload_summary: safe_failure_summary(idempotency_key.as_deref()),
+        last_error: safe_failure_summary(last_result.as_deref()),
         attempts: u32::try_from(attempts)
             .map_err(|_| SchedulerError::Job("attempts is outside u32".to_owned()))?,
         first_failed_at_unix_secs: failed_at,
         last_failed_at_unix_secs: failed_at,
     })
+}
+
+fn safe_failure_summary(value: Option<&str>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    if contains_sensitive_failure_material(value) {
+        return REDACTED_FAILURE_SUMMARY.to_owned();
+    }
+    truncate_chars(value, FAILURE_SUMMARY_MAX_CHARS)
+}
+
+fn contains_sensitive_failure_material(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "authorization",
+        "x-api-key",
+        "api_key",
+        "bearer ",
+        "sk-ant-",
+        "prompt",
+        "messages",
+        "encrypted_payload",
+        "ciphertext",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for character in value.chars().take(max_chars) {
+        output.push(character);
+    }
+    output
 }
 
 #[cfg(feature = "sqlite")]
@@ -381,4 +419,45 @@ fn usize_to_u32(value: usize) -> u32 {
 
 fn i64_to_u64(value: i64, field: &str) -> Result<u64> {
     u64::try_from(value).map_err(|_| SchedulerError::Job(format!("{field} is negative")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FAILURE_SUMMARY_MAX_CHARS, REDACTED_FAILURE_SUMMARY, failure_from_parts};
+
+    #[test]
+    fn cache_keepalive_failure_summary_redacts_prompt_and_auth_material() {
+        let failure = failure_from_parts(
+            "failed-keepalive".to_owned(),
+            "adaptive".to_owned(),
+            Some("cache_keepalive:session-hash:7".to_owned()),
+            Some(
+                r#"{"Err":"prompt contains secret; x-api-key=sk-ant-downstream; Authorization: Bearer token"}"#
+                    .to_owned(),
+            ),
+            1,
+            1_800_000_000,
+        )
+        .expect("failure row converts");
+
+        assert_eq!(failure.payload_summary, "cache_keepalive:session-hash:7");
+        assert_eq!(failure.last_error, REDACTED_FAILURE_SUMMARY);
+    }
+
+    #[test]
+    fn scheduler_failure_summaries_are_bounded() {
+        let long = "x".repeat(FAILURE_SUMMARY_MAX_CHARS + 64);
+        let failure = failure_from_parts(
+            "failed-job".to_owned(),
+            "adaptive".to_owned(),
+            Some(long.clone()),
+            Some(long),
+            1,
+            1_800_000_000,
+        )
+        .expect("failure row converts");
+
+        assert_eq!(failure.payload_summary.len(), FAILURE_SUMMARY_MAX_CHARS);
+        assert_eq!(failure.last_error.len(), FAILURE_SUMMARY_MAX_CHARS);
+    }
 }

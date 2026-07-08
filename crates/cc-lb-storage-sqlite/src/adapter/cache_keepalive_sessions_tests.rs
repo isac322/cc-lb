@@ -1,0 +1,210 @@
+use std::sync::Arc;
+
+use cc_lb_clock::SystemClock;
+use cc_lb_storage_api::{
+    BackendKind, CacheKeepaliveEnqueueState, CacheKeepaliveHitRefreshRequest,
+    CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore,
+    CacheKeepaliveTerminalReason, CacheTtl, MetaStore, cache_keepalive_job_key,
+};
+use tempfile::TempDir;
+use uuid::Uuid;
+
+use crate::{SqliteStorage, open_sqlite};
+
+async fn storage() -> (TempDir, SqliteStorage) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let database_url = format!("sqlite://{}", dir.path().join("keepalive.sqlite").display());
+    let storage = open_sqlite(&database_url, Arc::new(SystemClock))
+        .await
+        .expect("open sqlite");
+    storage
+        .initialize(BackendKind::Sqlite)
+        .await
+        .expect("initialize sqlite");
+    (dir, storage)
+}
+
+fn replace_request(payload: &[u8], now: u64) -> CacheKeepaliveReplaceRequest {
+    CacheKeepaliveReplaceRequest {
+        session_key_hash: "session-hash".to_owned(),
+        principal_id: "principal".to_owned(),
+        upstream_id: Uuid::from_u128(7),
+        cache_anchor_at_unix_secs: now,
+        ttl: CacheTtl::Ttl5m,
+        run_at_unix_secs: now + 270,
+        expires_at_unix_secs: now + 300,
+        encrypted_payload: payload.to_vec(),
+        now_unix_secs: now,
+    }
+}
+
+#[tokio::test]
+async fn replace_from_real_request_bumps_generation_and_resets_counters() {
+    let (_dir, storage) = storage().await;
+
+    let first = storage
+        .replace_from_real_request(&replace_request(b"ciphertext-one", 100))
+        .await
+        .expect("insert first session");
+    let second = storage
+        .replace_from_real_request(&replace_request(b"ciphertext-two", 200))
+        .await
+        .expect("replace session");
+
+    assert_eq!(first.generation, 1);
+    assert_eq!(second.generation, 2);
+    assert_eq!(second.refresh_count, 0);
+    assert_eq!(second.first_scheduled_at_unix_secs, 200);
+    assert_eq!(second.cache_anchor_at_unix_secs, 200);
+    assert_eq!(second.run_at_unix_secs, 470);
+    assert_eq!(
+        second.current_job_key,
+        cache_keepalive_job_key("session-hash", 2)
+    );
+    assert_eq!(second.encrypted_payload, b"ciphertext-two");
+}
+
+#[tokio::test]
+async fn update_payload_only_mutates_matching_pending_generation() {
+    let (_dir, storage) = storage().await;
+    let record = storage
+        .replace_from_real_request(&replace_request(b"pending-placeholder", 100))
+        .await
+        .expect("insert session");
+
+    assert!(
+        !storage
+            .update_cache_keepalive_payload("session-hash", record.generation + 1, b"stale", 101)
+            .await
+            .expect("stale payload no-op")
+    );
+    assert!(
+        storage
+            .update_cache_keepalive_payload("session-hash", record.generation, b"ciphertext", 102)
+            .await
+            .expect("fresh payload update")
+    );
+
+    let updated = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("row exists");
+    assert_eq!(updated.encrypted_payload, b"ciphertext");
+    assert_eq!(updated.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+
+    assert!(
+        storage
+            .mark_cache_keepalive_enqueued("session-hash", record.generation, 103)
+            .await
+            .expect("mark enqueued")
+    );
+    assert!(
+        !storage
+            .update_cache_keepalive_payload("session-hash", record.generation, b"late", 104)
+            .await
+            .expect("enqueued payload no-op")
+    );
+}
+
+#[tokio::test]
+async fn cache_hit_reschedule_preserves_duration_anchor_and_rejects_stale_generation() {
+    let (_dir, storage) = storage().await;
+    let original = storage
+        .replace_from_real_request(&replace_request(b"ciphertext-one", 100))
+        .await
+        .expect("insert first session");
+
+    let stale = storage
+        .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
+            session_key_hash: "session-hash".to_owned(),
+            generation: original.generation + 1,
+            cache_anchor_at_unix_secs: 150,
+            run_at_unix_secs: 420,
+            expires_at_unix_secs: 450,
+            encrypted_payload: b"stale".to_vec(),
+            now_unix_secs: 151,
+        })
+        .await
+        .expect("stale update is a no-op");
+    assert!(stale.is_none());
+
+    let updated = storage
+        .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
+            session_key_hash: "session-hash".to_owned(),
+            generation: original.generation,
+            cache_anchor_at_unix_secs: 150,
+            run_at_unix_secs: 420,
+            expires_at_unix_secs: 450,
+            encrypted_payload: b"ciphertext-hit".to_vec(),
+            now_unix_secs: 151,
+        })
+        .await
+        .expect("fresh update")
+        .expect("row updated");
+
+    assert_eq!(updated.generation, 2);
+    assert_eq!(updated.refresh_count, 1);
+    assert_eq!(updated.first_scheduled_at_unix_secs, 100);
+    assert_eq!(updated.cache_anchor_at_unix_secs, 150);
+    assert_eq!(updated.run_at_unix_secs, 420);
+    assert_eq!(updated.encrypted_payload, b"ciphertext-hit");
+}
+
+#[tokio::test]
+async fn conditional_enqueue_terminal_and_purge_are_generation_safe() {
+    let (_dir, storage) = storage().await;
+    let record = storage
+        .replace_from_real_request(&replace_request(b"ciphertext", 100))
+        .await
+        .expect("insert session");
+
+    assert!(
+        storage
+            .mark_cache_keepalive_enqueued("session-hash", record.generation, 101)
+            .await
+            .expect("mark enqueued")
+    );
+    assert!(
+        !storage
+            .mark_cache_keepalive_terminal(
+                "session-hash",
+                record.generation + 1,
+                CacheKeepaliveTerminalReason::CacheMiss,
+                102,
+            )
+            .await
+            .expect("stale terminal no-op")
+    );
+    assert!(
+        storage
+            .mark_cache_keepalive_terminal(
+                "session-hash",
+                record.generation,
+                CacheKeepaliveTerminalReason::CacheMiss,
+                102,
+            )
+            .await
+            .expect("fresh terminal")
+    );
+    let check = storage
+        .check_cache_keepalive_generation("session-hash")
+        .await
+        .expect("check")
+        .expect("row exists");
+    assert_eq!(check.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(check.enqueue_state, CacheKeepaliveEnqueueState::Enqueued);
+
+    let removed = storage
+        .purge_cache_keepalive_expired(401)
+        .await
+        .expect("purge expired");
+    assert_eq!(removed, 1);
+    assert!(
+        storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("get after purge")
+            .is_none()
+    );
+}

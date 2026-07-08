@@ -1,0 +1,229 @@
+use cc_lb_engine::cache_keepalive::{DispatchOutcome, PersistedRequestSnapshot, RequestSnapshot};
+use cc_lb_engine::clock::unix_secs;
+use cc_lb_scheduler::error::Result as SchedulerResult;
+use cc_lb_scheduler::jobs::cache_keepalive::{CacheKeepaliveJob, CacheKeepaliveJobHandler};
+use cc_lb_scheduler::retry::JobOutcome;
+use cc_lb_scheduler::worker::AdaptiveJob;
+use cc_lb_storage_api::{
+    CacheKeepaliveHitRefreshRequest, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
+};
+
+use super::{SchedulerDispatch, cache_keepalive_payload_aad};
+use crate::scheduler_dispatch::outcomes::cache_keepalive_outcome;
+
+impl SchedulerDispatch {
+    pub(super) async fn dispatch_cache_keepalive(
+        &self,
+        job: CacheKeepaliveJob,
+    ) -> SchedulerResult<JobOutcome> {
+        let outcome = CacheKeepaliveJobHandler::new(self.storage.as_ref())
+            .handle(job.clone())
+            .await?;
+        if !matches!(
+            outcome,
+            cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJobOutcome::Ready
+        ) {
+            return cache_keepalive_outcome(outcome);
+        }
+
+        let Some(record) = CacheKeepaliveSessionStore::get_cache_keepalive_session(
+            self.storage.as_ref(),
+            &job.session_key_hash,
+        )
+        .await
+        .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?
+        else {
+            return Ok(JobOutcome::Noop);
+        };
+        if record.generation != job.generation {
+            return Ok(JobOutcome::Noop);
+        }
+
+        let aad = cache_keepalive_payload_aad(
+            &record.principal_id,
+            &record.session_key_hash,
+            record.upstream_id,
+            record.generation,
+        );
+        let plaintext = match self.aead.decrypt(&record.encrypted_payload, &aad) {
+            Ok(plaintext) => plaintext,
+            Err(_) => {
+                self.mark_cache_keepalive_terminal(
+                    &job,
+                    CacheKeepaliveTerminalReason::DecryptFailed,
+                )
+                .await?;
+                return Ok(JobOutcome::Done);
+            }
+        };
+        let snapshot = match serde_json::from_slice::<PersistedRequestSnapshot>(&plaintext)
+            .map_err(|_| ())
+            .and_then(|persisted| RequestSnapshot::from_persisted(persisted).map_err(|_| ()))
+        {
+            Ok(snapshot) => snapshot,
+            Err(()) => {
+                self.mark_cache_keepalive_terminal(
+                    &job,
+                    CacheKeepaliveTerminalReason::DecryptFailed,
+                )
+                .await?;
+                return Ok(JobOutcome::Done);
+            }
+        };
+
+        match self.keepalive_dispatcher.dispatch(&snapshot).await {
+            DispatchOutcome::CacheHit { cache_anchor_age } => {
+                self.reschedule_cache_keepalive_hit(job, record, snapshot, cache_anchor_age)
+                    .await
+            }
+            DispatchOutcome::CacheMiss => {
+                self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::CacheMiss)
+                    .await?;
+                Ok(JobOutcome::Done)
+            }
+            DispatchOutcome::UnsupportedProvider(_) => {
+                self.mark_cache_keepalive_terminal(
+                    &job,
+                    CacheKeepaliveTerminalReason::UnsupportedProvider,
+                )
+                .await?;
+                Ok(JobOutcome::Done)
+            }
+            DispatchOutcome::Error(_) => {
+                self.mark_cache_keepalive_terminal(
+                    &job,
+                    CacheKeepaliveTerminalReason::DispatchError,
+                )
+                .await?;
+                Ok(JobOutcome::Done)
+            }
+        }
+    }
+
+    async fn reschedule_cache_keepalive_hit(
+        &self,
+        job: CacheKeepaliveJob,
+        record: cc_lb_storage_api::CacheKeepaliveSessionRecord,
+        snapshot: RequestSnapshot,
+        cache_anchor_age: std::time::Duration,
+    ) -> SchedulerResult<JobOutcome> {
+        let now = unix_secs(self.clock.now());
+        if record.refresh_count.saturating_add(1) >= job.max_refreshes {
+            self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::MaxRefreshes)
+                .await?;
+            return Ok(JobOutcome::Done);
+        }
+        if now.saturating_sub(record.first_scheduled_at_unix_secs) >= job.max_total_duration_secs {
+            self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::MaxDuration)
+                .await?;
+            return Ok(JobOutcome::Done);
+        }
+
+        let cache_anchor_at_unix_secs = now.saturating_sub(cache_anchor_age.as_secs());
+        let run_at_unix_secs = cache_anchor_at_unix_secs
+            .saturating_add(job.refresh_delay_secs)
+            .max(now.saturating_add(1));
+        let next_generation = job.generation.checked_add(1).ok_or_else(|| {
+            cc_lb_scheduler::error::SchedulerError::Job(
+                "cache keepalive generation overflow".to_owned(),
+            )
+        })?;
+        let plaintext = serde_json::to_vec(&snapshot.to_persisted())
+            .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?;
+        let encrypted_payload = self
+            .aead
+            .encrypt(
+                &plaintext,
+                &cache_keepalive_payload_aad(
+                    &record.principal_id,
+                    &record.session_key_hash,
+                    record.upstream_id,
+                    next_generation,
+                ),
+            )
+            .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?;
+        let updated = CacheKeepaliveSessionStore::reschedule_after_cache_hit(
+            self.storage.as_ref(),
+            &CacheKeepaliveHitRefreshRequest {
+                session_key_hash: job.session_key_hash.clone(),
+                generation: job.generation,
+                cache_anchor_at_unix_secs,
+                run_at_unix_secs,
+                expires_at_unix_secs: cache_anchor_at_unix_secs.saturating_add(job.ttl.as_secs()),
+                encrypted_payload,
+                now_unix_secs: now,
+            },
+        )
+        .await
+        .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?;
+        let Some(updated) = updated else {
+            return Ok(JobOutcome::Noop);
+        };
+
+        let next_job = CacheKeepaliveJob {
+            session_key_hash: updated.session_key_hash.clone(),
+            generation: updated.generation,
+            principal_id: updated.principal_id.clone(),
+            upstream_id: updated.upstream_id,
+            ttl: updated.ttl,
+            cache_anchor_at_unix_secs: updated.cache_anchor_at_unix_secs,
+            expires_at_unix_secs: updated.expires_at_unix_secs,
+            refresh_delay_secs: job.refresh_delay_secs,
+            max_refreshes: job.max_refreshes,
+            max_total_duration_secs: job.max_total_duration_secs,
+            traceparent: job.traceparent,
+        };
+        let idempotency_key = next_job.idempotency_key();
+        let task = cc_lb_scheduler::worker::SchedulerPushTask {
+            args: AdaptiveJob::CacheKeepalive(next_job),
+            idempotency_key: Some(idempotency_key),
+            run_at_unix_secs: Some(updated.run_at_unix_secs),
+            max_attempts: Some(1),
+        };
+        match self
+            .cache_keepalive_pusher
+            .push_cache_keepalive_task(task)
+            .await
+        {
+            Ok(()) | Err(cc_lb_scheduler::error::SchedulerError::Conflict(_)) => {
+                CacheKeepaliveSessionStore::mark_cache_keepalive_enqueued(
+                    self.storage.as_ref(),
+                    &updated.session_key_hash,
+                    updated.generation,
+                    now,
+                )
+                .await
+                .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?;
+                Ok(JobOutcome::Done)
+            }
+            Err(error) => {
+                CacheKeepaliveSessionStore::mark_cache_keepalive_terminal(
+                    self.storage.as_ref(),
+                    &updated.session_key_hash,
+                    updated.generation,
+                    CacheKeepaliveTerminalReason::DispatchError,
+                    now,
+                )
+                .await
+                .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn mark_cache_keepalive_terminal(
+        &self,
+        job: &CacheKeepaliveJob,
+        reason: CacheKeepaliveTerminalReason,
+    ) -> SchedulerResult<bool> {
+        CacheKeepaliveSessionStore::mark_cache_keepalive_terminal(
+            self.storage.as_ref(),
+            &job.session_key_hash,
+            job.generation,
+            reason,
+            unix_secs(self.clock.now()),
+        )
+        .await
+        .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))
+    }
+}

@@ -111,7 +111,7 @@ async fn lifecycle_schedules_and_fires_keepalive_through_current_proxy_path() {
     let calls = signer_log.lock().expect("signer log lock");
     assert!(calls.iter().any(|call| {
         call.label == "rotated"
-            && call.downstream_api_key == "sk-cclb-downstream"
+            && call.downstream_api_key.is_empty()
             && call.upstream_name == "primary"
     }));
 }

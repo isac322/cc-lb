@@ -1,6 +1,8 @@
 use bytes::Bytes;
-use http::{HeaderMap, Method};
+use http::{HeaderMap, HeaderName, HeaderValue, Method};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::fmt;
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
@@ -15,6 +17,12 @@ pub enum SnapshotError {
     InvalidJson,
     #[error("shaped body missing top-level object")]
     NotAnObject,
+    #[error("persisted snapshot contains invalid url")]
+    InvalidUrl,
+    #[error("persisted snapshot contains invalid method")]
+    InvalidMethod,
+    #[error("persisted snapshot contains invalid header")]
+    InvalidHeader,
 }
 
 #[derive(Clone, Debug)]
@@ -25,6 +33,50 @@ pub struct RequestSnapshot {
     pub body: Bytes,
     pub upstream_id: Uuid,
     pub ttl: CacheTtl,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PersistedRequestSnapshot {
+    pub url: String,
+    pub method: String,
+    pub headers: Vec<PersistedHeader>,
+    pub body: Vec<u8>,
+    pub upstream_id: Uuid,
+    pub ttl: CacheTtl,
+}
+
+impl fmt::Debug for PersistedRequestSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PersistedRequestSnapshot")
+            .field("url", &self.url)
+            .field("method", &self.method)
+            .field("headers", &self.headers)
+            .field(
+                "body",
+                &format_args!("<{} bytes redacted>", self.body.len()),
+            )
+            .field("upstream_id", &self.upstream_id)
+            .field("ttl", &self.ttl)
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PersistedHeader {
+    pub name: String,
+    pub value: Vec<u8>,
+}
+
+impl fmt::Debug for PersistedHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PersistedHeader")
+            .field("name", &self.name)
+            .field(
+                "value",
+                &format_args!("<{} bytes redacted>", self.value.len()),
+            )
+            .finish()
+    }
 }
 
 impl RequestSnapshot {
@@ -64,6 +116,49 @@ impl RequestSnapshot {
         transform_for_keepalive(map);
         let serialized = serde_json::to_vec(&value).map_err(|_| SnapshotError::InvalidJson)?;
         Ok(Bytes::from(serialized))
+    }
+
+    pub fn to_persisted(&self) -> PersistedRequestSnapshot {
+        PersistedRequestSnapshot {
+            url: self.url.to_string(),
+            method: self.method.as_str().to_owned(),
+            headers: self
+                .headers
+                .iter()
+                .map(|(name, value)| PersistedHeader {
+                    name: name.as_str().to_owned(),
+                    value: value.as_bytes().to_vec(),
+                })
+                .collect(),
+            body: self.body.to_vec(),
+            upstream_id: self.upstream_id,
+            ttl: self.ttl,
+        }
+    }
+
+    pub fn from_persisted(persisted: PersistedRequestSnapshot) -> Result<Self, SnapshotError> {
+        let url = Url::parse(&persisted.url).map_err(|_| SnapshotError::InvalidUrl)?;
+        let method = persisted
+            .method
+            .parse::<Method>()
+            .map_err(|_| SnapshotError::InvalidMethod)?;
+        let mut headers = HeaderMap::new();
+        for header in persisted.headers {
+            let name = HeaderName::from_bytes(header.name.as_bytes())
+                .map_err(|_| SnapshotError::InvalidHeader)?;
+            let value =
+                HeaderValue::from_bytes(&header.value).map_err(|_| SnapshotError::InvalidHeader)?;
+            headers.insert(name, value);
+        }
+        Self::capture(
+            url,
+            method,
+            headers,
+            Bytes::from(persisted.body),
+            persisted.upstream_id,
+            persisted.ttl,
+            usize::MAX,
+        )
     }
 }
 
@@ -190,5 +285,49 @@ mod tests {
             round.get("tool_choice").unwrap().get("type").unwrap(),
             &Value::String("auto".into())
         );
+    }
+
+    #[test]
+    fn persisted_snapshot_round_trips_without_debug_auth_material() {
+        let mut headers = HeaderMap::new();
+        headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+        let snapshot = RequestSnapshot {
+            url: "https://api.anthropic.com/v1/messages".parse().unwrap(),
+            method: Method::POST,
+            headers,
+            body: Bytes::from_static(b"{\"model\":\"m\",\"max_tokens\":1}"),
+            upstream_id: Uuid::from_u128(7),
+            ttl: CacheTtl::Ttl5m,
+        };
+
+        let round = RequestSnapshot::from_persisted(snapshot.to_persisted()).unwrap();
+
+        assert_eq!(round.url, snapshot.url);
+        assert_eq!(round.method, snapshot.method);
+        assert_eq!(round.headers, snapshot.headers);
+        assert_eq!(round.body, snapshot.body);
+        assert_eq!(round.upstream_id, snapshot.upstream_id);
+        assert_eq!(round.ttl, snapshot.ttl);
+    }
+
+    #[test]
+    fn persisted_snapshot_debug_redacts_body_and_header_values() {
+        let snapshot = PersistedRequestSnapshot {
+            url: "https://api.anthropic.com/v1/messages".to_owned(),
+            method: "POST".to_owned(),
+            headers: vec![PersistedHeader {
+                name: "anthropic-beta".to_owned(),
+                value: b"secret-beta-value".to_vec(),
+            }],
+            body: b"plaintext prompt".to_vec(),
+            upstream_id: Uuid::from_u128(7),
+            ttl: CacheTtl::Ttl5m,
+        };
+
+        let debug = format!("{snapshot:?}");
+
+        assert!(!debug.contains("plaintext prompt"));
+        assert!(!debug.contains("secret-beta-value"));
+        assert!(debug.contains("redacted"));
     }
 }

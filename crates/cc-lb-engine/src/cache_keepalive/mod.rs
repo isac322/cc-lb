@@ -18,11 +18,15 @@ mod session_key;
 
 pub use classifier::{HeuristicClassifier, TurnDecision};
 pub use dispatcher::AnthropicKeepaliveDispatcher;
+pub use lifecycle_glue::{
+    CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
+    CacheKeepaliveEnqueuer,
+};
 pub(crate) use lifecycle_glue::{
     LifecycleKeepalive, LifecycleKeepaliveContext, StreamingKeepaliveResponse,
 };
 pub use metrics::CancelReason;
 pub(crate) use metrics::record_cancelled;
-pub use request_snapshot::{RequestSnapshot, SnapshotError};
-pub use scheduler::{KeepaliveDispatcher, KeepaliveScheduler, ScheduleParams};
+pub use request_snapshot::{PersistedRequestSnapshot, RequestSnapshot, SnapshotError};
+pub use scheduler::{DispatchOutcome, KeepaliveDispatcher, KeepaliveScheduler, ScheduleParams};
 pub use session_key::SessionKey;

@@ -30,7 +30,7 @@ use cc_lb_engine::{
         builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
         limit_engine::LimitEngine, principal_view::PrincipalView,
     },
-    cache_keepalive::{AnthropicKeepaliveDispatcher, KeepaliveScheduler},
+    cache_keepalive::AnthropicKeepaliveDispatcher,
     make_default_dispatcher, spawn_audit_writer, start_subscription_quota_writer,
     start_upstream_rate_limit_writer,
 };
@@ -1310,11 +1310,21 @@ async fn build_app_with_storage_inner(
     > = Arc::new(tokio::sync::Mutex::new(
         lifecycle_prompt_cache_observation_subscriber_handle,
     ));
-    let keepalive_scheduler = KeepaliveScheduler::new(Arc::new(AnthropicKeepaliveDispatcher::new(
+    let keepalive_dispatcher = Arc::new(AnthropicKeepaliveDispatcher::new(
         Arc::clone(&dynamic_view_holder),
         Arc::clone(&stores.upstreams),
         Arc::clone(&dispatcher),
-    )));
+    ));
+    let cache_keepalive_enqueuer = Arc::new(
+        crate::cache_keepalive_enqueuer::ServerCacheKeepaliveEnqueuer::new(
+            crate::cache_keepalive_enqueuer::ServerCacheKeepaliveEnqueuerDeps {
+                storage: Arc::clone(&storage),
+                pusher: Arc::new(opened_scheduler.backend.clone()),
+                aead: Arc::clone(&aead),
+                clock: clock.clone(),
+            },
+        ),
+    );
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
         dynamic_view_holder.clone(),
@@ -1322,7 +1332,7 @@ async fn build_app_with_storage_inner(
         lifecycle_config,
         clock.clone(),
     );
-    lifecycle = lifecycle.with_keepalive_scheduler(Arc::clone(&keepalive_scheduler));
+    lifecycle = lifecycle.with_cache_keepalive_enqueuer(cache_keepalive_enqueuer);
     lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
     lifecycle = lifecycle.with_limit_cost_estimator(Arc::new(PricingLimitCostEstimator {
         catalog: price_catalog.clone(),
@@ -1460,20 +1470,6 @@ async fn build_app_with_storage_inner(
         });
     }
     {
-        let keepalive_scheduler = Arc::clone(&keepalive_scheduler);
-        signals.add_shutdown_hook(move || {
-            let keepalive_scheduler = Arc::clone(&keepalive_scheduler);
-            async move {
-                let handle = tokio::spawn(async move {
-                    keepalive_scheduler.shutdown().await;
-                });
-                if let Err(error) = handle.await {
-                    tracing::warn!(error = %error, "cache keepalive scheduler shutdown task failed");
-                }
-            }
-        });
-    }
-    {
         let rate_limit_header_slot = lifecycle_rate_limit_header_subscriber_slot.clone();
         signals.add_shutdown_hook(move || {
             let rate_limit_header_slot = rate_limit_header_slot.clone();
@@ -1574,6 +1570,7 @@ async fn build_app_with_storage_inner(
     let scheduler_ctx = crate::scheduler_dispatch::build_scheduler_ctx(
         crate::scheduler_dispatch::SchedulerDispatchDeps {
             backend: opened_scheduler.backend.clone(),
+            cache_keepalive_pusher: Arc::new(opened_scheduler.backend.clone()),
             config: config.clone(),
             storage: storage.clone(),
             stores: stores.clone(),
@@ -1588,6 +1585,7 @@ async fn build_app_with_storage_inner(
             replica_id: scheduler_replica_id,
             price_catalog: price_catalog.clone(),
             dynamic_view: dynamic_view_holder.clone(),
+            keepalive_dispatcher,
             clock: clock.clone(),
         },
     );
@@ -1780,6 +1778,7 @@ impl cc_lb_engine::MetadataRefreshEnqueue for ServerMetadataRefreshEnqueue {
             args: cc_lb_scheduler::worker::AdaptiveJob::MetadataRefresh(job),
             idempotency_key: Some(idempotency_key),
             run_at_unix_secs: None,
+            max_attempts: None,
         };
         match self.scheduler_backend.push_adaptive_task(task).await {
             Ok(()) | Err(cc_lb_scheduler::error::SchedulerError::Conflict(_)) => Ok(()),

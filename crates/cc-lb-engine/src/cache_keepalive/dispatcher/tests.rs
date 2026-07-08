@@ -4,16 +4,23 @@ use super::*;
 fn classifies_successful_cache_read_as_hit() {
     let body = br#"{"content":[],"stop_reason":"max_tokens","usage":{"cache_read_input_tokens":1234,"input_tokens":0,"output_tokens":0}}"#;
 
-    let outcome = classify_success_body(body);
+    let outcome = classify_success_body(body, Duration::from_secs(2));
 
-    assert!(matches!(outcome, DispatchOutcome::CacheHit));
+    match outcome {
+        DispatchOutcome::CacheHit { cache_anchor_age } => {
+            assert_eq!(cache_anchor_age, Duration::from_secs(2));
+        }
+        DispatchOutcome::CacheMiss
+        | DispatchOutcome::UnsupportedProvider(_)
+        | DispatchOutcome::Error(_) => panic!("expected cache hit"),
+    }
 }
 
 #[test]
 fn classifies_zero_cache_read_as_miss() {
     let body = br#"{"content":[],"stop_reason":"max_tokens","usage":{"cache_read_input_tokens":0,"input_tokens":0,"output_tokens":0}}"#;
 
-    let outcome = classify_success_body(body);
+    let outcome = classify_success_body(body, Duration::ZERO);
 
     assert!(matches!(outcome, DispatchOutcome::CacheMiss));
 }
@@ -22,7 +29,7 @@ fn classifies_zero_cache_read_as_miss() {
 fn classifies_missing_usage_as_miss() {
     let body = br#"{"content":[],"stop_reason":"max_tokens"}"#;
 
-    let outcome = classify_success_body(body);
+    let outcome = classify_success_body(body, Duration::ZERO);
 
     assert!(matches!(outcome, DispatchOutcome::CacheMiss));
 }
@@ -39,6 +46,18 @@ fn api_key_upstream_without_stored_key_is_not_keepalive_safe() {
 
     assert!(error.contains("AnthropicApiKey"));
     assert!(error.contains("storage-backed signing"));
+}
+
+#[test]
+fn unsupported_upstream_maps_to_terminal_business_outcome() {
+    let error = "unsupported".to_owned();
+
+    let outcome = DispatchOutcome::UnsupportedProvider(error.clone());
+
+    assert!(matches!(
+        outcome,
+        DispatchOutcome::UnsupportedProvider(reason) if reason == error
+    ));
 }
 
 #[test]

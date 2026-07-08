@@ -2,9 +2,9 @@
 
 Feature-gated per principal. When enabled, cc-lb tracks sessions that carry
 an Anthropic prompt-cache `cache_control` breakpoint, classifies whether the
-agent is still executing or waiting for the user, and periodically fires a
-synthetic `max_tokens: 0` request to keep the cache prefix warm before its
-TTL expires.
+agent is still executing or waiting for the user, and enqueues durable
+`CacheKeepaliveJob` work through Apalis to fire a synthetic `max_tokens: 0`
+request before the cache TTL expires.
 
 Design references:
 - [RFC-0003](./rfc/0003-prompt-cache-keepalive.md) — full architecture.
@@ -20,9 +20,46 @@ are skipped at fire time and the session is cancelled with `reason=upstream_gone
 - **Bedrock, Vertex:** `max_tokens: 0` behavior is unverified.
 - **OpenRouter:** schema requires `max_tokens >= 1`.
 
-Nothing runs — no snapshot, no schedule — for principals whose
+Nothing runs - no snapshot, no schedule - for principals whose
 `cache_keepalive.enabled` is `false` or unset, or for requests that carry
 no `cache_control` breakpoint.
+
+## Scheduler and storage model
+
+Apalis is the only timer/worker transport for GA. The durable session fence is
+the `cache_keepalive_sessions` table, not a second scheduler. Each eligible
+real response writes a new generation and enqueues a lightweight
+`CacheKeepaliveJob` with idempotency key
+`cache_keepalive:<session_key_hash>:<generation>`. A worker checks the stored
+generation before dispatch and again through conditional post-dispatch updates,
+so old queued/running work becomes a stale no-op.
+
+Scheduling is anchored to cache creation / response begin:
+
+- Streaming responses use the Anthropic `message_start` event timestamp.
+- Non-streaming responses use the first upstream response/body event when
+  available, with request dispatch time as the fallback.
+- `run_at = cache_anchor_at + ttl - lead_time`; with the default 5-minute TTL
+  and 30-second lead, the job fires 270 seconds after `message_start`, not 270
+  seconds after final response completion.
+
+Successful keepalive hits preserve the original duration anchor, increment
+`refresh_count`, record the synthetic hit's new response-begin/cache anchor,
+and enqueue the next generation. New real requests reset `refresh_count` and
+`first_scheduled_at`.
+
+Prompt snapshots are stored only as AEAD ciphertext in
+`cache_keepalive_sessions.encrypted_payload`. The AAD binds principal id,
+session hash, upstream id, generation, and the cache-keepalive snapshot version
+so ciphertext cannot be replayed across sessions or generations. Downstream
+`Authorization` and `x-api-key` headers are never persisted; the worker signs at
+fire time from storage-backed upstream credentials.
+
+SQLite is supported for local development, CI, and bounded single-node use.
+Production multi-replica / HA deployments should use Postgres so Apalis claims
+and the generation fence are visible to every replica. Redis is a no-go for this
+feature until a separate design proves a safe SQL fence / signing / retention
+boundary.
 
 ## Configuration
 
@@ -33,8 +70,8 @@ defaults; every field is optional except `enabled`.
 | Field | Default | Meaning |
 |---|---|---|
 | `enabled` | required | Master switch on this principal. |
-| `refresh_lead_time_5m_secs` | `30` | Fire 30 s before the 5-minute TTL expires. Schedule = 4m30s after last real request. |
-| `refresh_lead_time_1h_secs` | `300` | Fire 5 minutes before the 1-hour TTL expires. Schedule = 55m after last real request. |
+| `refresh_lead_time_5m_secs` | `30` | Fire 30 s before the 5-minute TTL expires. Schedule = 4m30s after `message_start` / response begin. |
+| `refresh_lead_time_1h_secs` | `300` | Fire 5 minutes before the 1-hour TTL expires. Schedule = 55m after `message_start` / response begin. |
 | `max_refreshes_per_session` | `12` | Hard cap on keep-alive fires per session. |
 | `max_total_duration_secs` | `14400` (4 h) | Wall-clock cap from first schedule. |
 | `snapshot_max_bytes` | `524288` (512 KiB) | Shaped body larger than this is not tracked. |
@@ -63,8 +100,10 @@ Roo, Aider, Continue, OpenCode, OpenHands, and Cursor:
    for one week. False-positive fires (miss + AgentInTurn) cost roughly
    the input-token price of one prefix per fire.
 4. **Phase 3 — general availability.** Enable on remaining principals as
-   operators opt in. Keep an eye on `cc_lb_cache_keepalive_active_sessions`
-   per principal for capacity planning.
+   operators opt in. GA assumes durable SQLite/Postgres storage is enabled;
+   the old no-DB-persistence and cross-replica non-goals apply only to the
+   pre-Apalis prototype. Keep an eye on
+   `cc_lb_cache_keepalive_active_sessions` per principal for capacity planning.
 
 ## Metrics
 
@@ -74,7 +113,8 @@ Prometheus surface:
   fire was queued. `ttl` is `"5m"` or `"1h"`.
 - `cc_lb_cache_keepalive_fired_total{principal_id, ttl, result}` — a
   keep-alive fire was dispatched. `result` is `"hit"` (cache read
-  observed), `"miss"` (no cache read), or `"error"` (transport / 4xx / 5xx).
+  observed), `"miss"` (no cache read), `"error"` (transport / 4xx / 5xx),
+  `"stale"`, `"noop"`, or `"decrypt_failed"`.
 - `cc_lb_cache_keepalive_cancelled_total{principal_id, reason}` — a
   session was torn down. `reason` values:
   - `new_request` — a fresh real request superseded the pending
@@ -169,6 +209,14 @@ upstream/miss error, or a subsequent real request classified as
 proportionally as sessions exit; expect it to reach zero within
 `max_total_duration_secs` in the worst case, and much faster in
 practice.
+
+Cleanup removes expired sessions, terminal keepalive Apalis rows, and stale
+old `Pending` keepalive rows. It never deletes `Queued` or `Running` rows;
+generation idempotency and worker pre/post checks make old active work safe
+when it eventually runs. `CacheKeepaliveJob` rows are enqueued with
+`max_attempts=1`, and business outcomes such as miss, stale, decrypt failure,
+unsupported provider, and dispatch error are recorded as terminal/noop results
+rather than retried by Apalis.
 
 ## Runbook: session isn't being kept warm
 

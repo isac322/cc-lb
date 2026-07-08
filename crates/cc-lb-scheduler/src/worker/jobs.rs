@@ -2,6 +2,7 @@ use apalis_core::task::Task;
 use serde::{Deserialize, Serialize};
 
 use crate::jobs::apalis_housekeeping::ApalisHousekeepingJob;
+use crate::jobs::cache_keepalive::CacheKeepaliveJob;
 use crate::jobs::compat::AnthropicCompatRefreshJob;
 use crate::jobs::metadata_refresh::MetadataRefreshJob;
 use crate::jobs::oauth_refresh::OAuthRefreshJob;
@@ -24,6 +25,7 @@ pub enum AdaptiveJob {
     #[serde(rename = "oauth_refresh", alias = "o_auth_refresh")]
     OAuthRefresh(OAuthRefreshJob),
     MetadataRefresh(MetadataRefreshJob),
+    CacheKeepalive(CacheKeepaliveJob),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -69,6 +71,7 @@ impl AdaptiveJob {
             Self::Warmup(_) => "warmup",
             Self::OAuthRefresh(_) => "oauth_refresh",
             Self::MetadataRefresh(_) => "metadata_refresh",
+            Self::CacheKeepalive(_) => "cache_keepalive",
         }
     }
 }
@@ -79,6 +82,7 @@ impl TraceparentCarrier for AdaptiveJob {
             Self::Warmup(_) => None,
             Self::OAuthRefresh(job) => job.traceparent(),
             Self::MetadataRefresh(job) => job.traceparent(),
+            Self::CacheKeepalive(job) => job.traceparent(),
         }
     }
 
@@ -87,6 +91,7 @@ impl TraceparentCarrier for AdaptiveJob {
             Self::Warmup(_) => {}
             Self::OAuthRefresh(job) => job.set_traceparent(traceparent),
             Self::MetadataRefresh(job) => job.set_traceparent(traceparent),
+            Self::CacheKeepalive(job) => job.set_traceparent(traceparent),
         }
     }
 }

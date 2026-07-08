@@ -2,6 +2,7 @@
 
 pub mod anthropic_compatibility_kv;
 pub mod cache_keepalive;
+pub mod cache_keepalive_sessions;
 pub mod error;
 pub mod organization_metadata;
 pub mod plan_tiers;
@@ -27,6 +28,7 @@ pub use anthropic_compatibility_kv::*;
 pub use cache_keepalive::{
     CacheKeepaliveConfig, CacheTtl, ClassifierConfig, JudgeResponseFormat, LlmJudgeConfig,
 };
+pub use cache_keepalive_sessions::*;
 
 pub use error::{PluginChainConflictReason, StorageError, StorageResult};
 pub use organization_metadata::*;

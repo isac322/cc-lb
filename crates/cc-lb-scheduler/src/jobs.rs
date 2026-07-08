@@ -1,6 +1,7 @@
 //! Job definitions and queue management.
 
 pub mod apalis_housekeeping;
+pub mod cache_keepalive;
 pub mod compat;
 pub mod metadata_refresh;
 pub mod oauth_refresh;

@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -76,12 +76,16 @@ impl AnthropicKeepaliveDispatcher {
             .map_err(|source| source.to_string())
     }
 
-    async fn dispatch_signed(&self, signed: SignedRequest) -> Result<(StatusCode, Bytes), String> {
+    async fn dispatch_signed(
+        &self,
+        signed: SignedRequest,
+    ) -> Result<(StatusCode, Bytes, Duration), String> {
         let response = self
             .http_client
             .dispatch(signed)
             .await
             .map_err(|source| source.to_string())?;
+        let cache_anchor_at = Instant::now();
         let status = response.status();
         let body = response
             .into_body()
@@ -89,7 +93,7 @@ impl AnthropicKeepaliveDispatcher {
             .await
             .map_err(|source| source.to_string())?
             .to_bytes();
-        Ok((status, body))
+        Ok((status, body, cache_anchor_at.elapsed()))
     }
 }
 
@@ -104,7 +108,7 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
             Err(source) => return DispatchOutcome::Error(source.to_string()),
         };
         if let Err(error) = keepalive_upstream_supported(&upstream) {
-            return DispatchOutcome::Error(error);
+            return DispatchOutcome::UnsupportedProvider(error);
         }
 
         let signed = match self.signed_keepalive_request(snapshot, &upstream).await {
@@ -113,8 +117,10 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
         };
 
         match tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await {
-            Ok(Ok((StatusCode::OK, body))) => classify_success_body(&body),
-            Ok(Ok((status, body))) => {
+            Ok(Ok((StatusCode::OK, body, cache_anchor_age))) => {
+                classify_success_body(&body, cache_anchor_age)
+            }
+            Ok(Ok((status, body, _))) => {
                 DispatchOutcome::Error(format!("status={} body={}", status, body_prefix(&body)))
             }
             Ok(Err(source)) => DispatchOutcome::Error(source),
@@ -237,7 +243,7 @@ struct KeepaliveResponseBody {
     usage: Option<KeepaliveResponseUsage>,
 }
 
-fn classify_success_body(body: &[u8]) -> DispatchOutcome {
+fn classify_success_body(body: &[u8], cache_anchor_age: Duration) -> DispatchOutcome {
     match sonic_rs::from_slice::<KeepaliveResponseBody>(body) {
         Ok(parsed)
             if parsed
@@ -245,7 +251,7 @@ fn classify_success_body(body: &[u8]) -> DispatchOutcome {
                 .as_ref()
                 .is_some_and(|usage| usage.cache_read_input_tokens > 0) =>
         {
-            DispatchOutcome::CacheHit
+            DispatchOutcome::CacheHit { cache_anchor_age }
         }
         Ok(_) => DispatchOutcome::CacheMiss,
         Err(source) => DispatchOutcome::Error(source.to_string()),
