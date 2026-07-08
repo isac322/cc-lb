@@ -52,6 +52,19 @@ pub struct CacheEntry {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PromptCacheObservationUpsert {
+    pub upstream_id: Uuid,
+    pub canonical_model: String,
+    pub prefix_hash: String,
+    pub ttl_class: TtlClass,
+    pub expires_at_unix_secs: u64,
+    pub last_observed_at_unix_secs: u64,
+    pub prefix_content_block_index: u32,
+    pub estimated_prefix_tokens: u64,
+    pub token_estimate_source: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ThreadUsageEntry {
     predicted_cache_read_tokens: u32,
     expires_at_unix_secs: u64,
@@ -106,46 +119,48 @@ impl PromptCacheObservationCache {
                 if record.hash_schema_version != HASH_SCHEMA_VERSION {
                     continue;
                 }
-                self.upsert_observation(
-                    record.upstream_id,
-                    record.canonical_model_id,
-                    record.v3_prefix_key,
-                    ttl_class_from_storage(record.ttl_class),
-                    record.expires_at_unix_secs,
-                    record.last_observed_at_unix_secs,
-                    record.prefix_content_block_index,
-                    record.estimated_prefix_tokens,
-                    record.token_estimate_source,
-                );
+                self.upsert_observation(PromptCacheObservationUpsert {
+                    upstream_id: record.upstream_id,
+                    canonical_model: record.canonical_model_id,
+                    prefix_hash: record.v3_prefix_key,
+                    ttl_class: ttl_class_from_storage(record.ttl_class),
+                    expires_at_unix_secs: record.expires_at_unix_secs,
+                    last_observed_at_unix_secs: record.last_observed_at_unix_secs,
+                    prefix_content_block_index: record.prefix_content_block_index,
+                    estimated_prefix_tokens: record.estimated_prefix_tokens,
+                    token_estimate_source: record.token_estimate_source,
+                });
                 loaded += 1;
             }
         }
         Ok(loaded)
     }
 
-    pub fn upsert_observation(
-        &self,
-        upstream_id: Uuid,
-        canonical_model: String,
-        prefix_hash: String,
-        ttl_class: TtlClass,
-        expires_at_unix_secs: u64,
-        now_unix_secs: u64,
-        prefix_content_block_index: u32,
-        estimated_prefix_tokens: u64,
-        token_estimate_source: String,
-    ) {
+    pub fn upsert_observation(&self, observation: PromptCacheObservationUpsert) {
+        let PromptCacheObservationUpsert {
+            upstream_id,
+            canonical_model,
+            prefix_hash,
+            ttl_class,
+            expires_at_unix_secs,
+            last_observed_at_unix_secs,
+            prefix_content_block_index,
+            estimated_prefix_tokens,
+            token_estimate_source,
+        } = observation;
         let mut guard = self.entries.write();
         let entries = guard.entry(upstream_id).or_default();
         let key = (canonical_model, prefix_hash, ttl_class);
         let last_persisted_at_unix_secs = entries
             .get(&key)
-            .map_or(now_unix_secs, |entry| entry.last_persisted_at_unix_secs);
+            .map_or(last_observed_at_unix_secs, |entry| {
+                entry.last_persisted_at_unix_secs
+            });
         entries.insert(
             key,
             CacheEntry {
                 expires_at_unix_secs,
-                last_observed_at_unix_secs: now_unix_secs,
+                last_observed_at_unix_secs,
                 ttl_class,
                 last_persisted_at_unix_secs,
                 prefix_content_block_index,
@@ -342,15 +357,17 @@ impl PromptCacheObservationCacheLike for PromptCacheObservationCache {
     ) {
         Self::upsert_observation(
             self,
-            upstream_id,
-            canonical_model,
-            prefix_hash,
-            ttl_class,
-            expires_at_unix_secs,
-            now_unix_secs,
-            0,
-            0,
-            "unknown".to_owned(),
+            PromptCacheObservationUpsert {
+                upstream_id,
+                canonical_model,
+                prefix_hash,
+                ttl_class,
+                expires_at_unix_secs,
+                last_observed_at_unix_secs: now_unix_secs,
+                prefix_content_block_index: 0,
+                estimated_prefix_tokens: 0,
+                token_estimate_source: "unknown".to_owned(),
+            },
         );
     }
 
@@ -449,17 +466,17 @@ pub(crate) mod tests {
         expires_at_unix_secs: u64,
         now_unix_secs: u64,
     ) {
-        cache.upsert_observation(
+        cache.upsert_observation(PromptCacheObservationUpsert {
             upstream_id,
-            MODEL.to_owned(),
-            prefix_hash.to_owned(),
+            canonical_model: MODEL.to_owned(),
+            prefix_hash: prefix_hash.to_owned(),
             ttl_class,
             expires_at_unix_secs,
-            now_unix_secs,
-            0,
-            0,
-            V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
-        );
+            last_observed_at_unix_secs: now_unix_secs,
+            prefix_content_block_index: 0,
+            estimated_prefix_tokens: 0,
+            token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+        });
     }
 
     #[derive(Clone, Default)]
