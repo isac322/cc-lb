@@ -64,11 +64,6 @@ expression: "SchedulerConfig::default()"
       "interval_secs": 600,
       "jitter_secs": 30
     },
-    "quota_gc": {
-      "enabled": true,
-      "interval_secs": 3600,
-      "jitter_secs": 30
-    },
     "usage_prune": {
       "enabled": true,
       "interval_secs": 86400,

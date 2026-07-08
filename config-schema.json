@@ -254,11 +254,6 @@
             "interval_secs": 600,
             "jitter_secs": 30
           },
-          "quota_gc": {
-            "enabled": true,
-            "interval_secs": 3600,
-            "jitter_secs": 30
-          },
           "usage_prune": {
             "enabled": true,
             "interval_secs": 86400,
@@ -317,8 +312,6 @@
       "$ref": "#/$defs/SubscriptionQuotaConfig",
       "default": {
         "dedup_elapsed_override_secs": 30,
-        "gc_batch_size": 10000,
-        "retention_days": 30,
         "routing_max_staleness_secs": 1800,
         "writer_batch_max_records": 256,
         "writer_channel_capacity": 4096,
@@ -1086,11 +1079,6 @@
               "interval_secs": 600,
               "jitter_secs": 30
             },
-            "quota_gc": {
-              "enabled": true,
-              "interval_secs": 3600,
-              "jitter_secs": 30
-            },
             "usage_prune": {
               "enabled": true,
               "interval_secs": 86400,
@@ -1331,18 +1319,6 @@
       "type": "object",
       "properties": {
         "dedup_elapsed_override_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 30,
-          "minimum": 0
-        },
-        "gc_batch_size": {
-          "type": "integer",
-          "format": "uint32",
-          "default": 10000,
-          "minimum": 0
-        },
-        "retention_days": {
           "type": "integer",
           "format": "uint64",
           "default": 30,

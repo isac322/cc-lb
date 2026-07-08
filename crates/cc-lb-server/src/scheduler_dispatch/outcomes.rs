@@ -3,7 +3,6 @@ use cc_lb_scheduler::jobs::apalis_housekeeping::ApalisHousekeepingJobResult;
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJobOutcome;
 use cc_lb_scheduler::jobs::price_catalog::PriceCatalogRefreshJobResult;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeJobResult;
-use cc_lb_scheduler::jobs::quota_gc::SubscriptionQuotaGcJobResult;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneJobResult;
 use cc_lb_scheduler::jobs::usage_rollup::UsageRollupResult;
 use cc_lb_scheduler::retry::JobOutcome;
@@ -27,15 +26,6 @@ pub(super) fn usage_prune_outcome(result: UsagePruneJobResult) -> SchedulerResul
     Ok(match result {
         UsagePruneJobResult::Done { result: _ } => JobOutcome::Done,
         UsagePruneJobResult::Skip => JobOutcome::Skip,
-    })
-}
-
-pub(super) fn quota_gc_outcome(
-    result: SubscriptionQuotaGcJobResult,
-) -> SchedulerResult<JobOutcome> {
-    Ok(match result {
-        SubscriptionQuotaGcJobResult::Done { .. } => JobOutcome::Done,
-        SubscriptionQuotaGcJobResult::Retry { delay, error: _ } => JobOutcome::Retry { delay },
     })
 }
 

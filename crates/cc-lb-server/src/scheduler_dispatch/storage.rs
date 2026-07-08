@@ -4,7 +4,6 @@ use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshUpstreams;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeStore;
-use cc_lb_scheduler::jobs::quota_gc::SubscriptionQuotaGcStore;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneRunner;
 use cc_lb_storage_api::{
     PromptCacheObservationStore, Storage, StorageError, StorageResult, UpstreamRecord,
@@ -45,21 +44,6 @@ impl OAuthRefreshUpstreams for StorageHandle {
         UpstreamStore::read_oauth_token_generation(self.storage.as_ref(), id)
             .await
             .map_err(storage_scheduler_error)
-    }
-}
-
-impl SubscriptionQuotaGcStore for StorageHandle {
-    async fn delete_subscription_quota_before(
-        &self,
-        cutoff_unix_millis: u64,
-        batch_size: u32,
-    ) -> StorageResult<u64> {
-        cc_lb_storage_api::UpstreamSubscriptionQuotaStore::delete_subscription_quota_before(
-            self.storage.as_ref(),
-            cutoff_unix_millis,
-            batch_size,
-        )
-        .await
     }
 }
 

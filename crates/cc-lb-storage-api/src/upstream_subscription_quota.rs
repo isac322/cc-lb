@@ -310,14 +310,4 @@ pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
         &self,
         query: SubscriptionQuotaSeriesQuery,
     ) -> StorageResult<Vec<SubscriptionQuotaSeries>>;
-
-    /// Deletes raw observations whose `observed_at_unix_millis` is strictly
-    /// less than `cutoff_unix_millis`. Returns the number of deleted rows.
-    /// The latest sidecar is NEVER deleted by this method, so routing
-    /// readers do not lose ground state when GC trims an inactive upstream.
-    async fn delete_subscription_quota_before(
-        &self,
-        cutoff_unix_millis: u64,
-        batch_size: u32,
-    ) -> StorageResult<u64>;
 }

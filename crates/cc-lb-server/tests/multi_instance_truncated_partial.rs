@@ -87,23 +87,29 @@ async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
             })
             .await
     });
+    // Each test run uses a unique NOTIFY channel so a concurrently-running sibling
+    // test's producer cannot deliver into this consumer over the shared Postgres
+    // database (Postgres NOTIFY broadcasts to every session listening on a channel).
+    let channel = format!("cc_lb_test_partial_{}", uuid::Uuid::now_v7().simple());
     let (producer_tx, producer_rx) = mpsc::channel(16);
     let (notifier_shutdown_tx, notifier_shutdown_rx) = watch::channel(false);
-    let notifier_task = PgNotifier::spawn(
+    let notifier_task = PgNotifier::spawn_with_channel(
         producer_pool.clone(),
         producer_rx,
         retention,
         producer_url,
+        channel.clone(),
         notifier_shutdown_rx,
     );
     let consumer_bus = Arc::new(InMemoryBus::new());
     let mut consumer_rx = consumer_bus.subscribe();
     let (listener_shutdown_tx, listener_shutdown_rx) = watch::channel(false);
-    let listener_task = PgListener::spawn(
+    let listener_task = PgListener::spawn_with_channel(
         consumer_pool.clone(),
         consumer_bus,
         reqwest::Client::new(),
         SecretString::new(consumer_token.to_owned().into()),
+        channel,
         listener_shutdown_rx,
     );
 
@@ -127,10 +133,12 @@ async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
 
     producer_tx.send(update).await?;
     wait_for_partial(&mut consumer_rx, &expected_event_id, expect_delivery).await?;
-    assert_eq!(
-        labeled_counter_value(handle, metric_name, metric_outcome),
-        before + 1.0
-    );
+    // The producer increments the counter only after its `pg_notify` await, which
+    // is not ordered against the consumer-side delivery `wait_for_partial` sees, so
+    // under scheduler starvation delivery can beat the increment. Poll to a bound;
+    // the assertion stays exact (precisely `before + 1.0`).
+    let observed = wait_for_counter(handle, metric_name, metric_outcome, before + 1.0).await;
+    assert_eq!(observed, before + 1.0);
 
     notifier_shutdown_tx.send(true)?;
     listener_shutdown_tx.send(true)?;
@@ -287,6 +295,22 @@ fn large_partial(name: &str) -> RequestEventPartial {
         input_tokens: Some(100),
         output_tokens: Some(25),
         ..small_partial(name)
+    }
+}
+
+async fn wait_for_counter(
+    handle: &PrometheusHandle,
+    name: &str,
+    outcome: &str,
+    expected: f64,
+) -> f64 {
+    let deadline = Instant::now() + RECEIVE_TIMEOUT;
+    loop {
+        let value = labeled_counter_value(handle, name, outcome);
+        if value >= expected || Instant::now() >= deadline {
+            return value;
+        }
+        tokio::time::sleep(WARMUP_PROBE_INTERVAL).await;
     }
 }
 

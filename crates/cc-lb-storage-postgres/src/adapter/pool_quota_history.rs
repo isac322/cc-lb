@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord, StorageError,
-    StorageResult, SubscriptionQuotaWindow,
+    PoolQuotaContributorBlob, PoolQuotaHistoryStore, PoolQuotaSnapshotRecord,
+    PoolQuotaSnapshotSummaryRecord, StorageError, StorageResult, SubscriptionQuotaWindow,
 };
 use sqlx::Row;
 
@@ -135,6 +135,49 @@ impl PoolQuotaHistoryStore for PostgresStorage {
         Ok(out)
     }
 
+    async fn list_pool_quota_contributor_blobs_page(
+        &self,
+        after: Option<(i64, SubscriptionQuotaWindow)>,
+        limit: u32,
+    ) -> StorageResult<Vec<PoolQuotaContributorBlob>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut query = sqlx::query(
+            r#"SELECT snapshot_at_unix_secs, "quota_window", contributors_json
+                 FROM pool_subscription_quota_history_v1
+                WHERE "quota_window" IN ('5h', '7d')
+                  AND contributors_json IS NOT NULL
+                  AND ($1::BIGINT IS NULL OR snapshot_at_unix_secs > $2 OR (snapshot_at_unix_secs = $3 AND "quota_window" > $4))
+             ORDER BY snapshot_at_unix_secs ASC, "quota_window" ASC
+                LIMIT $5"#,
+        );
+        match after {
+            Some((snapshot_at_unix_secs, window)) => {
+                query = query
+                    .bind(snapshot_at_unix_secs)
+                    .bind(snapshot_at_unix_secs)
+                    .bind(snapshot_at_unix_secs)
+                    .bind(window.as_str());
+            }
+            None => {
+                query = query
+                    .bind(Option::<i64>::None)
+                    .bind(Option::<i64>::None)
+                    .bind(Option::<i64>::None)
+                    .bind(Option::<&str>::None);
+            }
+        }
+        query
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?
+            .into_iter()
+            .map(row_to_blob)
+            .collect()
+    }
+
     async fn list_latest_pool_quota_snapshot_summaries(
         &self,
         windows: &[SubscriptionQuotaWindow],
@@ -181,6 +224,25 @@ impl PoolQuotaHistoryStore for PostgresStorage {
         .map_err(map_sqlx_error)?;
         Ok(result.rows_affected())
     }
+}
+
+fn row_to_blob(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaContributorBlob> {
+    let window_text = row
+        .try_get::<String, _>("quota_window")
+        .map_err(map_sqlx_error)?;
+    let window =
+        SubscriptionQuotaWindow::from_str(&window_text).ok_or_else(|| StorageError::Corrupted {
+            message: format!("unknown quota_window in pool quota history: {window_text}"),
+        })?;
+    Ok(PoolQuotaContributorBlob {
+        snapshot_at_unix_secs: row
+            .try_get::<i64, _>("snapshot_at_unix_secs")
+            .map_err(map_sqlx_error)?,
+        window,
+        contributors_json: row
+            .try_get::<String, _>("contributors_json")
+            .map_err(map_sqlx_error)?,
+    })
 }
 
 fn row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaSnapshotRecord> {

@@ -266,6 +266,20 @@ pub trait MetaStore: Send + Sync {
     async fn killswitch_enabled(&self) -> StorageResult<bool>;
 
     async fn set_killswitch_enabled(&self, enabled: bool) -> StorageResult<()>;
+
+    async fn get_meta_value(&self, key: &str) -> StorageResult<Option<String>> {
+        let _ = key;
+        Err(StorageError::Fatal {
+            message: "get_meta_value is not implemented for this storage backend".to_owned(),
+        })
+    }
+
+    async fn put_meta_value(&self, key: &str, value: &str) -> StorageResult<()> {
+        let _ = (key, value);
+        Err(StorageError::Fatal {
+            message: "put_meta_value is not implemented for this storage backend".to_owned(),
+        })
+    }
 }
 
 #[async_trait]
@@ -281,6 +295,7 @@ pub trait PriceCatalogCache: Send + Sync {
 pub trait Storage:
     AuditStore
     + crate::plugin_registry::PluginRegistryStore
+    + crate::plan_tiers::PlanTierStore
     + crate::pool_quota_history::PoolQuotaHistoryStore
     + crate::principal::PrincipalStore
     + crate::upstream::UpstreamStore
@@ -309,6 +324,7 @@ pub trait Storage:
 impl<T> Storage for T where
     T: AuditStore
         + crate::plugin_registry::PluginRegistryStore
+        + crate::plan_tiers::PlanTierStore
         + crate::pool_quota_history::PoolQuotaHistoryStore
         + crate::principal::PrincipalStore
         + crate::upstream::UpstreamStore

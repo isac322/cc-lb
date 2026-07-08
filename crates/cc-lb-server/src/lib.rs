@@ -16,6 +16,8 @@ pub mod cli;
 pub mod drain;
 pub mod dynamic_view_builder;
 pub mod notify_listener;
+pub mod plan_tier_backfill;
+mod plan_tier_backfill_inference;
 pub mod preflight;
 pub mod prompt_cache_observation_cache;
 pub mod prompt_cache_observation_sink;

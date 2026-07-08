@@ -110,6 +110,26 @@ impl MetaStore for SqliteStorage {
 
         Ok(())
     }
+
+    async fn get_meta_value(&self, key: &str) -> StorageResult<Option<String>> {
+        sqlx::query_scalar("SELECT value FROM meta_v1 WHERE key = ?")
+            .bind(key)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(map_sqlx_error)
+    }
+
+    async fn put_meta_value(&self, key: &str, value: &str) -> StorageResult<()> {
+        sqlx::query(
+            "INSERT INTO meta_v1 (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(())
+    }
 }
 
 fn parse_backend_kind(value: &str) -> StorageResult<BackendKind> {
