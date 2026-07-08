@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS cache_keepalive_sessions (
     principal_id TEXT NOT NULL,
     upstream_id UUID NOT NULL,
     generation BIGINT NOT NULL,
-    refresh_count INTEGER NOT NULL,
+    refresh_count BIGINT NOT NULL,
     first_scheduled_at BIGINT NOT NULL,
     cache_anchor_at BIGINT NOT NULL,
     run_at BIGINT NOT NULL,

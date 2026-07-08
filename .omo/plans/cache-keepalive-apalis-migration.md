@@ -128,17 +128,17 @@ Wave 1 is storage foundation and can split SQLite/Postgres/store-trait work afte
   Commit: Y | `feat(storage-api): define durable cache keepalive session state`
 
 - [x] 2. Add SQLite migrations and store implementation
-  What to do / Must NOT do: Add SQLite migration `0042_cache_keepalive_sessions.sql` for `cache_keepalive_sessions` and, if using a side table, `cache_keepalive_payloads`. Implement the store operations using SQLite transactions and WAL-friendly short writes. Do not use network-filesystem assumptions; follow SQLite locking rules.
+  What to do / Must NOT do: Add SQLite migration `0043_cache_keepalive_sessions.sql` for `cache_keepalive_sessions` and, if using a side table, `cache_keepalive_payloads`. Implement the store operations using SQLite transactions and WAL-friendly short writes. Do not use network-filesystem assumptions; follow SQLite locking rules.
   Parallelization: Wave 1 | Blocked by: 1 | Blocks: 5, 8, 13 | Can parallelize with: 3
-  References: `crates/cc-lb-storage-sqlite/migrations/0041_principals_cache_keepalive.sql`; `AGENTS.md` SQLite rules; `docs/adr/0004-cache-keepalive-scheduler.md` Section 1'
+  References: `crates/cc-lb-storage-sqlite/migrations/0042_principals_cache_keepalive.sql`; `AGENTS.md` SQLite rules; `docs/adr/0004-cache-keepalive-scheduler.md` Section 1'
   Acceptance criteria (agent-executable): SQLite conformance tests prove insert/bump generation, replace payload, mark terminal, purge expired, and stale generation no-op lookup.
   QA scenarios: `cargo test -p cc-lb-storage-sqlite cache_keepalive`; Evidence `.omo/evidence/cache-keepalive-apalis-migration/task-2-sqlite.md`
   Commit: Y | `feat(sqlite): persist cache keepalive session fences`
 
 - [x] 3. Add Postgres migrations and store implementation
-  What to do / Must NOT do: Add Postgres migration `0072_cache_keepalive_sessions.sql` with indexes for due/expiry/purge queries and status/generation lookup. Implement transactionally equivalent store operations. Do not depend on SQLite-only behavior.
+  What to do / Must NOT do: Add Postgres migration `0073_cache_keepalive_sessions.sql` with indexes for due/expiry/purge queries and status/generation lookup. Implement transactionally equivalent store operations. Do not depend on SQLite-only behavior.
   Parallelization: Wave 1 | Blocked by: 1 | Blocks: 5, 8, 13 | Can parallelize with: 2
-  References: `crates/cc-lb-storage-postgres/migrations/0071_principals_cache_keepalive.sql`; `docs/scheduler.md` pool isolation; `docs/adr/0004-cache-keepalive-scheduler.md` Section 1'
+  References: `crates/cc-lb-storage-postgres/migrations/0072_principals_cache_keepalive.sql`; `docs/scheduler.md` pool isolation; `docs/adr/0004-cache-keepalive-scheduler.md` Section 1'
   Acceptance criteria (agent-executable): Postgres conformance tests prove the same semantics as SQLite, including concurrent generation bumps and transaction isolation around stale rows.
   QA scenarios: `cargo test -p cc-lb-storage-postgres cache_keepalive` with a safe local `DATABASE_URL`; Evidence `.omo/evidence/cache-keepalive-apalis-migration/task-3-postgres.md`
   Closeout note: `cargo test -p cc-lb-storage-postgres cache_keepalive` passed against isolated `CI_POSTGRES_URL` schema and now includes concurrent real-request generation bumps plus concurrent stale-CAS hit-reschedule coverage.

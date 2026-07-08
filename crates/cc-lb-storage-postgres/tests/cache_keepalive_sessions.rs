@@ -162,7 +162,7 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe(
     storage: &PostgresStorage,
 ) -> Result<()> {
     let record = storage
-        .replace_from_real_request(&replace_request("terminal-session", b"ciphertext", 100))
+        .replace_from_real_request(&replace_request("terminal-session", b"ciphertext", 50))
         .await?;
 
     assert!(
@@ -197,7 +197,7 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe(
     assert_eq!(check.status, CacheKeepaliveSessionStatus::Terminal);
     assert_eq!(check.enqueue_state, CacheKeepaliveEnqueueState::Enqueued);
 
-    let removed = storage.purge_cache_keepalive_expired(401).await?;
+    let removed = storage.purge_cache_keepalive_expired(351).await?;
     assert_eq!(removed, 1);
     assert!(
         storage
