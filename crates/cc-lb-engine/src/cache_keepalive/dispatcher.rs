@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_control::dynamic_view::DynamicViewHolder;
 use cc_lb_plugin_api::{
-    DialectError, Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder,
-    SignedRequest, Upstream, UpstreamDialect, shape_request, sign_request,
+    CachePricingSummary, DialectError, Principal, PrincipalKind, RequestContext, ShapedRequest,
+    ShapedRequestBuilder, SignedRequest, Upstream, UpstreamDialect, shape_request, sign_request,
 };
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
@@ -175,6 +175,7 @@ fn shaped_request_from_snapshot(
         body_bytes: body,
         cache_breakpoints: Vec::new(),
         canonical_model_id: String::new(),
+        cache_pricing: CachePricingSummary::default(),
     };
     let principal = Principal {
         id: snapshot.upstream_id.to_string(),
