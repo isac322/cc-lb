@@ -49,8 +49,6 @@ use cc_lb_plugin_api::{
     FilterOutput, FilterPlugin, Principal, RequestContext, SubscriptionQuotaCandidateSnapshot,
     SubscriptionQuotaDataState, UpstreamCandidate, UpstreamKind,
 };
-use sha2::{Digest, Sha256};
-use std::borrow::Cow;
 use std::cmp::Ordering;
 use uuid::Uuid;
 
@@ -99,12 +97,6 @@ pub(crate) const OVERAGE_REMAINING_NOMINAL_SECS: u64 = 30 * 86_400;
 /// Baseline WRH weight for overage candidates whose utilization we cannot
 /// read.
 pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
-
-/// Maximum raw `thread_id` bytes accepted as a cache-warm routing key. Longer
-/// caller-controlled values are hashed before WRH use, so key bytes are bounded.
-const MAX_THREAD_ROUTING_KEY_BYTES: usize = 256;
-
-const HASHED_THREAD_ROUTING_KEY_PREFIX: &str = "sha256:";
 
 /// Short version tag identifying the WRH salt/algorithm shape. Embedded in
 /// [`RENDEZVOUS_SALT`] and surfaced on `SubscriptionPreferenceTrace.rendezvous_salt_version`
@@ -282,10 +274,10 @@ fn evaluate(
             let uniform_fallback = total_urgency_in_bucket < EPSILON;
             bucket.iter().map(move |a| {
                 let cache_tokens = candidate_cache_read_tokens(a);
-                let cache_ratio = cache_value_ratio_within_bucket(
-                    candidate_cache_value_micros(a.candidate, &ctx.cache_pricing),
-                    max_cache_value_micros,
-                );
+                let cache_value_micros =
+                    candidate_cache_value_micros(a.candidate, &ctx.cache_pricing);
+                let cache_ratio =
+                    cache_value_ratio_within_bucket(cache_value_micros, max_cache_value_micros);
                 let cache_weight_multiplier = cache_weight_multiplier(cache_ratio);
                 let quota_weight = if uniform_fallback { 1.0 } else { a.urgency };
                 let effective_weight =
@@ -309,27 +301,45 @@ fn evaluate(
                     cache_savings_ratio,
                     estimated_input_cost_micros,
                     effective_weight,
+                    cache_value_micros,
+                    matched_v3_cache_key: a
+                        .candidate
+                        .cache_score
+                        .as_ref()
+                        .and_then(|score| score.matched_v3_cache_key.clone()),
+                    matched_content_block_index: a
+                        .candidate
+                        .cache_score
+                        .as_ref()
+                        .and_then(|score| score.matched_content_block_index),
+                    breakpoint_content_block_index: a
+                        .candidate
+                        .cache_score
+                        .as_ref()
+                        .and_then(|score| score.breakpoint_content_block_index),
+                    lookback_distance: a
+                        .candidate
+                        .cache_score
+                        .as_ref()
+                        .and_then(|score| score.lookback_distance),
+                    token_estimate_source: a
+                        .candidate
+                        .cache_score
+                        .as_ref()
+                        .and_then(|score| score.token_estimate_source.clone()),
                 }
             })
         })
         .collect();
-
-    let session_thread_key = ctx
-        .thread_id
-        .as_deref()
-        .filter(|id| !id.is_empty())
-        .map(normalized_thread_routing_key);
 
     for bucket in buckets.iter() {
         if bucket.is_empty() {
             continue;
         }
         let max_cache_value_micros = max_positive_cache_value_micros(bucket, &ctx.cache_pricing);
-        let (routing_key, wrh_key_source) = routing_key_for_bucket(
-            ctx.request_id.as_str(),
-            session_thread_key.as_deref(),
-            max_cache_value_micros,
-        );
+        let bucket_v3_cache_affinity_key = bucket_v3_cache_affinity_key(bucket, &ctx.cache_pricing);
+        let (routing_key, wrh_key_source) =
+            routing_key_for_bucket(ctx.request_id.as_str(), bucket_v3_cache_affinity_key);
         let selection = pick_within_tier(
             bucket,
             routing_key,
@@ -354,6 +364,9 @@ fn evaluate(
             estimated_switch_cache_loss_micros: None,
             cache_loss_status: None,
             switch_gate_reason: Some("formula_winner".to_owned()),
+            bucket_v3_cache_affinity_key: bucket_v3_cache_affinity_key.map(str::to_owned),
+            lineage_would_have_predicted_read_tokens: None,
+            lineage_would_have_picked_upstream_id: None,
         };
         return FilterOutput {
             kept_upstream_ids: vec![kept_upstream_id],
@@ -387,36 +400,12 @@ fn relevant_base_windows(_canonical_model: &str) -> Vec<&'static str> {
     vec![WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY]
 }
 
-fn normalized_thread_routing_key(thread_id: &str) -> Cow<'_, str> {
-    if thread_id.len() <= MAX_THREAD_ROUTING_KEY_BYTES {
-        return Cow::Borrowed(thread_id);
-    }
-
-    let mut hasher = Sha256::new();
-    hasher.update(RENDEZVOUS_SALT.as_bytes());
-    hasher.update([0]);
-    hasher.update(thread_id.as_bytes());
-    let digest = hasher.finalize();
-    let mut key = String::with_capacity(HASHED_THREAD_ROUTING_KEY_PREFIX.len() + 64);
-    key.push_str(HASHED_THREAD_ROUTING_KEY_PREFIX);
-    for byte in digest {
-        let high = usize::from(byte >> 4);
-        let low = usize::from(byte & 0x0f);
-        key.push(char::from(b"0123456789abcdef"[high]));
-        key.push(char::from(b"0123456789abcdef"[low]));
-    }
-    Cow::Owned(key)
-}
-
 fn routing_key_for_bucket<'a>(
     request_id: &'a str,
-    session_thread_key: Option<&'a str>,
-    max_cache_value_micros: i64,
+    bucket_v3_cache_affinity_key: Option<&'a str>,
 ) -> (&'a str, WrhKeySource) {
-    if let Some(thread_key) = session_thread_key
-        && max_cache_value_micros > 0
-    {
-        (thread_key, WrhKeySource::ThreadId)
+    if let Some(cache_key) = bucket_v3_cache_affinity_key {
+        (cache_key, WrhKeySource::CacheHash)
     } else {
         (request_id, WrhKeySource::RequestId)
     }
@@ -863,6 +852,37 @@ fn max_positive_cache_value_micros(
         .filter(|value| *value > 0)
         .max()
         .unwrap_or(0)
+}
+
+fn bucket_v3_cache_affinity_key<'a>(
+    bucket: &'a [Assessment<'_>],
+    pricing: &CachePricingSummary,
+) -> Option<&'a str> {
+    bucket
+        .iter()
+        .filter_map(|assessment| {
+            let cache_value_micros = candidate_cache_value_micros(assessment.candidate, pricing)?;
+            if cache_value_micros <= 0 {
+                return None;
+            }
+            let score = assessment.candidate.cache_score.as_ref()?;
+            let cache_key = score.matched_v3_cache_key.as_deref()?;
+            Some((
+                cache_value_micros,
+                score.predicted_cache_read_tokens,
+                score.lookback_distance.unwrap_or(u32::MAX),
+                assessment.candidate.upstream_id,
+                cache_key,
+            ))
+        })
+        .max_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| right.2.cmp(&left.2))
+                .then_with(|| right.3.cmp(&left.3))
+        })
+        .map(|(_, _, _, _, cache_key)| cache_key)
 }
 
 fn cache_value_ratio_within_bucket(

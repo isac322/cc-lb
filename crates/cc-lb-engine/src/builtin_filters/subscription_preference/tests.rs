@@ -1483,6 +1483,7 @@ fn with_plan(mut candidate: UpstreamCandidate, ratio: f64) -> UpstreamCandidate 
 /// tests to synthesise a bucket where cache-hit depth varies per
 /// candidate; the max within the bucket drives the exponential boost.
 fn with_live_cache(mut candidate: UpstreamCandidate, read_tokens: u32) -> UpstreamCandidate {
+    let cache_key = format!("v3-cache-{}", candidate.upstream_id);
     candidate.cache_score = Some(cc_lb_plugin_api::types::CacheScore {
         predicted_cache_read_tokens: read_tokens,
         predicted_cache_creation_tokens_5m: 0,
@@ -1492,6 +1493,11 @@ fn with_live_cache(mut candidate: UpstreamCandidate, read_tokens: u32) -> Upstre
         matched_breakpoint_index: Some(0),
         confidence: 1.0,
         ambiguity_reason: None,
+        matched_v3_cache_key: Some(cache_key),
+        breakpoint_content_block_index: Some(0),
+        matched_content_block_index: Some(0),
+        lookback_distance: Some(0),
+        token_estimate_source: Some("test".to_owned()),
     });
     candidate
 }
@@ -1624,13 +1630,16 @@ fn rendezvous_salt_embeds_declared_version() {
 }
 
 #[test]
-fn wrh_key_source_is_thread_id_when_thread_has_positive_priced_cache_value() {
-    // Given: a threaded request where at least one candidate has priced live-cache value.
+fn wrh_key_source_is_cache_hash_when_candidate_has_positive_priced_cache_value() {
+    // Given: a threaded request where at least one candidate has priced v3 cache value.
     let filter = SubscriptionPreferenceFilter::new();
-    let candidates = vec![
-        with_live_cache(healthy_oauth_candidate("upstream-a", 1), 500_000),
-        healthy_oauth_candidate("upstream-b", 2),
-    ];
+    let warm = with_live_cache(healthy_oauth_candidate("upstream-a", 1), 500_000);
+    let expected_cache_key = warm
+        .cache_score
+        .as_ref()
+        .and_then(|score| score.matched_v3_cache_key.clone())
+        .expect("v3 cache key");
+    let candidates = vec![warm, healthy_oauth_candidate("upstream-b", 2)];
 
     // When: subscription-preference scores the cache-warm bucket.
     let ctx = ctx_with_thread_id(SONNET_MODEL, "req-1", "thread-A");
@@ -1639,11 +1648,15 @@ fn wrh_key_source_is_thread_id_when_thread_has_positive_priced_cache_value() {
         .subscription_preference
         .expect("subscription-alive path must emit trace");
 
-    // Then: thread_id is used only because current facts include positive cache value.
+    // Then: cache-positive routing uses the matched v3 key, never the thread id.
     assert_eq!(
         trace.wrh_key_source,
-        WrhKeySource::ThreadId,
-        "cache-warm subscription routing should key on thread_id when present"
+        WrhKeySource::CacheHash,
+        "cache-warm subscription routing should key on the matched v3 cache hash"
+    );
+    assert_eq!(
+        trace.bucket_v3_cache_affinity_key.as_deref(),
+        Some(expected_cache_key.as_str())
     );
     assert_eq!(
         trace.rendezvous_salt_version.as_deref(),
@@ -1651,6 +1664,48 @@ fn wrh_key_source_is_thread_id_when_thread_has_positive_priced_cache_value() {
         "trace must stamp the current WRH salt version so post-hoc queries can \
          distinguish algorithm changes from state changes"
     );
+}
+
+#[test]
+fn thread_id_does_not_change_cache_positive_routing_decision() {
+    let filter = SubscriptionPreferenceFilter::new();
+    let candidates = vec![
+        with_live_cache(healthy_oauth_candidate("upstream-a", 1), 500_000),
+        healthy_oauth_candidate("upstream-b", 2),
+    ];
+    let principal = principal();
+
+    let first = filter
+        .filter(
+            &ctx_with_thread_id(SONNET_MODEL, "req-same", "thread-A"),
+            &principal,
+            &candidates,
+        )
+        .unwrap();
+    let second = filter
+        .filter(
+            &ctx_with_thread_id(SONNET_MODEL, "req-same", "thread-B"),
+            &principal,
+            &candidates,
+        )
+        .unwrap();
+    let first_trace = first.subscription_preference.expect("first trace present");
+    let second_trace = second
+        .subscription_preference
+        .expect("second trace present");
+
+    assert_eq!(first.kept_upstream_ids, second.kept_upstream_ids);
+    assert_eq!(first_trace.wrh_key_source, WrhKeySource::CacheHash);
+    assert_eq!(second_trace.wrh_key_source, WrhKeySource::CacheHash);
+    assert_eq!(
+        first_trace.bucket_v3_cache_affinity_key,
+        second_trace.bucket_v3_cache_affinity_key
+    );
+    assert_eq!(
+        first_trace.formula_winner_upstream_id,
+        second_trace.formula_winner_upstream_id
+    );
+    assert_eq!(first_trace.kept_upstream_id, second_trace.kept_upstream_id);
 }
 
 #[test]
@@ -1735,7 +1790,7 @@ fn oversized_thread_id_uses_bounded_routing_key() {
         healthy_oauth_candidate("upstream-b", 2),
     ];
     let principal = principal();
-    let oversized_thread_id = "session-".repeat(MAX_THREAD_ROUTING_KEY_BYTES);
+    let oversized_thread_id = "session-".repeat(256);
 
     // When: two turns use the same oversized session id.
     let first = filter
@@ -1757,9 +1812,13 @@ fn oversized_thread_id_uses_bounded_routing_key() {
         .subscription_preference
         .expect("second trace present");
 
-    // Then: routing still treats it as ThreadId when cache value is live.
-    assert_eq!(first_trace.wrh_key_source, WrhKeySource::ThreadId);
-    assert_eq!(second_trace.wrh_key_source, WrhKeySource::ThreadId);
+    // Then: routing ignores thread_id size and uses bounded v3 cache keys.
+    assert_eq!(first_trace.wrh_key_source, WrhKeySource::CacheHash);
+    assert_eq!(second_trace.wrh_key_source, WrhKeySource::CacheHash);
+    assert_eq!(
+        first_trace.bucket_v3_cache_affinity_key,
+        second_trace.bucket_v3_cache_affinity_key
+    );
 }
 
 #[test]
@@ -1994,7 +2053,7 @@ fn usage_warm_owner_beats_moderate_quota_disadvantage() {
 
     // Then: cache bonus multiplies the existing quota weight instead of allowing
     // a modest quota advantage to recreate a hot Anthropic prompt cache elsewhere.
-    assert_eq!(trace.wrh_key_source, WrhKeySource::ThreadId);
+    assert_eq!(trace.wrh_key_source, WrhKeySource::CacheHash);
     assert!(
         peer_urg.quota_urgency / owner_urg.quota_urgency > 1.30,
         "fixture must preserve the observed moderate quota disadvantage"
@@ -2027,7 +2086,7 @@ fn severe_quota_pressure_can_override_usage_cache_owner() {
 
     // Then: cache locality is not an absolute v9-style pin; severe quota pressure
     // can still select the fresh peer.
-    assert_eq!(trace.wrh_key_source, WrhKeySource::ThreadId);
+    assert_eq!(trace.wrh_key_source, WrhKeySource::CacheHash);
     assert!(
         peer_urg.effective_weight > owner_urg.effective_weight,
         "fresh quota peer must beat a near-exhausted cache owner"

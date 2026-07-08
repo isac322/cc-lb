@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use cc_lb_engine::clock::{ClockHandle, TestClock, unix_secs};
+use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
 use cc_lb_plugin_api::types::TtlClass;
 use cc_lb_server::prompt_cache_observation_cache::PromptCacheObservationCache;
 use uuid::Uuid;
@@ -38,6 +39,9 @@ async fn prompt_cache_100k_observations_under_200mib() {
                 TtlClass::Ephemeral5m,
                 now + 300,
                 now,
+                0,
+                0,
+                V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
             );
         }
     }

@@ -1172,6 +1172,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use cc_lb_engine::clock::{Clock, TestClock};
+    use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
     use cc_lb_plugin_api::types::TtlClass as PluginTtlClass;
     use cc_lb_storage_api::{
         BackendKind, MetaStore, PromptCacheObservationRecord, TtlClass as StorageTtlClass,
@@ -1342,11 +1343,16 @@ mod tests {
         PromptCacheObservationRecord {
             upstream_id,
             canonical_model_id: MODEL.to_owned(),
-            prefix_hash: prefix_hash.to_owned(),
+            v3_prefix_key: prefix_hash.to_owned(),
             ttl_class: StorageTtlClass::Ephemeral5m,
             expires_at_unix_secs: 4_100_000_000,
             last_observed_at_unix_secs,
             hash_schema_version: HASH_SCHEMA_VERSION,
+            prefix_content_block_index: 0,
+            estimated_prefix_tokens: 0,
+            token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+            last_provider_cache_read_tokens: Some(0),
+            last_provider_cache_creation_tokens: Some(0),
         }
     }
 
@@ -1410,11 +1416,16 @@ mod tests {
         let record = PromptCacheObservationRecord {
             upstream_id: upstream.id,
             canonical_model_id: MODEL.to_owned(),
-            prefix_hash: "sink-wiring-prefix".to_owned(),
+            v3_prefix_key: "sink-wiring-prefix".to_owned(),
             ttl_class: cc_lb_storage_api::TtlClass::Ephemeral5m,
             expires_at_unix_secs: 4_100_000_300,
             last_observed_at_unix_secs: 1_700_000_000,
             hash_schema_version: HASH_SCHEMA_VERSION,
+            prefix_content_block_index: 0,
+            estimated_prefix_tokens: 0,
+            token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+            last_provider_cache_read_tokens: Some(0),
+            last_provider_cache_creation_tokens: Some(0),
         };
         sink.enqueue(record.clone())
             .expect("enqueue succeeds while writer is alive");
@@ -1430,7 +1441,7 @@ mod tests {
             1,
             "observation enqueued through DynamicView sink must reach the production store"
         );
-        assert_eq!(stored[0].prefix_hash, "sink-wiring-prefix");
+        assert_eq!(stored[0].v3_prefix_key, "sink-wiring-prefix");
         assert_eq!(stored[0].upstream_id, upstream.id);
     }
 

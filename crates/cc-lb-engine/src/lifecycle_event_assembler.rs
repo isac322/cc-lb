@@ -196,8 +196,15 @@ impl Partial {
                     auth.principal_kind.clone(),
                 )
             })
-            .unwrap_or_default();
-        let (upstream_id, upstream_name, upstream, route_ms) = self
+            .unwrap_or((None, None, None));
+        let (
+            upstream_id,
+            upstream_name,
+            upstream,
+            route_ms,
+            route_matched_v3_cache_key,
+            route_wrh_key_source,
+        ) = self
             .route
             .as_ref()
             .map(|route| {
@@ -206,9 +213,11 @@ impl Partial {
                     Some(route.upstream_name.clone()),
                     Some(RequestEventUpstream::AnthropicDirect),
                     route.route_ms,
+                    route.matched_v3_cache_key.clone(),
+                    route.wrh_key_source.clone(),
                 )
             })
-            .unwrap_or_default();
+            .unwrap_or((None, None, None, None, None, None));
         let cost = self.cost_options();
         let ts_ms = self.ts_ms;
 
@@ -265,6 +274,12 @@ impl Partial {
             cost_cache_read_micros: cost.cache_read,
             cache_control_block_count: self.cache_control_block_count,
             cache_prefix_hash: self.cache_prefix_hash.clone(),
+            matched_v3_cache_key: route_matched_v3_cache_key.or_else(|| {
+                self.parse
+                    .as_ref()
+                    .and_then(|parse| parse.matched_v3_cache_key.clone())
+            }),
+            wrh_key_source: route_wrh_key_source,
             auth_ms: self.auth.as_ref().and_then(|auth| auth.auth_ms),
             route_ms,
             limit_reserve_ms: self.limit_reserve_ms,
@@ -850,21 +865,58 @@ fn finalize_base(
             )
         })
         .unwrap_or_default();
-    let (upstream_id, upstream_name, upstream, route_model, route_ms, route_routing_trace) =
-        partial
-            .route
-            .as_ref()
-            .map(|r| {
-                (
-                    Some(r.upstream_id),
-                    Some(r.upstream_name.clone()),
-                    Some(RequestEventUpstream::AnthropicDirect),
-                    r.model.clone(),
-                    r.route_ms,
-                    r.routing_trace.clone(),
-                )
-            })
-            .unwrap_or_default();
+    let (
+        upstream_id,
+        upstream_name,
+        upstream,
+        route_model,
+        route_ms,
+        route_routing_trace,
+        matched_v3_cache_key,
+        breakpoint_content_block_index,
+        matched_content_block_index,
+        lookback_distance,
+        predicted_cache_read_tokens,
+        predicted_cache_creation_tokens_5m,
+        predicted_cache_creation_tokens_1h,
+        token_estimate_source,
+        cache_value_micros,
+        formula_winner_upstream_id,
+        kept_upstream_id,
+        wrh_key_source,
+        lineage_would_have_predicted_read_tokens,
+        lineage_would_have_picked_upstream_id,
+    ) = partial
+        .route
+        .as_ref()
+        .map(|r| {
+            (
+                Some(r.upstream_id),
+                Some(r.upstream_name.clone()),
+                Some(RequestEventUpstream::AnthropicDirect),
+                r.model.clone(),
+                r.route_ms,
+                r.routing_trace.clone(),
+                r.matched_v3_cache_key.clone(),
+                r.breakpoint_content_block_index.map(u64::from),
+                r.matched_content_block_index.map(u64::from),
+                r.lookback_distance.map(u64::from),
+                r.predicted_cache_read_tokens.map(u64::from),
+                r.predicted_cache_creation_tokens_5m.map(u64::from),
+                r.predicted_cache_creation_tokens_1h.map(u64::from),
+                r.token_estimate_source.clone(),
+                r.cache_value_micros,
+                r.formula_winner_upstream_id,
+                r.kept_upstream_id,
+                r.wrh_key_source.clone(),
+                r.lineage_would_have_predicted_read_tokens.map(u64::from),
+                r.lineage_would_have_picked_upstream_id,
+            )
+        })
+        .unwrap_or((
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None,
+        ));
     let model = route_model.or_else(|| partial.parse.as_ref().and_then(|p| p.model.clone()));
     let auth_ms = partial.auth.as_ref().and_then(|a| a.auth_ms);
     let routing_trace = partial.routing_trace.clone().or(route_routing_trace);
@@ -916,6 +968,25 @@ fn finalize_base(
         cache_control_block_count: partial.cache_control_block_count,
         cache_breakpoints: partial.cache_breakpoints.clone(),
         cache_prefix_hash: partial.cache_prefix_hash.clone(),
+        matched_v3_cache_key: matched_v3_cache_key.or_else(|| {
+            partial
+                .parse
+                .as_ref()
+                .and_then(|parse| parse.matched_v3_cache_key.clone())
+        }),
+        breakpoint_content_block_index,
+        matched_content_block_index,
+        lookback_distance,
+        predicted_cache_read_tokens,
+        predicted_cache_creation_tokens_5m,
+        predicted_cache_creation_tokens_1h,
+        token_estimate_source,
+        cache_value_micros,
+        formula_winner_upstream_id,
+        kept_upstream_id,
+        wrh_key_source,
+        lineage_would_have_predicted_read_tokens,
+        lineage_would_have_picked_upstream_id,
         cost_usd_micros: cost.total,
         cost_input_micros: cost.input,
         cost_output_micros: cost.output,
@@ -1462,6 +1533,19 @@ mod tests {
                 route_ms: Some(7),
                 routing_trace: None,
                 predicted_cache_read_tokens: None,
+                matched_v3_cache_key: None,
+                breakpoint_content_block_index: None,
+                matched_content_block_index: None,
+                lookback_distance: None,
+                predicted_cache_creation_tokens_5m: None,
+                predicted_cache_creation_tokens_1h: None,
+                token_estimate_source: None,
+                cache_value_micros: None,
+                formula_winner_upstream_id: None,
+                kept_upstream_id: None,
+                wrh_key_source: None,
+                lineage_would_have_predicted_read_tokens: None,
+                lineage_would_have_picked_upstream_id: None,
             }),
             routing_trace: None,
         })
@@ -1618,6 +1702,19 @@ mod tests {
                 route_ms: Some(7),
                 routing_trace: None,
                 predicted_cache_read_tokens: None,
+                matched_v3_cache_key: None,
+                breakpoint_content_block_index: None,
+                matched_content_block_index: None,
+                lookback_distance: None,
+                predicted_cache_creation_tokens_5m: None,
+                predicted_cache_creation_tokens_1h: None,
+                token_estimate_source: None,
+                cache_value_micros: None,
+                formula_winner_upstream_id: None,
+                kept_upstream_id: None,
+                wrh_key_source: None,
+                lineage_would_have_predicted_read_tokens: None,
+                lineage_would_have_picked_upstream_id: None,
             }),
             routing_trace: None,
         });

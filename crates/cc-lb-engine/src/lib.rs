@@ -17,7 +17,6 @@ pub mod builtin_filters;
 #[cfg(not(loom))]
 mod bulkhead;
 #[cfg(not(loom))]
-mod cache_score_selection;
 #[cfg(not(loom))]
 mod circuit_breaker;
 #[cfg(not(loom))]

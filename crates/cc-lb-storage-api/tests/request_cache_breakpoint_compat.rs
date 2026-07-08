@@ -16,6 +16,8 @@ fn request_cache_breakpoint_deserializes_without_prefix_token_count_field() {
     });
     let decoded: RequestCacheBreakpoint = serde_json::from_value(legacy_json).expect("decode");
     assert_eq!(decoded.prefix_token_count, 0);
+    assert!(decoded.lookback_prefixes.is_empty());
+    assert_eq!(decoded.token_estimate_source, None);
     assert_eq!(decoded.prefix_hash, "deadbeef");
     assert_eq!(decoded.ttl.as_deref(), Some("5m"));
 }
@@ -30,6 +32,8 @@ fn request_cache_breakpoint_zero_token_count_is_omitted_from_serialization() {
         ttl: Some("5m".to_owned()),
         prefix_hash: "deadbeef".to_owned(),
         prefix_token_count: 0,
+        lookback_prefixes: Vec::new(),
+        token_estimate_source: None,
     };
     let serialized: Value = serde_json::to_value(&breakpoint).expect("serialize");
     assert!(
@@ -48,6 +52,8 @@ fn request_cache_breakpoint_nonzero_token_count_roundtrips() {
         ttl: Some("1h".to_owned()),
         prefix_hash: "abc123".to_owned(),
         prefix_token_count: 3050,
+        lookback_prefixes: Vec::new(),
+        token_estimate_source: Some("test".to_owned()),
     };
     let serialized: Value = serde_json::to_value(&breakpoint).expect("serialize");
     assert_eq!(
@@ -88,5 +94,7 @@ fn request_event_decodes_pre_existing_audit_row_without_prefix_token_count() {
     );
     assert_eq!(decoded.cache_breakpoints.len(), 1);
     assert_eq!(decoded.cache_breakpoints[0].prefix_token_count, 0);
+    assert!(decoded.cache_breakpoints[0].lookback_prefixes.is_empty());
+    assert_eq!(decoded.cache_breakpoints[0].token_estimate_source, None);
     assert_eq!(decoded.cache_breakpoints[0].prefix_hash, "legacyhash");
 }

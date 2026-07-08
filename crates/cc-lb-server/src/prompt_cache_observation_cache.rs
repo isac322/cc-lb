@@ -46,6 +46,9 @@ pub struct CacheEntry {
     pub last_observed_at_unix_secs: u64,
     pub ttl_class: TtlClass,
     pub last_persisted_at_unix_secs: u64,
+    pub prefix_content_block_index: u32,
+    pub estimated_prefix_tokens: u64,
+    pub token_estimate_source: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -106,10 +109,13 @@ impl PromptCacheObservationCache {
                 self.upsert_observation(
                     record.upstream_id,
                     record.canonical_model_id,
-                    record.prefix_hash,
+                    record.v3_prefix_key,
                     ttl_class_from_storage(record.ttl_class),
                     record.expires_at_unix_secs,
                     record.last_observed_at_unix_secs,
+                    record.prefix_content_block_index,
+                    record.estimated_prefix_tokens,
+                    record.token_estimate_source,
                 );
                 loaded += 1;
             }
@@ -125,6 +131,9 @@ impl PromptCacheObservationCache {
         ttl_class: TtlClass,
         expires_at_unix_secs: u64,
         now_unix_secs: u64,
+        prefix_content_block_index: u32,
+        estimated_prefix_tokens: u64,
+        token_estimate_source: String,
     ) {
         let mut guard = self.entries.write();
         let entries = guard.entry(upstream_id).or_default();
@@ -139,6 +148,9 @@ impl PromptCacheObservationCache {
                 last_observed_at_unix_secs: now_unix_secs,
                 ttl_class,
                 last_persisted_at_unix_secs,
+                prefix_content_block_index,
+                estimated_prefix_tokens,
+                token_estimate_source,
             },
         );
     }
@@ -239,6 +251,11 @@ impl PromptCacheObservationCache {
             matched_breakpoint_index: None,
             confidence: 0.5,
             ambiguity_reason: Some("thread_usage_lineage".to_owned()),
+            matched_v3_cache_key: None,
+            breakpoint_content_block_index: None,
+            matched_content_block_index: None,
+            lookback_distance: None,
+            token_estimate_source: None,
         })
     }
 
@@ -253,6 +270,7 @@ impl PromptCacheObservationCache {
         if canonical_model.is_empty() || thread_id.is_empty() {
             return;
         }
+        // Analysis-only lineage measurement for v3 post-hoc validation. This must not feed routing, WRH keying, or candidate scoring. Delete after v3 validation proves it is no longer needed.
         let creation_equivalent = usage
             .cache_creation_input_tokens_5m
             .saturating_add(usage.cache_creation_input_tokens_1h)
@@ -330,6 +348,9 @@ impl PromptCacheObservationCacheLike for PromptCacheObservationCache {
             ttl_class,
             expires_at_unix_secs,
             now_unix_secs,
+            0,
+            0,
+            "unknown".to_owned(),
         );
     }
 
@@ -399,6 +420,7 @@ fn ttl_matches_request(request_ttl: TtlClass, entry_ttl: TtlClass) -> bool {
 pub(crate) mod tests {
     use async_trait::async_trait;
     use cc_lb_engine::clock::{Clock, ClockHandle, TestClock};
+    use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
     use cc_lb_storage_api::{
         PromptCacheObservationRecord, PromptCacheObservationStore, StorageResult,
         TtlClass as StorageTtlClass,
@@ -434,6 +456,9 @@ pub(crate) mod tests {
             ttl_class,
             expires_at_unix_secs,
             now_unix_secs,
+            0,
+            0,
+            V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
         );
     }
 
@@ -504,11 +529,16 @@ pub(crate) mod tests {
         PromptCacheObservationRecord {
             upstream_id,
             canonical_model_id: MODEL.to_owned(),
-            prefix_hash: prefix_hash.to_owned(),
+            v3_prefix_key: prefix_hash.to_owned(),
             ttl_class,
             expires_at_unix_secs,
             last_observed_at_unix_secs,
             hash_schema_version,
+            prefix_content_block_index: 0,
+            estimated_prefix_tokens: 0,
+            token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+            last_provider_cache_read_tokens: Some(0),
+            last_provider_cache_creation_tokens: Some(0),
         }
     }
 

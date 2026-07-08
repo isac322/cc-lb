@@ -391,6 +391,8 @@ fn request_events() -> Vec<RequestEvent> {
                     prefix_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .to_owned(),
                     prefix_token_count: 1536,
+                    lookback_prefixes: Vec::new(),
+                    token_estimate_source: Some("local_tiktoken_v1".to_owned()),
                 },
                 RequestCacheBreakpoint {
                     block_index: 1,
@@ -401,6 +403,8 @@ fn request_events() -> Vec<RequestEvent> {
                     prefix_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                         .to_owned(),
                     prefix_token_count: 4096,
+                    lookback_prefixes: Vec::new(),
+                    token_estimate_source: Some("local_tiktoken_v1".to_owned()),
                 },
             ],
             cache_prefix_hash: Some(

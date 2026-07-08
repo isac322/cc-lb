@@ -105,24 +105,27 @@ fn quota_snapshot(
 }
 
 pub struct TestPromptCacheObservationCache {
-    thread_scores: HashMap<(Uuid, String, String), CacheScore>,
+    warm_entries: HashMap<Uuid, Vec<WarmCacheEntry>>,
 }
 
 impl TestPromptCacheObservationCache {
-    pub fn new(thread_scores: HashMap<(Uuid, String, String), CacheScore>) -> Self {
-        Self { thread_scores }
+    pub fn new(warm_entries: HashMap<Uuid, Vec<WarmCacheEntry>>) -> Self {
+        Self { warm_entries }
     }
 }
 
 impl PromptCacheObservationCacheLike for TestPromptCacheObservationCache {
     fn snapshot_for_upstream(
         &self,
-        _upstream_id: Uuid,
+        upstream_id: Uuid,
         _canonical_model: &str,
         _request_breakpoint_hashes: &[(String, TtlClass)],
         _now_unix_secs: u64,
     ) -> Vec<WarmCacheEntry> {
-        Vec::new()
+        self.warm_entries
+            .get(&upstream_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn upsert_observation(
@@ -149,18 +152,12 @@ impl PromptCacheObservationCacheLike for TestPromptCacheObservationCache {
 
     fn thread_usage_score(
         &self,
-        upstream_id: Uuid,
-        canonical_model: &str,
-        thread_id: &str,
+        _upstream_id: Uuid,
+        _canonical_model: &str,
+        _thread_id: &str,
         _now_unix_secs: u64,
     ) -> Option<CacheScore> {
-        self.thread_scores
-            .get(&(
-                upstream_id,
-                canonical_model.to_owned(),
-                thread_id.to_owned(),
-            ))
-            .cloned()
+        None
     }
 
     fn grace_margin_secs(&self) -> u64 {

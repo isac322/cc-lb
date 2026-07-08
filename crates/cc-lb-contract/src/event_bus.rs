@@ -103,6 +103,10 @@ pub struct RequestEventPartial {
     pub cache_control_block_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_prefix_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_v3_cache_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrh_key_source: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_ms: Option<u64>,

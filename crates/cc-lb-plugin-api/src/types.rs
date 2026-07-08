@@ -278,6 +278,20 @@ pub enum CacheBreakpointSource {
     Message,
 }
 
+/// One v3 content-block lookback prefix that Anthropic may read for a breakpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct CacheLookbackPrefix {
+    /// Proxy-local v3 prefix key for this content-block prefix.
+    pub prefix_hash: String,
+    /// Content-block index in the flattened `tools -> system -> messages` sequence.
+    pub content_block_index: u32,
+    /// Estimated prefix tokens through this content block.
+    pub prefix_token_count: u64,
+    /// Distance from the requested breakpoint: 0 for N, 19 for N-19.
+    pub lookback_distance: u32,
+}
+
 /// Cache breakpoint position in the request, for prompt cache optimization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)]
@@ -298,6 +312,12 @@ pub struct CacheBreakpoint {
     pub requested_ttl: TtlClass,
     /// Origin of this breakpoint.
     pub origin: BreakpointOrigin,
+    /// V3 lookback candidates in N..N-19 order for this breakpoint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lookback_prefixes: Vec<CacheLookbackPrefix>,
+    /// Source of the prefix-token estimate used for this breakpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_estimate_source: Option<String>,
 }
 
 /// Warm cache entry eligible for reuse in upstream requests.
@@ -334,6 +354,21 @@ pub struct CacheScore {
     pub confidence: f32,
     /// Optional explanation for ambiguous or low-confidence predictions.
     pub ambiguity_reason: Option<String>,
+    /// Matched proxy-local v3 cache key, when the lookback window found one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_v3_cache_key: Option<String>,
+    /// Requested breakpoint content-block index that anchored the match/write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint_content_block_index: Option<u32>,
+    /// Matched content-block index inside the breakpoint's v3 lookback window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_content_block_index: Option<u32>,
+    /// Distance from the breakpoint to the matched content block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookback_distance: Option<u32>,
+    /// Source of the prefix-token estimate used for this score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_estimate_source: Option<String>,
 }
 
 /// Model-specific cache/input pricing exposed to router plugins.
@@ -848,6 +883,24 @@ pub struct CandidateUrgency {
     pub estimated_input_cost_micros: u64,
     /// Final WRH weight after quota, cache, and warning multipliers.
     pub effective_weight: f64,
+    /// Net priced cache value (`read_savings - creation_cost`) in micro-USD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_value_micros: Option<i64>,
+    /// Matched proxy-local v3 cache key for this candidate, when positive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_v3_cache_key: Option<String>,
+    /// Matched content-block index in the v3 lookback window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_content_block_index: Option<u32>,
+    /// Requested breakpoint content-block index that anchored the score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint_content_block_index: Option<u32>,
+    /// Distance from the breakpoint to the matched v3 content block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookback_distance: Option<u32>,
+    /// Source of the token estimate used for this candidate's cache score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_estimate_source: Option<String>,
 }
 
 impl PartialEq for CandidateUrgency {
@@ -878,6 +931,12 @@ impl PartialEq for CandidateUrgency {
                 .effective_weight
                 .total_cmp(&other.effective_weight)
                 .is_eq()
+            && self.cache_value_micros == other.cache_value_micros
+            && self.matched_v3_cache_key == other.matched_v3_cache_key
+            && self.matched_content_block_index == other.matched_content_block_index
+            && self.breakpoint_content_block_index == other.breakpoint_content_block_index
+            && self.lookback_distance == other.lookback_distance
+            && self.token_estimate_source == other.token_estimate_source
     }
 }
 
@@ -897,10 +956,8 @@ impl Eq for CandidateUrgency {}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WrhKeySource {
-    /// Filter used `RequestContext::thread_id` (populated from headers such as
-    /// `x-claude-code-session-id`). Turns sharing this key pin to the same
-    /// upstream and reuse the Anthropic prompt cache.
-    ThreadId,
+    /// Filter used the matched proxy-local v3 cache key for cache-positive affinity.
+    CacheHash,
     /// Filter fell back to `RequestContext::request_id` because no session
     /// identifier was available or the value was empty. Each request draws an
     /// independent random upstream at the WRH step; safe for stateless traffic
@@ -908,6 +965,7 @@ pub enum WrhKeySource {
     /// conversation. Default so that historical trace rows deserialize into a
     /// safe, backwards-compatible value.
     #[default]
+    #[serde(alias = "thread_id")]
     RequestId,
 }
 
@@ -957,6 +1015,15 @@ pub struct SubscriptionPreferenceTrace {
     /// Machine-readable switch-gate outcome reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switch_gate_reason: Option<String>,
+    /// Bucket-level v3 cache-affinity key selected before WRH when cache-positive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_v3_cache_affinity_key: Option<String>,
+    /// Analysis-only lineage prediction; must not feed routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_would_have_predicted_read_tokens: Option<u32>,
+    /// Analysis-only lineage upstream; must not feed routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_would_have_picked_upstream_id: Option<Uuid>,
 }
 
 /// Per-candidate cache-affinity trace row. Emitted by the built-in
@@ -1279,6 +1346,13 @@ mod tests {
             prefix_token_count: 100,
             requested_ttl: TtlClass::Ephemeral5m,
             origin: BreakpointOrigin::Explicit,
+            lookback_prefixes: vec![CacheLookbackPrefix {
+                prefix_hash: "abc123".to_owned(),
+                content_block_index: 0,
+                prefix_token_count: 100,
+                lookback_distance: 0,
+            }],
+            token_estimate_source: Some("local_tiktoken_v1".to_owned()),
         };
         let json = serde_json::to_string(&breakpoint).unwrap();
         let decoded: CacheBreakpoint = serde_json::from_str(&json).unwrap();
@@ -1303,6 +1377,11 @@ mod tests {
             matched_breakpoint_index: Some(0),
             confidence: 0.95,
             ambiguity_reason: None,
+            matched_v3_cache_key: Some("v3-cache-key".to_owned()),
+            breakpoint_content_block_index: Some(1),
+            matched_content_block_index: Some(1),
+            lookback_distance: Some(0),
+            token_estimate_source: Some("local_tiktoken_v1".to_owned()),
         };
         let json = serde_json::to_string(&cache_score).unwrap();
         let decoded: CacheScore = serde_json::from_str(&json).unwrap();
@@ -1365,6 +1444,11 @@ mod tests {
             matched_breakpoint_index: Some(0),
             confidence: 0.95,
             ambiguity_reason: None,
+            matched_v3_cache_key: Some("v3-cache-key".to_owned()),
+            breakpoint_content_block_index: Some(1),
+            matched_content_block_index: Some(1),
+            lookback_distance: Some(0),
+            token_estimate_source: Some("local_tiktoken_v1".to_owned()),
         };
         let candidate_with_cache = UpstreamCandidate {
             upstream_id: Uuid::new_v4(),
@@ -1414,6 +1498,13 @@ mod tests {
             prefix_token_count: 150,
             requested_ttl: TtlClass::Ephemeral1h,
             origin: BreakpointOrigin::Explicit,
+            lookback_prefixes: vec![CacheLookbackPrefix {
+                prefix_hash: "hash123".to_owned(),
+                content_block_index: 1,
+                prefix_token_count: 150,
+                lookback_distance: 0,
+            }],
+            token_estimate_source: Some("local_tiktoken_v1".to_owned()),
         };
         let ctx_populated = RequestContext {
             request_id: "req-2".to_owned(),
@@ -1475,15 +1566,15 @@ mod tests {
     #[test]
     fn wrh_key_source_serde_snake_case() {
         assert_eq!(
-            serde_json::to_string(&WrhKeySource::ThreadId).unwrap(),
-            "\"thread_id\""
+            serde_json::to_string(&WrhKeySource::CacheHash).unwrap(),
+            "\"cache_hash\""
         );
         assert_eq!(
             serde_json::to_string(&WrhKeySource::RequestId).unwrap(),
             "\"request_id\""
         );
         let decoded: WrhKeySource = serde_json::from_str("\"thread_id\"").unwrap();
-        assert_eq!(decoded, WrhKeySource::ThreadId);
+        assert_eq!(decoded, WrhKeySource::RequestId);
     }
 
     #[test]

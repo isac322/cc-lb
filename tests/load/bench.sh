@@ -221,7 +221,7 @@ run_mode() {
     *) fail "unsupported mode: $mode" ;;
   esac
 
-  "$ROOT_DIR/target/release/cc-lb-loadgen" \
+  "$RELEASE_BIN_DIR/cc-lb-loadgen" \
     --mode "$mode" \
     --direct-url "http://127.0.0.1:$fake_port/v1/messages" \
     --proxy-url "http://127.0.0.1:$proxy_port/v1/messages" \
@@ -239,6 +239,10 @@ run_mode() {
 
 mkdir -p "$SCRIPT_DIR/.tmp" "$ROOT_DIR/.omo/evidence"
 TMP_DIR=$(mktemp -d "$SCRIPT_DIR/.tmp/run.XXXXXX")
+if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+  export CARGO_TARGET_DIR="$TMP_DIR/cargo-target"
+fi
+RELEASE_BIN_DIR="$CARGO_TARGET_DIR/release"
 
 cargo build --release -q -p fake-anthropic
 cargo build --release -q -p cc-lb-server --features sqlite
@@ -251,14 +255,14 @@ metrics_port=$(free_port)
 config_path="$TMP_DIR/cc-lb.toml"
 render_config "$config_path"
 
-"$ROOT_DIR/target/release/fake-anthropic" --port "$fake_port" > "$TMP_DIR/fake-anthropic.log" 2>&1 &
+"$RELEASE_BIN_DIR/fake-anthropic" --port "$fake_port" > "$TMP_DIR/fake-anthropic.log" 2>&1 &
 FAKE_PID=$!
 wait_http "$fake_port" "/v1/models" "fake-anthropic"
 
 CC_LB_ADMIN_TOKEN=admin-token \
 CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
 RUST_LOG=warn,hyper=warn,hyper_util=warn,axum=warn \
-"$ROOT_DIR/target/release/cc-lb" serve --config "$config_path" > "$TMP_DIR/cc-lb.log" 2>&1 &
+"$RELEASE_BIN_DIR/cc-lb" serve --config "$config_path" > "$TMP_DIR/cc-lb.log" 2>&1 &
 PROXY_PID=$!
 wait_http "$proxy_port" "/healthz" "cc-lb"
 wait_http "$admin_port" "/admin/health" "cc-lb-admin"

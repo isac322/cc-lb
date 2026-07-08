@@ -164,6 +164,34 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_prefix_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_v3_cache_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint_content_block_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_content_block_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookback_distance: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_cache_creation_tokens_5m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_cache_creation_tokens_1h: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_estimate_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_value_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula_winner_upstream_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_upstream_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrh_key_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_would_have_predicted_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_would_have_picked_upstream_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd_micros: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_input_micros: Option<i64>,
@@ -303,6 +331,18 @@ pub struct RequestCacheBreakpoint {
     pub prefix_hash: String,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub prefix_token_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lookback_prefixes: Vec<RequestCacheLookbackPrefix>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_estimate_source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestCacheLookbackPrefix {
+    pub prefix_hash: String,
+    pub content_block_index: u64,
+    pub prefix_token_count: u64,
+    pub lookback_distance: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -570,6 +610,12 @@ pub struct PromptCacheObservationWire {
     pub ttl_class: TtlClass,
     pub expires_at_unix_secs: u64,
     pub kind: PromptCacheObservationKindWire,
+    #[serde(default)]
+    pub prefix_content_block_index: u32,
+    #[serde(default)]
+    pub estimated_prefix_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_estimate_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -664,6 +710,8 @@ pub struct ParseInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_prefix_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_v3_cache_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
@@ -740,6 +788,32 @@ pub struct RouteInfo {
     pub routing_trace: Option<RoutingTrace>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicted_cache_read_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_v3_cache_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint_content_block_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_content_block_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookback_distance: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_cache_creation_tokens_5m: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_cache_creation_tokens_1h: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_estimate_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_value_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula_winner_upstream_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_upstream_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrh_key_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_would_have_predicted_read_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_would_have_picked_upstream_id: Option<Uuid>,
 }
 
 /// Reason routing failed.
