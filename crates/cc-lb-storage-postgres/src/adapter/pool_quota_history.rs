@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    PoolQuotaContributorBlob, PoolQuotaHistoryStore, PoolQuotaSnapshotRecord,
-    PoolQuotaSnapshotSummaryRecord, StorageError, StorageResult, SubscriptionQuotaWindow,
+    PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord, StorageError,
+    StorageResult, SubscriptionQuotaWindow,
 };
 use sqlx::Row;
 
@@ -24,9 +24,9 @@ impl PoolQuotaHistoryStore for PostgresStorage {
                     capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
                     stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
                     header_contributing_upstreams, api_contributing_upstreams,
-                    max_observed_at_unix_millis, contributors_json, computed_at_unix_millis,
+                    max_observed_at_unix_millis, computed_at_unix_millis,
                     policy_version
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 ON CONFLICT (snapshot_at_unix_secs, "quota_window") DO UPDATE SET
                     utilization = excluded.utilization,
                     weighted_utilization_sum = excluded.weighted_utilization_sum,
@@ -39,7 +39,6 @@ impl PoolQuotaHistoryStore for PostgresStorage {
                     header_contributing_upstreams = excluded.header_contributing_upstreams,
                     api_contributing_upstreams = excluded.api_contributing_upstreams,
                     max_observed_at_unix_millis = excluded.max_observed_at_unix_millis,
-                    contributors_json = excluded.contributors_json,
                     computed_at_unix_millis = excluded.computed_at_unix_millis,
                     policy_version = excluded.policy_version"#,
             )
@@ -56,7 +55,6 @@ impl PoolQuotaHistoryStore for PostgresStorage {
             .bind(record.header_contributing_upstreams)
             .bind(record.api_contributing_upstreams)
             .bind(record.max_observed_at_unix_millis)
-            .bind(record.contributors_json.as_deref())
             .bind(record.computed_at_unix_millis)
             .bind(record.policy_version)
             .execute(&mut *tx)
@@ -81,7 +79,7 @@ impl PoolQuotaHistoryStore for PostgresStorage {
                           capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
                           stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
                           header_contributing_upstreams, api_contributing_upstreams,
-                          max_observed_at_unix_millis, contributors_json, computed_at_unix_millis,
+                          max_observed_at_unix_millis, computed_at_unix_millis,
                           policy_version
                    FROM pool_subscription_quota_history_v1
                   WHERE "quota_window" = $1
@@ -115,7 +113,7 @@ impl PoolQuotaHistoryStore for PostgresStorage {
                           capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
                           stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
                           header_contributing_upstreams, api_contributing_upstreams,
-                          max_observed_at_unix_millis, contributors_json, computed_at_unix_millis,
+                          max_observed_at_unix_millis, computed_at_unix_millis,
                           policy_version
                    FROM pool_subscription_quota_history_v1
                   WHERE "quota_window" = $1
@@ -133,49 +131,6 @@ impl PoolQuotaHistoryStore for PostgresStorage {
             }
         }
         Ok(out)
-    }
-
-    async fn list_pool_quota_contributor_blobs_page(
-        &self,
-        after: Option<(i64, SubscriptionQuotaWindow)>,
-        limit: u32,
-    ) -> StorageResult<Vec<PoolQuotaContributorBlob>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let mut query = sqlx::query(
-            r#"SELECT snapshot_at_unix_secs, "quota_window", contributors_json
-                 FROM pool_subscription_quota_history_v1
-                WHERE "quota_window" IN ('5h', '7d')
-                  AND contributors_json IS NOT NULL
-                  AND ($1::BIGINT IS NULL OR snapshot_at_unix_secs > $2 OR (snapshot_at_unix_secs = $3 AND "quota_window" > $4))
-             ORDER BY snapshot_at_unix_secs ASC, "quota_window" ASC
-                LIMIT $5"#,
-        );
-        match after {
-            Some((snapshot_at_unix_secs, window)) => {
-                query = query
-                    .bind(snapshot_at_unix_secs)
-                    .bind(snapshot_at_unix_secs)
-                    .bind(snapshot_at_unix_secs)
-                    .bind(window.as_str());
-            }
-            None => {
-                query = query
-                    .bind(Option::<i64>::None)
-                    .bind(Option::<i64>::None)
-                    .bind(Option::<i64>::None)
-                    .bind(Option::<&str>::None);
-            }
-        }
-        query
-            .bind(i64::from(limit))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?
-            .into_iter()
-            .map(row_to_blob)
-            .collect()
     }
 
     async fn list_latest_pool_quota_snapshot_summaries(
@@ -226,25 +181,6 @@ impl PoolQuotaHistoryStore for PostgresStorage {
     }
 }
 
-fn row_to_blob(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaContributorBlob> {
-    let window_text = row
-        .try_get::<String, _>("quota_window")
-        .map_err(map_sqlx_error)?;
-    let window =
-        SubscriptionQuotaWindow::from_str(&window_text).ok_or_else(|| StorageError::Corrupted {
-            message: format!("unknown quota_window in pool quota history: {window_text}"),
-        })?;
-    Ok(PoolQuotaContributorBlob {
-        snapshot_at_unix_secs: row
-            .try_get::<i64, _>("snapshot_at_unix_secs")
-            .map_err(map_sqlx_error)?,
-        window,
-        contributors_json: row
-            .try_get::<String, _>("contributors_json")
-            .map_err(map_sqlx_error)?,
-    })
-}
-
 fn row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaSnapshotRecord> {
     let window_text = row
         .try_get::<String, _>("quota_window")
@@ -290,9 +226,6 @@ fn row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaSnapshotR
             .map_err(map_sqlx_error)?,
         max_observed_at_unix_millis: row
             .try_get::<Option<i64>, _>("max_observed_at_unix_millis")
-            .map_err(map_sqlx_error)?,
-        contributors_json: row
-            .try_get::<Option<String>, _>("contributors_json")
             .map_err(map_sqlx_error)?,
         computed_at_unix_millis: row
             .try_get::<i64, _>("computed_at_unix_millis")
