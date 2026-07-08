@@ -225,6 +225,22 @@ upstream_subscription_quota_sqlite_test!(
     upstream_subscription_quota_series_filters_observed_at_window_sqlite,
     series_filters_observed_at_window
 );
+upstream_subscription_quota_sqlite_test!(
+    upstream_subscription_quota_checkpoint_writer_latest_freshness_sqlite,
+    checkpoint_writer_latest_freshness
+);
+upstream_subscription_quota_sqlite_test!(
+    upstream_subscription_quota_checkpoint_writer_decrease_sqlite,
+    checkpoint_writer_decrease
+);
+upstream_subscription_quota_sqlite_test!(
+    upstream_subscription_quota_checkpoint_series_anchor_merge_sqlite,
+    checkpoint_series_anchor_merge
+);
+upstream_subscription_quota_sqlite_test!(
+    upstream_subscription_quota_checkpoint_history_sqlite,
+    checkpoint_history
+);
 
 #[test]
 fn warmup_attempts_store_sqlite() {

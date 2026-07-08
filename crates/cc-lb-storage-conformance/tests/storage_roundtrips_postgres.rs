@@ -271,6 +271,38 @@ fn upstream_subscription_quota_store_postgres() {
 }
 
 #[test]
+fn upstream_subscription_quota_checkpoint_writer_latest_freshness_postgres() {
+    run_postgres_scenario(
+        "upstream_subscription_quota_checkpoint_writer_latest_freshness",
+        upstream_subscription_quota_store::checkpoint_writer_latest_freshness,
+    );
+}
+
+#[test]
+fn upstream_subscription_quota_checkpoint_writer_decrease_postgres() {
+    run_postgres_scenario(
+        "upstream_subscription_quota_checkpoint_writer_decrease",
+        upstream_subscription_quota_store::checkpoint_writer_decrease,
+    );
+}
+
+#[test]
+fn upstream_subscription_quota_checkpoint_series_anchor_merge_postgres() {
+    run_postgres_scenario(
+        "upstream_subscription_quota_checkpoint_series_anchor_merge",
+        upstream_subscription_quota_store::checkpoint_series_anchor_merge,
+    );
+}
+
+#[test]
+fn upstream_subscription_quota_checkpoint_history_postgres() {
+    run_postgres_scenario(
+        "upstream_subscription_quota_checkpoint_history",
+        upstream_subscription_quota_store::checkpoint_history,
+    );
+}
+
+#[test]
 fn warmup_attempts_store_postgres() {
     run_postgres_scenario("warmup_attempts_store", |backend| async move {
         warmup_attempts_store::run_all(backend, warmup_attempts_clock()).await

@@ -1,4 +1,3 @@
-// biome-ignore-all lint/suspicious/noExplicitAny: legitimate any for loose chart/metadata shapes
 import { Meter as BaseMeter } from '@base-ui/react/meter';
 import { Radio as BaseRadio } from '@base-ui/react/radio';
 import { RadioGroup as BaseRadioGroup } from '@base-ui/react/radio-group';
@@ -54,12 +53,21 @@ import {
 } from '../components/ui/RelativeTime';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { ApiUsageCard } from '../components/upstreams/ApiUsageCard';
+import {
+  buildQuotaChartData,
+  type ChartMarker,
+} from '../components/upstreams/buildQuotaChartData';
 import { InlineNameEditor } from '../components/upstreams/InlineNameEditor';
 import { QuotaObservedAt } from '../components/upstreams/QuotaObservedAt';
 import { SettingsCard } from '../components/upstreams/SettingsCard';
 import { WarmupCardMinimal } from '../components/upstreams/warmup/WarmupCardMinimal';
-import { ApiError } from '../lib/api';
-import { getWindowColor, WINDOW_DURATION_SECS } from '../lib/colors';
+import {
+  ApiError,
+  type DraftCompleteResponse,
+  type OrganizationMetadataInner,
+  type QuotaSnapshot,
+} from '../lib/api';
+import { getWindowColor } from '../lib/colors';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
 import { fmtChartTooltipTs } from '../lib/format';
 import {
@@ -427,13 +435,6 @@ function oauthBadge(entry: {
   return { tone: 'ok', label: 'Connected' };
 }
 
-type ChartRow = { ts: string; unix: number } & Record<
-  string,
-  number | null | string
->;
-
-type ChartMarker = { ts: number; kind: string; window: string };
-
 const DETAIL_WINDOWS = ['5h', '7d', '7d_sonnet', '7d_opus', 'overage'];
 const SNAPSHOT_ORDER = ['5h', '7d', '7d_sonnet', '7d_opus', 'overage'];
 
@@ -450,7 +451,7 @@ function windowLabel(windowName: string): string {
   }
 }
 
-function SnapshotStatusComposite({ snap }: { snap: any }) {
+function SnapshotStatusComposite({ snap }: { snap: QuotaSnapshot }) {
   const source =
     snap.source === 'api' ? 'API' : snap.source === 'header' ? 'Header' : '—';
   const label =
@@ -490,14 +491,17 @@ function SnapshotStatusComposite({ snap }: { snap: any }) {
   );
 }
 
-function PromotionalCreditsBadge({ orgMeta }: { orgMeta: any }) {
+function PromotionalCreditsBadge({
+  orgMeta,
+}: {
+  orgMeta: OrganizationMetadataInner | null | undefined;
+}) {
   const hasAny =
     orgMeta?.overage_credit_granted === true ||
     orgMeta?.overage_credit_eligible === true ||
-    orgMeta?.overage_credit_available === true ||
     (orgMeta?.overage_credit_amount_minor_units != null &&
       orgMeta.overage_credit_amount_minor_units > 0);
-  if (!hasAny) {
+  if (!hasAny || !orgMeta) {
     return null;
   }
   const amount = orgMeta.overage_credit_amount_minor_units;
@@ -522,7 +526,11 @@ function PromotionalCreditsBadge({ orgMeta }: { orgMeta: any }) {
   );
 }
 
-function TrialBanner({ orgMeta }: { orgMeta: any }) {
+function TrialBanner({
+  orgMeta,
+}: {
+  orgMeta: OrganizationMetadataInner | null | undefined;
+}) {
   if (!orgMeta?.claude_code_trial_ends_at) return null;
   return (
     <div className="rounded-sm border border-accent/30 bg-accent/10 p-3 text-xs text-accent">
@@ -532,7 +540,11 @@ function TrialBanner({ orgMeta }: { orgMeta: any }) {
   );
 }
 
-function PaymentWarning({ orgMeta }: { orgMeta: any }) {
+function PaymentWarning({
+  orgMeta,
+}: {
+  orgMeta: OrganizationMetadataInner | null | undefined;
+}) {
   if (!orgMeta?.payment_auth_hosted_invoice_url) return null;
   return (
     <div className="rounded-sm border border-amber-400/30 bg-amber-400/10 p-3 text-xs text-amber-200 flex items-center justify-between gap-3">
@@ -671,60 +683,11 @@ function DetailView({
   );
 
   const chartData = useMemo(() => {
-    if (!quotaSeries.data?.series.length)
-      return { rows: [] as ChartRow[], markers: [] as ChartMarker[] };
-
-    const bucketsByTime = new Map<number, ChartRow>();
-    const markers: ChartMarker[] = [];
-
-    for (const series of quotaSeries.data.series) {
-      const windowName = series.window;
-      for (const bucket of series.buckets) {
-        const ts = bucket.bucket_start_unix_secs;
-        if (!bucketsByTime.has(ts)) {
-          const date = new Date(ts * 1000);
-          const label =
-            range === '7d' || range === '24h'
-              ? `${date.getMonth() + 1}/${date.getDate()} ${date.getHours()}h`
-              : date.toTimeString().slice(0, 5);
-          bucketsByTime.set(ts, { ts: label, unix: ts });
-        }
-        const row = bucketsByTime.get(ts)!;
-        row[windowName] =
-          bucket.utilization_last != null
-            ? bucket.utilization_last * 100
-            : null;
-      }
-
-      for (const marker of series.markers) {
-        if (marker.at_unix_secs) {
-          markers.push({
-            ts: marker.at_unix_secs,
-            kind: marker.kind,
-            window: windowName,
-          });
-        }
-      }
-    }
-
-    const latestWindows = selectedLatest?.windows;
-    if (latestWindows) {
-      for (const snap of latestWindows) {
-        const duration = WINDOW_DURATION_SECS[snap.window];
-        if (snap.resets_at_unix_secs && duration) {
-          markers.push({
-            ts: snap.resets_at_unix_secs - duration,
-            kind: 'start',
-            window: snap.window,
-          });
-        }
-      }
-    }
-
-    return {
-      rows: Array.from(bucketsByTime.values()).sort((a, b) => a.unix - b.unix),
-      markers,
-    };
+    return buildQuotaChartData(
+      quotaSeries.data?.series,
+      selectedLatest?.windows,
+      range,
+    );
   }, [quotaSeries.data, selectedLatest, range]);
 
   const recent = useRecentEvents({
@@ -1045,7 +1008,6 @@ function DetailView({
           orgMeta?.payment_auth_hosted_invoice_url ||
           orgMeta?.overage_credit_granted ||
           orgMeta?.overage_credit_eligible ||
-          (orgMeta as any)?.overage_credit_available ||
           (orgMeta?.overage_credit_amount_minor_units != null &&
             orgMeta.overage_credit_amount_minor_units > 0)) ? (
           <div className="space-y-2">
@@ -1303,9 +1265,11 @@ function DetailView({
                             { start?: ChartMarker; reset?: ChartMarker }
                           >();
                           for (const marker of chartData.markers) {
-                            if (!paired.has(marker.window))
-                              paired.set(marker.window, {});
-                            const bucket = paired.get(marker.window)!;
+                            let bucket = paired.get(marker.window);
+                            if (bucket === undefined) {
+                              bucket = {};
+                              paired.set(marker.window, bucket);
+                            }
                             if (marker.kind === 'start') bucket.start = marker;
                             else if (marker.kind === 'reset')
                               bucket.reset = marker;
@@ -1378,7 +1342,7 @@ function DetailView({
                           return windows.map((windowName) => (
                             <Area
                               key={windowName}
-                              type="monotone"
+                              type="stepAfter"
                               dataKey={windowName}
                               stroke={getWindowColor(windowName).stroke}
                               strokeWidth={1.4}
@@ -1835,11 +1799,14 @@ function DetailView({
               variant="primary"
               disabled={!oauthState.code || !oauthState.state_token}
               onClick={() => {
+                const token = oauthState.state_token;
+                const oauthCode = oauthState.code;
+                if (!token || !oauthCode) return;
                 oauthComplete.mutate(
                   {
                     id: upstream.id,
-                    state_token: oauthState.state_token!,
-                    code: oauthState.code!,
+                    state_token: token,
+                    code: oauthCode,
                   },
                   {
                     onSuccess: () => {
@@ -1967,7 +1934,9 @@ function CreateUpstreamModal({
     state_token: string;
   } | null>(null);
   const [code, setCode] = useState('');
-  const [draftResult, setDraftResult] = useState<any>(null);
+  const [draftResult, setDraftResult] = useState<DraftCompleteResponse | null>(
+    null,
+  );
   const [oauthName, setOauthName] = useState('');
   const [oauthError, setOauthError] = useState<string | null>(null);
 
@@ -2021,11 +1990,11 @@ function CreateUpstreamModal({
   const handleAuthorizeClick = () => {
     setOauthError(null);
     startDraft.mutate(undefined, {
-      onSuccess: (res: any) => {
+      onSuccess: (res: { authorize_url: string; state_token: string }) => {
         setAuthState(res);
         window.open(res.authorize_url, '_blank');
       },
-      onError: (err: any) => {
+      onError: (err: unknown) => {
         setOauthError(err instanceof Error ? err.message : String(err));
       },
     });
@@ -2037,12 +2006,12 @@ function CreateUpstreamModal({
     completeDraft.mutate(
       { state_token: authState.state_token, code: code.trim() },
       {
-        onSuccess: (res: any) => {
+        onSuccess: (res: DraftCompleteResponse) => {
           setDraftResult(res);
           setOauthName(res.suggested_name || '');
           setStep('oauth_confirm');
         },
-        onError: (err: any) => {
+        onError: (err: unknown) => {
           setOauthError(err instanceof Error ? err.message : String(err));
         },
       },
@@ -2058,7 +2027,7 @@ function CreateUpstreamModal({
           toast.success('OAuth upstream created');
           onOpenChange(false);
         },
-        onError: (err: any) => {
+        onError: (err: unknown) => {
           toast.error(err instanceof Error ? err.message : String(err));
         },
       },
