@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-api-v0.8.0...cc-lb-plugin-api-v0.9.0) - 2026-07-08
+
+### Added
+
+- *(routing)* add v9 subscription-preference cache-loss gate ([#364](https://github.com/isac322/cc-lb/pull/364))
+
+### Fixed
+
+- *(routing)* cache-weighted subscription-preference exponential boost — delete cache_affinity from principal chain ([#340](https://github.com/isac322/cc-lb/pull/340)) ([#350](https://github.com/isac322/cc-lb/pull/350))
+
 ## [0.4.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-api-v0.3.0...cc-lb-plugin-api-v0.4.0) - 2026-07-03
 
 ### Added
