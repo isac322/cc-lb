@@ -10,8 +10,8 @@ use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_config::PromptCacheShadowConfig;
 use cc_lb_plugin_api::types::{
-    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheScore, StageDecision,
-    TerminalDecision, TtlClass, WarmCacheEntry,
+    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CachePricingSummary, CacheScore,
+    StageDecision, TerminalDecision, TtlClass, WarmCacheEntry,
 };
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, FilterError, FilterOutput, InternalError, InternalErrorKind,
@@ -43,6 +43,7 @@ use crate::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuth
 use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as LimitReservation};
 use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
+use crate::cache_score_selection::select_cache_score_by_value;
 use crate::clock::{Clock, ClockHandle, unix_millis};
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::ErrorNormalizer;
@@ -67,7 +68,7 @@ use cc_lb_control::dynamic_view::{
 };
 pub use cc_lb_control::{
     PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
-    PromptCacheObservationSinkLike, SubscriptionQuotaCacheLike,
+    PromptCacheObservationSinkLike, PromptCacheThreadUsage, SubscriptionQuotaCacheLike,
 };
 use cc_lb_observability::{redact_internal_errors, truncate_reason};
 
@@ -129,6 +130,7 @@ pub fn build_candidates(
     request_kind: RequestKind,
     canonical_model: &str,
     request_breakpoints: &[CacheBreakpoint],
+    thread_id: Option<&str>,
     clock: &dyn Clock,
 ) -> Vec<UpstreamCandidate> {
     let Some(allowed_upstreams) = view.principal_view.allowed_upstreams(principal_id) else {
@@ -139,6 +141,7 @@ pub fn build_candidates(
         let rate_limit_cache = view.upstream_rate_limit_cache.read();
         let now_unix_millis = unix_now_ms(clock);
         let prompt_cache = view.prompt_cache_observation_cache_opt();
+        let cache_pricing = cache_pricing_summary_for_model(canonical_model);
         let request_breakpoint_hashes_with_ttl = request_breakpoints
             .iter()
             .map(|breakpoint| (breakpoint.prefix_hash.clone(), breakpoint.requested_ttl))
@@ -163,13 +166,23 @@ pub fn build_candidates(
                     rate_limit_cache.updated_at_unix_secs
                 };
                 let cache_score = prompt_cache.and_then(|cache| {
+                    let now_unix_secs = cache.clock_now_unix_secs();
                     let warm_entries = cache.snapshot_for_upstream(
                         upstream.id,
                         canonical_model,
                         &request_breakpoint_hashes_with_ttl,
-                        cache.clock_now_unix_secs(),
+                        now_unix_secs,
                     );
-                    build_cache_score(request_breakpoints, &warm_entries)
+                    let exact_score = build_cache_score(request_breakpoints, &warm_entries);
+                    let thread_score = thread_id.and_then(|thread_id| {
+                        cache.thread_usage_score(
+                            upstream.id,
+                            canonical_model,
+                            thread_id,
+                            now_unix_secs,
+                        )
+                    });
+                    select_cache_score_by_value(exact_score, thread_score, &cache_pricing)
                 });
                 let plan_info = view.plan_info_by_upstream.get(&upstream.id);
                 UpstreamCandidate {
@@ -201,7 +214,7 @@ fn build_cache_score(
     request_breakpoints: &[CacheBreakpoint],
     warm_entries: &[WarmCacheEntry],
 ) -> Option<CacheScore> {
-    if warm_entries.is_empty() {
+    if request_breakpoints.is_empty() {
         return None;
     }
 
@@ -216,20 +229,31 @@ fn build_cache_score(
         .filter_map(|breakpoint| warm_entry_for(breakpoint).map(|entry| (breakpoint, entry)))
         .max_by_key(|(breakpoint, _)| breakpoint.prefix_token_count);
 
+    let matched_prefix_tokens = longest_match
+        .map(|(breakpoint, _)| breakpoint.prefix_token_count)
+        .unwrap_or(0);
+    let mut missing_breakpoints = request_breakpoints
+        .iter()
+        .filter(|breakpoint| breakpoint.prefix_token_count > matched_prefix_tokens)
+        .collect::<Vec<_>>();
+    missing_breakpoints.sort_unstable_by_key(|breakpoint| breakpoint.prefix_token_count);
+
     let mut predicted_cache_creation_tokens_5m = 0_u64;
     let mut predicted_cache_creation_tokens_1h = 0_u64;
-    for breakpoint in request_breakpoints {
-        if warm_entry_for(breakpoint).is_some() {
-            continue;
-        }
+    let mut previous_prefix_tokens = matched_prefix_tokens;
+    for breakpoint in missing_breakpoints {
+        let segment_tokens = breakpoint
+            .prefix_token_count
+            .saturating_sub(previous_prefix_tokens);
+        previous_prefix_tokens = breakpoint.prefix_token_count;
         match breakpoint.requested_ttl {
             TtlClass::Ephemeral5m => {
-                predicted_cache_creation_tokens_5m = predicted_cache_creation_tokens_5m
-                    .saturating_add(breakpoint.prefix_token_count);
+                predicted_cache_creation_tokens_5m =
+                    predicted_cache_creation_tokens_5m.saturating_add(segment_tokens);
             }
             TtlClass::Ephemeral1h => {
-                predicted_cache_creation_tokens_1h = predicted_cache_creation_tokens_1h
-                    .saturating_add(breakpoint.prefix_token_count);
+                predicted_cache_creation_tokens_1h =
+                    predicted_cache_creation_tokens_1h.saturating_add(segment_tokens);
             }
         }
     }
@@ -250,6 +274,184 @@ fn build_cache_score(
         confidence: if longest_match.is_some() { 1.0 } else { 0.0 },
         ambiguity_reason: None,
     })
+}
+
+#[cfg(test)]
+mod cache_score_tests {
+    use super::{anthropic_family_cache_pricing_summary, build_cache_score};
+    use cc_lb_plugin_api::types::{
+        BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, TtlClass, WarmCacheEntry,
+    };
+
+    #[test]
+    fn build_cache_score_counts_missing_breakpoints_as_incremental_segments_by_ttl() {
+        let score = build_cache_score(
+            &[
+                breakpoint(0, 100_000, TtlClass::Ephemeral1h),
+                breakpoint(1, 300_000, TtlClass::Ephemeral5m),
+                breakpoint(2, 500_000, TtlClass::Ephemeral5m),
+            ],
+            &[],
+        )
+        .expect("cache score for cacheable request");
+
+        assert_eq!(score.predicted_cache_read_tokens, 0);
+        assert_eq!(score.predicted_cache_creation_tokens_1h, 100_000);
+        assert_eq!(score.predicted_cache_creation_tokens_5m, 400_000);
+    }
+
+    #[test]
+    fn build_cache_score_only_counts_segments_after_longest_live_breakpoint() {
+        let score = build_cache_score(
+            &[
+                breakpoint(0, 100_000, TtlClass::Ephemeral1h),
+                breakpoint(1, 300_000, TtlClass::Ephemeral5m),
+                breakpoint(2, 500_000, TtlClass::Ephemeral5m),
+            ],
+            &[warm_entry("bp-1", TtlClass::Ephemeral5m)],
+        )
+        .expect("cache score for cacheable request");
+
+        assert_eq!(score.predicted_cache_read_tokens, 300_000);
+        assert_eq!(score.predicted_cache_creation_tokens_1h, 0);
+        assert_eq!(score.predicted_cache_creation_tokens_5m, 200_000);
+        assert_eq!(score.matched_breakpoint_index, Some(1));
+    }
+
+    #[test]
+    fn anthropic_family_cache_pricing_fallback_covers_opus_4_8_alias() {
+        let pricing = anthropic_family_cache_pricing_summary("claude-opus-4-8")
+            .expect("opus family fallback exists");
+
+        assert_eq!(pricing.status, "known");
+        assert_eq!(pricing.input_micros_per_million, Some(15_000_000));
+        assert_eq!(
+            pricing.cache_creation_5m_micros_per_million,
+            Some(18_750_000)
+        );
+        assert_eq!(
+            pricing.cache_creation_1h_micros_per_million,
+            Some(30_000_000)
+        );
+        assert_eq!(pricing.cache_read_micros_per_million, Some(1_500_000));
+    }
+
+    #[test]
+    fn anthropic_family_cache_pricing_fallback_leaves_non_claude_unknown() {
+        assert!(anthropic_family_cache_pricing_summary("gpt-5.5").is_none());
+    }
+
+    fn breakpoint(
+        block_index: u32,
+        prefix_token_count: u64,
+        requested_ttl: TtlClass,
+    ) -> CacheBreakpoint {
+        CacheBreakpoint {
+            block_index,
+            source: CacheBreakpointSource::Message,
+            path: format!("messages.{block_index}.content"),
+            message_index: Some(block_index),
+            prefix_hash: format!("bp-{block_index}"),
+            prefix_token_count,
+            requested_ttl,
+            origin: BreakpointOrigin::Explicit,
+        }
+    }
+
+    fn warm_entry(prefix_hash: &str, ttl_class: TtlClass) -> WarmCacheEntry {
+        WarmCacheEntry {
+            prefix_hash: prefix_hash.to_owned(),
+            expires_at_unix_secs: 1_700_000_300,
+            ttl_class,
+            last_observed_at_unix_secs: 1_700_000_000,
+        }
+    }
+}
+
+fn cache_pricing_summary_for_model(model: &str) -> CachePricingSummary {
+    if model.is_empty() {
+        return CachePricingSummary {
+            status: "unknown".to_owned(),
+            input_micros_per_million: None,
+            cache_creation_5m_micros_per_million: None,
+            cache_creation_1h_micros_per_million: None,
+            cache_read_micros_per_million: None,
+        };
+    }
+
+    let normalized = cc_lb_pricing::normalize_model_id(model, None);
+    let snapshot = cc_lb_pricing::global_catalog().current();
+    let input = snapshot
+        .models
+        .get(&normalized)
+        .map(|pricing| pricing.input_per_million_usd.as_micros_usd());
+    let cache_creation_5m = snapshot
+        .cache_creation_per_million_usd
+        .get(&normalized)
+        .map(|price| price.as_micros_usd());
+    let cache_creation_1h = cache_creation_5m.map(cache_creation_1h_micros_from_5m);
+    let cache_read = snapshot
+        .cache_read_per_million_usd
+        .get(&normalized)
+        .map(|price| price.as_micros_usd());
+    let status = if input.is_some() && cache_creation_5m.is_some() && cache_read.is_some() {
+        "known"
+    } else {
+        if let Some(fallback) = anthropic_family_cache_pricing_summary(&normalized) {
+            return fallback;
+        }
+        "unknown"
+    };
+
+    CachePricingSummary {
+        status: status.to_owned(),
+        input_micros_per_million: input,
+        cache_creation_5m_micros_per_million: cache_creation_5m,
+        cache_creation_1h_micros_per_million: cache_creation_1h,
+        cache_read_micros_per_million: cache_read,
+    }
+}
+
+fn anthropic_family_cache_pricing_summary(model: &str) -> Option<CachePricingSummary> {
+    let input_micros_per_million = anthropic_family_input_micros_per_million(model)?;
+    Some(CachePricingSummary {
+        status: "known".to_owned(),
+        input_micros_per_million: Some(input_micros_per_million),
+        cache_creation_5m_micros_per_million: Some(cache_creation_5m_micros_from_input(
+            input_micros_per_million,
+        )),
+        cache_creation_1h_micros_per_million: Some(input_micros_per_million.saturating_mul(2)),
+        cache_read_micros_per_million: Some(cache_read_micros_from_input(input_micros_per_million)),
+    })
+}
+
+fn anthropic_family_input_micros_per_million(model: &str) -> Option<u64> {
+    if model.starts_with("claude-opus") {
+        Some(15_000_000)
+    } else if model.starts_with("claude-sonnet") {
+        Some(3_000_000)
+    } else if model.starts_with("claude-haiku") {
+        Some(1_000_000)
+    } else {
+        None
+    }
+}
+
+fn cache_creation_5m_micros_from_input(input_micros: u64) -> u64 {
+    (u128::from(input_micros) * 5 / 4)
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn cache_read_micros_from_input(input_micros: u64) -> u64 {
+    (u128::from(input_micros) / 10)
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn cache_creation_1h_micros_from_5m(cache_creation_5m_micros: u64) -> u64 {
+    let micros = (u128::from(cache_creation_5m_micros) * 8 + 2) / 5;
+    micros.try_into().unwrap_or(u64::MAX)
 }
 
 fn saturating_u64_to_u32(value: u64) -> u32 {
@@ -872,6 +1074,7 @@ impl Lifecycle {
             body_bytes: input.body_bytes,
             cache_breakpoints,
             canonical_model_id,
+            cache_pricing: cache_pricing_summary_for_model(&cache_metadata.canonical_model_id),
         };
         let principal = Principal {
             id: input.principal_id,
@@ -885,6 +1088,7 @@ impl Lifecycle {
             RequestKind::AnthropicMessages,
             &ctx.canonical_model_id,
             &ctx.cache_breakpoints,
+            ctx.thread_id.as_deref(),
             &*self.clock,
         );
         let pipeline_result = execute_filter_pipeline(
@@ -1024,6 +1228,7 @@ impl Lifecycle {
         } else {
             String::new()
         };
+        ctx.cache_pricing = cache_pricing_summary_for_model(&ctx.canonical_model_id);
         ctx.thread_id = cache_metadata.thread_id.clone();
 
         let auth_start = Instant::now();
@@ -1161,6 +1366,7 @@ impl Lifecycle {
             RequestKind::AnthropicMessages,
             &ctx.canonical_model_id,
             &ctx.cache_breakpoints,
+            ctx.thread_id.as_deref(),
             &*self.clock,
         );
         let pipeline_result = execute_filter_pipeline(
@@ -1542,6 +1748,8 @@ impl Lifecycle {
                 stream_hooks,
                 RequestEventContext {
                     request_id: ctx.request_id.clone(),
+                    thread_id: ctx.thread_id.clone(),
+                    canonical_model_id: ctx.canonical_model_id.clone(),
                     proxy_setup_ms: Some(proxy_setup_ms),
                     stage_timings: attempt_timings,
                     internal_errors,
@@ -1739,6 +1947,7 @@ impl Lifecycle {
             && let Some(context) = prompt_cache_observation_context.as_ref()
         {
             let now_unix_secs = context.cache.clock_now_unix_secs();
+            record_thread_usage_from_response(&event_ctx, context, &usage, now_unix_secs);
             let decode = decode_prompt_cache_observations_pure(
                 context,
                 PromptCacheUsage::from(&usage),
@@ -1879,6 +2088,7 @@ impl Lifecycle {
             body_bytes: body,
             cache_breakpoints: Vec::new(),
             canonical_model_id: String::new(),
+            cache_pricing: CachePricingSummary::default(),
         };
         (ctx, body_too_large)
     }
@@ -2261,6 +2471,13 @@ impl Lifecycle {
                 active_limit.hand_off_reservation_to_reconcile_subscriber();
             }
             if let Some(o) = observer.as_ref() {
+                if status == StatusCode::OK
+                    && prompt_cache_shadow_enabled
+                    && let Some(context) = prompt_cache_observation_context.as_ref()
+                {
+                    let now_unix_secs = context.cache.clock_now_unix_secs();
+                    record_thread_usage_from_response(&event_ctx, context, &usage, now_unix_secs);
+                }
                 o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
                     event_id: o.event_id().to_owned(),
                     result: Ok(cc_lb_contract::StreamSuccess {
@@ -2852,6 +3069,8 @@ impl ActiveLimit {
 #[derive(Clone)]
 struct RequestEventContext {
     request_id: String,
+    thread_id: Option<String>,
+    canonical_model_id: String,
     proxy_setup_ms: Option<u64>,
     stage_timings: AttemptTimings,
     internal_errors: Vec<InternalError>,
@@ -3532,6 +3751,31 @@ fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_contract::UsageSnapshot {
     }
 }
 
+fn record_thread_usage_from_response(
+    event_ctx: &RequestEventContext,
+    context: &PromptCacheObservationContext,
+    usage: &UsageCounts,
+    now_unix_secs: u64,
+) {
+    let Some(thread_id) = event_ctx.thread_id.as_deref().filter(|id| !id.is_empty()) else {
+        return;
+    };
+    if event_ctx.canonical_model_id.is_empty() {
+        return;
+    }
+    context.cache.record_thread_usage(
+        context.upstream_id,
+        &event_ctx.canonical_model_id,
+        thread_id,
+        PromptCacheThreadUsage {
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_input_tokens_5m: usage.cache_creation_input_tokens_5m,
+            cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
+        },
+        now_unix_secs,
+    );
+}
+
 fn principal_kind_lite_as_str(kind: &cc_lb_storage_api::types::PrincipalKindLite) -> &'static str {
     match kind {
         cc_lb_storage_api::types::PrincipalKindLite::Machine => "machine",
@@ -3571,7 +3815,7 @@ mod tests {
         let breakpoints = vec![
             cache_breakpoint(0, "short", 100, TtlClass::Ephemeral5m),
             cache_breakpoint(1, "long", 250, TtlClass::Ephemeral1h),
-            cache_breakpoint(2, "cold", 50, TtlClass::Ephemeral5m),
+            cache_breakpoint(2, "cold", 300, TtlClass::Ephemeral5m),
         ];
 
         let candidates = build_candidates(
@@ -3580,6 +3824,7 @@ mod tests {
             RequestKind::AnthropicMessages,
             TEST_MODEL,
             &breakpoints,
+            None,
             &crate::clock::SystemClock,
         );
 
@@ -3629,6 +3874,7 @@ mod tests {
             RequestKind::AnthropicMessages,
             TEST_MODEL,
             &breakpoints,
+            None,
             &crate::clock::SystemClock,
         );
 
@@ -3682,6 +3928,7 @@ mod tests {
                     RequestKind::AnthropicMessages,
                     TEST_MODEL,
                     &breakpoints,
+                    None,
                     &crate::clock::SystemClock,
                 );
                 samples.push(start.elapsed().as_nanos());
@@ -3707,7 +3954,7 @@ mod tests {
     }
 
     #[test]
-    fn build_candidates_no_warm_returns_none() {
+    fn build_candidates_no_warm_returns_cold_creation_estimate() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000202").unwrap();
         let view = cache_score_view(
             upstream_id,
@@ -3721,10 +3968,64 @@ mod tests {
             RequestKind::AnthropicMessages,
             TEST_MODEL,
             &breakpoints,
+            None,
             &crate::clock::SystemClock,
         );
 
-        assert_eq!(candidates[0].cache_score, None);
+        assert_eq!(
+            candidates[0].cache_score,
+            Some(CacheScore {
+                predicted_cache_read_tokens: 0,
+                predicted_cache_creation_tokens_5m: 100,
+                predicted_cache_creation_tokens_1h: 0,
+                predicted_uncached_input_tokens: 0,
+                predicted_expires_at_unix_secs: None,
+                matched_breakpoint_index: None,
+                confidence: 0.0,
+                ambiguity_reason: None,
+            })
+        );
+    }
+
+    #[test]
+    fn build_candidates_uses_positive_thread_score_over_creation_only_exact_score() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000204").unwrap();
+        let thread_id = "thread-cache-positive";
+        let cache = TestPromptCacheObservationCache::new(32, TEST_MODEL).with_thread_score(
+            upstream_id,
+            TEST_MODEL,
+            thread_id,
+            CacheScore {
+                predicted_cache_read_tokens: 120_000,
+                predicted_cache_creation_tokens_5m: 0,
+                predicted_cache_creation_tokens_1h: 0,
+                predicted_uncached_input_tokens: 0,
+                predicted_expires_at_unix_secs: Some(4_100_000_300),
+                matched_breakpoint_index: None,
+                confidence: 0.5,
+                ambiguity_reason: Some("thread_usage_lineage".to_owned()),
+            },
+        );
+        let view = cache_score_view(upstream_id, Arc::new(cache));
+        let breakpoints = vec![cache_breakpoint(0, "cold", 100, TtlClass::Ephemeral5m)];
+
+        let candidates = build_candidates(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            TEST_MODEL,
+            &breakpoints,
+            Some(thread_id),
+            &crate::clock::SystemClock,
+        );
+
+        let score = candidates[0].cache_score.as_ref().expect("cache score");
+        assert_eq!(score.predicted_cache_read_tokens, 120_000);
+        assert_eq!(score.predicted_cache_creation_tokens_5m, 0);
+        assert_eq!(
+            score.ambiguity_reason.as_deref(),
+            Some("thread_usage_lineage")
+        );
     }
 
     #[test]
@@ -3758,6 +4059,7 @@ mod tests {
             RequestKind::AnthropicMessages,
             TEST_MODEL,
             &breakpoints,
+            None,
             &crate::clock::SystemClock,
         );
 
@@ -4393,6 +4695,7 @@ mod tests {
         cap: usize,
         expected_model: &'static str,
         entries: HashMap<Uuid, Vec<WarmCacheEntry>>,
+        thread_scores: HashMap<(Uuid, String, String), CacheScore>,
     }
 
     impl TestPromptCacheObservationCache {
@@ -4401,11 +4704,30 @@ mod tests {
                 cap,
                 expected_model,
                 entries: HashMap::new(),
+                thread_scores: HashMap::new(),
             }
         }
 
         fn with_entries(mut self, upstream_id: Uuid, entries: Vec<WarmCacheEntry>) -> Self {
             self.entries.insert(upstream_id, entries);
+            self
+        }
+
+        fn with_thread_score(
+            mut self,
+            upstream_id: Uuid,
+            canonical_model: &str,
+            thread_id: &str,
+            score: CacheScore,
+        ) -> Self {
+            self.thread_scores.insert(
+                (
+                    upstream_id,
+                    canonical_model.to_owned(),
+                    thread_id.to_owned(),
+                ),
+                score,
+            );
             self
         }
     }
@@ -4461,6 +4783,22 @@ mod tests {
             _now_unix_secs: u64,
         ) -> bool {
             false
+        }
+
+        fn thread_usage_score(
+            &self,
+            upstream_id: Uuid,
+            canonical_model: &str,
+            thread_id: &str,
+            _now_unix_secs: u64,
+        ) -> Option<CacheScore> {
+            self.thread_scores
+                .get(&(
+                    upstream_id,
+                    canonical_model.to_owned(),
+                    thread_id.to_owned(),
+                ))
+                .cloned()
         }
 
         fn grace_margin_secs(&self) -> u64 {

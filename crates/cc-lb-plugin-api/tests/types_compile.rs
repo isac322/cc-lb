@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    CredentialStrategy, ObserveEvent, Principal, PrincipalKind, PrincipalQuotas, RequestContext,
-    Upstream,
+    CachePricingSummary, CredentialStrategy, ObserveEvent, Principal, PrincipalKind,
+    PrincipalQuotas, RequestContext, Upstream,
 };
 use http::{HeaderMap, Method, StatusCode};
 
@@ -36,6 +36,7 @@ fn remaining_public_types_compile() {
         body_bytes: Bytes::from_static(b"{}"),
         cache_breakpoints: Vec::new(),
         canonical_model_id: String::new(),
+        cache_pricing: CachePricingSummary::default(),
     };
     assert_eq!(ctx.method, Method::POST);
 

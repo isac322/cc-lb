@@ -30,8 +30,8 @@
 //!
 //! ## Windows
 //!
-//! Base: `5h`, `7d`, plus `7d_sonnet` on sonnet requests. `7d_opus` is
-//! deliberately ignored (Anthropic ships the label without a real quota).
+//! Base: `5h` and `7d`. Model-specific `7d_sonnet` and `7d_opus` labels are
+//! deliberately ignored because they are not stable enough to drive routing.
 //! `unified` is not itself an exhaustion window; its top-level flags
 //! (`overage_in_use`, `fallback_available`, `extra_usage_*`) enrich the
 //! overage assessment.
@@ -43,17 +43,15 @@
 //! - Stale + `rejected` + future reset: hard negative (rejection still live).
 //! - Stale + `rejected` + past reset: unknown (rejection expired).
 
-use cc_lb_plugin_api::types::WrhKeySource;
+use cc_lb_plugin_api::types::{CachePricingSummary, WrhKeySource};
 use cc_lb_plugin_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, FilterError,
     FilterOutput, FilterPlugin, Principal, RequestContext, SubscriptionQuotaCandidateSnapshot,
-    SubscriptionQuotaDataState, SubscriptionTier as PublicTier, UpstreamCandidate, UpstreamKind,
+    SubscriptionQuotaDataState, UpstreamCandidate, UpstreamKind,
 };
-use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 // -- Reason strings surfaced on FilterOutput.reason (log/audit surface). -----
@@ -67,9 +65,6 @@ pub(crate) const NO_SUBSCRIPTION_REASON: &str = "keep:no_subscription_candidates
 
 pub(crate) const WINDOW_FIVE_HOUR: &str = "5h";
 pub(crate) const WINDOW_SEVEN_DAY: &str = "7d";
-pub(crate) const WINDOW_SEVEN_DAY_SONNET: &str = "7d_sonnet";
-#[allow(dead_code)]
-pub(crate) const WINDOW_SEVEN_DAY_OPUS: &str = "7d_opus";
 pub(crate) const WINDOW_OVERAGE: &str = "overage";
 pub(crate) const WINDOW_UNIFIED: &str = "unified";
 
@@ -105,16 +100,41 @@ pub(crate) const OVERAGE_REMAINING_NOMINAL_SECS: u64 = 30 * 86_400;
 /// read.
 pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
 
+/// Maximum raw `thread_id` bytes accepted as a cache-warm routing key. Longer
+/// caller-controlled values are hashed before WRH use, so key bytes are bounded.
+const MAX_THREAD_ROUTING_KEY_BYTES: usize = 256;
+
+const HASHED_THREAD_ROUTING_KEY_PREFIX: &str = "sha256:";
+
 /// Short version tag identifying the WRH salt/algorithm shape. Embedded in
 /// [`RENDEZVOUS_SALT`] and surfaced on `SubscriptionPreferenceTrace.rendezvous_salt_version`
 /// so trace queries can distinguish upstream-mix shifts caused by an
 /// algorithm/salt change from those caused by upstream or quota state
 /// changes. Bumped in lockstep with `RENDEZVOUS_SALT` — a `debug_assert`
 /// in `tests::rendezvous_salt_embeds_version` guards the invariant.
-pub(crate) const SALT_VERSION: &str = "v7";
+pub(crate) const SALT_VERSION: &str = "v10";
 
 /// Salt for the weighted-rendezvous hash. Bumped as a version stamp when the
 /// selection algorithm changes shape; older salts must never be reused.
+///
+/// v10 (2026-07-07): removes hidden threaded owner memory and cache-loss switch
+/// gates. Cache influence is folded into each candidate's WRH weight as
+/// `read_savings - missing_incremental_create_cost`, normalized within the
+/// selected tier. Thread IDs are used as the WRH key only when the current tier
+/// has a positive priced cache value; all-cold routing falls back to request ID.
+///
+/// v9 (2026-07-06): warning-positive base windows remain KnownBase with a
+/// same-tier multiplier, and threaded owner handoff is additionally gated by
+/// estimated in-memory cache re-prime cost derived from plugin-visible pricing
+/// and cache-score inputs.
+///
+/// v8 (2026-07-06): WRH is keyed on non-empty `thread_id`, falling back to
+/// `request_id` only for stateless requests. Fresh base windows with
+/// `allowed_warning`, or with `allowed` plus finite utilization at/above a
+/// finite `surpassed_threshold`, remain selectable but demote the candidate
+/// from KnownBase to PartialBase. Threaded requests keep a per-thread owner and
+/// require a converged challenger before non-forced handoff. See
+/// docs/adr/0005-thread-keyed-subscription-preference-with-warning-demotion.md.
 ///
 /// v7 (2026-07-06): WRH is keyed on `request_id` and the per-candidate
 /// weight is `quota_urgency * exp(CACHE_LOG_BOOST * cache_ratio)`, where
@@ -145,7 +165,10 @@ pub(crate) const SALT_VERSION: &str = "v7";
 /// v4 (2026-07-05): keyed WRH on `thread_id` so multi-turn sessions pinned
 /// while the prompt cache stayed warm. Deployed by PR #322 after the
 /// 2026-07-05 06:24 UTC scatter incident.
-const RENDEZVOUS_SALT: &str = "cc-lb:subscription-preference:v7:cache-weighted-wrh:2026-07-06";
+const RENDEZVOUS_SALT: &str = "cc-lb:subscription-preference:v10:symmetric-cache-value:2026-07-07";
+
+const CACHE_COST_BASIS_VERSION: &str = "v1";
+const WARNING_MULTIPLIER: f64 = 0.20;
 
 /// Exponent coefficient on the cache-weighted WRH multiplier.
 /// `cache_weight_multiplier_i = exp(CACHE_LOG_BOOST * cache_ratio_i)` sits on
@@ -161,113 +184,6 @@ const RENDEZVOUS_SALT: &str = "cc-lb:subscription-preference:v7:cache-weighted-w
 /// re-deriving that calibration will shift where the fresh-quota peer starts
 /// winning; test `cache_boost_calibration_at_99_percent` guards the equality.
 pub const CACHE_LOG_BOOST: f64 = 9.574_063_128_362_267;
-
-// -- Tier memory (per-filter, per-DynamicView). -----------------------------
-
-/// Retention window for a `thread_id`'s last observed `SubscriptionTier`.
-/// Chosen to comfortably cover a typical multi-turn conversation without
-/// pinning stale sessions in memory forever.
-const TIER_MEMORY_TTL: Duration = Duration::from_secs(30 * 60);
-
-/// Upper bound on the number of `thread_id -> TierEntry` records the
-/// per-filter memory keeps at once. When both this bound is hit AND all
-/// existing records are fresh (no TTL evictions available), new insertions
-/// are dropped rather than evicting a live record. This trades observability
-/// completeness for a hard memory bound — the tier-flip signal is best-effort
-/// and a dropped insertion just means the affected `thread_id`'s next trace
-/// will show `previous_tier: None` even though a prior turn occurred.
-const TIER_MEMORY_CAP: usize = 10_000;
-
-struct TierEntry {
-    tier: PublicTier,
-    expires_at: Instant,
-}
-
-/// Per-filter map from `thread_id` to the tier that filter previously
-/// assessed the same session into. Shared by every `evaluate` call the
-/// same `SubscriptionPreferenceFilter` instance handles; a `DynamicView`
-/// rebuild replaces the filter (and therefore wipes the map) — acceptable
-/// because this is best-effort observability, not routing correctness.
-pub struct TierMemory {
-    cap: usize,
-    ttl: Duration,
-    inner: Mutex<HashMap<String, TierEntry>>,
-}
-
-impl TierMemory {
-    pub fn new() -> Self {
-        Self::with_cap_and_ttl(TIER_MEMORY_CAP, TIER_MEMORY_TTL)
-    }
-
-    pub fn with_cap_and_ttl(cap: usize, ttl: Duration) -> Self {
-        Self {
-            cap,
-            ttl,
-            inner: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Return the last tier this memory saw for `thread_id`, provided the
-    /// record has not aged past `ttl`. Returns `None` for absent, expired,
-    /// or empty `thread_id`.
-    pub fn get(&self, thread_id: &str, now: Instant) -> Option<PublicTier> {
-        if thread_id.is_empty() {
-            return None;
-        }
-        let map = self.inner.lock();
-        let entry = map.get(thread_id)?;
-        if entry.expires_at > now {
-            Some(entry.tier)
-        } else {
-            None
-        }
-    }
-
-    /// Insert or refresh the tier for `thread_id`. Best-effort: when the
-    /// map is at cap AND all existing entries are still fresh, the new
-    /// key is dropped rather than evicting a live entry. Empty
-    /// `thread_id` is a no-op.
-    pub fn insert(&self, thread_id: &str, tier: PublicTier, now: Instant) {
-        if thread_id.is_empty() {
-            return;
-        }
-        let mut map = self.inner.lock();
-        let expires_at = now + self.ttl;
-        if let Some(entry) = map.get_mut(thread_id) {
-            entry.tier = tier;
-            entry.expires_at = expires_at;
-            return;
-        }
-        if map.len() >= self.cap {
-            map.retain(|_, e| e.expires_at > now);
-        }
-        if map.len() >= self.cap {
-            return;
-        }
-        map.insert(thread_id.to_owned(), TierEntry { tier, expires_at });
-    }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.inner.lock().len()
-    }
-}
-
-impl Default for TierMemory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Debug for TierMemory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TierMemory")
-            .field("cap", &self.cap)
-            .field("ttl", &self.ttl)
-            .field("entries", &self.inner.lock().len())
-            .finish()
-    }
-}
 
 // -- Config knobs (compiled defaults today; expose per-principal later). ----
 
@@ -291,24 +207,12 @@ impl Default for FilterConfig {
 
 // -- Public plugin type. ----------------------------------------------------
 
-#[derive(Clone, Debug, Default)]
-pub struct SubscriptionPreferenceFilter {
-    tier_memory: Arc<TierMemory>,
-}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SubscriptionPreferenceFilter;
 
 impl SubscriptionPreferenceFilter {
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_tier_memory(tier_memory: Arc<TierMemory>) -> Self {
-        Self { tier_memory }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn tier_memory(&self) -> &Arc<TierMemory> {
-        &self.tier_memory
+        Self
     }
 }
 
@@ -320,13 +224,7 @@ impl FilterPlugin for SubscriptionPreferenceFilter {
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
         let config = FilterConfig::default();
-        Ok(evaluate(
-            ctx,
-            candidates,
-            &config,
-            &self.tier_memory,
-            Instant::now(),
-        ))
+        Ok(evaluate(ctx, candidates, &config))
     }
 
     fn plugin_id(&self) -> Uuid {
@@ -344,8 +242,6 @@ fn evaluate(
     ctx: &RequestContext,
     candidates: &[UpstreamCandidate],
     config: &FilterConfig,
-    tier_memory: &TierMemory,
-    now: Instant,
 ) -> FilterOutput {
     let canonical_model = ctx.canonical_model_id.as_str();
     let base_windows = relevant_base_windows(canonical_model);
@@ -380,57 +276,87 @@ fn evaluate(
     let all_assessments: Vec<cc_lb_plugin_api::CandidateUrgency> = buckets
         .iter()
         .flat_map(|bucket| {
-            let max_cache_tokens_in_bucket: u32 = bucket
-                .iter()
-                .map(candidate_cache_read_tokens)
-                .max()
-                .unwrap_or(0);
+            let max_cache_value_micros =
+                max_positive_cache_value_micros(bucket, &ctx.cache_pricing);
             let total_urgency_in_bucket: f64 = bucket.iter().map(|a| a.urgency).sum();
             let uniform_fallback = total_urgency_in_bucket < EPSILON;
             bucket.iter().map(move |a| {
                 let cache_tokens = candidate_cache_read_tokens(a);
-                let cache_ratio =
-                    cache_ratio_within_bucket(cache_tokens, max_cache_tokens_in_bucket);
-                let cache_weight_multiplier = (CACHE_LOG_BOOST * cache_ratio).exp();
+                let cache_ratio = cache_value_ratio_within_bucket(
+                    candidate_cache_value_micros(a.candidate, &ctx.cache_pricing),
+                    max_cache_value_micros,
+                );
+                let cache_weight_multiplier = cache_weight_multiplier(cache_ratio);
                 let quota_weight = if uniform_fallback { 1.0 } else { a.urgency };
-                let effective_weight = quota_weight * cache_weight_multiplier;
+                let effective_weight =
+                    quota_weight * cache_weight_multiplier * a.warning_multiplier;
+                let estimated_input_cost_micros =
+                    estimate_candidate_input_cost_micros(a.candidate, &ctx.cache_pricing)
+                        .unwrap_or(0);
+                let cache_savings_ratio = cache_read_savings_ratio(a.candidate, &ctx.cache_pricing);
                 cc_lb_plugin_api::CandidateUrgency {
                     upstream_id: a.candidate.upstream_id,
                     tier: tier_to_plugin_api(a.tier),
                     urgency: effective_weight,
                     quota_urgency: a.urgency,
                     predicted_cache_read_tokens: cache_tokens,
+                    predicted_cache_creation_tokens_5m: candidate_cache_creation_tokens_5m(a),
+                    predicted_cache_creation_tokens_1h: candidate_cache_creation_tokens_1h(a),
+                    predicted_uncached_input_tokens: candidate_uncached_input_tokens(a),
                     cache_ratio,
                     cache_weight_multiplier,
+                    warning_multiplier: a.warning_multiplier,
+                    cache_savings_ratio,
+                    estimated_input_cost_micros,
                     effective_weight,
                 }
             })
         })
         .collect();
 
-    let session_thread_id: Option<&str> = ctx.thread_id.as_deref().filter(|id| !id.is_empty());
-    let wrh_key_source = WrhKeySource::RequestId;
+    let session_thread_key = ctx
+        .thread_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .map(normalized_thread_routing_key);
 
     for bucket in buckets.iter() {
         if bucket.is_empty() {
             continue;
         }
-        let winner = pick_within_tier(bucket, ctx, config);
-        let chosen_tier = tier_to_plugin_api(winner.tier);
-        let previous_tier = session_thread_id.and_then(|thread_id| tier_memory.get(thread_id, now));
-        if let Some(thread_id) = session_thread_id {
-            tier_memory.insert(thread_id, chosen_tier, now);
-        }
+        let max_cache_value_micros = max_positive_cache_value_micros(bucket, &ctx.cache_pricing);
+        let (routing_key, wrh_key_source) = routing_key_for_bucket(
+            ctx.request_id.as_str(),
+            session_thread_key.as_deref(),
+            max_cache_value_micros,
+        );
+        let selection = pick_within_tier(
+            bucket,
+            routing_key,
+            config,
+            &ctx.cache_pricing,
+            max_cache_value_micros,
+        );
+        let formula_winner = selection.winner;
+        let chosen_tier = tier_to_plugin_api(formula_winner.tier);
+        let kept_upstream_id = formula_winner.candidate.upstream_id;
 
         let trace = cc_lb_plugin_api::SubscriptionPreferenceTrace {
             chosen_tier,
             candidates: all_assessments,
             wrh_key_source,
-            previous_tier,
+            previous_tier: None,
             rendezvous_salt_version: Some(SALT_VERSION.to_owned()),
+            cache_cost_basis_version: Some(CACHE_COST_BASIS_VERSION.to_owned()),
+            formula_winner_upstream_id: Some(formula_winner.candidate.upstream_id),
+            kept_upstream_id: Some(kept_upstream_id),
+            incumbent_upstream_id: None,
+            estimated_switch_cache_loss_micros: None,
+            cache_loss_status: None,
+            switch_gate_reason: Some("formula_winner".to_owned()),
         };
         return FilterOutput {
-            kept_upstream_ids: vec![winner.candidate.upstream_id],
+            kept_upstream_ids: vec![kept_upstream_id],
             reason: SUBSCRIPTION_ALIVE_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: Some(trace),
@@ -457,12 +383,43 @@ fn evaluate(
     }
 }
 
-fn relevant_base_windows(canonical_model: &str) -> Vec<&'static str> {
-    let mut windows = vec![WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY];
-    if canonical_model.contains("sonnet") {
-        windows.push(WINDOW_SEVEN_DAY_SONNET);
+fn relevant_base_windows(_canonical_model: &str) -> Vec<&'static str> {
+    vec![WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY]
+}
+
+fn normalized_thread_routing_key(thread_id: &str) -> Cow<'_, str> {
+    if thread_id.len() <= MAX_THREAD_ROUTING_KEY_BYTES {
+        return Cow::Borrowed(thread_id);
     }
-    windows
+
+    let mut hasher = Sha256::new();
+    hasher.update(RENDEZVOUS_SALT.as_bytes());
+    hasher.update([0]);
+    hasher.update(thread_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut key = String::with_capacity(HASHED_THREAD_ROUTING_KEY_PREFIX.len() + 64);
+    key.push_str(HASHED_THREAD_ROUTING_KEY_PREFIX);
+    for byte in digest {
+        let high = usize::from(byte >> 4);
+        let low = usize::from(byte & 0x0f);
+        key.push(char::from(b"0123456789abcdef"[high]));
+        key.push(char::from(b"0123456789abcdef"[low]));
+    }
+    Cow::Owned(key)
+}
+
+fn routing_key_for_bucket<'a>(
+    request_id: &'a str,
+    session_thread_key: Option<&'a str>,
+    max_cache_value_micros: i64,
+) -> (&'a str, WrhKeySource) {
+    if let Some(thread_key) = session_thread_key
+        && max_cache_value_micros > 0
+    {
+        (thread_key, WrhKeySource::ThreadId)
+    } else {
+        (request_id, WrhKeySource::RequestId)
+    }
 }
 
 fn collect_kind(candidates: &[UpstreamCandidate], kind: UpstreamKind) -> Vec<Uuid> {
@@ -495,6 +452,7 @@ fn tier_to_plugin_api(tier: Tier) -> cc_lb_plugin_api::SubscriptionTier {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BaseSignal {
     CurrentPositive,
+    WarningPositive,
     HardNegative,
     Unknown,
 }
@@ -512,6 +470,7 @@ struct Assessment<'a> {
     original_index: usize,
     tier: Tier,
     urgency: f64,
+    warning_multiplier: f64,
 }
 
 // -- Candidate assessment. --------------------------------------------------
@@ -526,6 +485,7 @@ fn assess_candidate<'a>(
     let multiplier = capacity_multiplier(candidate);
 
     let mut positive_count = 0u32;
+    let mut warning_positive_count = 0u32;
     let mut hard_negative_count = 0u32;
     let mut base_urgency = 0.0f64;
     for &window in base_windows {
@@ -534,6 +494,16 @@ fn assess_candidate<'a>(
         match signal {
             BaseSignal::CurrentPositive => {
                 positive_count += 1;
+                if let Some(contribution) =
+                    window_urgency_contribution(snapshot, now_secs, multiplier)
+                    && contribution > base_urgency
+                {
+                    base_urgency = contribution;
+                }
+            }
+            BaseSignal::WarningPositive => {
+                positive_count += 1;
+                warning_positive_count += 1;
                 if let Some(contribution) =
                     window_urgency_contribution(snapshot, now_secs, multiplier)
                     && contribution > base_urgency
@@ -571,6 +541,11 @@ fn assess_candidate<'a>(
         original_index,
         tier,
         urgency,
+        warning_multiplier: if warning_positive_count > 0 {
+            WARNING_MULTIPLIER
+        } else {
+            1.0
+        },
     })
 }
 
@@ -639,9 +614,23 @@ fn classify_base_snapshot(
             if snap.disabled_reason.is_some() {
                 return BaseSignal::HardNegative;
             }
+            if let Some(util) = snap.utilization
+                && util.is_finite()
+                && util >= 1.0
+            {
+                return BaseSignal::HardNegative;
+            }
+            let allowed_surpassed_threshold = match (snap.utilization, snap.surpassed_threshold) {
+                (Some(util), Some(threshold)) => {
+                    util.is_finite() && threshold.is_finite() && util >= threshold
+                }
+                (Some(_), None) | (None, Some(_)) | (None, None) => false,
+            };
             match snap.status.as_deref() {
                 Some("rejected") => BaseSignal::HardNegative,
-                Some("allowed") | Some("allowed_warning") => BaseSignal::CurrentPositive,
+                Some("allowed_warning") => BaseSignal::WarningPositive,
+                Some("allowed") if allowed_surpassed_threshold => BaseSignal::WarningPositive,
+                Some("allowed") => BaseSignal::CurrentPositive,
                 Some(_) | None => utilization_signal(snap.utilization),
             }
         }
@@ -781,34 +770,51 @@ fn candidate_estimated_now(candidate: &UpstreamCandidate) -> u64 {
 
 // -- Weighted-rendezvous selection. -----------------------------------------
 
+struct TierSelection<'a, 'b> {
+    winner: &'b Assessment<'a>,
+}
+
 fn pick_within_tier<'a, 'b>(
     bucket: &'b [Assessment<'a>],
-    ctx: &RequestContext,
+    routing_key: &str,
     config: &FilterConfig,
-) -> &'b Assessment<'a> {
+    pricing: &CachePricingSummary,
+    max_cache_value_micros: i64,
+) -> TierSelection<'a, 'b> {
     debug_assert!(!bucket.is_empty());
-    if bucket.len() == 1 {
-        return &bucket[0];
-    }
-
     let total_urgency: f64 = bucket.iter().map(|a| a.urgency).sum();
     let uniform = total_urgency < EPSILON;
-    let max_cache_tokens: u32 = bucket
-        .iter()
-        .map(candidate_cache_read_tokens)
-        .max()
-        .unwrap_or(0);
+
+    if bucket.len() == 1 {
+        return TierSelection { winner: &bucket[0] };
+    }
 
     let mut best_index = 0usize;
-    let mut best_key = wrh_key(&bucket[0], ctx, config, uniform, max_cache_tokens);
+    let mut best_key = wrh_key(
+        &bucket[0],
+        routing_key,
+        config,
+        uniform,
+        pricing,
+        max_cache_value_micros,
+    );
     for (i, assessment) in bucket.iter().enumerate().skip(1) {
-        let key = wrh_key(assessment, ctx, config, uniform, max_cache_tokens);
+        let key = wrh_key(
+            assessment,
+            routing_key,
+            config,
+            uniform,
+            pricing,
+            max_cache_value_micros,
+        );
         if compare_wrh_key(&key, &best_key) == Ordering::Less {
             best_index = i;
             best_key = key;
         }
     }
-    &bucket[best_index]
+    TierSelection {
+        winner: &bucket[best_index],
+    }
 }
 
 /// Read-token count on a bucket assessment. Collapses `None` cache_score and
@@ -823,16 +829,142 @@ fn candidate_cache_read_tokens(assessment: &Assessment<'_>) -> u32 {
         .map_or(0, |score| score.predicted_cache_read_tokens)
 }
 
-/// Cache ratio inside one tier bucket. Returns `0.0` when the bucket has no
-/// positive cache signal so the exponential multiplier collapses to `1.0`
-/// (cold-pool fallback: WRH reduces to pure quota urgency, matching the
-/// v6 all-cold behaviour tests already lock in).
-fn cache_ratio_within_bucket(candidate_cache_tokens: u32, max_cache_tokens_in_bucket: u32) -> f64 {
-    if max_cache_tokens_in_bucket == 0 {
+fn candidate_cache_creation_tokens_5m(assessment: &Assessment<'_>) -> u32 {
+    assessment
+        .candidate
+        .cache_score
+        .as_ref()
+        .map_or(0, |score| score.predicted_cache_creation_tokens_5m)
+}
+
+fn candidate_cache_creation_tokens_1h(assessment: &Assessment<'_>) -> u32 {
+    assessment
+        .candidate
+        .cache_score
+        .as_ref()
+        .map_or(0, |score| score.predicted_cache_creation_tokens_1h)
+}
+
+fn candidate_uncached_input_tokens(assessment: &Assessment<'_>) -> u32 {
+    assessment
+        .candidate
+        .cache_score
+        .as_ref()
+        .map_or(0, |score| score.predicted_uncached_input_tokens)
+}
+
+fn max_positive_cache_value_micros(
+    bucket: &[Assessment<'_>],
+    pricing: &CachePricingSummary,
+) -> i64 {
+    bucket
+        .iter()
+        .filter_map(|assessment| candidate_cache_value_micros(assessment.candidate, pricing))
+        .filter(|value| *value > 0)
+        .max()
+        .unwrap_or(0)
+}
+
+fn cache_value_ratio_within_bucket(
+    candidate_cache_value: Option<i64>,
+    max_cache_value: i64,
+) -> f64 {
+    let Some(value) = candidate_cache_value else {
+        return 0.0;
+    };
+    if max_cache_value <= 0 {
         0.0
     } else {
-        candidate_cache_tokens as f64 / max_cache_tokens_in_bucket as f64
+        ((value as f64) / (max_cache_value as f64)).clamp(-1.0, 1.0)
     }
+}
+
+fn cache_weight_multiplier(cache_value_ratio: f64) -> f64 {
+    (CACHE_LOG_BOOST * cache_value_ratio).exp()
+}
+
+fn estimate_candidate_input_cost_micros(
+    candidate: &UpstreamCandidate,
+    pricing: &CachePricingSummary,
+) -> Option<u64> {
+    let score = candidate.cache_score.as_ref()?;
+    let input_price = pricing.input_micros_per_million?;
+    let cache_creation_5m_price = pricing.cache_creation_5m_micros_per_million?;
+    let cache_creation_1h_price = pricing.cache_creation_1h_micros_per_million?;
+    let cache_read_price = pricing.cache_read_micros_per_million?;
+    Some(
+        micros_for_tokens(score.predicted_uncached_input_tokens, input_price)
+            .saturating_add(micros_for_tokens(
+                score.predicted_cache_creation_tokens_5m,
+                cache_creation_5m_price,
+            ))
+            .saturating_add(micros_for_tokens(
+                score.predicted_cache_creation_tokens_1h,
+                cache_creation_1h_price,
+            ))
+            .saturating_add(micros_for_tokens(
+                score.predicted_cache_read_tokens,
+                cache_read_price,
+            )),
+    )
+}
+
+fn cache_read_savings_ratio(candidate: &UpstreamCandidate, pricing: &CachePricingSummary) -> f64 {
+    let Some(score) = candidate.cache_score.as_ref() else {
+        return 0.0;
+    };
+    let Some(input_price) = pricing.input_micros_per_million else {
+        return 0.0;
+    };
+    let Some(read_price) = pricing.cache_read_micros_per_million else {
+        return 0.0;
+    };
+    let cold_cost = micros_for_tokens(score.predicted_cache_read_tokens, input_price);
+    if cold_cost == 0 {
+        return 0.0;
+    }
+    let read_cost = micros_for_tokens(score.predicted_cache_read_tokens, read_price);
+    cold_cost.saturating_sub(read_cost) as f64 / cold_cost as f64
+}
+
+fn candidate_cache_value_micros(
+    candidate: &UpstreamCandidate,
+    pricing: &CachePricingSummary,
+) -> Option<i64> {
+    let score = candidate.cache_score.as_ref()?;
+    let input_price = pricing.input_micros_per_million?;
+    let cache_creation_5m_price = pricing.cache_creation_5m_micros_per_million?;
+    let cache_creation_1h_price = pricing.cache_creation_1h_micros_per_million?;
+    let cache_read_price = pricing.cache_read_micros_per_million?;
+
+    let cold_read_cost = micros_for_tokens(score.predicted_cache_read_tokens, input_price);
+    let cached_read_cost = micros_for_tokens(score.predicted_cache_read_tokens, cache_read_price);
+    let read_savings = cold_read_cost.saturating_sub(cached_read_cost);
+    let create_cost = micros_for_tokens(
+        score.predicted_cache_creation_tokens_5m,
+        cache_creation_5m_price,
+    )
+    .saturating_add(micros_for_tokens(
+        score.predicted_cache_creation_tokens_1h,
+        cache_creation_1h_price,
+    ));
+    Some(saturating_i128_to_i64(
+        i128::from(read_savings) - i128::from(create_cost),
+    ))
+}
+
+fn saturating_i128_to_i64(value: i128) -> i64 {
+    i64::try_from(value).unwrap_or(if value.is_negative() {
+        i64::MIN
+    } else {
+        i64::MAX
+    })
+}
+
+fn micros_for_tokens(tokens: u32, micros_per_million: u64) -> u64 {
+    (u128::from(tokens) * u128::from(micros_per_million) / 1_000_000)
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 struct WrhKey {
@@ -846,20 +978,24 @@ struct WrhKey {
 
 fn wrh_key(
     assessment: &Assessment<'_>,
-    ctx: &RequestContext,
+    routing_key: &str,
     config: &FilterConfig,
     uniform: bool,
-    max_cache_tokens: u32,
+    pricing: &CachePricingSummary,
+    max_cache_value_micros: i64,
 ) -> WrhKey {
     let hash = rendezvous_hash(
         config.rendezvous_hash_salt,
-        ctx.request_id.as_str(),
+        routing_key,
         assessment.candidate.upstream_id,
     );
     let quota_weight = if uniform { 1.0 } else { assessment.urgency };
-    let cache_tokens = candidate_cache_read_tokens(assessment);
-    let cache_ratio = cache_ratio_within_bucket(cache_tokens, max_cache_tokens);
-    let effective_weight = quota_weight * (CACHE_LOG_BOOST * cache_ratio).exp();
+    let cache_ratio = cache_value_ratio_within_bucket(
+        candidate_cache_value_micros(assessment.candidate, pricing),
+        max_cache_value_micros,
+    );
+    let effective_weight =
+        quota_weight * cache_weight_multiplier(cache_ratio) * assessment.warning_multiplier;
     let u = hash_to_open_unit(hash);
     let score = if effective_weight <= 0.0 {
         f64::INFINITY
@@ -890,7 +1026,7 @@ fn hash_to_open_unit(hash: u64) -> f64 {
     ((top53 as f64) + 0.5) / ((1u64 << 53) as f64)
 }
 
-// -- Rendezvous hash (FNV-1a 64 over salt || request_id || upstream_id,
+// -- Rendezvous hash (FNV-1a 64 over salt || routing key || upstream_id,
 // with a Murmur3 fmix64 avalanche finalizer). ------------------------------
 //
 // FNV-1a alone has weak avalanche: two inputs differing in one trailing byte
@@ -900,7 +1036,7 @@ fn hash_to_open_unit(hash: u64) -> f64 {
 // step spreads any local input change across all 64 output bits, restoring
 // the "independent uniforms per candidate" property WRH requires.
 
-fn rendezvous_hash(salt: &str, session_key: &str, upstream_id: Uuid) -> u64 {
+fn rendezvous_hash(salt: &str, routing_key: &str, upstream_id: Uuid) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let fnv_prime: u64 = 0x100_0000_01b3;
     let mix = |h: &mut u64, byte: u8| {
@@ -911,7 +1047,7 @@ fn rendezvous_hash(salt: &str, session_key: &str, upstream_id: Uuid) -> u64 {
         mix(&mut h, b);
     }
     mix(&mut h, 0);
-    for &b in session_key.as_bytes() {
+    for &b in routing_key.as_bytes() {
         mix(&mut h, b);
     }
     mix(&mut h, 0);

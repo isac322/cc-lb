@@ -4,9 +4,9 @@ use std::{env, fs};
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    DialectError, Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder,
-    SignedRequest, Signer, SignerError, SigningCapability, Upstream, UpstreamDialect,
-    shape_request, sign_request,
+    CachePricingSummary, DialectError, Principal, PrincipalKind, RequestContext, ShapedRequest,
+    ShapedRequestBuilder, SignedRequest, Signer, SignerError, SigningCapability, Upstream,
+    UpstreamDialect, shape_request, sign_request,
 };
 use http::{HeaderMap, Method};
 
@@ -64,6 +64,7 @@ fn signer_seals_by_consuming_shaped_request() {
         body_bytes: Bytes::from_static(b"{}"),
         cache_breakpoints: Vec::new(),
         canonical_model_id: String::new(),
+        cache_pricing: CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "alice".to_owned(),
@@ -124,6 +125,7 @@ fn controlled_builder_cannot_be_fabricated_by_normal_callers() {
         body_bytes: Bytes::new(),
         cache_breakpoints: Vec::new(),
         canonical_model_id: String::new(),
+        cache_pricing: CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "alice".to_owned(),

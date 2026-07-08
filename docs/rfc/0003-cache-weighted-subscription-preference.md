@@ -5,6 +5,7 @@
 - Status: Draft
 - Related PRs: #350 (v7 rewrite), supersedes prior PR #322 routing effect
 - Related ADRs: ADR 0004 (this RFC's decision record), ADR 0003 (WRH shape it extends)
+- Superseded in part by: ADR 0005, which restores thread-keyed routing for non-empty `thread_id`, adds bounded same-thread owner memory with hysteresis, and excludes `7d_sonnet`/`7d_opus` from routing criteria.
 
 ## Summary
 
@@ -14,7 +15,7 @@ The resulting WRH weight `effective_weight_i = quota_urgency_i * exp(CACHE_LOG_B
 
 ## Motivation
 
-Two production incidents on `ses_example00000000`:
+Two production incidents on `thread-prod-cache-redacted`:
 
 1. **2026-07-05 06:24 UTC scatter** — 50 consecutive turns bounced across four upstreams because `cache_affinity`'s binary `> 0` filter left all four in the pool (BP0 warm on each) and subscription's request-id keying redraw was independent per turn. Estimated waste: ~$25 per 5-turn scatter block.
 2. **2026-07-06 02:34 UTC sticky cold** — Once the fix from PR #322 was live, `thread_id`-keyed WRH deterministically re-picked the same (now-cold) upstream on every post-idle turn. Three consecutive $5 cache_creation events with zero cache-read benefit.
@@ -31,7 +32,7 @@ Both filters can be reconciled by placing the cache signal inside subscription's
 - Cross-instance session affinity, prefix-hash-keyed WRH, or a persistent thread-affinity map. Discussed and rejected in prior consultations (bg_63be9089, bg_a5698121, bg_aab7308b).
 - Tuning per-principal `CACHE_LOG_BOOST`. Ships as a compile-time constant. Making it configurable is a follow-up if operators want per-tenant curves.
 - Rewriting `cache_affinity` for non-default chains that still name it. The type and its trace shape stay in the tree.
-- Changing `RequestContext.thread_id` semantics. Header is still extracted, still surfaced in `TierMemory` and traces; only routing use is removed.
+- Changing `RequestContext.thread_id` semantics. Header is still extracted, still surfaced in `TierMemory` and traces; only routing use is removed in this v7 RFC. ADR 0005 later supersedes this point by restoring thread-keyed routing with bounded owner memory.
 - Wire-level plugin API changes.
 
 ## Design
@@ -144,7 +145,7 @@ Unchanged. `evaluate` still iterates `KnownBase → PartialBase → Overage → 
 
 ### `RequestContext.thread_id`
 
-Field retained. Population path (`x-claude-code-session-id` → `x-claude-session-id` → `x-session-affinity` → `x-session-id`) unchanged. `TierMemory` still keys on it for the `previous_tier` observability field. `wrh_session_key` is deleted; nothing else reads `thread_id` for routing.
+Field retained. Population path (`x-claude-code-session-id` → `x-claude-session-id` → `x-session-affinity` → `x-session-id`) unchanged. In this v7 RFC, `TierMemory` still keys on it for the `previous_tier` observability field, `wrh_session_key` is deleted, and nothing else reads `thread_id` for routing. ADR 0005 supersedes this by using a normalized `thread_id` routing key and owner memory.
 
 ### Uniform-fallback interaction
 
@@ -228,5 +229,5 @@ Non-blocking, out of PR #350 scope:
 ## Open questions
 
 - Should `CACHE_LOG_BOOST` be per-principal or per-tier configurable? Defer to post-deployment empirical data.
-- Should we still record `wrh_key_source` in the trace? Under v7 it is always `RequestId`. Kept for serde back-compat only; removing it later is a plugin API break.
+- Should we still record `wrh_key_source` in the trace? Under v7 it is always `RequestId`; ADR 0005 supersedes this and records `ThreadId` when a non-empty thread id is used.
 - Should the tests use a `MockNow` trait or `Instant` fixtures to eliminate flake from `TierMemory` clock-based tests? Existing pattern from v6 tests suffices; revisit if flake appears.

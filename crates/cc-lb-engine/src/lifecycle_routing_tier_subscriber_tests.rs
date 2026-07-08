@@ -36,6 +36,13 @@ fn stage(tier: Option<SubscriptionTier>) -> StageDecision {
             wrh_key_source: WrhKeySource::RequestId,
             previous_tier: None,
             rendezvous_salt_version: None,
+            cache_cost_basis_version: None,
+            formula_winner_upstream_id: None,
+            kept_upstream_id: None,
+            incumbent_upstream_id: None,
+            estimated_switch_cache_loss_micros: None,
+            cache_loss_status: None,
+            switch_gate_reason: None,
         }),
         cache_affinity: None,
     }

@@ -9,10 +9,10 @@
 //! borrowed encoding stops producing bytes the guest can parse.
 
 use cc_lb_plugin_wire::{
-    ArchivedFilterRequest, ArchivedObserveEvent, ArchivedShapeRequest, Claim, ClaimRef,
-    FilterRequest, FilterRequestRef, Header, HeaderRef, ObserveEvent, Principal, PrincipalRef,
-    QueryRef, ShapeRequest, ShapeRequestRef, ShapeResponse, Upstream, UpstreamCandidate,
-    UpstreamCandidateRef, UpstreamRef, WireSchema,
+    ArchivedFilterRequest, ArchivedObserveEvent, ArchivedShapeRequest, CachePricingSummary,
+    CachePricingSummaryRef, Claim, ClaimRef, FilterRequest, FilterRequestRef, Header, HeaderRef,
+    ObserveEvent, Principal, PrincipalRef, QueryRef, ShapeRequest, ShapeRequestRef, ShapeResponse,
+    Upstream, UpstreamCandidate, UpstreamCandidateRef, UpstreamRef, WireSchema,
     schema::{HookKind, WireVersion},
 };
 use rkyv::rancor::Error;
@@ -40,6 +40,14 @@ fn filter_request_round_trips() {
     let req = FilterRequest {
         request_id: Box::from("req-1"),
         thread_id: None,
+        canonical_model_id: Box::from("claude-test"),
+        cache_pricing: CachePricingSummary {
+            status: Box::from("known"),
+            input_micros_per_million: Some(5_000_000),
+            cache_creation_5m_micros_per_million: Some(6_250_000),
+            cache_creation_1h_micros_per_million: Some(10_000_000),
+            cache_read_micros_per_million: Some(500_000),
+        },
         method: Box::from("POST"),
         path: Box::from("/v1/messages"),
         query: None,
@@ -52,6 +60,9 @@ fn filter_request_round_trips() {
             kind: Box::from("anthropic_api_key"),
             observed_at_unix_secs: 42,
             predicted_cache_read_tokens: 256,
+            predicted_cache_creation_tokens_5m: 512,
+            predicted_cache_creation_tokens_1h: 1024,
+            predicted_uncached_input_tokens: 32,
             plan_capacity_ratio: 1.0,
             organization_type: Box::from(""),
             rate_limit_tier: Box::from(""),
@@ -63,8 +74,10 @@ fn filter_request_round_trips() {
     let owned: FilterRequest =
         rkyv::deserialize::<FilterRequest, Error>(archived).expect("deserialize");
     assert_eq!(&*owned.request_id, "req-1");
+    assert_eq!(&*owned.canonical_model_id, "claude-test");
     assert_eq!(owned.candidates.len(), 1);
     assert_eq!(owned.candidates[0].predicted_cache_read_tokens, 256);
+    assert_eq!(owned.candidates[0].predicted_cache_creation_tokens_5m, 512);
 }
 
 /// RFC-0001 #9: `FilterRequestRef<'_>` (borrowed) must produce bytes
@@ -85,6 +98,9 @@ fn filter_request_ref_encodes_to_owned_wire() {
         kind: "anthropic_api_key",
         observed_at_unix_secs: 42,
         predicted_cache_read_tokens: 256,
+        predicted_cache_creation_tokens_5m: 512,
+        predicted_cache_creation_tokens_1h: 1024,
+        predicted_uncached_input_tokens: 32,
         plan_capacity_ratio: 1.0,
         organization_type: "",
         rate_limit_tier: "",
@@ -93,6 +109,14 @@ fn filter_request_ref_encodes_to_owned_wire() {
     let req_ref = FilterRequestRef {
         request_id: "req-1",
         thread_id: None,
+        canonical_model_id: "claude-test",
+        cache_pricing: CachePricingSummaryRef {
+            status: "known",
+            input_micros_per_million: Some(5_000_000),
+            cache_creation_5m_micros_per_million: Some(6_250_000),
+            cache_creation_1h_micros_per_million: Some(10_000_000),
+            cache_read_micros_per_million: Some(500_000),
+        },
         method: "POST",
         path: "/v1/messages",
         query: None,
@@ -111,6 +135,8 @@ fn filter_request_ref_encodes_to_owned_wire() {
     assert_eq!(owned_body, b"{\"k\":1}");
     let owned_id: &str = &archived.request_id;
     assert_eq!(owned_id, "req-1");
+    let model_id: &str = &archived.canonical_model_id;
+    assert_eq!(model_id, "claude-test");
 }
 
 #[test]

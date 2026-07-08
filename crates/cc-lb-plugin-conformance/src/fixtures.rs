@@ -7,7 +7,9 @@
 //! author actually re-types every time is header construction, a
 //! synthetic principal, and the six-variant observe sample.
 
-use cc_lb_plugin_wire::{FilterRequest, Header, ObserveEvent, Principal, ShapeRequest, Upstream};
+use cc_lb_plugin_wire::{
+    CachePricingSummary, FilterRequest, Header, ObserveEvent, Principal, ShapeRequest, Upstream,
+};
 
 /// Build a `Header` from `(name, value)`. Value can be `&str`, `&[u8]`,
 /// `String`, or anything that dereferences to bytes.
@@ -93,6 +95,14 @@ pub fn sample_filter_request() -> FilterRequest {
     FilterRequest {
         request_id: Box::from("conformance-req-1"),
         thread_id: None,
+        canonical_model_id: Box::from("claude-3-haiku-20240307"),
+        cache_pricing: CachePricingSummary {
+            status: Box::from("unknown"),
+            input_micros_per_million: None,
+            cache_creation_5m_micros_per_million: None,
+            cache_creation_1h_micros_per_million: None,
+            cache_read_micros_per_million: None,
+        },
         method: Box::from("POST"),
         path: Box::from("/v1/messages"),
         query: None,

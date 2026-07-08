@@ -146,6 +146,7 @@ pub async fn dispatch_warmup_with_dialect(
         body_bytes: Bytes::from(serde_json::to_vec(&body_json)?),
         cache_breakpoints: Vec::new(),
         canonical_model_id: WARMUP_MODEL.to_owned(),
+        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: params.upstream.id.to_string(),

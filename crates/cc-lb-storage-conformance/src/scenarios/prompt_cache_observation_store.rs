@@ -293,6 +293,67 @@ where
     .await
 }
 
+/// Two models that share the same (upstream, prefix_hash, ttl_class) must not
+/// collide: the primary key includes canonical_model_id, so a second model's
+/// observation keeps its own row instead of overwriting the first. Guards the
+/// SQLite regression where the key omitted canonical_model_id.
+pub async fn cross_model_same_prefix_keeps_both_rows<B>(
+    backend: Arc<B>,
+    clock: ClockHandle,
+) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: PromptCacheObservationStore,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let now = unix_secs(clock.now());
+        let upstream_id = upstream_id(6);
+        let prefix_hash = "sha256:t15-cross-model-shared";
+        let sonnet = observation_with_model(
+            upstream_id,
+            "claude-sonnet-4-5-20250929",
+            prefix_hash,
+            TtlClass::Ephemeral5m,
+            now + 300,
+            now,
+        );
+        let opus = observation_with_model(
+            upstream_id,
+            "claude-opus-4-1-20250805",
+            prefix_hash,
+            TtlClass::Ephemeral5m,
+            now + 600,
+            now,
+        );
+
+        storage.upsert_observation(&sonnet).await?;
+        storage.upsert_observation(&opus).await?;
+
+        let records = storage.list_active_for_upstream(upstream_id, now).await?;
+        ensure!(
+            records.len() == 2,
+            "same prefix under two models must persist as two rows, got {}",
+            records.len()
+        );
+        ensure!(
+            records.iter().any(
+                |record| record.canonical_model_id == sonnet.canonical_model_id
+                    && record.expires_at_unix_secs == sonnet.expires_at_unix_secs
+            ),
+            "sonnet observation must survive with its own expiry"
+        );
+        ensure!(
+            records.iter().any(
+                |record| record.canonical_model_id == opus.canonical_model_id
+                    && record.expires_at_unix_secs == opus.expires_at_unix_secs
+            ),
+            "opus observation must survive with its own expiry"
+        );
+        Ok(())
+    })
+    .await
+}
+
 fn observation(
     upstream_id: Uuid,
     prefix_hash: &str,
@@ -300,9 +361,27 @@ fn observation(
     expires_at_unix_secs: u64,
     last_observed_at_unix_secs: u64,
 ) -> PromptCacheObservationRecord {
+    observation_with_model(
+        upstream_id,
+        "claude-sonnet-4-5-20250929",
+        prefix_hash,
+        ttl_class,
+        expires_at_unix_secs,
+        last_observed_at_unix_secs,
+    )
+}
+
+fn observation_with_model(
+    upstream_id: Uuid,
+    canonical_model_id: &str,
+    prefix_hash: &str,
+    ttl_class: TtlClass,
+    expires_at_unix_secs: u64,
+    last_observed_at_unix_secs: u64,
+) -> PromptCacheObservationRecord {
     PromptCacheObservationRecord {
         upstream_id,
-        canonical_model_id: "claude-sonnet-4-5-20250929".to_owned(),
+        canonical_model_id: canonical_model_id.to_owned(),
         prefix_hash: prefix_hash.to_owned(),
         ttl_class,
         expires_at_unix_secs,
