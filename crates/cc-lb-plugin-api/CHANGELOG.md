@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-api-v0.9.0...cc-lb-plugin-api-v0.10.0) - 2026-07-08
+
+### Added
+
+- *(routing)* cut over prompt-cache routing to v3 content-block lookback ([#371](https://github.com/isac322/cc-lb/pull/371))
+
 ## [0.4.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-api-v0.3.0...cc-lb-plugin-api-v0.4.0) - 2026-07-03
 
 ### Added
