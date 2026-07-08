@@ -307,11 +307,13 @@ impl StreamingTlsResponse {
             assert!(Instant::now() < deadline, "stream did not contain {needle}");
 
             let mut buffer = [0_u8; 4096];
-            let read =
+            let Ok(read_result) =
                 tokio::time::timeout(Duration::from_millis(500), self.stream.read(&mut buffer))
                     .await
-                    .expect("stream read timed out")
-                    .expect("stream read");
+            else {
+                continue;
+            };
+            let read = read_result.expect("stream read");
             assert!(read > 0, "stream ended before {needle}");
             self.bytes.extend_from_slice(&buffer[..read]);
         }
