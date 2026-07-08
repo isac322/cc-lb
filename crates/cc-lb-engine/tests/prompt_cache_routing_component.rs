@@ -7,7 +7,7 @@ use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferen
 use cc_lb_engine::{
     DynamicViewBuilder, RequestKind, build_candidates, parse_request_cache_breakpoints,
 };
-use cc_lb_plugin_api::types::{CacheScore, WrhKeySource};
+use cc_lb_plugin_api::types::{TtlClass, WarmCacheEntry, WrhKeySource};
 use cc_lb_plugin_api::{FilterPlugin, RequestContext, UpstreamCandidate};
 use http::{HeaderMap, Method};
 use url::Url;
@@ -38,18 +38,15 @@ fn built_candidate_cache_score_drives_subscription_preference_component_route() 
     );
     let breakpoints = parse_request_cache_breakpoints(&HeaderMap::new(), &body);
     assert_eq!(breakpoints.len(), 1);
+    let owner_prefix = breakpoints[0].lookback_prefixes[0].prefix_hash.clone();
     let prompt_cache = TestPromptCacheObservationCache::new(HashMap::from([(
-        (owner_id, TEST_MODEL.to_owned(), thread_id.to_owned()),
-        CacheScore {
-            predicted_cache_read_tokens: 590_000,
-            predicted_cache_creation_tokens_5m: 0,
-            predicted_cache_creation_tokens_1h: 0,
-            predicted_uncached_input_tokens: 0,
-            predicted_expires_at_unix_secs: Some(TEST_QUOTA_NOW_SECS + 300),
-            matched_breakpoint_index: None,
-            confidence: 0.5,
-            ambiguity_reason: Some("thread_usage_lineage".to_owned()),
-        },
+        owner_id,
+        vec![WarmCacheEntry {
+            prefix_hash: owner_prefix.clone(),
+            expires_at_unix_secs: TEST_QUOTA_NOW_SECS + 300,
+            ttl_class: TtlClass::Ephemeral5m,
+            last_observed_at_unix_secs: TEST_QUOTA_NOW_SECS,
+        }],
     )]));
     let quota_cache = TestSubscriptionQuotaCache::new(HashMap::from([
         (owner_id, known_base_quota_snapshots(0.22)),
@@ -89,15 +86,12 @@ fn built_candidate_cache_score_drives_subscription_preference_component_route() 
     );
     let owner = candidate(&candidates, owner_id, "owner");
     let peer = candidate(&candidates, quota_peer_id, "quota peer");
+    let owner_score = owner.cache_score.as_ref().expect("owner cache score");
     assert_eq!(
-        owner
-            .cache_score
-            .as_ref()
-            .expect("owner cache score")
-            .ambiguity_reason
-            .as_deref(),
-        Some("thread_usage_lineage")
+        owner_score.matched_v3_cache_key.as_deref(),
+        Some(owner_prefix.as_str())
     );
+    assert_eq!(owner_score.ambiguity_reason, None);
     assert_eq!(
         peer.cache_score
             .as_ref()
@@ -119,7 +113,11 @@ fn built_candidate_cache_score_drives_subscription_preference_component_route() 
     let owner_weight = trace_row_weight(&trace.candidates, owner_id, "owner");
     let peer_weight = trace_row_weight(&trace.candidates, quota_peer_id, "quota peer");
 
-    assert_eq!(trace.wrh_key_source, WrhKeySource::ThreadId);
+    assert_eq!(trace.wrh_key_source, WrhKeySource::CacheHash);
+    assert_eq!(
+        trace.bucket_v3_cache_affinity_key.as_deref(),
+        Some(owner_prefix.as_str())
+    );
     assert!(
         owner_weight > peer_weight * 1000.0,
         "generated thread cache score must dominate moderate quota advantage: owner={owner_weight}, peer={peer_weight}"

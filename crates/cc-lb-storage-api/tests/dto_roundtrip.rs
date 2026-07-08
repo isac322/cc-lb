@@ -1,7 +1,7 @@
 #![cfg(feature = "dto-roundtrip")]
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 
-use cc_lb_contract::CostBreakdown;
+use cc_lb_contract::{CostBreakdown, RequestCacheLookbackPrefix};
 use cc_lb_engine::event_bus::RequestEventUpdate;
 use cc_lb_plugin_api::{
     InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace,
@@ -150,6 +150,13 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
             prefix_hash: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
                 .to_owned(),
             prefix_token_count: 2048,
+            lookback_prefixes: vec![RequestCacheLookbackPrefix {
+                prefix_hash: "fedcba9876543210".to_owned(),
+                content_block_index: 0,
+                prefix_token_count: 2048,
+                lookback_distance: 0,
+            }],
+            token_estimate_source: Some("local_tiktoken_v1".to_owned()),
         }],
         cache_prefix_hash: Some(
             "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
@@ -334,6 +341,13 @@ fn batch_b_wire_snapshots_are_stable() {
             ttl: Some("5m".to_owned()),
             prefix_hash: "abcdef0123456789".to_owned(),
             prefix_token_count: 4096,
+            lookback_prefixes: vec![RequestCacheLookbackPrefix {
+                prefix_hash: "lookbackabcdef0123456789".to_owned(),
+                content_block_index: 6,
+                prefix_token_count: 3072,
+                lookback_distance: 1,
+            }],
+            token_estimate_source: Some("local_tiktoken_v1".to_owned()),
         },
         json!({
             "block_index": 7,
@@ -342,7 +356,14 @@ fn batch_b_wire_snapshots_are_stable() {
             "message_index": 2,
             "ttl": "5m",
             "prefix_hash": "abcdef0123456789",
-            "prefix_token_count": 4096
+            "prefix_token_count": 4096,
+            "lookback_prefixes": [{
+                "prefix_hash": "lookbackabcdef0123456789",
+                "content_block_index": 6,
+                "prefix_token_count": 3072,
+                "lookback_distance": 1
+            }],
+            "token_estimate_source": "local_tiktoken_v1"
         }),
     );
 
@@ -379,8 +400,31 @@ fn batch_b_wire_snapshots_are_stable() {
             ttl: Some("5m".to_owned()),
             prefix_hash: "abcdef0123456789".to_owned(),
             prefix_token_count: 4096,
+            lookback_prefixes: vec![RequestCacheLookbackPrefix {
+                prefix_hash: "lookbackabcdef0123456789".to_owned(),
+                content_block_index: 6,
+                prefix_token_count: 3072,
+                lookback_distance: 1,
+            }],
+            token_estimate_source: Some("local_tiktoken_v1".to_owned()),
         }],
         cache_prefix_hash: Some("prefix_hash_batch_b".to_owned()),
+        matched_v3_cache_key: Some("matched_v3_cache_key_batch_b".to_owned()),
+        breakpoint_content_block_index: Some(7),
+        matched_content_block_index: Some(6),
+        lookback_distance: Some(1),
+        predicted_cache_read_tokens: Some(4096),
+        predicted_cache_creation_tokens_5m: Some(123),
+        predicted_cache_creation_tokens_1h: Some(210),
+        token_estimate_source: Some("local_tiktoken_v1".to_owned()),
+        cache_value_micros: Some(777_000),
+        formula_winner_upstream_id: Some(Uuid::from_u128(0x44444444444444444444444444444444)),
+        kept_upstream_id: Some(Uuid::from_u128(0x55555555555555555555555555555555)),
+        wrh_key_source: Some("cache_hash".to_owned()),
+        lineage_would_have_predicted_read_tokens: Some(1024),
+        lineage_would_have_picked_upstream_id: Some(Uuid::from_u128(
+            0x66666666666666666666666666666666,
+        )),
         cost_usd_micros: Some(987_654),
         cost_input_micros: Some(111_000),
         cost_output_micros: Some(222_000),
@@ -478,9 +522,30 @@ fn batch_b_wire_snapshots_are_stable() {
             "message_index": 2,
             "ttl": "5m",
             "prefix_hash": "abcdef0123456789",
-            "prefix_token_count": 4096
+            "prefix_token_count": 4096,
+            "lookback_prefixes": [{
+                "prefix_hash": "lookbackabcdef0123456789",
+                "content_block_index": 6,
+                "prefix_token_count": 3072,
+                "lookback_distance": 1
+            }],
+            "token_estimate_source": "local_tiktoken_v1"
         }],
         "cache_prefix_hash": "prefix_hash_batch_b",
+        "matched_v3_cache_key": "matched_v3_cache_key_batch_b",
+        "breakpoint_content_block_index": 7,
+        "matched_content_block_index": 6,
+        "lookback_distance": 1,
+        "predicted_cache_read_tokens": 4096,
+        "predicted_cache_creation_tokens_5m": 123,
+        "predicted_cache_creation_tokens_1h": 210,
+        "token_estimate_source": "local_tiktoken_v1",
+        "cache_value_micros": 777_000,
+        "formula_winner_upstream_id": "44444444-4444-4444-4444-444444444444",
+        "kept_upstream_id": "55555555-5555-5555-5555-555555555555",
+        "wrh_key_source": "cache_hash",
+        "lineage_would_have_predicted_read_tokens": 1024,
+        "lineage_would_have_picked_upstream_id": "66666666-6666-6666-6666-666666666666",
         "cost_usd_micros": 987_654,
         "cost_input_micros": 111_000,
         "cost_output_micros": 222_000,

@@ -181,10 +181,15 @@ fn observation(
     PromptCacheObservationRecord {
         upstream_id,
         canonical_model_id: "claude-sonnet-4-5-20250929".to_owned(),
-        prefix_hash: prefix_hash.to_owned(),
+        v3_prefix_key: prefix_hash.to_owned(),
         ttl_class,
         expires_at_unix_secs,
         last_observed_at_unix_secs,
-        hash_schema_version: 1,
+        hash_schema_version: 3,
+        prefix_content_block_index: 7,
+        estimated_prefix_tokens: 12_345,
+        token_estimate_source: "local_tiktoken_v1".to_owned(),
+        last_provider_cache_read_tokens: Some(12_000),
+        last_provider_cache_creation_tokens: Some(345),
     }
 }

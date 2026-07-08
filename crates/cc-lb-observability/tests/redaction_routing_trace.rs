@@ -150,6 +150,12 @@ fn routing_trace_cap_respects_extended_stage_payloads() {
                         cache_savings_ratio: cache_ratio,
                         estimated_input_cost_micros: u64::from(c) * 1_000,
                         effective_weight,
+                        cache_value_micros: Some(i64::from(c) * 1_000),
+                        matched_v3_cache_key: Some(format!("cache-key-{c}")),
+                        matched_content_block_index: Some(u32::from(c)),
+                        breakpoint_content_block_index: Some(u32::from(c) + 1),
+                        lookback_distance: Some(u32::from(c)),
+                        token_estimate_source: Some("local_tiktoken_v1".to_owned()),
                     }
                 })
                 .collect(),
@@ -163,6 +169,9 @@ fn routing_trace_cap_respects_extended_stage_payloads() {
             estimated_switch_cache_loss_micros: Some(u64::from(index) * 1_000),
             cache_loss_status: Some("known".to_owned()),
             switch_gate_reason: Some("formula_winner".to_owned()),
+            bucket_v3_cache_affinity_key: Some(format!("bucket-cache-key-{index}")),
+            lineage_would_have_predicted_read_tokens: None,
+            lineage_would_have_picked_upstream_id: None,
         }),
         cache_affinity: None,
     };
@@ -233,6 +242,12 @@ fn subscription_preference_all_fields_survive_serde_roundtrip() {
             cache_savings_ratio: 0.4,
             estimated_input_cost_micros: 123_456,
             effective_weight: 0.75,
+            cache_value_micros: Some(42_000),
+            matched_v3_cache_key: Some("cache-key".to_owned()),
+            matched_content_block_index: Some(10),
+            breakpoint_content_block_index: Some(11),
+            lookback_distance: Some(1),
+            token_estimate_source: Some("local_tiktoken_v1".to_owned()),
         }],
         wrh_key_source: WrhKeySource::RequestId,
         previous_tier: Some(SubscriptionTier::KnownBase),
@@ -244,6 +259,9 @@ fn subscription_preference_all_fields_survive_serde_roundtrip() {
         estimated_switch_cache_loss_micros: Some(42_000),
         cache_loss_status: Some("known".to_owned()),
         switch_gate_reason: Some("formula_winner".to_owned()),
+        bucket_v3_cache_affinity_key: Some("cache-key".to_owned()),
+        lineage_would_have_predicted_read_tokens: Some(50_000),
+        lineage_would_have_picked_upstream_id: Some(Uuid::from_bytes([2; 16])),
     };
     let json = serde_json::to_string(&trace).unwrap();
     let decoded: SubscriptionPreferenceTrace = serde_json::from_str(&json).unwrap();
@@ -255,6 +273,8 @@ fn subscription_preference_all_fields_survive_serde_roundtrip() {
     assert!(json.contains("\"predicted_cache_read_tokens\":100000"));
     assert!(json.contains("\"cache_weight_multiplier\":"));
     assert!(json.contains("\"effective_weight\":"));
+    assert!(json.contains("\"bucket_v3_cache_affinity_key\":\"cache-key\""));
+    assert!(json.contains("\"lineage_would_have_predicted_read_tokens\":50000"));
 }
 
 #[test]
