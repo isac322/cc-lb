@@ -3,8 +3,8 @@ use std::sync::Arc;
 use cc_lb_plugin_wire::metadata::PluginMetadata;
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
 use cc_lb_plugin_wire::v1::{
-    ArchivedFilterResponse, ArchivedShapeResponse, FilterRequest, Header, ObserveEvent, Principal,
-    ShapeRequest, Upstream,
+    ArchivedFilterResponse, ArchivedShapeResponse, CachePricingSummary, FilterRequest, Header,
+    ObserveEvent, Principal, ShapeRequest, Upstream,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
@@ -78,6 +78,14 @@ fn sample_filter_request() -> FilterRequest {
     FilterRequest {
         request_id: Box::from("probe-req-1"),
         thread_id: None,
+        canonical_model_id: Box::from("claude-3-haiku-20240307"),
+        cache_pricing: CachePricingSummary {
+            status: Box::from("unknown"),
+            input_micros_per_million: None,
+            cache_creation_5m_micros_per_million: None,
+            cache_creation_1h_micros_per_million: None,
+            cache_read_micros_per_million: None,
+        },
         method: Box::from("POST"),
         path: Box::from("/v1/messages"),
         query: None,

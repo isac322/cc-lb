@@ -271,6 +271,10 @@ prompt_cache_observation_sqlite_test!(
     prompt_cache_observation_observation_list_is_sorted_sqlite,
     observation_list_is_sorted
 );
+prompt_cache_observation_sqlite_test!(
+    prompt_cache_observation_cross_model_same_prefix_keeps_both_rows_sqlite,
+    cross_model_same_prefix_keeps_both_rows
+);
 
 #[test]
 fn upstream_subscription_metadata_store_sqlite() {

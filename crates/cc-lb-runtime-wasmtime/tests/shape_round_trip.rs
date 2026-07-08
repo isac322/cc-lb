@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    Principal, PrincipalKind, RequestContext, SlotKey, Upstream, shape_request,
+    CachePricingSummary, Principal, PrincipalKind, RequestContext, SlotKey, Upstream, shape_request,
 };
 use cc_lb_runtime_wasmtime::{WasmtimeRuntime, WasmtimeUpstreamDialect};
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
@@ -75,6 +75,7 @@ fn fixture_request() -> RequestContext {
         body_bytes: Bytes::from_static(b"{\"prompt\":\"hi\"}"),
         cache_breakpoints: Vec::new(),
         canonical_model_id: "claude-fixture".to_owned(),
+        cache_pricing: CachePricingSummary::default(),
     }
 }
 

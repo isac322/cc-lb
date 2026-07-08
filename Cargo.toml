@@ -28,13 +28,13 @@ license = "Apache-2.0"
 rust-version = "1.96.0"
 
 [workspace.dependencies]
-cc-lb-plugin-api = { version = "0.8", path = "crates/cc-lb-plugin-api" }
+cc-lb-plugin-api = { version = "0.9", path = "crates/cc-lb-plugin-api" }
 
 # Internal, unpublished — RFC-0002 event-driven lifecycle vocabulary.
 cc-lb-contract = { path = "crates/cc-lb-contract", version = "0.1.0" }
 
 cc-lb-runtime-wasmtime    = { path = "crates/cc-lb-runtime-wasmtime", version = "0.1.1" }
-cc-lb-plugin-wire = { version = "0.4", path = "crates/cc-lb-plugin-wire" }
+cc-lb-plugin-wire = { version = "0.5", path = "crates/cc-lb-plugin-wire" }
 cc-lb-pdk-wasmtime = { version = "0.1", path = "crates/cc-lb-pdk-wasmtime" }
 cc-lb-pdk-wasmtime-macros = { version = "0.1", path = "crates/cc-lb-pdk-wasmtime-macros" }
 cc-lb-plugin-conformance = { version = "0.2", path = "crates/cc-lb-plugin-conformance" }

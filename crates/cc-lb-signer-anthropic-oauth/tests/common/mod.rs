@@ -236,6 +236,7 @@ pub fn shaped_request() -> ShapedRequest {
         body_bytes: Bytes::from_static(b"{}"),
         cache_breakpoints: Vec::new(),
         canonical_model_id: String::new(),
+        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "alice".to_owned(),

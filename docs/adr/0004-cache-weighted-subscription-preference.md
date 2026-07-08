@@ -4,10 +4,11 @@
 - Date: 2026-07-06
 - Ships with: PR #350 (rewrite)
 - Supersedes: ADR 0003's within-tier WRH signature; the tier ordering and quota-urgency computation from ADR 0003 stay unchanged.
+- Follow-up: ADR 0005 bumps the salt to v8, restores thread-keyed WRH when `RequestContext.thread_id` is non-empty, adds bounded same-thread owner memory with hysteresis, demotes provider warning base snapshots to `PartialBase`, and supersedes ADR 0003's `7d_sonnet` routing-window decision by using only `5h` and `7d`; the v7 cache-weighted WRH formula remains the formula winner inside a tier.
 
 ## Context
 
-Two production incidents on session `ses_0d40d66f8ffezC7gUXysWIv4cz` exposed a common root failure between the `cache_affinity` and `subscription_preference` filters:
+Two production incidents on session `thread-prod-cache-redacted` exposed a common root failure between the `cache_affinity` and `subscription_preference` filters:
 
 1. **2026-07-05 06:24 UTC — scatter.** cache_affinity's `predicted_cache_read_tokens > 0` filter kept every upstream whose shared BP0 (system-prompt) hash was warm — all four candidates for `isac-opencode`. subscription_preference then broke the tie with request-id-keyed WRH, drawing an independent random winner per turn. Fifty consecutive turns bounced across `Runbear`, `bear-max`, `isac-personal`, `bh322yoo-max`. Each switch paid ~250K cache_creation tokens at Opus-write rates.
 

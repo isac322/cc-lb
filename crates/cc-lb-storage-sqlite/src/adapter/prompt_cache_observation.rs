@@ -15,8 +15,7 @@ impl PromptCacheObservationStore for SqliteStorage {
             "INSERT INTO prompt_cache_observations \
              (upstream_id, canonical_model_id, prefix_hash, ttl_class, expires_at, last_observed_at, hash_schema_version) \
              VALUES (?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(upstream_id, prefix_hash, ttl_class) DO UPDATE SET \
-             canonical_model_id = excluded.canonical_model_id, \
+             ON CONFLICT(upstream_id, canonical_model_id, prefix_hash, ttl_class) DO UPDATE SET \
              expires_at = excluded.expires_at, \
              last_observed_at = excluded.last_observed_at, \
              hash_schema_version = excluded.hash_schema_version",

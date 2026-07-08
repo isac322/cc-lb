@@ -323,6 +323,10 @@ prompt_cache_observation_postgres_test!(
     prompt_cache_observation_observation_list_is_sorted_postgres,
     observation_list_is_sorted
 );
+prompt_cache_observation_postgres_test!(
+    prompt_cache_observation_cross_model_same_prefix_keeps_both_rows_postgres,
+    cross_model_same_prefix_keeps_both_rows
+);
 
 #[test]
 fn price_catalog_roundtrip_smoke_postgres() {

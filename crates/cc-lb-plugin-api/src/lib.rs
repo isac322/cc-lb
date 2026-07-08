@@ -27,13 +27,14 @@ pub use traits::{
     RouterPlugin, Signer, SignerFactory, UpstreamDialect,
 };
 pub use types::{
-    CandidateUrgency, CredentialStrategy, GLOBAL_PRINCIPAL, InternalError, InternalErrorKind,
-    InternalErrorStage, ObserveEvent, PerCandidateReason, PluginManifest, PluginSlot, Principal,
-    PrincipalKind, PrincipalQuotas, RateLimitKind, RateLimitObservation, RequestContext,
-    RetryDecision, RouteDecision, RoutingTrace, ShapedRequest, ShapedRequestBuilder, SignedRequest,
-    SigningCapability, SlotKey, SubscriptionPreferenceTrace, SubscriptionQuotaCandidateSnapshot,
-    SubscriptionQuotaDataState, SubscriptionTier, TerminalStrategy, Upstream, UpstreamCandidate,
-    UpstreamKind, default_pure, shape_request, sign_request,
+    CachePricingSummary, CandidateUrgency, CredentialStrategy, GLOBAL_PRINCIPAL, InternalError,
+    InternalErrorKind, InternalErrorStage, ObserveEvent, PerCandidateReason, PluginManifest,
+    PluginSlot, Principal, PrincipalKind, PrincipalQuotas, RateLimitKind, RateLimitObservation,
+    RequestContext, RetryDecision, RouteDecision, RoutingTrace, ShapedRequest,
+    ShapedRequestBuilder, SignedRequest, SigningCapability, SlotKey, SubscriptionPreferenceTrace,
+    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, SubscriptionTier,
+    TerminalStrategy, Upstream, UpstreamCandidate, UpstreamKind, default_pure, shape_request,
+    sign_request,
 };
 
 /// Stable registry id for the built-in cache-affinity router filter.

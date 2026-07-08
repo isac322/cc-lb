@@ -323,7 +323,10 @@ pub fn virtual_cost_micros_full(
 }
 
 pub fn normalize_model_id(model: &str, _upstream_kind: Option<UpstreamKind>) -> String {
-    model.to_owned()
+    match model {
+        "claude-opus-4-8-20250514" => "claude-opus-4-8".to_owned(),
+        _ => model.to_owned(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -442,6 +445,18 @@ mod tests {
 
         assert_eq!(
             catalog.lookup("claude-3-5-sonnet-20241022", None),
+            Some(inserted)
+        );
+    }
+
+    #[test]
+    fn lookup_maps_dated_opus_4_8_to_undated_catalog_entry() {
+        let catalog = PriceCatalog::new_empty();
+        let inserted = pricing("claude-opus-4-8", 15, 75);
+        catalog.install_snapshot(snapshot_with("claude-opus-4-8", inserted.clone()));
+
+        assert_eq!(
+            catalog.lookup("claude-opus-4-8-20250514", None),
             Some(inserted)
         );
     }

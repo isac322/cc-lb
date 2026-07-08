@@ -29,6 +29,7 @@ pub fn request_context(
         body_bytes,
         cache_breakpoints: Vec::new(),
         canonical_model_id: String::new(),
+        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     }
 }
 
