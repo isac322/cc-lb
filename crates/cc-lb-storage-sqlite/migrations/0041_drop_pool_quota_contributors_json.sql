@@ -1,0 +1,12 @@
+-- Drop the write-only contributors_json blob column from pool subscription quota history.
+--
+-- Historical pool utilization is now recomputable from the effective-dated
+-- plan_tier_ratio_history_v1 / upstream_plan_tier_history_v1 catalog (see
+-- docs/adr/0005-pool-quota-history-recompute-derivability.md), so the per-row
+-- JSON blob is redundant. The one-time backfill that reconstructs tier history
+-- from these blobs must have run before this migration is deployed.
+--
+-- ALTER TABLE ... DROP COLUMN removes the column and moves its pages to the
+-- freelist; the database file is not shrunk until VACUUM is run manually after
+-- deploy.
+ALTER TABLE pool_subscription_quota_history_v1 DROP COLUMN contributors_json;

@@ -20,7 +20,6 @@ pub struct PoolQuotaSnapshotRecord {
     pub header_contributing_upstreams: i64,
     pub api_contributing_upstreams: i64,
     pub max_observed_at_unix_millis: Option<i64>,
-    pub contributors_json: Option<String>,
     pub computed_at_unix_millis: i64,
     pub policy_version: i32,
 }
@@ -42,13 +41,6 @@ pub struct PoolQuotaSnapshotSummaryRecord {
     pub max_observed_at_unix_millis: Option<i64>,
     pub computed_at_unix_millis: i64,
     pub policy_version: i32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PoolQuotaContributorBlob {
-    pub snapshot_at_unix_secs: i64,
-    pub window: SubscriptionQuotaWindow,
-    pub contributors_json: String,
 }
 
 impl From<&PoolQuotaSnapshotRecord> for PoolQuotaSnapshotSummaryRecord {
@@ -91,12 +83,6 @@ pub trait PoolQuotaHistoryStore: Send + Sync {
         since_unix_secs: i64,
         until_unix_secs: i64,
     ) -> StorageResult<Vec<PoolQuotaSnapshotRecord>>;
-
-    async fn list_pool_quota_contributor_blobs_page(
-        &self,
-        after: Option<(i64, SubscriptionQuotaWindow)>,
-        limit: u32,
-    ) -> StorageResult<Vec<PoolQuotaContributorBlob>>;
 
     async fn list_latest_pool_quota_snapshot_summaries(
         &self,

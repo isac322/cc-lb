@@ -42,7 +42,6 @@ pub enum Command {
         #[command(subcommand)]
         command: DoctorCommand,
     },
-    BackfillPlanTiers,
 }
 
 #[cfg(test)]
