@@ -6,7 +6,6 @@ use std::process::ExitCode;
 
 use cc_lb_server::app::{BuildError, ServeError};
 use cc_lb_server::cli::{Cli, Command, ConfigCommand, DoctorCommand};
-use cc_lb_server::plan_tier_backfill::{self, BackfillReport, PlanTierBackfillError};
 use cc_lb_server::{run_serve, validate};
 use cc_lb_storage_api::{BackendKind, MetaStore, PluginRegistryStore, PluginSlot, PrincipalStore};
 use clap::FromArgMatches;
@@ -18,7 +17,6 @@ enum RunError {
     Serve(cc_lb_server::app::ServeError),
     Cli(clap::Error),
     Doctor(DoctorError),
-    PlanTierBackfill(PlanTierBackfillError),
     Runtime(std::io::Error),
     Help(std::io::Error),
 }
@@ -84,10 +82,6 @@ fn main() -> ExitCode {
         }
         Err(RunError::Doctor(error)) => {
             eprintln!("doctor: failed: {error}");
-            ExitCode::FAILURE
-        }
-        Err(RunError::PlanTierBackfill(error)) => {
-            eprintln!("plan tier backfill: failed: {error}");
             ExitCode::FAILURE
         }
         Err(RunError::Runtime(error)) => {
@@ -165,15 +159,6 @@ fn run() -> Result<(), RunError> {
                 .block_on(run_list_abandoned_chain_entries(clock))
                 .map_err(RunError::Doctor)
         }
-        Some(Command::BackfillPlanTiers) => {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(RunError::Runtime)?;
-            runtime
-                .block_on(run_backfill_plan_tiers(clock))
-                .map_err(RunError::PlanTierBackfill)
-        }
         None => {
             let mut command = Cli::command();
             command.print_help().map_err(RunError::Help)?;
@@ -181,42 +166,6 @@ fn run() -> Result<(), RunError> {
             Ok(())
         }
     }
-}
-
-async fn run_backfill_plan_tiers(
-    clock: cc_lb_engine::ClockHandle,
-) -> Result<(), PlanTierBackfillError> {
-    let path = plan_tier_backfill::require_existing_sqlite_storage_path(doctor_storage_path())?;
-    let database_url = format!("sqlite://{}", path.display());
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone()).await?;
-    storage.initialize(BackendKind::Sqlite).await?;
-    let now_unix_millis = now_unix_millis(&clock);
-    let report =
-        plan_tier_backfill::run_pool_quota_blob_backfill(&storage, now_unix_millis).await?;
-    print_backfill_report(&report);
-    if !plan_tier_backfill::should_write_marker(&report) {
-        return Err(PlanTierBackfillError::MalformedSourceData {
-            malformed_blobs: report.malformed_blobs,
-            malformed_entries: report.malformed_entries,
-        });
-    }
-    Ok(())
-}
-
-fn now_unix_millis(clock: &cc_lb_engine::ClockHandle) -> i64 {
-    i64::try_from(cc_lb_engine::clock::unix_millis(clock.now())).unwrap_or(i64::MAX)
-}
-
-fn print_backfill_report(report: &BackfillReport) {
-    println!(
-        "plan_tier_backfill scanned_blobs={} upstreams={} inserted_rows={} skipped_upstreams={} malformed_blobs={} malformed_entries={}",
-        report.scanned_blobs,
-        report.upstreams,
-        report.inserted_rows,
-        report.skipped_upstreams,
-        report.malformed_blobs,
-        report.malformed_entries
-    );
 }
 
 async fn run_list_abandoned_chain_entries(

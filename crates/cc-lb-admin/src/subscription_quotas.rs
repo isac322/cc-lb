@@ -1081,21 +1081,6 @@ pub fn pool_quota_snapshots_from_aggregate(
                 .filter_map(|lot| lot.observed_at_unix_millis)
                 .max()
                 .and_then(|millis| i64::try_from(millis).ok());
-            let contributors_payload = contributing
-                .iter()
-                .map(|lot| {
-                    json!({
-                        "upstream_id": lot.upstream_id,
-                        "upstream_name": lot.upstream_name,
-                        "utilization": lot.utilization,
-                        "ratio": lot.capacity_ratio,
-                        "source": lot.source,
-                        "observed_at_unix_millis": lot.observed_at_unix_millis,
-                        "state": lot.state,
-                    })
-                })
-                .collect::<Vec<_>>();
-            let contributors_json = serde_json::to_string(&contributors_payload).ok();
             Some(PoolQuotaSnapshotRecord {
                 snapshot_at_unix_secs,
                 window,
@@ -1115,7 +1100,6 @@ pub fn pool_quota_snapshots_from_aggregate(
                     .unwrap_or(i64::MAX),
                 api_contributing_upstreams: i64::try_from(api_contributing).unwrap_or(i64::MAX),
                 max_observed_at_unix_millis,
-                contributors_json,
                 computed_at_unix_millis,
                 policy_version: POOL_QUOTA_POLICY_VERSION,
             })
