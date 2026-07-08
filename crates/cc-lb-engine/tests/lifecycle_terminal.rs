@@ -9,7 +9,7 @@ use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_engine::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
-    RouterPipelineCache,
+    ResponseTransformCache, RouterPipelineCache, SseEventTransformCache,
 };
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
@@ -249,6 +249,8 @@ fn principal_view(
             Some(pipeline),
             ObservabilityHooksCache::Inherit,
             DialectCache::Inherit,
+            ResponseTransformCache::None,
+            SseEventTransformCache::None,
         ),
     );
     Arc::new(PrincipalView::from_db(&[principal()], chains))

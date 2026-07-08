@@ -141,15 +141,17 @@ sections, and one `cc_lb.plugin.v1` metadata custom section.
 
 ## Hook Contracts
 
-cc-lb currently supports three hook kinds. A wasm artifact may implement one or
-more hooks, and upload-time `slot_kind=filter|shape|observe` selects which hook
-the registration targets.
+cc-lb currently supports five hook kinds. A wasm artifact may implement one or
+more hooks, and upload-time `slot_kind=filter|shape|observe|transform_response|transform_sse_event`
+selects which hook the registration targets.
 
 | Hook | Export | Request type | Response type | Use |
 |---|---|---|---|---|
 | `filter` | `cc_lb_filter` | `FilterRequest` | `FilterResponse` | Keep or reject upstream candidates. |
 | `shape` | `cc_lb_shape` | `ShapeRequest` | `ShapeResponse` | Produce the upstream-bound request. |
 | `observe` | `cc_lb_observe` | `ObserveEvent` | none | Receive lifecycle events for side effects. |
+| `transform_response` | `cc_lb_transform_response` | `TransformResponseRequest` | `TransformResponseResult` | Rewrite a buffered upstream response before delivery. |
+| `transform_sse_event` | `cc_lb_transform_sse_event` | `TransformSseEventRequest` | `TransformSseEventResult` | Rewrite each upstream SSE event before delivery. |
 
 Filter example:
 
@@ -247,7 +249,7 @@ Required per-hook fields:
 Upload rejection names relevant to plugin authors include:
 
 - `missing_part`: a required multipart field is absent.
-- `invalid_slot_kind`: `slot_kind` is not `filter`, `shape`, or `observe`.
+- `invalid_slot_kind`: `slot_kind` is not `filter`, `shape`, `observe`, `transform_response`, or `transform_sse_event`.
 - `invalid_wasm_magic`: uploaded bytes do not start with the wasm magic.
 - `invalid_wasm_length`: uploaded bytes are too short to be wasm.
 - `wasm_too_large`: the wasm exceeds the 32 MiB upload limit.

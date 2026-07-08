@@ -189,6 +189,8 @@ async fn list_plugin_chain_entries(
             PluginSlot::Router,
             PluginSlot::ObservabilityHook,
             PluginSlot::Shape,
+            PluginSlot::TransformResponse,
+            PluginSlot::TransformSseEvent,
         ] {
             entries.extend(
                 stores

@@ -11,6 +11,27 @@ fn root_schema_exports_describe_v1_hooks() {
     assert_eq!(HookKind::Filter.export_name(), "cc_lb_filter");
     assert_eq!(HookKind::Filter.section_prefix(), "cc_lb.schema.filter");
     assert_eq!(HookKind::parse("shape"), Some(HookKind::Shape));
+    assert_eq!(HookKind::TransformResponse.as_str(), "transform_response");
+    assert_eq!(
+        HookKind::TransformResponse.export_name(),
+        "cc_lb_transform_response"
+    );
+    assert_eq!(
+        HookKind::TransformResponse.section_prefix(),
+        "cc_lb.schema.transform_response"
+    );
+    assert_eq!(
+        HookKind::parse("transform_sse_event"),
+        Some(HookKind::TransformSseEvent)
+    );
+    assert!(schema::host_supports(
+        HookKind::TransformResponse,
+        WireVersion::V1
+    ));
+    assert!(schema::host_supports(
+        HookKind::TransformSseEvent,
+        WireVersion::V1
+    ));
     assert!(schema::host_supports(HookKind::Observe, WireVersion::V1));
 }
 
@@ -30,6 +51,16 @@ fn plugin_metadata_parse_validates_required_fields() {
                     "wire_version":1,
                     "description":"Filters upstream candidates.",
                     "usage":"Return accept/reject reasons."
+                },
+                "transform_response":{
+                    "wire_version":1,
+                    "description":"Transforms buffered responses.",
+                    "usage":"Return unchanged or replacement response parts."
+                },
+                "transform_sse_event":{
+                    "wire_version":1,
+                    "description":"Transforms one SSE event.",
+                    "usage":"Return unchanged, replacement events, or drop."
                 }
             }
         }"#,
@@ -38,6 +69,8 @@ fn plugin_metadata_parse_validates_required_fields() {
 
     assert_eq!(metadata.name, "cache-aware");
     assert_eq!(metadata.hooks["filter"].wire_version, 1);
+    assert_eq!(metadata.hooks["transform_response"].wire_version, 1);
+    assert_eq!(metadata.hooks["transform_sse_event"].wire_version, 1);
 
     let error = PluginMetadata::parse(
         br#"{

@@ -190,6 +190,12 @@ pub(crate) async fn collect_revision_hash(stores: &Stores) -> StorageResult<u64>
                 chain_revisions(stores, principal.id, PluginSlot::ObservabilityHook).await?,
             );
             chains.extend(chain_revisions(stores, principal.id, PluginSlot::Shape).await?);
+            chains.extend(
+                chain_revisions(stores, principal.id, PluginSlot::TransformResponse).await?,
+            );
+            chains.extend(
+                chain_revisions(stores, principal.id, PluginSlot::TransformSseEvent).await?,
+            );
             principals.push((principal.id, principal.revision));
         }
     }

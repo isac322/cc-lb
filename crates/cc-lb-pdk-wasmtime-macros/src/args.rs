@@ -81,12 +81,14 @@ impl Parse for HandlerArgs {
                 Meta::Path(path)
                     if path.is_ident("filter")
                         || path.is_ident("shape")
-                        || path.is_ident("observe") =>
+                        || path.is_ident("observe")
+                        || path.is_ident("transform_response")
+                        || path.is_ident("transform_sse_event") =>
                 {
                     kind = Some(HandlerKind::from_path(&path).ok_or_else(|| {
                         Error::new_spanned(
                             &path,
-                            "unknown handler kind (supported: filter, shape, observe)",
+                            "unknown handler kind (supported: filter, shape, observe, transform_response, transform_sse_event)",
                         )
                     })?);
                 }
@@ -141,6 +143,8 @@ pub(crate) enum HandlerKind {
     Filter,
     Shape,
     Observe,
+    TransformResponse,
+    TransformSseEvent,
 }
 
 impl HandlerKind {
@@ -149,6 +153,8 @@ impl HandlerKind {
             "filter" => Self::Filter,
             "shape" => Self::Shape,
             "observe" => Self::Observe,
+            "transform_response" => Self::TransformResponse,
+            "transform_sse_event" => Self::TransformSseEvent,
             _ => return None,
         })
     }
@@ -158,6 +164,8 @@ impl HandlerKind {
             Self::Filter => "filter",
             Self::Shape => "shape",
             Self::Observe => "observe",
+            Self::TransformResponse => "transform_response",
+            Self::TransformSseEvent => "transform_sse_event",
         }
     }
 
@@ -166,6 +174,8 @@ impl HandlerKind {
             Self::Filter => "cc_lb_filter",
             Self::Shape => "cc_lb_shape",
             Self::Observe => "cc_lb_observe",
+            Self::TransformResponse => "cc_lb_transform_response",
+            Self::TransformSseEvent => "cc_lb_transform_sse_event",
         }
     }
 
@@ -177,6 +187,10 @@ impl HandlerKind {
             (Self::Shape, true) => "run_shape_view",
             (Self::Observe, false) => "run_observe",
             (Self::Observe, true) => "run_observe_view",
+            (Self::TransformResponse, false) => "run_transform_response",
+            (Self::TransformResponse, true) => "run_transform_response_view",
+            (Self::TransformSseEvent, false) => "run_transform_sse_event",
+            (Self::TransformSseEvent, true) => "run_transform_sse_event_view",
         }
     }
 
@@ -189,6 +203,12 @@ impl HandlerKind {
             Self::Filter => quote! { ::cc_lb_pdk_wasmtime::types::FilterRequest },
             Self::Shape => quote! { ::cc_lb_pdk_wasmtime::types::ShapeRequest },
             Self::Observe => quote! { ::cc_lb_pdk_wasmtime::types::ObserveEvent },
+            Self::TransformResponse => {
+                quote! { ::cc_lb_pdk_wasmtime::types::TransformResponseRequest }
+            }
+            Self::TransformSseEvent => {
+                quote! { ::cc_lb_pdk_wasmtime::types::TransformSseEventRequest }
+            }
         }
     }
 
@@ -197,6 +217,8 @@ impl HandlerKind {
             Self::Filter => "FILTER",
             Self::Shape => "SHAPE",
             Self::Observe => "OBSERVE",
+            Self::TransformResponse => "TRANSFORM_RESPONSE",
+            Self::TransformSseEvent => "TRANSFORM_SSE_EVENT",
         }
     }
 }

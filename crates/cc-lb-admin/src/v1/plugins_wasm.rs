@@ -53,11 +53,10 @@ struct UploadParts {
     bytes: Option<Vec<u8>>,
     name: Option<String>,
     original_filename: Option<String>,
-    /// Required: which slot kind the plugin targets — `filter`,
-    /// `shape`, or `observe`. Maps to [`SlotKind`] for wasmtime
-    /// load-time inspection and to [`PluginSlot`] for the registry.
     slot_kind: Option<String>,
 }
+
+const SLOT_KIND_NAMES: &str = "filter|shape|observe|transform_response|transform_sse_event";
 
 pub fn router() -> Router<AdminState> {
     let limiter = UploadRateLimitState::default();
@@ -175,7 +174,7 @@ async fn upload_wasm_inner(
         Box::new(json_error(
             StatusCode::BAD_REQUEST,
             "missing_part",
-            "missing multipart part: slot_kind (must be one of filter, shape, observe)",
+            format!("missing multipart part: slot_kind (must be one of {SLOT_KIND_NAMES})"),
         ))
     })?;
     let (hook_kind, _) = parse_slot_kind(&slot_kind_str).map_err(Box::new)?;
@@ -442,10 +441,12 @@ fn parse_slot_kind(value: &str) -> Result<(HookKind, PluginSlot), Response> {
         "filter" => Ok((HookKind::Filter, PluginSlot::Router)),
         "shape" => Ok((HookKind::Shape, PluginSlot::Shape)),
         "observe" => Ok((HookKind::Observe, PluginSlot::ObservabilityHook)),
+        "transform_response" => Ok((HookKind::TransformResponse, PluginSlot::TransformResponse)),
+        "transform_sse_event" => Ok((HookKind::TransformSseEvent, PluginSlot::TransformSseEvent)),
         other => Err(json_error(
             StatusCode::BAD_REQUEST,
             "invalid_slot_kind",
-            format!("slot_kind must be one of filter|shape|observe, got `{other}`"),
+            format!("slot_kind must be one of {SLOT_KIND_NAMES}, got `{other}`"),
         )),
     }
 }
@@ -493,6 +494,8 @@ fn supported_slots_from_inspection(inspection: &ModuleInspection) -> Vec<PluginS
             HookKind::Filter => PluginSlot::Router,
             HookKind::Shape => PluginSlot::Shape,
             HookKind::Observe => PluginSlot::ObservabilityHook,
+            HookKind::TransformResponse => PluginSlot::TransformResponse,
+            HookKind::TransformSseEvent => PluginSlot::TransformSseEvent,
         })
         .collect()
 }
@@ -650,4 +653,21 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
         let _ = write!(&mut output, "{byte:02x}");
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_slot_kind_accepts_response_transform_hooks() {
+        assert_eq!(
+            parse_slot_kind("transform_response").expect("valid transform response slot"),
+            (HookKind::TransformResponse, PluginSlot::TransformResponse)
+        );
+        assert_eq!(
+            parse_slot_kind("transform_sse_event").expect("valid transform sse slot"),
+            (HookKind::TransformSseEvent, PluginSlot::TransformSseEvent)
+        );
+    }
 }

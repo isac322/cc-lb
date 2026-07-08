@@ -236,6 +236,12 @@ pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> [u8;
         (HookKind::Observe, WireVersion::V1) => {
             <cc_lb_plugin_wire::v1::ObserveEvent as WireSchema>::FINGERPRINT
         }
+        (HookKind::TransformResponse, WireVersion::V1) => {
+            <cc_lb_plugin_wire::v1::TransformResponseRequest as WireSchema>::FINGERPRINT
+        }
+        (HookKind::TransformSseEvent, WireVersion::V1) => {
+            <cc_lb_plugin_wire::v1::TransformSseEventRequest as WireSchema>::FINGERPRINT
+        }
     }
 }
 
@@ -260,6 +266,12 @@ mod tests {
     }
     fn observe_section_bytes() -> Vec<u8> {
         expected_fingerprint(HookKind::Observe, WireVersion::V1).to_vec()
+    }
+    fn transform_response_section_bytes() -> Vec<u8> {
+        expected_fingerprint(HookKind::TransformResponse, WireVersion::V1).to_vec()
+    }
+    fn transform_sse_event_section_bytes() -> Vec<u8> {
+        expected_fingerprint(HookKind::TransformSseEvent, WireVersion::V1).to_vec()
     }
 
     fn metadata_section(hook: &str) -> Vec<u8> {
@@ -335,6 +347,28 @@ mod tests {
         "#
     }
 
+    fn transform_response_plugin_wat() -> &'static str {
+        r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
+            (func (export "cc_lb_free") (param i32 i32 i32))
+            (func (export "cc_lb_transform_response") (param i32 i32) (result i64) i64.const 0)
+        )
+        "#
+    }
+
+    fn transform_sse_event_plugin_wat() -> &'static str {
+        r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
+            (func (export "cc_lb_free") (param i32 i32 i32))
+            (func (export "cc_lb_transform_sse_event") (param i32 i32) (result i64) i64.const 0)
+        )
+        "#
+    }
+
     #[test]
     fn accepts_filter_plugin() {
         let bytes = wat_with_custom_sections(
@@ -385,6 +419,46 @@ mod tests {
         let inspection = inspect_wasm(HookKind::Observe, &bytes).expect("observe plugin OK");
         assert_eq!(
             inspection.hook_versions[&HookKind::Observe],
+            WireVersion::V1
+        );
+    }
+
+    #[test]
+    fn accepts_transform_response_plugin() {
+        let bytes = wat_with_custom_sections(
+            transform_response_plugin_wat(),
+            &[
+                (
+                    &schema_section_name(HookKind::TransformResponse, WireVersion::V1),
+                    &transform_response_section_bytes(),
+                ),
+                ("cc_lb.plugin.v1", &metadata_section("transform_response")),
+            ],
+        );
+        let inspection = inspect_wasm(HookKind::TransformResponse, &bytes)
+            .expect("transform_response plugin OK");
+        assert_eq!(
+            inspection.hook_versions[&HookKind::TransformResponse],
+            WireVersion::V1
+        );
+    }
+
+    #[test]
+    fn accepts_transform_sse_event_plugin() {
+        let bytes = wat_with_custom_sections(
+            transform_sse_event_plugin_wat(),
+            &[
+                (
+                    &schema_section_name(HookKind::TransformSseEvent, WireVersion::V1),
+                    &transform_sse_event_section_bytes(),
+                ),
+                ("cc_lb.plugin.v1", &metadata_section("transform_sse_event")),
+            ],
+        );
+        let inspection = inspect_wasm(HookKind::TransformSseEvent, &bytes)
+            .expect("transform_sse_event plugin OK");
+        assert_eq!(
+            inspection.hook_versions[&HookKind::TransformSseEvent],
             WireVersion::V1
         );
     }

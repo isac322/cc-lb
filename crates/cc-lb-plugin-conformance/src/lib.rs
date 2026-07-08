@@ -70,8 +70,10 @@ pub mod prelude;
 
 use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_wire::{
-    ArchivedFilterResponse, ArchivedShapeResponse, FilterRequest, FilterResponse, ObserveEvent,
-    ShapeRequest, ShapeResponse,
+    ArchivedFilterResponse, ArchivedShapeResponse, ArchivedTransformResponseResult,
+    ArchivedTransformSseEventResult, FilterRequest, FilterResponse, ObserveEvent, ShapeRequest,
+    ShapeResponse, TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
+    TransformSseEventResult,
 };
 use cc_lb_runtime_wasmtime::{
     HotEngineConfig, ModuleInspection, SlotKind, WasmtimeRuntime, inspect_wasm,
@@ -108,17 +110,27 @@ impl<'a> ConformanceSuite<'a> {
         Self::with_kind(wasm, SlotKind::Observe)
     }
 
+    /// Build a suite for a buffered response-transform plugin.
+    pub fn for_transform_response(wasm: &'a [u8]) -> Self {
+        Self::with_kind(wasm, SlotKind::TransformResponse)
+    }
+
+    /// Build a suite for an SSE event response-transform plugin.
+    pub fn for_transform_sse_event(wasm: &'a [u8]) -> Self {
+        Self::with_kind(wasm, SlotKind::TransformSseEvent)
+    }
+
     pub fn from_wasm(wasm: &'a [u8]) -> Self {
         let mut matches = SlotKind::ALL
             .iter()
             .copied()
             .filter(|kind| inspect_wasm(*kind, wasm).is_ok());
         let Some(kind) = matches.next() else {
-            panic!("inspect_wasm did not recognise filter, shape, or observe exports")
+            panic!("inspect_wasm did not recognise a supported plugin export")
         };
         assert!(
             matches.next().is_none(),
-            "wasm exports multiple hooks; use for_filter, for_shape, or for_observe"
+            "wasm exports multiple hooks; use the explicit for_* constructor"
         );
         Self::with_kind(wasm, kind)
     }
@@ -128,6 +140,8 @@ impl<'a> ConformanceSuite<'a> {
             SlotKind::Filter => "filter",
             SlotKind::Shape => "shape",
             SlotKind::Observe => "observe",
+            SlotKind::TransformResponse => "transform-response",
+            SlotKind::TransformSseEvent => "transform-sse-event",
         };
         Self {
             wasm,
@@ -198,6 +212,14 @@ impl<'a> ConformanceSuite<'a> {
                 .register_observe(slot_key.clone(), self.plugin_name.clone(), self.wasm)
                 .map(|_| ())
                 .expect("register_observe must accept a conforming plugin"),
+            SlotKind::TransformResponse => runtime
+                .register_transform_response(slot_key.clone(), self.plugin_name.clone(), self.wasm)
+                .map(|_| ())
+                .expect("register_transform_response must accept a conforming plugin"),
+            SlotKind::TransformSseEvent => runtime
+                .register_transform_sse_event(slot_key.clone(), self.plugin_name.clone(), self.wasm)
+                .map(|_| ())
+                .expect("register_transform_sse_event must accept a conforming plugin"),
         }
         PluginSession {
             runtime,
@@ -233,6 +255,14 @@ impl<'a> ConformanceSuite<'a> {
             }
             SlotKind::Observe => {
                 session.exercise_observe_variants();
+            }
+            SlotKind::TransformResponse => {
+                let _ =
+                    session.call_transform_response(fixtures::sample_transform_response_request());
+            }
+            SlotKind::TransformSseEvent => {
+                let _ = session
+                    .call_transform_sse_event(fixtures::sample_transform_sse_event_request());
             }
         }
     }
@@ -320,6 +350,54 @@ impl PluginSession {
         self.runtime
             .call_observe(&self.slot_key, in_bytes.as_slice())
             .expect("guest cc_lb_observe must complete without trap");
+    }
+
+    /// Round-trip a [`TransformResponseRequest`] through the guest boundary.
+    pub fn call_transform_response(
+        &self,
+        request: TransformResponseRequest,
+    ) -> TransformResponseResult {
+        assert!(
+            matches!(self.kind, SlotKind::TransformResponse),
+            "call_transform_response requires SlotKind::TransformResponse, got {:?}",
+            self.kind
+        );
+        let in_bytes =
+            rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode TransformResponseRequest");
+        let out_bytes = self
+            .runtime
+            .call_transform_response(&self.slot_key, in_bytes.as_slice())
+            .expect("guest cc_lb_transform_response must complete without trap");
+        let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
+        aligned.extend_from_slice(&out_bytes);
+        let archived = rkyv::access::<ArchivedTransformResponseResult, RkyvError>(&aligned)
+            .expect("rkyv access TransformResponseResult");
+        rkyv::deserialize::<TransformResponseResult, RkyvError>(archived)
+            .expect("rkyv deserialize TransformResponseResult")
+    }
+
+    /// Round-trip a [`TransformSseEventRequest`] through the guest boundary.
+    pub fn call_transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> TransformSseEventResult {
+        assert!(
+            matches!(self.kind, SlotKind::TransformSseEvent),
+            "call_transform_sse_event requires SlotKind::TransformSseEvent, got {:?}",
+            self.kind
+        );
+        let in_bytes =
+            rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode TransformSseEventRequest");
+        let out_bytes = self
+            .runtime
+            .call_transform_sse_event(&self.slot_key, in_bytes.as_slice())
+            .expect("guest cc_lb_transform_sse_event must complete without trap");
+        let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
+        aligned.extend_from_slice(&out_bytes);
+        let archived = rkyv::access::<ArchivedTransformSseEventResult, RkyvError>(&aligned)
+            .expect("rkyv access TransformSseEventResult");
+        rkyv::deserialize::<TransformSseEventResult, RkyvError>(archived)
+            .expect("rkyv deserialize TransformSseEventResult")
     }
 
     /// Send one of every [`ObserveEvent`] variant, using

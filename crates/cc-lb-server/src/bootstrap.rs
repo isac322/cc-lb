@@ -429,6 +429,8 @@ fn parse_plugin_slot(slot: &str) -> Option<PluginSlot> {
         "Router" | "router" => Some(PluginSlot::Router),
         "ObservabilityHook" | "observability_hook" => Some(PluginSlot::ObservabilityHook),
         "Shape" | "shape" => Some(PluginSlot::Shape),
+        "TransformResponse" | "transform_response" => Some(PluginSlot::TransformResponse),
+        "TransformSseEvent" | "transform_sse_event" => Some(PluginSlot::TransformSseEvent),
         _ => None,
     }
 }
@@ -616,6 +618,26 @@ plugins = ["missing-plugin"]
             .await
             .unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_plugin_slot_accepts_response_transform_slots() {
+        assert_eq!(
+            parse_plugin_slot("transform_response"),
+            Some(PluginSlot::TransformResponse)
+        );
+        assert_eq!(
+            parse_plugin_slot("TransformResponse"),
+            Some(PluginSlot::TransformResponse)
+        );
+        assert_eq!(
+            parse_plugin_slot("transform_sse_event"),
+            Some(PluginSlot::TransformSseEvent)
+        );
+        assert_eq!(
+            parse_plugin_slot("TransformSseEvent"),
+            Some(PluginSlot::TransformSseEvent)
+        );
     }
 
     async fn fixture() -> (tempfile::TempDir, Storage) {

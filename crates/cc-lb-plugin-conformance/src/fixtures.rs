@@ -8,7 +8,8 @@
 //! synthetic principal, and the six-variant observe sample.
 
 use cc_lb_plugin_wire::{
-    CachePricingSummary, FilterRequest, Header, ObserveEvent, Principal, ShapeRequest, Upstream,
+    CachePricingSummary, FilterRequest, Header, ObserveEvent, Principal, ShapeRequest, SseEvent,
+    TransformResponseRequest, TransformSseEventRequest, Upstream,
 };
 
 /// Build a `Header` from `(name, value)`. Value can be `&str`, `&[u8]`,
@@ -110,5 +111,38 @@ pub fn sample_filter_request() -> FilterRequest {
         body: Box::from(&br#"{"model":"claude-3-haiku-20240307","messages":[]}"#[..]),
         principal: synth_principal(),
         candidates: Box::new([]),
+    }
+}
+
+/// Protocol-valid minimal `TransformResponseRequest`.
+pub fn sample_transform_response_request() -> TransformResponseRequest {
+    TransformResponseRequest {
+        request_id: Box::from("conformance-req-1"),
+        principal: synth_principal(),
+        upstream: Upstream::AnthropicDirect { base_url: None },
+        request_method: Box::from("POST"),
+        request_path: Box::from("/v1/messages"),
+        canonical_model_id: Box::from("claude-3-haiku-20240307"),
+        response_status: 200,
+        response_headers: Box::new([hdr("content-type", "application/json")]),
+        body: Box::from(&br#"{"content":[]}"#[..]),
+    }
+}
+
+/// Protocol-valid minimal `TransformSseEventRequest`.
+pub fn sample_transform_sse_event_request() -> TransformSseEventRequest {
+    TransformSseEventRequest {
+        request_id: Box::from("conformance-req-1"),
+        principal: synth_principal(),
+        upstream: Upstream::AnthropicDirect { base_url: None },
+        request_method: Box::from("POST"),
+        request_path: Box::from("/v1/messages"),
+        canonical_model_id: Box::from("claude-3-haiku-20240307"),
+        response_status: 200,
+        response_headers: Box::new([hdr("content-type", "text/event-stream")]),
+        event: SseEvent {
+            event: Box::from("content_block_start"),
+            data: Box::from(&br#"{"type":"content_block_start"}"#[..]),
+        },
     }
 }

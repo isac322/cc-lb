@@ -54,6 +54,8 @@ enum HookFn {
     Filter,
     Shape,
     Observe,
+    TransformResponse,
+    TransformSseEvent,
 }
 
 impl HookFn {
@@ -62,6 +64,8 @@ impl HookFn {
             HookFn::Filter => "cc_lb_filter",
             HookFn::Shape => "cc_lb_shape",
             HookFn::Observe => "cc_lb_observe",
+            HookFn::TransformResponse => "cc_lb_transform_response",
+            HookFn::TransformSseEvent => "cc_lb_transform_sse_event",
         }
     }
 
@@ -73,6 +77,8 @@ impl HookFn {
             HookFn::Filter => "filter",
             HookFn::Shape => "shape",
             HookFn::Observe => "observe",
+            HookFn::TransformResponse => "transform_response",
+            HookFn::TransformSseEvent => "transform_sse_event",
         }
     }
 }
@@ -102,6 +108,20 @@ pub fn call_observe_hook(
     input: &[u8],
 ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
     call_hook(cell, input, HookFn::Observe)
+}
+
+pub fn call_transform_response_hook(
+    cell: &Arc<PluginCell>,
+    input: &[u8],
+) -> Result<Vec<u8>, WasmtimeRuntimeError> {
+    call_hook(cell, input, HookFn::TransformResponse)
+}
+
+pub fn call_transform_sse_event_hook(
+    cell: &Arc<PluginCell>,
+    input: &[u8],
+) -> Result<Vec<u8>, WasmtimeRuntimeError> {
+    call_hook(cell, input, HookFn::TransformSseEvent)
 }
 
 fn call_hook(
@@ -175,12 +195,16 @@ fn execute_call_inner(
         filter_fn,
         shape_fn,
         observe_fn,
+        transform_response_fn,
+        transform_sse_event_fn,
     } = wi;
 
     let hook_fn = match hook {
         HookFn::Filter => filter_fn.as_ref(),
         HookFn::Shape => shape_fn.as_ref(),
         HookFn::Observe => observe_fn.as_ref(),
+        HookFn::TransformResponse => transform_response_fn.as_ref(),
+        HookFn::TransformSseEvent => transform_sse_event_fn.as_ref(),
     }
     .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
         reason: format!(
