@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_engine::DynamicViewHolder;
+use cc_lb_engine::PromptCacheObservationSinkLike;
 use cc_lb_engine::clock::ClockHandle;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{ChangeChannel, ChangeEvent, RuntimeChangeNotifier};
@@ -13,6 +14,7 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use crate::dynamic_view_builder::{self, Stores};
+use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
 pub struct NotifyListener {
@@ -26,6 +28,8 @@ pub struct NotifyListener {
     data_dir: PathBuf,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
+    prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     subscription_quota_routing_max_staleness_secs: u64,
     config: Arc<Config>,
     clock: ClockHandle,
@@ -42,6 +46,8 @@ pub struct NotifyListenerParams {
     pub data_dir: PathBuf,
     pub lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     pub subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    pub prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
+    pub prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     pub subscription_quota_routing_max_staleness_secs: u64,
     pub config: Arc<Config>,
     pub clock: ClockHandle,
@@ -60,6 +66,8 @@ impl NotifyListener {
             data_dir: params.data_dir,
             lazy_refresher: params.lazy_refresher,
             subscription_quota_cache: params.subscription_quota_cache,
+            prompt_cache_observation_cache: params.prompt_cache_observation_cache,
+            prompt_cache_observation_sink: params.prompt_cache_observation_sink,
             subscription_quota_routing_max_staleness_secs: params
                 .subscription_quota_routing_max_staleness_secs,
             config: params.config,
@@ -133,6 +141,8 @@ impl NotifyListener {
             &self.runtime,
             &self.data_dir,
             self.subscription_quota_cache.clone(),
+            self.prompt_cache_observation_cache.clone(),
+            self.prompt_cache_observation_sink.clone(),
             self.subscription_quota_routing_max_staleness_secs,
             &self.config,
             self.clock.clone(),

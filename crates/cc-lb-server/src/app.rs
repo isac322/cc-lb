@@ -33,6 +33,7 @@ use cc_lb_engine::{
     make_default_dispatcher, spawn_audit_writer, start_subscription_quota_writer,
     start_upstream_rate_limit_writer,
 };
+use cc_lb_engine::{PromptCacheObservationSinkLike, lifecycle::PromptCacheObservationCacheLike};
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -57,9 +58,14 @@ use crate::builtins::NoopObservabilityHook;
 use crate::drain::DrainController;
 use crate::dynamic_view_builder::{
     Stores as DynamicStores, build_dynamic_view, ensure_wasm_cache_dirs,
+    new_prompt_cache_observation_cache,
 };
 use crate::notify_listener::{NotifyListener, NotifyListenerParams};
 use crate::preflight;
+use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
+use crate::prompt_cache_observation_sink::{
+    DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY, PromptCacheObservationSink,
+};
 use crate::reconcile::Reconciler;
 use crate::refresh::{LazyRefreshClaimGuard, LazyRefresher};
 use crate::reload::{ConfigWatcher, summarize_restart_required};
@@ -135,6 +141,7 @@ pub struct App {
     audit_writer_task: Option<JoinHandle<()>>,
     upstream_rate_limit_writer_task: Option<JoinHandle<()>>,
     subscription_quota_writer_task: Option<JoinHandle<()>>,
+    prompt_cache_observation_writer_task: Option<JoinHandle<()>>,
     event_fanout_shutdown_tx: Option<watch::Sender<bool>>,
     event_fanout_tasks: Vec<JoinHandle<()>>,
     signals: signal::SignalHandle,
@@ -226,6 +233,7 @@ impl App {
             audit_writer_task,
             upstream_rate_limit_writer_task,
             subscription_quota_writer_task,
+            prompt_cache_observation_writer_task,
             event_fanout_shutdown_tx,
             event_fanout_tasks,
             signals,
@@ -310,6 +318,9 @@ impl App {
             await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
         if let Some(task) = subscription_quota_writer_task {
+            await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        }
+        if let Some(task) = prompt_cache_observation_writer_task {
             await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
         if let Some(tx) = event_fanout_shutdown_tx {
@@ -849,6 +860,22 @@ async fn build_app_with_storage_inner(
         anthropic_compatibility_kv: storage_for_dynamic.clone(),
         audit: Some(storage_for_dynamic.clone()),
     });
+    let (
+        prompt_cache_observation_cache,
+        prompt_cache_observation_sink,
+        prompt_cache_observation_writer_task,
+    ) = if config.prompt_cache_shadow.enabled {
+        let cache = new_prompt_cache_observation_cache(&config.prompt_cache_shadow, clock.clone());
+        let (sink, writer) = PromptCacheObservationSink::new(
+            stores.prompt_cache_observations.clone(),
+            DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
+            cc_lb_observability::cache_observation_store_kind::SQLITE,
+        );
+        let sink: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
+        (Some(cache), Some(sink), Some(writer))
+    } else {
+        (None, None, None)
+    };
     let lifecycle_config = LifecycleConfig {
         messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
         files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
@@ -918,6 +945,8 @@ async fn build_app_with_storage_inner(
         &runtime,
         &data_dir,
         subscription_quota_cache.clone(),
+        prompt_cache_observation_cache.clone(),
+        prompt_cache_observation_sink.clone(),
         config.subscription_quota.routing_max_staleness_secs,
         &config,
         clock.clone(),
@@ -946,6 +975,8 @@ async fn build_app_with_storage_inner(
         data_dir: data_dir.clone(),
         lazy_refresher: lazy_refresher.clone(),
         subscription_quota_cache: subscription_quota_cache.clone(),
+        prompt_cache_observation_cache: prompt_cache_observation_cache.clone(),
+        prompt_cache_observation_sink: prompt_cache_observation_sink.clone(),
         subscription_quota_routing_max_staleness_secs: config
             .subscription_quota
             .routing_max_staleness_secs,
@@ -1046,7 +1077,7 @@ async fn build_app_with_storage_inner(
     let lifecycle_prompt_cache_observation_rx =
         if config.lifecycle_prompt_cache_observation_subscriber.enabled
             && config.prompt_cache_shadow.enabled
-            && initial_view.prompt_cache_observation_cache_opt().is_some()
+            && prompt_cache_observation_cache.is_some()
         {
             Some(in_memory_bus.attach_lifecycle_prompt_cache_observation(
                 cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY,
@@ -1205,18 +1236,16 @@ async fn build_app_with_storage_inner(
         });
     let lifecycle_prompt_cache_observation_subscriber_handle =
         lifecycle_prompt_cache_observation_rx.and_then(|rx| {
-            initial_view
-                .prompt_cache_observation_cache_opt()
-                .cloned()
-                .map(|cache| {
-                    cc_lb_engine::spawn_lifecycle_prompt_cache_observation_subscriber(
-                        rx,
-                        config.lifecycle_prompt_cache_observation_subscriber.clone(),
-                        cache,
-                        initial_view.prompt_cache_observation_sink_opt().cloned(),
-                        Arc::clone(&metrics_hook),
-                    )
-                })
+            prompt_cache_observation_cache.clone().map(|cache| {
+                let cache: Arc<dyn PromptCacheObservationCacheLike> = cache;
+                cc_lb_engine::spawn_lifecycle_prompt_cache_observation_subscriber(
+                    rx,
+                    config.lifecycle_prompt_cache_observation_subscriber.clone(),
+                    cache,
+                    prompt_cache_observation_sink.clone(),
+                    Arc::clone(&metrics_hook),
+                )
+            })
         });
     let lifecycle_event_logger_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::LifecycleEventLoggerHandle>>,
@@ -1315,6 +1344,8 @@ async fn build_app_with_storage_inner(
         lazy_refresher: lazy_refresher.clone(),
         data_dir: data_dir.clone(),
         subscription_quota_cache: subscription_quota_cache.clone(),
+        prompt_cache_observation_cache: prompt_cache_observation_cache.clone(),
+        prompt_cache_observation_sink: prompt_cache_observation_sink.clone(),
         subscription_quota_routing_max_staleness_secs: config
             .subscription_quota
             .routing_max_staleness_secs,
@@ -1556,6 +1587,8 @@ async fn build_app_with_storage_inner(
         cancel: reconcile_cancel.clone(),
         data_dir: data_dir.clone(),
         subscription_quota_cache: subscription_quota_cache.clone(),
+        prompt_cache_observation_cache: prompt_cache_observation_cache.clone(),
+        prompt_cache_observation_sink: prompt_cache_observation_sink.clone(),
         subscription_quota_routing_max_staleness_secs: config
             .subscription_quota
             .routing_max_staleness_secs,
@@ -1639,6 +1672,7 @@ async fn build_app_with_storage_inner(
         audit_writer_task: Some(audit_writer_task),
         upstream_rate_limit_writer_task: Some(upstream_rate_limit_writer_task),
         subscription_quota_writer_task: Some(subscription_quota_writer_task),
+        prompt_cache_observation_writer_task,
         event_fanout_shutdown_tx: Some(event_fanout_shutdown_tx),
         event_fanout_tasks,
         signals,
@@ -1808,6 +1842,8 @@ struct ServerDynamicViewRebinder {
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     data_dir: PathBuf,
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
+    prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     subscription_quota_routing_max_staleness_secs: u64,
     config: Arc<cc_lb_config::Config>,
     clock: ClockHandle,
@@ -1828,6 +1864,8 @@ impl DynamicViewRebinder for ServerDynamicViewRebinder {
             &self.runtime,
             &self.data_dir,
             self.subscription_quota_cache.clone(),
+            self.prompt_cache_observation_cache.clone(),
+            self.prompt_cache_observation_sink.clone(),
             self.subscription_quota_routing_max_staleness_secs,
             &self.config,
             self.clock.clone(),
@@ -1846,6 +1884,8 @@ struct ReconcilerParams {
     cancel: CancellationToken,
     data_dir: PathBuf,
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
+    prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     subscription_quota_routing_max_staleness_secs: u64,
     config: Arc<cc_lb_config::Config>,
     clock: ClockHandle,
@@ -1862,6 +1902,8 @@ fn spawn_reconciler(params: ReconcilerParams) {
         params.cancel,
         params.data_dir,
         params.subscription_quota_cache,
+        params.prompt_cache_observation_cache,
+        params.prompt_cache_observation_sink,
         params.subscription_quota_routing_max_staleness_secs,
         params.config,
         params.clock,
