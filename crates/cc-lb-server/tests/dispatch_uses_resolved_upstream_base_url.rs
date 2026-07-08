@@ -116,6 +116,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         upstream_subscription_quotas: storage.clone(),
         upstream_subscription_metadata: storage.clone(),
         organization_metadata: storage.clone(),
+        plan_tiers: storage.clone(),
         anthropic_compatibility_kv: storage.clone(),
         audit: Some(storage.clone()),
         prompt_cache_observations: storage.clone(),

@@ -13,7 +13,6 @@ use cc_lb_scheduler::jobs::oauth_usage_poll::{
 use cc_lb_scheduler::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob;
 use cc_lb_scheduler::jobs::price_catalog::PriceCatalogRefreshJobHandler;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeJobHandler;
-use cc_lb_scheduler::jobs::quota_gc::{SubscriptionQuotaGcConfig, SubscriptionQuotaGcJobHandler};
 use cc_lb_scheduler::jobs::usage_prune::handle_usage_prune_job;
 use cc_lb_scheduler::jobs::usage_rollup::handle_usage_rollup_job;
 use cc_lb_scheduler::jobs::watchdog::{
@@ -29,7 +28,7 @@ use uuid::Uuid;
 use super::SchedulerDispatch;
 use crate::scheduler_dispatch::outcomes::{
     apalis_housekeeping_outcome, price_catalog_outcome, prompt_cache_purge_outcome,
-    quota_gc_outcome, usage_prune_outcome, usage_rollup_outcome,
+    usage_prune_outcome, usage_rollup_outcome,
 };
 use crate::scheduler_dispatch::storage::StorageHandle;
 
@@ -48,19 +47,11 @@ impl SchedulerDispatch {
                 )
                 .await,
             ),
-            CronJob::QuotaGc(job) => {
-                let config = SubscriptionQuotaGcConfig::new(
-                    self.config.subscription_quota.retention_days,
-                    self.config.subscription_quota.gc_batch_size,
+            CronJob::QuotaGc(_job) => {
+                tracing::debug!(
+                    "quota_gc retired; subscription-quota retention removed (ADR 0005)"
                 );
-                quota_gc_outcome(
-                    SubscriptionQuotaGcJobHandler::new(
-                        StorageHandle::new(self.storage.clone()),
-                        config,
-                    )
-                    .handle(job, unix_secs(self.clock.now()))
-                    .await,
-                )
+                Ok(JobOutcome::Done)
             }
             CronJob::PromptCachePurge(job) => prompt_cache_purge_outcome(
                 PromptCacheObservationPurgeJobHandler::new(StorageHandle::new(

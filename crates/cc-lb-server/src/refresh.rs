@@ -1058,6 +1058,7 @@ mod tests {
                 upstream_subscription_quotas: storage.clone(),
                 upstream_subscription_metadata: storage.clone(),
                 organization_metadata: storage.clone(),
+                plan_tiers: storage.clone(),
                 prompt_cache_observations: storage.clone(),
                 anthropic_compatibility_kv: storage.clone(),
                 audit: Some(storage.clone()),

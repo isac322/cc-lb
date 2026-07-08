@@ -3,6 +3,7 @@
 pub mod anthropic_compatibility_kv;
 pub mod error;
 pub mod organization_metadata;
+pub mod plan_tiers;
 pub mod plugin_registry;
 pub mod pool_quota_history;
 pub mod principal;
@@ -24,6 +25,7 @@ pub use anthropic_compatibility_kv::*;
 
 pub use error::{PluginChainConflictReason, StorageError, StorageResult};
 pub use organization_metadata::*;
+pub use plan_tiers::*;
 pub use plugin_registry::*;
 pub use pool_quota_history::*;
 pub use principal::*;

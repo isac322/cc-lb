@@ -92,31 +92,6 @@ impl UpstreamSubscriptionQuotaStore for PostgresStorage {
             .collect::<StorageResult<Vec<_>>>()?;
         build_series(records, &query)
     }
-
-    async fn delete_subscription_quota_before(
-        &self,
-        cutoff_unix_millis: u64,
-        batch_size: u32,
-    ) -> StorageResult<u64> {
-        let result = sqlx::query(
-            "WITH victims AS ( \
-                 SELECT ctid FROM upstream_subscription_quota_observations_v1 \
-                 WHERE observed_at_unix_millis < $1 \
-                 LIMIT $2 \
-             ) \
-             DELETE FROM upstream_subscription_quota_observations_v1 \
-             WHERE ctid IN (SELECT ctid FROM victims)",
-        )
-        .bind(u64_to_i64(
-            cutoff_unix_millis,
-            "subscription quota cutoff_unix_millis",
-        )?)
-        .bind(i64::from(batch_size))
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-        Ok(result.rows_affected())
-    }
 }
 
 async fn insert_observation(

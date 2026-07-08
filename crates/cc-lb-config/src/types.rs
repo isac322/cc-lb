@@ -657,10 +657,6 @@ pub struct OAuthConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct SubscriptionQuotaConfig {
-    #[serde(default = "default_subscription_quota_retention_days")]
-    pub retention_days: u64,
-    #[serde(default = "default_subscription_quota_gc_batch_size")]
-    pub gc_batch_size: u32,
     #[serde(default = "default_subscription_quota_writer_batch_max_records")]
     pub writer_batch_max_records: u32,
     #[serde(default = "default_subscription_quota_writer_flush_ms")]
@@ -676,8 +672,6 @@ pub struct SubscriptionQuotaConfig {
 impl Default for SubscriptionQuotaConfig {
     fn default() -> Self {
         Self {
-            retention_days: 30,
-            gc_batch_size: 10_000,
             writer_batch_max_records: 256,
             writer_flush_ms: 100,
             writer_channel_capacity: 4096,
@@ -1269,10 +1263,6 @@ fn default_scheduler_recurring_jobs() -> HashMap<String, RecurringJobConfig> {
             recurring_job_config(86_400, scheduler_jitter_secs(86_400)),
         ),
         (
-            "quota_gc".to_owned(),
-            recurring_job_config(3600, scheduler_jitter_secs(3600)),
-        ),
-        (
             "prompt_cache_purge".to_owned(),
             recurring_job_config(600, scheduler_jitter_secs(600)),
         ),
@@ -1445,14 +1435,6 @@ fn default_dns_cache_ttl_floor_secs() -> u64 {
 
 fn default_dns_cache_ttl_ceiling_secs() -> u64 {
     DnsConfig::default().cache_ttl_ceiling_secs
-}
-
-fn default_subscription_quota_retention_days() -> u64 {
-    SubscriptionQuotaConfig::default().retention_days
-}
-
-fn default_subscription_quota_gc_batch_size() -> u32 {
-    SubscriptionQuotaConfig::default().gc_batch_size
 }
 
 fn default_subscription_quota_writer_batch_max_records() -> u32 {

@@ -31,6 +31,7 @@ pub enum AdaptiveJob {
 pub enum CronJob {
     UsageRollup(UsageRollupTask),
     UsagePrune(UsagePruneJob),
+    // Retired: subscription-quota retention removed (ADR 0005). Never scheduled; dispatch is a no-op. Kept as a deserialization tombstone so queued CRON_QUEUE rows still deserialize.
     QuotaGc(SubscriptionQuotaGcJob),
     PromptCachePurge(PromptCacheObservationPurgeJob),
     PriceCatalogRefresh(PriceCatalogRefreshJob),
@@ -153,5 +154,22 @@ impl<Ctx, IdType> TraceparentCarrier for Task<CronJob, Ctx, IdType> {
 impl<Ctx, IdType> RetryPayload for Task<CronJob, Ctx, IdType> {
     fn attempt_count(&self) -> u32 {
         u32::try_from(self.parts.attempt.current()).unwrap_or(u32::MAX)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quota_gc_tombstone_preserves_serialized_shape() {
+        let serialized =
+            serde_json::to_string(&CronJob::QuotaGc(SubscriptionQuotaGcJob::default()))
+                .expect("serialize quota_gc tombstone");
+        assert_eq!(serialized, r#"{"type":"quota_gc","payload":{}}"#);
+
+        let deserialized: CronJob = serde_json::from_str(&serialized)
+            .expect("deserialize quota_gc tombstone from cron queue payload");
+        assert!(matches!(deserialized, CronJob::QuotaGc(_)));
     }
 }

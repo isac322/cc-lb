@@ -6,9 +6,10 @@ use cc_lb_clock::{Clock, SystemClock, unix_secs};
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AnthropicCompatibilityKvStore, AuditStore, OrganizationMetadataStore, PluginRegistryStore,
-    PrincipalStore, PromptCacheObservationStore, UpstreamCreate, UpstreamRateLimitStateStore,
-    UpstreamStore, UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore,
+    AnthropicCompatibilityKvStore, AuditStore, OrganizationMetadataStore, PlanTierStore,
+    PluginRegistryStore, PrincipalStore, PromptCacheObservationStore, UpstreamCreate,
+    UpstreamRateLimitStateStore, UpstreamStore, UpstreamSubscriptionMetadataStore,
+    UpstreamSubscriptionQuotaStore,
 };
 use uuid::Uuid;
 
@@ -35,6 +36,7 @@ where
     Storage: AnthropicCompatibilityKvStore
         + AuditStore
         + OrganizationMetadataStore
+        + PlanTierStore
         + PluginRegistryStore
         + PrincipalStore
         + PromptCacheObservationStore
@@ -52,6 +54,7 @@ where
     let upstream_subscription_metadata: Arc<dyn UpstreamSubscriptionMetadataStore> =
         storage.clone();
     let organization_metadata: Arc<dyn OrganizationMetadataStore> = storage.clone();
+    let plan_tiers: Arc<dyn PlanTierStore> = storage.clone();
     let prompt_cache_observations: Arc<dyn PromptCacheObservationStore> = storage.clone();
     let anthropic_compatibility_kv: Arc<dyn AnthropicCompatibilityKvStore> = storage.clone();
     let audit: Arc<dyn AuditStore> = storage;
@@ -64,6 +67,7 @@ where
         upstream_subscription_quotas,
         upstream_subscription_metadata,
         organization_metadata,
+        plan_tiers,
         prompt_cache_observations,
         anthropic_compatibility_kv,
         audit: Some(audit),

@@ -8,6 +8,7 @@ pub mod meta;
 pub mod notifier;
 pub mod oauth_credentials;
 pub mod organization_metadata;
+pub mod plan_tiers;
 pub mod plugin_registry;
 pub mod pool_quota_history;
 mod pool_quota_history_summary;

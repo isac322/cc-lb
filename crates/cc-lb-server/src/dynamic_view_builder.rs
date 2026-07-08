@@ -15,8 +15,10 @@ use cc_lb_engine::api_keys::principal_view::{
 };
 use cc_lb_engine::builtin_filters::cache_affinity::CacheAffinityFilter;
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_engine::clock::unix_secs;
-use cc_lb_engine::plan_capacity::{PlanInfo, plan_capacity_ratio};
+use cc_lb_engine::clock::{unix_millis, unix_secs};
+use cc_lb_engine::plan_capacity::{
+    PRO_CAPACITY_RATIO, PlanInfo, PlanTierClassification, TierKey, classify_plan_tier,
+};
 use cc_lb_engine::{
     ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamRateLimitCache, UpstreamStatusEntry,
     UpstreamStatusSnapshot,
@@ -31,11 +33,12 @@ use cc_lb_runtime_wasmtime::{
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AnthropicCompatibilityKvStore, AuditStore, OrganizationMetadataStore, PluginRegistryStore,
-    PluginSlot, PrincipalRecord, PrincipalStore, PromptCacheObservationStore, RateLimitKind,
-    StorageError, StorageResult, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
-    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataStore,
-    UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
+    AnthropicCompatibilityKvStore, AuditStore, MetadataTierMappingOverrideRecord,
+    OrganizationMetadataStore, PlanTierRatioRecord, PlanTierStore, PluginRegistryStore, PluginSlot,
+    PrincipalRecord, PrincipalStore, PromptCacheObservationStore, RateLimitKind, StorageError,
+    StorageResult, TierResolutionSource, UpstreamPlanTierRecord,
+    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
 };
 use parking_lot::RwLock;
 use thiserror::Error;
@@ -61,6 +64,7 @@ pub struct Stores {
     pub upstream_subscription_quotas: Arc<dyn UpstreamSubscriptionQuotaStore>,
     pub upstream_subscription_metadata: Arc<dyn UpstreamSubscriptionMetadataStore>,
     pub organization_metadata: Arc<dyn OrganizationMetadataStore>,
+    pub plan_tiers: Arc<dyn PlanTierStore>,
     pub prompt_cache_observations: Arc<dyn PromptCacheObservationStore>,
     pub anthropic_compatibility_kv: Arc<dyn AnthropicCompatibilityKvStore>,
     pub audit: Option<Arc<dyn AuditStore>>,
@@ -282,6 +286,8 @@ pub async fn build_dynamic_view(
     });
 
     let plan_info_by_upstream = load_plan_info_by_upstream(stores).await?;
+    let now_unix_millis = i64::try_from(unix_millis(clock.now())).unwrap_or(i64::MAX);
+    reconcile_upstream_plan_tiers(stores, now_unix_millis).await;
     let mut builder = DynamicViewBuilder::new(current_generation)
         .signer_factory(signer_factory)
         .global_router(global_router)
@@ -349,6 +355,11 @@ fn rate_limit_kind(kind: RateLimitKind) -> cc_lb_plugin_api::RateLimitKind {
 }
 
 async fn load_plan_info_by_upstream(stores: &Stores) -> StorageResult<HashMap<Uuid, PlanInfo>> {
+    let ratio_by_tier = ratio_by_tier(stores.plan_tiers.list_current_plan_tier_ratios().await?);
+    let overrides = stores
+        .plan_tiers
+        .list_current_metadata_tier_overrides()
+        .await?;
     let subscription_metadata = stores
         .upstream_subscription_metadata
         .list_upstream_subscription_metadata()
@@ -369,11 +380,37 @@ async fn load_plan_info_by_upstream(stores: &Stores) -> StorageResult<HashMap<Uu
         let Some(organization) = organizations.get(organization_uuid).copied() else {
             continue;
         };
-        let capacity_ratio = plan_capacity_ratio(
+        let (tier, _source) = resolve_tier(
+            &overrides,
             organization.organization_type.as_deref(),
             organization.rate_limit_tier.as_deref(),
             organization.seat_tier.as_deref(),
         );
+        let capacity_ratio = match tier {
+            Some(tier) => match ratio_by_tier.get(&tier) {
+                Some(ratio) => *ratio,
+                None => {
+                    tracing::error!(
+                        upstream_id = %record.upstream_id,
+                        tier = tier.as_str(),
+                        "plan tier missing a current ratio row in plan_tier_ratio_history_v1; using built-in seed ratio"
+                    );
+                    metrics::counter!("cc_lb_plan_tier_ratio_missing_total").increment(1);
+                    tier.seed_pro_relative_ratio()
+                }
+            },
+            None => {
+                tracing::warn!(
+                    upstream_id = %record.upstream_id,
+                    organization_type = ?organization.organization_type,
+                    rate_limit_tier = ?organization.rate_limit_tier,
+                    seat_tier = ?organization.seat_tier,
+                    "unknown plan tier; routing at Pro ratio"
+                );
+                metrics::counter!("cc_lb_plan_tier_unknown_total").increment(1);
+                PRO_CAPACITY_RATIO
+            }
+        };
         plan_info.insert(
             record.upstream_id,
             PlanInfo {
@@ -385,6 +422,146 @@ async fn load_plan_info_by_upstream(stores: &Stores) -> StorageResult<HashMap<Uu
         );
     }
     Ok(plan_info)
+}
+
+fn resolve_tier(
+    overrides: &[MetadataTierMappingOverrideRecord],
+    organization_type: Option<&str>,
+    rate_limit_tier: Option<&str>,
+    seat_tier: Option<&str>,
+) -> (Option<TierKey>, TierResolutionSource) {
+    let norm = |s: Option<&str>| s.unwrap_or_default().to_ascii_lowercase();
+    let (ot, rlt, st) = (
+        norm(organization_type),
+        norm(rate_limit_tier),
+        norm(seat_tier),
+    );
+    for override_record in overrides {
+        if norm(override_record.organization_type.as_deref()) == ot
+            && norm(override_record.rate_limit_tier.as_deref()) == rlt
+            && norm(override_record.seat_tier.as_deref()) == st
+            && let Ok(tier) = override_record.tier_key.parse::<TierKey>()
+        {
+            return (Some(tier), TierResolutionSource::Override);
+        }
+    }
+    match classify_plan_tier(organization_type, rate_limit_tier, seat_tier) {
+        PlanTierClassification::Known(tier) => (Some(tier), TierResolutionSource::Builtin),
+        PlanTierClassification::Unknown => (None, TierResolutionSource::Unknown),
+    }
+}
+
+async fn reconcile_upstream_plan_tiers(stores: &Stores, now_unix_millis: i64) {
+    if let Err(error) = reconcile_upstream_plan_tiers_inner(stores, now_unix_millis).await {
+        tracing::error!(error = %error, "plan tier history reconcile failed");
+        metrics::counter!("cc_lb_plan_tier_reconcile_failed_total").increment(1);
+    }
+}
+
+async fn reconcile_upstream_plan_tiers_inner(
+    stores: &Stores,
+    now_unix_millis: i64,
+) -> StorageResult<()> {
+    let ratio_by_tier = ratio_by_tier(stores.plan_tiers.list_current_plan_tier_ratios().await?);
+    let overrides = stores
+        .plan_tiers
+        .list_current_metadata_tier_overrides()
+        .await?;
+    let current_by_upstream = stores
+        .plan_tiers
+        .list_current_upstream_plan_tiers()
+        .await?
+        .into_iter()
+        .map(|record| (record.upstream_id, record))
+        .collect::<HashMap<_, _>>();
+    let subscription_metadata = stores
+        .upstream_subscription_metadata
+        .list_upstream_subscription_metadata()
+        .await?;
+    let organization_metadata = stores
+        .organization_metadata
+        .list_organization_metadata()
+        .await?;
+    let organizations = organization_metadata
+        .iter()
+        .map(|record| (record.organization_uuid.as_str(), record))
+        .collect::<HashMap<_, _>>();
+
+    for record in subscription_metadata {
+        let Some(organization_uuid) = record.organization_uuid.as_deref() else {
+            continue;
+        };
+        let Some(organization) = organizations.get(organization_uuid).copied() else {
+            continue;
+        };
+        let (tier, resolution_source) = resolve_tier(
+            &overrides,
+            organization.organization_type.as_deref(),
+            organization.rate_limit_tier.as_deref(),
+            organization.seat_tier.as_deref(),
+        );
+        let desired = UpstreamPlanTierRecord {
+            upstream_id: record.upstream_id,
+            organization_uuid: record.organization_uuid.clone(),
+            organization_type: organization.organization_type.clone(),
+            rate_limit_tier: organization.rate_limit_tier.clone(),
+            seat_tier: organization.seat_tier.clone(),
+            tier_key: tier.map(|tier| tier.as_str().to_owned()),
+            resolution_source,
+            resolved_ratio_snapshot: tier.and_then(|tier| ratio_by_tier.get(&tier).copied()),
+            observed_at_unix_millis: now_unix_millis,
+            effective_from_unix_millis: now_unix_millis,
+            effective_to_unix_millis: None,
+            provenance: "dynamic_view_reconcile".to_owned(),
+            created_at_unix_millis: now_unix_millis,
+        };
+        if current_by_upstream
+            .get(&record.upstream_id)
+            .is_none_or(|current| upstream_plan_tier_changed(current, &desired))
+        {
+            stores
+                .plan_tiers
+                .append_upstream_plan_tier(&desired)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+fn ratio_by_tier(records: Vec<PlanTierRatioRecord>) -> HashMap<TierKey, f64> {
+    records
+        .into_iter()
+        .filter_map(|record| {
+            record
+                .tier_key
+                .parse::<TierKey>()
+                .ok()
+                .map(|tier| (tier, record.pro_relative_ratio))
+        })
+        .collect()
+}
+
+fn upstream_plan_tier_changed(
+    current: &UpstreamPlanTierRecord,
+    desired: &UpstreamPlanTierRecord,
+) -> bool {
+    current.tier_key != desired.tier_key
+        || current.resolution_source != desired.resolution_source
+        || !normalized_option_eq(
+            current.organization_type.as_deref(),
+            desired.organization_type.as_deref(),
+        )
+        || !normalized_option_eq(
+            current.rate_limit_tier.as_deref(),
+            desired.rate_limit_tier.as_deref(),
+        )
+        || !normalized_option_eq(current.seat_tier.as_deref(), desired.seat_tier.as_deref())
+        || current.organization_uuid != desired.organization_uuid
+}
+
+fn normalized_option_eq(left: Option<&str>, right: Option<&str>) -> bool {
+    left.unwrap_or_default()
+        .eq_ignore_ascii_case(right.unwrap_or_default())
 }
 
 async fn list_upstreams(stores: &Stores) -> StorageResult<Vec<UpstreamRecord>> {
@@ -1099,6 +1276,7 @@ mod tests {
             upstream_subscription_quotas: storage.clone(),
             upstream_subscription_metadata: storage.clone(),
             organization_metadata: storage.clone(),
+            plan_tiers: storage.clone(),
             prompt_cache_observations,
             anthropic_compatibility_kv: storage.clone(),
             audit: Some(storage),
