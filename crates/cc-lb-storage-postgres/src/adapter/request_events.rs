@@ -25,12 +25,16 @@ impl RequestEventStore for PostgresStorage {
               (ts, principal_id, upstream_id, key_id, model, upstream_name, cache_state, thread_id, message_id, \
                message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, \
                 input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, \
-                event_id, error_code, upstream_error_type, upstream_error_message, \
-                thinking_tokens, web_search_requests, web_fetch_requests, \
-                 service_tier, inference_geo, \
-                 cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, \
-                 payload, created_at) \
-              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,NOW()) \
+                 event_id, error_code, upstream_error_type, upstream_error_message, \
+                 thinking_tokens, web_search_requests, web_fetch_requests, \
+                  service_tier, inference_geo, \
+                  cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, \
+                  matched_v3_cache_key, breakpoint_content_block_index, matched_content_block_index, lookback_distance, \
+                  predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, predicted_cache_creation_tokens_1h, \
+                  token_estimate_source, cache_value_micros, formula_winner_upstream_id, kept_upstream_id, wrh_key_source, \
+                  lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, \
+                  payload, created_at) \
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,NOW()) \
               ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
               RETURNING seq",
         )
@@ -123,6 +127,55 @@ impl RequestEventStore for PostgresStorage {
                 .map(|value| u64_to_i64(value, "request event cache_creation_input_tokens_1h"))
                 .transpose()?,
         )
+        .bind(event.matched_v3_cache_key.as_deref())
+        .bind(
+            event
+                .breakpoint_content_block_index
+                .map(|value| u64_to_i64(value, "request event breakpoint_content_block_index"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .matched_content_block_index
+                .map(|value| u64_to_i64(value, "request event matched_content_block_index"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .lookback_distance
+                .map(|value| u64_to_i64(value, "request event lookback_distance"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .predicted_cache_read_tokens
+                .map(|value| u64_to_i64(value, "request event predicted_cache_read_tokens"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .predicted_cache_creation_tokens_5m
+                .map(|value| u64_to_i64(value, "request event predicted_cache_creation_tokens_5m"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .predicted_cache_creation_tokens_1h
+                .map(|value| u64_to_i64(value, "request event predicted_cache_creation_tokens_1h"))
+                .transpose()?,
+        )
+        .bind(event.token_estimate_source.as_deref())
+        .bind(event.cache_value_micros)
+        .bind(event.formula_winner_upstream_id)
+        .bind(event.kept_upstream_id)
+        .bind(event.wrh_key_source.as_deref())
+        .bind(
+            event
+                .lineage_would_have_predicted_read_tokens
+                .map(|value| u64_to_i64(value, "request event lineage_would_have_predicted_read_tokens"))
+                .transpose()?,
+        )
+        .bind(event.lineage_would_have_picked_upstream_id)
         .bind(payload)
         .fetch_optional(&self.pool)
         .await

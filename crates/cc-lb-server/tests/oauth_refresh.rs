@@ -273,6 +273,8 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         &runtime,
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        None,
+        None,
         1800,
         &cc_lb_config::Config::default(),
         fixture.clock.clone(),

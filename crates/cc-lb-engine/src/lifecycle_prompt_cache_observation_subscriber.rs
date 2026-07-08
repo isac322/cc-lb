@@ -172,11 +172,19 @@ fn enqueue_observation(
     let record = PromptCacheObservationRecord {
         upstream_id,
         canonical_model_id: canonical_model_id.to_owned(),
-        prefix_hash: observation.prefix_hash.clone(),
+        v3_prefix_key: observation.prefix_hash.clone(),
         ttl_class: ttl_to_storage(observation.ttl_class),
         expires_at_unix_secs: observation.expires_at_unix_secs,
         last_observed_at_unix_secs: now_unix_secs,
         hash_schema_version: HASH_SCHEMA_VERSION,
+        prefix_content_block_index: observation.prefix_content_block_index,
+        estimated_prefix_tokens: observation.estimated_prefix_tokens,
+        token_estimate_source: observation
+            .token_estimate_source
+            .clone()
+            .unwrap_or_else(|| "unknown".to_owned()),
+        last_provider_cache_read_tokens: None,
+        last_provider_cache_creation_tokens: None,
     };
     if let Err(error) = sink.enqueue(record) {
         match error {
@@ -242,7 +250,7 @@ mod tests {
         assert_eq!(upserts[0].canonical_model, TEST_MODEL);
         let records = sink.records();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].prefix_hash, "write");
+        assert_eq!(records[0].v3_prefix_key, "write");
         assert_eq!(records[0].canonical_model_id, TEST_MODEL);
         assert_eq!(records[0].hash_schema_version, HASH_SCHEMA_VERSION);
     }
@@ -287,6 +295,9 @@ mod tests {
                 ttl_class: TtlClass::Ephemeral5m,
                 expires_at_unix_secs: 1_800_000_300,
                 kind: PromptCacheObservationKindWire::Write,
+                prefix_content_block_index: 1,
+                estimated_prefix_tokens: 2_400,
+                token_estimate_source: Some("test".to_owned()),
             }],
             dropped_below_threshold,
             dropped_aborted: 0,

@@ -49,11 +49,16 @@ fn record(index: u64) -> PromptCacheObservationRecord {
     PromptCacheObservationRecord {
         upstream_id: Uuid::from_u128(0x1234_5678_90ab_cdef_1234_5678_90ab_cdef),
         canonical_model_id: "claude-sonnet-4-5-20250929".to_owned(),
-        prefix_hash: format!("sha256:{index}"),
+        v3_prefix_key: format!("sha256:{index}"),
         ttl_class: TtlClass::Ephemeral5m,
         expires_at_unix_secs: 1_800 + index,
         last_observed_at_unix_secs: 1_500 + index,
-        hash_schema_version: 2,
+        hash_schema_version: 3,
+        prefix_content_block_index: 0,
+        estimated_prefix_tokens: 0,
+        token_estimate_source: "local_tiktoken_v1".to_owned(),
+        last_provider_cache_read_tokens: Some(0),
+        last_provider_cache_creation_tokens: Some(0),
     }
 }
 

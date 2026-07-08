@@ -10,8 +10,8 @@ use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_config::PromptCacheShadowConfig;
 use cc_lb_plugin_api::types::{
-    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CachePricingSummary, CacheScore,
-    StageDecision, TerminalDecision, TtlClass, WarmCacheEntry,
+    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix,
+    CachePricingSummary, CacheScore, StageDecision, TerminalDecision, TtlClass, WarmCacheEntry,
 };
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, FilterError, FilterOutput, InternalError, InternalErrorKind,
@@ -43,12 +43,14 @@ use crate::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuth
 use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as LimitReservation};
 use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
-use crate::cache_score_selection::select_cache_score_by_value;
 use crate::clock::{Clock, ClockHandle, unix_millis};
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::ErrorNormalizer;
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
+use crate::prompt_cache_simulator::{
+    V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheBlockSource, analyze_v3_prompt_cache,
+};
 use crate::rate_limit_headers::{
     parse_anthropic_rate_limit_headers, parse_anthropic_unified_headers,
 };
@@ -74,7 +76,7 @@ use cc_lb_observability::{redact_internal_errors, truncate_reason};
 
 pub type Body = AxumBody;
 
-pub const HASH_SCHEMA_VERSION: u8 = 2;
+pub const HASH_SCHEMA_VERSION: u8 = 3;
 
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
@@ -130,7 +132,7 @@ pub fn build_candidates(
     request_kind: RequestKind,
     canonical_model: &str,
     request_breakpoints: &[CacheBreakpoint],
-    thread_id: Option<&str>,
+    _thread_id: Option<&str>,
     clock: &dyn Clock,
 ) -> Vec<UpstreamCandidate> {
     let Some(allowed_upstreams) = view.principal_view.allowed_upstreams(principal_id) else {
@@ -141,11 +143,8 @@ pub fn build_candidates(
         let rate_limit_cache = view.upstream_rate_limit_cache.read();
         let now_unix_millis = unix_now_ms(clock);
         let prompt_cache = view.prompt_cache_observation_cache_opt();
-        let cache_pricing = cache_pricing_summary_for_model(canonical_model);
-        let request_breakpoint_hashes_with_ttl = request_breakpoints
-            .iter()
-            .map(|breakpoint| (breakpoint.prefix_hash.clone(), breakpoint.requested_ttl))
-            .collect::<Vec<_>>();
+        let request_breakpoint_hashes_with_ttl =
+            request_lookback_hashes_with_ttl(request_breakpoints);
         view.upstreams_snapshot()
             .iter()
             .filter(|upstream| upstream.enabled)
@@ -173,16 +172,7 @@ pub fn build_candidates(
                         &request_breakpoint_hashes_with_ttl,
                         now_unix_secs,
                     );
-                    let exact_score = build_cache_score(request_breakpoints, &warm_entries);
-                    let thread_score = thread_id.and_then(|thread_id| {
-                        cache.thread_usage_score(
-                            upstream.id,
-                            canonical_model,
-                            thread_id,
-                            now_unix_secs,
-                        )
-                    });
-                    select_cache_score_by_value(exact_score, thread_score, &cache_pricing)
+                    build_cache_score(request_breakpoints, &warm_entries)
                 });
                 let plan_info = view.plan_info_by_upstream.get(&upstream.id);
                 UpstreamCandidate {
@@ -218,19 +208,31 @@ fn build_cache_score(
         return None;
     }
 
-    let warm_entry_for = |breakpoint: &CacheBreakpoint| {
+    let warm_entry_for = |prefix_hash: &str| {
         warm_entries
             .iter()
-            .filter(|entry| entry.prefix_hash == breakpoint.prefix_hash)
+            .filter(|entry| entry.prefix_hash == prefix_hash)
             .max_by_key(|entry| entry.expires_at_unix_secs)
     };
     let longest_match = request_breakpoints
         .iter()
-        .filter_map(|breakpoint| warm_entry_for(breakpoint).map(|entry| (breakpoint, entry)))
-        .max_by_key(|(breakpoint, _)| breakpoint.prefix_token_count);
+        .flat_map(|breakpoint| {
+            breakpoint
+                .lookback_prefixes
+                .iter()
+                .filter_map(move |prefix| {
+                    warm_entry_for(&prefix.prefix_hash).map(|entry| (breakpoint, prefix, entry))
+                })
+        })
+        .max_by(|left, right| {
+            left.1
+                .prefix_token_count
+                .cmp(&right.1.prefix_token_count)
+                .then_with(|| right.1.lookback_distance.cmp(&left.1.lookback_distance))
+        });
 
     let matched_prefix_tokens = longest_match
-        .map(|(breakpoint, _)| breakpoint.prefix_token_count)
+        .map(|(_, prefix, _)| prefix.prefix_token_count)
         .unwrap_or(0);
     let mut missing_breakpoints = request_breakpoints
         .iter()
@@ -260,7 +262,7 @@ fn build_cache_score(
 
     Some(CacheScore {
         predicted_cache_read_tokens: longest_match
-            .map(|(breakpoint, _)| saturating_u64_to_u32(breakpoint.prefix_token_count))
+            .map(|(_, prefix, _)| saturating_u64_to_u32(prefix.prefix_token_count))
             .unwrap_or(0),
         predicted_cache_creation_tokens_5m: saturating_u64_to_u32(
             predicted_cache_creation_tokens_5m,
@@ -269,11 +271,33 @@ fn build_cache_score(
             predicted_cache_creation_tokens_1h,
         ),
         predicted_uncached_input_tokens: 0,
-        predicted_expires_at_unix_secs: longest_match.map(|(_, entry)| entry.expires_at_unix_secs),
-        matched_breakpoint_index: longest_match.map(|(breakpoint, _)| breakpoint.block_index),
+        predicted_expires_at_unix_secs: longest_match
+            .map(|(_, _, entry)| entry.expires_at_unix_secs),
+        matched_breakpoint_index: longest_match.map(|(breakpoint, _, _)| breakpoint.block_index),
         confidence: if longest_match.is_some() { 1.0 } else { 0.0 },
         ambiguity_reason: None,
+        matched_v3_cache_key: longest_match.map(|(_, prefix, _)| prefix.prefix_hash.clone()),
+        breakpoint_content_block_index: longest_match
+            .map(|(breakpoint, _, _)| breakpoint.block_index),
+        matched_content_block_index: longest_match.map(|(_, prefix, _)| prefix.content_block_index),
+        lookback_distance: longest_match.map(|(_, prefix, _)| prefix.lookback_distance),
+        token_estimate_source: longest_match
+            .and_then(|(breakpoint, _, _)| breakpoint.token_estimate_source.clone()),
     })
+}
+
+fn request_lookback_hashes_with_ttl(
+    request_breakpoints: &[CacheBreakpoint],
+) -> Vec<(String, TtlClass)> {
+    request_breakpoints
+        .iter()
+        .flat_map(|breakpoint| {
+            breakpoint
+                .lookback_prefixes
+                .iter()
+                .map(move |prefix| (prefix.prefix_hash.clone(), breakpoint.requested_ttl))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -355,6 +379,13 @@ mod cache_score_tests {
             prefix_token_count,
             requested_ttl,
             origin: BreakpointOrigin::Explicit,
+            lookback_prefixes: vec![cc_lb_plugin_api::types::CacheLookbackPrefix {
+                prefix_hash: format!("bp-{block_index}"),
+                content_block_index: block_index,
+                prefix_token_count,
+                lookback_distance: 0,
+            }],
+            token_estimate_source: Some("test".to_owned()),
         }
     }
 
@@ -487,6 +518,9 @@ pub(crate) struct DecodedPromptCacheObservation {
     pub(crate) prefix_hash: String,
     pub(crate) ttl_class: TtlClass,
     pub(crate) expires_at_unix_secs: u64,
+    pub(crate) prefix_content_block_index: u32,
+    pub(crate) estimated_prefix_tokens: u64,
+    pub(crate) token_estimate_source: Option<String>,
     kind: DecodedPromptCacheObservationKind,
 }
 
@@ -578,6 +612,9 @@ pub(crate) fn decode_prompt_cache_observations_pure(
                     warm_entry.ttl_class,
                     grace_secs,
                 ),
+                prefix_content_block_index: breakpoint.block_index,
+                estimated_prefix_tokens: breakpoint.prefix_token_count,
+                token_estimate_source: breakpoint.token_estimate_source.clone(),
                 kind: DecodedPromptCacheObservationKind::Hit,
             });
         } else {
@@ -603,6 +640,9 @@ pub(crate) fn decode_prompt_cache_observations_pure(
                     breakpoint.requested_ttl,
                     grace_secs,
                 ),
+                prefix_content_block_index: breakpoint.block_index,
+                estimated_prefix_tokens: breakpoint.prefix_token_count,
+                token_estimate_source: breakpoint.token_estimate_source.clone(),
                 kind: DecodedPromptCacheObservationKind::Write,
             });
         }
@@ -631,6 +671,9 @@ pub(crate) fn prompt_cache_observations_to_wire(
                     cc_lb_contract::PromptCacheObservationKindWire::Write
                 }
             },
+            prefix_content_block_index: observation.prefix_content_block_index,
+            estimated_prefix_tokens: observation.estimated_prefix_tokens,
+            token_estimate_source: observation.token_estimate_source.clone(),
         })
         .collect()
 }
@@ -1203,6 +1246,7 @@ impl Lifecycle {
                     cache_control_block_count: cache_metadata.cache_control_block_count,
                     cache_breakpoints: cache_metadata.cache_breakpoints.clone(),
                     cache_prefix_hash: cache_metadata.cache_prefix_hash.clone(),
+                    matched_v3_cache_key: cache_metadata.cache_prefix_hash.clone(),
                     thread_id: cache_metadata.thread_id.clone(),
                     message_id: cache_metadata.message_id.clone(),
                     message_index: cache_metadata.message_index,
@@ -1477,13 +1521,22 @@ impl Lifecycle {
         };
         let route_ms = duration_to_ms(route_start.elapsed());
         let routing_trace_value = pipeline_result.routing_trace(terminal_decision.clone());
-        let predicted_cache_read_tokens = pipeline_result
+        let selected_cache_score = pipeline_result
             .candidates
             .iter()
             .find(|candidate| candidate.upstream_id == resolved_upstream_id)
             .and_then(|candidate| candidate.cache_score.as_ref())
-            .map(|score| score.predicted_cache_read_tokens)
-            .unwrap_or(0);
+            .cloned();
+        let predicted_cache_read_tokens = selected_cache_score
+            .as_ref()
+            .map_or(0, |score| score.predicted_cache_read_tokens);
+        let subscription_trace = subscription_preference_trace(&routing_trace_value);
+        let lineage_counterfactual = lineage_counterfactual_from_thread_usage(
+            view.prompt_cache_observation_cache_opt(),
+            &pipeline_result.candidates,
+            &ctx.canonical_model_id,
+            ctx.thread_id.as_deref(),
+        );
         if let Some(o) = observer.as_ref() {
             o.emit_lifecycle(cc_lb_contract::LifecycleEvent::RouteCompleted {
                 event_id: o.event_id().to_owned(),
@@ -1495,6 +1548,47 @@ impl Lifecycle {
                     route_ms: Some(route_ms),
                     routing_trace: Some(routing_trace_value.clone()),
                     predicted_cache_read_tokens: Some(predicted_cache_read_tokens),
+                    matched_v3_cache_key: selected_cache_score
+                        .as_ref()
+                        .and_then(|score| score.matched_v3_cache_key.clone()),
+                    breakpoint_content_block_index: selected_cache_score
+                        .as_ref()
+                        .and_then(|score| score.breakpoint_content_block_index),
+                    matched_content_block_index: selected_cache_score
+                        .as_ref()
+                        .and_then(|score| score.matched_content_block_index),
+                    lookback_distance: selected_cache_score
+                        .as_ref()
+                        .and_then(|score| score.lookback_distance),
+                    predicted_cache_creation_tokens_5m: selected_cache_score
+                        .as_ref()
+                        .map(|score| score.predicted_cache_creation_tokens_5m),
+                    predicted_cache_creation_tokens_1h: selected_cache_score
+                        .as_ref()
+                        .map(|score| score.predicted_cache_creation_tokens_1h),
+                    token_estimate_source: selected_cache_score
+                        .as_ref()
+                        .and_then(|score| score.token_estimate_source.clone()),
+                    cache_value_micros: subscription_trace.and_then(|trace| {
+                        trace
+                            .candidates
+                            .iter()
+                            .find(|candidate| candidate.upstream_id == resolved_upstream_id)
+                            .and_then(|candidate| candidate.cache_value_micros)
+                    }),
+                    formula_winner_upstream_id: subscription_trace
+                        .and_then(|trace| trace.formula_winner_upstream_id),
+                    kept_upstream_id: subscription_trace.and_then(|trace| trace.kept_upstream_id),
+                    wrh_key_source: subscription_trace.map(|trace| match trace.wrh_key_source {
+                        cc_lb_plugin_api::types::WrhKeySource::CacheHash => "cache_hash".to_owned(),
+                        cc_lb_plugin_api::types::WrhKeySource::RequestId => "request_id".to_owned(),
+                    }),
+                    lineage_would_have_predicted_read_tokens: subscription_trace
+                        .and_then(|trace| trace.lineage_would_have_predicted_read_tokens)
+                        .or(lineage_counterfactual.map(|counterfactual| counterfactual.0)),
+                    lineage_would_have_picked_upstream_id: subscription_trace
+                        .and_then(|trace| trace.lineage_would_have_picked_upstream_id)
+                        .or(lineage_counterfactual.map(|counterfactual| counterfactual.1)),
                 }),
                 routing_trace: Some(routing_trace_value.clone()),
             });
@@ -2581,6 +2675,15 @@ impl FilterPipelineResult {
     }
 }
 
+fn subscription_preference_trace(
+    routing_trace: &RoutingTrace,
+) -> Option<&cc_lb_plugin_api::SubscriptionPreferenceTrace> {
+    routing_trace
+        .stages
+        .iter()
+        .find_map(|stage| stage.subscription_preference.as_ref())
+}
+
 fn execute_filter_pipeline(
     filters: &[Arc<dyn cc_lb_plugin_api::FilterPlugin>],
     ctx: &RequestContext,
@@ -3102,6 +3205,17 @@ impl RequestCacheMetadata {
                 prefix_token_count: breakpoint.prefix_token_count,
                 requested_ttl: plugin_ttl_class(breakpoint.ttl.as_deref()),
                 origin: BreakpointOrigin::Explicit,
+                lookback_prefixes: breakpoint
+                    .lookback_prefixes
+                    .iter()
+                    .map(|prefix| CacheLookbackPrefix {
+                        prefix_hash: prefix.prefix_hash.clone(),
+                        content_block_index: saturating_u64_to_u32(prefix.content_block_index),
+                        prefix_token_count: prefix.prefix_token_count,
+                        lookback_distance: saturating_u64_to_u32(prefix.lookback_distance),
+                    })
+                    .collect(),
+                token_estimate_source: breakpoint.token_estimate_source.clone(),
             })
             .collect()
     }
@@ -3184,40 +3298,37 @@ fn request_cache_metadata_from_value(
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
 
-    let mut cache_breakpoints = Vec::new();
-    collect_cache_breakpoints(
-        value,
-        value.get("tools"),
-        RequestCacheBreakpointSource::Tools,
-        "tools".to_owned(),
-        None,
-        &mut cache_breakpoints,
-    );
-    collect_cache_breakpoints(
-        value,
-        value.get("system"),
-        RequestCacheBreakpointSource::System,
-        "system".to_owned(),
-        None,
-        &mut cache_breakpoints,
-    );
-    let mut cache_control_message_indices = Vec::new();
-    if let Some(messages) = messages {
-        for (index, message) in messages.iter().enumerate() {
-            let previous_count = cache_breakpoints.len();
-            collect_cache_breakpoints(
-                value,
-                Some(message),
-                RequestCacheBreakpointSource::Message,
-                format!("messages[{index}]"),
-                Some(index as u64),
-                &mut cache_breakpoints,
-            );
-            if cache_breakpoints.len() > previous_count {
-                cache_control_message_indices.push(index as u64);
-            }
-        }
-    }
+    let analysis = analyze_v3_prompt_cache(value, &canonical_model_id);
+    let cache_breakpoints = analysis
+        .breakpoints
+        .iter()
+        .map(|breakpoint| RequestCacheBreakpoint {
+            block_index: breakpoint.block_index,
+            source: request_breakpoint_source_from_v3(breakpoint.source),
+            path: breakpoint.path.clone(),
+            message_index: breakpoint.message_index,
+            ttl: breakpoint.ttl.clone(),
+            prefix_hash: breakpoint.prefix_key.clone(),
+            prefix_token_count: breakpoint.prefix_token_count,
+            lookback_prefixes: breakpoint
+                .lookback_prefixes
+                .iter()
+                .map(|prefix| cc_lb_contract::RequestCacheLookbackPrefix {
+                    prefix_hash: prefix.prefix_key.clone(),
+                    content_block_index: prefix.content_block_index,
+                    prefix_token_count: prefix.prefix_token_count,
+                    lookback_distance: prefix.lookback_distance,
+                })
+                .collect(),
+            token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
+        })
+        .collect::<Vec<_>>();
+    let mut cache_control_message_indices = cache_breakpoints
+        .iter()
+        .filter_map(|breakpoint| breakpoint.message_index)
+        .collect::<Vec<_>>();
+    cache_control_message_indices.sort_unstable();
+    cache_control_message_indices.dedup();
 
     let cache_control_block_count = cache_breakpoints.len() as u64;
     let cache_prefix_hash = cache_breakpoints
@@ -3237,63 +3348,14 @@ fn request_cache_metadata_from_value(
     }
 }
 
-fn collect_cache_breakpoints(
-    request: &Value,
-    value: Option<&Value>,
-    source: RequestCacheBreakpointSource,
-    path: String,
-    message_index: Option<u64>,
-    breakpoints: &mut Vec<RequestCacheBreakpoint>,
-) {
-    match value {
-        Some(Value::Object(map)) => {
-            if let Some(cache_control) = map.get("cache_control") {
-                let (prefix_hash, prefix_token_count) =
-                    cache_prefix_hash_and_token_count_v2(request, source, &path, message_index);
-                breakpoints.push(RequestCacheBreakpoint {
-                    block_index: breakpoints.len() as u64,
-                    source,
-                    path: path.clone(),
-                    message_index,
-                    ttl: cache_control_ttl(cache_control),
-                    prefix_hash,
-                    prefix_token_count,
-                });
-            }
-            for (key, value) in map {
-                if key != "cache_control" {
-                    collect_cache_breakpoints(
-                        request,
-                        Some(value),
-                        source,
-                        format!("{path}.{key}"),
-                        message_index,
-                        breakpoints,
-                    );
-                }
-            }
-        }
-        Some(Value::Array(items)) => {
-            for (index, value) in items.iter().enumerate() {
-                collect_cache_breakpoints(
-                    request,
-                    Some(value),
-                    source,
-                    format!("{path}[{index}]"),
-                    message_index,
-                    breakpoints,
-                );
-            }
-        }
-        _ => {}
+fn request_breakpoint_source_from_v3(
+    source: V3PromptCacheBlockSource,
+) -> RequestCacheBreakpointSource {
+    match source {
+        V3PromptCacheBlockSource::Tools => RequestCacheBreakpointSource::Tools,
+        V3PromptCacheBlockSource::System => RequestCacheBreakpointSource::System,
+        V3PromptCacheBlockSource::Message => RequestCacheBreakpointSource::Message,
     }
-}
-
-fn cache_control_ttl(cache_control: &Value) -> Option<String> {
-    cache_control
-        .get("ttl")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
 }
 
 pub fn cache_prefix_hash(
@@ -3717,6 +3779,30 @@ fn upstream_kind_for_candidate(kind: StorageUpstreamKind) -> CandidateUpstreamKi
     }
 }
 
+fn lineage_counterfactual_from_thread_usage(
+    cache: Option<&Arc<dyn PromptCacheObservationCacheLike>>,
+    candidates: &[UpstreamCandidate],
+    canonical_model_id: &str,
+    thread_id: Option<&str>,
+) -> Option<(u32, Uuid)> {
+    let cache = cache?;
+    let thread_id = thread_id.filter(|id| !id.is_empty())?;
+    let now_unix_secs = cache.clock_now_unix_secs();
+    candidates
+        .iter()
+        .filter_map(|candidate| {
+            let score = cache.thread_usage_score(
+                candidate.upstream_id,
+                canonical_model_id,
+                thread_id,
+                now_unix_secs,
+            )?;
+            (score.predicted_cache_read_tokens > 0)
+                .then_some((score.predicted_cache_read_tokens, candidate.upstream_id))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
+}
+
 fn is_sse_response(headers: &HeaderMap) -> bool {
     headers
         .get(CONTENT_TYPE)
@@ -3983,12 +4069,17 @@ mod tests {
                 matched_breakpoint_index: None,
                 confidence: 0.0,
                 ambiguity_reason: None,
+                matched_v3_cache_key: None,
+                breakpoint_content_block_index: None,
+                matched_content_block_index: None,
+                lookback_distance: None,
+                token_estimate_source: None,
             })
         );
     }
 
     #[test]
-    fn build_candidates_uses_positive_thread_score_over_creation_only_exact_score() {
+    fn build_candidates_ignores_positive_thread_score_for_active_cache_score() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000204").unwrap();
         let thread_id = "thread-cache-positive";
         let cache = TestPromptCacheObservationCache::new(32, TEST_MODEL).with_thread_score(
@@ -4004,6 +4095,11 @@ mod tests {
                 matched_breakpoint_index: None,
                 confidence: 0.5,
                 ambiguity_reason: Some("thread_usage_lineage".to_owned()),
+                matched_v3_cache_key: Some("lineage-key".to_owned()),
+                breakpoint_content_block_index: Some(0),
+                matched_content_block_index: Some(0),
+                lookback_distance: Some(0),
+                token_estimate_source: Some("thread_usage_lineage".to_owned()),
             },
         );
         let view = cache_score_view(upstream_id, Arc::new(cache));
@@ -4020,12 +4116,10 @@ mod tests {
         );
 
         let score = candidates[0].cache_score.as_ref().expect("cache score");
-        assert_eq!(score.predicted_cache_read_tokens, 120_000);
-        assert_eq!(score.predicted_cache_creation_tokens_5m, 0);
-        assert_eq!(
-            score.ambiguity_reason.as_deref(),
-            Some("thread_usage_lineage")
-        );
+        assert_eq!(score.predicted_cache_read_tokens, 0);
+        assert_eq!(score.predicted_cache_creation_tokens_5m, 100);
+        assert_eq!(score.ambiguity_reason, None);
+        assert_eq!(score.matched_v3_cache_key, None);
     }
 
     #[test]
@@ -4386,7 +4480,7 @@ mod tests {
         );
         assert_eq!(metadata.cache_breakpoints[1].path, "system[0]");
         assert_eq!(metadata.cache_breakpoints[1].ttl.as_deref(), Some("1h"));
-        assert_eq!(metadata.cache_breakpoints[2].block_index, 2);
+        assert_eq!(metadata.cache_breakpoints[2].block_index, 3);
         assert_eq!(
             metadata.cache_breakpoints[2].source,
             RequestCacheBreakpointSource::Message
@@ -4432,7 +4526,7 @@ mod tests {
     }
 
     #[test]
-    fn request_cache_metadata_uses_v2_hash() {
+    fn request_cache_metadata_uses_v3_content_block_hash() {
         let headers = HeaderMap::new();
         let body = Bytes::from_static(
             br#"{
@@ -4451,7 +4545,14 @@ mod tests {
             .cache_breakpoints
             .first()
             .expect("system cache breakpoint");
-        let expected_v2 = cache_prefix_hash_v2(
+        let expected_v3 =
+            analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"))
+                .breakpoints
+                .first()
+                .expect("system cache breakpoint")
+                .prefix_key
+                .clone();
+        let legacy_v2 = cache_prefix_hash_v2(
             &request,
             RequestCacheBreakpointSource::System,
             "system[0]",
@@ -4464,7 +4565,8 @@ mod tests {
             None,
         );
 
-        assert_eq!(breakpoint.prefix_hash, expected_v2);
+        assert_eq!(breakpoint.prefix_hash, expected_v3);
+        assert_ne!(breakpoint.prefix_hash, legacy_v2);
         assert_ne!(breakpoint.prefix_hash, legacy_v1);
     }
 
@@ -4842,6 +4944,13 @@ mod tests {
             prefix_token_count,
             requested_ttl,
             origin: BreakpointOrigin::Explicit,
+            lookback_prefixes: vec![CacheLookbackPrefix {
+                prefix_hash: prefix_hash.to_owned(),
+                content_block_index: index,
+                prefix_token_count,
+                lookback_distance: 0,
+            }],
+            token_estimate_source: Some("test".to_owned()),
         }
     }
 

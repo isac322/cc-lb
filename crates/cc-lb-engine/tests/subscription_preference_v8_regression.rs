@@ -147,10 +147,15 @@ fn same_thread_uses_formula_winner_without_cache_loss_gate() {
             matched_breakpoint_index: Some(0),
             confidence: 1.0,
             ambiguity_reason: None,
+            matched_v3_cache_key: Some("example-v3-cache-key".to_owned()),
+            breakpoint_content_block_index: Some(0),
+            matched_content_block_index: Some(0),
+            lookback_distance: Some(0),
+            token_estimate_source: Some("test".to_owned()),
         },
     );
-    let bh = with_cache_score(
-        recorded_bh_clean_snapshot(),
+    let example_secondary = with_cache_score(
+        example_secondary_clean_snapshot(),
         CacheScore {
             predicted_cache_read_tokens: 0,
             predicted_cache_creation_tokens_5m: 516_000,
@@ -160,6 +165,11 @@ fn same_thread_uses_formula_winner_without_cache_loss_gate() {
             matched_breakpoint_index: None,
             confidence: 1.0,
             ambiguity_reason: None,
+            matched_v3_cache_key: None,
+            breakpoint_content_block_index: None,
+            matched_content_block_index: None,
+            lookback_distance: None,
+            token_estimate_source: None,
         },
     );
 
@@ -373,6 +383,7 @@ fn candidate_urgency(
 }
 
 fn with_live_cache(candidate: UpstreamCandidate, read_tokens: u32) -> UpstreamCandidate {
+    let matched_v3_cache_key = format!("v3-cache-{}", candidate.upstream_id);
     with_cache_score(
         candidate,
         CacheScore {
@@ -384,6 +395,11 @@ fn with_live_cache(candidate: UpstreamCandidate, read_tokens: u32) -> UpstreamCa
             matched_breakpoint_index: Some(0),
             confidence: 1.0,
             ambiguity_reason: None,
+            matched_v3_cache_key: Some(matched_v3_cache_key),
+            breakpoint_content_block_index: Some(0),
+            matched_content_block_index: Some(0),
+            lookback_distance: Some(0),
+            token_estimate_source: Some("test".to_owned()),
         },
     )
 }
@@ -403,6 +419,11 @@ fn warm_cache_score(read_tokens: u32) -> CacheScore {
         matched_breakpoint_index: Some(0),
         confidence: 1.0,
         ambiguity_reason: None,
+        matched_v3_cache_key: Some(format!("warm-v3-cache-{read_tokens}")),
+        breakpoint_content_block_index: Some(0),
+        matched_content_block_index: Some(0),
+        lookback_distance: Some(0),
+        token_estimate_source: Some("test".to_owned()),
     }
 }
 
@@ -416,6 +437,11 @@ fn cold_reprime_score(tokens: u32) -> CacheScore {
         matched_breakpoint_index: None,
         confidence: 1.0,
         ambiguity_reason: None,
+        matched_v3_cache_key: None,
+        breakpoint_content_block_index: None,
+        matched_content_block_index: None,
+        lookback_distance: None,
+        token_estimate_source: None,
     }
 }
 

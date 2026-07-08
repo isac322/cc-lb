@@ -20,12 +20,9 @@ pub fn canonical_model_id(requested: &str) -> &str {
     match requested {
         // Sonnet aliases
         "claude-sonnet-4-5" => "claude-sonnet-4-5-20250929",
-        "claude-sonnet-4-6" => "claude-sonnet-4-6-20250929", // If uncertain, use same
 
         // Opus aliases
         "claude-opus-4-5" => "claude-opus-4-5-20251101",
-        "claude-opus-4-6" => "claude-opus-4-6-20251101", // If uncertain, use same
-        "claude-opus-4-7" => "claude-opus-4-7-20250819", // If uncertain, use same
         "claude-opus-4-8" => "claude-opus-4-8-20250514",
 
         // Haiku aliases
@@ -74,7 +71,6 @@ pub fn cache_threshold_tokens(canonical: &str) -> usize {
     match canonical {
         // Sonnet 4.5 / 4.6 family: 1024
         "claude-sonnet-4-5-20250929" => 1024,
-        "claude-sonnet-4-6-20250929" => 1024,
         "claude-sonnet-4-5" => 1024,
         "claude-sonnet-4-6" => 1024,
 
@@ -84,8 +80,6 @@ pub fn cache_threshold_tokens(canonical: &str) -> usize {
 
         // Opus 4.5 / 4.6 / 4.7: 4096
         "claude-opus-4-5-20251101" => 4096,
-        "claude-opus-4-6-20251101" => 4096,
-        "claude-opus-4-7-20250819" => 4096,
         "claude-opus-4-5" => 4096,
         "claude-opus-4-6" => 4096,
         "claude-opus-4-7" => 4096,

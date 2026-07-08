@@ -42,7 +42,7 @@ where
         let records = storage.list_active_for_upstream(upstream_id, now).await?;
         ensure!(records.len() == 1, "expected exactly one active record");
         ensure!(
-            records[0].prefix_hash == active.prefix_hash,
+            records[0].v3_prefix_key == active.v3_prefix_key,
             "active prefix hash should be returned"
         );
         Ok(())
@@ -156,7 +156,7 @@ where
         let records = storage.list_active_for_upstream(upstream_id, now).await?;
         ensure!(records.len() == 1, "active list should contain one row");
         ensure!(
-            records[0].prefix_hash == active.prefix_hash,
+            records[0].v3_prefix_key == active.v3_prefix_key,
             "remaining active row should be R1"
         );
         Ok(())
@@ -210,7 +210,7 @@ where
             "reopened store should list one active row"
         );
         ensure!(
-            records[0].prefix_hash == active.prefix_hash,
+            records[0].v3_prefix_key == active.v3_prefix_key,
             "reopened store should filter the expired row"
         );
         Ok(())
@@ -277,7 +277,7 @@ where
                 TtlClass::Ephemeral5m => 0i16,
                 TtlClass::Ephemeral1h => 1i16,
             };
-            let curr = (record.prefix_hash.clone(), ttl_value);
+            let curr = (record.v3_prefix_key.clone(), ttl_value);
             if let Some(p) = &prev {
                 ensure!(
                     &curr >= p,
@@ -382,11 +382,16 @@ fn observation_with_model(
     PromptCacheObservationRecord {
         upstream_id,
         canonical_model_id: canonical_model_id.to_owned(),
-        prefix_hash: prefix_hash.to_owned(),
+        v3_prefix_key: prefix_hash.to_owned(),
         ttl_class,
         expires_at_unix_secs,
         last_observed_at_unix_secs,
-        hash_schema_version: 1,
+        hash_schema_version: 3,
+        prefix_content_block_index: 7,
+        estimated_prefix_tokens: 12_345,
+        token_estimate_source: "local_tiktoken_v1".to_owned(),
+        last_provider_cache_read_tokens: Some(12_000),
+        last_provider_cache_creation_tokens: Some(345),
     }
 }
 

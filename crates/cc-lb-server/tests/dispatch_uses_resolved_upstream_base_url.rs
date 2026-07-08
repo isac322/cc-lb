@@ -141,6 +141,8 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         &runtime,
         dir.path(),
         Arc::new(SubscriptionQuotaCache::new()),
+        None,
+        None,
         1800,
         &config,
         Arc::new(cc_lb_engine::SystemClock),

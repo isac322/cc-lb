@@ -255,6 +255,8 @@ mod tests {
             ttl: Some("5m".into()),
             prefix_hash: "prefix-a".into(),
             prefix_token_count: 1_200,
+            lookback_prefixes: Vec::new(),
+            token_estimate_source: None,
         }
     }
 
@@ -284,6 +286,19 @@ mod tests {
                 route_ms: None,
                 routing_trace: None,
                 predicted_cache_read_tokens: Some(100),
+                matched_v3_cache_key: None,
+                breakpoint_content_block_index: None,
+                matched_content_block_index: None,
+                lookback_distance: None,
+                predicted_cache_creation_tokens_5m: None,
+                predicted_cache_creation_tokens_1h: None,
+                token_estimate_source: None,
+                cache_value_micros: None,
+                formula_winner_upstream_id: None,
+                kept_upstream_id: None,
+                wrh_key_source: None,
+                lineage_would_have_predicted_read_tokens: None,
+                lineage_would_have_picked_upstream_id: None,
             }),
             routing_trace: None,
         }

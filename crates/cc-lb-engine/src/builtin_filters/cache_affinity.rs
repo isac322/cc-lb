@@ -281,6 +281,11 @@ mod tests {
                 matched_breakpoint_index: None,
                 confidence: 1.0,
                 ambiguity_reason: None,
+                matched_v3_cache_key: None,
+                breakpoint_content_block_index: None,
+                matched_content_block_index: None,
+                lookback_distance: None,
+                token_estimate_source: None,
             }),
             ..candidate_without_score(name)
         }

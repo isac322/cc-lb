@@ -621,7 +621,7 @@ fn tier_json_len(tier: SubscriptionTier) -> usize {
 
 fn wrh_key_source_json_len(source: WrhKeySource) -> usize {
     match source {
-        WrhKeySource::ThreadId => "\"thread_id\"".len(),
+        WrhKeySource::CacheHash => "\"cache_hash\"".len(),
         WrhKeySource::RequestId => "\"request_id\"".len(),
     }
 }
