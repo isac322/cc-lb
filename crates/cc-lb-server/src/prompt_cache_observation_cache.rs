@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use cc_lb_engine::clock::{ClockHandle, unix_secs};
-use cc_lb_engine::lifecycle::PromptCacheObservationCacheLike;
+use cc_lb_engine::lifecycle::{PromptCacheObservationCacheLike, PromptCacheThreadUsage};
 use cc_lb_plugin_api::types::{CacheScore, TtlClass, WarmCacheEntry};
 use cc_lb_storage_api::{PromptCacheObservationStore, StorageResult};
 use parking_lot::RwLock;
@@ -14,6 +14,8 @@ const DEFAULT_REFRESH_DEBOUNCE_SECS: u64 = 60;
 const THREAD_USAGE_CAP_PER_UPSTREAM: usize = 2048;
 const THREAD_USAGE_TTL_SECS: u64 = 5 * 60;
 const CREATION_READ_EQUIVALENT_DIVISOR: u64 = 4;
+type ThreadUsageKey = (String, String);
+type ThreadUsageByUpstream = HashMap<Uuid, HashMap<ThreadUsageKey, ThreadUsageEntry>>;
 
 pub struct PromptCacheObservationCache {
     #[allow(clippy::type_complexity)]
@@ -32,7 +34,7 @@ pub struct PromptCacheObservationCache {
     >,
     #[allow(dead_code)]
     clock: ClockHandle,
-    thread_usage: RwLock<HashMap<Uuid, HashMap<(String, String), ThreadUsageEntry>>>,
+    thread_usage: RwLock<ThreadUsageByUpstream>,
     grace_margin_secs: u64,
     warm_set_cap: usize,
     refresh_debounce_secs: u64,
@@ -245,18 +247,17 @@ impl PromptCacheObservationCache {
         upstream_id: Uuid,
         canonical_model: &str,
         thread_id: &str,
-        cache_read_input_tokens: u64,
-        cache_creation_input_tokens_5m: u64,
-        cache_creation_input_tokens_1h: u64,
+        usage: PromptCacheThreadUsage,
         now_unix_secs: u64,
     ) {
         if canonical_model.is_empty() || thread_id.is_empty() {
             return;
         }
-        let creation_equivalent = cache_creation_input_tokens_5m
-            .saturating_add(cache_creation_input_tokens_1h)
+        let creation_equivalent = usage
+            .cache_creation_input_tokens_5m
+            .saturating_add(usage.cache_creation_input_tokens_1h)
             / CREATION_READ_EQUIVALENT_DIVISOR;
-        let predicted_cache_read_tokens = cache_read_input_tokens.max(creation_equivalent);
+        let predicted_cache_read_tokens = usage.cache_read_input_tokens.max(creation_equivalent);
         if predicted_cache_read_tokens == 0 {
             return;
         }
@@ -365,9 +366,7 @@ impl PromptCacheObservationCacheLike for PromptCacheObservationCache {
         upstream_id: Uuid,
         canonical_model: &str,
         thread_id: &str,
-        cache_read_input_tokens: u64,
-        cache_creation_input_tokens_5m: u64,
-        cache_creation_input_tokens_1h: u64,
+        usage: PromptCacheThreadUsage,
         now_unix_secs: u64,
     ) {
         Self::record_thread_usage(
@@ -375,9 +374,7 @@ impl PromptCacheObservationCacheLike for PromptCacheObservationCache {
             upstream_id,
             canonical_model,
             thread_id,
-            cache_read_input_tokens,
-            cache_creation_input_tokens_5m,
-            cache_creation_input_tokens_1h,
+            usage,
             now_unix_secs,
         );
     }

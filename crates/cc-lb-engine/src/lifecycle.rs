@@ -43,6 +43,7 @@ use crate::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuth
 use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as LimitReservation};
 use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
+use crate::cache_score_selection::select_cache_score_by_value;
 use crate::clock::{Clock, ClockHandle, unix_millis};
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::ErrorNormalizer;
@@ -67,7 +68,7 @@ use cc_lb_control::dynamic_view::{
 };
 pub use cc_lb_control::{
     PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
-    PromptCacheObservationSinkLike, SubscriptionQuotaCacheLike,
+    PromptCacheObservationSinkLike, PromptCacheThreadUsage, SubscriptionQuotaCacheLike,
 };
 use cc_lb_observability::{redact_internal_errors, truncate_reason};
 
@@ -140,6 +141,7 @@ pub fn build_candidates(
         let rate_limit_cache = view.upstream_rate_limit_cache.read();
         let now_unix_millis = unix_now_ms(clock);
         let prompt_cache = view.prompt_cache_observation_cache_opt();
+        let cache_pricing = cache_pricing_summary_for_model(canonical_model);
         let request_breakpoint_hashes_with_ttl = request_breakpoints
             .iter()
             .map(|breakpoint| (breakpoint.prefix_hash.clone(), breakpoint.requested_ttl))
@@ -171,16 +173,16 @@ pub fn build_candidates(
                         &request_breakpoint_hashes_with_ttl,
                         now_unix_secs,
                     );
-                    build_cache_score(request_breakpoints, &warm_entries).or_else(|| {
-                        thread_id.and_then(|thread_id| {
-                            cache.thread_usage_score(
-                                upstream.id,
-                                canonical_model,
-                                thread_id,
-                                now_unix_secs,
-                            )
-                        })
-                    })
+                    let exact_score = build_cache_score(request_breakpoints, &warm_entries);
+                    let thread_score = thread_id.and_then(|thread_id| {
+                        cache.thread_usage_score(
+                            upstream.id,
+                            canonical_model,
+                            thread_id,
+                            now_unix_secs,
+                        )
+                    });
+                    select_cache_score_by_value(exact_score, thread_score, &cache_pricing)
                 });
                 let plan_info = view.plan_info_by_upstream.get(&upstream.id);
                 UpstreamCandidate {
@@ -3765,9 +3767,11 @@ fn record_thread_usage_from_response(
         context.upstream_id,
         &event_ctx.canonical_model_id,
         thread_id,
-        usage.cache_read_input_tokens,
-        usage.cache_creation_input_tokens_5m,
-        usage.cache_creation_input_tokens_1h,
+        PromptCacheThreadUsage {
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_input_tokens_5m: usage.cache_creation_input_tokens_5m,
+            cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
+        },
         now_unix_secs,
     );
 }
@@ -3980,6 +3984,47 @@ mod tests {
                 confidence: 0.0,
                 ambiguity_reason: None,
             })
+        );
+    }
+
+    #[test]
+    fn build_candidates_uses_positive_thread_score_over_creation_only_exact_score() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000204").unwrap();
+        let thread_id = "thread-cache-positive";
+        let cache = TestPromptCacheObservationCache::new(32, TEST_MODEL).with_thread_score(
+            upstream_id,
+            TEST_MODEL,
+            thread_id,
+            CacheScore {
+                predicted_cache_read_tokens: 120_000,
+                predicted_cache_creation_tokens_5m: 0,
+                predicted_cache_creation_tokens_1h: 0,
+                predicted_uncached_input_tokens: 0,
+                predicted_expires_at_unix_secs: Some(4_100_000_300),
+                matched_breakpoint_index: None,
+                confidence: 0.5,
+                ambiguity_reason: Some("thread_usage_lineage".to_owned()),
+            },
+        );
+        let view = cache_score_view(upstream_id, Arc::new(cache));
+        let breakpoints = vec![cache_breakpoint(0, "cold", 100, TtlClass::Ephemeral5m)];
+
+        let candidates = build_candidates(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            TEST_MODEL,
+            &breakpoints,
+            Some(thread_id),
+            &crate::clock::SystemClock,
+        );
+
+        let score = candidates[0].cache_score.as_ref().expect("cache score");
+        assert_eq!(score.predicted_cache_read_tokens, 120_000);
+        assert_eq!(score.predicted_cache_creation_tokens_5m, 0);
+        assert_eq!(
+            score.ambiguity_reason.as_deref(),
+            Some("thread_usage_lineage")
         );
     }
 
@@ -4650,6 +4695,7 @@ mod tests {
         cap: usize,
         expected_model: &'static str,
         entries: HashMap<Uuid, Vec<WarmCacheEntry>>,
+        thread_scores: HashMap<(Uuid, String, String), CacheScore>,
     }
 
     impl TestPromptCacheObservationCache {
@@ -4658,11 +4704,30 @@ mod tests {
                 cap,
                 expected_model,
                 entries: HashMap::new(),
+                thread_scores: HashMap::new(),
             }
         }
 
         fn with_entries(mut self, upstream_id: Uuid, entries: Vec<WarmCacheEntry>) -> Self {
             self.entries.insert(upstream_id, entries);
+            self
+        }
+
+        fn with_thread_score(
+            mut self,
+            upstream_id: Uuid,
+            canonical_model: &str,
+            thread_id: &str,
+            score: CacheScore,
+        ) -> Self {
+            self.thread_scores.insert(
+                (
+                    upstream_id,
+                    canonical_model.to_owned(),
+                    thread_id.to_owned(),
+                ),
+                score,
+            );
             self
         }
     }
@@ -4718,6 +4783,22 @@ mod tests {
             _now_unix_secs: u64,
         ) -> bool {
             false
+        }
+
+        fn thread_usage_score(
+            &self,
+            upstream_id: Uuid,
+            canonical_model: &str,
+            thread_id: &str,
+            _now_unix_secs: u64,
+        ) -> Option<CacheScore> {
+            self.thread_scores
+                .get(&(
+                    upstream_id,
+                    canonical_model.to_owned(),
+                    thread_id.to_owned(),
+                ))
+                .cloned()
         }
 
         fn grace_margin_secs(&self) -> u64 {

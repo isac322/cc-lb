@@ -16,6 +16,13 @@ use crate::api_keys::secret::RedactedSecret;
 use crate::audit_writer::AuditWriterSink;
 use crate::dynamic_view::{DynamicView, DynamicViewHolder};
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PromptCacheThreadUsage {
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens_5m: u64,
+    pub cache_creation_input_tokens_1h: u64,
+}
+
 pub trait SubscriptionQuotaCacheLike: Send + Sync {
     fn upsert_observation(&self, record: &SubscriptionQuotaObservationRecord);
 
@@ -70,9 +77,7 @@ pub trait PromptCacheObservationCacheLike: Send + Sync {
         _upstream_id: Uuid,
         _canonical_model: &str,
         _thread_id: &str,
-        _cache_read_input_tokens: u64,
-        _cache_creation_input_tokens_5m: u64,
-        _cache_creation_input_tokens_1h: u64,
+        _usage: PromptCacheThreadUsage,
         _now_unix_secs: u64,
     ) {
     }

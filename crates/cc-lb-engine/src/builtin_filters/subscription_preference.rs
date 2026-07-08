@@ -212,7 +212,7 @@ pub struct SubscriptionPreferenceFilter;
 
 impl SubscriptionPreferenceFilter {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 }
 
