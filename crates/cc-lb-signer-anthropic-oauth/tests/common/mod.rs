@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
-use cc_lb_core::clock::{Clock, ClockHandle, SystemClock, TestClock, unix_secs};
+use cc_lb_clock::{Clock, ClockHandle, SystemClock, TestClock, unix_secs};
 use cc_lb_plugin_api::{
     Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder, Upstream,
     UpstreamDialect, shape_request,
@@ -228,6 +228,7 @@ pub fn now_epoch_secs(clock: &dyn Clock) -> u64 {
 pub fn shaped_request() -> ShapedRequest {
     let ctx = RequestContext {
         request_id: "req-1".to_owned(),
+        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
@@ -235,6 +236,7 @@ pub fn shaped_request() -> ShapedRequest {
         body_bytes: Bytes::from_static(b"{}"),
         cache_breakpoints: Vec::new(),
         canonical_model_id: String::new(),
+        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "alice".to_owned(),
@@ -373,7 +375,7 @@ impl AuditStore for MemoryStorage {
 
 #[async_trait]
 impl RequestEventStore for MemoryStorage {
-    async fn append_request_event(&self, _event: &RequestEvent) -> StorageResult<()> {
+    async fn append_request_event(&self, _event: &RequestEvent) -> StorageResult<u64> {
         unsupported()
     }
 

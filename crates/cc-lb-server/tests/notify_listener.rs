@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens};
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_core::DynamicViewHolder;
+use cc_lb_engine::DynamicViewHolder;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::notify_listener::{NotifyListener, NotifyListenerParams};
@@ -217,7 +217,7 @@ async fn fixture() -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("notify.sqlite");
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
         .await
         .expect("storage opens");
     cc_lb_storage_api::MetaStore::initialize(&storage, BackendKind::Sqlite)
@@ -232,6 +232,7 @@ async fn fixture() -> Fixture {
         upstream_subscription_quotas: storage.clone(),
         upstream_subscription_metadata: storage.clone(),
         organization_metadata: storage.clone(),
+        plan_tiers: storage.clone(),
         prompt_cache_observations: storage.clone(),
         anthropic_compatibility_kv: storage.clone(),
         audit: None,
@@ -248,9 +249,11 @@ async fn fixture() -> Fixture {
         &runtime,
         dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        None,
+        None,
         1800,
         &cc_lb_config::Config::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect("initial dynamic view builds");
@@ -283,9 +286,11 @@ async fn spawn_listener(
         data_dir: fixture._dir.path().to_path_buf(),
         lazy_refresher: None,
         subscription_quota_cache: Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        prompt_cache_observation_cache: None,
+        prompt_cache_observation_sink: None,
         subscription_quota_routing_max_staleness_secs: 1800,
         config: Arc::new(cc_lb_config::Config::default()),
-        clock: Arc::new(cc_lb_core::SystemClock),
+        clock: Arc::new(cc_lb_engine::SystemClock),
     }));
     let task = tokio::spawn(async move {
         listener.run().await;
@@ -372,6 +377,7 @@ async fn cancel_during_rebuild_graceful() {
         upstream_subscription_quotas: fixture.storage.clone(),
         upstream_subscription_metadata: fixture.storage.clone(),
         organization_metadata: fixture.storage.clone(),
+        plan_tiers: fixture.storage.clone(),
         prompt_cache_observations: fixture.storage.clone(),
         anthropic_compatibility_kv: fixture.storage.clone(),
         audit: None,
@@ -404,6 +410,7 @@ async fn rebuild_failure_does_not_swap_view() {
         upstream_subscription_quotas: fixture.storage.clone(),
         upstream_subscription_metadata: fixture.storage.clone(),
         organization_metadata: fixture.storage.clone(),
+        plan_tiers: fixture.storage.clone(),
         prompt_cache_observations: fixture.storage.clone(),
         anthropic_compatibility_kv: fixture.storage.clone(),
         audit: None,

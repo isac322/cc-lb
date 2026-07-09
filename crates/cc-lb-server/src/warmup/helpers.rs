@@ -1,7 +1,7 @@
 use std::hash::Hasher;
 use std::time::Duration;
 
-use cc_lb_core::UnifiedQuotaObservation;
+use cc_lb_engine::UnifiedQuotaObservation;
 use cc_lb_storage_api::{
     SubscriptionQuotaLatestRecord, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
 };

@@ -105,7 +105,7 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
         &key_path,
     );
     let config = Config::load(&config_path).expect("load config");
-    let clock: cc_lb_core::ClockHandle = std::sync::Arc::new(cc_lb_core::SystemClock);
+    let clock: cc_lb_engine::ClockHandle = std::sync::Arc::new(cc_lb_engine::SystemClock);
     let app = build_app_with_path(config, Some(&config_path), clock)
         .await
         .expect("build app");
@@ -307,11 +307,13 @@ impl StreamingTlsResponse {
             assert!(Instant::now() < deadline, "stream did not contain {needle}");
 
             let mut buffer = [0_u8; 4096];
-            let read =
+            let Ok(read_result) =
                 tokio::time::timeout(Duration::from_millis(500), self.stream.read(&mut buffer))
                     .await
-                    .expect("stream read timed out")
-                    .expect("stream read");
+            else {
+                continue;
+            };
+            let read = read_result.expect("stream read");
             assert!(read > 0, "stream ended before {needle}");
             self.bytes.extend_from_slice(&buffer[..read]);
         }

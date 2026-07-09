@@ -3,16 +3,17 @@
 use std::{future::Future, sync::Arc};
 
 use async_trait::async_trait;
-use cc_lb_core::{ClockHandle, SystemClock, TestClock};
+use cc_lb_engine::{ClockHandle, SystemClock, TestClock};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
-        anthropic_compatibility_kv_store, atomicity, organization_metadata_store,
-        plugin_registry_store, price_catalog, principal_store, prompt_cache_observation_store,
-        storage_roundtrips, storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
-        upstream_rate_limit_store, upstream_subscription_metadata_store,
-        upstream_subscription_quota_store, warmup_attempts_store,
+        anthropic_compatibility_kv_store, atomicity, organization_metadata_store, plan_tier_store,
+        plan_tier_store_backfill, plugin_registry_store, price_catalog, principal_store,
+        prompt_cache_observation_store, storage_roundtrips, storage_roundtrips_cache_split,
+        storage_roundtrips_latency_stages, upstream_rate_limit_store,
+        upstream_subscription_metadata_store, upstream_subscription_quota_store,
+        warmup_attempts_store,
     },
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
@@ -213,14 +214,6 @@ upstream_subscription_quota_sqlite_test!(
     series_max_points_per_series_downsamples
 );
 upstream_subscription_quota_sqlite_test!(
-    upstream_subscription_quota_delete_before_removes_old_observations_sqlite,
-    delete_before_removes_old_observations
-);
-upstream_subscription_quota_sqlite_test!(
-    upstream_subscription_quota_delete_before_does_not_touch_latest_table_sqlite,
-    delete_before_does_not_touch_latest_table
-);
-upstream_subscription_quota_sqlite_test!(
     upstream_subscription_quota_process_start_marker_persists_with_sample_kind_sqlite,
     process_start_marker_persists_with_sample_kind
 );
@@ -231,6 +224,22 @@ upstream_subscription_quota_sqlite_test!(
 upstream_subscription_quota_sqlite_test!(
     upstream_subscription_quota_series_filters_observed_at_window_sqlite,
     series_filters_observed_at_window
+);
+upstream_subscription_quota_sqlite_test!(
+    upstream_subscription_quota_checkpoint_writer_latest_freshness_sqlite,
+    checkpoint_writer_latest_freshness
+);
+upstream_subscription_quota_sqlite_test!(
+    upstream_subscription_quota_checkpoint_writer_decrease_sqlite,
+    checkpoint_writer_decrease
+);
+upstream_subscription_quota_sqlite_test!(
+    upstream_subscription_quota_checkpoint_series_anchor_merge_sqlite,
+    checkpoint_series_anchor_merge
+);
+upstream_subscription_quota_sqlite_test!(
+    upstream_subscription_quota_checkpoint_history_sqlite,
+    checkpoint_history
 );
 
 #[test]
@@ -271,6 +280,10 @@ prompt_cache_observation_sqlite_test!(
     prompt_cache_observation_observation_list_is_sorted_sqlite,
     observation_list_is_sorted
 );
+prompt_cache_observation_sqlite_test!(
+    prompt_cache_observation_cross_model_same_prefix_keeps_both_rows_sqlite,
+    cross_model_same_prefix_keeps_both_rows
+);
 
 #[test]
 fn upstream_subscription_metadata_store_sqlite() {
@@ -285,6 +298,19 @@ fn organization_metadata_store_sqlite() {
     run_sqlite_scenario(
         "organization_metadata_store",
         organization_metadata_store::run_all,
+    );
+}
+
+#[test]
+fn plan_tier_store_sqlite() {
+    run_sqlite_scenario("plan_tier_store", plan_tier_store::run_all);
+}
+
+#[test]
+fn plan_tier_store_backfill_sqlite() {
+    run_sqlite_scenario(
+        "plan_tier_store_backfill",
+        plan_tier_store_backfill::upstream_tier_backfill_intervals,
     );
 }
 

@@ -4,7 +4,6 @@ use anyhow::Result;
 use cc_lb_storage_api::principal::{Limit, LimitKind};
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, PrincipalUpdate,
-    StorageError,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use serde_json::json;
@@ -35,13 +34,13 @@ async fn run_test(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(
         fixture.pool.clone(),
-        std::sync::Arc::new(cc_lb_core::SystemClock),
+        std::sync::Arc::new(cc_lb_clock::SystemClock),
     );
     storage.initialize(BackendKind::Postgres).await?;
 
     default_strategy_is_first_pick(&storage).await?;
     update_strategy_to_random_roundtrips(&storage).await?;
-    unsupported_strategy_update_is_rejected(&storage).await?;
+    unsupported_strategy_update_is_rejected(&fixture.pool, &storage).await?;
 
     fixture.drop_schema().await
 }
@@ -97,31 +96,28 @@ async fn update_strategy_to_random_roundtrips(storage: &PostgresStorage) -> Resu
     Ok(())
 }
 
-async fn unsupported_strategy_update_is_rejected(storage: &PostgresStorage) -> Result<()> {
+async fn unsupported_strategy_update_is_rejected(
+    pool: &PgPool,
+    storage: &PostgresStorage,
+) -> Result<()> {
     let record = PrincipalStore::create(
         storage,
         principal_create("unsupported-strategy"),
         1_900_000_020,
     )
     .await?;
-    let round_robin_strategy = serde_json::from_value(json!("round-robin"))?;
 
-    let error = PrincipalStore::update(
-        storage,
-        record.id,
-        record.revision,
-        PrincipalUpdate {
-            router_terminal_strategy: Some(round_robin_strategy),
-            ..PrincipalUpdate::default()
-        },
-        1_900_000_021,
+    let error = sqlx::query(
+        "UPDATE principals_v1 SET router_terminal_strategy = 'round-robin' WHERE id = $1",
     )
+    .bind(record.id)
+    .execute(pool)
     .await
     .expect_err("unsupported terminal strategy must be rejected by postgres");
-    assert!(
-        matches!(error, StorageError::InvalidInput { .. }),
-        "unexpected error: {error:?}"
-    );
+    let database_error = error
+        .as_database_error()
+        .expect("postgres check violation is a database error");
+    assert_eq!(database_error.code().as_deref(), Some("23514"));
 
     let fetched = PrincipalStore::get_by_id(storage, record.id)
         .await?

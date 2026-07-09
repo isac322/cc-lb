@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 arc-swap.workspace = true
 bytes.workspace = true
+cc-lb-contract = { workspace = true }
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 futures-lite = "2.6.1"
@@ -30,4 +31,5 @@ tracing.workspace = true
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 tempfile.workspace = true
+uuid.workspace = true
 wiremock = "0.6"

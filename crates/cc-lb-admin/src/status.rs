@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use axum::{Json, extract::State};
 use cc_lb_config::Config;
-use cc_lb_core::{BreakerRegistry, BulkheadRegistry, DrainController};
+use cc_lb_engine::{BreakerRegistry, BulkheadRegistry, DrainController};
 use cc_lb_storage_api::{RequestEventUpstream, Storage, StorageError};
 use serde::Serialize;
 

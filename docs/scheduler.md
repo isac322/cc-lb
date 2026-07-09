@@ -61,7 +61,6 @@ The table below lists every job type registered in the scheduler. This list is d
 | **MetadataRefreshJob** | Entity | `entity:metadata_refresh:<upstream_id>:<generation>` | Entity | Enqueued after OAuth refresh completes | `metadata_refresh_claims` | 10s |
 | **UsageRollupJob** | Singleton | `singleton:usage_rollup` | Maintenance | Every 30s (with jitter) | `usage_rollups` | 5s |
 | **UsagePruneJob** | Singleton | `singleton:usage_prune` | Maintenance | Every 24h (86,400s) | `request_events`, `audit_log` | 60s |
-| **SubscriptionQuotaGcJob** | Singleton | `singleton:quota_gc` | Maintenance | Every 1h (3600s) | `subscription_quotas` | 10s |
 | **PromptCacheObservationPurgeJob** | Singleton | `singleton:prompt_cache_purge` | Maintenance | Every 10m (600s) | `prompt_cache_observations` | 10s |
 | **PriceCatalogRefreshJob** | Singleton | `singleton:price_catalog_refresh` | Maintenance | Every 1h (3600s) | `price_catalog` | 10s |
 | **ApalisHousekeepingJob** | Singleton | `singleton:apalis_housekeeping` | Maintenance | Every 1h (3600s) | `apalis.jobs` | 10s |
@@ -160,8 +159,6 @@ The scheduler emits a comprehensive set of Prometheus metrics to monitor health 
 - `cclb_scheduler_prune_rows_removed_total` (Counter): Tracks pruned rows.
   - Labels: `table` (request_events, audit_log)
   - Cardinality: 2
-- `cclb_scheduler_quota_gc_rows_removed_total` (Counter): Tracks removed subscription quota rows.
-  - Cardinality: 1
 - `cclb_scheduler_price_catalog_status_total` (Counter): Tracks price catalog refresh outcomes.
   - Labels: `status` (applied, noop)
   - Cardinality: 2

@@ -8,13 +8,12 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use cc_lb_admin::{AdminState, CurrentConfig, DynamicViewRebinder, router};
 use cc_lb_config::Config;
-use cc_lb_core::api_keys::principal_view::PrincipalView;
-use cc_lb_core::{
-    ApiKeyAwareSignerFactory, ApplyStatus, DispatchError, DynamicView, DynamicViewBuilder,
-    UpstreamDispatch, UpstreamStatusEntry, UpstreamStatusSnapshot,
+use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_control::{
+    ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
 use cc_lb_plugin_api::{
-    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, SignedRequest,
+    ApiKeyAwareSignerFactory, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
     SignerFactory, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::UpstreamStore;
@@ -74,9 +73,7 @@ impl DynamicViewRebinder for SnapshotRebinder {
         Ok(DynamicViewBuilder::new(current_generation)
             .signer_factory(Arc::new(NoopSignerFactory))
             .global_router(Arc::new(NoopRouter))
-            .dispatcher(Arc::new(NoopDispatch))
             .global_observability_hooks(Vec::new())
-            .error_normalizer(Arc::new(cc_lb_core::ErrorNormalizer::new()))
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot {
                 entries,
@@ -126,18 +123,6 @@ impl RouterPlugin for NoopRouter {
     }
 }
 
-struct NoopDispatch;
-
-#[async_trait]
-impl UpstreamDispatch for NoopDispatch {
-    async fn dispatch(
-        &self,
-        _request: SignedRequest,
-    ) -> Result<http::Response<Body>, DispatchError> {
-        Ok(http::Response::new(Body::empty()))
-    }
-}
-
 #[tokio::test]
 async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
     let dir = tempfile::tempdir().expect("temp admin dir");
@@ -165,7 +150,8 @@ async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus: None,
-        clock: Arc::new(cc_lb_core::SystemClock),
+        storage_tail: cc_lb_admin::events::storage_tail_channel(),
+        clock: Arc::new(cc_lb_clock::SystemClock),
     };
     let app = router(state);
 

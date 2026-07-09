@@ -4,7 +4,6 @@ use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshUpstreams;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeStore;
-use cc_lb_scheduler::jobs::quota_gc::SubscriptionQuotaGcStore;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneRunner;
 use cc_lb_storage_api::{
     PromptCacheObservationStore, Storage, StorageError, StorageResult, UpstreamRecord,
@@ -48,21 +47,6 @@ impl OAuthRefreshUpstreams for StorageHandle {
     }
 }
 
-impl SubscriptionQuotaGcStore for StorageHandle {
-    async fn delete_subscription_quota_before(
-        &self,
-        cutoff_unix_millis: u64,
-        batch_size: u32,
-    ) -> StorageResult<u64> {
-        cc_lb_storage_api::UpstreamSubscriptionQuotaStore::delete_subscription_quota_before(
-            self.storage.as_ref(),
-            cutoff_unix_millis,
-            batch_size,
-        )
-        .await
-    }
-}
-
 impl PromptCacheObservationPurgeStore for StorageHandle {
     async fn purge_expired_before(&self, ts_unix_secs: u64) -> StorageResult<u64> {
         PromptCacheObservationStore::purge_expired_before(self.storage.as_ref(), ts_unix_secs).await
@@ -73,9 +57,9 @@ impl UsagePruneRunner for StorageHandle {
     async fn prune_once_for_retention(
         &self,
         retention_days: u64,
-        clock: cc_lb_core::ClockHandle,
-    ) -> cc_lb_core::usage_pruner::PruneResult {
-        cc_lb_core::usage_pruner::UsagePruner::new(self.storage.clone(), retention_days, clock)
+        clock: cc_lb_engine::ClockHandle,
+    ) -> cc_lb_engine::usage_pruner::PruneResult {
+        cc_lb_engine::usage_pruner::UsagePruner::new(self.storage.clone(), retention_days, clock)
             .prune_once()
             .await
     }

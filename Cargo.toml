@@ -2,6 +2,7 @@
 members = [
     "crates/cc-lb-pricing",
     "crates/cc-lb-storage-sqlite",
+    "crates/cc-lb-control",
     "crates/cc-lb-*",
     "plugins/router/cache-aware-wasmtime",
     "plugins/test-fixtures/wasmtime-shape-passthrough",
@@ -27,18 +28,13 @@ license = "Apache-2.0"
 rust-version = "1.96.0"
 
 [workspace.dependencies]
-cc-lb-plugin-api = { version = "0.5", path = "crates/cc-lb-plugin-api" }
+cc-lb-plugin-api = { version = "0.11", path = "crates/cc-lb-plugin-api" }
 
 # Internal, unpublished — RFC-0002 event-driven lifecycle vocabulary.
-cc-lb-lifecycle = { path = "crates/cc-lb-lifecycle", version = "0.1.0" }
+cc-lb-contract = { path = "crates/cc-lb-contract", version = "0.1.0" }
 
-<<<<<<< Updated upstream
-cc-lb-runtime-wasmtime    = { path = "crates/cc-lb-runtime-wasmtime", version = "0.1.1" }
-cc-lb-plugin-wire = { version = "0.3", path = "crates/cc-lb-plugin-wire" }
-=======
 cc-lb-runtime-wasmtime    = { path = "crates/cc-lb-runtime-wasmtime", version = "0.1.2" }
 cc-lb-plugin-wire = { version = "0.6", path = "crates/cc-lb-plugin-wire" }
->>>>>>> Stashed changes
 cc-lb-pdk-wasmtime = { version = "0.1", path = "crates/cc-lb-pdk-wasmtime" }
 cc-lb-pdk-wasmtime-macros = { version = "0.1", path = "crates/cc-lb-pdk-wasmtime-macros" }
 cc-lb-plugin-conformance = { version = "0.2", path = "crates/cc-lb-plugin-conformance" }
@@ -91,6 +87,7 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 opentelemetry_sdk = { version = "0.32", features = ["trace"] }
 proptest = "1"
 regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 ring = "0.17"
 rust-embed = "8"
 secrecy = "0.10"

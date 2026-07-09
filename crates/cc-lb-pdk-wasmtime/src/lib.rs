@@ -73,11 +73,19 @@ pub mod __private {
     //! `cc_lb_free`, `cc_lb_filter` exports. Not stable API.
 
     use core::alloc::Layout;
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        target_os = "linux",
+        target_pointer_width = "64"
+    ))]
+    use core::ffi::c_void;
     use core::slice;
 
     use cc_lb_plugin_wire::{
-        ArchivedFilterRequest, ArchivedObserveEvent, ArchivedShapeRequest, FilterRequest,
-        FilterResponse, ObserveEvent, ShapeRequest, ShapeResponse, pack_ret,
+        ArchivedFilterRequest, ArchivedObserveEvent, ArchivedShapeRequest,
+        ArchivedTransformResponseRequest, ArchivedTransformSseEventRequest, FilterRequest,
+        FilterResponse, ObserveEvent, ShapeRequest, ShapeResponse, TransformResponseRequest,
+        TransformResponseResult, TransformSseEventRequest, TransformSseEventResult, pack_ret,
     };
     use rkyv::rancor::Error;
 
@@ -97,9 +105,7 @@ pub mod __private {
         if layout.size() == 0 {
             return 0;
         }
-        // SAFETY: layout has positive size and a valid alignment.
-        let ptr = unsafe { alloc::alloc::alloc(layout) };
-        if ptr.is_null() { 0 } else { ptr as u32 }
+        alloc_with_layout(layout)
     }
 
     /// Free a previously-allocated buffer. `ptr` MUST have come from
@@ -116,9 +122,112 @@ pub mod __private {
         if layout.size() == 0 {
             return;
         }
+        free_with_layout(ptr, layout);
+    }
+
+    #[cfg(not(all(
+        not(target_arch = "wasm32"),
+        target_os = "linux",
+        target_pointer_width = "64"
+    )))]
+    #[allow(unsafe_code)]
+    fn alloc_with_layout(layout: Layout) -> u32 {
+        // SAFETY: layout has positive size and a valid alignment.
+        let ptr = unsafe { alloc::alloc::alloc(layout) };
+        if ptr.is_null() { 0 } else { ptr as u32 }
+    }
+
+    #[cfg(not(all(
+        not(target_arch = "wasm32"),
+        target_os = "linux",
+        target_pointer_width = "64"
+    )))]
+    #[allow(unsafe_code)]
+    fn free_with_layout(ptr: u32, layout: Layout) {
         // SAFETY: ptr came from `alloc_bytes` with the same layout per the
         // host↔guest contract enforced by `cc-lb-runtime-wasmtime::cache`.
         unsafe { alloc::alloc::dealloc(ptr as *mut u8, layout) };
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        target_os = "linux",
+        target_pointer_width = "64"
+    ))]
+    fn alloc_with_layout(layout: Layout) -> u32 {
+        let ptr = low_mmap(layout.size());
+        if ptr.is_null() || ptr as usize > u32::MAX as usize {
+            0
+        } else {
+            ptr as u32
+        }
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        target_os = "linux",
+        target_pointer_width = "64"
+    ))]
+    fn free_with_layout(ptr: u32, layout: Layout) {
+        low_munmap(ptr, layout.size());
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        target_os = "linux",
+        target_pointer_width = "64"
+    ))]
+    #[allow(unsafe_code)]
+    fn low_mmap(size: usize) -> *mut u8 {
+        const PROT_READ: i32 = 0x1;
+        const PROT_WRITE: i32 = 0x2;
+        const MAP_PRIVATE: i32 = 0x02;
+        const MAP_ANONYMOUS: i32 = 0x20;
+        const MAP_FIXED_NOREPLACE: i32 = 0x100000;
+        const MAP_FAILED: *mut c_void = !0usize as *mut c_void;
+
+        unsafe extern "C" {
+            fn mmap(
+                addr: *mut c_void,
+                length: usize,
+                prot: i32,
+                flags: i32,
+                fd: i32,
+                offset: isize,
+            ) -> *mut c_void;
+        }
+
+        let mut addr = 0x1_0000usize;
+        while addr < 0x8000_0000usize {
+            let ptr = unsafe {
+                mmap(
+                    addr as *mut c_void,
+                    size,
+                    PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                    -1,
+                    0,
+                )
+            };
+            if ptr != MAP_FAILED {
+                return ptr.cast();
+            }
+            addr += 0x1_0000;
+        }
+        core::ptr::null_mut()
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        target_os = "linux",
+        target_pointer_width = "64"
+    ))]
+    #[allow(unsafe_code)]
+    fn low_munmap(ptr: u32, size: usize) {
+        unsafe extern "C" {
+            fn munmap(addr: *mut c_void, length: usize) -> i32;
+        }
+        let _ = unsafe { munmap(ptr as usize as *mut c_void, size) };
     }
 
     /// Owned-mode filter dispatch — invoked from the macro-generated
@@ -279,6 +388,80 @@ pub mod __private {
         handler(archived);
         free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
         pack_ret(0, 0)
+    }
+
+    #[allow(unsafe_code)]
+    pub fn run_transform_response<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(TransformResponseRequest) -> TransformResponseResult,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedTransformResponseRequest =
+            match rkyv::access::<ArchivedTransformResponseRequest, Error>(in_bytes) {
+                Ok(value) => value,
+                Err(_) => panic!("rkyv::access(TransformResponseRequest) failed"),
+            };
+        let owned: TransformResponseRequest =
+            match rkyv::deserialize::<TransformResponseRequest, Error>(archived) {
+                Ok(value) => value,
+                Err(_) => panic!("rkyv::deserialize(TransformResponseRequest) failed"),
+            };
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        let response = handler(owned);
+        encode_and_pack::<TransformResponseResult>(&response, "TransformResponseResult")
+    }
+
+    #[allow(unsafe_code)]
+    pub fn run_transform_response_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(&ArchivedTransformResponseRequest) -> TransformResponseResult,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedTransformResponseRequest =
+            match rkyv::access::<ArchivedTransformResponseRequest, Error>(in_bytes) {
+                Ok(value) => value,
+                Err(_) => panic!("rkyv::access(TransformResponseRequest) failed"),
+            };
+        let response = handler(archived);
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        encode_and_pack::<TransformResponseResult>(&response, "TransformResponseResult")
+    }
+
+    #[allow(unsafe_code)]
+    pub fn run_transform_sse_event<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(TransformSseEventRequest) -> TransformSseEventResult,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedTransformSseEventRequest =
+            match rkyv::access::<ArchivedTransformSseEventRequest, Error>(in_bytes) {
+                Ok(value) => value,
+                Err(_) => panic!("rkyv::access(TransformSseEventRequest) failed"),
+            };
+        let owned: TransformSseEventRequest =
+            match rkyv::deserialize::<TransformSseEventRequest, Error>(archived) {
+                Ok(value) => value,
+                Err(_) => panic!("rkyv::deserialize(TransformSseEventRequest) failed"),
+            };
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        let response = handler(owned);
+        encode_and_pack::<TransformSseEventResult>(&response, "TransformSseEventResult")
+    }
+
+    #[allow(unsafe_code)]
+    pub fn run_transform_sse_event_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(&ArchivedTransformSseEventRequest) -> TransformSseEventResult,
+    {
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let archived: &ArchivedTransformSseEventRequest =
+            match rkyv::access::<ArchivedTransformSseEventRequest, Error>(in_bytes) {
+                Ok(value) => value,
+                Err(_) => panic!("rkyv::access(TransformSseEventRequest) failed"),
+            };
+        let response = handler(archived);
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+        encode_and_pack::<TransformSseEventResult>(&response, "TransformSseEventResult")
     }
 
     /// Serialize an rkyv-Serializable response, allocate a guest

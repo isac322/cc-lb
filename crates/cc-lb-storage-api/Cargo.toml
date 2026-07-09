@@ -11,10 +11,12 @@ dto-roundtrip = []
 
 [dependencies]
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 cc-lb-aead = { version = "0.1.0", path = "../cc-lb-aead" }
-cc-lb-plugin-api = { version = "0.5.0", path = "../cc-lb-plugin-api" }
+cc-lb-contract = { workspace = true }
+cc-lb-plugin-api = { workspace = true }
 cc-lb-plugin-wire = { workspace = true, features = ["std"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -25,7 +27,7 @@ url = { workspace = true, features = ["serde"] }
 uuid = { workspace = true }
 
 [dev-dependencies]
-cc-lb-core = { path = "../cc-lb-core" }
+cc-lb-engine = { path = "../cc-lb-engine" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

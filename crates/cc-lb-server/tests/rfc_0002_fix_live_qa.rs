@@ -557,7 +557,7 @@ async fn lqa_2b_lifecycle_metrics_increment_for_happy_non_stream() {
     let post = wait_metric_delta(
         server.metrics_addr,
         &pre,
-        r#"cc_lb_lifecycle_events_total{kind="request_terminated"}"#,
+        r#"cc_lb_contract_events_total{kind="request_terminated"}"#,
         1,
     )
     .await;
@@ -575,14 +575,14 @@ async fn lqa_2b_lifecycle_metrics_increment_for_happy_non_stream() {
         "priced",
         "cache_observed",
     ] {
-        let prefix = format!(r#"cc_lb_lifecycle_events_total{{kind="{kind}"}}"#);
+        let prefix = format!(r#"cc_lb_contract_events_total{{kind="{kind}"}}"#);
         assert_eq!(diff_counter(&pre, &post, &prefix), 1, "metric {kind}");
     }
     assert_eq!(
         diff_counter(
             &pre,
             &post,
-            r#"cc_lb_lifecycle_events_total{kind="provider_error_observed"}"#,
+            r#"cc_lb_contract_events_total{kind="provider_error_observed"}"#,
         ),
         0
     );
@@ -644,20 +644,32 @@ async fn lqa_4a_admin_sse_stream_emits_final_request_event_update() {
     let response = post_happy(&server).await;
 
     assert_eq!(response.status, 200);
-    let frame = next_sse_data(&mut reader).await;
-    eprintln!("admin sse frame: {frame}");
-    assert_eq!(frame["phase"], "final");
-    let event = &frame["event"];
+    // The live-tail redesign (plan §3.9) precedes the final frame with a cursor
+    // bookmark, optional partial snapshots, and heartbeats. Skip everything that
+    // is not phase="final" so this test continues to assert on the terminal row.
+    //
+    // The SSE stream also carries `phase="final"` frames unrelated to this POST:
+    // `common::spawn_test_server` runs a `GET /v1/models` readiness probe (see
+    // `wait_for_proxy_ready`) that goes through the lifecycle pipeline and
+    // publishes its own terminal frame with no model, no usage, and no cost —
+    // sometimes still in flight (via backfill or the live bus) when this test
+    // subscribes. Filter on `model == HAPPY_MODEL` so we assert on the frame
+    // produced by `post_happy` rather than the readiness probe.
+    let frame = loop {
+        let frame = next_sse_data(&mut reader).await;
+        if frame["phase"] == "final"
+            && frame["payload"]["event"]["model"].as_str() == Some(HAPPY_MODEL)
+        {
+            break frame;
+        }
+    };
+    let event = &frame["payload"]["event"];
     assert_eq!(event["status"], 200);
     assert!(event["input_tokens"].as_i64().unwrap_or_default() > 0);
     assert!(event["output_tokens"].as_i64().unwrap_or_default() > 0);
     assert!(event["cost_usd_micros"].as_i64().unwrap_or_default() > 0);
     assert_eq!(event["upstream_name"], "fake_anthropic");
-    assert!(
-        event["model"]
-            .as_str()
-            .is_some_and(|model| !model.is_empty())
-    );
+    assert_eq!(event["model"], HAPPY_MODEL);
 }
 
 #[tokio::test]
@@ -997,7 +1009,7 @@ async fn lqa_6c_upstream_rate_limit_error_records_provider_error_metric() {
     let post = wait_metric_delta(
         server.metrics_addr,
         &pre,
-        r#"cc_lb_lifecycle_events_total{kind="provider_error_observed"}"#,
+        r#"cc_lb_contract_events_total{kind="provider_error_observed"}"#,
         1,
     )
     .await;
@@ -1005,7 +1017,7 @@ async fn lqa_6c_upstream_rate_limit_error_records_provider_error_metric() {
         diff_counter(
             &pre,
             &post,
-            r#"cc_lb_lifecycle_events_total{kind="provider_error_observed"}"#
+            r#"cc_lb_contract_events_total{kind="provider_error_observed"}"#
         ),
         1
     );
@@ -1070,7 +1082,7 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
     let post = wait_metric_delta(
         server.metrics_addr,
         &pre,
-        r#"cc_lb_lifecycle_events_total{kind="request_terminated"}"#,
+        r#"cc_lb_contract_events_total{kind="request_terminated"}"#,
         1,
     )
     .await;
@@ -1078,7 +1090,7 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
         diff_counter(
             &pre,
             &post,
-            r#"cc_lb_lifecycle_events_total{kind="parse_completed"}"#
+            r#"cc_lb_contract_events_total{kind="parse_completed"}"#
         ),
         1
     );
@@ -1086,7 +1098,7 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
         diff_counter(
             &pre,
             &post,
-            r#"cc_lb_lifecycle_events_total{kind="request_terminated"}"#
+            r#"cc_lb_contract_events_total{kind="request_terminated"}"#
         ),
         1
     );
@@ -1094,7 +1106,7 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
         diff_counter(
             &pre,
             &post,
-            r#"cc_lb_lifecycle_events_total{kind="route_completed"}"#
+            r#"cc_lb_contract_events_total{kind="route_completed"}"#
         ),
         0
     );
@@ -1102,7 +1114,7 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
         diff_counter(
             &pre,
             &post,
-            r#"cc_lb_lifecycle_events_total{kind="upstream_attempt"}"#
+            r#"cc_lb_contract_events_total{kind="upstream_attempt"}"#
         ),
         0
     );

@@ -4,16 +4,18 @@ use std::time::Duration;
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, Config};
-use cc_lb_core::DynamicViewHolder;
-use cc_lb_core::clock::ClockHandle;
+use cc_lb_engine::DynamicViewHolder;
+use cc_lb_engine::clock::ClockHandle;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{PluginSlot, StorageResult};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::dynamic_view_builder::{Stores, build_dynamic_view};
+use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
 use crate::revision_hash::compute_revision_hash;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
+use cc_lb_engine::PromptCacheObservationSinkLike;
 
 pub struct Reconciler {
     pub stores: Arc<Stores>,
@@ -25,6 +27,8 @@ pub struct Reconciler {
     pub cancel: CancellationToken,
     pub data_dir: PathBuf,
     pub subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    pub prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
+    pub prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     pub subscription_quota_routing_max_staleness_secs: u64,
     pub config: Arc<Config>,
     pub clock: ClockHandle,
@@ -42,6 +46,8 @@ impl Reconciler {
         cancel: CancellationToken,
         data_dir: PathBuf,
         subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+        prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
+        prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
         subscription_quota_routing_max_staleness_secs: u64,
         config: Arc<Config>,
         clock: ClockHandle,
@@ -56,6 +62,8 @@ impl Reconciler {
             cancel,
             data_dir,
             subscription_quota_cache,
+            prompt_cache_observation_cache,
+            prompt_cache_observation_sink,
             subscription_quota_routing_max_staleness_secs,
             config,
             clock,
@@ -108,6 +116,8 @@ impl Reconciler {
             &self.runtime,
             &self.data_dir,
             self.subscription_quota_cache.clone(),
+            self.prompt_cache_observation_cache.clone(),
+            self.prompt_cache_observation_sink.clone(),
             self.subscription_quota_routing_max_staleness_secs,
             &self.config,
             self.clock.clone(),

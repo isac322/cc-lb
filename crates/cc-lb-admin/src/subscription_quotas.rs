@@ -9,10 +9,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use cc_lb_core::{
-    Clock, DynamicViewHolder,
-    plan_capacity::{PRO_CAPACITY_RATIO, plan_capacity_ratio},
-};
+use cc_lb_clock::Clock;
+use cc_lb_control::DynamicViewHolder;
+use cc_lb_engine::plan_capacity::{PRO_CAPACITY_RATIO, plan_capacity_ratio};
 use cc_lb_plugin_api::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaHistoryStore,
@@ -36,7 +35,6 @@ const ANALYSIS_BUCKET_SECS: u64 = 60;
 const ANALYSIS_MAX_POINTS: u32 = 10_000;
 const RESET_DROP_THRESHOLD: f64 = 0.5;
 const GAP_MARKER_MULTIPLIER: u64 = 2;
-const CYCLE_GAP_MULTIPLIER: u64 = 4;
 const PROXY_RATE_LOOKBACK_SECS: u64 = 3_600;
 const CAPACITY_CAVEAT: &str = "capacity is inferred from proxy tokens and quota utilization; Anthropic quota units are not directly exposed";
 const OUTSIDE_TRAFFIC_CAVEAT: &str =
@@ -300,7 +298,7 @@ struct BurnResponse {
     eta_to_limit_secs: Option<u64>,
     resets_before_limit: Option<bool>,
     confidence: String,
-    sample_count: usize,
+    interval_count: usize,
     reason: Option<String>,
 }
 
@@ -313,7 +311,7 @@ struct ProxyBurnResponse {
     eta_to_limit_secs: Option<u64>,
     resets_before_limit: Option<bool>,
     confidence: String,
-    sample_count: usize,
+    interval_count: usize,
     reason: Option<String>,
 }
 
@@ -819,7 +817,7 @@ async fn build_analysis_response(
 
     let mut windows_by_upstream: BTreeMap<Uuid, Vec<AnalysisWindowResponse>> = BTreeMap::new();
     for series in quota_series {
-        let observations = analysis_observations(&series.buckets);
+        let observations = checkpoint_observations(&series.buckets);
         let latest = latest_by_upstream_window.get(&(series.upstream_id, series.window));
         let rollups_for_upstream = rollups
             .iter()
@@ -982,8 +980,12 @@ pub async fn build_cc_lb_aggregate_response(
         }
     }
 
-    let mut lot_inputs =
-        provider_lot_inputs_from_series(&quota_series, &upstream_by_id, &capacity_ratios);
+    let mut lot_inputs = provider_lot_inputs_from_series(
+        &quota_series,
+        &upstream_by_id,
+        &capacity_ratios,
+        now_unix_secs,
+    );
     let covered_by_series = lot_inputs
         .iter()
         .map(|input| (input.upstream.id, input.window))
@@ -1082,21 +1084,6 @@ pub fn pool_quota_snapshots_from_aggregate(
                 .filter_map(|lot| lot.observed_at_unix_millis)
                 .max()
                 .and_then(|millis| i64::try_from(millis).ok());
-            let contributors_payload = contributing
-                .iter()
-                .map(|lot| {
-                    json!({
-                        "upstream_id": lot.upstream_id,
-                        "upstream_name": lot.upstream_name,
-                        "utilization": lot.utilization,
-                        "ratio": lot.capacity_ratio,
-                        "source": lot.source,
-                        "observed_at_unix_millis": lot.observed_at_unix_millis,
-                        "state": lot.state,
-                    })
-                })
-                .collect::<Vec<_>>();
-            let contributors_json = serde_json::to_string(&contributors_payload).ok();
             Some(PoolQuotaSnapshotRecord {
                 snapshot_at_unix_secs,
                 window,
@@ -1116,7 +1103,6 @@ pub fn pool_quota_snapshots_from_aggregate(
                     .unwrap_or(i64::MAX),
                 api_contributing_upstreams: i64::try_from(api_contributing).unwrap_or(i64::MAX),
                 max_observed_at_unix_millis,
-                contributors_json,
                 computed_at_unix_millis,
                 policy_version: POOL_QUOTA_POLICY_VERSION,
             })
@@ -1298,6 +1284,7 @@ struct AggregateProviderLotInput {
     provider_start: Option<u64>,
     provider_reset: Option<u64>,
     observed_at_unix_millis: Option<u64>,
+    evaluation_unix_secs: u64,
     utilization: Option<f64>,
     capacity_ratio: f64,
 }
@@ -1319,6 +1306,7 @@ fn provider_lot_input_from_snapshot(
         provider_start: provider_window_start_unix_secs(window, snapshot, now_unix_secs),
         provider_reset: snapshot.resets_at_unix_secs.or(Some(cc_reset)),
         observed_at_unix_millis: snapshot.observed_at_unix_millis,
+        evaluation_unix_secs: now_unix_secs,
         utilization: snapshot.utilization,
         capacity_ratio,
     }
@@ -1328,6 +1316,7 @@ fn provider_lot_inputs_from_series(
     series: &[cc_lb_storage_api::SubscriptionQuotaSeries],
     upstream_by_id: &HashMap<Uuid, UpstreamRecord>,
     capacity_ratios: &HashMap<Uuid, f64>,
+    evaluation_unix_secs: u64,
 ) -> Vec<AggregateProviderLotInput> {
     let mut inputs = Vec::new();
     for series in series {
@@ -1337,11 +1326,17 @@ fn provider_lot_inputs_from_series(
         let Some(secs) = window_secs(series.window) else {
             continue;
         };
-        let observations = analysis_observations(&series.buckets);
-        let cycles = split_reset_cycles(&observations, ANALYSIS_BUCKET_SECS);
-        for cycle in cycles {
+        let observations = step_observations(&series.buckets);
+        let cycles = split_reset_cycles(&observations);
+        let cycle_count = cycles.len();
+        for (cycle_index, cycle) in cycles.into_iter().enumerate() {
             let Some(last) = cycle.observations.last() else {
                 continue;
+            };
+            let cycle_evaluation_unix_secs = if cycle_index + 1 == cycle_count {
+                evaluation_unix_secs
+            } else {
+                last.bucket_start_unix_secs
             };
             let provider_reset = last.resets_at_unix_secs_last;
             inputs.push(AggregateProviderLotInput {
@@ -1359,6 +1354,7 @@ fn provider_lot_inputs_from_series(
                     }),
                 provider_reset,
                 observed_at_unix_millis: Some(last.observed_at_unix_millis_last),
+                evaluation_unix_secs: cycle_evaluation_unix_secs,
                 utilization: Some(last.utilization_last),
                 capacity_ratio: capacity_ratios
                     .get(&upstream.id)
@@ -1381,13 +1377,9 @@ fn build_provider_lot_response(
     let (cc_start, cc_reset) = cc_window_bounds(now_unix_secs, secs);
     let provider_start = input.provider_start;
     let provider_reset = input.provider_reset.or(Some(cc_reset));
-    let observed_at_unix_secs = input
-        .observed_at_unix_millis
-        .map(|observed_at| observed_at / 1_000)
-        .unwrap_or(now_unix_secs);
     let provider_sample_end = provider_reset
         .unwrap_or(now_unix_secs)
-        .min(observed_at_unix_secs)
+        .min(input.evaluation_unix_secs)
         .min(now_unix_secs);
     let provider_tokens = provider_start
         .map(|start| {
@@ -1704,8 +1696,8 @@ fn build_analysis_window(
     let data_state = latest
         .map(|snapshot| data_state_str(snapshot.state).to_owned())
         .unwrap_or_else(|| "missing".to_owned());
-    let cycles = split_reset_cycles(observations, ANALYSIS_BUCKET_SECS);
-    let intervals = valid_utilization_intervals(&cycles, ANALYSIS_BUCKET_SECS);
+    let cycles = split_reset_cycles(observations);
+    let intervals = valid_utilization_intervals(&cycles);
     let actual_account_burn = infer_actual_account_burn(
         &intervals,
         current_utilization,
@@ -1757,7 +1749,7 @@ fn infer_actual_account_burn(
             eta_to_limit_secs: None,
             resets_before_limit: None,
             confidence: "low".to_owned(),
-            sample_count: 0,
+            interval_count: 0,
             reason: Some("insufficient_growth_intervals".to_owned()),
         };
     };
@@ -1769,8 +1761,8 @@ fn infer_actual_account_burn(
         eta_to_limit_secs,
         resets_before_limit: eta_to_limit_secs
             .map(|eta| resets_before_limit(eta, resets_at_unix_secs, now_unix_secs)),
-        confidence: confidence_for_sample_count(intervals.len()).to_owned(),
-        sample_count: intervals.len(),
+        confidence: confidence_for_interval_count(intervals.len()).to_owned(),
+        interval_count: intervals.len(),
         reason: None,
     }
 }
@@ -1804,7 +1796,7 @@ fn infer_proxy_projected_burn(
             eta_to_limit_secs: None,
             resets_before_limit: None,
             confidence: "low".to_owned(),
-            sample_count: 0,
+            interval_count: 0,
             reason: Some("insufficient_growth_intervals".to_owned()),
         };
     };
@@ -1830,8 +1822,8 @@ fn infer_proxy_projected_burn(
         eta_to_limit_secs,
         resets_before_limit: eta_to_limit_secs
             .map(|eta| resets_before_limit(eta, resets_at_unix_secs, until_unix_secs)),
-        confidence: confidence_for_sample_count(intervals.len()).to_owned(),
-        sample_count: intervals.len(),
+        confidence: confidence_for_interval_count(intervals.len()).to_owned(),
+        interval_count: intervals.len(),
         reason: None,
     }
 }
@@ -1866,10 +1858,7 @@ fn deficit_for_window(
     })
 }
 
-fn split_reset_cycles(
-    observations: &[AnalysisObservation],
-    bucket_secs: u64,
-) -> Vec<ObservationCycle> {
+fn split_reset_cycles(observations: &[AnalysisObservation]) -> Vec<ObservationCycle> {
     let mut sorted = observations.to_vec();
     sorted.sort_by_key(|observation| observation.observed_at_unix_millis_last);
     let mut cycles = Vec::new();
@@ -1877,7 +1866,7 @@ fn split_reset_cycles(
 
     for observation in sorted {
         if let Some(previous) = current.last()
-            && starts_new_cycle(previous, &observation, bucket_secs)
+            && starts_new_cycle(previous, &observation)
         {
             cycles.push(ObservationCycle {
                 observations: std::mem::take(&mut current),
@@ -1894,11 +1883,7 @@ fn split_reset_cycles(
     cycles
 }
 
-fn starts_new_cycle(
-    previous: &AnalysisObservation,
-    current: &AnalysisObservation,
-    bucket_secs: u64,
-) -> bool {
+fn starts_new_cycle(previous: &AnalysisObservation, current: &AnalysisObservation) -> bool {
     let reset_changed = match (
         previous.resets_at_unix_secs_last,
         current.resets_at_unix_secs_last,
@@ -1909,19 +1894,10 @@ fn starts_new_cycle(
     };
     let synthetic_reset =
         previous.utilization_last - current.utilization_last >= RESET_DROP_THRESHOLD;
-    let elapsed_secs = current
-        .observed_at_unix_millis_last
-        .saturating_sub(previous.observed_at_unix_millis_last)
-        / 1_000;
-    reset_changed
-        || synthetic_reset
-        || elapsed_secs > CYCLE_GAP_MULTIPLIER.saturating_mul(bucket_secs)
+    reset_changed || synthetic_reset
 }
 
-fn valid_utilization_intervals(
-    cycles: &[ObservationCycle],
-    bucket_secs: u64,
-) -> Vec<UtilizationInterval> {
+fn valid_utilization_intervals(cycles: &[ObservationCycle]) -> Vec<UtilizationInterval> {
     let mut intervals = Vec::new();
     for cycle in cycles {
         for pair in cycle.observations.windows(2) {
@@ -1933,10 +1909,7 @@ fn valid_utilization_intervals(
                 .saturating_sub(previous.observed_at_unix_millis_last)
                 / 1_000;
             let delta_utilization = current.utilization_last - previous.utilization_last;
-            if delta_utilization <= 0.0
-                || delta_time_secs == 0
-                || delta_time_secs > CYCLE_GAP_MULTIPLIER.saturating_mul(bucket_secs)
-            {
+            if delta_utilization < 0.0 || delta_time_secs == 0 {
                 continue;
             }
             intervals.push(UtilizationInterval {
@@ -2001,20 +1974,32 @@ fn build_markers(
     markers
 }
 
-fn analysis_observations(buckets: &[SubscriptionQuotaBucket]) -> Vec<AnalysisObservation> {
+fn step_observations(buckets: &[SubscriptionQuotaBucket]) -> Vec<AnalysisObservation> {
     buckets
         .iter()
         .filter(|bucket| bucket.observed)
-        .filter_map(|bucket| {
-            Some(AnalysisObservation {
-                bucket_start_unix_secs: bucket.bucket_start_unix_secs,
-                utilization_last: bucket.utilization_last?,
-                resets_at_unix_secs_last: bucket.resets_at_unix_secs_last,
-                observed_at_unix_millis_last: bucket.observed_at_unix_millis_last?,
-                sources_seen: bucket.sources_seen.clone(),
-            })
-        })
+        .filter_map(analysis_observation_from_bucket)
         .collect()
+}
+
+fn checkpoint_observations(buckets: &[SubscriptionQuotaBucket]) -> Vec<AnalysisObservation> {
+    buckets
+        .iter()
+        .filter(|bucket| bucket.observed && bucket.sample_count > 0)
+        .filter_map(analysis_observation_from_bucket)
+        .collect()
+}
+
+fn analysis_observation_from_bucket(
+    bucket: &SubscriptionQuotaBucket,
+) -> Option<AnalysisObservation> {
+    Some(AnalysisObservation {
+        bucket_start_unix_secs: bucket.bucket_start_unix_secs,
+        utilization_last: bucket.utilization_last?,
+        resets_at_unix_secs_last: bucket.resets_at_unix_secs_last,
+        observed_at_unix_millis_last: bucket.observed_at_unix_millis_last?,
+        sources_seen: bucket.sources_seen.clone(),
+    })
 }
 
 fn analysis_caveats(
@@ -2360,7 +2345,7 @@ fn resets_before_limit(
         .unwrap_or(false)
 }
 
-fn confidence_for_sample_count(count: usize) -> &'static str {
+fn confidence_for_interval_count(count: usize) -> &'static str {
     if count >= 8 {
         "high"
     } else if count >= 3 {
@@ -2412,7 +2397,7 @@ fn internal_error(error: &str) -> Response {
 }
 
 fn now_unix_millis(clock: &dyn Clock) -> u64 {
-    cc_lb_core::clock::unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
+    cc_lb_engine::clock::unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
@@ -2428,7 +2413,7 @@ mod tests {
             observation(180, 0.40, Some(1_120)),
         ];
 
-        let cycles = split_reset_cycles(&observations, 60);
+        let cycles = split_reset_cycles(&observations);
 
         assert_eq!(cycles.len(), 2);
         assert_eq!(cycles[0].observations.len(), 2);
@@ -2440,13 +2425,13 @@ mod tests {
         let observations = (0..=5)
             .map(|idx| observation(idx * 60, 0.10 + idx as f64 * 0.05, Some(1_000)))
             .collect::<Vec<_>>();
-        let cycles = split_reset_cycles(&observations, 60);
-        let intervals = valid_utilization_intervals(&cycles, 60);
+        let cycles = split_reset_cycles(&observations);
+        let intervals = valid_utilization_intervals(&cycles);
 
         let burn = infer_actual_account_burn(&intervals, Some(0.35), Some(3_600), 0);
 
         assert_eq!(burn.confidence, "medium");
-        assert_eq!(burn.sample_count, 5);
+        assert_eq!(burn.interval_count, 5);
         assert!(burn.utilization_per_hour.unwrap() > 2.9);
         assert!(burn.reason.is_none());
     }
@@ -2461,7 +2446,7 @@ mod tests {
             eta_to_limit_secs: Some(1_000),
             resets_before_limit: Some(false),
             confidence: "medium".to_owned(),
-            sample_count: 5,
+            interval_count: 5,
             reason: None,
         };
 
@@ -2528,7 +2513,7 @@ mod tests {
         };
         let upstreams = HashMap::from([(upstream_id, upstream)]);
         let ratios = HashMap::from([(upstream_id, PRO_CAPACITY_RATIO)]);
-        let inputs = provider_lot_inputs_from_series(&[series], &upstreams, &ratios);
+        let inputs = provider_lot_inputs_from_series(&[series], &upstreams, &ratios, 50_000);
         let rollups = vec![
             usage_rollup(upstream_id, 40_000, 50),
             usage_rollup(upstream_id, 48_000, 100),

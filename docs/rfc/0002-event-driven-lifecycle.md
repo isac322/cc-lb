@@ -37,18 +37,18 @@ comparison machinery deleted with it.
 
 ### As-shipped shape
 
-- **Event vocabulary** lives in `cc-lb-lifecycle` (a new crate — resolution
+- **Event vocabulary** lives in `cc-lb-contract` (a new crate — resolution
   of unresolved question #2 in the original RFC). Variants match the RFC's
   10-variant shape, with `HeaderSnapshot`, `RouteInfo`, `AuthInfo`,
   `ParseInfo`, `LimitDecisionKind`, `UsageSnapshot`, `StreamSuccess`,
   `StreamError`, and `TerminationReason` supporting types. `predicted_cache_read_tokens`
   was added to `RouteInfo` for the prompt-cache drift subscriber.
-- **`LifecycleContext`** in `crates/cc-lb-core/src/terminal_observer.rs` is
+- **`LifecycleContext`** in `crates/cc-lb-engine/src/terminal_observer.rs` is
   the successor to `TerminalObserver`. Its state is now just the 9 fields
   the terminal event carries; `make_request_event` is gone. `Drop` emits
   `RequestTerminated { reason: Dropped }` via the terminal-CAS-guarded
   `emit_terminated` helper.
-- **Assembler** (`crates/cc-lb-core/src/lifecycle_event_assembler.rs`) is
+- **Assembler** (`crates/cc-lb-engine/src/lifecycle_event_assembler.rs`) is
   the sole producer of `RequestEvent` rows. It maintains a
   `HashMap<EventId, Partial>` capped at 4096 entries with a 300s TTL and a
   30s sweeper. On `RequestTerminated` it writes a shadow row
@@ -125,12 +125,12 @@ comparison machinery deleted with it.
 
 ### Where the code lives
 
-- `crates/cc-lb-lifecycle/` — event vocabulary crate.
-- `crates/cc-lb-core/src/terminal_observer.rs` — `LifecycleContext`.
-- `crates/cc-lb-core/src/lifecycle_event_assembler.rs` — the assembler.
-- `crates/cc-lb-core/src/lifecycle_*_subscriber.rs` — the per-concern
+- `crates/cc-lb-contract/` — event vocabulary crate.
+- `crates/cc-lb-engine/src/terminal_observer.rs` — `LifecycleContext`.
+- `crates/cc-lb-engine/src/lifecycle_event_assembler.rs` — the assembler.
+- `crates/cc-lb-engine/src/lifecycle_*_subscriber.rs` — the per-concern
   subscribers.
-- `crates/cc-lb-core/src/event_bus.rs` — `InMemoryBus` + per-channel
+- `crates/cc-lb-engine/src/event_bus.rs` — `InMemoryBus` + per-channel
   attach methods.
 - `crates/cc-lb-server/tests/rfc_0002_fix_live_qa.rs` — end-to-end
   verification (5 tests).
@@ -799,7 +799,7 @@ summarised here.
    4096 far exceeds observed peak concurrency (~50), so hitting the cap
    is a bug-detection signal, not a routine backpressure event.
 2. **Cross-crate event definition location.** *Resolved:* new crate
-   `cc-lb-lifecycle`. Both `cc-lb-core` and `cc-lb-admin` depend on it;
+   `cc-lb-contract`. Both `cc-lb-engine` and `cc-lb-admin` depend on it;
    no compile-fan-out issues surfaced in practice.
 3. **Shadow-mode diff tolerance.** *Resolved (moot):* the transitional
    `writer_source = both` mode + drift metric were removed in Phase 13.

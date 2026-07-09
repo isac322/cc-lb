@@ -10,8 +10,8 @@ use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::{
     AnthropicOAuthConfig, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind,
 };
-use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_core::{Clock, ClockHandle, DynamicViewHolder, Lifecycle, LifecycleConfig, TestClock};
+use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_engine::{Clock, ClockHandle, DynamicViewHolder, Lifecycle, LifecycleConfig, TestClock};
 use cc_lb_oauth_protocol::{
     ExistingTokenParts, TokenEndpointResponse, parse_token_endpoint_response,
     refresh_token_form_body, refreshed_token_parts,
@@ -100,6 +100,7 @@ impl Fixture {
             upstream_subscription_quotas: storage.clone(),
             upstream_subscription_metadata: storage.clone(),
             organization_metadata: storage.clone(),
+            plan_tiers: storage.clone(),
             prompt_cache_observations: storage.clone(),
             anthropic_compatibility_kv: storage.clone(),
             audit: Some(storage.clone()),
@@ -272,6 +273,8 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         &runtime,
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        None,
+        None,
         1800,
         &cc_lb_config::Config::default(),
         fixture.clock.clone(),
@@ -289,6 +292,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
             fixture.clock.clone(),
         )),
         Arc::new(DynamicViewHolder::new(view)),
+        cc_lb_engine::make_default_dispatcher(50),
         LifecycleConfig::default(),
         fixture.clock.clone(),
     );
@@ -730,6 +734,7 @@ fn now_secs(clock: &dyn Clock) -> u64 {
 fn shaped_request() -> ShapedRequest {
     let ctx = RequestContext {
         request_id: "req-1".to_owned(),
+        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
@@ -737,6 +742,7 @@ fn shaped_request() -> ShapedRequest {
         body_bytes: Bytes::from_static(b"{}"),
         cache_breakpoints: Vec::new(),
         canonical_model_id: String::new(),
+        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     };
     let principal = cc_lb_plugin_api::Principal {
         id: "principal".to_owned(),

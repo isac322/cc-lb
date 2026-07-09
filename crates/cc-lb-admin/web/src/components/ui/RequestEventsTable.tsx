@@ -1,16 +1,29 @@
 import type React from 'react';
 import { useState } from 'react';
 import { eventTime, type RequestEvent } from '../../lib/api';
-import { fmtUsd, fmtUsdCompact, splitNum } from '../../lib/format';
+import { getSessionColor } from '../../lib/colors';
+import { formatCostMicros, splitNum, statusTone } from '../../lib/format';
 import { LatencyCell } from './latency/LatencyCell';
 import { cx, Hint, SkeletonRow } from './primitives';
 import { RelativeTime } from './RelativeTime';
 import { RequestEventDrawer } from './RequestEventDrawer';
+import { SLICE_COLORS } from './usage/sliceColors';
 
 const DASH = '—';
 
+const STATUS_TONE_TEXT: Record<'ok' | 'warn' | 'danger' | 'neutral', string> = {
+  ok: 'text-[color:var(--color-ok)]',
+  warn: 'text-[color:var(--color-warn)]',
+  danger: 'text-[color:var(--color-danger)]',
+  neutral: 'text-text',
+};
+
+export type RequestEventWithPhase = RequestEvent & {
+  _phase?: 'partial' | 'final';
+};
+
 interface RequestEventsTableProps {
-  events: RequestEvent[];
+  events: RequestEventWithPhase[];
   principalNameMap: Map<string, string>;
   upstreamNameMap: Map<string, string>;
   loading?: boolean;
@@ -20,6 +33,7 @@ interface RequestEventsTableProps {
   columns?: {
     principal?: boolean;
     upstream?: boolean;
+    session?: boolean;
     cost?: boolean;
     tokens?: boolean;
   };
@@ -48,15 +62,17 @@ export function RequestEventsTable({
   const [selected, setSelected] = useState<RequestEvent | null>(null);
   const showPrincipal = columns?.principal ?? true;
   const showUpstream = columns?.upstream ?? true;
+  const showSession = columns?.session ?? true;
   const showTokens = columns?.tokens ?? true;
   const showCost = columns?.cost ?? true;
 
   // Always shown: Timestamp, Model, Status, Latency (4)
-  // Toggleable: Principal, Upstream, Tokens, Cost (up to 4)
+  // Toggleable: Principal, Upstream, Session, Tokens, Cost (up to 5)
   const colCount =
     4 +
     (showPrincipal ? 1 : 0) +
     (showUpstream ? 1 : 0) +
+    (showSession ? 1 : 0) +
     (showTokens ? 1 : 0) +
     (showCost ? 1 : 0);
 
@@ -78,6 +94,9 @@ export function RequestEventsTable({
                 Upstream
               </th>
             )}
+            {showSession && (
+              <th className="text-left px-3 py-2 whitespace-nowrap">Session</th>
+            )}
             <th className="text-left px-3 py-2 whitespace-nowrap">Model</th>
             <th className="text-right px-3 py-2 whitespace-nowrap">Status</th>
             <th className="text-right px-3 py-2 whitespace-nowrap">Latency</th>
@@ -95,63 +114,90 @@ export function RequestEventsTable({
               <SkeletonRow key={i} cols={colCount} />
             ))
           ) : events.length ? (
-            events.map((e) => (
-              <tr
-                key={e.request_id}
-                className={cx(
-                  'border-b border-row hover:bg-overlay-1 cursor-pointer',
-                  liveFlashIds?.has(e.request_id) ? 'flash-in' : '',
-                )}
-                onClick={() => setSelected(e)}
-              >
-                <td className="px-3 py-2 text-text-faint whitespace-nowrap">
-                  <span
-                    className={cx(
-                      'status-dot mr-2',
-                      e.status >= 500
-                        ? 'danger'
-                        : e.status >= 400
-                          ? 'warn'
-                          : 'ok',
-                    )}
-                  />
-                  <RelativeTime compact ts={eventTime(e)} />
-                </td>
-                {showPrincipal && (
-                  <td className="px-3 py-2 whitespace-nowrap truncate max-w-[160px]">
-                    {(e.principal_id && principalNameMap.get(e.principal_id)) ??
-                      e.principal_id ??
-                      DASH}
-                  </td>
-                )}
-                {showUpstream && (
-                  <td className="px-3 py-2 whitespace-nowrap truncate max-w-[180px]">
-                    {upstreamNameMap.get(e.upstream ?? '') ??
-                      e.upstream_name ??
-                      e.upstream ??
-                      DASH}
-                  </td>
-                )}
-                <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
-                  {e.model ?? DASH}
-                </td>
-                <td
+            events.map((e) => {
+              const isPartial = e._phase === 'partial';
+              const key = e.event_id ?? e.request_id;
+              return (
+                <tr
+                  key={key}
                   className={cx(
-                    'px-3 py-2 text-right tabular-nums whitespace-nowrap',
-                    e.status >= 500
-                      ? 'text-red-400'
-                      : e.status >= 400
-                        ? 'text-amber-400'
-                        : 'text-green-400',
+                    'border-b border-row hover:bg-overlay-1 cursor-pointer',
+                    liveFlashIds?.has(key) ? 'flash-in' : '',
                   )}
+                  onClick={() => setSelected(e)}
                 >
-                  {e.status}
-                </td>
-                <LatencyCell event={e} />
-                {showTokens && <TokenCell event={e} />}
-                {showCost && <CostCell event={e} />}
-              </tr>
-            ))
+                  <td className="px-3 py-2 text-text-faint whitespace-nowrap">
+                    <span
+                      className={cx(
+                        'status-dot mr-2',
+                        isPartial
+                          ? 'neutral animate-pulse'
+                          : e.status >= 500
+                            ? 'danger'
+                            : e.status >= 400
+                              ? 'warn'
+                              : 'ok',
+                      )}
+                    />
+                    <RelativeTime compact ts={eventTime(e)} />
+                  </td>
+                  {showPrincipal && (
+                    <td className="px-3 py-2 whitespace-nowrap truncate max-w-[160px]">
+                      {(e.principal_id &&
+                        principalNameMap.get(e.principal_id)) ??
+                        e.principal_id ??
+                        DASH}
+                    </td>
+                  )}
+                  {showUpstream && (
+                    <td className="px-3 py-2 whitespace-nowrap truncate max-w-[180px]">
+                      {upstreamNameMap.get(e.upstream ?? '') ??
+                        e.upstream_name ??
+                        e.upstream ??
+                        DASH}
+                    </td>
+                  )}
+                  {showSession && (
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <SessionChip sessionId={e.thread_id ?? null} />
+                    </td>
+                  )}
+                  <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
+                    {e.model ?? DASH}
+                  </td>
+                  <td
+                    className={cx(
+                      'px-3 py-2 text-right tabular-nums whitespace-nowrap',
+                      isPartial
+                        ? 'text-text-faint'
+                        : STATUS_TONE_TEXT[statusTone(e.status)],
+                    )}
+                  >
+                    {isPartial ? (
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="w-3 h-3 border-2 border-text-faint border-t-transparent rounded-full animate-spin" />
+                        In progress
+                      </span>
+                    ) : (
+                      e.status
+                    )}
+                  </td>
+                  <LatencyCell
+                    event={e as RequestEvent}
+                    isPartial={isPartial}
+                  />
+                  {showTokens && (
+                    <TokenCell
+                      event={e as RequestEvent}
+                      isPartial={isPartial}
+                    />
+                  )}
+                  {showCost && (
+                    <CostCell event={e as RequestEvent} isPartial={isPartial} />
+                  )}
+                </tr>
+              );
+            })
           ) : (
             <tr>
               <td
@@ -196,6 +242,36 @@ export function RequestEventsTable({
   );
 }
 
+// ─── Session chip ────────────────────────────────────────────────────────────
+
+export function SessionChip({ sessionId }: { sessionId: string | null }) {
+  if (!sessionId) {
+    return <span className="text-text-faint">{DASH}</span>;
+  }
+  const color = getSessionColor(sessionId);
+  const short =
+    sessionId.length <= 8
+      ? sessionId
+      : `${sessionId.slice(0, 3)}…${sessionId.slice(-4)}`;
+  return (
+    <span
+      title={sessionId}
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm border text-[10px] font-mono tabular-nums leading-none"
+      style={{
+        backgroundColor: color.bg,
+        color: color.fg,
+        borderColor: color.border,
+      }}
+    >
+      <span
+        className="h-1.5 w-1.5 rounded-full shrink-0"
+        style={{ backgroundColor: color.fg }}
+      />
+      {short}
+    </span>
+  );
+}
+
 // ─── Token cell ──────────────────────────────────────────────────────────────
 
 type TokenBreakdown = {
@@ -236,7 +312,13 @@ function hitRatioPercent(b: TokenBreakdown): number {
   return Math.round((b.cr / denom) * 100);
 }
 
-function TokenCell({ event }: { event: RequestEvent }) {
+function TokenCell({
+  event,
+  isPartial,
+}: {
+  event: RequestEvent;
+  isPartial?: boolean;
+}) {
   const b = tokenBreakdown(event);
   const hit = hitRatioPercent(b);
   const inp = splitNum(totalInputTokens(b));
@@ -246,29 +328,34 @@ function TokenCell({ event }: { event: RequestEvent }) {
     <BreakdownPopover
       title="Tokens"
       rows={[
-        { label: 'Input', value: b.input, color: 'bg-sky-400', fmt: fmtTokens },
+        {
+          label: 'Input',
+          value: b.input,
+          color: SLICE_COLORS.input,
+          fmt: fmtTokens,
+        },
         {
           label: 'Output',
           value: b.output,
-          color: 'bg-violet-400',
+          color: SLICE_COLORS.output,
           fmt: fmtTokens,
         },
         {
           label: 'Cache create 5m',
           value: b.cc_5m,
-          color: 'bg-amber-400',
+          color: SLICE_COLORS.cache_create_5m,
           fmt: fmtTokens,
         },
         {
           label: 'Cache create 1h',
           value: b.cc_1h,
-          color: 'bg-amber-700',
+          color: SLICE_COLORS.cache_create_1h,
           fmt: fmtTokens,
         },
         {
           label: 'Cache read',
           value: b.cr,
-          color: 'bg-emerald-400',
+          color: SLICE_COLORS.cache_read,
           fmt: fmtTokens,
         },
       ]}
@@ -281,7 +368,12 @@ function TokenCell({ event }: { event: RequestEvent }) {
       onClick={(e) => e.stopPropagation()}
     >
       <Hint label={popover}>
-        <div className="px-3 py-2 cursor-help block">
+        <div
+          className={cx(
+            'px-3 py-2 cursor-help block',
+            isPartial ? 'animate-pulse' : '',
+          )}
+        >
           <div className="flex items-baseline justify-end tabular-nums leading-tight">
             <span className="shrink-0 w-[4ch] text-right text-sky-400">
               {inp.value}
@@ -315,11 +407,11 @@ function TokenCell({ event }: { event: RequestEvent }) {
           </div>
           <Sparkline
             segments={[
-              { value: b.input, color: 'bg-sky-400' },
-              { value: b.output, color: 'bg-violet-400' },
-              { value: b.cc_5m, color: 'bg-amber-400' },
-              { value: b.cc_1h, color: 'bg-amber-700' },
-              { value: b.cr, color: 'bg-emerald-400' },
+              { value: b.input, color: SLICE_COLORS.input },
+              { value: b.output, color: SLICE_COLORS.output },
+              { value: b.cc_5m, color: SLICE_COLORS.cache_create_5m },
+              { value: b.cc_1h, color: SLICE_COLORS.cache_create_1h },
+              { value: b.cr, color: SLICE_COLORS.cache_read },
             ]}
           />
         </div>
@@ -356,11 +448,17 @@ function costBreakdown(e: RequestEvent): CostBreakdownT {
   return { input, output, cc_5m, cc_1h, cr, total, hasComponents };
 }
 
-function CostCell({ event }: { event: RequestEvent }) {
+function CostCell({
+  event,
+  isPartial,
+}: {
+  event: RequestEvent;
+  isPartial?: boolean;
+}) {
   const c = costBreakdown(event);
 
-  // No cost data at all: render plain dash, no popover.
-  if (event.cost_usd_micros == null && !c.hasComponents) {
+  // No cost data at all and not partial: render plain dash, no popover.
+  if (!isPartial && event.cost_usd_micros == null && !c.hasComponents) {
     return (
       <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap text-text-faint">
         {DASH}
@@ -370,44 +468,42 @@ function CostCell({ event }: { event: RequestEvent }) {
 
   const popover = (
     <BreakdownPopover
-      title="Cost"
+      title={isPartial ? 'Estimated Cost' : 'Cost'}
+      showZeroRows={true}
+      isPartial={isPartial}
       rows={[
         {
           label: 'Input',
           value: c.input,
-          color: 'bg-sky-400',
-          fmt: fmtUsd,
+          color: SLICE_COLORS.input,
+          fmt: formatCostMicros,
         },
         {
           label: 'Output',
           value: c.output,
-          color: 'bg-violet-400',
-          fmt: fmtUsd,
+          color: SLICE_COLORS.output,
+          fmt: formatCostMicros,
         },
         {
           label: 'Cache create 5m',
           value: c.cc_5m,
-          color: 'bg-amber-400',
-          fmt: fmtUsd,
+          color: SLICE_COLORS.cache_create_5m,
+          fmt: formatCostMicros,
         },
         {
           label: 'Cache create 1h',
           value: c.cc_1h,
-          color: 'bg-amber-700',
-          fmt: fmtUsd,
+          color: SLICE_COLORS.cache_create_1h,
+          fmt: formatCostMicros,
         },
         {
           label: 'Cache read',
           value: c.cr,
-          color: 'bg-emerald-400',
-          fmt: fmtUsd,
+          color: SLICE_COLORS.cache_read,
+          fmt: formatCostMicros,
         },
       ]}
-      footer={
-        c.hasComponents && c.total > 0
-          ? { label: 'Total', value: c.total, fmt: fmtUsd }
-          : null
-      }
+      footer={{ label: 'Total', value: c.total, fmt: formatCostMicros }}
     />
   );
 
@@ -417,18 +513,25 @@ function CostCell({ event }: { event: RequestEvent }) {
       onClick={(e) => e.stopPropagation()}
     >
       <Hint label={popover}>
-        <div className="px-3 py-2 cursor-help block">
+        <div
+          className={cx(
+            'px-3 py-2 cursor-help block',
+            isPartial ? 'animate-pulse' : '',
+          )}
+        >
           <div className="text-right tabular-nums leading-tight">
-            {fmtUsdCompact(c.total)}
+            {isPartial
+              ? `Est. ${c.total > 0 ? formatCostMicros(c.total) : '—'}`
+              : formatCostMicros(c.total)}
           </div>
           {c.hasComponents ? (
             <Sparkline
               segments={[
-                { value: c.input, color: 'bg-sky-400' },
-                { value: c.output, color: 'bg-violet-400' },
-                { value: c.cc_5m, color: 'bg-amber-400' },
-                { value: c.cc_1h, color: 'bg-amber-700' },
-                { value: c.cr, color: 'bg-emerald-400' },
+                { value: c.input, color: SLICE_COLORS.input },
+                { value: c.output, color: SLICE_COLORS.output },
+                { value: c.cc_5m, color: SLICE_COLORS.cache_create_5m },
+                { value: c.cc_1h, color: SLICE_COLORS.cache_create_1h },
+                { value: c.cr, color: SLICE_COLORS.cache_read },
               ]}
             />
           ) : (
@@ -454,15 +557,20 @@ export function Sparkline({ segments }: { segments: SparkSegment[] }) {
   }
   return (
     <div className="mt-1 h-1 w-full rounded-full overflow-hidden flex bg-overlay-1">
-      {segments.map((s, i) =>
-        s.value > 0 ? (
+      {segments.map((s, i) => {
+        if (s.value <= 0) return null;
+        const isTailwindBg = /(^|\s)bg-/.test(s.color);
+        return (
           <span
             key={i}
-            className={cx('h-full', s.color)}
-            style={{ width: `${(s.value / total) * 100}%` }}
+            className={cx('h-full', isTailwindBg ? s.color : undefined)}
+            style={{
+              width: `${(s.value / total) * 100}%`,
+              backgroundColor: isTailwindBg ? undefined : s.color,
+            }}
           />
-        ) : null,
-      )}
+        );
+      })}
     </div>
   );
 }
@@ -480,12 +588,16 @@ function BreakdownPopover({
   title,
   rows,
   footer,
+  showZeroRows,
+  isPartial,
 }: {
   title: string;
   rows: PopoverRow[];
   footer?: { label: string; value: number; fmt: (v: number) => string } | null;
+  showZeroRows?: boolean;
+  isPartial?: boolean;
 }) {
-  const visible = rows.filter((r) => r.value > 0);
+  const visible = showZeroRows ? rows : rows.filter((r) => r.value > 0);
   const total = rows.reduce((a, r) => a + r.value, 0);
   return (
     <div className="min-w-[200px] font-mono">
@@ -498,22 +610,27 @@ function BreakdownPopover({
         <div className="flex flex-col gap-1">
           {visible.map((r) => {
             const pct = total > 0 ? Math.round((r.value / total) * 100) : 0;
+            const isZero = r.value <= 0;
             return (
               <div
                 key={r.label}
-                className="flex items-center gap-2 text-[11px]"
+                className={cx(
+                  'flex items-center gap-2 text-[11px]',
+                  isZero ? 'opacity-50' : '',
+                )}
               >
                 <span
-                  className={cx('h-2 w-2 rounded-full shrink-0', r.color)}
+                  className="h-2 w-2 rounded-full shrink-0"
+                  style={{ backgroundColor: r.color }}
                 />
                 <span className="text-text-muted flex-1 truncate">
                   {r.label}
                 </span>
                 <span className="tabular-nums text-text w-14 text-right">
-                  {r.fmt(r.value)}
+                  {isZero && isPartial ? '—' : r.fmt(r.value)}
                 </span>
                 <span className="tabular-nums text-text-faint w-9 text-right">
-                  {pct}%
+                  {isZero ? '—' : `${pct}%`}
                 </span>
               </div>
             );
@@ -525,7 +642,7 @@ function BreakdownPopover({
           <span className="h-2 w-2 shrink-0" />
           <span className="text-text-faint flex-1">{footer.label}</span>
           <span className="tabular-nums text-text w-14 text-right">
-            {footer.fmt(footer.value)}
+            {isPartial && footer.value <= 0 ? '—' : footer.fmt(footer.value)}
           </span>
           <span className="w-9" />
         </div>

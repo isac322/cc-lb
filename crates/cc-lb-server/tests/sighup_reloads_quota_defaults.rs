@@ -23,15 +23,15 @@ async fn sighup_reloads_body_defaults() {
         &config_path,
         reload_common::load_config(&config_path),
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     ));
     let app = cc_lb_admin::router(AdminState {
         storage: None,
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
-            Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_core::SystemClock),
+        limit_engine: cc_lb_engine::api_keys::limit_engine::LimitEngine::new(
+            Arc::new(cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
+            Arc::new(cc_lb_engine::SystemClock),
         ),
         lifecycle: None,
         audit_sink: None,
@@ -47,8 +47,9 @@ async fn sighup_reloads_body_defaults() {
         warmup_dialect_dispatcher: None,
         subscription_metadata_hook: None,
         event_bus: None,
+        storage_tail: cc_lb_admin::events::storage_tail_channel(),
         start_time: std::time::Instant::now(),
-        clock: Arc::new(cc_lb_core::SystemClock),
+        clock: Arc::new(cc_lb_engine::SystemClock),
     });
     let before_admin = admin_config(app.clone()).await;
     assert_eq!(before_admin["body"]["messages_cap_bytes"], json!(100));

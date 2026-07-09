@@ -3,6 +3,7 @@ use cc_lb_storage_api::{
     PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate, StorageError,
     StorageResult, validate_identifier,
 };
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 use uuid::Uuid;
@@ -348,6 +349,9 @@ async fn cascade_plugin_chains_in_tx(
 
 fn principal_from_row(row: SqliteRow) -> StorageResult<PrincipalRecord> {
     let id = row.try_get::<String, _>("id").map_err(map_sqlx_error)?;
+    let router_terminal_strategy = row
+        .try_get::<String, _>("router_terminal_strategy")
+        .map_err(map_sqlx_error)?;
     let allowed_models = row
         .try_get::<String, _>("allowed_models")
         .map_err(map_sqlx_error)?;
@@ -390,14 +394,26 @@ fn principal_from_row(row: SqliteRow) -> StorageResult<PrincipalRecord> {
         revision: i64_to_u64(revision, "principal.revision")?,
         created_at_unix_secs: i64_to_u64(created_at, "principal.created_at")?,
         updated_at_unix_secs: i64_to_u64(updated_at, "principal.updated_at")?,
-        router_terminal_strategy: serde_json::from_value(Value::String(
-            row.try_get::<String, _>("router_terminal_strategy")
-                .map_err(map_sqlx_error)?,
-        ))
-        .map_err(|error| StorageError::Corrupted {
-            message: format!("invalid principal router_terminal_strategy: {error}"),
-        })?,
+        router_terminal_strategy: terminal_strategy_from_db_value(&router_terminal_strategy),
     })
+}
+
+fn terminal_strategy_from_db_value<T>(value: &str) -> T
+where
+    T: DeserializeOwned + Default,
+{
+    match serde_json::from_value(Value::String(value.to_owned())) {
+        Ok(strategy) => strategy,
+        Err(error) => {
+            tracing::warn!(
+                storage_backend = "sqlite",
+                router_terminal_strategy = %value,
+                %error,
+                "unexpected principal router_terminal_strategy; defaulting to first-pick"
+            );
+            T::default()
+        }
+    }
 }
 
 fn map_sqlite_error(error: sqlx::Error) -> StorageError {

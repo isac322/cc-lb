@@ -15,7 +15,10 @@ use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParam
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use sqlx::postgres::PgPoolOptions;
 use storage_sqlx::postgres::PgPoolOptions as StoragePgPoolOptions;
-use testcontainers_modules::{postgres::Postgres, testcontainers::runners::AsyncRunner};
+use testcontainers_modules::{
+    postgres::Postgres,
+    testcontainers::{ImageExt, runners::AsyncRunner},
+};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -48,7 +51,7 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
     let storage = Arc::new(cc_lb_storage_postgres::PostgresStorage::new(
         storage_pool.clone(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     ));
     storage.initialize(BackendKind::Postgres).await?;
 
@@ -91,7 +94,7 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
             stores: stores_from_storage(storage.clone()),
             aead,
             oauth_cfg,
-            clock: Arc::new(cc_lb_core::SystemClock),
+            clock: Arc::new(cc_lb_clock::SystemClock),
         },
         replica_id: Uuid::new_v4(),
         metadata_hook: None,
@@ -210,7 +213,7 @@ where
             return Ok(());
         }
     };
-    let container = match Postgres::default().start().await {
+    let container = match Postgres::default().with_tag("18-alpine").start().await {
         Ok(container) => container,
         Err(error) => {
             eprintln!(

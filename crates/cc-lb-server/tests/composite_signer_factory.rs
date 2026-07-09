@@ -45,7 +45,7 @@ impl Fixture {
         let dir = tempfile::tempdir().expect("tempdir");
         let database_url = format!("sqlite://{}", dir.path().join("composite.sqlite").display());
         let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
                 .await
                 .expect("storage"),
         );
@@ -58,6 +58,7 @@ impl Fixture {
             upstream_subscription_quotas: storage.clone(),
             upstream_subscription_metadata: storage.clone(),
             organization_metadata: storage.clone(),
+            plan_tiers: storage.clone(),
             prompt_cache_observations: storage.clone(),
             anthropic_compatibility_kv: storage.clone(),
             audit: Some(storage.clone()),
@@ -169,7 +170,7 @@ async fn oauth_upstream_routes_to_oauth_signer() {
         fixture.storage.clone(),
         fixture.aead.clone(),
         "oauth-test",
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     );
 
     let signer = factory
@@ -241,9 +242,11 @@ async fn router_choice_selects_matching_oauth_upstream() {
         &runtime,
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        None,
+        None,
         1800,
         &cc_lb_config::Config::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect("dynamic view builds");
@@ -283,9 +286,11 @@ async fn empty_router_choice_errors() {
         &runtime,
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        None,
+        None,
         1800,
         &cc_lb_config::Config::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect("dynamic view builds");
@@ -321,7 +326,7 @@ async fn missing_oauth_credentials_returns_proper_signer_error() {
         fixture.storage.clone(),
         fixture.aead.clone(),
         "oauth-missing",
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     );
 
     let result = factory
@@ -370,6 +375,7 @@ fn encrypted(
 fn shaped_request() -> ShapedRequest {
     let ctx = RequestContext {
         request_id: "req-1".to_owned(),
+        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
@@ -377,6 +383,7 @@ fn shaped_request() -> ShapedRequest {
         body_bytes: Bytes::from_static(b"{}"),
         cache_breakpoints: Vec::new(),
         canonical_model_id: String::new(),
+        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "principal".to_owned(),
@@ -412,9 +419,9 @@ impl UpstreamDialect for DirectDialect {
 }
 
 fn now_secs() -> u64 {
-    use cc_lb_core::Clock as _;
+    use cc_lb_engine::Clock as _;
 
-    let clock = cc_lb_core::SystemClock;
+    let clock = cc_lb_engine::SystemClock;
     clock
         .now()
         .duration_since(std::time::UNIX_EPOCH)

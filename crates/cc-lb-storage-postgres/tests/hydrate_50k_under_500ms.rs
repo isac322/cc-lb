@@ -120,7 +120,7 @@ impl Fixture {
     fn store(&self) -> PostgresStorage {
         PostgresStorage::new(
             self.pool.clone(),
-            std::sync::Arc::new(cc_lb_core::SystemClock),
+            std::sync::Arc::new(cc_lb_clock::SystemClock),
         )
     }
 
@@ -156,7 +156,7 @@ fn observation(
     PromptCacheObservationRecord {
         upstream_id,
         canonical_model_id: "claude-sonnet-4-5-20250929".to_owned(),
-        prefix_hash: format!("sha256:t30-postgres-{upstream_index:02}-{record_index:05}"),
+        v3_prefix_key: format!("v3:t30-postgres-{upstream_index:02}-{record_index:05}"),
         ttl_class: ttl_class(record_index),
         expires_at_unix_secs: if is_expired {
             NOW_UNIX_SECS - 1
@@ -164,7 +164,12 @@ fn observation(
             NOW_UNIX_SECS + 300
         },
         last_observed_at_unix_secs: NOW_UNIX_SECS.saturating_sub(60),
-        hash_schema_version: 2,
+        hash_schema_version: 3,
+        prefix_content_block_index: u32::try_from(record_index).expect("record index fits u32"),
+        estimated_prefix_tokens: 1_000 + record_index as u64,
+        token_estimate_source: "local_tiktoken_v1".to_owned(),
+        last_provider_cache_read_tokens: Some(900 + record_index as u64),
+        last_provider_cache_creation_tokens: Some(100),
     }
 }
 

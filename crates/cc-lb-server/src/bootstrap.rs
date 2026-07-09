@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use cc_lb_config::Config;
-use cc_lb_core::clock::{Clock, unix_secs};
+use cc_lb_engine::clock::{Clock, unix_secs};
 use cc_lb_storage_api::plugin_registry::{PluginChainEntryInput, PluginSlot, WasmRegistryEntry};
 use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind};
 use cc_lb_storage_api::sparse_order;
@@ -448,7 +448,7 @@ fn parse_upstream_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_core::clock::TestClock;
+    use cc_lb_engine::clock::TestClock;
     use cc_lb_storage_api::{
         BackendKind, MetaStore, PluginRegistryStore, PrincipalStore, WasmBlob,
         WasmRegistryEntryInput,
@@ -618,12 +618,20 @@ plugins = ["missing-plugin"]
         assert!(entries.is_empty());
     }
 
+    #[test]
+    fn parse_plugin_slot_rejects_response_transform_slots() {
+        assert_eq!(parse_plugin_slot("transform_response"), None);
+        assert_eq!(parse_plugin_slot("TransformResponse"), None);
+        assert_eq!(parse_plugin_slot("transform_sse_event"), None);
+        assert_eq!(parse_plugin_slot("TransformSseEvent"), None);
+    }
+
     async fn fixture() -> (tempfile::TempDir, Storage) {
         let dir = tempfile::tempdir().unwrap();
         let database_url = format!("sqlite://{}", dir.path().join("storage.sqlite").display());
         let storage = cc_lb_storage_sqlite::open_sqlite(
             &database_url,
-            std::sync::Arc::new(cc_lb_core::SystemClock),
+            std::sync::Arc::new(cc_lb_engine::SystemClock),
         )
         .await
         .unwrap();

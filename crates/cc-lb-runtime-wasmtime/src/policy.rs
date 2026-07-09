@@ -44,7 +44,7 @@ pub struct PluginWireBounds {
 
 impl PluginWireBounds {
     /// `output_body_bytes` = 100 MiB matches `DEFAULT_FILES_CAP_BYTES`
-    /// in `cc-lb-core::lifecycle` so the shape output plus the rkyv
+    /// in `cc-lb-engine::lifecycle` so the shape output plus the rkyv
     /// envelope can carry the largest legitimate request body without
     /// rejection at the plugin boundary.
     pub const DEFAULT_OUTPUT_BODY_BYTES: u64 = 100 * 1024 * 1024;

@@ -714,8 +714,11 @@ dependencies = [
  "blake3",
  "bytes",
  "cc-lb-aead",
+ "cc-lb-clock",
  "cc-lb-config",
- "cc-lb-core",
+ "cc-lb-contract",
+ "cc-lb-control",
+ "cc-lb-engine",
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
@@ -802,7 +805,65 @@ dependencies = [
 ]
 
 [[package]]
-name = "cc-lb-core"
+name = "cc-lb-contract"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-plugin-api",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "cc-lb-control"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "base64",
+ "bincode",
+ "bytes",
+ "cc-lb-clock",
+ "cc-lb-config",
+ "cc-lb-contract",
+ "cc-lb-plugin-api",
+ "cc-lb-storage-api",
+ "chrono",
+ "dashmap",
+ "globset",
+ "http",
+ "http-body-util",
+ "hyper-rustls",
+ "hyper-util",
+ "loom",
+ "metrics",
+ "parking_lot",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "ulid",
+ "uuid",
+]
+
+[[package]]
+name = "cc-lb-dialect-anthropic"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "cc-lb-plugin-api",
+ "http",
+ "url",
+]
+
+[[package]]
+name = "cc-lb-engine"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
@@ -816,7 +877,8 @@ dependencies = [
  "cc-lb-aead",
  "cc-lb-clock",
  "cc-lb-config",
- "cc-lb-lifecycle",
+ "cc-lb-contract",
+ "cc-lb-control",
  "cc-lb-observability",
  "cc-lb-plugin-api",
  "cc-lb-pricing",
@@ -837,12 +899,17 @@ dependencies = [
  "insta",
  "loom",
  "metrics",
+ "metrics-exporter-prometheus",
  "parking_lot",
+ "proptest",
  "rand 0.10.1",
+ "reqwest",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "sonic-rs",
+ "sqlx 0.9.0",
  "subtle",
  "tempfile",
  "thiserror 2.0.18",
@@ -856,27 +923,6 @@ dependencies = [
  "url",
  "uuid",
  "zstd",
-]
-
-[[package]]
-name = "cc-lb-dialect-anthropic"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "cc-lb-plugin-api",
- "http",
- "url",
-]
-
-[[package]]
-name = "cc-lb-lifecycle"
-version = "0.1.0"
-dependencies = [
- "cc-lb-plugin-api",
- "cc-lb-storage-api",
- "serde",
- "serde_json",
- "uuid",
 ]
 
 [[package]]
@@ -905,6 +951,7 @@ name = "cc-lb-observability"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "cc-lb-contract",
  "cc-lb-plugin-api",
  "http",
  "insta",
@@ -918,10 +965,11 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tower-http",
+ "tower-http 0.7.0",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -946,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-plugin-api"
-version = "0.5.0"
+version = "0.11.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -971,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-plugin-wire"
-version = "0.3.0"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "rkyv",
@@ -986,6 +1034,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "cc-lb-clock",
+ "cc-lb-contract",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
  "futures-lite",
@@ -1003,6 +1052,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
  "wiremock",
 ]
 
@@ -1013,7 +1063,7 @@ dependencies = [
  "async-stream",
  "axum",
  "bytes",
- "cc-lb-core",
+ "cc-lb-engine",
  "cc-lb-plugin-api",
  "http",
  "http-body-util",
@@ -1061,8 +1111,9 @@ dependencies = [
  "axum",
  "base64",
  "cc-lb-aead",
+ "cc-lb-clock",
  "cc-lb-config",
- "cc-lb-core",
+ "cc-lb-engine",
  "cc-lb-oauth-protocol",
  "cc-lb-pricing",
  "cc-lb-server",
@@ -1117,8 +1168,10 @@ dependencies = [
  "cc-lb-admin",
  "cc-lb-aead",
  "cc-lb-config",
- "cc-lb-core",
+ "cc-lb-contract",
+ "cc-lb-control",
  "cc-lb-dialect-anthropic",
+ "cc-lb-engine",
  "cc-lb-oauth-protocol",
  "cc-lb-observability",
  "cc-lb-plugin-api",
@@ -1133,6 +1186,7 @@ dependencies = [
  "chrono",
  "clap",
  "fake-anthropic",
+ "futures-util",
  "hex",
  "http",
  "http-body-util",
@@ -1146,8 +1200,10 @@ dependencies = [
  "oauth2",
  "parking_lot",
  "rand 0.10.1",
+ "reqwest",
  "rustls",
  "rustls-pemfile",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1164,7 +1220,7 @@ dependencies = [
  "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tower",
- "tower-http",
+ "tower-http 0.7.0",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -1199,7 +1255,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cc-lb-aead",
- "cc-lb-core",
+ "cc-lb-clock",
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-api",
  "cc-lb-storage-api",
@@ -1228,9 +1284,11 @@ name = "cc-lb-storage-api"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "bytes",
  "cc-lb-aead",
- "cc-lb-core",
+ "cc-lb-contract",
+ "cc-lb-engine",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "cc-lb-storage-sqlite",
@@ -1252,7 +1310,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "cc-lb-aead",
- "cc-lb-core",
+ "cc-lb-engine",
  "cc-lb-plugin-wire",
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
@@ -1277,7 +1335,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cc-lb-aead",
- "cc-lb-core",
+ "cc-lb-clock",
  "cc-lb-plugin-wire",
  "cc-lb-pricing",
  "cc-lb-storage-api",
@@ -1301,8 +1359,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "cc-lb-aead",
+ "cc-lb-clock",
  "cc-lb-config",
- "cc-lb-core",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "cc-lb-storage-api",
@@ -1311,6 +1369,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sqlx 0.9.0",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -1325,7 +1384,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "cc-lb-config",
- "cc-lb-core",
+ "cc-lb-engine",
  "cc-lb-server",
  "fake-anthropic",
  "ring",
@@ -1787,9 +1846,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -2478,9 +2537,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 5.3.0",
  "wasip2",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2883,13 +2944,16 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
+ "base64",
  "bytes",
  "futures-channel",
  "futures-util",
  "http",
  "http-body",
  "hyper",
+ "ipnet",
  "libc",
+ "percent-encoding",
  "pin-project-lite",
  "socket2",
  "tokio",
@@ -3375,6 +3439,12 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "lru-slab"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "mach2"
@@ -4289,6 +4359,61 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
 
 [[package]]
+name = "quinn"
+version = "0.11.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c1a41e437b6bbd489372cd4971de128e85c855f56c57f283d20ff016cf7c0a8"
+dependencies = [
+ "bytes",
+ "cfg_aliases",
+ "pin-project-lite",
+ "quinn-proto",
+ "quinn-udp",
+ "rustc-hash",
+ "rustls",
+ "socket2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "quinn-proto"
+version = "0.11.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fcb935c5bec503c2f0e306bdd3e58bb9029dcb14fa8d9ac76e3a5256ac0763e"
+dependencies = [
+ "bytes",
+ "getrandom 0.3.4",
+ "lru-slab",
+ "rand 0.9.4",
+ "ring",
+ "rustc-hash",
+ "rustls",
+ "rustls-pki-types",
+ "slab",
+ "thiserror 2.0.18",
+ "tinyvec",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "quinn-udp"
+version = "0.5.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "addec6a0dcad8a8d96a771f815f0eaf55f9d1805756410b39f5fa81332574cbd"
+dependencies = [
+ "cfg_aliases",
+ "libc",
+ "once_cell",
+ "socket2",
+ "tracing",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4553,6 +4678,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "reqwest"
+version = "0.12.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
+dependencies = [
+ "base64",
+ "bytes",
+ "futures-core",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "js-sys",
+ "log",
+ "percent-encoding",
+ "pin-project-lite",
+ "quinn",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sync_wrapper",
+ "tokio",
+ "tokio-rustls",
+ "tower",
+ "tower-http 0.6.11",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "webpki-roots 1.0.8",
+]
+
+[[package]]
 name = "resolv-conf"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4732,6 +4895,7 @@ version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "30a7197ae7eb376e574fe940d068c30fe0462554a3ddbe4eca7838e049c937a9"
 dependencies = [
+ "web-time",
  "zeroize",
 ]
 
@@ -5680,6 +5844,9 @@ name = "sync_wrapper"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
+dependencies = [
+ "futures-core",
+]
 
 [[package]]
 name = "synstructure"
@@ -5792,7 +5959,7 @@ name = "tests-integration"
 version = "0.1.0"
 dependencies = [
  "cc-lb-config",
- "cc-lb-core",
+ "cc-lb-engine",
  "cc-lb-pricing",
  "cc-lb-server",
  "cc-lb-storage-api",
@@ -6214,6 +6381,24 @@ dependencies = [
 
 [[package]]
 name = "tower-http"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
+dependencies = [
+ "bitflags",
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "pin-project-lite",
+ "tower",
+ "tower-layer",
+ "tower-service",
+ "url",
+]
+
+[[package]]
+name = "tower-http"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b11f75e912b0c2be01b63d8cf8057b8c3f97cf34abb3d431a3a4c8675498e233"
@@ -6601,6 +6786,16 @@ dependencies = [
  "rustversion",
  "wasm-bindgen-macro",
  "wasm-bindgen-shared",
+]
+
+[[package]]
+name = "wasm-bindgen-futures"
+version = "0.4.75"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "503b14d284f2c8dac03b819967e155ea753f573586193b2b2c95990cb5d69280"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]

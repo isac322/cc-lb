@@ -45,6 +45,7 @@ pub const COVERAGE_CHECKLIST: &[&str] = &[
     "lifecycle_limit_rejection_audit_subscriber",
     "lifecycle_api_key_metrics_subscriber",
     "lifecycle_cache_hit_miss_subscriber",
+    "lifecycle_routing_tier_subscriber",
     "lifecycle_prompt_cache_drift_subscriber",
     "lifecycle_prompt_cache_observation_subscriber",
     "lifecycle_limit_reconcile_subscriber",
@@ -209,10 +210,10 @@ fn strip_schema_defaults(value: &mut Value) {
 
 pub async fn get_draft(
     storage: &dyn Storage,
-    clock: &dyn cc_lb_core::Clock,
+    clock: &dyn cc_lb_clock::Clock,
 ) -> Result<ConfigDraftResponse, SettingsError> {
     let state = storage.get_config_draft().await?;
-    if invalid_draft_expired(&state, cc_lb_core::clock::unix_secs(clock.now())) {
+    if invalid_draft_expired(&state, cc_lb_clock::unix_secs(clock.now())) {
         let revision = state.revision;
         let _ = storage
             .put_config_draft(ConfigDraftState::default(), revision)
@@ -504,8 +505,11 @@ fn reject_unknown_top_level_keys(value: &Value) -> Result<(), String> {
         "lifecycle_limit_rejection_audit_subscriber",
         "lifecycle_api_key_metrics_subscriber",
         "lifecycle_cache_hit_miss_subscriber",
+        "lifecycle_routing_tier_subscriber",
         "lifecycle_prompt_cache_drift_subscriber",
         "lifecycle_prompt_cache_observation_subscriber",
+        "event_bus",
+        "cluster",
     ];
     let allowed: BTreeSet<&str> = allowed.into_iter().collect();
     let unknown: Vec<&str> = object

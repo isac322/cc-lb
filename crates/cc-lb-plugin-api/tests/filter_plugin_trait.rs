@@ -2,8 +2,8 @@
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, Principal, PrincipalKind, RequestContext,
-    TerminalStrategy, UpstreamCandidate, UpstreamKind,
+    CachePricingSummary, FilterError, FilterOutput, FilterPlugin, Principal, PrincipalKind,
+    RequestContext, TerminalStrategy, UpstreamCandidate, UpstreamKind,
 };
 use http::Method;
 use uuid::Uuid;
@@ -14,11 +14,15 @@ fn filter_output_equality() {
         kept_upstream_ids: vec![Uuid::new_v4()],
         reason: "allowed".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
+        cache_affinity: None,
     };
     let output2 = FilterOutput {
         kept_upstream_ids: output1.kept_upstream_ids.clone(),
         reason: "allowed".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
+        cache_affinity: None,
     };
     assert_eq!(output1, output2);
 }
@@ -31,11 +35,15 @@ fn filter_output_inequality_different_ids() {
         kept_upstream_ids: vec![id1],
         reason: "allowed".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
+        cache_affinity: None,
     };
     let output2 = FilterOutput {
         kept_upstream_ids: vec![id2],
         reason: "allowed".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
+        cache_affinity: None,
     };
     assert_ne!(output1, output2);
 }
@@ -47,11 +55,15 @@ fn filter_output_inequality_different_reason() {
         kept_upstream_ids: vec![id],
         reason: "allowed".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
+        cache_affinity: None,
     };
     let output2 = FilterOutput {
         kept_upstream_ids: vec![id],
         reason: "rejected".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
+        cache_affinity: None,
     };
     assert_ne!(output1, output2);
 }
@@ -63,6 +75,8 @@ fn filter_output_debug_formatting() {
         kept_upstream_ids: vec![id],
         reason: "test reason".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
+        cache_affinity: None,
     };
     let debug_str = format!("{:?}", output);
     assert!(debug_str.contains("FilterOutput"));
@@ -76,6 +90,8 @@ fn filter_output_clone() {
         kept_upstream_ids: vec![id],
         reason: "original".to_string(),
         per_candidate_reasons: Vec::new(),
+        subscription_preference: None,
+        cache_affinity: None,
     };
     let cloned = output.clone();
     assert_eq!(output, cloned);
@@ -133,6 +149,8 @@ impl FilterPlugin for AllowAllFilter {
             kept_upstream_ids: ids,
             reason: "all candidates allowed".to_string(),
             per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
+            cache_affinity: None,
         })
     }
 
@@ -163,6 +181,8 @@ impl FilterPlugin for SelectiveFilter {
             kept_upstream_ids: filtered,
             reason: "filtered to production upstreams".to_string(),
             per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
+            cache_affinity: None,
         })
     }
 
@@ -212,6 +232,7 @@ fn allow_all_filter_execution() {
     let filter = AllowAllFilter;
     let ctx = RequestContext {
         request_id: "req-1".to_string(),
+        thread_id: None,
         downstream_headers: http::HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_string(),
@@ -219,6 +240,7 @@ fn allow_all_filter_execution() {
         body_bytes: Bytes::new(),
         cache_breakpoints: Vec::new(),
         canonical_model_id: "claude-3-sonnet".to_string(),
+        cache_pricing: CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "principal-1".to_string(),
@@ -271,6 +293,7 @@ fn selective_filter_execution() {
     let filter = SelectiveFilter;
     let ctx = RequestContext {
         request_id: "req-2".to_string(),
+        thread_id: None,
         downstream_headers: http::HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_string(),
@@ -278,6 +301,7 @@ fn selective_filter_execution() {
         body_bytes: Bytes::new(),
         cache_breakpoints: Vec::new(),
         canonical_model_id: "claude-3-sonnet".to_string(),
+        cache_pricing: CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "principal-2".to_string(),
@@ -329,6 +353,7 @@ fn error_filter_execution() {
     let filter = ErrorProducingFilter;
     let ctx = RequestContext {
         request_id: "req-3".to_string(),
+        thread_id: None,
         downstream_headers: http::HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_string(),
@@ -336,6 +361,7 @@ fn error_filter_execution() {
         body_bytes: Bytes::new(),
         cache_breakpoints: Vec::new(),
         canonical_model_id: "claude-3-sonnet".to_string(),
+        cache_pricing: CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "principal-3".to_string(),
@@ -384,12 +410,7 @@ fn terminal_strategy_equality() {
 
 #[test]
 fn terminal_strategy_serialization() {
-    let strategies = vec![
-        TerminalStrategy::FirstPick,
-        TerminalStrategy::Random,
-        TerminalStrategy::RoundRobin,
-        TerminalStrategy::LeastConnections,
-    ];
+    let strategies = vec![TerminalStrategy::FirstPick, TerminalStrategy::Random];
 
     for strategy in strategies {
         let json = serde_json::to_string(&strategy).expect("serialization failed");
@@ -408,14 +429,6 @@ fn terminal_strategy_serialization_format() {
     let random = TerminalStrategy::Random;
     let json = serde_json::to_string(&random).unwrap();
     assert_eq!(json, "\"random\"");
-
-    let round_robin = TerminalStrategy::RoundRobin;
-    let json = serde_json::to_string(&round_robin).unwrap();
-    assert_eq!(json, "\"round-robin\"");
-
-    let least_conn = TerminalStrategy::LeastConnections;
-    let json = serde_json::to_string(&least_conn).unwrap();
-    assert_eq!(json, "\"least-connections\"");
 }
 
 #[test]
@@ -427,14 +440,13 @@ fn terminal_strategy_deserialization_from_kebab_case() {
     let json = "\"random\"";
     let strategy: TerminalStrategy = serde_json::from_str(json).unwrap();
     assert_eq!(strategy, TerminalStrategy::Random);
+}
 
-    let json = "\"round-robin\"";
-    let strategy: TerminalStrategy = serde_json::from_str(json).unwrap();
-    assert_eq!(strategy, TerminalStrategy::RoundRobin);
-
-    let json = "\"least-connections\"";
-    let strategy: TerminalStrategy = serde_json::from_str(json).unwrap();
-    assert_eq!(strategy, TerminalStrategy::LeastConnections);
+#[test]
+fn terminal_strategy_removed_variants_do_not_deserialize() {
+    for json in ["\"round-robin\"", "\"least-connections\""] {
+        assert!(serde_json::from_str::<TerminalStrategy>(json).is_err());
+    }
 }
 
 #[test]
@@ -446,14 +458,6 @@ fn terminal_strategy_debug_formatting() {
     let random = TerminalStrategy::Random;
     let debug_str = format!("{:?}", random);
     assert_eq!(debug_str, "Random");
-
-    let round_robin = TerminalStrategy::RoundRobin;
-    let debug_str = format!("{:?}", round_robin);
-    assert_eq!(debug_str, "RoundRobin");
-
-    let least_conn = TerminalStrategy::LeastConnections;
-    let debug_str = format!("{:?}", least_conn);
-    assert_eq!(debug_str, "LeastConnections");
 }
 
 #[test]

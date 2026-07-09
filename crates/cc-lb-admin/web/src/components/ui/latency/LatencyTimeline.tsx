@@ -1178,8 +1178,14 @@ function clampPct(v: number): number {
 // Entry component
 // -----------------------------------------------------------------------------
 
-export function LatencyTimeline({ event }: { event: RequestEvent }) {
-  const total = event.duration_ms || 0;
+export function LatencyTimeline({
+  event,
+  isPartial,
+}: {
+  event: RequestEvent;
+  isPartial?: boolean;
+}) {
+  const total = isPartial ? event.elapsed_ms || 0 : event.duration_ms || 0;
   const stages = useMemo(() => buildStageDetails(event), [event]);
   const markers = useMemo(() => buildSseMarkers(event), [event]);
   const positioned = useMemo(() => {
@@ -1201,7 +1207,7 @@ export function LatencyTimeline({ event }: { event: RequestEvent }) {
 
   const sum = stages.reduce((a, s) => a + s.ms, 0);
   const unaccounted = Math.max(0, total - sum);
-  const showStreamLane = markers.length > 0;
+  const showStreamLane = markers.length > 0 && !isPartial;
 
   return (
     <div className="space-y-3">

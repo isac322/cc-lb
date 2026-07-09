@@ -35,7 +35,7 @@ pub struct WarmupDialectDispatchParams<'a> {
     pub lazy_refresher: Arc<LazyRefresher>,
     pub upstream: &'a UpstreamRecord,
     pub http: &'a WarmupHttpClient,
-    pub clock: cc_lb_core::ClockHandle,
+    pub clock: cc_lb_engine::ClockHandle,
 }
 
 #[derive(Debug, Error)]
@@ -138,6 +138,7 @@ pub async fn dispatch_warmup_with_dialect(
     });
     let ctx = RequestContext {
         request_id: Uuid::new_v4().to_string(),
+        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
@@ -145,6 +146,7 @@ pub async fn dispatch_warmup_with_dialect(
         body_bytes: Bytes::from(serde_json::to_vec(&body_json)?),
         cache_breakpoints: Vec::new(),
         canonical_model_id: WARMUP_MODEL.to_owned(),
+        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: params.upstream.id.to_string(),

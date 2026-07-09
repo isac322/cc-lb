@@ -69,10 +69,16 @@ function Section({
   );
 }
 
-export function LatencyCell({ event: e }: { event: RequestEvent }) {
+export function LatencyCell({
+  event: e,
+  isPartial,
+}: {
+  event: RequestEvent;
+  isPartial?: boolean;
+}) {
   const groups = computeStageGroups(e);
   const { value, unit } = fmtMsCompact(e.duration_ms);
-  const duration = e.duration_ms ?? 0;
+  const duration = isPartial ? (e.elapsed_ms ?? 0) : (e.duration_ms ?? 0);
 
   const setup_overhead_ms = deriveSetupOverhead(e);
 

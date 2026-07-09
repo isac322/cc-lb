@@ -155,11 +155,11 @@ pub mod single_flight {
 #[cfg(loom)]
 pub mod api_keys {
     pub mod types {
-        include!("../../../crates/cc-lb-core/src/api_keys/types.rs");
+        include!("../../../crates/cc-lb-engine/src/api_keys/types.rs");
     }
 
     pub mod concurrent_guard {
-        include!("../../../crates/cc-lb-core/src/api_keys/concurrent_guard.rs");
+        include!("../../../crates/cc-lb-engine/src/api_keys/concurrent_guard.rs");
     }
 
     pub mod principal_view {
@@ -203,6 +203,6 @@ pub mod api_keys {
     }
 
     pub mod limit_engine {
-        include!("../../../crates/cc-lb-core/src/api_keys/limit_engine.rs");
+        include!("../../../crates/cc-lb-engine/src/api_keys/limit_engine.rs");
     }
 }

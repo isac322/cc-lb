@@ -22,13 +22,13 @@
 use std::sync::Arc;
 
 use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, PerCandidateReason, Principal, RequestContext,
-    SlotKey, UpstreamCandidate,
+    FilterError, FilterOutput, FilterPlugin, PerCandidateReason, Principal, PrincipalKind,
+    RequestContext, ResponseTransformHook, SlotKey, SseEventTransformHook, UpstreamCandidate,
 };
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
 use cc_lb_plugin_wire::{
-    ArchivedFilterResponse, ClaimRef, FilterRequestRef, HeaderRef, PrincipalRef, QueryRef,
-    ShapeRequestRef, UpstreamCandidateRef, UpstreamRef,
+    ArchivedFilterResponse, CachePricingSummaryRef, ClaimRef, FilterRequestRef, HeaderRef,
+    PrincipalRef, QueryRef, ShapeRequestRef, UpstreamCandidateRef, UpstreamRef,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
@@ -37,6 +37,7 @@ use uuid::Uuid;
 use crate::cache::call_filter_hook;
 use crate::cell::{PluginCell, PluginSlot};
 use crate::error::WasmtimeRuntimeError;
+use crate::response_transform::{WasmtimeResponseTransformHook, WasmtimeSseEventTransformHook};
 
 /// `FilterPlugin` adapter backed by a wasmtime `PluginSlot`. The
 /// adapter **snapshots** the slot's [`PluginCell`] at construction
@@ -50,6 +51,7 @@ pub struct WasmtimeFilterPlugin {
     plugin_id: Uuid,
     plugin_name: String,
     runtime_config: Arc<crate::HotEngineConfig>,
+    wire_version: Option<WireVersion>,
 }
 
 impl WasmtimeFilterPlugin {
@@ -64,12 +66,18 @@ impl WasmtimeFilterPlugin {
         runtime_config: Arc<crate::HotEngineConfig>,
     ) -> Self {
         let cell = slot.current.load_full();
+        let wire_version = cell
+            .metadata
+            .hooks
+            .get(HookKind::Filter.as_str())
+            .and_then(|m| WireVersion::from_u8(m.wire_version));
         Self {
             slot_key,
             cell,
             plugin_id,
             plugin_name: plugin_name.into(),
             runtime_config,
+            wire_version,
         }
     }
 }
@@ -91,15 +99,13 @@ impl FilterPlugin for WasmtimeFilterPlugin {
             reason: format!("rkyv encode request: {e}"),
         })?;
 
-        let out_bytes = match self
-            .cell
-            .metadata
-            .hooks
-            .get(HookKind::Filter.as_str())
-            .and_then(|m| WireVersion::from_u8(m.wire_version))
-        {
+        let out_bytes = match self.wire_version {
             Some(WireVersion::V1) => call_filter_hook(&self.cell, in_bytes.as_slice()),
-            None => unreachable!("filter slot has filter metadata"),
+            None => {
+                return Err(FilterError::Runtime {
+                    reason: "plugin metadata missing filter hook".to_owned(),
+                });
+            }
         }
         .map_err(runtime_error_to_filter)?;
         // Wire-bound cap on filter output; matches the DEFAULT_FILES_CAP_BYTES
@@ -205,25 +211,49 @@ fn host_to_wire_request(
     let candidate_refs: Vec<UpstreamCandidateRef<'_>> = candidates
         .iter()
         .zip(candidate_id_bufs.iter())
-        .map(|(c, id_str)| UpstreamCandidateRef {
-            upstream_id: id_str.as_str(),
-            name: c.name.as_str(),
-            kind: c.kind.as_str(),
-            observed_at_unix_secs: c.observed_at_unix_secs,
-            predicted_cache_read_tokens: c
-                .cache_score
-                .as_ref()
-                .map(|s| s.predicted_cache_read_tokens)
-                .unwrap_or(0),
-            plan_capacity_ratio: c.plan_capacity_ratio.unwrap_or(1.0),
-            organization_type: c.organization_type.as_deref().unwrap_or(""),
-            rate_limit_tier: c.rate_limit_tier.as_deref().unwrap_or(""),
-            seat_tier: c.seat_tier.as_deref().unwrap_or(""),
+        .map(|(c, id_str)| {
+            let cache_score = c.cache_score.as_ref();
+            UpstreamCandidateRef {
+                upstream_id: id_str.as_str(),
+                name: c.name.as_str(),
+                kind: c.kind.as_str(),
+                observed_at_unix_secs: c.observed_at_unix_secs,
+                predicted_cache_read_tokens: cache_score
+                    .map(|s| s.predicted_cache_read_tokens)
+                    .unwrap_or(0),
+                predicted_cache_creation_tokens_5m: cache_score
+                    .map(|s| s.predicted_cache_creation_tokens_5m)
+                    .unwrap_or(0),
+                predicted_cache_creation_tokens_1h: cache_score
+                    .map(|s| s.predicted_cache_creation_tokens_1h)
+                    .unwrap_or(0),
+                predicted_uncached_input_tokens: cache_score
+                    .map(|s| s.predicted_uncached_input_tokens)
+                    .unwrap_or(0),
+                plan_capacity_ratio: c.plan_capacity_ratio.unwrap_or(1.0),
+                organization_type: c.organization_type.as_deref().unwrap_or(""),
+                rate_limit_tier: c.rate_limit_tier.as_deref().unwrap_or(""),
+                seat_tier: c.seat_tier.as_deref().unwrap_or(""),
+            }
         })
         .collect();
     let query_ref = ctx.query.as_deref().map(|s| QueryRef { value: s });
+    let thread_id_ref = ctx.thread_id.as_deref().map(|s| QueryRef { value: s });
     let request = FilterRequestRef {
         request_id: ctx.request_id.as_str(),
+        thread_id: thread_id_ref,
+        canonical_model_id: ctx.canonical_model_id.as_str(),
+        cache_pricing: CachePricingSummaryRef {
+            status: ctx.cache_pricing.status.as_str(),
+            input_micros_per_million: ctx.cache_pricing.input_micros_per_million,
+            cache_creation_5m_micros_per_million: ctx
+                .cache_pricing
+                .cache_creation_5m_micros_per_million,
+            cache_creation_1h_micros_per_million: ctx
+                .cache_pricing
+                .cache_creation_1h_micros_per_million,
+            cache_read_micros_per_million: ctx.cache_pricing.cache_read_micros_per_million,
+        },
         method: ctx.method.as_str(),
         path: ctx.path.as_str(),
         query: query_ref,
@@ -231,7 +261,7 @@ fn host_to_wire_request(
         body: ctx.body_bytes.as_ref(),
         principal: PrincipalRef {
             id: principal.id.as_str(),
-            kind: principal_kind_str.as_str(),
+            kind: principal_kind_str,
             claims: &claim_refs,
         },
         candidates: &candidate_refs,
@@ -239,11 +269,18 @@ fn host_to_wire_request(
     rkyv::to_bytes::<RkyvError>(&request)
 }
 
-fn principal_kind_to_wire(principal: &Principal) -> String {
-    serde_json::to_value(&principal.kind)
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .unwrap_or_else(|| "unknown".to_owned())
+fn principal_kind_str(kind: &PrincipalKind) -> &'static str {
+    match kind {
+        PrincipalKind::ApiKey => "api_key",
+        PrincipalKind::OAuthSubject => "oauth_subject",
+        PrincipalKind::InternalKey => "internal_key",
+        PrincipalKind::WorkloadIdentity => "workload_identity",
+        PrincipalKind::SubscriptionBearer => "subscription_bearer",
+    }
+}
+
+fn principal_kind_to_wire(principal: &Principal) -> &'static str {
+    principal_kind_str(&principal.kind)
 }
 
 /// Downstream-request headers that must NEVER cross the plugin
@@ -329,6 +366,8 @@ fn wire_to_host_output(
         kept_upstream_ids,
         reason: reasons.join("; "),
         per_candidate_reasons,
+        subscription_preference: None,
+        cache_affinity: None,
     })
 }
 
@@ -371,14 +410,47 @@ fn per_candidate_reason_from_label(decision: &str, reason: &str) -> PerCandidate
 pub struct WasmtimeUpstreamDialect {
     cell: Arc<PluginCell>,
     runtime_config: Arc<crate::HotEngineConfig>,
+    wire_version: Option<WireVersion>,
+    response_transform_hook: Option<WasmtimeResponseTransformHook>,
+    sse_event_transform_hook: Option<WasmtimeSseEventTransformHook>,
 }
 
 impl WasmtimeUpstreamDialect {
     pub fn new(slot: Arc<PluginSlot>, runtime_config: Arc<crate::HotEngineConfig>) -> Self {
         let cell = slot.current.load_full();
+        let wire_version = cell
+            .metadata
+            .hooks
+            .get(HookKind::Shape.as_str())
+            .and_then(|m| WireVersion::from_u8(m.wire_version));
+        let response_transform_hook = cell
+            .metadata
+            .hooks
+            .get(HookKind::TransformResponse.as_str())
+            .filter(|metadata| !metadata.mode.is_noop())
+            .map(|_| {
+                WasmtimeResponseTransformHook::from_cell(
+                    Arc::clone(&cell),
+                    Arc::clone(&runtime_config),
+                )
+            });
+        let sse_event_transform_hook = cell
+            .metadata
+            .hooks
+            .get(HookKind::TransformSseEvent.as_str())
+            .filter(|metadata| !metadata.mode.is_noop())
+            .map(|_| {
+                WasmtimeSseEventTransformHook::from_cell(
+                    Arc::clone(&cell),
+                    Arc::clone(&runtime_config),
+                )
+            });
         Self {
             cell,
             runtime_config,
+            wire_version,
+            response_transform_hook,
+            sse_event_transform_hook,
         }
     }
 }
@@ -401,15 +473,13 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
             reason: format!("rkyv encode ShapeRequest: {e}"),
         })?;
 
-        let out_bytes = match self
-            .cell
-            .metadata
-            .hooks
-            .get(HookKind::Shape.as_str())
-            .and_then(|m| WireVersion::from_u8(m.wire_version))
-        {
+        let out_bytes = match self.wire_version {
             Some(WireVersion::V1) => crate::cache::call_shape_hook(&self.cell, in_bytes.as_slice()),
-            None => unreachable!("shape slot has shape metadata"),
+            None => {
+                return Err(cc_lb_plugin_api::DialectError::UnsupportedRequest {
+                    reason: "plugin metadata missing shape hook".to_owned(),
+                });
+            }
         }
         .map_err(runtime_error_to_dialect)?;
         let out_bound = self.runtime_config.wire_bounds.output_body_bytes;
@@ -440,6 +510,18 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
             self.runtime_config.shape_origin_policy,
             &self.runtime_config.wire_bounds,
         )
+    }
+
+    fn response_transform_hook(&self) -> Option<&dyn ResponseTransformHook> {
+        self.response_transform_hook
+            .as_ref()
+            .map(|hook| hook as &dyn ResponseTransformHook)
+    }
+
+    fn sse_event_transform_hook(&self) -> Option<&dyn SseEventTransformHook> {
+        self.sse_event_transform_hook
+            .as_ref()
+            .map(|hook| hook as &dyn SseEventTransformHook)
     }
 }
 
@@ -516,7 +598,7 @@ fn host_to_wire_shape_request(
         body: ctx.body_bytes.as_ref(),
         principal: PrincipalRef {
             id: principal.id.as_str(),
-            kind: principal_kind_str.as_str(),
+            kind: principal_kind_str,
             claims: &claim_refs,
         },
         upstream: upstream_ref,
@@ -625,13 +707,19 @@ fn wire_to_host_shaped_request(
 /// [`WasmtimeFilterPlugin`] for the atomic hot-swap rationale.
 pub struct WasmtimeObservabilityHookPlugin {
     cell: Arc<PluginCell>,
+    wire_version: Option<WireVersion>,
 }
 
 impl WasmtimeObservabilityHookPlugin {
     pub fn new(slot: Arc<PluginSlot>, runtime_config: Arc<crate::HotEngineConfig>) -> Self {
         let _ = runtime_config;
         let cell = slot.current.load_full();
-        Self { cell }
+        let wire_version = cell
+            .metadata
+            .hooks
+            .get(HookKind::Observe.as_str())
+            .and_then(|m| WireVersion::from_u8(m.wire_version));
+        Self { cell, wire_version }
     }
 }
 
@@ -646,17 +734,15 @@ impl cc_lb_plugin_api::ObservabilityHook for WasmtimeObservabilityHookPlugin {
                 reason: format!("rkyv encode ObserveEvent: {e}"),
             }
         })?;
-        match self
-            .cell
-            .metadata
-            .hooks
-            .get(HookKind::Observe.as_str())
-            .and_then(|m| WireVersion::from_u8(m.wire_version))
-        {
+        match self.wire_version {
             Some(WireVersion::V1) => {
                 crate::cache::call_observe_hook(&self.cell, in_bytes.as_slice())
             }
-            None => unreachable!("observe slot has observe metadata"),
+            None => {
+                return Err(cc_lb_plugin_api::ObservabilityError::Dropped {
+                    reason: "plugin metadata missing observe hook".to_owned(),
+                });
+            }
         }
         .map_err(|e| cc_lb_plugin_api::ObservabilityError::Dropped {
             reason: e.to_string(),
@@ -680,11 +766,7 @@ fn host_observe_event_to_wire(
         },
         Host::AuthnComplete { principal_id, kind } => Wire::AuthnComplete {
             principal_id: principal_id.into_boxed_str(),
-            principal_kind: serde_json::to_value(&kind)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .unwrap_or_else(|| "unknown".to_owned())
-                .into_boxed_str(),
+            principal_kind: Box::from(principal_kind_str(&kind)),
         },
         Host::UpstreamChosen { upstream } => Wire::UpstreamChosen {
             upstream: host_upstream_to_wire(&upstream),
@@ -754,6 +836,7 @@ mod tests {
         );
         RequestContext {
             request_id: "req-123".to_owned(),
+            thread_id: None,
             downstream_headers: headers,
             method: http::Method::POST,
             path: "/v1/messages".to_owned(),
@@ -761,6 +844,7 @@ mod tests {
             body_bytes: bytes::Bytes::from_static(b"{\"msg\":\"hi\"}"),
             cache_breakpoints: Vec::new(),
             canonical_model_id: "claude-fixture".to_owned(),
+            cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
         }
     }
 

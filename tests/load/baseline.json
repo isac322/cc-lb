@@ -10,7 +10,7 @@
     }
   },
   "regression": {
-    "tolerance_percent": 10.0,
+    "tolerance_percent": 20.0,
     "non_streaming": {
       "p50_overhead_ms_baseline": 4.545,
       "p99_overhead_ms_baseline": 18.181

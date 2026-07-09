@@ -21,6 +21,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use rkyv::util::AlignedVec;
+
 use crate::cell::PluginCell;
 use crate::error::WasmtimeRuntimeError;
 
@@ -54,6 +56,33 @@ enum HookFn {
     Filter,
     Shape,
     Observe,
+    TransformResponse,
+    TransformSseEvent,
+}
+
+trait OutputBuffer: Sized {
+    fn empty() -> Self;
+    fn copy_from_slice(slice: &[u8]) -> Self;
+}
+
+impl OutputBuffer for Vec<u8> {
+    fn empty() -> Self {
+        Vec::new()
+    }
+    fn copy_from_slice(slice: &[u8]) -> Self {
+        slice.to_vec()
+    }
+}
+
+impl OutputBuffer for AlignedVec<16> {
+    fn empty() -> Self {
+        AlignedVec::with_capacity(0)
+    }
+    fn copy_from_slice(slice: &[u8]) -> Self {
+        let mut aligned = AlignedVec::with_capacity(slice.len());
+        aligned.extend_from_slice(slice);
+        aligned
+    }
 }
 
 impl HookFn {
@@ -62,6 +91,8 @@ impl HookFn {
             HookFn::Filter => "cc_lb_filter",
             HookFn::Shape => "cc_lb_shape",
             HookFn::Observe => "cc_lb_observe",
+            HookFn::TransformResponse => "cc_lb_transform_response",
+            HookFn::TransformSseEvent => "cc_lb_transform_sse_event",
         }
     }
 
@@ -73,6 +104,8 @@ impl HookFn {
             HookFn::Filter => "filter",
             HookFn::Shape => "shape",
             HookFn::Observe => "observe",
+            HookFn::TransformResponse => "transform_response",
+            HookFn::TransformSseEvent => "transform_sse_event",
         }
     }
 }
@@ -104,11 +137,25 @@ pub fn call_observe_hook(
     call_hook(cell, input, HookFn::Observe)
 }
 
-fn call_hook(
+pub fn call_transform_response_hook(
+    cell: &Arc<PluginCell>,
+    input: &[u8],
+) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
+    call_hook(cell, input, HookFn::TransformResponse)
+}
+
+pub fn call_transform_sse_event_hook(
+    cell: &Arc<PluginCell>,
+    input: &[u8],
+) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
+    call_hook(cell, input, HookFn::TransformSseEvent)
+}
+
+fn call_hook<O: OutputBuffer>(
     cell: &Arc<PluginCell>,
     input: &[u8],
     hook: HookFn,
-) -> Result<Vec<u8>, WasmtimeRuntimeError> {
+) -> Result<O, WasmtimeRuntimeError> {
     let _store_permit = cell
         .store_budget
         .try_acquire()
@@ -124,12 +171,12 @@ fn record_pool_saturation(err: &WasmtimeRuntimeError) {
     }
 }
 
-fn execute_call(
+fn execute_call<O: OutputBuffer>(
     wi: &mut WorkerInstance,
     cell: &PluginCell,
     input: &[u8],
     hook: HookFn,
-) -> Result<Vec<u8>, WasmtimeRuntimeError> {
+) -> Result<O, WasmtimeRuntimeError> {
     let start = Instant::now();
     // Reuse the cell's owned `Arc<str>` label instead of `.to_string()`
     // per emission — SharedString accepts `Arc<str>` directly, avoiding
@@ -162,11 +209,11 @@ fn execute_call(
     result
 }
 
-fn execute_call_inner(
+fn execute_call_inner<O: OutputBuffer>(
     wi: &mut WorkerInstance,
     input: &[u8],
     hook: HookFn,
-) -> Result<Vec<u8>, WasmtimeRuntimeError> {
+) -> Result<O, WasmtimeRuntimeError> {
     let WorkerInstance {
         store,
         memory,
@@ -175,12 +222,16 @@ fn execute_call_inner(
         filter_fn,
         shape_fn,
         observe_fn,
+        transform_response_fn,
+        transform_sse_event_fn,
     } = wi;
 
     let hook_fn = match hook {
         HookFn::Filter => filter_fn.as_ref(),
         HookFn::Shape => shape_fn.as_ref(),
         HookFn::Observe => observe_fn.as_ref(),
+        HookFn::TransformResponse => transform_response_fn.as_ref(),
+        HookFn::TransformSseEvent => transform_sse_event_fn.as_ref(),
     }
     .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
         reason: format!(
@@ -242,7 +293,7 @@ fn execute_call_inner(
     // violation; collapsing it into empty bytes here would hide the
     // bug from downstream rkyv decode.
     let out_bytes = if matches!(hook, HookFn::Observe) && out_ptr == 0 && out_len == 0 {
-        Vec::new()
+        O::empty()
     } else if out_ptr == 0 || out_len == 0 {
         return Err(WasmtimeRuntimeError::ModuleRejected {
             reason: format!(
@@ -267,7 +318,7 @@ fn execute_call_inner(
                 ),
             });
         }
-        let bytes = mem_view[out_ptr as usize..out_end].to_vec();
+        let bytes = O::copy_from_slice(&mem_view[out_ptr as usize..out_end]);
 
         // Skip `cc_lb_free(out_ptr, out_len, ..)` on the output
         // buffer: the surrounding pure-mode contract drops the whole

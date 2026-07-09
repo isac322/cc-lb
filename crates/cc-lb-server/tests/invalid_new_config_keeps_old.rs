@@ -17,7 +17,7 @@ fn invalid_new_config_keeps_old() {
         &config_path,
         reload_common::load_config(&config_path),
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     );
     let before_failed = reload_common::counter_value(&handle, "cc_lb_config_reload_failed_total");
     std::fs::write(&config_path, "[listener\nthis is not valid toml").unwrap();
@@ -67,7 +67,7 @@ fn config_reload_accepts_config_only_change_and_keeps_runtime_view() {
         initial_config,
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
         Some(dynamic_view.clone()),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     );
     reload_common::write_config_with_principal_model(&config_path, 200, proxy_addr, "[");
 
@@ -107,7 +107,7 @@ fn config_reload_accepts_plugin_unrelated_change_and_records_success() {
         initial_config,
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
         Some(dynamic_view.clone()),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     );
     reload_common::write_config_with_principal_plugins(
         &config_path,

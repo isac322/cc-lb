@@ -4,6 +4,7 @@ pub mod dashboard;
 pub mod dashboard_routes;
 pub mod events;
 pub mod events_routes;
+pub mod internal_partials;
 pub mod management;
 mod oauth_pkce;
 pub mod principals;
@@ -26,11 +27,13 @@ use cc_lb_config::{Config, RestartRequiredField};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use serde::Serialize;
 
-use cc_lb_core::{
-    AuditWriterSink, ClockHandle, DynamicView, DynamicViewHolder, Lifecycle, MetadataHookHandle,
-    RequestEventBus,
+use cc_lb_clock::ClockHandle;
+use cc_lb_contract::RequestEventBus;
+use cc_lb_control::{
+    AuditWriterSink, DynamicView, DynamicViewHolder, MetadataHookHandle,
     api_keys::{key_store::KeyStore, limit_engine::LimitEngine},
 };
+use cc_lb_engine::Lifecycle;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{Storage, UpstreamRecord};
 
@@ -98,6 +101,7 @@ pub struct AdminState {
     pub admin_token: Option<String>,
     pub start_time: std::time::Instant,
     pub event_bus: Option<Arc<dyn RequestEventBus>>,
+    pub storage_tail: tokio::sync::broadcast::Sender<events::StorageTailUpdate>,
     pub clock: ClockHandle,
 }
 

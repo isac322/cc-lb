@@ -11,8 +11,8 @@ use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::{
     AnthropicOAuthConfig, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind,
 };
-use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_core::{DynamicViewHolder, Lifecycle, LifecycleConfig};
+use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_engine::{DynamicViewHolder, Lifecycle, LifecycleConfig};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::{
@@ -55,9 +55,11 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
         &runtime,
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        None,
+        None,
         1800,
         &cc_lb_config::Config::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect("dynamic view builds");
@@ -69,11 +71,12 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
                 upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
             }),
             None,
-            Arc::new(cc_lb_core::SystemClock),
+            Arc::new(cc_lb_engine::SystemClock),
         )),
         Arc::new(DynamicViewHolder::new(view)),
+        cc_lb_engine::make_default_dispatcher(50),
         LifecycleConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     );
 
     let response = lifecycle
@@ -109,7 +112,7 @@ impl Fixture {
             dir.path().join("composite-dispatch.sqlite").display()
         );
         let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
                 .await
                 .expect("storage"),
         );
@@ -124,6 +127,7 @@ impl Fixture {
             upstream_subscription_quotas: storage.clone(),
             upstream_subscription_metadata: storage.clone(),
             organization_metadata: storage.clone(),
+            plan_tiers: storage.clone(),
             prompt_cache_observations: storage.clone(),
             anthropic_compatibility_kv: storage.clone(),
             audit: Some(storage.clone()),
@@ -521,9 +525,9 @@ fn message_request() -> Request<Bytes> {
 }
 
 fn now_secs() -> u64 {
-    use cc_lb_core::Clock as _;
+    use cc_lb_engine::Clock as _;
 
-    let clock = cc_lb_core::SystemClock;
+    let clock = cc_lb_engine::SystemClock;
     clock
         .now()
         .duration_since(UNIX_EPOCH)

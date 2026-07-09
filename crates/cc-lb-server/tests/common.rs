@@ -1,8 +1,11 @@
 #![allow(dead_code)]
 
+use std::io::Read;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle as ThreadJoinHandle;
 
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate,
@@ -11,7 +14,7 @@ use cc_lb_storage_api::{
     types::{PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
 };
 
-use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_sqlite::open_sqlite;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
@@ -23,12 +26,65 @@ use url::Url;
 
 pub struct TestProcess {
     child: Child,
+    stderr: Arc<Mutex<Vec<u8>>>,
+    stderr_thread: Option<ThreadJoinHandle<()>>,
 }
 
 impl Drop for TestProcess {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(stderr_thread) = self.stderr_thread.take() {
+            let _ = stderr_thread.join();
+        }
+    }
+}
+
+impl TestProcess {
+    fn spawn(config_path: &Path) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
+            .arg("serve")
+            .arg("--config")
+            .arg(config_path)
+            .env(
+                "CC_LB_MASTER_KEY",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .env("CC_LB_ADMIN_TOKEN", "admin-token")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn cc-lb binary");
+        let mut stderr_pipe = child.stderr.take().expect("child stderr pipe");
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        let stderr_sink = Arc::clone(&stderr);
+        let stderr_thread = std::thread::spawn(move || {
+            let mut stderr_bytes = Vec::new();
+            let _ = stderr_pipe.read_to_end(&mut stderr_bytes);
+            if let Ok(mut captured) = stderr_sink.lock() {
+                *captured = stderr_bytes;
+            }
+        });
+
+        Self {
+            child,
+            stderr,
+            stderr_thread: Some(stderr_thread),
+        }
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    fn finish_stderr(&mut self) -> String {
+        if let Some(stderr_thread) = self.stderr_thread.take() {
+            let _ = stderr_thread.join();
+        }
+        self.stderr
+            .lock()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default()
     }
 }
 
@@ -89,6 +145,23 @@ enum AuthConfig {
     ApiKey,
 }
 
+struct SpawnedTestServer {
+    proxy_addr: SocketAddr,
+    admin_addr: SocketAddr,
+    metrics_addr: SocketAddr,
+    sqlite_path: PathBuf,
+    managed_key: Option<ManagedTestKey>,
+    config_dir: TempDir,
+    process: TestProcess,
+}
+
+struct StartupFailure {
+    message: String,
+    address_in_use: bool,
+}
+
+const SERVER_START_ATTEMPTS: usize = 4;
+
 async fn spawn_test_server_with_options(
     extra_toml: &str,
     fake_config: AppConfig,
@@ -104,6 +177,46 @@ async fn spawn_test_server_with_options(
             async move { axum::serve(fake_listener, fake_anthropic_app(fake_config)).await },
         );
 
+    for attempt in 1..=SERVER_START_ATTEMPTS {
+        match spawn_test_server_attempt(
+            extra_toml,
+            fake_addr,
+            &auth_config,
+            principal_limits.clone(),
+        )
+        .await
+        {
+            Ok(spawned) => {
+                return TestServer {
+                    proxy_addr: spawned.proxy_addr,
+                    admin_addr: spawned.admin_addr,
+                    metrics_addr: spawned.metrics_addr,
+                    sqlite_path: spawned.sqlite_path,
+                    managed_key: spawned.managed_key,
+                    _fake: fake,
+                    _config_dir: spawned.config_dir,
+                    _process: spawned.process,
+                };
+            }
+            Err(error) if error.address_in_use && attempt < SERVER_START_ATTEMPTS => {
+                eprintln!(
+                    "cc-lb test server hit address-in-use during reserved-port handoff; retrying with fresh ports ({attempt}/{SERVER_START_ATTEMPTS})\n{}",
+                    error.message
+                );
+            }
+            Err(error) => panic!("{}", error.message),
+        }
+    }
+
+    unreachable!("server start attempts loop always returns or panics")
+}
+
+async fn spawn_test_server_attempt(
+    extra_toml: &str,
+    fake_addr: SocketAddr,
+    auth_config: &AuthConfig,
+    principal_limits: Vec<Limit>,
+) -> Result<SpawnedTestServer, StartupFailure> {
     let proxy_listener = reserve_addr();
     let admin_listener = reserve_addr();
     let metrics_listener = reserve_addr();
@@ -119,40 +232,26 @@ async fn spawn_test_server_with_options(
         admin_addr,
         metrics_addr,
         extra_toml,
-        &auth_config,
+        auth_config,
     );
-    let managed_key = seed_storage(&sqlite_path, fake_addr, &auth_config, principal_limits).await;
+    let managed_key = seed_storage(&sqlite_path, fake_addr, auth_config, principal_limits).await;
 
     drop((proxy_listener, admin_listener, metrics_listener));
 
-    let child = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
-        .arg("serve")
-        .arg("--config")
-        .arg(&config_path)
-        .env(
-            "CC_LB_MASTER_KEY",
-            "0000000000000000000000000000000000000000000000000000000000000000",
-        )
-        .env("CC_LB_ADMIN_TOKEN", "admin-token")
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn cc-lb binary");
-    let process = TestProcess { child };
+    let mut process = TestProcess::spawn(&config_path);
 
-    wait_for_proxy_ready(proxy_addr, managed_key.as_ref()).await;
-    wait_for_status(admin_addr, "/admin/health", 200).await;
+    wait_for_proxy_ready_or_exit(&mut process, proxy_addr, managed_key.as_ref()).await?;
+    wait_for_status_or_exit(&mut process, admin_addr, "/admin/health", 200).await?;
 
-    TestServer {
+    Ok(SpawnedTestServer {
         proxy_addr,
         admin_addr,
         metrics_addr,
         sqlite_path,
         managed_key,
-        _fake: fake,
-        _config_dir: config_dir,
-        _process: process,
-    }
+        config_dir,
+        process,
+    })
 }
 
 pub fn free_addr() -> SocketAddr {
@@ -282,9 +381,12 @@ async fn seed_storage(
 ) -> Option<ManagedTestKey> {
     let database_url = format!("sqlite://{}", storage_path.display());
     let storage = std::sync::Arc::new(
-        open_sqlite(&database_url, std::sync::Arc::new(cc_lb_core::SystemClock))
-            .await
-            .expect("test storage opens"),
+        open_sqlite(
+            &database_url,
+            std::sync::Arc::new(cc_lb_engine::SystemClock),
+        )
+        .await
+        .expect("test storage opens"),
     );
     storage
         .initialize(BackendKind::Sqlite)
@@ -337,7 +439,7 @@ async fn seed_storage(
                 )
                 .await
                 .expect("seed managed key");
-            let (key_id, _) = cc_lb_core::api_keys::secret::parse(plaintext.expose())
+            let (key_id, _) = cc_lb_engine::api_keys::secret::parse(plaintext.expose())
                 .expect("generated key parses");
             Some(ManagedTestKey {
                 key_id,
@@ -380,6 +482,91 @@ async fn wait_for_proxy_ready(addr: SocketAddr, managed_key: Option<&ManagedTest
         ),
     )
     .await;
+}
+
+async fn wait_for_proxy_ready_or_exit(
+    process: &mut TestProcess,
+    addr: SocketAddr,
+    managed_key: Option<&ManagedTestKey>,
+) -> Result<(), StartupFailure> {
+    let api_key = managed_key
+        .map(|key| key.plaintext.as_str())
+        .unwrap_or("sk-ant-test");
+    wait_for_status_with_request_or_exit(
+        process,
+        addr,
+        "/v1/models",
+        200,
+        &format!(
+            "GET /v1/models HTTP/1.1\r\nHost: {addr}\r\nx-api-key: {api_key}\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .await
+}
+
+async fn wait_for_status_or_exit(
+    process: &mut TestProcess,
+    addr: SocketAddr,
+    path: &str,
+    status: u16,
+) -> Result<(), StartupFailure> {
+    wait_for_status_with_request_or_exit(
+        process,
+        addr,
+        path,
+        status,
+        &format!(
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nx-api-key: sk-ant-test\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .await
+}
+
+async fn wait_for_status_with_request_or_exit(
+    process: &mut TestProcess,
+    addr: SocketAddr,
+    path: &str,
+    status: u16,
+    request: &str,
+) -> Result<(), StartupFailure> {
+    let deadline = std::time::Instant::now() + ready_timeout(std::time::Duration::from_secs(60));
+    loop {
+        if let Some(exit_status) = process.try_wait().expect("poll cc-lb child") {
+            let stderr = process.finish_stderr();
+            return Err(startup_failure_for_exit(exit_status, stderr));
+        }
+
+        let last = match raw_http(addr, request).await {
+            Ok(response) => {
+                let last = format!("status={} body={}", response.status, response.body);
+                if response.status == status {
+                    return Ok(());
+                }
+                last
+            }
+            Err(error) => format!("error={error}"),
+        };
+        if std::time::Instant::now() >= deadline {
+            return Err(StartupFailure {
+                message: format!(
+                    "server did not become ready at http://{addr}{path}; expected status {status}; last {last}"
+                ),
+                address_in_use: false,
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+fn startup_failure_for_exit(exit_status: ExitStatus, stderr: String) -> StartupFailure {
+    let address_in_use =
+        stderr.contains("Address already in use") || stderr.contains("os error 98");
+    StartupFailure {
+        message: format!(
+            "cc-lb child exited before becoming ready: {exit_status}\nstderr:\n{stderr}"
+        ),
+        address_in_use,
+    }
 }
 
 async fn wait_for_status_with_request(addr: SocketAddr, path: &str, status: u16, request: &str) {
@@ -502,7 +689,7 @@ async fn raw_http(addr: SocketAddr, request: &str) -> std::io::Result<RawRespons
 fn split_response(text: &str) -> (String, String) {
     match text.split_once("\r\n\r\n") {
         Some((headers, body)) => (headers.to_owned(), body.to_owned()),
-        None => (text.to_owned(), String::new()),
+        _ => (text.to_owned(), String::new()),
     }
 }
 

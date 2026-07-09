@@ -3,8 +3,8 @@ mod config_admin_common;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
+use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::Config;
-use cc_lb_core::{ClockHandle, TestClock};
 use cc_lb_storage_api::{RequestEvent, RequestEventStore, UsageRollupStore};
 use config_admin_common::{
     app, authed_bytes, authed_json, temp_storage, temp_storage_with_clock, test_state,
@@ -157,8 +157,8 @@ fn test_clock() -> ClockHandle {
     Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS))
 }
 
-fn current_unix_secs(clock: &dyn cc_lb_core::Clock) -> u64 {
-    cc_lb_core::clock::unix_secs(clock.now())
+fn current_unix_secs(clock: &dyn cc_lb_clock::Clock) -> u64 {
+    cc_lb_engine::clock::unix_secs(clock.now())
 }
 
 fn usage_event(

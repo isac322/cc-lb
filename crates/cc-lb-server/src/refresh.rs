@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_core::clock::{Clock, ClockHandle, unix_secs};
-use cc_lb_core::{AuditPayload, MetadataHookHandle, MetadataHookRequest};
+use cc_lb_engine::clock::{Clock, ClockHandle, unix_secs};
+use cc_lb_engine::{AuditPayload, MetadataHookHandle, MetadataHookRequest};
 use cc_lb_oauth_protocol::{
     ExistingTokenParts, TokenEndpointResponse, parse_token_endpoint_response,
     refresh_token_form_body, refreshed_token_parts,
@@ -851,7 +851,7 @@ fn lazy_scheduler_error(error: cc_lb_scheduler::error::SchedulerError) -> LazyRe
     }
 }
 
-fn lazy_metadata_hook_error(error: cc_lb_core::MetadataHookEnqueueError) -> LazyRefreshError {
+fn lazy_metadata_hook_error(error: cc_lb_engine::MetadataHookEnqueueError) -> LazyRefreshError {
     LazyRefreshError::Failed {
         reason: error.to_string(),
     }
@@ -898,7 +898,7 @@ mod tests {
     use axum::{Json, Router};
     use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
     use cc_lb_config::AnthropicOAuthConfig;
-    use cc_lb_core::clock::{ClockHandle, TestClock};
+    use cc_lb_engine::clock::{ClockHandle, TestClock};
     use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
     use cc_lb_storage_api::upstream::UpstreamKind;
     use cc_lb_storage_api::{BackendKind, MetaStore, StorageResult, UpstreamCreate, UpstreamStore};
@@ -1015,9 +1015,12 @@ mod tests {
                 dir.path().join("lazy-refresh.sqlite").display()
             );
             let storage = Arc::new(
-                cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
-                    .await
-                    .expect("storage opens"),
+                cc_lb_storage_sqlite::open_sqlite(
+                    &database_url,
+                    Arc::new(cc_lb_engine::SystemClock),
+                )
+                .await
+                .expect("storage opens"),
             );
             storage
                 .initialize(BackendKind::Sqlite)
@@ -1045,7 +1048,7 @@ mod tests {
                         &scheduler_pool,
                         cc_lb_scheduler::worker::ADAPTIVE_QUEUE,
                     ),
-                    clock: Arc::new(cc_lb_core::SystemClock),
+                    clock: Arc::new(cc_lb_engine::SystemClock),
                 });
             let stores = Arc::new(crate::dynamic_view_builder::Stores {
                 upstreams: storage.clone(),
@@ -1055,6 +1058,7 @@ mod tests {
                 upstream_subscription_quotas: storage.clone(),
                 upstream_subscription_metadata: storage.clone(),
                 organization_metadata: storage.clone(),
+                plan_tiers: storage.clone(),
                 prompt_cache_observations: storage.clone(),
                 anthropic_compatibility_kv: storage.clone(),
                 audit: Some(storage.clone()),

@@ -47,7 +47,7 @@ const MESSAGES_BODY: &[u8] = br#"{"model":"claude-3-5-sonnet-20241022","messages
 #[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_postgres_storage_path_writes_a_row() -> TestResult<()> {
-    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
     let Some(database_url) = std::env::var("CI_POSTGRES_URL").ok() else {
         eprintln!("skipped: CI_POSTGRES_URL unset");
         return Ok(());
@@ -167,7 +167,7 @@ async fn build_postgres_app(
     pool: PgPool,
     upstream_addr: SocketAddr,
 ) -> TestResult<App> {
-    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
     let storage: Arc<dyn StorageTrait> =
         Arc::new(PostgresStorage::new(pool.clone(), clock.clone()));
     storage.initialize(BackendKind::Postgres).await?;

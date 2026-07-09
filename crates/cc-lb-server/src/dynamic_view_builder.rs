@@ -8,19 +8,21 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, PromptCacheShadowConfig};
-use cc_lb_core::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
-    RouterPipelineCache,
-};
-use cc_lb_core::builtin_filters::cache_affinity::CacheAffinityFilter;
-use cc_lb_core::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_core::clock::unix_secs;
-use cc_lb_core::plan_capacity::{PlanInfo, plan_capacity_ratio};
-use cc_lb_core::{
-    ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
-    UpstreamStatusEntry, UpstreamStatusSnapshot, make_default_dispatcher,
-};
 use cc_lb_dialect_anthropic::AnthropicDirectDialect;
+use cc_lb_engine::api_keys::principal_view::{
+    DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
+    RouterPipelineCache, ShapePluginCache,
+};
+use cc_lb_engine::builtin_filters::cache_affinity::CacheAffinityFilter;
+use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
+use cc_lb_engine::clock::{unix_millis, unix_secs};
+use cc_lb_engine::plan_capacity::{
+    PRO_CAPACITY_RATIO, PlanInfo, PlanTierClassification, TierKey, classify_plan_tier,
+};
+use cc_lb_engine::{
+    ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamRateLimitCache, UpstreamStatusEntry,
+    UpstreamStatusSnapshot,
+};
 use cc_lb_plugin_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, FilterPlugin, PluginManifest,
     Principal, RateLimitObservation, RequestContext, RouteDecision, RouteError, RouterPlugin,
@@ -31,23 +33,21 @@ use cc_lb_runtime_wasmtime::{
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AnthropicCompatibilityKvStore, AuditStore, OrganizationMetadataStore, PluginRegistryStore,
-    PluginSlot, PrincipalRecord, PrincipalStore, PromptCacheObservationStore, RateLimitKind,
-    StorageError, StorageResult, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
-    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataStore,
-    UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
+    AnthropicCompatibilityKvStore, AuditStore, MetadataTierMappingOverrideRecord,
+    OrganizationMetadataStore, PlanTierRatioRecord, PlanTierStore, PluginChainEntry,
+    PluginRegistryStore, PluginSlot, PrincipalRecord, PrincipalStore, PromptCacheObservationStore,
+    RateLimitKind, StorageError, StorageResult, TierResolutionSource, UpstreamPlanTierRecord,
+    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
 };
 use parking_lot::RwLock;
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
-use cc_lb_core::lifecycle::PromptCacheObservationSinkLike;
+use cc_lb_engine::PromptCacheObservationSinkLike;
 
 use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
-use crate::prompt_cache_observation_sink::{
-    DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY, PromptCacheObservationSink,
-};
 use crate::reconcile::collect_revision_hash;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
@@ -61,6 +61,7 @@ pub struct Stores {
     pub upstream_subscription_quotas: Arc<dyn UpstreamSubscriptionQuotaStore>,
     pub upstream_subscription_metadata: Arc<dyn UpstreamSubscriptionMetadataStore>,
     pub organization_metadata: Arc<dyn OrganizationMetadataStore>,
+    pub plan_tiers: Arc<dyn PlanTierStore>,
     pub prompt_cache_observations: Arc<dyn PromptCacheObservationStore>,
     pub anthropic_compatibility_kv: Arc<dyn AnthropicCompatibilityKvStore>,
     pub audit: Option<Arc<dyn AuditStore>>,
@@ -178,9 +179,11 @@ pub async fn build_dynamic_view(
     runtime: &Arc<WasmtimeRuntime>,
     data_dir: &Path,
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
+    prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     subscription_quota_routing_max_staleness_secs: u64,
     config: &cc_lb_config::Config,
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 ) -> Result<Arc<DynamicView>, RebindError> {
     let upstreams = list_upstreams(stores).await?;
     let all_upstream_ids = upstreams
@@ -191,52 +194,44 @@ pub async fn build_dynamic_view(
         .hydrate_from_store(stores, &all_upstream_ids)
         .await?;
     let prompt_cache_shadow = &config.prompt_cache_shadow;
-    let (prompt_cache_observation_cache, prompt_cache_observation_sink) = if prompt_cache_shadow
-        .enabled
-    {
-        let cache = new_prompt_cache_observation_cache(prompt_cache_shadow, clock.clone());
-        let cache = match tokio::time::timeout(
-            Duration::from_secs(5),
-            cache.hydrate_from_store(stores.prompt_cache_observations.as_ref(), &all_upstream_ids),
-        )
-        .await
-        {
-            Ok(Ok(record_count)) => {
-                tracing::info!(
-                    record_count,
-                    upstream_count = all_upstream_ids.len(),
-                    "hydrated prompt cache observation cache from store"
-                );
-                cache
+    let prompt_cache_observation_handles = if prompt_cache_shadow.enabled {
+        match prompt_cache_observation_cache {
+            Some(cache) => {
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    cache.hydrate_from_store(
+                        stores.prompt_cache_observations.as_ref(),
+                        &all_upstream_ids,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(record_count)) => {
+                        tracing::info!(
+                            record_count,
+                            upstream_count = all_upstream_ids.len(),
+                            "hydrated prompt cache observation cache from store"
+                        );
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            %error,
+                            "failed to hydrate prompt cache observation cache from store; continuing with shared cache"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            timeout_secs = 5,
+                            "timed out hydrating prompt cache observation cache from store; continuing with shared cache"
+                        );
+                    }
+                }
+                Some((cache, prompt_cache_observation_sink))
             }
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    %error,
-                    "failed to hydrate prompt cache observation cache from store; continuing with empty cache"
-                );
-                new_prompt_cache_observation_cache(prompt_cache_shadow, clock.clone())
-            }
-            Err(_) => {
-                tracing::warn!(
-                    timeout_secs = 5,
-                    "timed out hydrating prompt cache observation cache from store; continuing with empty cache"
-                );
-                new_prompt_cache_observation_cache(prompt_cache_shadow, clock.clone())
-            }
-        };
-        // Spawn the async observation sink writer. The JoinHandle is intentionally
-        // dropped: when the sender is dropped on the next rebind the mpsc channel
-        // closes and the writer task exits naturally.
-        //
-        let (sink, _writer) = PromptCacheObservationSink::new(
-            stores.prompt_cache_observations.clone(),
-            DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
-            cc_lb_observability::cache_observation_store_kind::SQLITE,
-        );
-        let sink_arc: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
-        (Some(cache), Some(sink_arc))
+            None => None,
+        }
     } else {
-        (None, None)
+        None
     };
     let upstream_rate_limit_records = stores
         .upstream_rate_limits
@@ -275,7 +270,6 @@ pub async fn build_dynamic_view(
         lazy_refresher,
         clock.clone(),
     ));
-    let dispatcher = make_default_dispatcher(50);
     let snapshot = Arc::new(UpstreamStatusSnapshot {
         entries: statuses,
         applied_at_unix_secs: unix_secs(clock.now()),
@@ -283,12 +277,12 @@ pub async fn build_dynamic_view(
     });
 
     let plan_info_by_upstream = load_plan_info_by_upstream(stores).await?;
+    let now_unix_millis = i64::try_from(unix_millis(clock.now())).unwrap_or(i64::MAX);
+    reconcile_upstream_plan_tiers(stores, now_unix_millis).await;
     let mut builder = DynamicViewBuilder::new(current_generation)
         .signer_factory(signer_factory)
         .global_router(global_router)
-        .dispatcher(dispatcher)
         .global_observability_hooks(Vec::new())
-        .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(principal_view)
         .upstream_status_snapshot(snapshot)
         .upstream_rate_limit_cache(upstream_rate_limit_cache)
@@ -298,18 +292,18 @@ pub async fn build_dynamic_view(
         )
         .plan_info_by_upstream(plan_info_by_upstream)
         .upstream_records(upstreams.clone());
-    if let Some(cache) = prompt_cache_observation_cache {
+    if let Some((cache, sink)) = prompt_cache_observation_handles {
         builder = builder.prompt_cache_observation_cache(cache);
-    }
-    if let Some(sink) = prompt_cache_observation_sink {
-        builder = builder.prompt_cache_observation_sink(sink);
+        if let Some(sink) = sink {
+            builder = builder.prompt_cache_observation_sink(sink);
+        }
     }
     Ok(builder.build())
 }
 
-fn new_prompt_cache_observation_cache(
+pub(crate) fn new_prompt_cache_observation_cache(
     config: &PromptCacheShadowConfig,
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 ) -> Arc<PromptCacheObservationCache> {
     Arc::new(PromptCacheObservationCache::new_with_debounce(
         clock,
@@ -352,6 +346,11 @@ fn rate_limit_kind(kind: RateLimitKind) -> cc_lb_plugin_api::RateLimitKind {
 }
 
 async fn load_plan_info_by_upstream(stores: &Stores) -> StorageResult<HashMap<Uuid, PlanInfo>> {
+    let ratio_by_tier = ratio_by_tier(stores.plan_tiers.list_current_plan_tier_ratios().await?);
+    let overrides = stores
+        .plan_tiers
+        .list_current_metadata_tier_overrides()
+        .await?;
     let subscription_metadata = stores
         .upstream_subscription_metadata
         .list_upstream_subscription_metadata()
@@ -372,11 +371,37 @@ async fn load_plan_info_by_upstream(stores: &Stores) -> StorageResult<HashMap<Uu
         let Some(organization) = organizations.get(organization_uuid).copied() else {
             continue;
         };
-        let capacity_ratio = plan_capacity_ratio(
+        let (tier, _source) = resolve_tier(
+            &overrides,
             organization.organization_type.as_deref(),
             organization.rate_limit_tier.as_deref(),
             organization.seat_tier.as_deref(),
         );
+        let capacity_ratio = match tier {
+            Some(tier) => match ratio_by_tier.get(&tier) {
+                Some(ratio) => *ratio,
+                None => {
+                    tracing::error!(
+                        upstream_id = %record.upstream_id,
+                        tier = tier.as_str(),
+                        "plan tier missing a current ratio row in plan_tier_ratio_history_v1; using built-in seed ratio"
+                    );
+                    metrics::counter!("cc_lb_plan_tier_ratio_missing_total").increment(1);
+                    tier.seed_pro_relative_ratio()
+                }
+            },
+            None => {
+                tracing::warn!(
+                    upstream_id = %record.upstream_id,
+                    organization_type = ?organization.organization_type,
+                    rate_limit_tier = ?organization.rate_limit_tier,
+                    seat_tier = ?organization.seat_tier,
+                    "unknown plan tier; routing at Pro ratio"
+                );
+                metrics::counter!("cc_lb_plan_tier_unknown_total").increment(1);
+                PRO_CAPACITY_RATIO
+            }
+        };
         plan_info.insert(
             record.upstream_id,
             PlanInfo {
@@ -388,6 +413,146 @@ async fn load_plan_info_by_upstream(stores: &Stores) -> StorageResult<HashMap<Uu
         );
     }
     Ok(plan_info)
+}
+
+fn resolve_tier(
+    overrides: &[MetadataTierMappingOverrideRecord],
+    organization_type: Option<&str>,
+    rate_limit_tier: Option<&str>,
+    seat_tier: Option<&str>,
+) -> (Option<TierKey>, TierResolutionSource) {
+    let norm = |s: Option<&str>| s.unwrap_or_default().to_ascii_lowercase();
+    let (ot, rlt, st) = (
+        norm(organization_type),
+        norm(rate_limit_tier),
+        norm(seat_tier),
+    );
+    for override_record in overrides {
+        if norm(override_record.organization_type.as_deref()) == ot
+            && norm(override_record.rate_limit_tier.as_deref()) == rlt
+            && norm(override_record.seat_tier.as_deref()) == st
+            && let Ok(tier) = override_record.tier_key.parse::<TierKey>()
+        {
+            return (Some(tier), TierResolutionSource::Override);
+        }
+    }
+    match classify_plan_tier(organization_type, rate_limit_tier, seat_tier) {
+        PlanTierClassification::Known(tier) => (Some(tier), TierResolutionSource::Builtin),
+        PlanTierClassification::Unknown => (None, TierResolutionSource::Unknown),
+    }
+}
+
+async fn reconcile_upstream_plan_tiers(stores: &Stores, now_unix_millis: i64) {
+    if let Err(error) = reconcile_upstream_plan_tiers_inner(stores, now_unix_millis).await {
+        tracing::error!(error = %error, "plan tier history reconcile failed");
+        metrics::counter!("cc_lb_plan_tier_reconcile_failed_total").increment(1);
+    }
+}
+
+async fn reconcile_upstream_plan_tiers_inner(
+    stores: &Stores,
+    now_unix_millis: i64,
+) -> StorageResult<()> {
+    let ratio_by_tier = ratio_by_tier(stores.plan_tiers.list_current_plan_tier_ratios().await?);
+    let overrides = stores
+        .plan_tiers
+        .list_current_metadata_tier_overrides()
+        .await?;
+    let current_by_upstream = stores
+        .plan_tiers
+        .list_current_upstream_plan_tiers()
+        .await?
+        .into_iter()
+        .map(|record| (record.upstream_id, record))
+        .collect::<HashMap<_, _>>();
+    let subscription_metadata = stores
+        .upstream_subscription_metadata
+        .list_upstream_subscription_metadata()
+        .await?;
+    let organization_metadata = stores
+        .organization_metadata
+        .list_organization_metadata()
+        .await?;
+    let organizations = organization_metadata
+        .iter()
+        .map(|record| (record.organization_uuid.as_str(), record))
+        .collect::<HashMap<_, _>>();
+
+    for record in subscription_metadata {
+        let Some(organization_uuid) = record.organization_uuid.as_deref() else {
+            continue;
+        };
+        let Some(organization) = organizations.get(organization_uuid).copied() else {
+            continue;
+        };
+        let (tier, resolution_source) = resolve_tier(
+            &overrides,
+            organization.organization_type.as_deref(),
+            organization.rate_limit_tier.as_deref(),
+            organization.seat_tier.as_deref(),
+        );
+        let desired = UpstreamPlanTierRecord {
+            upstream_id: record.upstream_id,
+            organization_uuid: record.organization_uuid.clone(),
+            organization_type: organization.organization_type.clone(),
+            rate_limit_tier: organization.rate_limit_tier.clone(),
+            seat_tier: organization.seat_tier.clone(),
+            tier_key: tier.map(|tier| tier.as_str().to_owned()),
+            resolution_source,
+            resolved_ratio_snapshot: tier.and_then(|tier| ratio_by_tier.get(&tier).copied()),
+            observed_at_unix_millis: now_unix_millis,
+            effective_from_unix_millis: now_unix_millis,
+            effective_to_unix_millis: None,
+            provenance: "dynamic_view_reconcile".to_owned(),
+            created_at_unix_millis: now_unix_millis,
+        };
+        if current_by_upstream
+            .get(&record.upstream_id)
+            .is_none_or(|current| upstream_plan_tier_changed(current, &desired))
+        {
+            stores
+                .plan_tiers
+                .append_upstream_plan_tier(&desired)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+fn ratio_by_tier(records: Vec<PlanTierRatioRecord>) -> HashMap<TierKey, f64> {
+    records
+        .into_iter()
+        .filter_map(|record| {
+            record
+                .tier_key
+                .parse::<TierKey>()
+                .ok()
+                .map(|tier| (tier, record.pro_relative_ratio))
+        })
+        .collect()
+}
+
+fn upstream_plan_tier_changed(
+    current: &UpstreamPlanTierRecord,
+    desired: &UpstreamPlanTierRecord,
+) -> bool {
+    current.tier_key != desired.tier_key
+        || current.resolution_source != desired.resolution_source
+        || !normalized_option_eq(
+            current.organization_type.as_deref(),
+            desired.organization_type.as_deref(),
+        )
+        || !normalized_option_eq(
+            current.rate_limit_tier.as_deref(),
+            desired.rate_limit_tier.as_deref(),
+        )
+        || !normalized_option_eq(current.seat_tier.as_deref(), desired.seat_tier.as_deref())
+        || current.organization_uuid != desired.organization_uuid
+}
+
+fn normalized_option_eq(left: Option<&str>, right: Option<&str>) -> bool {
+    left.unwrap_or_default()
+        .eq_ignore_ascii_case(right.unwrap_or_default())
 }
 
 async fn list_upstreams(stores: &Stores) -> StorageResult<Vec<UpstreamRecord>> {
@@ -440,21 +605,38 @@ async fn build_principal_chains(
     RebindError,
 > {
     let registry = list_registry_by_id(stores).await?;
+    let principal_ids = principals
+        .iter()
+        .map(|principal| principal.id)
+        .collect::<Vec<_>>();
+    let slots = [
+        PluginSlot::Router,
+        PluginSlot::ObservabilityHook,
+        PluginSlot::Shape,
+    ];
+    let mut chain_entries: HashMap<(Uuid, PluginSlot), Vec<PluginChainEntry>> = stores
+        .plugin_registry
+        .list_chains_for_principals(&principal_ids, &slots)
+        .await?
+        .into_iter()
+        .fold(HashMap::new(), |mut entries, entry| {
+            entries
+                .entry((entry.principal_id, entry.slot))
+                .or_insert_with(Vec::new)
+                .push(entry);
+            entries
+        });
     let mut chains = HashMap::new();
     let mut registered_slot_keys: HashSet<cc_lb_plugin_api::SlotKey> = HashSet::new();
     for principal in principals {
-        let router_entries = stores
-            .plugin_registry
-            .list_chain_for_principal(principal.id, PluginSlot::Router)
-            .await?;
-        let hook_entries = stores
-            .plugin_registry
-            .list_chain_for_principal(principal.id, PluginSlot::ObservabilityHook)
-            .await?;
-        let shape_entries = stores
-            .plugin_registry
-            .list_chain_for_principal(principal.id, PluginSlot::Shape)
-            .await?;
+        let router_entries =
+            take_chain_entries(&mut chain_entries, principal.id, PluginSlot::Router);
+        let hook_entries = take_chain_entries(
+            &mut chain_entries,
+            principal.id,
+            PluginSlot::ObservabilityHook,
+        );
+        let shape_entries = take_chain_entries(&mut chain_entries, principal.id, PluginSlot::Shape);
 
         let router = build_router_pipeline(
             stores,
@@ -468,20 +650,11 @@ async fn build_principal_chains(
         .await?;
 
         let mut hooks = Vec::new();
-        let mut hook_entries = hook_entries;
-        hook_entries.sort_by_key(|entry| entry.order);
         for entry in hook_entries {
             let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
             })?;
-            let registry_entry = stores
-                .plugin_registry
-                .get_registry_entry_by_sha(registry_entry.sha256)
-                .await?
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, "plugin registry sha not found")
-                })?;
-            if registry_entry_unsupported_slot(&registry_entry, PluginSlot::ObservabilityHook) {
+            if registry_entry_unsupported_slot(registry_entry, PluginSlot::ObservabilityHook) {
                 tracing::warn!(
                     target: "cc_lb_server::drift",
                     principal = %principal.name,
@@ -497,7 +670,7 @@ async fn build_principal_chains(
             let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
             let manifest = PluginManifest {
                 pure: true,
-                name: registry_entry.name,
+                name: registry_entry.name.clone(),
                 artifact: wasm_path.to_string_lossy().into_owned(),
                 wire_version: None,
                 config: entry.config,
@@ -530,45 +703,52 @@ async fn build_principal_chains(
             ObservabilityHooksCache::Explicit(hooks)
         };
 
-        let dialect = if let Some(entry) = shape_entries.into_iter().min_by_key(|entry| entry.order)
-        {
+        let dialect = if let Some(entry) = shape_entries.into_iter().next() {
             let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
             })?;
-            let registry_entry = stores
-                .plugin_registry
-                .get_registry_entry_by_sha(registry_entry.sha256)
-                .await?
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, "plugin registry sha not found")
-                })?;
-            let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
-            let manifest = PluginManifest {
-                pure: true,
-                name: registry_entry.name,
-                artifact: wasm_path.to_string_lossy().into_owned(),
-                wire_version: None,
-                config: entry.config,
-                metadata: std::collections::BTreeMap::new(),
-            };
-            let slot_key =
-                cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
-            registered_slot_keys.insert(slot_key.clone());
-            match register_shape_slot(runtime, &slot_key, &manifest).await {
-                Ok(slot) => {
-                    let handle: Arc<dyn cc_lb_plugin_api::UpstreamDialect> =
-                        Arc::new(WasmtimeUpstreamDialect::new(slot, runtime.config_arc()));
-                    DialectCache::Explicit(handle)
-                }
-                Err(error) => {
-                    tracing::error!(
-                        principal = %principal.name,
-                        plugin = %manifest.name,
-                        chain_entry_id = %entry.id,
-                        %error,
-                        "skipping shape chain entry: instantiation failed; principal falls back to route dialect",
-                    );
-                    DialectCache::Inherit
+            if registry_entry_unsupported_slot(registry_entry, PluginSlot::Shape) {
+                tracing::warn!(
+                    target: "cc_lb_server::drift",
+                    principal = %principal.name,
+                    plugin = registry_entry.name.as_str(),
+                    chain_entry_id = %entry.id,
+                    wasm_registry_id = %registry_entry.id,
+                    requested_slot = PluginSlot::Shape.as_str(),
+                    supported_slots = ?registry_entry.supported_slots,
+                    "skipping shape chain entry: registry entry does not support requested slot",
+                );
+                DialectCache::Inherit
+            } else {
+                let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
+                let manifest = PluginManifest {
+                    pure: true,
+                    name: registry_entry.name.clone(),
+                    artifact: wasm_path.to_string_lossy().into_owned(),
+                    wire_version: None,
+                    config: entry.config,
+                    metadata: std::collections::BTreeMap::new(),
+                };
+                let slot_key =
+                    cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
+                registered_slot_keys.insert(slot_key.clone());
+                match register_shape_slot(runtime, &slot_key, &manifest).await {
+                    Ok(slot) => {
+                        let handle: Arc<dyn cc_lb_plugin_api::UpstreamDialect> = Arc::new(
+                            WasmtimeUpstreamDialect::new(slot.clone(), runtime.config_arc()),
+                        );
+                        DialectCache::Explicit(ShapePluginCache { dialect: handle })
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            principal = %principal.name,
+                            plugin = %manifest.name,
+                            chain_entry_id = %entry.id,
+                            %error,
+                            "skipping shape chain entry: instantiation failed; principal falls back to route dialect",
+                        );
+                        DialectCache::Inherit
+                    }
                 }
             }
         } else {
@@ -578,6 +758,16 @@ async fn build_principal_chains(
         chains.insert(principal.name.clone(), (router, hooks, dialect));
     }
     Ok((chains, registered_slot_keys))
+}
+
+fn take_chain_entries(
+    entries: &mut HashMap<(Uuid, PluginSlot), Vec<PluginChainEntry>>,
+    principal_id: Uuid,
+    slot: PluginSlot,
+) -> Vec<PluginChainEntry> {
+    let mut chain = entries.remove(&(principal_id, slot)).unwrap_or_default();
+    chain.sort_by_key(|entry| (entry.order, entry.id));
+    chain
 }
 
 async fn list_registry_by_id(
@@ -622,15 +812,10 @@ async fn manifest_for_chain_entry(
     let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
     })?;
-    let registry_entry = stores
-        .plugin_registry
-        .get_registry_entry_by_sha(registry_entry.sha256)
-        .await?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "plugin registry sha not found"))?;
     let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
     Ok(PluginManifest {
         pure: true,
-        name: registry_entry.name,
+        name: registry_entry.name.clone(),
         artifact: wasm_path.to_string_lossy().into_owned(),
         wire_version: None,
         config: entry.config.clone(),
@@ -868,7 +1053,7 @@ struct DbCompositeSignerFactory {
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     downstream_api_key: Option<String>,
     router_chosen_upstream_name: Option<String>,
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 }
 
 impl DbCompositeSignerFactory {
@@ -877,7 +1062,7 @@ impl DbCompositeSignerFactory {
         upstream_store: Arc<dyn UpstreamStore>,
         aead: Arc<AeadService>,
         lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
-        clock: cc_lb_core::ClockHandle,
+        clock: cc_lb_engine::ClockHandle,
     ) -> Self {
         Self {
             upstreams,
@@ -907,7 +1092,7 @@ impl DbCompositeSignerFactory {
     }
 }
 
-impl cc_lb_core::ApiKeyAwareSignerFactory for DbCompositeSignerFactory {
+impl cc_lb_engine::ApiKeyAwareSignerFactory for DbCompositeSignerFactory {
     fn with_router_choice(
         &self,
         api_key: String,
@@ -997,7 +1182,9 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
 mod tests {
     use std::collections::BTreeSet;
 
-    use cc_lb_core::clock::{Clock, TestClock};
+    use cc_lb_engine::clock::{Clock, TestClock};
+    use cc_lb_engine::lifecycle::PromptCacheObservationCacheLike;
+    use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
     use cc_lb_plugin_api::types::TtlClass as PluginTtlClass;
     use cc_lb_storage_api::{
         BackendKind, MetaStore, PromptCacheObservationRecord, TtlClass as StorageTtlClass,
@@ -1007,6 +1194,9 @@ mod tests {
 
     use super::*;
     use crate::prompt_cache_observation_cache::HASH_SCHEMA_VERSION;
+    use crate::prompt_cache_observation_sink::{
+        DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY, PromptCacheObservationSink,
+    };
 
     const MODEL: &str = "claude-sonnet-4-5-20250929";
 
@@ -1082,7 +1272,7 @@ mod tests {
                 .display()
         );
         let storage =
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
                 .await
                 .expect("storage");
         storage.initialize(BackendKind::Sqlite).await.unwrap();
@@ -1102,6 +1292,7 @@ mod tests {
             upstream_subscription_quotas: storage.clone(),
             upstream_subscription_metadata: storage.clone(),
             organization_metadata: storage.clone(),
+            plan_tiers: storage.clone(),
             prompt_cache_observations,
             anthropic_compatibility_kv: storage.clone(),
             audit: Some(storage),
@@ -1141,7 +1332,21 @@ mod tests {
         data_dir: &Path,
         config: cc_lb_config::Config,
     ) -> Arc<DynamicView> {
-        let clock: cc_lb_core::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let clock: cc_lb_engine::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let (prompt_cache_observation_cache, prompt_cache_observation_sink) =
+            if config.prompt_cache_shadow.enabled {
+                let cache =
+                    new_prompt_cache_observation_cache(&config.prompt_cache_shadow, clock.clone());
+                let (sink, _writer) = PromptCacheObservationSink::new(
+                    stores.prompt_cache_observations.clone(),
+                    DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
+                    cc_lb_observability::cache_observation_store_kind::SQLITE,
+                );
+                let sink: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
+                (Some(cache), Some(sink))
+            } else {
+                (None, None)
+            };
         build_dynamic_view(
             stores,
             &AnthropicOAuthConfig::default(),
@@ -1151,6 +1356,8 @@ mod tests {
             runtime,
             data_dir,
             Arc::new(SubscriptionQuotaCache::new()),
+            prompt_cache_observation_cache,
+            prompt_cache_observation_sink,
             1800,
             &config,
             clock,
@@ -1167,11 +1374,16 @@ mod tests {
         PromptCacheObservationRecord {
             upstream_id,
             canonical_model_id: MODEL.to_owned(),
-            prefix_hash: prefix_hash.to_owned(),
+            v3_prefix_key: prefix_hash.to_owned(),
             ttl_class: StorageTtlClass::Ephemeral5m,
             expires_at_unix_secs: 4_100_000_000,
             last_observed_at_unix_secs,
             hash_schema_version: HASH_SCHEMA_VERSION,
+            prefix_content_block_index: 0,
+            estimated_prefix_tokens: 0,
+            token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+            last_provider_cache_read_tokens: Some(0),
+            last_provider_cache_creation_tokens: Some(0),
         }
     }
 
@@ -1235,11 +1447,16 @@ mod tests {
         let record = PromptCacheObservationRecord {
             upstream_id: upstream.id,
             canonical_model_id: MODEL.to_owned(),
-            prefix_hash: "sink-wiring-prefix".to_owned(),
+            v3_prefix_key: "sink-wiring-prefix".to_owned(),
             ttl_class: cc_lb_storage_api::TtlClass::Ephemeral5m,
             expires_at_unix_secs: 4_100_000_300,
             last_observed_at_unix_secs: 1_700_000_000,
             hash_schema_version: HASH_SCHEMA_VERSION,
+            prefix_content_block_index: 0,
+            estimated_prefix_tokens: 0,
+            token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+            last_provider_cache_read_tokens: Some(0),
+            last_provider_cache_creation_tokens: Some(0),
         };
         sink.enqueue(record.clone())
             .expect("enqueue succeeds while writer is alive");
@@ -1255,8 +1472,94 @@ mod tests {
             1,
             "observation enqueued through DynamicView sink must reach the production store"
         );
-        assert_eq!(stored[0].prefix_hash, "sink-wiring-prefix");
+        assert_eq!(stored[0].v3_prefix_key, "sink-wiring-prefix");
         assert_eq!(stored[0].upstream_id, upstream.id);
+    }
+
+    #[tokio::test]
+    async fn shared_prompt_cache_observation_cache_sees_live_upsert_after_rebind() {
+        // Given: two DynamicView builds share the process-level observation cache handle.
+        let (dir, storage) = storage_fixture(23).await;
+        let upstream = create_upstream(&storage, "shared-cache-upstream").await;
+        let prompt_store = Arc::new(FakePromptCacheObservationStore::new(Vec::new()));
+        let stores = stores(storage, prompt_store);
+        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
+        let mut config = cc_lb_config::Config::default();
+        config.prompt_cache_shadow.enabled = true;
+        let clock: cc_lb_engine::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let shared_cache =
+            new_prompt_cache_observation_cache(&config.prompt_cache_shadow, clock.clone());
+        let shared_cache_trait: Arc<dyn PromptCacheObservationCacheLike> = shared_cache.clone();
+
+        let view_a = build_dynamic_view(
+            &stores,
+            &AnthropicOAuthConfig::default(),
+            Arc::new(AeadService::from_master_key([19; 32])),
+            None,
+            0,
+            &runtime,
+            dir.path(),
+            Arc::new(SubscriptionQuotaCache::new()),
+            Some(shared_cache.clone()),
+            None,
+            1800,
+            &config,
+            clock.clone(),
+        )
+        .await
+        .expect("first dynamic view builds");
+        let view_b = build_dynamic_view(
+            &stores,
+            &AnthropicOAuthConfig::default(),
+            Arc::new(AeadService::from_master_key([19; 32])),
+            None,
+            view_a.generation,
+            &runtime,
+            dir.path(),
+            Arc::new(SubscriptionQuotaCache::new()),
+            Some(shared_cache.clone()),
+            None,
+            1800,
+            &config,
+            clock.clone(),
+        )
+        .await
+        .expect("second dynamic view builds");
+
+        // When: the long-lived subscriber upserts into the shared cache after rebind.
+        shared_cache.upsert_observation(
+            crate::prompt_cache_observation_cache::PromptCacheObservationUpsert {
+                upstream_id: upstream.id,
+                canonical_model: MODEL.to_owned(),
+                prefix_hash: "live-prefix".to_owned(),
+                ttl_class: PluginTtlClass::Ephemeral5m,
+                expires_at_unix_secs: 4_100_000_000,
+                last_observed_at_unix_secs: 1_700_000_010,
+                prefix_content_block_index: 0,
+                estimated_prefix_tokens: 0,
+                token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+            },
+        );
+
+        // Then: the rebuilt DynamicView routes against the same cache and sees the live write.
+        assert!(Arc::ptr_eq(
+            view_a
+                .prompt_cache_observation_cache_opt()
+                .expect("first view has shared cache"),
+            &shared_cache_trait,
+        ));
+        let view_b_cache = view_b
+            .prompt_cache_observation_cache_opt()
+            .expect("second view has shared cache");
+        assert!(Arc::ptr_eq(view_b_cache, &shared_cache_trait));
+        let snapshot = view_b_cache.snapshot_for_upstream(
+            upstream.id,
+            MODEL,
+            &[("live-prefix".to_owned(), PluginTtlClass::Ephemeral5m)],
+            unix_secs(clock.now()),
+        );
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].prefix_hash, "live-prefix");
     }
 
     #[tokio::test]

@@ -1,8 +1,8 @@
 use std::time::Duration;
 
+use cc_lb_clock::ClockHandle;
 use cc_lb_config::Config;
-use cc_lb_core::anthropic_compat::CLAUDE_CODE_STABLE_VERSION_KEY;
-use cc_lb_core::clock::ClockHandle;
+use cc_lb_engine::anthropic_compat::CLAUDE_CODE_STABLE_VERSION_KEY;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -193,9 +193,6 @@ fn singleton_cron_specs(config: &Config, clock: ClockHandle) -> Vec<SingletonCro
     });
     push_singleton_spec(&mut specs, config, &clock, "usage_prune", |_| {
         CronJob::UsagePrune(Default::default())
-    });
-    push_singleton_spec(&mut specs, config, &clock, "quota_gc", |_| {
-        CronJob::QuotaGc(Default::default())
     });
     push_singleton_spec(&mut specs, config, &clock, "prompt_cache_purge", |_| {
         CronJob::PromptCachePurge(Default::default())

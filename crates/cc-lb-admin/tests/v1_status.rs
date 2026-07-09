@@ -6,11 +6,10 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_config::{Config, DownstreamAuthMode};
-use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_core::{
-    ApplyStatus, DynamicViewBuilder, Lifecycle, LifecycleConfig, ReplicaIdentity,
-    UpstreamStatusEntry, UpstreamStatusSnapshot,
-};
+use cc_lb_contract::ReplicaIdentity;
+use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_control::{ApplyStatus, DynamicViewBuilder, UpstreamStatusEntry, UpstreamStatusSnapshot};
+use cc_lb_engine::{Lifecycle, LifecycleConfig};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate,
@@ -30,14 +29,15 @@ async fn status_reflects_in_memory_dynamic_view_generation_and_replica_id() {
             DownstreamAuthMode::ApiKey,
             None,
             state.key_store.clone(),
-            Arc::new(cc_lb_core::SystemClock),
+            Arc::new(cc_lb_clock::SystemClock),
         )),
         state.dynamic_view.clone(),
+        cc_lb_engine::make_default_dispatcher(50),
         LifecycleConfig {
             replica_identity: Some(replica.clone()),
             ..LifecycleConfig::default()
         },
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     );
     state.lifecycle = Some(Arc::new(lifecycle));
     bump_dynamic_generation(&state, UpstreamStatusSnapshot::default());

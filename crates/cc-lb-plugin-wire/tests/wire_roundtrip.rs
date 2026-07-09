@@ -9,10 +9,13 @@
 //! borrowed encoding stops producing bytes the guest can parse.
 
 use cc_lb_plugin_wire::{
-    ArchivedFilterRequest, ArchivedObserveEvent, ArchivedShapeRequest, Claim, ClaimRef,
-    FilterRequest, FilterRequestRef, Header, HeaderRef, ObserveEvent, Principal, PrincipalRef,
-    QueryRef, ShapeRequest, ShapeRequestRef, ShapeResponse, Upstream, UpstreamCandidate,
-    UpstreamCandidateRef, UpstreamRef, WireSchema,
+    ArchivedFilterRequest, ArchivedObserveEvent, ArchivedShapeRequest, CachePricingSummary,
+    CachePricingSummaryRef, Claim, ClaimRef, FilterRequest, FilterRequestRef, Header, HeaderRef,
+    ObserveEvent, Principal, PrincipalRef, QueryRef, ShapeRequest, ShapeRequestRef, ShapeResponse,
+    SseEvent, SseEventRef, TransformResponseRequest, TransformResponseRequestRef,
+    TransformResponseResult, TransformSseEventRequest, TransformSseEventRequestRef,
+    TransformSseEventResult, Upstream, UpstreamCandidate, UpstreamCandidateRef, UpstreamRef,
+    WireSchema,
     schema::{HookKind, WireVersion},
 };
 use rkyv::rancor::Error;
@@ -39,6 +42,15 @@ fn header(name: &str, value: &str) -> Header {
 fn filter_request_round_trips() {
     let req = FilterRequest {
         request_id: Box::from("req-1"),
+        thread_id: None,
+        canonical_model_id: Box::from("claude-test"),
+        cache_pricing: CachePricingSummary {
+            status: Box::from("known"),
+            input_micros_per_million: Some(5_000_000),
+            cache_creation_5m_micros_per_million: Some(6_250_000),
+            cache_creation_1h_micros_per_million: Some(10_000_000),
+            cache_read_micros_per_million: Some(500_000),
+        },
         method: Box::from("POST"),
         path: Box::from("/v1/messages"),
         query: None,
@@ -51,6 +63,9 @@ fn filter_request_round_trips() {
             kind: Box::from("anthropic_api_key"),
             observed_at_unix_secs: 42,
             predicted_cache_read_tokens: 256,
+            predicted_cache_creation_tokens_5m: 512,
+            predicted_cache_creation_tokens_1h: 1024,
+            predicted_uncached_input_tokens: 32,
             plan_capacity_ratio: 1.0,
             organization_type: Box::from(""),
             rate_limit_tier: Box::from(""),
@@ -62,8 +77,10 @@ fn filter_request_round_trips() {
     let owned: FilterRequest =
         rkyv::deserialize::<FilterRequest, Error>(archived).expect("deserialize");
     assert_eq!(&*owned.request_id, "req-1");
+    assert_eq!(&*owned.canonical_model_id, "claude-test");
     assert_eq!(owned.candidates.len(), 1);
     assert_eq!(owned.candidates[0].predicted_cache_read_tokens, 256);
+    assert_eq!(owned.candidates[0].predicted_cache_creation_tokens_5m, 512);
 }
 
 /// RFC-0001 #9: `FilterRequestRef<'_>` (borrowed) must produce bytes
@@ -84,6 +101,9 @@ fn filter_request_ref_encodes_to_owned_wire() {
         kind: "anthropic_api_key",
         observed_at_unix_secs: 42,
         predicted_cache_read_tokens: 256,
+        predicted_cache_creation_tokens_5m: 512,
+        predicted_cache_creation_tokens_1h: 1024,
+        predicted_uncached_input_tokens: 32,
         plan_capacity_ratio: 1.0,
         organization_type: "",
         rate_limit_tier: "",
@@ -91,6 +111,15 @@ fn filter_request_ref_encodes_to_owned_wire() {
     }];
     let req_ref = FilterRequestRef {
         request_id: "req-1",
+        thread_id: None,
+        canonical_model_id: "claude-test",
+        cache_pricing: CachePricingSummaryRef {
+            status: "known",
+            input_micros_per_million: Some(5_000_000),
+            cache_creation_5m_micros_per_million: Some(6_250_000),
+            cache_creation_1h_micros_per_million: Some(10_000_000),
+            cache_read_micros_per_million: Some(500_000),
+        },
         method: "POST",
         path: "/v1/messages",
         query: None,
@@ -109,6 +138,8 @@ fn filter_request_ref_encodes_to_owned_wire() {
     assert_eq!(owned_body, b"{\"k\":1}");
     let owned_id: &str = &archived.request_id;
     assert_eq!(owned_id, "req-1");
+    let model_id: &str = &archived.canonical_model_id;
+    assert_eq!(model_id, "claude-test");
 }
 
 #[test]
@@ -181,6 +212,123 @@ fn shape_response_round_trips() {
     };
     let bytes = rkyv::to_bytes::<Error>(&resp).expect("encode");
     let _ = bytes; // serialize success suffices
+}
+
+#[test]
+fn transform_response_request_ref_encodes_to_owned_wire() {
+    let claim_refs = [ClaimRef {
+        key: "scope",
+        value: b"inference",
+    }];
+    let header_refs = [HeaderRef {
+        name: "content-type",
+        value: b"application/json",
+    }];
+    let req_ref = TransformResponseRequestRef {
+        request_id: "req-transform",
+        principal: PrincipalRef {
+            id: "tenant-a",
+            kind: "api_key",
+            claims: &claim_refs,
+        },
+        upstream: UpstreamRef::AnthropicDirect { base_url: None },
+        request_method: "POST",
+        request_path: "/v1/messages",
+        canonical_model_id: "claude-test",
+        response_status: 200,
+        response_headers: &header_refs,
+        body: b"{\"content\":[]}",
+    };
+    let bytes = rkyv::to_bytes::<Error>(&req_ref).expect("encode ref");
+    let archived =
+        rkyv::access::<cc_lb_plugin_wire::ArchivedTransformResponseRequest, Error>(&bytes)
+            .expect("access owned");
+    let body: &[u8] = &archived.body;
+    assert_eq!(body, b"{\"content\":[]}");
+    let request_id: &str = &archived.request_id;
+    assert_eq!(request_id, "req-transform");
+}
+
+#[test]
+fn transform_response_result_round_trips() {
+    let result = TransformResponseResult::Replace {
+        status: Some(202),
+        headers: Some(Box::new([header("x-plugin", "yes")])),
+        body: Some(Box::from(&b"{\"ok\":true}"[..])),
+    };
+    let bytes = rkyv::to_bytes::<Error>(&result).expect("encode");
+    let archived =
+        rkyv::access::<cc_lb_plugin_wire::ArchivedTransformResponseResult, Error>(&bytes)
+            .expect("access");
+    let owned: TransformResponseResult =
+        rkyv::deserialize::<TransformResponseResult, Error>(archived).expect("deserialize");
+    match owned {
+        TransformResponseResult::Replace { status, body, .. } => {
+            assert_eq!(status, Some(202));
+            assert_eq!(body.as_deref(), Some(&b"{\"ok\":true}"[..]));
+        }
+        TransformResponseResult::Unchanged => panic!("variant mismatch"),
+    }
+}
+
+#[test]
+fn transform_sse_event_request_ref_encodes_to_owned_wire() {
+    let header_refs = [HeaderRef {
+        name: "content-type",
+        value: b"text/event-stream",
+    }];
+    let event_ref = SseEventRef {
+        event: "content_block_start",
+        data: br#"{"type":"content_block_start"}"#,
+    };
+    let req_ref = TransformSseEventRequestRef {
+        request_id: "req-sse",
+        principal: PrincipalRef {
+            id: "tenant-a",
+            kind: "api_key",
+            claims: &[],
+        },
+        upstream: UpstreamRef::AnthropicDirect { base_url: None },
+        request_method: "POST",
+        request_path: "/v1/messages",
+        canonical_model_id: "claude-test",
+        response_status: 200,
+        response_headers: &header_refs,
+        event: event_ref,
+    };
+    let bytes = rkyv::to_bytes::<Error>(&req_ref).expect("encode ref");
+    let archived =
+        rkyv::access::<cc_lb_plugin_wire::ArchivedTransformSseEventRequest, Error>(&bytes)
+            .expect("access owned");
+    let event_name: &str = &archived.event.event;
+    let data: &[u8] = &archived.event.data;
+    assert_eq!(event_name, "content_block_start");
+    assert_eq!(data, br#"{"type":"content_block_start"}"#);
+}
+
+#[test]
+fn transform_sse_event_result_round_trips() {
+    let result = TransformSseEventResult::Replace {
+        events: Box::new([SseEvent {
+            event: Box::from("content_block_start"),
+            data: Box::from(&br#"{"rewritten":true}"#[..]),
+        }]),
+    };
+    let bytes = rkyv::to_bytes::<Error>(&result).expect("encode");
+    let archived =
+        rkyv::access::<cc_lb_plugin_wire::ArchivedTransformSseEventResult, Error>(&bytes)
+            .expect("access");
+    let owned: TransformSseEventResult =
+        rkyv::deserialize::<TransformSseEventResult, Error>(archived).expect("deserialize");
+    match owned {
+        TransformSseEventResult::Replace { events } => {
+            assert_eq!(events.len(), 1);
+            assert_eq!(&*events[0].event, "content_block_start");
+        }
+        TransformSseEventResult::Unchanged | TransformSseEventResult::Drop => {
+            panic!("variant mismatch")
+        }
+    }
 }
 
 #[test]
@@ -262,6 +410,8 @@ fn schema_fingerprints_and_sections_are_distinct() {
         <FilterRequest as WireSchema>::FINGERPRINT,
         <ShapeRequest as WireSchema>::FINGERPRINT,
         <ObserveEvent as WireSchema>::FINGERPRINT,
+        <TransformResponseRequest as WireSchema>::FINGERPRINT,
+        <TransformSseEventRequest as WireSchema>::FINGERPRINT,
     ];
     for i in 0..fingerprints.len() {
         for j in i + 1..fingerprints.len() {
@@ -285,6 +435,16 @@ fn schema_fingerprints_and_sections_are_distinct() {
         format!(
             "{}.{}",
             HookKind::Observe.section_prefix(),
+            WireVersion::V1.as_str()
+        ),
+        format!(
+            "{}.{}",
+            HookKind::TransformResponse.section_prefix(),
+            WireVersion::V1.as_str()
+        ),
+        format!(
+            "{}.{}",
+            HookKind::TransformSseEvent.section_prefix(),
             WireVersion::V1.as_str()
         ),
     ];

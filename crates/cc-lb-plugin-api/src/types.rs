@@ -48,7 +48,7 @@ pub enum PluginSlot {
     Router,
     /// Observability hook slot for receiving request lifecycle events.
     ObservabilityHook,
-    /// Request shaping slot for producing upstream-specific requests.
+    /// Request/response shaping slot for upstream-specific requests and response hooks.
     Shape,
 }
 
@@ -278,6 +278,20 @@ pub enum CacheBreakpointSource {
     Message,
 }
 
+/// One v3 content-block lookback prefix that Anthropic may read for a breakpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct CacheLookbackPrefix {
+    /// Proxy-local v3 prefix key for this content-block prefix.
+    pub prefix_hash: String,
+    /// Content-block index in the flattened `tools -> system -> messages` sequence.
+    pub content_block_index: u32,
+    /// Estimated prefix tokens through this content block.
+    pub prefix_token_count: u64,
+    /// Distance from the requested breakpoint: 0 for N, 19 for N-19.
+    pub lookback_distance: u32,
+}
+
 /// Cache breakpoint position in the request, for prompt cache optimization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)]
@@ -298,6 +312,12 @@ pub struct CacheBreakpoint {
     pub requested_ttl: TtlClass,
     /// Origin of this breakpoint.
     pub origin: BreakpointOrigin,
+    /// V3 lookback candidates in N..N-19 order for this breakpoint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lookback_prefixes: Vec<CacheLookbackPrefix>,
+    /// Source of the prefix-token estimate used for this breakpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_estimate_source: Option<String>,
 }
 
 /// Warm cache entry eligible for reuse in upstream requests.
@@ -334,6 +354,48 @@ pub struct CacheScore {
     pub confidence: f32,
     /// Optional explanation for ambiguous or low-confidence predictions.
     pub ambiguity_reason: Option<String>,
+    /// Matched proxy-local v3 cache key, when the lookback window found one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_v3_cache_key: Option<String>,
+    /// Requested breakpoint content-block index that anchored the match/write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint_content_block_index: Option<u32>,
+    /// Matched content-block index inside the breakpoint's v3 lookback window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_content_block_index: Option<u32>,
+    /// Distance from the breakpoint to the matched content block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookback_distance: Option<u32>,
+    /// Source of the prefix-token estimate used for this score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_estimate_source: Option<String>,
+}
+
+/// Model-specific cache/input pricing exposed to router plugins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachePricingSummary {
+    /// Pricing availability status, currently `known` or `unknown`.
+    pub status: String,
+    /// Base input token price in micros USD per million tokens.
+    pub input_micros_per_million: Option<u64>,
+    /// 5-minute cache creation token price in micros USD per million tokens.
+    pub cache_creation_5m_micros_per_million: Option<u64>,
+    /// 1-hour cache creation token price in micros USD per million tokens.
+    pub cache_creation_1h_micros_per_million: Option<u64>,
+    /// Cache read token price in micros USD per million tokens.
+    pub cache_read_micros_per_million: Option<u64>,
+}
+
+impl Default for CachePricingSummary {
+    fn default() -> Self {
+        Self {
+            status: "unknown".to_owned(),
+            input_micros_per_million: None,
+            cache_creation_5m_micros_per_million: None,
+            cache_creation_1h_micros_per_million: None,
+            cache_read_micros_per_million: None,
+        }
+    }
 }
 
 /// Available upstream candidate for routing decisions.
@@ -400,6 +462,16 @@ pub enum CredentialStrategy {
 pub struct RequestContext {
     /// Stable request identifier used for logs, audit rows, and upstream traceability.
     pub request_id: String,
+    /// Session / thread identifier that stays constant across multiple requests
+    /// belonging to the same conversation. Populated at request parse time
+    /// from `x-claude-code-session-id` and friends. `None` for stateless
+    /// requests that do not carry a session header.
+    ///
+    /// Filters that need cache-affinity (e.g. subscription routing) MUST
+    /// prefer this over `request_id` as their per-session hash input so that
+    /// all requests belonging to the same conversation land on the same
+    /// upstream and reuse the Anthropic prompt cache.
+    pub thread_id: Option<String>,
     /// Downstream request headers after hop-by-hop stripping.
     pub downstream_headers: HeaderMap,
     /// Downstream HTTP method.
@@ -414,6 +486,94 @@ pub struct RequestContext {
     pub cache_breakpoints: Vec<CacheBreakpoint>,
     /// Canonical model identifier resolved from the request.
     pub canonical_model_id: String,
+    /// Pricing summary for the canonical model, loaded by the host from the
+    /// in-memory price catalog before router plugins run.
+    pub cache_pricing: CachePricingSummary,
+}
+
+/// Buffered upstream response transform input.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransformResponseRequest {
+    /// Stable request identifier.
+    pub request_id: String,
+    /// Authenticated caller identity.
+    pub principal: Principal,
+    /// Selected upstream that produced the response.
+    pub upstream: Upstream,
+    /// Original downstream request method.
+    pub request_method: Method,
+    /// Original downstream request path.
+    pub request_path: String,
+    /// Canonical model identifier resolved from the request.
+    pub canonical_model_id: String,
+    /// Upstream response status.
+    pub response_status: StatusCode,
+    /// Upstream response headers after host-owned trimming/decoding.
+    pub response_headers: HeaderMap,
+    /// Decoded response body bytes.
+    pub body: Bytes,
+}
+
+/// Buffered upstream response transform output.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TransformResponseResult {
+    /// Return the upstream response unchanged.
+    Unchanged,
+    /// Replace selected downstream-visible response parts.
+    Replace {
+        /// Optional replacement status.
+        status: Option<StatusCode>,
+        /// Optional replacement end-to-end headers.
+        headers: Option<HeaderMap>,
+        /// Optional replacement decoded body.
+        body: Option<Bytes>,
+    },
+}
+
+/// One parsed SSE event delivered to response-transform plugins.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SseEvent {
+    /// SSE event type, empty for unnamed `data:` events.
+    pub event: String,
+    /// Concatenated SSE data payload bytes.
+    pub data: Bytes,
+}
+
+/// Per-event SSE response transform input.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransformSseEventRequest {
+    /// Stable request identifier.
+    pub request_id: String,
+    /// Authenticated caller identity.
+    pub principal: Principal,
+    /// Selected upstream that produced the response.
+    pub upstream: Upstream,
+    /// Original downstream request method.
+    pub request_method: Method,
+    /// Original downstream request path.
+    pub request_path: String,
+    /// Canonical model identifier resolved from the request.
+    pub canonical_model_id: String,
+    /// Upstream response status.
+    pub response_status: StatusCode,
+    /// Upstream response headers after host-owned trimming/decoding.
+    pub response_headers: HeaderMap,
+    /// Complete parsed SSE event.
+    pub event: SseEvent,
+}
+
+/// Per-event SSE response transform output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TransformSseEventResult {
+    /// Emit the input event unchanged.
+    Unchanged,
+    /// Replace the input event with zero or more events.
+    Replace {
+        /// Replacement events emitted in order.
+        events: Vec<SseEvent>,
+    },
+    /// Drop the input event.
+    Drop,
 }
 
 /// Request produced by an upstream dialect before credentials are applied.
@@ -748,10 +908,250 @@ pub enum TerminalStrategy {
     FirstPick,
     /// Select a router plugin at random.
     Random,
-    /// Round-robin selection.
-    RoundRobin,
-    /// Least connections strategy.
-    LeastConnections,
+}
+
+/// Tier assigned by the subscription-preference filter to a candidate upstream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionTier {
+    /// All relevant base quota windows are fresh positive signals.
+    KnownBase,
+    /// At least one base window is a positive signal but not all — partial visibility.
+    PartialBase,
+    /// Base quotas are exhausted but extra-usage / overage is available and usable.
+    Overage,
+    /// No signal at all: sending the request would probe the upstream's real state.
+    UnknownProbe,
+}
+
+/// Per-candidate weighted-rendezvous-hash urgency score and tier for one
+/// subscription-preference selection.
+///
+/// Under salt v10 the `urgency` field is aliased to `effective_weight` so a
+/// consumer that only reads `urgency` still sees the current selection
+/// weight. Component fields expose the quota, cache, warning, and pricing
+/// inputs so operator queries can distinguish quota-driven changes from
+/// cache-value-driven WRH selection.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CandidateUrgency {
+    /// Upstream identifier this urgency was computed for.
+    pub upstream_id: Uuid,
+    /// Tier the candidate was assessed into.
+    pub tier: SubscriptionTier,
+    /// WRH selection weight actually used to score this candidate.
+    pub urgency: f64,
+    /// Pre-boost quota urgency component
+    /// (`capacity_multiplier * (1 - util)^2 / remaining_secs`).
+    pub quota_urgency: f64,
+    /// Predicted input tokens that can be read from cache.
+    pub predicted_cache_read_tokens: u32,
+    /// Predicted input tokens that would be written to 5-minute cache.
+    pub predicted_cache_creation_tokens_5m: u32,
+    /// Predicted input tokens that would be written to 1-hour cache.
+    pub predicted_cache_creation_tokens_1h: u32,
+    /// Predicted input tokens that are neither read from nor written to cache.
+    pub predicted_uncached_input_tokens: u32,
+    /// Ratio of net priced cache value to the maximum positive value in this
+    /// candidate's tier bucket. Ranges `[-1.0, 1.0]`; zero when pricing is
+    /// unknown or the bucket has no positive cache value.
+    pub cache_ratio: f64,
+    /// `exp(CACHE_LOG_BOOST * cache_ratio)`. Values below 1.0 penalize cache
+    /// whose missing write cost exceeds its read savings; values above 1.0
+    /// boost positive cache value. Multiplied onto `quota_urgency` to produce
+    /// `effective_weight`.
+    pub cache_weight_multiplier: f64,
+    /// Same-tier multiplier applied when base quota is warning-positive.
+    pub warning_multiplier: f64,
+    /// Ratio of cache-read savings to estimated cold-input cost.
+    pub cache_savings_ratio: f64,
+    /// Estimated input-side cost for this candidate in micros USD.
+    pub estimated_input_cost_micros: u64,
+    /// Final WRH weight after quota, cache, and warning multipliers.
+    pub effective_weight: f64,
+    /// Net priced cache value (`read_savings - creation_cost`) in micro-USD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_value_micros: Option<i64>,
+    /// Matched proxy-local v3 cache key for this candidate, when positive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_v3_cache_key: Option<String>,
+    /// Matched content-block index in the v3 lookback window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_content_block_index: Option<u32>,
+    /// Requested breakpoint content-block index that anchored the score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint_content_block_index: Option<u32>,
+    /// Distance from the breakpoint to the matched v3 content block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookback_distance: Option<u32>,
+    /// Source of the token estimate used for this candidate's cache score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_estimate_source: Option<String>,
+}
+
+impl PartialEq for CandidateUrgency {
+    fn eq(&self, other: &Self) -> bool {
+        self.upstream_id == other.upstream_id
+            && self.tier == other.tier
+            && self.urgency.total_cmp(&other.urgency).is_eq()
+            && self.quota_urgency.total_cmp(&other.quota_urgency).is_eq()
+            && self.predicted_cache_read_tokens == other.predicted_cache_read_tokens
+            && self.predicted_cache_creation_tokens_5m == other.predicted_cache_creation_tokens_5m
+            && self.predicted_cache_creation_tokens_1h == other.predicted_cache_creation_tokens_1h
+            && self.predicted_uncached_input_tokens == other.predicted_uncached_input_tokens
+            && self.cache_ratio.total_cmp(&other.cache_ratio).is_eq()
+            && self
+                .cache_weight_multiplier
+                .total_cmp(&other.cache_weight_multiplier)
+                .is_eq()
+            && self
+                .warning_multiplier
+                .total_cmp(&other.warning_multiplier)
+                .is_eq()
+            && self
+                .cache_savings_ratio
+                .total_cmp(&other.cache_savings_ratio)
+                .is_eq()
+            && self.estimated_input_cost_micros == other.estimated_input_cost_micros
+            && self
+                .effective_weight
+                .total_cmp(&other.effective_weight)
+                .is_eq()
+            && self.cache_value_micros == other.cache_value_micros
+            && self.matched_v3_cache_key == other.matched_v3_cache_key
+            && self.matched_content_block_index == other.matched_content_block_index
+            && self.breakpoint_content_block_index == other.breakpoint_content_block_index
+            && self.lookback_distance == other.lookback_distance
+            && self.token_estimate_source == other.token_estimate_source
+    }
+}
+
+impl Eq for CandidateUrgency {}
+
+/// Source of the per-session hash key that the subscription-preference filter's
+/// Weighted Rendezvous Hash used to break ties within the winning tier.
+///
+/// Emitted on [`SubscriptionPreferenceTrace`] so downstream trace consumers can
+/// distinguish "this turn stayed on the same upstream because the session
+/// (thread) id kept its WRH seed stable" from "this turn drew an independent
+/// random upstream because no session id was available and the request id was
+/// used as fallback." A run where multiple consecutive turns of the same
+/// conversation show `request_id` here is the primary regression signature of
+/// the 2026-07-05 incident that motivated PR #322 (WRH thread-id fix) and its
+/// follow-up observability issue #340.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WrhKeySource {
+    /// Filter used the matched proxy-local v3 cache key for cache-positive affinity.
+    CacheHash,
+    /// Filter fell back to `RequestContext::request_id` because no session
+    /// identifier was available or the value was empty. Each request draws an
+    /// independent random upstream at the WRH step; safe for stateless traffic
+    /// but destroys prompt-cache affinity across turns of the same
+    /// conversation. Default so that historical trace rows deserialize into a
+    /// safe, backwards-compatible value.
+    #[default]
+    #[serde(alias = "thread_id")]
+    RequestId,
+}
+
+/// Structured trace payload emitted by the subscription-preference filter,
+/// exposing the winning tier and per-candidate WRH urgency scores.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionPreferenceTrace {
+    /// Tier the winning candidate was selected from.
+    pub chosen_tier: SubscriptionTier,
+    /// One entry per candidate that participated in tier assessment.
+    pub candidates: Vec<CandidateUrgency>,
+    /// Which `RequestContext` field the filter fed into the Weighted
+    /// Rendezvous Hash to break ties within `chosen_tier`.
+    pub wrh_key_source: WrhKeySource,
+    /// Tier the same `thread_id` was previously assessed into during a
+    /// prior request on this proxy instance, when known. `None` for the
+    /// first turn of a session, for stateless requests (no `thread_id`),
+    /// after a `DynamicView` rebuild wipes tier memory, and after the
+    /// per-thread tier record ages out or is evicted by the tier-memory
+    /// bound. Used to distinguish legitimate tier transitions
+    /// (`KnownBase -> Overage` on a genuine quota flip) from spurious
+    /// upstream churn in trace queries.
+    pub previous_tier: Option<SubscriptionTier>,
+    /// Version label of the WRH salt/algorithm that produced this trace.
+    /// Bumped when the selection algorithm changes shape so a shift in
+    /// upstream mix can be attributed to an algorithm change vs. an
+    /// upstream/quota state change.
+    pub rendezvous_salt_version: Option<String>,
+    /// Version label for cache-cost fields in this trace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_cost_basis_version: Option<String>,
+    /// Upstream that won the raw formula before thread-owner retention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula_winner_upstream_id: Option<Uuid>,
+    /// Upstream kept after thread-owner retention and cache-loss gating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_upstream_id: Option<Uuid>,
+    /// Prior owner for this thread, when a same-tier owner existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incumbent_upstream_id: Option<Uuid>,
+    /// Estimated incremental cache cost to switch from incumbent to formula winner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_switch_cache_loss_micros: Option<u64>,
+    /// Pricing/cache availability for the switch-cost estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_loss_status: Option<String>,
+    /// Machine-readable switch-gate outcome reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_gate_reason: Option<String>,
+    /// Bucket-level v3 cache-affinity key selected before WRH when cache-positive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_v3_cache_affinity_key: Option<String>,
+    /// Analysis-only lineage prediction; must not feed routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_would_have_predicted_read_tokens: Option<u32>,
+    /// Analysis-only lineage upstream; must not feed routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_would_have_picked_upstream_id: Option<Uuid>,
+}
+
+/// Per-candidate cache-affinity trace row. Emitted by the built-in
+/// `cache_affinity` filter so a stored `routing_trace` retains enough state
+/// to reconstruct why a candidate was kept or dropped without re-running
+/// the filter.
+///
+/// Fields intentionally stay raw (no `never_warm` / `cache_expired`
+/// derived labels) because the filter itself does not consult TTLs when
+/// deciding to keep or drop — it only checks that
+/// `predicted_cache_read_tokens` is greater than zero. Trace consumers
+/// can compute their own labels from
+/// `(kept, predicted_cache_read_tokens, predicted_expires_at_unix_secs)`
+/// against the surrounding request timestamp.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheAffinityCandidate {
+    /// Upstream identifier this trace row describes.
+    pub upstream_id: Uuid,
+    /// `true` when the candidate survived the filter and was passed to the
+    /// next stage. `false` when the filter dropped it (only possible when
+    /// at least one peer candidate was a cache hit).
+    pub kept: bool,
+    /// Predicted prompt-cache read tokens from the cache-score subsystem.
+    /// `Some(0)` means a score was computed but nothing would replay from
+    /// cache; `None` means no cache score was available for this candidate.
+    /// Consumers derive "warm" as `Some(n) if n > 0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_cache_read_tokens: Option<u32>,
+    /// Predicted cache expiry (unix seconds) from the cache-score subsystem
+    /// when known. Consumers derive "cache expired at trace time" by
+    /// comparing against the request event's timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_expires_at_unix_secs: Option<u64>,
+}
+
+/// Structured trace payload emitted by the built-in cache-affinity filter,
+/// exposing which candidates were kept versus dropped and the cache-score
+/// signals that drove the decision.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheAffinityTrace {
+    /// One entry per candidate the filter observed, in the order the
+    /// filter received them.
+    pub candidates: Vec<CacheAffinityCandidate>,
 }
 
 /// Decision made at a single routing stage.
@@ -768,6 +1168,15 @@ pub struct StageDecision {
     /// Time spent executing this routing stage, in microseconds.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub duration_us: u64,
+    /// Optional filter-specific trace payload. Only the built-in
+    /// subscription-preference filter populates this today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription_preference: Option<SubscriptionPreferenceTrace>,
+    /// Optional cache-affinity trace payload. Only the built-in
+    /// `cache_affinity` filter populates this today; user-defined
+    /// wasm filters leave it `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_affinity: Option<CacheAffinityTrace>,
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -788,7 +1197,6 @@ pub struct TerminalDecision {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RoutingTrace {
     /// Sequence of stage decisions made during routing.
-    #[serde(default)]
     pub stages: Vec<StageDecision>,
     /// Final terminal routing decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1023,6 +1431,13 @@ mod tests {
             prefix_token_count: 100,
             requested_ttl: TtlClass::Ephemeral5m,
             origin: BreakpointOrigin::Explicit,
+            lookback_prefixes: vec![CacheLookbackPrefix {
+                prefix_hash: "abc123".to_owned(),
+                content_block_index: 0,
+                prefix_token_count: 100,
+                lookback_distance: 0,
+            }],
+            token_estimate_source: Some("local_tiktoken_v1".to_owned()),
         };
         let json = serde_json::to_string(&breakpoint).unwrap();
         let decoded: CacheBreakpoint = serde_json::from_str(&json).unwrap();
@@ -1047,6 +1462,11 @@ mod tests {
             matched_breakpoint_index: Some(0),
             confidence: 0.95,
             ambiguity_reason: None,
+            matched_v3_cache_key: Some("v3-cache-key".to_owned()),
+            breakpoint_content_block_index: Some(1),
+            matched_content_block_index: Some(1),
+            lookback_distance: Some(0),
+            token_estimate_source: Some("local_tiktoken_v1".to_owned()),
         };
         let json = serde_json::to_string(&cache_score).unwrap();
         let decoded: CacheScore = serde_json::from_str(&json).unwrap();
@@ -1109,6 +1529,11 @@ mod tests {
             matched_breakpoint_index: Some(0),
             confidence: 0.95,
             ambiguity_reason: None,
+            matched_v3_cache_key: Some("v3-cache-key".to_owned()),
+            breakpoint_content_block_index: Some(1),
+            matched_content_block_index: Some(1),
+            lookback_distance: Some(0),
+            token_estimate_source: Some("local_tiktoken_v1".to_owned()),
         };
         let candidate_with_cache = UpstreamCandidate {
             upstream_id: Uuid::new_v4(),
@@ -1136,6 +1561,7 @@ mod tests {
     fn request_context_cache_fields_roundtrip() {
         let ctx_empty = RequestContext {
             request_id: "req-1".to_owned(),
+            thread_id: None,
             downstream_headers: HeaderMap::new(),
             method: Method::POST,
             path: "/v1/messages".to_owned(),
@@ -1143,6 +1569,7 @@ mod tests {
             body_bytes: Bytes::new(),
             cache_breakpoints: Vec::new(),
             canonical_model_id: String::new(),
+            cache_pricing: CachePricingSummary::default(),
         };
         assert_eq!(ctx_empty.cache_breakpoints.len(), 0);
         assert_eq!(ctx_empty.canonical_model_id, "");
@@ -1156,9 +1583,17 @@ mod tests {
             prefix_token_count: 150,
             requested_ttl: TtlClass::Ephemeral1h,
             origin: BreakpointOrigin::Explicit,
+            lookback_prefixes: vec![CacheLookbackPrefix {
+                prefix_hash: "hash123".to_owned(),
+                content_block_index: 1,
+                prefix_token_count: 150,
+                lookback_distance: 0,
+            }],
+            token_estimate_source: Some("local_tiktoken_v1".to_owned()),
         };
         let ctx_populated = RequestContext {
             request_id: "req-2".to_owned(),
+            thread_id: None,
             downstream_headers: HeaderMap::new(),
             method: Method::POST,
             path: "/v1/messages".to_owned(),
@@ -1166,6 +1601,7 @@ mod tests {
             body_bytes: Bytes::from_static(b"test"),
             cache_breakpoints: vec![breakpoint],
             canonical_model_id: "claude-sonnet-4-5-20250929".to_owned(),
+            cache_pricing: CachePricingSummary::default(),
         };
         assert_eq!(ctx_populated.cache_breakpoints.len(), 1);
         assert_eq!(
@@ -1193,6 +1629,7 @@ mod tests {
     fn request_context_cache_breakpoints_default_on_missing_fields() {
         let ctx = RequestContext {
             request_id: "test".to_owned(),
+            thread_id: None,
             downstream_headers: HeaderMap::new(),
             method: Method::GET,
             path: "/test".to_owned(),
@@ -1200,8 +1637,49 @@ mod tests {
             body_bytes: Bytes::new(),
             cache_breakpoints: Vec::new(),
             canonical_model_id: String::new(),
+            cache_pricing: CachePricingSummary::default(),
         };
         assert!(ctx.cache_breakpoints.is_empty());
         assert!(ctx.canonical_model_id.is_empty());
+    }
+
+    #[test]
+    fn wrh_key_source_default_is_request_id() {
+        assert_eq!(WrhKeySource::default(), WrhKeySource::RequestId);
+    }
+
+    #[test]
+    fn wrh_key_source_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&WrhKeySource::CacheHash).unwrap(),
+            "\"cache_hash\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WrhKeySource::RequestId).unwrap(),
+            "\"request_id\""
+        );
+        let decoded: WrhKeySource = serde_json::from_str("\"thread_id\"").unwrap();
+        assert_eq!(decoded, WrhKeySource::RequestId);
+    }
+
+    #[test]
+    fn subscription_preference_trace_deserializes_current_payload() {
+        let payload = r#"{"chosen_tier":"known_base","candidates":[],"wrh_key_source":"request_id","previous_tier":null,"rendezvous_salt_version":"v9","cache_cost_basis_version":"v1","formula_winner_upstream_id":null,"kept_upstream_id":null,"incumbent_upstream_id":null,"estimated_switch_cache_loss_micros":null,"cache_loss_status":null,"switch_gate_reason":"no_previous_owner"}"#;
+        let decoded: SubscriptionPreferenceTrace = serde_json::from_str(payload).unwrap();
+        assert_eq!(decoded.chosen_tier, SubscriptionTier::KnownBase);
+        assert!(decoded.candidates.is_empty());
+        assert_eq!(decoded.wrh_key_source, WrhKeySource::RequestId);
+        assert!(decoded.previous_tier.is_none());
+        assert_eq!(decoded.rendezvous_salt_version.as_deref(), Some("v9"));
+        assert_eq!(decoded.cache_cost_basis_version.as_deref(), Some("v1"));
+    }
+
+    #[test]
+    fn stage_decision_deserializes_legacy_payload_without_cache_affinity() {
+        let legacy = r#"{"stage_name":"cache_affinity"}"#;
+        let decoded: StageDecision = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.stage_name, "cache_affinity");
+        assert!(decoded.cache_affinity.is_none());
+        assert!(decoded.subscription_preference.is_none());
     }
 }

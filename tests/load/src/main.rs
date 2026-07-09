@@ -17,6 +17,8 @@ use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use url::Url;
 
+mod live_tail;
+
 #[derive(Clone, Debug)]
 struct Options {
     mode: String,
@@ -33,6 +35,19 @@ struct Options {
     tool: String,
     oha_available: bool,
     fallback: String,
+    stream_body_path: Option<PathBuf>,
+    rps: Option<u64>,
+    duration_secs: Option<u64>,
+    stream_ratio: Option<u8>,
+    max_in_flight: Option<usize>,
+    sse_subscribers: Option<usize>,
+    reconnect_churn_secs: Option<u64>,
+    sse_stream_url: Option<String>,
+    admin_token: Option<String>,
+    metrics_scrape_url: Option<String>,
+    metrics_scrape_interval_secs: Option<u64>,
+    metrics_output: Option<PathBuf>,
+    rss_pid: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -52,6 +67,9 @@ struct Sample {
 #[tokio::main]
 async fn main() -> Result<()> {
     let options = Options::parse()?;
+    if options.mode == "live-tail-soak" {
+        return live_tail::run(options).await;
+    }
     let baseline = Baseline::read(&options.baseline_path).map_err(anyhow::Error::msg)?;
     let body = fs::read(&options.body_path)
         .with_context(|| format!("read body fixture {}", options.body_path.display()))?;
@@ -136,6 +154,19 @@ impl Options {
         let mut tool = Some("cc-lb-loadgen".to_owned());
         let mut oha_available = Some(false);
         let mut fallback = Some("deterministic raw TCP load generator".to_owned());
+        let mut stream_body_path = None;
+        let mut rps = None;
+        let mut duration_secs = None;
+        let mut stream_ratio = None;
+        let mut max_in_flight = None;
+        let mut sse_subscribers = None;
+        let mut reconnect_churn_secs = None;
+        let mut sse_stream_url = None;
+        let mut admin_token = None;
+        let mut metrics_scrape_url = None;
+        let mut metrics_scrape_interval_secs = Some(5_u64);
+        let mut metrics_output = None;
+        let mut rss_pid = None;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -144,7 +175,37 @@ impl Options {
                 "--direct-url" => direct_url = Some(next_arg(&mut args, &arg)?),
                 "--proxy-url" => proxy_url = Some(next_arg(&mut args, &arg)?),
                 "--body" => body_path = Some(PathBuf::from(next_arg(&mut args, &arg)?)),
+                "--stream-body" => {
+                    stream_body_path = Some(PathBuf::from(next_arg(&mut args, &arg)?))
+                }
                 "--requests" => requests = Some(parse_usize(next_arg(&mut args, &arg)?, &arg)?),
+                "--rps" => rps = Some(parse_u64(next_arg(&mut args, &arg)?, &arg)?),
+                "--duration-secs" => {
+                    duration_secs = Some(parse_u64(next_arg(&mut args, &arg)?, &arg)?)
+                }
+                "--stream-ratio" => {
+                    stream_ratio = Some(parse_u8(next_arg(&mut args, &arg)?, &arg)?)
+                }
+                "--max-in-flight" => {
+                    max_in_flight = Some(parse_usize(next_arg(&mut args, &arg)?, &arg)?)
+                }
+                "--sse-subscribers" => {
+                    sse_subscribers = Some(parse_usize(next_arg(&mut args, &arg)?, &arg)?)
+                }
+                "--reconnect-churn-secs" => {
+                    reconnect_churn_secs = Some(parse_u64(next_arg(&mut args, &arg)?, &arg)?)
+                }
+                "--sse-stream-url" => sse_stream_url = Some(next_arg(&mut args, &arg)?),
+                "--admin-token" => admin_token = Some(next_arg(&mut args, &arg)?),
+                "--metrics-scrape-url" => metrics_scrape_url = Some(next_arg(&mut args, &arg)?),
+                "--metrics-scrape-interval-secs" => {
+                    metrics_scrape_interval_secs =
+                        Some(parse_u64(next_arg(&mut args, &arg)?, &arg)?)
+                }
+                "--metrics-output" => {
+                    metrics_output = Some(PathBuf::from(next_arg(&mut args, &arg)?))
+                }
+                "--rss-pid" => rss_pid = Some(parse_u32(next_arg(&mut args, &arg)?, &arg)?),
                 "--soak-duration-secs" => {
                     soak_duration_secs = Some(parse_u64(next_arg(&mut args, &arg)?, &arg)?)
                 }
@@ -169,8 +230,10 @@ impl Options {
         }
 
         let mode = mode.ok_or_else(|| anyhow!("--mode is required"))?;
-        mode_key(&mode).map_err(anyhow::Error::msg)?;
-        let concurrency = concurrency.ok_or_else(|| anyhow!("--concurrency is required"))?;
+        if mode != "live-tail-soak" {
+            mode_key(&mode).map_err(anyhow::Error::msg)?;
+        }
+        let concurrency = concurrency.unwrap_or(1);
         if concurrency == 0 {
             bail!("--concurrency must be positive");
         }
@@ -179,7 +242,20 @@ impl Options {
         {
             bail!("--requests must be positive");
         }
-        if let Some(duration_secs) = soak_duration_secs {
+        if mode == "live-tail-soak" {
+            if rps.unwrap_or(0) == 0 {
+                bail!("--rps must be positive for live-tail-soak");
+            }
+            if duration_secs.unwrap_or(0) == 0 {
+                bail!("--duration-secs must be positive for live-tail-soak");
+            }
+            if stream_ratio.unwrap_or(0) > 100 {
+                bail!("--stream-ratio must be between 0 and 100");
+            }
+            if max_in_flight.unwrap_or_else(|| rps.unwrap_or(1) as usize) == 0 {
+                bail!("--max-in-flight must be positive");
+            }
+        } else if let Some(duration_secs) = soak_duration_secs {
             if duration_secs == 0 {
                 bail!("--soak-duration-secs must be positive");
             }
@@ -190,9 +266,14 @@ impl Options {
             bail!("--requests is required unless --soak-duration-secs is set");
         }
 
+        let is_live_tail_soak = mode == "live-tail-soak";
         Ok(Self {
             mode,
-            direct_url: direct_url.ok_or_else(|| anyhow!("--direct-url is required"))?,
+            direct_url: if is_live_tail_soak {
+                direct_url.unwrap_or_default()
+            } else {
+                direct_url.ok_or_else(|| anyhow!("--direct-url is required"))?
+            },
             proxy_url: proxy_url.ok_or_else(|| anyhow!("--proxy-url is required"))?,
             body_path: body_path.ok_or_else(|| anyhow!("--body is required"))?,
             requests,
@@ -205,6 +286,19 @@ impl Options {
             tool: tool.unwrap_or_else(|| "cc-lb-loadgen".to_owned()),
             oha_available: oha_available.unwrap_or(false),
             fallback: fallback.unwrap_or_else(|| "deterministic raw TCP load generator".to_owned()),
+            stream_body_path,
+            rps,
+            duration_secs,
+            stream_ratio,
+            max_in_flight,
+            sse_subscribers,
+            reconnect_churn_secs,
+            sse_stream_url,
+            admin_token,
+            metrics_scrape_url,
+            metrics_scrape_interval_secs,
+            metrics_output,
+            rss_pid,
         })
     }
 }
@@ -223,6 +317,18 @@ fn parse_usize(value: String, name: &str) -> Result<usize> {
 fn parse_u64(value: String, name: &str) -> Result<u64> {
     value
         .parse::<u64>()
+        .with_context(|| format!("parse {name}={value}"))
+}
+
+fn parse_u32(value: String, name: &str) -> Result<u32> {
+    value
+        .parse::<u32>()
+        .with_context(|| format!("parse {name}={value}"))
+}
+
+fn parse_u8(value: String, name: &str) -> Result<u8> {
+    value
+        .parse::<u8>()
         .with_context(|| format!("parse {name}={value}"))
 }
 

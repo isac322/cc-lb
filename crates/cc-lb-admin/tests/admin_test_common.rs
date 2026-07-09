@@ -5,18 +5,18 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use axum::{Router, body::Body};
+use cc_lb_clock::{ClockHandle, SystemClock};
 use cc_lb_config::Config;
-use cc_lb_core::api_keys::{
+use cc_lb_control::api_keys::{
     concurrent_guard::KeyConcurrencyManager, principal_view::PrincipalView,
 };
-use cc_lb_core::{
-    ApiKeyAwareSignerFactory, ClockHandle, DispatchError, DynamicViewBuilder, DynamicViewHolder,
-    ErrorNormalizer, SystemClock, UpstreamDispatch, UpstreamStatusSnapshot,
+use cc_lb_control::{
+    DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
     api_keys::limit_engine::LimitEngine, spawn_audit_writer,
 };
 use cc_lb_plugin_api::{
-    ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    SignedRequest, SignerFactory, Upstream, UpstreamCandidate,
+    ApiKeyAwareSignerFactory, ObservabilityHook, Principal, RequestContext, RouteDecision,
+    RouteError, RouterPlugin, SignerFactory, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -35,8 +35,8 @@ fn system_clock() -> ClockHandle {
     Arc::new(SystemClock)
 }
 
-pub fn key_store(storage: Arc<SqliteStorage>) -> Arc<cc_lb_core::api_keys::key_store::KeyStore> {
-    Arc::new(cc_lb_core::api_keys::key_store::KeyStore::new(storage))
+pub fn key_store(storage: Arc<SqliteStorage>) -> Arc<cc_lb_control::api_keys::key_store::KeyStore> {
+    Arc::new(cc_lb_control::api_keys::key_store::KeyStore::new(storage))
 }
 
 pub fn dynamic_view_holder(_config: &Config) -> Arc<DynamicViewHolder> {
@@ -48,9 +48,7 @@ pub fn dynamic_view_holder(_config: &Config) -> Arc<DynamicViewHolder> {
         DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(NoopSignerFactory))
             .global_router(Arc::new(NoopRouter))
-            .dispatcher(Arc::new(NoopDispatch))
             .global_observability_hooks(Vec::<Arc<dyn ObservabilityHook>>::new())
-            .error_normalizer(Arc::new(ErrorNormalizer::new()))
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build(),
@@ -96,18 +94,6 @@ impl RouterPlugin for NoopRouter {
     }
 }
 
-struct NoopDispatch;
-
-#[async_trait]
-impl UpstreamDispatch for NoopDispatch {
-    async fn dispatch(
-        &self,
-        _request: SignedRequest,
-    ) -> Result<http::Response<Body>, DispatchError> {
-        Ok(http::Response::new(Body::empty()))
-    }
-}
-
 pub struct SpawnedAdminServer {
     pub _dir: tempfile::TempDir,
     pub storage: Arc<SqliteStorage>,
@@ -148,6 +134,7 @@ pub async fn spawn_admin_server_with_clock(clock: ClockHandle) -> SpawnedAdminSe
         admin_token: Some("test-token".to_owned()),
         start_time: std::time::Instant::now(),
         event_bus: None,
+        storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock,
     };
     SpawnedAdminServer {

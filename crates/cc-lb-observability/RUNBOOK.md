@@ -1,6 +1,6 @@
-# Prompt Cache Shadow Runbook
+# cc-lb Observability Runbook
 
-This document describes the metrics and troubleshooting procedures for the prompt cache shadow system in `cc-lb`.
+This document describes the metrics and troubleshooting procedures for observability in `cc-lb`, including the prompt cache shadow system and the subscription-preference routing pipeline.
 
 ## Metric: cc_lb_cache_token_drift
 
@@ -141,6 +141,59 @@ This indicates a critical storage issue.
 ```promql
 sum(rate(cc_lb_cache_observation_write_failed_total[1m])) > 0
 ```
+
+## Metric: cc_lb_routing_tier_selections_total
+
+- **Type**: Counter
+- **Labels**: `tier`, `upstream`, `principal_id`
+- **Label Cardinality Bounds**: Bounded by `4 tiers × configured upstreams × active principals`. Typical live estimate ~16k series at 20 upstreams × 200 principals; comfortably within Prometheus safe bounds.
+
+### Interpretation
+
+This metric counts routing decisions won by each upstream in each subscription-preference tier, per principal. It surfaces which tier the WRH within-tier selection actually placed candidates in, and which upstream captured the pick.
+
+- `tier` ∈ `{known_base, partial_base, overage, unknown_probe}` from the `SubscriptionTier` enum.
+- `upstream` matches the upstream name (same convention as `cc_lb_requests_total` / `cc_lb_cache_hit_total`), NOT the UUID.
+- `principal_id` is the UUID string (same convention as `cclb_api_key_requests_total`).
+
+Bookkeeping counter `cc_lb_contract_routing_tier_events_total{outcome=emitted|missing_principal_id|orphan_ttl_evicted|cap_evicted}` tracks subscriber-side health without contaminating the main tier signal.
+
+### Typical PromQL Query
+
+Per-tier share by upstream:
+
+```promql
+sum by (tier, upstream) (rate(cc_lb_routing_tier_selections_total[15m]))
+/ ignoring(upstream) group_left
+sum by (tier) (rate(cc_lb_routing_tier_selections_total[15m]))
+```
+
+### Suggested Alerting Threshold
+
+An alert `RoutingUpstreamFunneling` in `deploy/alerts/routing-anomaly.yml` fires when any single upstream captures more than 70% of decisions within a tier over 15 minutes, sustained for 10 minutes, guarded by a low-volume floor (`> 2` req/s per tier). This detects regression of the WRH within-tier distribution shipped in PR #312.
+
+```promql
+(
+  sum by (tier, upstream) (rate(cc_lb_routing_tier_selections_total[15m]))
+  / ignoring(upstream) group_left
+  sum by (tier) (rate(cc_lb_routing_tier_selections_total[15m]))
+) > 0.7
+and on(tier) (
+  sum by (tier) (rate(cc_lb_routing_tier_selections_total[15m])) > 2
+)
+```
+
+### Response Playbook
+
+When `RoutingUpstreamFunneling` fires:
+
+1. Query `sum by (tier, upstream) (rate(cc_lb_routing_tier_selections_total[15m]))` in Prometheus to confirm the funneling upstream and the tier.
+2. Compare against the shadow-eval baseline distribution captured during PR #312 development (Runbear ~55%, isac-personal ~16%, bh322yoo-max ~15%, bear-max ~13%). Deviation from this shape is the signal.
+3. Query `/admin/v1/subscription-quotas/latest` for the tier's upstreams; look for stale, zero-remaining, or `disabled_reason`-set windows that could distort the urgency computation.
+4. Use `POST /admin/v1/router/preview` with a known `request_id` to inspect the `SubscriptionPreferenceTrace` on `RoutingTrace.stages[..]`. The `candidate_assessments[].urgency` numbers show WHY the WRH placed weight there.
+5. Common causes: (a) a single upstream is the only one with fresh quota snapshots and everyone else is stale, (b) a plan-capacity change made one upstream saturate the cap while others fell below, (c) the collector stopped ingesting subscription-quota headers from N-1 of the N upstreams.
+
+False positives: sustained low traffic that clears the `> 2 req/s` floor after the alert has already latched. If confirmed low-volume, no action; alert will self-clear.
 
 ## Troubleshooting
 

@@ -193,7 +193,7 @@ async fn connect_probe(url: &str) -> Result<(), sqlx::Error> {
 async fn build_api_key_app_for_testing_postgres(
     database_url: &str,
 ) -> TestResult<(App, RunningUpstream)> {
-    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
     let fixture_app = build_app_for_testing_postgres(database_url, clock.clone()).await?;
     drop(fixture_app);
     reset_managed_key_tables(database_url).await?;
@@ -231,7 +231,7 @@ async fn build_api_key_app_for_testing_postgres(
 }
 
 async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
-    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(database_url)

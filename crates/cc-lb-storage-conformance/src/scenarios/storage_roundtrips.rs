@@ -142,14 +142,20 @@ where
             ..Default::default()
         };
 
-        storage
+        let first_cursor = storage
             .append_request_event(&first)
             .await
             .context("first write must succeed (no partial-index match error)")?;
-        storage
+        let second_cursor = storage
             .append_request_event(&second)
             .await
             .context("second write with same event_id must succeed (ON CONFLICT DO NOTHING)")?;
+        ensure!(
+            first_cursor == second_cursor,
+            "duplicate event_id should return existing cursor: first {}, second {}",
+            first_cursor,
+            second_cursor
+        );
 
         let read_back = storage.query_request_events(0, u64::MAX, 10).await?;
         ensure!(
@@ -385,6 +391,8 @@ fn request_events() -> Vec<RequestEvent> {
                     prefix_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .to_owned(),
                     prefix_token_count: 1536,
+                    lookback_prefixes: Vec::new(),
+                    token_estimate_source: Some("local_tiktoken_v1".to_owned()),
                 },
                 RequestCacheBreakpoint {
                     block_index: 1,
@@ -395,6 +403,8 @@ fn request_events() -> Vec<RequestEvent> {
                     prefix_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                         .to_owned(),
                     prefix_token_count: 4096,
+                    lookback_prefixes: Vec::new(),
+                    token_estimate_source: Some("local_tiktoken_v1".to_owned()),
                 },
             ],
             cache_prefix_hash: Some(

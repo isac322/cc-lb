@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, OAuthTokenBundle};
-use cc_lb_core::clock::{Clock, ClockHandle, unix_secs};
+use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
     SignerFactory, SigningCapability, Upstream, UpstreamError,
@@ -973,7 +973,7 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
     use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-    use cc_lb_core::clock::TestClock;
+    use cc_lb_clock::TestClock;
     use cc_lb_plugin_api::{
         RequestContext, Upstream, UpstreamDialect, shape_request, sign_request,
     };
@@ -1809,6 +1809,7 @@ mod tests {
     fn shaped_request() -> ShapedRequest {
         let ctx = RequestContext {
             request_id: "req-1".to_owned(),
+            thread_id: None,
             downstream_headers: HeaderMap::new(),
             method: Method::POST,
             path: "/v1/messages".to_owned(),
@@ -1816,6 +1817,7 @@ mod tests {
             body_bytes: Bytes::from_static(b"{}"),
             cache_breakpoints: Vec::new(),
             canonical_model_id: String::new(),
+            cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
         };
         let principal = cc_lb_plugin_api::Principal {
             id: "principal".to_owned(),

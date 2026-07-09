@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "postgres")]
 use apalis::prelude::TaskSink;
+use cc_lb_clock::{Clock, ClockHandle, unix_millis};
 use cc_lb_config::{Config, SchedulerConfig};
-use cc_lb_core::clock::{Clock, ClockHandle, unix_millis};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 

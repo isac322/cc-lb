@@ -5,7 +5,7 @@ Consensus of 3 independent test-design agents (behavior verification, regression
 ## Static / compile-time gates
 
 - **TC-STATIC-1** · No compile references to `LifecycleContext::update_usage`, `set_prebuilt_event`, `attach_cache_metadata`. `rg` returns 0 code hits under `crates/`.
-- **TC-STATIC-2** · No `RequestEvent {` literals in handler success paths (`crates/cc-lb-core/src/lifecycle.rs`).
+- **TC-STATIC-2** · No `RequestEvent {` literals in handler success paths (`crates/cc-lb-engine/src/lifecycle.rs`).
 - **TC-STATIC-3** · `TerminalState` struct field list excludes `usage`, `prebuilt_event`, `cache_state`, `cache_control_block_count`, `cache_breakpoints`, `cache_prefix_hash`.
 - **TC-STATIC-4** · Default config values: `lifecycle_limit_reconcile_subscriber.enabled = true`; TTL sweeper spawns regardless of config gate.
 - **TC-STATIC-5** · `terminal_observer` module renamed to `lifecycle_context`; grep returns 0 production hits (docs/tests may keep the term).

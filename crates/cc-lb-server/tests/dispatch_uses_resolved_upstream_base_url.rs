@@ -22,8 +22,8 @@ use cc_lb_aead::{AeadService, EncryptedOAuthTokens};
 use cc_lb_config::{
     AnthropicOAuthConfig, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind,
 };
-use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_core::{
+use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_engine::{
     Body, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
     UpstreamDispatch,
 };
@@ -50,7 +50,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         dir.path().join("base-url-dispatch.sqlite").display()
     );
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
             .await
             .expect("storage"),
     );
@@ -116,6 +116,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         upstream_subscription_quotas: storage.clone(),
         upstream_subscription_metadata: storage.clone(),
         organization_metadata: storage.clone(),
+        plan_tiers: storage.clone(),
         anthropic_compatibility_kv: storage.clone(),
         audit: Some(storage.clone()),
         prompt_cache_observations: storage.clone(),
@@ -140,21 +141,20 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         &runtime,
         dir.path(),
         Arc::new(SubscriptionQuotaCache::new()),
+        None,
+        None,
         1800,
         &config,
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect("dynamic view builds");
 
-    // Swap the default HTTPS dispatcher with a no-network recording one.
     let captured: Arc<Mutex<Vec<Url>>> = Arc::new(Mutex::new(Vec::new()));
     let recording = Arc::new(RecordingDispatcher {
         captured: captured.clone(),
     }) as Arc<dyn UpstreamDispatch>;
-    let view = DynamicViewBuilder::from_view(&view)
-        .dispatcher(recording)
-        .build();
+    let view = DynamicViewBuilder::from_view(&view).build();
     let holder = Arc::new(DynamicViewHolder::new(view));
 
     let lifecycle = Lifecycle::new_with_dynamic_view(
@@ -165,11 +165,12 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
                 upstream_kind: NoneModeUpstreamKind::AnthropicKey,
             }),
             None,
-            Arc::new(cc_lb_core::SystemClock),
+            Arc::new(cc_lb_engine::SystemClock),
         )),
         holder,
+        recording,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     );
 
     let response = lifecycle
@@ -359,9 +360,9 @@ fn message_request() -> Request<Bytes> {
 }
 
 fn now_secs() -> u64 {
-    use cc_lb_core::Clock as _;
+    use cc_lb_engine::Clock as _;
 
-    let clock = cc_lb_core::SystemClock;
+    let clock = cc_lb_engine::SystemClock;
     clock
         .now()
         .duration_since(UNIX_EPOCH)

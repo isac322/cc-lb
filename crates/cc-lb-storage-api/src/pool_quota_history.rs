@@ -20,7 +20,6 @@ pub struct PoolQuotaSnapshotRecord {
     pub header_contributing_upstreams: i64,
     pub api_contributing_upstreams: i64,
     pub max_observed_at_unix_millis: Option<i64>,
-    pub contributors_json: Option<String>,
     pub computed_at_unix_millis: i64,
     pub policy_version: i32,
 }

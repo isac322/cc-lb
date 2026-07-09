@@ -6,18 +6,21 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_core::DynamicViewHolder;
+use cc_lb_engine::DynamicViewHolder;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::reconcile::Reconciler;
 use cc_lb_storage_api::{
-    AnthropicCompatibilityKvStore, BackendKind, CompatibilityKvRecord, MetaStore,
-    OrganizationMetadataRecord, OrganizationMetadataStore, PluginChainEntry, PluginChainEntryInput,
-    PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
-    PrincipalRecord, PrincipalStore, PrincipalUpdate, PromptCacheObservationStore, StorageResult,
+    AnthropicCompatibilityKvStore, BackendKind, BackfillApplyOutcome, CompatibilityKvRecord,
+    MetaStore, MetadataTierMappingOverrideRecord, OrganizationMetadataRecord,
+    OrganizationMetadataStore, PlanTierRatioRecord, PlanTierStore, PluginChainEntry,
+    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlot,
+    PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
+    PromptCacheObservationStore, StorageResult, SubscriptionQuotaCheckpointRange,
+    SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
     SubscriptionQuotaObservationRecord, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
-    UpstreamCreate, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
-    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
+    UpstreamCreate, UpstreamPlanTierRecord, UpstreamRateLimitObservationRecord,
+    UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
     UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob,
     WasmRegistryEntry, WasmRegistryEntryInput,
 };
@@ -56,7 +59,7 @@ async fn storage_fixture() -> (tempfile::TempDir, Arc<Storage>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!("sqlite://{}", dir.path().join("test.sqlite").display());
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
             .await
             .expect("storage"),
     );
@@ -73,6 +76,7 @@ fn stores(storage: Arc<Storage>) -> Arc<Stores> {
         upstream_subscription_quotas: storage.clone(),
         upstream_subscription_metadata: storage.clone(),
         organization_metadata: storage.clone(),
+        plan_tiers: storage.clone(),
         prompt_cache_observations: storage.clone(),
         anthropic_compatibility_kv: storage,
         audit: None,
@@ -153,9 +157,11 @@ async fn initial_holder(
         runtime,
         data_dir,
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        None,
+        None,
         1800,
         &cc_lb_config::Config::default(),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     )
     .await
     .expect("initial dynamic view");
@@ -179,9 +185,11 @@ fn reconciler(
         cancel,
         data_dir.to_path_buf(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        None,
+        None,
         1800,
         Arc::new(cc_lb_config::Config::default()),
-        Arc::new(cc_lb_core::SystemClock),
+        Arc::new(cc_lb_engine::SystemClock),
     ))
 }
 
@@ -311,6 +319,7 @@ async fn cancel_during_tick_is_graceful() {
         upstream_subscription_quotas: Arc::new(EmptySubscriptionQuotaStore),
         upstream_subscription_metadata: Arc::new(EmptyUpstreamSubscriptionMetadataStore),
         organization_metadata: Arc::new(EmptyOrganizationMetadataStore),
+        plan_tiers: Arc::new(EmptyPlanTierStore),
         prompt_cache_observations: Arc::new(EmptyPromptCacheObservationStore),
         anthropic_compatibility_kv: Arc::new(EmptyCompatibilityKvStore),
         audit: None,
@@ -513,18 +522,99 @@ impl UpstreamSubscriptionQuotaStore for EmptySubscriptionQuotaStore {
         Ok(Vec::new())
     }
 
-    async fn delete_subscription_quota_before(
+    async fn put_subscription_quota_checkpoints(
         &self,
-        _cutoff_unix_millis: u64,
-        _batch_size: u32,
-    ) -> StorageResult<u64> {
+        _records: &[SubscriptionQuotaCheckpointRecord],
+    ) -> StorageResult<usize> {
         Ok(0)
+    }
+
+    async fn list_latest_subscription_quota_checkpoints_for_upstreams(
+        &self,
+        _upstream_ids: &[Uuid],
+    ) -> StorageResult<Vec<SubscriptionQuotaCheckpointRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_subscription_quota_checkpoint_ranges(
+        &self,
+        _query: SubscriptionQuotaCheckpointRangeQuery,
+    ) -> StorageResult<Vec<SubscriptionQuotaCheckpointRange>> {
+        Ok(Vec::new())
     }
 }
 
 struct EmptyPromptCacheObservationStore;
 
 impl PromptCacheObservationStore for EmptyPromptCacheObservationStore {}
+
+struct EmptyPlanTierStore;
+
+#[async_trait]
+impl PlanTierStore for EmptyPlanTierStore {
+    async fn upsert_plan_tier_ratio(&self, _record: &PlanTierRatioRecord) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn list_current_plan_tier_ratios(&self) -> StorageResult<Vec<PlanTierRatioRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_plan_tier_ratios_as_of(
+        &self,
+        _as_of_unix_millis: i64,
+    ) -> StorageResult<Vec<PlanTierRatioRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn upsert_metadata_tier_override(
+        &self,
+        _record: &MetadataTierMappingOverrideRecord,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn list_current_metadata_tier_overrides(
+        &self,
+    ) -> StorageResult<Vec<MetadataTierMappingOverrideRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_metadata_tier_overrides_as_of(
+        &self,
+        _as_of_unix_millis: i64,
+    ) -> StorageResult<Vec<MetadataTierMappingOverrideRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn append_upstream_plan_tier(
+        &self,
+        _record: &UpstreamPlanTierRecord,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn backfill_upstream_plan_tier_intervals(
+        &self,
+        _upstream_id: Uuid,
+        _intervals: &[UpstreamPlanTierRecord],
+        _terminal_cap_unix_millis: i64,
+        _provenance: &str,
+    ) -> StorageResult<BackfillApplyOutcome> {
+        Ok(BackfillApplyOutcome::Skipped)
+    }
+
+    async fn list_current_upstream_plan_tiers(&self) -> StorageResult<Vec<UpstreamPlanTierRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_upstream_plan_tiers_as_of(
+        &self,
+        _as_of_unix_millis: i64,
+    ) -> StorageResult<Vec<UpstreamPlanTierRecord>> {
+        Ok(Vec::new())
+    }
+}
 
 struct EmptyUpstreamSubscriptionMetadataStore;
 

@@ -32,7 +32,8 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus: None,
-        clock: Arc::new(cc_lb_core::SystemClock),
+        storage_tail: cc_lb_admin::events::storage_tail_channel(),
+        clock: Arc::new(cc_lb_clock::SystemClock),
     }
 }
 
@@ -89,7 +90,7 @@ async fn test_killswitch_persists() {
 async fn open_storage(path: &std::path::Path) -> Arc<Storage> {
     let database_url = format!("sqlite://{}", path.display());
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .unwrap();
     storage.initialize(BackendKind::Sqlite).await.unwrap();

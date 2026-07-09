@@ -9,8 +9,8 @@ use cc_lb_admin::{DynamicViewRebinder, LastReloadStatus, ReloadOutcome};
 use cc_lb_config::{
     Config, ConfigError, RestartRequiredField, StorageConfig, WasmtimeAllocationStrategy,
 };
-use cc_lb_core::DynamicViewHolder;
-use cc_lb_core::clock::{ClockHandle, unix_secs};
+use cc_lb_engine::DynamicViewHolder;
+use cc_lb_engine::clock::{ClockHandle, unix_secs};
 use notify::{Event, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
@@ -472,6 +472,11 @@ fn summarize_lifecycle_subscriber_restart_required(
             "lifecycle_cache_hit_miss_subscriber.enabled",
             current.lifecycle_cache_hit_miss_subscriber.enabled,
             new_config.lifecycle_cache_hit_miss_subscriber.enabled,
+        ),
+        (
+            "lifecycle_routing_tier_subscriber.enabled",
+            current.lifecycle_routing_tier_subscriber.enabled,
+            new_config.lifecycle_routing_tier_subscriber.enabled,
         ),
         (
             "lifecycle_prompt_cache_drift_subscriber.enabled",

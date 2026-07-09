@@ -10,8 +10,8 @@ use humantime::parse_duration;
 use serde::{Deserialize, Serialize};
 
 use crate::{AdminState, management::ManagementError};
-use cc_lb_core::Clock;
-use cc_lb_core::api_keys::limit_engine::{IdentityFilter, PrincipalLimitsSnapshot};
+use cc_lb_clock::Clock;
+use cc_lb_control::api_keys::limit_engine::{IdentityFilter, PrincipalLimitsSnapshot};
 use cc_lb_storage_api::{StorageError, UsageRollup, UsageRollupResolution};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -276,7 +276,7 @@ async fn build_principal_usage(
     let step = parse_principal_usage_step(query.step.as_deref(), range)?;
     validate_principal_usage_step(range, step)?;
 
-    let now_unix_secs = cc_lb_core::clock::unix_secs(state.clock.now());
+    let now_unix_secs = cc_lb_engine::clock::unix_secs(state.clock.now());
     let (window_start_unix_secs, window_end_unix_secs) =
         principal_usage_window(range, step, now_unix_secs);
     let rollups = storage
@@ -519,5 +519,5 @@ fn duration_to_ms(duration: Duration) -> u64 {
 }
 
 fn now_unix_ms(clock: &dyn Clock) -> Result<u64, ManagementError> {
-    Ok(cc_lb_core::clock::unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64)
+    Ok(cc_lb_engine::clock::unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64)
 }

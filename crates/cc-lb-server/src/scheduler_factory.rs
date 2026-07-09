@@ -51,7 +51,7 @@ pub enum SchedulerFactoryError {
 pub async fn open_scheduler_storage(
     storage: &StorageConfig,
     scheduler: &SchedulerConfig,
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
     let opened = match storage {
         StorageConfig::Sqlite { path } => open_sqlite(path, scheduler, clock).await,
@@ -65,7 +65,7 @@ pub async fn open_scheduler_storage(
 async fn open_sqlite(
     _path: &std::path::Path,
     _scheduler: &SchedulerConfig,
-    _clock: cc_lb_core::ClockHandle,
+    _clock: cc_lb_engine::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
     Err(SchedulerFactoryError::FeatureDisabled {
         backend: "sqlite".to_owned(),
@@ -76,7 +76,7 @@ async fn open_sqlite(
 async fn open_sqlite(
     path: &std::path::Path,
     scheduler: &SchedulerConfig,
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
     use std::str::FromStr as _;
     use std::time::Duration;
@@ -139,7 +139,7 @@ fn scheduler_sqlite_path(path: &std::path::Path) -> std::path::PathBuf {
 async fn open_postgres(
     _url: &str,
     _scheduler: &SchedulerConfig,
-    _clock: cc_lb_core::ClockHandle,
+    _clock: cc_lb_engine::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
     Err(SchedulerFactoryError::FeatureDisabled {
         backend: "postgres".to_owned(),
@@ -150,7 +150,7 @@ async fn open_postgres(
 async fn open_postgres(
     url: &str,
     scheduler: &SchedulerConfig,
-    _clock: cc_lb_core::ClockHandle,
+    _clock: cc_lb_engine::ClockHandle,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
     use std::str::FromStr as _;
     use std::time::Duration;

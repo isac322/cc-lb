@@ -33,6 +33,7 @@ impl UpstreamDialect for E2EDialect {
 async fn fake_anthropic_accepts_signed_request() {
     let ctx = RequestContext {
         request_id: "req-e2e".to_owned(),
+        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
@@ -40,6 +41,7 @@ async fn fake_anthropic_accepts_signed_request() {
         body_bytes: Bytes::from_static(b"{}"),
         cache_breakpoints: Vec::new(),
         canonical_model_id: String::new(),
+        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "alice".to_owned(),

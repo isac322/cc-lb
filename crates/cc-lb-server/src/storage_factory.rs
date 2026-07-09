@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::StorageConfig;
-use cc_lb_storage_api::{
-    BackendKind, ManagedKeyStore, MetaStore, PluginBlobRepo, Storage, StorageResult,
-};
+#[cfg(feature = "sqlite")]
+use cc_lb_storage_api::MetaStore;
+use cc_lb_storage_api::{BackendKind, ManagedKeyStore, PluginBlobRepo, Storage, StorageResult};
 
 pub struct OpenedStorage {
     pub storage: Arc<dyn Storage>,
@@ -57,7 +57,7 @@ pub async fn open_storage(
     config: &StorageConfig,
     _aead: Arc<AeadService>,
     _master_key: [u8; 32],
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 ) -> Result<OpenedStorage, StorageFactoryError> {
     match config {
         StorageConfig::Postgres {
@@ -70,6 +70,32 @@ pub async fn open_storage(
 
 pub async fn probe_postgres_connection(url: &str) -> Result<(), StorageFactoryError> {
     probe_postgres_connection_impl(url).await
+}
+
+#[cfg(feature = "postgres")]
+pub async fn open_pg_fanout_pool(
+    config: &StorageConfig,
+) -> Result<Option<sqlx::PgPool>, StorageFactoryError> {
+    let StorageConfig::Postgres {
+        url,
+        pool: pool_config,
+    } = config
+    else {
+        return Ok(None);
+    };
+    open_postgres_pool(url, pool_config).await.map(Some)
+}
+
+#[cfg(not(feature = "postgres"))]
+pub async fn open_pg_fanout_pool(
+    config: &StorageConfig,
+) -> Result<Option<()>, StorageFactoryError> {
+    match config {
+        StorageConfig::Postgres { .. } => Err(StorageFactoryError::FeatureDisabled {
+            backend: "postgres".to_owned(),
+        }),
+        StorageConfig::Sqlite { .. } => Ok(None),
+    }
 }
 
 fn map_init_error(
@@ -89,7 +115,7 @@ fn map_init_error(
 #[cfg(not(feature = "sqlite"))]
 async fn open_sqlite(
     _path: &Path,
-    _clock: cc_lb_core::ClockHandle,
+    _clock: cc_lb_engine::ClockHandle,
 ) -> Result<OpenedStorage, StorageFactoryError> {
     Err(StorageFactoryError::FeatureDisabled {
         backend: "sqlite".to_owned(),
@@ -99,7 +125,7 @@ async fn open_sqlite(
 #[cfg(feature = "sqlite")]
 async fn open_sqlite(
     path: &Path,
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 ) -> Result<OpenedStorage, StorageFactoryError> {
     let database_url = format!("sqlite://{}", path.display());
     let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, clock)
@@ -123,7 +149,7 @@ async fn open_sqlite(
 async fn open_postgres(
     _url: &str,
     _pool: &cc_lb_config::PostgresPoolConfig,
-    _clock: cc_lb_core::ClockHandle,
+    _clock: cc_lb_engine::ClockHandle,
 ) -> Result<OpenedStorage, StorageFactoryError> {
     Err(StorageFactoryError::FeatureDisabled {
         backend: "postgres".to_owned(),
@@ -141,45 +167,9 @@ async fn probe_postgres_connection_impl(_url: &str) -> Result<(), StorageFactory
 async fn open_postgres(
     url: &str,
     pool_config: &cc_lb_config::PostgresPoolConfig,
-    clock: cc_lb_core::ClockHandle,
+    clock: cc_lb_engine::ClockHandle,
 ) -> Result<OpenedStorage, StorageFactoryError> {
-    use std::str::FromStr;
-    use std::time::Duration;
-
-    use sqlx::AssertSqlSafe;
-    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-
-    let statement_timeout_ms = pool_config.statement_timeout_secs * 1000;
-    let ssl_mode = parse_ssl_mode(&pool_config.sslmode)?;
-
-    let connect_options =
-        PgConnectOptions::from_str(url).map_err(|error| StorageFactoryError::ConnectionFailed {
-            message: host_only(url) + ": " + &error.to_string(),
-        })?;
-    let connect_options = connect_options.ssl_mode(ssl_mode);
-
-    let pool = PgPoolOptions::new()
-        .max_connections(pool_config.max_connections)
-        .min_connections(pool_config.min_connections)
-        .acquire_timeout(Duration::from_secs(pool_config.acquire_timeout_secs))
-        .idle_timeout(Duration::from_secs(pool_config.idle_timeout_secs))
-        .after_connect(move |conn, _meta| {
-            Box::pin(async move {
-                // sqlx 0.9 requires SqlSafeStr; statement_timeout_ms is a u64, so the
-                // interpolated string is SQL-injection safe by construction.
-                let statement_timeout =
-                    format!("SET statement_timeout = '{statement_timeout_ms}ms'");
-                sqlx::query(AssertSqlSafe(statement_timeout))
-                    .execute(conn)
-                    .await?;
-                Ok(())
-            })
-        })
-        .connect_with(connect_options)
-        .await
-        .map_err(|error| StorageFactoryError::ConnectionFailed {
-            message: host_only(url) + ": " + &error.to_string(),
-        })?;
+    let pool = open_postgres_pool(url, pool_config).await?;
 
     let plugin_blob_repo = Arc::new(cc_lb_storage_postgres::PostgresPluginBlobRepo::new(
         pool.clone(),
@@ -200,6 +190,47 @@ async fn open_postgres(
         managed_key_store,
         plugin_blob_repo,
     })
+}
+
+#[cfg(feature = "postgres")]
+async fn open_postgres_pool(
+    url: &str,
+    pool_config: &cc_lb_config::PostgresPoolConfig,
+) -> Result<sqlx::PgPool, StorageFactoryError> {
+    use std::str::FromStr;
+    use std::time::Duration;
+
+    use sqlx::AssertSqlSafe;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+    let statement_timeout_ms = pool_config.statement_timeout_secs * 1000;
+    let ssl_mode = parse_ssl_mode(&pool_config.sslmode)?;
+    let connect_options =
+        PgConnectOptions::from_str(url).map_err(|error| StorageFactoryError::ConnectionFailed {
+            message: host_only(url) + ": " + &error.to_string(),
+        })?;
+    let connect_options = connect_options.ssl_mode(ssl_mode);
+
+    PgPoolOptions::new()
+        .max_connections(pool_config.max_connections)
+        .min_connections(pool_config.min_connections)
+        .acquire_timeout(Duration::from_secs(pool_config.acquire_timeout_secs))
+        .idle_timeout(Duration::from_secs(pool_config.idle_timeout_secs))
+        .after_connect(move |conn, _meta| {
+            Box::pin(async move {
+                let statement_timeout =
+                    format!("SET statement_timeout = '{statement_timeout_ms}ms'");
+                sqlx::query(AssertSqlSafe(statement_timeout))
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(connect_options)
+        .await
+        .map_err(|error| StorageFactoryError::ConnectionFailed {
+            message: host_only(url) + ": " + &error.to_string(),
+        })
 }
 
 #[cfg(feature = "postgres")]

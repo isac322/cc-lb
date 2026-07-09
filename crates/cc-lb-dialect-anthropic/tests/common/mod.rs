@@ -21,6 +21,7 @@ pub fn request_context(
 ) -> RequestContext {
     RequestContext {
         request_id: "req-direct-identity".to_owned(),
+        thread_id: None,
         downstream_headers,
         method,
         path: path.to_owned(),
@@ -28,6 +29,7 @@ pub fn request_context(
         body_bytes,
         cache_breakpoints: Vec::new(),
         canonical_model_id: String::new(),
+        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     }
 }
 

@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
-use cc_lb_core::clock::{ClockHandle, TestClock, unix_secs};
+use cc_lb_engine::clock::{ClockHandle, TestClock, unix_secs};
+use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
 use cc_lb_plugin_api::types::TtlClass;
-use cc_lb_server::prompt_cache_observation_cache::PromptCacheObservationCache;
+use cc_lb_server::prompt_cache_observation_cache::{
+    PromptCacheObservationCache, PromptCacheObservationUpsert,
+};
 use uuid::Uuid;
 
 #[global_allocator]
@@ -31,14 +34,17 @@ async fn prompt_cache_100k_observations_under_200mib() {
     for (upstream_index, upstream_id) in upstreams.iter().copied().enumerate() {
         for per_upstream_index in 0..OBSERVATIONS_PER_UPSTREAM {
             let observation_index = upstream_index * OBSERVATIONS_PER_UPSTREAM + per_upstream_index;
-            cache.upsert_observation(
+            cache.upsert_observation(PromptCacheObservationUpsert {
                 upstream_id,
-                MODEL.to_owned(),
-                format!("hash-{observation_index:09}"),
-                TtlClass::Ephemeral5m,
-                now + 300,
-                now,
-            );
+                canonical_model: MODEL.to_owned(),
+                prefix_hash: format!("hash-{observation_index:09}"),
+                ttl_class: TtlClass::Ephemeral5m,
+                expires_at_unix_secs: now + 300,
+                last_observed_at_unix_secs: now,
+                prefix_content_block_index: 0,
+                estimated_prefix_tokens: 0,
+                token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+            });
         }
     }
 

@@ -30,7 +30,8 @@ fn test_state() -> AdminState {
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus: None,
-        clock: Arc::new(cc_lb_core::SystemClock),
+        storage_tail: cc_lb_admin::events::storage_tail_channel(),
+        clock: Arc::new(cc_lb_clock::SystemClock),
     }
 }
 

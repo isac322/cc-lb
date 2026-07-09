@@ -3,22 +3,44 @@ import type { RequestEvent } from './api';
 const DASH = '—';
 
 export function fmtMs(v: number | null | undefined): string {
-  return v == null ? DASH : `${Math.round(v).toLocaleString()} ms`;
+  if (v == null || !Number.isFinite(v) || v < 0) return DASH;
+  if (v > Number.MAX_SAFE_INTEGER) return DASH;
+  return `${Math.round(v).toLocaleString()} ms`;
 }
 
 export function fmtN(v: number | null | undefined): string {
-  return v == null ? DASH : v.toLocaleString();
+  if (v == null || !Number.isFinite(v)) return DASH;
+  if (v > Number.MAX_SAFE_INTEGER) return DASH;
+  return v.toLocaleString();
 }
 
 export function fmtBytes(v: number | null | undefined): string {
-  if (v == null) return DASH;
+  if (v == null || !Number.isFinite(v) || v < 0) return DASH;
+  if (v > Number.MAX_SAFE_INTEGER) return DASH;
   if (v < 1024) return `${v} B`;
   if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
   return `${(v / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 export function fmtUsd(micros: number | null | undefined): string {
-  if (micros == null) return DASH;
+  if (micros == null || !Number.isFinite(micros) || micros < 0) return DASH;
+  if (micros > Number.MAX_SAFE_INTEGER) return DASH;
+  const usd = micros / 1_000_000;
+  return `$${usd.toFixed(4)}`;
+}
+
+export function formatBigInteger(
+  n: number | null | undefined,
+  _maxSafeDigits = 15,
+): string {
+  if (n == null || !Number.isFinite(n)) return DASH;
+  if (n > Number.MAX_SAFE_INTEGER) return DASH;
+  return n.toLocaleString();
+}
+
+export function formatCostMicros(micros?: number | null): string {
+  if (micros == null || !Number.isFinite(micros) || micros < 0) return DASH;
+  if (micros > Number.MAX_SAFE_INTEGER) return DASH;
   const usd = micros / 1_000_000;
   return `$${usd.toFixed(4)}`;
 }
@@ -47,6 +69,9 @@ export function splitNum(v: number | null | undefined): SplitNumber {
   if (v == null || !Number.isFinite(v) || v <= 0) {
     return { value: '0', unit: '' };
   }
+  if (v > Number.MAX_SAFE_INTEGER) {
+    return { value: DASH, unit: '' };
+  }
   if (v < 1_000) {
     return { value: Math.round(v).toString(), unit: '' };
   }
@@ -66,7 +91,8 @@ function roundCompact(v: number): string {
 }
 
 export function fmtUsdCompact(micros: number | null | undefined): string {
-  if (micros == null) return DASH;
+  if (micros == null || !Number.isFinite(micros) || micros < 0) return DASH;
+  if (micros > Number.MAX_SAFE_INTEGER) return DASH;
   const usd = micros / 1_000_000;
   return `$${usd.toFixed(4)}`;
 }
@@ -75,7 +101,9 @@ export function fmtMsCompact(ms: number | null | undefined): {
   value: string;
   unit: string;
 } {
-  if (ms == null) return { value: '—', unit: '' };
+  if (ms == null || !Number.isFinite(ms) || ms < 0)
+    return { value: DASH, unit: '' };
+  if (ms > Number.MAX_SAFE_INTEGER) return { value: DASH, unit: '' };
   if (ms < 1000) return { value: String(Math.round(ms)), unit: 'ms' };
   if (ms < 60_000) return { value: (ms / 1000).toFixed(1), unit: 's' };
   return { value: (ms / 60_000).toFixed(1), unit: 'm' };

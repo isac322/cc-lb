@@ -5,6 +5,7 @@ import { ToggleGroup as BaseToggleGroup } from '@base-ui/react/toggle-group';
 import { createFileRoute } from '@tanstack/react-router';
 import {
   Activity,
+  AlertTriangle,
   ArrowUpRight,
   Database,
   Gauge,
@@ -24,6 +25,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import { LiveTailFailureBanner } from '../components/LiveTailFailureBanner';
 import {
   Card,
   CardHeader,
@@ -36,7 +38,6 @@ import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { eventTime, type RequestEvent } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import {
-  useLiveRequestEvents,
   usePrincipalNameMap,
   useRecentEventsInfinite,
   useSubscriptionQuotaAggregate,
@@ -45,6 +46,7 @@ import {
   useUpstreamNameMap,
   useUsage,
 } from '../lib/queries';
+import { useLiveEventStream } from '../lib/useLiveEventStream';
 export const Route = createFileRoute('/')({
   component: OverviewPage,
 });
@@ -759,9 +761,8 @@ function OverviewPage() {
     untilUnixSecs: nowUnixSecs,
   });
 
-  const live = useLiveRequestEvents(true, 50);
-  const liveEvents = live.data ?? [];
-  const streamStatus: 'idle' | 'live' | 'down' = live.isError ? 'down' : 'live';
+  const live = useLiveEventStream({});
+  const streamStatus = live.status;
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLTableRowElement>(null);
 
@@ -779,30 +780,39 @@ function OverviewPage() {
     return () => obs.disconnect();
   }, [events.hasNextPage, events.isFetchingNextPage, events.fetchNextPage]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: live.eventsMap is a stable Map ref mutated in place by useLiveEventStream; live.version is bumped on every upsert so it is the real re-run trigger.
   const recentRows = useMemo(() => {
     const historical = events.data?.pages.flatMap((p) => p.events) ?? [];
     const seen = new Set<string>();
-    const out: RequestEvent[] = [];
-    for (const ev of liveEvents) {
-      if (!seen.has(ev.request_id)) {
-        seen.add(ev.request_id);
-        out.push(ev);
+    const out: (RequestEvent & { _phase?: 'partial' | 'final' })[] = [];
+    for (const { phase, event: ev } of live.eventsMap.values()) {
+      const key = ev.event_id ?? ev.request_id;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push({ ...(ev as RequestEvent), _phase: phase });
       }
     }
     for (const ev of historical) {
-      if (!seen.has(ev.request_id)) {
-        seen.add(ev.request_id);
-        out.push(ev);
+      const key = ev.event_id ?? ev.request_id;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push({ ...ev, _phase: 'final' });
       }
     }
     return out.sort(
       (a, b) => (eventTime(b)?.getTime() ?? 0) - (eventTime(a)?.getTime() ?? 0),
     );
-  }, [liveEvents, events.data]);
+  }, [live.eventsMap, live.version, events.data]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: same rationale — live.version is the mutation counter for the stable eventsMap ref.
   const recentLiveIds = useMemo(
-    () => new Set(liveEvents.slice(0, 20).map((e) => e.request_id)),
-    [liveEvents],
+    () =>
+      new Set(
+        Array.from(live.eventsMap.values())
+          .slice(0, 20)
+          .map((e) => e.event.event_id ?? e.event.request_id),
+      ),
+    [live.eventsMap, live.version],
   );
 
   // KPI Data
@@ -952,6 +962,12 @@ function OverviewPage() {
 
   return (
     <PageContainer>
+      <LiveTailFailureBanner
+        permanentFailure={live.permanentFailure}
+        permanentFailureSince={live.permanentFailureSince}
+        reconnectAttempts={live.reconnectAttempts}
+        onRetry={live.forceReconnect}
+      />
       <div className="flex items-center justify-between mb-2">
         <h1 className="text-lg font-medium">Overview</h1>
         <BaseToggleGroup
@@ -1107,12 +1123,23 @@ function OverviewPage() {
               Live preview — full view on Logs page
               {streamStatus === 'live' ? ' · streaming' : ''}
             </span>
-            <span
-              className={cx(
-                'status-dot',
-                streamStatus === 'live' ? 'live' : 'neutral',
-              )}
-            />
+            {live.permanentFailure ? (
+              <AlertTriangle className="w-3 h-3 text-[color:var(--color-danger)]" />
+            ) : (
+              <span
+                className={cx(
+                  'status-dot',
+                  streamStatus === 'live'
+                    ? 'live'
+                    : streamStatus === 'error'
+                      ? 'danger'
+                      : streamStatus === 'connecting' ||
+                          streamStatus === 'reconnecting'
+                        ? 'warn animate-pulse'
+                        : 'neutral',
+                )}
+              />
+            )}
           </span>
         }
         action={
@@ -1139,7 +1166,7 @@ function OverviewPage() {
               sentinelRef={sentinelRef}
               loadingMore={events.isFetchingNextPage}
               hasMore={events.hasNextPage}
-              minWidthClass="min-w-[980px]"
+              minWidthClass="min-w-[1080px]"
               emptyTitle="No recent requests"
             />
           </div>

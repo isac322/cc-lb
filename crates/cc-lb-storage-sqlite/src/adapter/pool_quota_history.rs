@@ -24,9 +24,9 @@ impl PoolQuotaHistoryStore for SqliteStorage {
                     capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
                     stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
                     header_contributing_upstreams, api_contributing_upstreams,
-                    max_observed_at_unix_millis, contributors_json, computed_at_unix_millis,
+                    max_observed_at_unix_millis, computed_at_unix_millis,
                     policy_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(snapshot_at_unix_secs, quota_window) DO UPDATE SET
                     utilization = excluded.utilization,
                     weighted_utilization_sum = excluded.weighted_utilization_sum,
@@ -39,7 +39,6 @@ impl PoolQuotaHistoryStore for SqliteStorage {
                     header_contributing_upstreams = excluded.header_contributing_upstreams,
                     api_contributing_upstreams = excluded.api_contributing_upstreams,
                     max_observed_at_unix_millis = excluded.max_observed_at_unix_millis,
-                    contributors_json = excluded.contributors_json,
                     computed_at_unix_millis = excluded.computed_at_unix_millis,
                     policy_version = excluded.policy_version"#,
             )
@@ -56,7 +55,6 @@ impl PoolQuotaHistoryStore for SqliteStorage {
             .bind(record.header_contributing_upstreams)
             .bind(record.api_contributing_upstreams)
             .bind(record.max_observed_at_unix_millis)
-            .bind(record.contributors_json.as_deref())
             .bind(record.computed_at_unix_millis)
             .bind(record.policy_version)
             .execute(&mut *tx)
@@ -81,7 +79,7 @@ impl PoolQuotaHistoryStore for SqliteStorage {
                           capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
                           stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
                           header_contributing_upstreams, api_contributing_upstreams,
-                          max_observed_at_unix_millis, contributors_json, computed_at_unix_millis,
+                          max_observed_at_unix_millis, computed_at_unix_millis,
                           policy_version
                    FROM pool_subscription_quota_history_v1
                   WHERE quota_window = ?
@@ -115,7 +113,7 @@ impl PoolQuotaHistoryStore for SqliteStorage {
                           capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
                           stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
                           header_contributing_upstreams, api_contributing_upstreams,
-                          max_observed_at_unix_millis, contributors_json, computed_at_unix_millis,
+                          max_observed_at_unix_millis, computed_at_unix_millis,
                           policy_version
                    FROM pool_subscription_quota_history_v1
                   WHERE quota_window = ?
@@ -227,9 +225,6 @@ fn row_to_record(row: sqlx::sqlite::SqliteRow) -> StorageResult<PoolQuotaSnapsho
             .map_err(map_sqlx_error)?,
         max_observed_at_unix_millis: row
             .try_get::<Option<i64>, _>("max_observed_at_unix_millis")
-            .map_err(map_sqlx_error)?,
-        contributors_json: row
-            .try_get::<Option<String>, _>("contributors_json")
             .map_err(map_sqlx_error)?,
         computed_at_unix_millis: row
             .try_get::<i64, _>("computed_at_unix_millis")

@@ -1,0 +1,45 @@
+# Reference Prometheus scrape configuration for cc-lb.
+#
+# Drop this into your Prometheus config's `scrape_configs:` section (or wire via
+# file_sd_configs / consul_sd_configs / kubernetes_sd_configs for dynamic
+# discovery in your environment).
+#
+# cc-lb exposes its /metrics endpoint on the port configured in
+# `[listener] metrics_addr` (default port 52253 in the sample config; production
+# deployments should pick their own). The endpoint is HTTP (no auth), so keep it
+# on a loopback interface or a private network — do NOT expose to the public
+# internet.
+#
+# The `cluster` label is what the alert rules in deploy/alerts/live-tail.yml
+# match on. Set it explicitly per environment (e.g. "prod-us-east-1",
+# "staging"). Every instance of cc-lb in the same cluster shares the label.
+
+scrape_configs:
+  - job_name: cc-lb
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - 127.0.0.1:52253       # single-instance / sqlite deploy
+        labels:
+          cluster: local
+          instance_role: proxy
+      # Multi-instance PG NOTIFY deploy — enumerate every replica so
+      # cross-instance metrics (storage tail lag, NOTIFY queue usage, HTTP
+      # fallback fetches) can be correlated per-instance in Grafana.
+      # - targets:
+      #     - cc-lb-a.internal:52253
+      #     - cc-lb-b.internal:52253
+      #   labels:
+      #     cluster: prod-us-east-1
+      #     instance_role: proxy
+
+# Rule files — attach the shipped alert rules:
+#
+# rule_files:
+#   - /path/to/cc-lb/deploy/alerts/live-tail.yml
+#
+# The rule set is validated in CI via `promtool check rules`. If you edit
+# either the alerts or add new ones, the same promtool invocation catches
+# expression bugs before rollout.

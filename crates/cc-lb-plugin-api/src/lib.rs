@@ -21,19 +21,25 @@ mod errors;
 mod traits;
 pub mod types;
 
-pub use errors::{DialectError, ObservabilityError, RouteError, SignerError, UpstreamError};
+pub use errors::{
+    DialectError, ObservabilityError, ResponseTransformError, RouteError, SignerError,
+    UpstreamError,
+};
 pub use traits::{
     ApiKeyAwareSignerFactory, FilterError, FilterOutput, FilterPlugin, ObservabilityHook,
-    RouterPlugin, Signer, SignerFactory, UpstreamDialect,
+    ResponseTransformHook, RouterPlugin, Signer, SignerFactory, SseEventTransformHook,
+    UpstreamDialect,
 };
 pub use types::{
-    CredentialStrategy, GLOBAL_PRINCIPAL, InternalError, InternalErrorKind, InternalErrorStage,
-    ObserveEvent, PerCandidateReason, PluginManifest, PluginSlot, Principal, PrincipalKind,
-    PrincipalQuotas, RateLimitKind, RateLimitObservation, RequestContext, RetryDecision,
-    RouteDecision, RoutingTrace, ShapedRequest, ShapedRequestBuilder, SignedRequest,
-    SigningCapability, SlotKey, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
-    TerminalStrategy, Upstream, UpstreamCandidate, UpstreamKind, default_pure, shape_request,
-    sign_request,
+    CachePricingSummary, CandidateUrgency, CredentialStrategy, GLOBAL_PRINCIPAL, InternalError,
+    InternalErrorKind, InternalErrorStage, ObserveEvent, PerCandidateReason, PluginManifest,
+    PluginSlot, Principal, PrincipalKind, PrincipalQuotas, RateLimitKind, RateLimitObservation,
+    RequestContext, RetryDecision, RouteDecision, RoutingTrace, ShapedRequest,
+    ShapedRequestBuilder, SignedRequest, SigningCapability, SlotKey, SseEvent,
+    SubscriptionPreferenceTrace, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
+    SubscriptionTier, TerminalStrategy, TransformResponseRequest, TransformResponseResult,
+    TransformSseEventRequest, TransformSseEventResult, Upstream, UpstreamCandidate, UpstreamKind,
+    default_pure, shape_request, sign_request,
 };
 
 /// Stable registry id for the built-in cache-affinity router filter.

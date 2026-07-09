@@ -3,6 +3,7 @@
 pub mod anthropic_compatibility_kv;
 pub mod error;
 pub mod organization_metadata;
+pub mod plan_tiers;
 pub mod plugin_registry;
 pub mod pool_quota_history;
 pub mod principal;
@@ -15,6 +16,7 @@ pub mod upstream;
 pub mod upstream_rate_limit;
 pub mod upstream_subscription_metadata;
 pub mod upstream_subscription_quota;
+pub mod upstream_subscription_quota_checkpoint;
 pub mod validation;
 pub mod warmup_attempts;
 
@@ -24,6 +26,7 @@ pub use anthropic_compatibility_kv::*;
 
 pub use error::{PluginChainConflictReason, StorageError, StorageResult};
 pub use organization_metadata::*;
+pub use plan_tiers::*;
 pub use plugin_registry::*;
 pub use pool_quota_history::*;
 pub use principal::*;
@@ -40,6 +43,7 @@ pub use upstream::*;
 pub use upstream_rate_limit::*;
 pub use upstream_subscription_metadata::*;
 pub use upstream_subscription_quota::*;
+pub use upstream_subscription_quota_checkpoint::*;
 pub use uuid::Uuid as UpstreamRecordId;
 pub use validation::validate_identifier;
 pub use warmup_attempts::*;

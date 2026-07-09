@@ -1,4 +1,4 @@
-use cc_lb_core::clock::unix_secs;
+use cc_lb_engine::clock::unix_secs;
 use cc_lb_pricing::LiteLlmLoader;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::apalis_housekeeping::{
@@ -13,7 +13,6 @@ use cc_lb_scheduler::jobs::oauth_usage_poll::{
 use cc_lb_scheduler::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob;
 use cc_lb_scheduler::jobs::price_catalog::PriceCatalogRefreshJobHandler;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeJobHandler;
-use cc_lb_scheduler::jobs::quota_gc::{SubscriptionQuotaGcConfig, SubscriptionQuotaGcJobHandler};
 use cc_lb_scheduler::jobs::usage_prune::handle_usage_prune_job;
 use cc_lb_scheduler::jobs::usage_rollup::handle_usage_rollup_job;
 use cc_lb_scheduler::jobs::watchdog::{
@@ -29,7 +28,7 @@ use uuid::Uuid;
 use super::SchedulerDispatch;
 use crate::scheduler_dispatch::outcomes::{
     apalis_housekeeping_outcome, price_catalog_outcome, prompt_cache_purge_outcome,
-    quota_gc_outcome, usage_prune_outcome, usage_rollup_outcome,
+    usage_prune_outcome, usage_rollup_outcome,
 };
 use crate::scheduler_dispatch::storage::StorageHandle;
 
@@ -48,19 +47,11 @@ impl SchedulerDispatch {
                 )
                 .await,
             ),
-            CronJob::QuotaGc(job) => {
-                let config = SubscriptionQuotaGcConfig::new(
-                    self.config.subscription_quota.retention_days,
-                    self.config.subscription_quota.gc_batch_size,
+            CronJob::QuotaGc(_job) => {
+                tracing::debug!(
+                    "quota_gc retired; subscription-quota retention removed (ADR 0005)"
                 );
-                quota_gc_outcome(
-                    SubscriptionQuotaGcJobHandler::new(
-                        StorageHandle::new(self.storage.clone()),
-                        config,
-                    )
-                    .handle(job, unix_secs(self.clock.now()))
-                    .await,
-                )
+                Ok(JobOutcome::Done)
             }
             CronJob::PromptCachePurge(job) => prompt_cache_purge_outcome(
                 PromptCacheObservationPurgeJobHandler::new(StorageHandle::new(
@@ -196,12 +187,23 @@ impl SchedulerDispatch {
     ) -> SchedulerResult<JobOutcome> {
         let upstream_ids = self.list_oauth_watchdog_upstream_ids().await?;
         let total = upstream_ids.len();
+        let traceparent = job.traceparent.as_deref();
+        // Poll upstreams concurrently so one slow/hanging upstream cannot
+        // consume the shared 60s tick budget and starve the rest (the prior
+        // sequential loop did exactly that). Per-call/job timeouts unchanged.
+        let results = futures_util::future::join_all(upstream_ids.into_iter().map(
+            |upstream_id| async move {
+                (
+                    upstream_id,
+                    self.poll_and_record_oauth_usage(upstream_id, traceparent)
+                        .await,
+                )
+            },
+        ))
+        .await;
         let mut stats = OAuthUsagePollTickStats::default();
-        for upstream_id in upstream_ids {
-            match self
-                .poll_and_record_oauth_usage(upstream_id, job.traceparent.as_deref())
-                .await
-            {
+        for (upstream_id, result) in results {
+            match result {
                 Ok(label) => stats.record(label),
                 Err(error) => {
                     stats.handler_err += 1;

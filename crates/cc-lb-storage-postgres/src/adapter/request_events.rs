@@ -1,11 +1,13 @@
 use async_trait::async_trait;
-use cc_lb_storage_api::{RequestEvent, RequestEventStore, StorageResult};
+use cc_lb_storage_api::{
+    RequestEvent, RequestEventStore, RequestEventStreamFilters, StorageResult,
+};
 use chrono::{DateTime, Utc};
 
 use crate::{
     adapter::{
-        PostgresStorage, u64_to_i64, unix_secs_to_datetime, unix_secs_to_datetime_lower,
-        unix_secs_to_datetime_upper,
+        PostgresStorage, i64_to_u64, u64_to_i64, unix_secs_to_datetime,
+        unix_secs_to_datetime_lower, unix_secs_to_datetime_upper,
     },
     error_map::map_sqlx_error,
 };
@@ -14,21 +16,27 @@ const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
 
 #[async_trait]
 impl RequestEventStore for PostgresStorage {
-    async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<()> {
+    async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<u64> {
         let payload = serde_json::to_vec(event)?;
         let cache_breakpoints = serde_json::to_value(&event.cache_breakpoints)?;
-        sqlx::query(
+        let event_id = storage_event_id(event);
+        let inserted_seq = sqlx::query_scalar::<_, i64>(
             "INSERT INTO request_events_v1 \
-             (ts, principal_id, upstream_id, key_id, model, upstream_name, cache_state, thread_id, message_id, \
-              message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, \
-               input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, \
-               event_id, error_code, upstream_error_type, upstream_error_message, \
-               thinking_tokens, web_search_requests, web_fetch_requests, \
-                service_tier, inference_geo, \
-                cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, \
-                payload, created_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,NOW()) \
-             ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING",
+              (ts, principal_id, upstream_id, key_id, model, upstream_name, cache_state, thread_id, message_id, \
+               message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, \
+                input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, \
+                 event_id, error_code, upstream_error_type, upstream_error_message, \
+                 thinking_tokens, web_search_requests, web_fetch_requests, \
+                  service_tier, inference_geo, \
+                  cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, \
+                  matched_v3_cache_key, breakpoint_content_block_index, matched_content_block_index, lookback_distance, \
+                  predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, predicted_cache_creation_tokens_1h, \
+                  token_estimate_source, cache_value_micros, formula_winner_upstream_id, kept_upstream_id, wrh_key_source, \
+                  lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, \
+                  payload, created_at) \
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,NOW()) \
+              ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
+              RETURNING seq",
         )
         .bind(unix_secs_to_datetime(event.ts, "request event ts")?)
         .bind(event.principal_id.as_deref())
@@ -83,7 +91,7 @@ impl RequestEventStore for PostgresStorage {
                 .map(|value| u64_to_i64(value, "request event cache_read_input_tokens"))
                 .transpose()?,
         )
-        .bind(event.event_id.as_deref())
+        .bind(event_id.as_str())
         .bind(event.error_code.as_deref())
         .bind(event.upstream_error_type.as_deref())
         .bind(event.upstream_error_message.as_deref())
@@ -119,12 +127,65 @@ impl RequestEventStore for PostgresStorage {
                 .map(|value| u64_to_i64(value, "request event cache_creation_input_tokens_1h"))
                 .transpose()?,
         )
+        .bind(event.matched_v3_cache_key.as_deref())
+        .bind(
+            event
+                .breakpoint_content_block_index
+                .map(|value| u64_to_i64(value, "request event breakpoint_content_block_index"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .matched_content_block_index
+                .map(|value| u64_to_i64(value, "request event matched_content_block_index"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .lookback_distance
+                .map(|value| u64_to_i64(value, "request event lookback_distance"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .predicted_cache_read_tokens
+                .map(|value| u64_to_i64(value, "request event predicted_cache_read_tokens"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .predicted_cache_creation_tokens_5m
+                .map(|value| u64_to_i64(value, "request event predicted_cache_creation_tokens_5m"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .predicted_cache_creation_tokens_1h
+                .map(|value| u64_to_i64(value, "request event predicted_cache_creation_tokens_1h"))
+                .transpose()?,
+        )
+        .bind(event.token_estimate_source.as_deref())
+        .bind(event.cache_value_micros)
+        .bind(event.formula_winner_upstream_id)
+        .bind(event.kept_upstream_id)
+        .bind(event.wrh_key_source.as_deref())
+        .bind(
+            event
+                .lineage_would_have_predicted_read_tokens
+                .map(|value| u64_to_i64(value, "request event lineage_would_have_predicted_read_tokens"))
+                .transpose()?,
+        )
+        .bind(event.lineage_would_have_picked_upstream_id)
         .bind(payload)
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
 
-        Ok(())
+        let seq = match inserted_seq {
+            Some(seq) => seq,
+            None => select_existing_event_id(self, &event_id).await?,
+        };
+        i64_to_u64(seq, "request event cursor")
     }
 
     async fn query_request_events(
@@ -212,6 +273,105 @@ impl RequestEventStore for PostgresStorage {
 
         Ok(result.rows_affected())
     }
+
+    async fn current_request_event_cursor(&self) -> StorageResult<u64> {
+        let cursor = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(MAX(seq), 0)::bigint FROM request_events_v1",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        i64_to_u64(cursor, "request event cursor")
+    }
+
+    /// Query committed request events in cursor order without skipping rows whose
+    /// `BIGSERIAL` value was allocated by a transaction that has not become visible yet.
+    async fn query_request_events_between_cursors(
+        &self,
+        after: u64,
+        until: u64,
+        limit: usize,
+        filters: &RequestEventStreamFilters,
+    ) -> StorageResult<Vec<(u64, RequestEvent)>> {
+        if limit == 0 || until <= after {
+            return Ok(Vec::new());
+        }
+
+        let rows = sqlx::query_as::<_, (i64, Vec<u8>)>(
+            "SELECT seq, payload FROM request_events_v1 \
+             WHERE seq > $1 AND seq <= $2 \
+               AND COALESCE(tx_id, '0'::xid8) < pg_snapshot_xmin(pg_current_snapshot()) \
+             ORDER BY seq ASC LIMIT $3",
+        )
+        .bind(u64_to_i64(after, "request event cursor after")?)
+        .bind(u64_to_i64(until, "request event cursor until")?)
+        .bind(u64_to_i64(
+            limit.min(500) as u64,
+            "request event cursor limit",
+        )?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        rows.into_iter()
+            .map(|(seq, payload)| {
+                let cursor = i64_to_u64(seq, "request event cursor")?;
+                let event = serde_json::from_slice::<RequestEvent>(&payload)?;
+                Ok((cursor, event))
+            })
+            .filter(|result| match result {
+                Ok((_, event)) => request_event_matches_filters(event, filters),
+                Err(_) => true,
+            })
+            .collect()
+    }
+}
+
+async fn select_existing_event_id(storage: &PostgresStorage, event_id: &str) -> StorageResult<i64> {
+    sqlx::query_scalar::<_, i64>("SELECT seq FROM request_events_v1 WHERE event_id = $1")
+        .bind(event_id)
+        .fetch_one(&storage.pool)
+        .await
+        .map_err(map_sqlx_error)
+}
+
+fn storage_event_id(event: &RequestEvent) -> String {
+    event
+        .event_id
+        .clone()
+        .unwrap_or_else(|| format!("{}-legacy-live-{}", event.ts, uuid::Uuid::now_v7()))
+}
+
+fn request_event_matches_filters(
+    event: &RequestEvent,
+    filters: &RequestEventStreamFilters,
+) -> bool {
+    if let Some(principal_id) = filters.principal_id.as_deref()
+        && event.principal_id.as_deref() != Some(principal_id)
+    {
+        return false;
+    }
+    if let Some(model) = filters.model.as_deref()
+        && event.model.as_deref() != Some(model)
+    {
+        return false;
+    }
+    if let Some(upstream) = filters.upstream
+        && event.upstream != Some(upstream)
+    {
+        return false;
+    }
+    if let Some(upstream_id) = filters.upstream_id
+        && event.upstream_id != Some(upstream_id)
+    {
+        return false;
+    }
+    if let Some(status_class) = filters.status_class
+        && !status_class.matches(event.status)
+    {
+        return false;
+    }
+    true
 }
 
 impl PostgresStorage {

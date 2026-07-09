@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_core::LifecycleConfig;
+use cc_lb_engine::LifecycleConfig;
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_server::preflight::{self, PreflightReport};
 use cc_lb_storage_api::{
@@ -141,7 +141,7 @@ impl Fixture {
             "sqlite://{}",
             db_dir.path().join("preflight.sqlite").display()
         );
-        let storage = open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
+        let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
             .await
             .unwrap();
         storage.initialize(BackendKind::Sqlite).await.unwrap();
@@ -157,6 +157,7 @@ impl Fixture {
             upstream_subscription_quotas: storage.clone(),
             upstream_subscription_metadata: storage.clone(),
             organization_metadata: storage.clone(),
+            plan_tiers: storage.clone(),
             prompt_cache_observations: storage.clone(),
             anthropic_compatibility_kv: storage.clone(),
             audit: None,
@@ -171,7 +172,7 @@ impl Fixture {
 }
 
 async fn run_preflight(fixture: &Fixture) -> PreflightReport {
-    let clock: cc_lb_core::ClockHandle = Arc::new(cc_lb_core::SystemClock);
+    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
     preflight::run_preflight(
         &fixture.stores,
         &LifecycleConfig::default(),

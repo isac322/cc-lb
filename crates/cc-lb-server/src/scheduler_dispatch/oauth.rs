@@ -1,5 +1,5 @@
 use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_core::clock::unix_secs;
+use cc_lb_engine::clock::unix_secs;
 use cc_lb_oauth_protocol::{ExistingTokenParts, refreshed_token_parts};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
@@ -113,10 +113,7 @@ impl SchedulerDispatch {
         else {
             return Ok(OAuthUsagePollObservation::Skip);
         };
-        if upstream.kind != UpstreamKind::AnthropicOauth
-            || (!upstream.enabled && !upstream.warmup_enabled)
-            || upstream.deleted_at_unix_secs.is_some()
-        {
+        if !should_poll_oauth_usage(&upstream) {
             return Ok(OAuthUsagePollObservation::Skip);
         }
         self.ensure_fresh_usage_token(&mut upstream).await?;
@@ -248,3 +245,12 @@ enum FetchOutcome {
     Response(crate::scheduler_dispatch::http::UsageFetchResponse),
     Network,
 }
+
+fn should_poll_oauth_usage(upstream: &UpstreamRecord) -> bool {
+    upstream.kind == UpstreamKind::AnthropicOauth
+        && upstream.deleted_at_unix_secs.is_none()
+        && upstream.oauth_credentials.is_some()
+}
+
+#[cfg(test)]
+mod tests;

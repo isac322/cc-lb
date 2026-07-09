@@ -4,8 +4,8 @@ use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use cc_lb_clock::SystemClock;
 use cc_lb_config::{Config, RecurringJobConfig};
-use cc_lb_core::clock::SystemClock;
 use cc_lb_scheduler::migrations::apply_post_setup_migrations;
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{
