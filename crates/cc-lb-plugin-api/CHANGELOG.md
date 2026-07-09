@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-api-v0.10.0...cc-lb-plugin-api-v0.11.0) - 2026-07-09
+
+### Added
+
+- *(plugin)* add response transform hooks ([#373](https://github.com/isac322/cc-lb/pull/373))
+
 ## [0.4.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-api-v0.3.0...cc-lb-plugin-api-v0.4.0) - 2026-07-03
 
 ### Added
