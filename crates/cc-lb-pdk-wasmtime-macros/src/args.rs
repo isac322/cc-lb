@@ -66,6 +66,7 @@ pub(crate) struct HandlerArgs {
     pub(crate) description: String,
     pub(crate) usage: String,
     pub(crate) view: bool,
+    pub(crate) mode: HandlerMode,
 }
 
 impl Parse for HandlerArgs {
@@ -76,17 +77,20 @@ impl Parse for HandlerArgs {
         let mut description = None;
         let mut usage = None;
         let mut view = false;
+        let mut mode = HandlerMode::Active;
         for meta in metas {
             match meta {
                 Meta::Path(path)
                     if path.is_ident("filter")
                         || path.is_ident("shape")
-                        || path.is_ident("observe") =>
+                        || path.is_ident("observe")
+                        || path.is_ident("transform_response")
+                        || path.is_ident("transform_sse_event") =>
                 {
                     kind = Some(HandlerKind::from_path(&path).ok_or_else(|| {
                         Error::new_spanned(
                             &path,
-                            "unknown handler kind (supported: filter, shape, observe)",
+                            "unknown handler kind (supported: filter, shape, observe, transform_response, transform_sse_event)",
                         )
                     })?);
                 }
@@ -106,19 +110,35 @@ impl Parse for HandlerArgs {
                 Meta::NameValue(nv) if nv.path.is_ident("usage") => {
                     usage = Some(expect_string(&nv)?)
                 }
+                Meta::NameValue(nv) if nv.path.is_ident("mode") => {
+                    let value = expect_string(&nv)?;
+                    mode = HandlerMode::from_str(&value).ok_or_else(|| {
+                        Error::new_spanned(
+                            &nv.value,
+                            "expected `mode = \"active\"` or `mode = \"noop\"`",
+                        )
+                    })?;
+                }
                 Meta::Path(path) if path.is_ident("view") => view = true,
                 other => {
                     return Err(Error::new_spanned(
                         other,
-                        "expected `<kind>`, `wire = 1`, `description = \"...\"`, `usage = \"...\"`, or `view`",
+                        "expected `<kind>`, `wire = 1`, `description = \"...\"`, `usage = \"...\"`, `mode = \"active\"|\"noop\"`, or `view`",
                     ));
                 }
             }
         }
+        let kind = kind.ok_or_else(|| {
+            Error::new(Span::call_site(), "#[handler] missing required hook kind")
+        })?;
+        if mode == HandlerMode::Noop && !kind.supports_noop_mode() {
+            return Err(Error::new(
+                Span::call_site(),
+                "`mode = \"noop\"` is only valid for transform_response and transform_sse_event handlers",
+            ));
+        }
         Ok(Self {
-            kind: kind.ok_or_else(|| {
-                Error::new(Span::call_site(), "#[handler] missing required hook kind")
-            })?,
+            kind,
             wire_version: wire_version.ok_or_else(|| {
                 Error::new(Span::call_site(), "#[handler] missing required `wire`")
             })?,
@@ -132,7 +152,31 @@ impl Parse for HandlerArgs {
                 Error::new(Span::call_site(), "#[handler] missing required `usage`")
             })?,
             view,
+            mode,
         })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HandlerMode {
+    Active,
+    Noop,
+}
+
+impl HandlerMode {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(Self::Active),
+            "noop" => Some(Self::Noop),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Noop => "noop",
+        }
     }
 }
 
@@ -141,6 +185,8 @@ pub(crate) enum HandlerKind {
     Filter,
     Shape,
     Observe,
+    TransformResponse,
+    TransformSseEvent,
 }
 
 impl HandlerKind {
@@ -149,6 +195,8 @@ impl HandlerKind {
             "filter" => Self::Filter,
             "shape" => Self::Shape,
             "observe" => Self::Observe,
+            "transform_response" => Self::TransformResponse,
+            "transform_sse_event" => Self::TransformSseEvent,
             _ => return None,
         })
     }
@@ -158,7 +206,13 @@ impl HandlerKind {
             Self::Filter => "filter",
             Self::Shape => "shape",
             Self::Observe => "observe",
+            Self::TransformResponse => "transform_response",
+            Self::TransformSseEvent => "transform_sse_event",
         }
+    }
+
+    pub(crate) const fn supports_noop_mode(self) -> bool {
+        matches!(self, Self::TransformResponse | Self::TransformSseEvent)
     }
 
     pub(crate) fn export_name(self) -> &'static str {
@@ -166,6 +220,8 @@ impl HandlerKind {
             Self::Filter => "cc_lb_filter",
             Self::Shape => "cc_lb_shape",
             Self::Observe => "cc_lb_observe",
+            Self::TransformResponse => "cc_lb_transform_response",
+            Self::TransformSseEvent => "cc_lb_transform_sse_event",
         }
     }
 
@@ -177,6 +233,10 @@ impl HandlerKind {
             (Self::Shape, true) => "run_shape_view",
             (Self::Observe, false) => "run_observe",
             (Self::Observe, true) => "run_observe_view",
+            (Self::TransformResponse, false) => "run_transform_response",
+            (Self::TransformResponse, true) => "run_transform_response_view",
+            (Self::TransformSseEvent, false) => "run_transform_sse_event",
+            (Self::TransformSseEvent, true) => "run_transform_sse_event_view",
         }
     }
 
@@ -189,6 +249,12 @@ impl HandlerKind {
             Self::Filter => quote! { ::cc_lb_pdk_wasmtime::types::FilterRequest },
             Self::Shape => quote! { ::cc_lb_pdk_wasmtime::types::ShapeRequest },
             Self::Observe => quote! { ::cc_lb_pdk_wasmtime::types::ObserveEvent },
+            Self::TransformResponse => {
+                quote! { ::cc_lb_pdk_wasmtime::types::TransformResponseRequest }
+            }
+            Self::TransformSseEvent => {
+                quote! { ::cc_lb_pdk_wasmtime::types::TransformSseEventRequest }
+            }
         }
     }
 
@@ -197,6 +263,8 @@ impl HandlerKind {
             Self::Filter => "FILTER",
             Self::Shape => "SHAPE",
             Self::Observe => "OBSERVE",
+            Self::TransformResponse => "TRANSFORM_RESPONSE",
+            Self::TransformSseEvent => "TRANSFORM_SSE_EVENT",
         }
     }
 }
@@ -208,6 +276,7 @@ pub(crate) struct DiscoveredHandler {
     pub(crate) description: String,
     pub(crate) usage: String,
     pub(crate) view: bool,
+    pub(crate) mode: HandlerMode,
 }
 
 pub(crate) fn collect_handlers(module: &ItemMod) -> syn::Result<Vec<DiscoveredHandler>> {
@@ -232,6 +301,7 @@ pub(crate) fn collect_handlers(module: &ItemMod) -> syn::Result<Vec<DiscoveredHa
                 description: args.description,
                 usage: args.usage,
                 view: args.view,
+                mode: args.mode,
             });
         }
     }

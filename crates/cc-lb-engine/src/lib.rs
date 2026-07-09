@@ -73,6 +73,8 @@ mod rate_limit_headers;
 #[cfg(not(loom))]
 pub mod request_timing;
 #[cfg(not(loom))]
+pub(crate) mod response_transform;
+#[cfg(not(loom))]
 mod sse_error_frame;
 #[cfg(not(loom))]
 mod sse_relay;

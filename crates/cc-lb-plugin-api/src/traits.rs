@@ -5,11 +5,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::errors::{DialectError, ObservabilityError, RouteError, SignerError, UpstreamError};
+use crate::errors::{
+    DialectError, ObservabilityError, ResponseTransformError, RouteError, SignerError,
+    UpstreamError,
+};
 use crate::types::{
     CacheAffinityTrace, ObserveEvent, PerCandidateReason, Principal, RequestContext, RetryDecision,
     RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, SlotKey,
-    SubscriptionPreferenceTrace, Upstream, UpstreamCandidate,
+    SubscriptionPreferenceTrace, TransformResponseRequest, TransformResponseResult,
+    TransformSseEventRequest, TransformSseEventResult, Upstream, UpstreamCandidate,
 };
 
 /// Filter plugin output containing upstream selection results and per-candidate reasons.
@@ -121,6 +125,16 @@ pub trait UpstreamDialect: Send + Sync {
         principal: &Principal,
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError>;
+
+    /// Buffered response transform hook carried by this dialect, if any.
+    fn response_transform_hook(&self) -> Option<&dyn ResponseTransformHook> {
+        None
+    }
+
+    /// Per-event SSE response transform hook carried by this dialect, if any.
+    fn sse_event_transform_hook(&self) -> Option<&dyn SseEventTransformHook> {
+        None
+    }
 }
 
 /// Signer boundary for applying credentials to shaped requests.
@@ -158,4 +172,22 @@ pub trait ApiKeyAwareSignerFactory: Send + Sync {
 pub trait ObservabilityHook: Send + Sync {
     /// Observes a lifecycle event.
     fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError>;
+}
+
+/// Buffered response transform boundary.
+pub trait ResponseTransformHook: Send + Sync {
+    /// Transforms one buffered upstream response.
+    fn transform_response(
+        &self,
+        request: TransformResponseRequest,
+    ) -> Result<TransformResponseResult, ResponseTransformError>;
+}
+
+/// SSE event response transform boundary.
+pub trait SseEventTransformHook: Send + Sync {
+    /// Transforms one complete parsed SSE event.
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError>;
 }

@@ -35,6 +35,11 @@ use wasmparser::{ExternalKind, Parser, Payload};
 const PLUGIN_META_SECTION: &str = "cc_lb.plugin.v1";
 const REQUIRED_MEMORY_EXPORT: &str = "memory";
 const ALWAYS_REQUIRED_FUNC_EXPORTS: &[&str] = &["cc_lb_alloc", "cc_lb_free"];
+const SHAPE_OWNED_HOOKS: [HookKind; 3] = [
+    HookKind::Shape,
+    HookKind::TransformResponse,
+    HookKind::TransformSseEvent,
+];
 
 /// Outcome of [`inspect_wasm`].
 #[derive(Debug, Clone)]
@@ -122,25 +127,26 @@ pub fn inspect_wasm(kind: HookKind, wasm: &[u8]) -> Result<ModuleInspection, Was
         }
     }
 
-    let metadata = plugin_metadata
-        .as_deref()
-        .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
-            reason: format!("missing required `{PLUGIN_META_SECTION}` custom section"),
-        })
-        .and_then(|bytes| {
-            PluginMetadata::parse(bytes).map_err(|error| WasmtimeRuntimeError::ModuleRejected {
-                reason: format!("invalid `{PLUGIN_META_SECTION}` metadata: {error}"),
-            })
+    let metadata_bytes =
+        plugin_metadata
+            .as_deref()
+            .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
+                reason: format!("missing required `{PLUGIN_META_SECTION}` custom section"),
+            })?;
+    let metadata_json: serde_json::Value =
+        serde_json::from_slice(metadata_bytes).map_err(|error| {
+            WasmtimeRuntimeError::ModuleRejected {
+                reason: format!("invalid `{PLUGIN_META_SECTION}` metadata JSON: {error}"),
+            }
         })?;
+    let metadata = PluginMetadata::parse(metadata_bytes).map_err(|error| {
+        WasmtimeRuntimeError::ModuleRejected {
+            reason: format!("invalid `{PLUGIN_META_SECTION}` metadata: {error}"),
+        }
+    })?;
 
-    if !metadata.hooks.contains_key(kind.as_str()) {
-        return Err(WasmtimeRuntimeError::ModuleRejected {
-            reason: format!(
-                "metadata does not declare required `{}` hook for this slot",
-                kind.as_str()
-            ),
-        });
-    }
+    reject_non_response_noop_modes(&metadata)?;
+    require_hooks_for_slot(kind, &metadata, &metadata_json)?;
 
     if !found_memory_export {
         return Err(WasmtimeRuntimeError::ModuleRejected {
@@ -221,6 +227,86 @@ pub fn inspect_wasm(kind: HookKind, wasm: &[u8]) -> Result<ModuleInspection, Was
     })
 }
 
+fn require_hooks_for_slot(
+    kind: HookKind,
+    metadata: &PluginMetadata,
+    metadata_json: &serde_json::Value,
+) -> Result<(), WasmtimeRuntimeError> {
+    match kind {
+        HookKind::Shape => {
+            for hook in SHAPE_OWNED_HOOKS {
+                require_declared_hook(metadata, hook, "shape plugin")?;
+            }
+            for hook in [HookKind::TransformResponse, HookKind::TransformSseEvent] {
+                if !hook_mode_declared(metadata_json, hook) {
+                    return Err(WasmtimeRuntimeError::ModuleRejected {
+                        reason: format!(
+                            "shape plugin hook `{}` must explicitly declare mode `active` or `noop`",
+                            hook.as_str()
+                        ),
+                    });
+                }
+            }
+            Ok(())
+        }
+        HookKind::Filter => require_declared_hook(metadata, HookKind::Filter, "this slot"),
+        HookKind::Observe => require_declared_hook(metadata, HookKind::Observe, "this slot"),
+        HookKind::TransformResponse => reject_shape_owned_hook_as_slot(HookKind::TransformResponse),
+        HookKind::TransformSseEvent => reject_shape_owned_hook_as_slot(HookKind::TransformSseEvent),
+    }
+}
+
+fn reject_shape_owned_hook_as_slot(hook: HookKind) -> Result<(), WasmtimeRuntimeError> {
+    Err(WasmtimeRuntimeError::ModuleRejected {
+        reason: format!(
+            "hook `{}` is shape-owned and cannot be admitted as a standalone slot",
+            hook.as_str()
+        ),
+    })
+}
+
+fn reject_non_response_noop_modes(metadata: &PluginMetadata) -> Result<(), WasmtimeRuntimeError> {
+    for hook in [HookKind::Filter, HookKind::Shape, HookKind::Observe] {
+        if metadata
+            .hooks
+            .get(hook.as_str())
+            .is_some_and(|hook_metadata| hook_metadata.mode.is_noop())
+        {
+            return Err(WasmtimeRuntimeError::ModuleRejected {
+                reason: format!(
+                    "hook `{}` cannot declare mode `noop`; no-op is only valid for shape-owned response hooks",
+                    hook.as_str()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn require_declared_hook(
+    metadata: &PluginMetadata,
+    hook: HookKind,
+    owner: &str,
+) -> Result<(), WasmtimeRuntimeError> {
+    if metadata.hooks.contains_key(hook.as_str()) {
+        return Ok(());
+    }
+    Err(WasmtimeRuntimeError::ModuleRejected {
+        reason: format!(
+            "metadata does not declare required `{}` hook for {owner}",
+            hook.as_str()
+        ),
+    })
+}
+
+fn hook_mode_declared(metadata_json: &serde_json::Value, hook: HookKind) -> bool {
+    metadata_json
+        .get("hooks")
+        .and_then(|hooks| hooks.get(hook.as_str()))
+        .and_then(|hook_metadata| hook_metadata.get("mode"))
+        .is_some()
+}
+
 pub(crate) fn schema_section_name(hook: HookKind, version: WireVersion) -> String {
     format!("{}.{}", hook.section_prefix(), version.as_str())
 }
@@ -235,6 +321,12 @@ pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> [u8;
         }
         (HookKind::Observe, WireVersion::V1) => {
             <cc_lb_plugin_wire::v1::ObserveEvent as WireSchema>::FINGERPRINT
+        }
+        (HookKind::TransformResponse, WireVersion::V1) => {
+            <cc_lb_plugin_wire::v1::TransformResponseRequest as WireSchema>::FINGERPRINT
+        }
+        (HookKind::TransformSseEvent, WireVersion::V1) => {
+            <cc_lb_plugin_wire::v1::TransformSseEventRequest as WireSchema>::FINGERPRINT
         }
     }
 }
@@ -261,12 +353,37 @@ mod tests {
     fn observe_section_bytes() -> Vec<u8> {
         expected_fingerprint(HookKind::Observe, WireVersion::V1).to_vec()
     }
+    fn transform_response_section_bytes() -> Vec<u8> {
+        expected_fingerprint(HookKind::TransformResponse, WireVersion::V1).to_vec()
+    }
+    fn transform_sse_event_section_bytes() -> Vec<u8> {
+        expected_fingerprint(HookKind::TransformSseEvent, WireVersion::V1).to_vec()
+    }
 
     fn metadata_section(hook: &str) -> Vec<u8> {
         format!(
             r#"{{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{{"{hook}":{{"wire_version":1,"description":"{hook} hook","usage":"call {hook}"}}}}}}"#
         )
         .into_bytes()
+    }
+
+    fn shape_owned_metadata_section(transform_response_mode: &str, sse_mode: &str) -> Vec<u8> {
+        format!(
+            r#"{{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{{"shape":{{"wire_version":1,"description":"shape hook","usage":"call shape","mode":"active"}},"transform_response":{{"wire_version":1,"description":"transform_response hook","usage":"call transform_response","mode":"{transform_response_mode}"}},"transform_sse_event":{{"wire_version":1,"description":"transform_sse_event hook","usage":"call transform_sse_event","mode":"{sse_mode}"}}}}}}"#
+        )
+        .into_bytes()
+    }
+
+    fn shape_owned_metadata_without_response_mode() -> Vec<u8> {
+        r#"{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{"shape":{"wire_version":1,"description":"shape hook","usage":"call shape","mode":"active"},"transform_response":{"wire_version":1,"description":"transform_response hook","usage":"call transform_response"},"transform_sse_event":{"wire_version":1,"description":"transform_sse_event hook","usage":"call transform_sse_event","mode":"noop"}}}"#
+            .as_bytes()
+            .to_vec()
+    }
+
+    fn shape_noop_metadata_section() -> Vec<u8> {
+        r#"{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{"shape":{"wire_version":1,"description":"shape hook","usage":"call shape","mode":"noop"},"transform_response":{"wire_version":1,"description":"transform_response hook","usage":"call transform_response","mode":"noop"},"transform_sse_event":{"wire_version":1,"description":"transform_sse_event hook","usage":"call transform_sse_event","mode":"noop"}}}"#
+            .as_bytes()
+            .to_vec()
     }
 
     fn wat_with_custom_sections(wat: &str, sections: &[(&str, &[u8])]) -> Vec<u8> {
@@ -324,6 +441,19 @@ mod tests {
         "#
     }
 
+    fn shape_owned_plugin_wat() -> &'static str {
+        r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
+            (func (export "cc_lb_free") (param i32 i32 i32))
+            (func (export "cc_lb_shape") (param i32 i32) (result i64) i64.const 0)
+            (func (export "cc_lb_transform_response") (param i32 i32) (result i64) i64.const 0)
+            (func (export "cc_lb_transform_sse_event") (param i32 i32) (result i64) i64.const 0)
+        )
+        "#
+    }
+
     fn observe_plugin_wat() -> &'static str {
         r#"
         (module
@@ -355,7 +485,42 @@ mod tests {
     }
 
     #[test]
-    fn accepts_shape_plugin_with_shape_section() {
+    fn accepts_shape_plugin_with_shape_response_hooks_and_noop_modes() {
+        let bytes = wat_with_custom_sections(
+            shape_owned_plugin_wat(),
+            &[
+                (
+                    &schema_section_name(HookKind::Shape, WireVersion::V1),
+                    &shape_section_bytes(),
+                ),
+                (
+                    &schema_section_name(HookKind::TransformResponse, WireVersion::V1),
+                    &transform_response_section_bytes(),
+                ),
+                (
+                    &schema_section_name(HookKind::TransformSseEvent, WireVersion::V1),
+                    &transform_sse_event_section_bytes(),
+                ),
+                (
+                    "cc_lb.plugin.v1",
+                    &shape_owned_metadata_section("noop", "noop"),
+                ),
+            ],
+        );
+        let inspection = inspect_wasm(HookKind::Shape, &bytes).expect("shape plugin OK");
+        assert_eq!(inspection.hook_versions[&HookKind::Shape], WireVersion::V1);
+        assert_eq!(
+            inspection.hook_versions[&HookKind::TransformResponse],
+            WireVersion::V1
+        );
+        assert_eq!(
+            inspection.hook_versions[&HookKind::TransformSseEvent],
+            WireVersion::V1
+        );
+    }
+
+    #[test]
+    fn rejects_shape_plugin_without_response_hook_metadata() {
         let bytes = wat_with_custom_sections(
             shape_plugin_wat(),
             &[
@@ -366,8 +531,68 @@ mod tests {
                 ("cc_lb.plugin.v1", &metadata_section("shape")),
             ],
         );
-        let inspection = inspect_wasm(HookKind::Shape, &bytes).expect("shape plugin OK");
-        assert_eq!(inspection.hook_versions[&HookKind::Shape], WireVersion::V1);
+        let err = inspect_wasm(HookKind::Shape, &bytes).expect_err("shape response hooks required");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("transform_response") && msg.contains("shape plugin"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_shape_response_hook_without_explicit_mode() {
+        let bytes = wat_with_custom_sections(
+            shape_owned_plugin_wat(),
+            &[
+                (
+                    &schema_section_name(HookKind::Shape, WireVersion::V1),
+                    &shape_section_bytes(),
+                ),
+                (
+                    &schema_section_name(HookKind::TransformResponse, WireVersion::V1),
+                    &transform_response_section_bytes(),
+                ),
+                (
+                    &schema_section_name(HookKind::TransformSseEvent, WireVersion::V1),
+                    &transform_sse_event_section_bytes(),
+                ),
+                (
+                    "cc_lb.plugin.v1",
+                    &shape_owned_metadata_without_response_mode(),
+                ),
+            ],
+        );
+        let err = inspect_wasm(HookKind::Shape, &bytes).expect_err("response mode required");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("mode") && msg.contains("transform_response"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_noop_mode_on_primary_shape_hook() {
+        let bytes = wat_with_custom_sections(
+            shape_owned_plugin_wat(),
+            &[
+                (
+                    &schema_section_name(HookKind::Shape, WireVersion::V1),
+                    &shape_section_bytes(),
+                ),
+                (
+                    &schema_section_name(HookKind::TransformResponse, WireVersion::V1),
+                    &transform_response_section_bytes(),
+                ),
+                (
+                    &schema_section_name(HookKind::TransformSseEvent, WireVersion::V1),
+                    &transform_sse_event_section_bytes(),
+                ),
+                ("cc_lb.plugin.v1", &shape_noop_metadata_section()),
+            ],
+        );
+        let err = inspect_wasm(HookKind::Shape, &bytes).expect_err("shape hook cannot be noop");
+        let msg = format!("{err}");
+        assert!(msg.contains("shape") && msg.contains("noop"), "got: {msg}");
     }
 
     #[test]

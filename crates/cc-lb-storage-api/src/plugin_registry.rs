@@ -174,6 +174,7 @@ fn builtin_filter_hook_metadata() -> BTreeMap<String, HookMetadata> {
             wire_version: default_wire_version(),
             description: "Built-in filter hook".to_owned(),
             usage: "Called by the router filter pipeline.".to_owned(),
+            mode: Default::default(),
         },
     )])
 }
@@ -298,6 +299,23 @@ pub trait PluginRegistryStore: Send + Sync {
         principal_id: Uuid,
         slot: PluginSlot,
     ) -> StorageResult<Vec<PluginChainEntry>>;
+
+    /// Lists plugin chain entries for multiple principals and slots.
+    ///
+    /// Callers must not rely on cross-principal/slot global order; per-slot chain order is what matters.
+    async fn list_chains_for_principals(
+        &self,
+        principal_ids: &[Uuid],
+        slots: &[PluginSlot],
+    ) -> StorageResult<Vec<PluginChainEntry>> {
+        let mut entries = Vec::new();
+        for principal_id in principal_ids {
+            for slot in slots {
+                entries.extend(self.list_chain_for_principal(*principal_id, *slot).await?);
+            }
+        }
+        Ok(entries)
+    }
 
     async fn update_chain_entry(
         &self,

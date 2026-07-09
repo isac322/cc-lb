@@ -573,6 +573,7 @@ fn filter_hook_metadata() -> BTreeMap<String, HookMetadata> {
             wire_version: default_wire_version(),
             description: "filter hook".to_owned(),
             usage: "called by router".to_owned(),
+            mode: Default::default(),
         },
     )])
 }

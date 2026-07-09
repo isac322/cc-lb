@@ -117,11 +117,12 @@ fn plugin_metadata_json(args: &PluginArgs, handlers: &[DiscoveredHandler]) -> St
         .iter()
         .map(|handler| {
             format!(
-                r#""{}":{{"wire_version":{},"description":"{}","usage":"{}"}}"#,
+                r#""{}":{{"wire_version":{},"description":"{}","usage":"{}","mode":"{}"}}"#,
                 handler.kind.wire_name(),
                 handler.wire_version,
                 escape_json(&handler.description),
                 escape_json(&handler.usage),
+                handler.mode.wire_name(),
             )
         })
         .collect::<Vec<_>>()
