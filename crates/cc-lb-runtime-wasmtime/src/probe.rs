@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_plugin_wire::metadata::PluginMetadata;
+use cc_lb_plugin_wire::metadata::{HookMode, PluginMetadata};
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
 use cc_lb_plugin_wire::v1::{
     ArchivedFilterResponse, ArchivedShapeResponse, ArchivedTransformResponseResult,
@@ -28,6 +28,17 @@ pub(crate) fn probe_hook_dispatch(
     metadata: &PluginMetadata,
     memory_max_pages: u32,
 ) -> Result<(), WasmtimeRuntimeError> {
+    if matches!(
+        hook,
+        HookKind::TransformResponse | HookKind::TransformSseEvent
+    ) && metadata
+        .hooks
+        .get(hook.as_str())
+        .is_some_and(|hook_metadata| hook_metadata.mode == HookMode::Noop)
+    {
+        return Ok(());
+    }
+
     let cell = Arc::new(PluginCell {
         version_id: 0,
         instance_pre,

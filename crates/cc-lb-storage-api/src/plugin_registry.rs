@@ -174,6 +174,7 @@ fn builtin_filter_hook_metadata() -> BTreeMap<String, HookMetadata> {
             wire_version: default_wire_version(),
             description: "Built-in filter hook".to_owned(),
             usage: "Called by the router filter pipeline.".to_owned(),
+            mode: Default::default(),
         },
     )])
 }

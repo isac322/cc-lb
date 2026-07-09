@@ -29,19 +29,3 @@ fn missing_slot_returns_error() {
         .expect_err("must fail on missing slot");
     assert!(matches!(err, WasmtimeRuntimeError::ModuleRejected { .. }));
 }
-
-#[test]
-fn missing_response_transform_slots_return_errors() {
-    let rt = WasmtimeRuntime::with_defaults().expect("engine build");
-    let slot_key = SlotKey::global("nonexistent-transform");
-
-    let err = rt
-        .call_transform_response(&slot_key, &[])
-        .expect_err("must fail on missing transform_response slot");
-    assert!(matches!(err, WasmtimeRuntimeError::ModuleRejected { .. }));
-
-    let err = rt
-        .call_transform_sse_event(&slot_key, &[])
-        .expect_err("must fail on missing transform_sse_event slot");
-    assert!(matches!(err, WasmtimeRuntimeError::ModuleRejected { .. }));
-}

@@ -1370,8 +1370,6 @@ impl Lifecycle {
         };
         let hooks = cached.resolved_hooks(&view.global_observability_hooks);
         let stream_hooks = StreamHooks::new(hooks);
-        let response_transform_hook = cached.response_transform_hook().cloned();
-        let sse_event_transform_hook = cached.sse_event_transform_hook().cloned();
         let principal = Principal {
             id: principal_id,
             kind: PrincipalKind::ApiKey,
@@ -1839,8 +1837,7 @@ impl Lifecycle {
                     upstream: route.upstream.clone(),
                     request_method: ctx.method.clone(),
                     request_path: ctx.path.clone(),
-                    response_transform_hook,
-                    sse_event_transform_hook,
+                    dialect: route.dialect.clone(),
                 },
                 prompt_cache_observation_context,
                 observer.clone(),
@@ -2038,7 +2035,7 @@ impl Lifecycle {
             .map_or_else(UsageCounts::default, |body| usage_from_json_body(body));
         let mut downstream_body = body;
         if let (Some(hook), Some(semantic_body)) = (
-            transform_ctx.response_transform_hook.as_ref(),
+            transform_ctx.dialect.response_transform_hook(),
             semantic_body,
         ) {
             match hook.transform_response(TransformResponseRequest {
@@ -2362,7 +2359,7 @@ impl Lifecycle {
         let (mut parts, mut body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
         let usage_decoder = UsageDecoder::from_headers(&parts.headers);
-        let transform_requested = transform_ctx.sse_event_transform_hook.is_some();
+        let transform_requested = transform_ctx.dialect.sse_event_transform_hook().is_some();
         let transform_decode_supported = usage_decoder.unsupported_encoding().is_none();
         let response_headers = (transform_requested && transform_decode_supported)
             .then(|| sanitized_response_headers_for_plugin(&parts.headers));
@@ -2407,6 +2404,7 @@ impl Lifecycle {
                 match frame {
                     Ok(frame) => {
                         if let Ok(data) = frame.into_data() {
+                            let mut raw_passthrough_current_chunk = false;
                             let now = Instant::now();
                             if first_chunk_at.is_none() {
                                 first_chunk_at = Some(now);
@@ -2421,8 +2419,8 @@ impl Lifecycle {
                                         %error,
                                         "skipping streaming usage extraction: chunk decode failed"
                                     );
-                                    if sse_transform_active {
-                                        if transformed_output_started {
+                                        if sse_transform_active {
+                                            if transformed_output_started {
                                             let transform_error = ResponseTransformError::Runtime {
                                                 reason: format!("streaming response decode failed after transform output: {error}"),
                                             };
@@ -2433,21 +2431,18 @@ impl Lifecycle {
                                                 total_bytes: frame.len(),
                                             });
                                             stream_transform_error = Some(transform_error);
-                                            yield Ok::<Bytes, Infallible>(frame);
-                                            break;
+                                                yield Ok::<Bytes, Infallible>(frame);
+                                                break;
+                                            }
+                                            sse_transform_active = false;
+                                            raw_passthrough_current_chunk = true;
                                         }
-                                        sse_transform_active = false;
-                                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                            batch_index,
-                                            event_count: 1,
-                                            total_bytes: data.len(),
-                                        });
-                                        batch_index = batch_index.saturating_add(1);
-                                        yield Ok::<Bytes, Infallible>(data.clone());
                                     }
                                 }
-                            }
-                            while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
+                                while !raw_passthrough_current_chunk {
+                                    let Some(end) = usage_parser::find_sse_event_end(&buffer) else {
+                                        break;
+                                    };
                                 let raw = buffer.drain(..end).collect::<Vec<u8>>();
                                 let raw = Bytes::from(raw);
                                 let usage_update = accumulate_sse_usage(&raw, &mut usage);
@@ -2573,7 +2568,7 @@ impl Lifecycle {
                                 if sse_transform_active {
                                     let outgoing = if let Some(response_headers) = response_headers.as_ref() {
                                         match transform_sse_event_bytes(
-                                            transform_ctx.sse_event_transform_hook.as_ref(),
+                                            transform_ctx.dialect.sse_event_transform_hook(),
                                             &transform_ctx,
                                             &event_ctx,
                                             status,
@@ -2604,7 +2599,8 @@ impl Lifecycle {
                                                     break;
                                                 }
                                                 sse_transform_active = false;
-                                                raw
+                                                raw_passthrough_current_chunk = true;
+                                                Bytes::new()
                                             }
                                             SseTransformOutcome::Error(error) => {
                                                 tracing::warn!(
@@ -2612,7 +2608,7 @@ impl Lifecycle {
                                                     %error,
                                                     "sse response transform failed"
                                                 );
-                                                if transformed_output_started {
+                                                    if transformed_output_started {
                                                     let frame = make_response_transform_error_frame(&error);
                                                     observe_many(hooks.as_slice(), ObserveEvent::Chunk {
                                                         batch_index,
@@ -2620,16 +2616,22 @@ impl Lifecycle {
                                                         total_bytes: frame.len(),
                                                     });
                                                     stream_transform_error = Some(error);
-                                                    yield Ok::<Bytes, Infallible>(frame);
-                                                    break;
+                                                        yield Ok::<Bytes, Infallible>(frame);
+                                                        break;
                                                 }
-                                                raw
+                                                sse_transform_active = false;
+                                                raw_passthrough_current_chunk = true;
+                                                Bytes::new()
                                             }
                                         }
                                     } else {
                                         sse_transform_active = false;
-                                        raw
+                                        raw_passthrough_current_chunk = true;
+                                        Bytes::new()
                                     };
+                                    if raw_passthrough_current_chunk {
+                                        break;
+                                    }
                                     observe_many(hooks.as_slice(), ObserveEvent::Chunk {
                                         batch_index,
                                         event_count: 1,

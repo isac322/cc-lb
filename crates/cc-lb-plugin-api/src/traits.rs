@@ -125,6 +125,16 @@ pub trait UpstreamDialect: Send + Sync {
         principal: &Principal,
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError>;
+
+    /// Buffered response transform hook carried by this dialect, if any.
+    fn response_transform_hook(&self) -> Option<&dyn ResponseTransformHook> {
+        None
+    }
+
+    /// Per-event SSE response transform hook carried by this dialect, if any.
+    fn sse_event_transform_hook(&self) -> Option<&dyn SseEventTransformHook> {
+        None
+    }
 }
 
 /// Signer boundary for applying credentials to shaped requests.

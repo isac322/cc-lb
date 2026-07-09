@@ -1,4 +1,4 @@
-# ADR 0007 — Plugin response transform hooks
+# ADR 0007: Unified Shape Plugin Model
 
 - Status: Accepted
 - Date: 2026-07-08
@@ -22,10 +22,15 @@ A publish-grade interface must keep host-owned transport correctness while givin
 
 ## Decision
 
-Add two new additive plugin hook kinds. Do not change the existing `Filter`, `Shape`, or `Observe` contracts.
+Unify request shaping and response transformation into a single `shape` slot. A plugin registered to the `shape` slot must implement three distinct wire hook functions:
 
-1. Add a buffered response transform hook exported as `cc_lb_transform_response`.
-2. Add an SSE event transform hook exported as `cc_lb_transform_sse_event`.
+1. Request shaping exported as `cc_lb_shape`.
+2. Buffered response transform exported as `cc_lb_transform_response`.
+3. SSE event transform exported as `cc_lb_transform_sse_event`.
+
+The wire hook functions remain distinct at the ABI level to preserve clean, typed signatures and avoid mixing request and response types in a single guest call. However, the slot and configuration surface is `shape` only. Host-level composition of separate response-transform plugins is intentionally removed. This simplifies the configuration model, reduces guest-call overhead, and ensures that request-side and response-side transformations (such as tool-name laundering and its reverse mapping) are kept consistent within a single logical plugin.
+
+If a plugin only needs to shape requests or only needs to transform responses, it must explicitly implement no-op handlers for the other hooks. For example, a request-only shaper must implement `cc_lb_transform_response` and `cc_lb_transform_sse_event` to return `Unchanged`.
 
 Dispatch uses the actual upstream response framing, not the client request's `stream` flag. A response with `Content-Type: text/event-stream` uses the SSE event hook. Other buffered bodies use the buffered response hook when body size and decoding constraints allow it. Non-SSE binary or indefinite streaming responses pass through unless a future hook explicitly supports them.
 
@@ -108,7 +113,7 @@ Usage, billing, quota, and cache accounting parse upstream truth before transfor
 
 ### ABI and versioning
 
-The implementation adds new hook kinds and independent V1 schemas:
+The implementation adds new hook kinds and independent V1 schemas under the unified `shape` slot:
 
 - `HookKind::TransformResponse`;
 - `HookKind::TransformSseEvent`;
@@ -119,21 +124,23 @@ The implementation adds new hook kinds and independent V1 schemas:
 
 Each request/result type has owned and borrowed `*Ref<'a>` twins with identical archived bytes, following the existing filter/shape/observe rkyv pattern. PDK support includes `run_transform_response`, `run_transform_sse_event`, `#[handler(transform_response)]`, and `#[handler(transform_sse_event)]`.
 
-Adding these hook kinds is backward-compatible. Existing plugins do not declare these exports, so the host treats absence as no transform and preserves existing byte-equivalent passthrough behavior. Existing `ShapeRequest` and `ShapeResponse` are not renamed, extended, or field-modified.
+Adding these hook kinds preserves the existing `ShapeRequest` and `ShapeResponse` schemas, but shape-plugin admission is intentionally stricter: a plugin registered in the `shape` slot must declare all three hooks. Request-only or response-only plugins preserve byte-equivalent passthrough by declaring explicit no-op response hooks, not by omitting them.
 
 ## Consequences
 
 ### Positive
 
-- Fixes the response half of tool-name laundering without coupling it to request shaping.
+- Solves the response half of tool-name laundering while keeping request and response logic co-located in a single plugin.
+- Simplifies host configuration by avoiding separate response-transform slots.
 - Keeps response transport correctness in the host, where framing, headers, compression, and backpressure are already owned.
-- Preserves deployed plugin compatibility by adding new hooks instead of mutating existing schemas.
+- Avoids mutating existing request-shaping schemas while making response no-op behavior explicit in metadata.
 - Gives plugin authors two precise surfaces instead of a misleading raw-stream API.
 - Keeps accounting trustworthy by billing upstream truth rather than plugin-mutated bytes.
 
 ### Negative
 
-- The response lifecycle must retain a trimmed request/upstream context until response processing.
+- Authors must implement all three hooks in a shape plugin, even if some are no-ops.
+- The response lifecycle must retain a trimmed request and upstream context until response processing.
 - SSE transforms add per-event guest-call latency and may occupy pinned guest instances for long-lived streams.
 - V1 identity output can change client-visible `Content-Encoding` when a compressed upstream response is transformed.
 - Mid-stream transform failure is necessarily asymmetric: fallback is possible only before transformed bytes are emitted.
@@ -141,12 +148,13 @@ Adding these hook kinds is backward-compatible. Existing plugins do not declare 
 ### Neutral
 
 - Original request bodies are not passed to response hooks by default. A future opt-in capability can be added if a response plugin genuinely needs them.
-- Header/status replacement is allowed only through host sanitization; plugins propose end-to-end fields, while the host keeps proxy-owned fields authoritative.
+- Header and status replacement is allowed only through host sanitization. Plugins propose end-to-end fields, while the host keeps proxy-owned fields authoritative.
 
 ## Alternatives considered
 
 | Alternative | Rejection reason |
 | --- | --- |
+| Separate response-transform slots / host-level composition | Increases configuration complexity, adds guest-call overhead, and risks inconsistency between request-side and response-side transformations (e.g., request-side tool renaming and response-side reverse mapping must match exactly). |
 | Extend `shape()` or rename `ShapeResponse` | Breaks existing rkyv fingerprints and conflates upstream-bound request shaping with downstream response mutation. |
 | One generic `cc_lb_transform_stream` hook | Implies raw chunk/transport control. The safe abstraction is complete SSE events under host-owned framing and backpressure. |
 | Transform raw TCP chunks | Tool-use JSON can span chunks or multiple SSE lines; raw chunk transforms corrupt framing and break UTF-8/event boundaries. |
@@ -157,10 +165,10 @@ Adding these hook kinds is backward-compatible. Existing plugins do not declare 
 
 ## Rollout and QA requirements
 
-- Add wire schema, PDK, macro, runtime admission, and conformance tests for both new hooks.
-- Add engine tests proving no transform preserves existing passthrough behavior.
-- Add buffered JSON tests proving a plugin can rewrite `content[].type == "tool_use"` names from PascalCase to lower-case and that `Content-Length`/encoding headers remain correct.
-- Add SSE tests proving a plugin can rewrite `content_block_start.content_block.name` and that event framing, order, cancellation, and terminal events remain valid.
+- Add wire schema, PDK, macro, runtime admission, and conformance tests for the unified shape plugin model.
+- Add engine tests proving no-op response hooks preserve existing passthrough behavior.
+- Add buffered JSON tests proving a shape plugin can rewrite `content[].type == "tool_use"` names from PascalCase to lower-case and that `Content-Length`/encoding headers remain correct.
+- Add SSE tests proving a shape plugin can rewrite `content_block_start.content_block.name` and that event framing, order, cancellation, and terminal events remain valid.
 - Add failure tests proving buffered fail-open and SSE no-raw-after-transformed behavior.
 - Add accounting tests proving billing/quota reads upstream truth even when client-visible bytes are transformed.
 - Run proxy-path QA through `/v1/messages` for buffered and streaming responses using the client-visible proxy surface.

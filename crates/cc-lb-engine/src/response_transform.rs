@@ -5,8 +5,8 @@ use http::header::{CONTENT_ENCODING, CONTENT_LENGTH};
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 
 use cc_lb_plugin_api::{
-    Principal, ResponseTransformError, ResponseTransformHook, SseEvent, SseEventTransformHook,
-    TransformResponseResult, TransformSseEventRequest, TransformSseEventResult, Upstream,
+    Principal, ResponseTransformError, SseEvent, SseEventTransformHook, TransformResponseResult,
+    TransformSseEventRequest, TransformSseEventResult, Upstream, UpstreamDialect,
 };
 
 use crate::hop_by_hop::strip_hop_by_hop;
@@ -19,8 +19,7 @@ pub(crate) struct ResponseTransformContext {
     pub(crate) upstream: Upstream,
     pub(crate) request_method: Method,
     pub(crate) request_path: String,
-    pub(crate) response_transform_hook: Option<Arc<dyn ResponseTransformHook>>,
-    pub(crate) sse_event_transform_hook: Option<Arc<dyn SseEventTransformHook>>,
+    pub(crate) dialect: Arc<dyn UpstreamDialect>,
 }
 
 pub(crate) struct BufferedTransformParts {
@@ -122,7 +121,7 @@ fn sanitize_host_owned_headers(headers: &mut HeaderMap) {
 }
 
 pub(crate) fn transform_sse_event_bytes(
-    hook: Option<&Arc<dyn SseEventTransformHook>>,
+    hook: Option<&dyn SseEventTransformHook>,
     transform_ctx: &ResponseTransformContext,
     event_ctx: &RequestEventContext,
     response_status: StatusCode,
@@ -147,9 +146,10 @@ pub(crate) fn transform_sse_event_bytes(
         event: event.clone(),
     }) {
         Ok(TransformSseEventResult::Unchanged) => SseTransformOutcome::Emit(raw),
-        Ok(TransformSseEventResult::Replace { events }) => {
-            SseTransformOutcome::Emit(format_sse_events(&events))
-        }
+        Ok(TransformSseEventResult::Replace { events }) => match format_sse_events(&events) {
+            Ok(bytes) => SseTransformOutcome::Emit(bytes),
+            Err(error) => SseTransformOutcome::Error(error),
+        },
         Ok(TransformSseEventResult::Drop) => SseTransformOutcome::Drop,
         Err(error) => SseTransformOutcome::Error(error),
     }
@@ -177,10 +177,19 @@ fn parse_sse_event(raw: Bytes) -> Option<SseEvent> {
     })
 }
 
-fn format_sse_events(events: &[SseEvent]) -> Bytes {
+fn format_sse_events(events: &[SseEvent]) -> Result<Bytes, ResponseTransformError> {
     let mut output = Vec::new();
     for event in events {
         if !event.event.is_empty() {
+            if event
+                .event
+                .bytes()
+                .any(|byte| matches!(byte, b'\r' | b'\n'))
+            {
+                return Err(ResponseTransformError::Runtime {
+                    reason: "plugin returned SSE event name containing CR/LF".to_owned(),
+                });
+            }
             output.extend_from_slice(b"event: ");
             output.extend_from_slice(event.event.as_bytes());
             output.extend_from_slice(b"\n");
@@ -192,7 +201,7 @@ fn format_sse_events(events: &[SseEvent]) -> Bytes {
         }
         output.extend_from_slice(b"\n");
     }
-    Bytes::from(output)
+    Ok(Bytes::from(output))
 }
 
 pub(crate) fn make_response_transform_error_frame(error: &ResponseTransformError) -> Bytes {

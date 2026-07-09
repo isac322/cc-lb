@@ -70,10 +70,8 @@ pub mod prelude;
 
 use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_wire::{
-    ArchivedFilterResponse, ArchivedShapeResponse, ArchivedTransformResponseResult,
-    ArchivedTransformSseEventResult, FilterRequest, FilterResponse, ObserveEvent, ShapeRequest,
-    ShapeResponse, TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
-    TransformSseEventResult,
+    ArchivedFilterResponse, ArchivedShapeResponse, FilterRequest, FilterResponse, ObserveEvent,
+    ShapeRequest, ShapeResponse,
 };
 use cc_lb_runtime_wasmtime::{
     HotEngineConfig, ModuleInspection, SlotKind, WasmtimeRuntime, inspect_wasm,
@@ -89,42 +87,58 @@ use crate::fixtures::observe_event_samples;
 /// call [`Self::session`] and drive the returned [`PluginSession`].
 pub struct ConformanceSuite<'a> {
     wasm: &'a [u8],
-    kind: SlotKind,
+    kind: ConformanceKind,
     plugin_name: String,
     engine_config: HotEngineConfig,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConformanceKind {
+    Filter,
+    Shape,
+    Observe,
+}
+
+impl ConformanceKind {
+    const ALL: [Self; 3] = [Self::Filter, Self::Shape, Self::Observe];
+
+    fn slot_kind(self) -> SlotKind {
+        match self {
+            Self::Filter => SlotKind::Filter,
+            Self::Shape => SlotKind::Shape,
+            Self::Observe => SlotKind::Observe,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Filter => "filter",
+            Self::Shape => "shape",
+            Self::Observe => "observe",
+        }
+    }
 }
 
 impl<'a> ConformanceSuite<'a> {
     /// Build a suite for a Filter-slot plugin.
     pub fn for_filter(wasm: &'a [u8]) -> Self {
-        Self::with_kind(wasm, SlotKind::Filter)
+        Self::with_kind(wasm, ConformanceKind::Filter)
     }
 
     /// Build a suite for a Shape-slot plugin.
     pub fn for_shape(wasm: &'a [u8]) -> Self {
-        Self::with_kind(wasm, SlotKind::Shape)
+        Self::with_kind(wasm, ConformanceKind::Shape)
     }
 
     /// Build a suite for an Observe-slot plugin.
     pub fn for_observe(wasm: &'a [u8]) -> Self {
-        Self::with_kind(wasm, SlotKind::Observe)
-    }
-
-    /// Build a suite for a buffered response-transform plugin.
-    pub fn for_transform_response(wasm: &'a [u8]) -> Self {
-        Self::with_kind(wasm, SlotKind::TransformResponse)
-    }
-
-    /// Build a suite for an SSE event response-transform plugin.
-    pub fn for_transform_sse_event(wasm: &'a [u8]) -> Self {
-        Self::with_kind(wasm, SlotKind::TransformSseEvent)
+        Self::with_kind(wasm, ConformanceKind::Observe)
     }
 
     pub fn from_wasm(wasm: &'a [u8]) -> Self {
-        let mut matches = SlotKind::ALL
-            .iter()
-            .copied()
-            .filter(|kind| inspect_wasm(*kind, wasm).is_ok());
+        let mut matches = ConformanceKind::ALL
+            .into_iter()
+            .filter(|kind| inspect_wasm(kind.slot_kind(), wasm).is_ok());
         let Some(kind) = matches.next() else {
             panic!("inspect_wasm did not recognise a supported plugin export")
         };
@@ -135,14 +149,8 @@ impl<'a> ConformanceSuite<'a> {
         Self::with_kind(wasm, kind)
     }
 
-    fn with_kind(wasm: &'a [u8], kind: SlotKind) -> Self {
-        let label = match kind {
-            SlotKind::Filter => "filter",
-            SlotKind::Shape => "shape",
-            SlotKind::Observe => "observe",
-            SlotKind::TransformResponse => "transform-response",
-            SlotKind::TransformSseEvent => "transform-sse-event",
-        };
+    fn with_kind(wasm: &'a [u8], kind: ConformanceKind) -> Self {
+        let label = kind.label();
         Self {
             wasm,
             kind,
@@ -173,12 +181,12 @@ impl<'a> ConformanceSuite<'a> {
     /// authors can assert admission WITHOUT paying for full engine
     /// setup (fast pre-flight in a `build.rs`, etc.).
     pub fn assert_static_admission(&self) {
-        inspect_wasm(self.kind, self.wasm)
+        inspect_wasm(self.kind.slot_kind(), self.wasm)
             .unwrap_or_else(|e| panic!("inspect_wasm rejected plugin: {e}"));
     }
 
     pub fn inspect(&self) -> ModuleInspection {
-        inspect_wasm(self.kind, self.wasm)
+        inspect_wasm(self.kind.slot_kind(), self.wasm)
             .unwrap_or_else(|e| panic!("inspect_wasm rejected plugin: {e}"))
     }
 
@@ -186,7 +194,7 @@ impl<'a> ConformanceSuite<'a> {
         let runtime = WasmtimeRuntime::new(self.engine_config.clone())
             .expect("wasmtime engine build must succeed");
         runtime
-            .admit_wasm(self.kind, self.wasm)
+            .admit_wasm(self.kind.slot_kind(), self.wasm)
             .unwrap_or_else(|e| panic!("admit_wasm rejected plugin: {e}"));
     }
 
@@ -200,26 +208,18 @@ impl<'a> ConformanceSuite<'a> {
             .expect("wasmtime engine build must succeed");
         let slot_key = SlotKey::global(self.plugin_name.clone());
         match self.kind {
-            SlotKind::Filter => runtime
+            ConformanceKind::Filter => runtime
                 .register_filter(slot_key.clone(), self.plugin_name.clone(), self.wasm)
                 .map(|_| ())
                 .expect("register_filter must accept a conforming plugin"),
-            SlotKind::Shape => runtime
+            ConformanceKind::Shape => runtime
                 .register_shape(slot_key.clone(), self.plugin_name.clone(), self.wasm)
                 .map(|_| ())
                 .expect("register_shape must accept a conforming plugin"),
-            SlotKind::Observe => runtime
+            ConformanceKind::Observe => runtime
                 .register_observe(slot_key.clone(), self.plugin_name.clone(), self.wasm)
                 .map(|_| ())
                 .expect("register_observe must accept a conforming plugin"),
-            SlotKind::TransformResponse => runtime
-                .register_transform_response(slot_key.clone(), self.plugin_name.clone(), self.wasm)
-                .map(|_| ())
-                .expect("register_transform_response must accept a conforming plugin"),
-            SlotKind::TransformSseEvent => runtime
-                .register_transform_sse_event(slot_key.clone(), self.plugin_name.clone(), self.wasm)
-                .map(|_| ())
-                .expect("register_transform_sse_event must accept a conforming plugin"),
         }
         PluginSession {
             runtime,
@@ -247,22 +247,14 @@ impl<'a> ConformanceSuite<'a> {
     pub fn run(&self) {
         let session = self.session();
         match self.kind {
-            SlotKind::Filter => {
+            ConformanceKind::Filter => {
                 let _ = session.call_filter(fixtures::sample_filter_request());
             }
-            SlotKind::Shape => {
+            ConformanceKind::Shape => {
                 let _ = session.call_shape(fixtures::sample_shape_request());
             }
-            SlotKind::Observe => {
+            ConformanceKind::Observe => {
                 session.exercise_observe_variants();
-            }
-            SlotKind::TransformResponse => {
-                let _ =
-                    session.call_transform_response(fixtures::sample_transform_response_request());
-            }
-            SlotKind::TransformSseEvent => {
-                let _ = session
-                    .call_transform_sse_event(fixtures::sample_transform_sse_event_request());
             }
         }
     }
@@ -274,13 +266,13 @@ impl<'a> ConformanceSuite<'a> {
 pub struct PluginSession {
     runtime: WasmtimeRuntime,
     slot_key: SlotKey,
-    kind: SlotKind,
+    kind: ConformanceKind,
 }
 
 impl PluginSession {
     /// The slot kind this session was built for.
     pub fn kind(&self) -> SlotKind {
-        self.kind
+        self.kind.slot_kind()
     }
 
     /// The `SlotKey` the plugin is registered under.
@@ -299,9 +291,9 @@ impl PluginSession {
     /// Panics if this session is not Filter-kind.
     pub fn call_filter(&self, request: FilterRequest) -> FilterResponse {
         assert!(
-            matches!(self.kind, SlotKind::Filter),
+            matches!(self.kind, ConformanceKind::Filter),
             "call_filter requires SlotKind::Filter, got {:?}",
-            self.kind
+            self.kind.slot_kind()
         );
         let in_bytes = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode FilterRequest");
         let out_bytes = self
@@ -320,9 +312,9 @@ impl PluginSession {
     /// Panics if this session is not Shape-kind.
     pub fn call_shape(&self, request: ShapeRequest) -> ShapeResponse {
         assert!(
-            matches!(self.kind, SlotKind::Shape),
+            matches!(self.kind, ConformanceKind::Shape),
             "call_shape requires SlotKind::Shape, got {:?}",
-            self.kind
+            self.kind.slot_kind()
         );
         let in_bytes = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode ShapeRequest");
         let out_bytes = self
@@ -342,62 +334,14 @@ impl PluginSession {
     /// session is not Observe-kind.
     pub fn call_observe(&self, event: ObserveEvent) {
         assert!(
-            matches!(self.kind, SlotKind::Observe),
+            matches!(self.kind, ConformanceKind::Observe),
             "call_observe requires SlotKind::Observe, got {:?}",
-            self.kind
+            self.kind.slot_kind()
         );
         let in_bytes = rkyv::to_bytes::<RkyvError>(&event).expect("rkyv encode ObserveEvent");
         self.runtime
             .call_observe(&self.slot_key, in_bytes.as_slice())
             .expect("guest cc_lb_observe must complete without trap");
-    }
-
-    /// Round-trip a [`TransformResponseRequest`] through the guest boundary.
-    pub fn call_transform_response(
-        &self,
-        request: TransformResponseRequest,
-    ) -> TransformResponseResult {
-        assert!(
-            matches!(self.kind, SlotKind::TransformResponse),
-            "call_transform_response requires SlotKind::TransformResponse, got {:?}",
-            self.kind
-        );
-        let in_bytes =
-            rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode TransformResponseRequest");
-        let out_bytes = self
-            .runtime
-            .call_transform_response(&self.slot_key, in_bytes.as_slice())
-            .expect("guest cc_lb_transform_response must complete without trap");
-        let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
-        aligned.extend_from_slice(&out_bytes);
-        let archived = rkyv::access::<ArchivedTransformResponseResult, RkyvError>(&aligned)
-            .expect("rkyv access TransformResponseResult");
-        rkyv::deserialize::<TransformResponseResult, RkyvError>(archived)
-            .expect("rkyv deserialize TransformResponseResult")
-    }
-
-    /// Round-trip a [`TransformSseEventRequest`] through the guest boundary.
-    pub fn call_transform_sse_event(
-        &self,
-        request: TransformSseEventRequest,
-    ) -> TransformSseEventResult {
-        assert!(
-            matches!(self.kind, SlotKind::TransformSseEvent),
-            "call_transform_sse_event requires SlotKind::TransformSseEvent, got {:?}",
-            self.kind
-        );
-        let in_bytes =
-            rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode TransformSseEventRequest");
-        let out_bytes = self
-            .runtime
-            .call_transform_sse_event(&self.slot_key, in_bytes.as_slice())
-            .expect("guest cc_lb_transform_sse_event must complete without trap");
-        let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
-        aligned.extend_from_slice(&out_bytes);
-        let archived = rkyv::access::<ArchivedTransformSseEventResult, RkyvError>(&aligned)
-            .expect("rkyv access TransformSseEventResult");
-        rkyv::deserialize::<TransformSseEventResult, RkyvError>(archived)
-            .expect("rkyv deserialize TransformSseEventResult")
     }
 
     /// Send one of every [`ObserveEvent`] variant, using

@@ -1,10 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use cc_lb_plugin_api::{
-    FilterPlugin, ObservabilityHook, ResponseTransformHook, SseEventTransformHook,
-    TerminalStrategy, UpstreamDialect,
-};
+use cc_lb_plugin_api::{FilterPlugin, ObservabilityHook, TerminalStrategy, UpstreamDialect};
 use cc_lb_storage_api::principal::Limit as DbLimit;
 use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -45,45 +42,18 @@ pub enum ObservabilityHooksCache {
 #[derive(Clone)]
 pub enum DialectCache {
     Inherit,
-    Explicit(Arc<dyn UpstreamDialect>),
+    Explicit(ShapePluginCache),
 }
 
 #[derive(Clone)]
-pub enum ResponseTransformCache {
-    None,
-    Explicit(Arc<dyn ResponseTransformHook>),
-}
-
-impl ResponseTransformCache {
-    pub fn from_optional(hook: Option<Arc<dyn ResponseTransformHook>>) -> Self {
-        match hook {
-            Some(hook) => Self::Explicit(hook),
-            None => Self::None,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub enum SseEventTransformCache {
-    None,
-    Explicit(Arc<dyn SseEventTransformHook>),
-}
-
-impl SseEventTransformCache {
-    pub fn from_optional(hook: Option<Arc<dyn SseEventTransformHook>>) -> Self {
-        match hook {
-            Some(hook) => Self::Explicit(hook),
-            None => Self::None,
-        }
-    }
+pub struct ShapePluginCache {
+    pub dialect: Arc<dyn UpstreamDialect>,
 }
 
 pub type PrincipalRoutingArtifacts = (
     Option<Arc<RouterPipelineCache>>,
     ObservabilityHooksCache,
     DialectCache,
-    ResponseTransformCache,
-    SseEventTransformCache,
 );
 
 #[derive(Debug)]
@@ -104,8 +74,6 @@ pub struct PrincipalSpecCached {
     default_router_pipeline: Arc<RouterPipelineCache>,
     observability_hooks: ObservabilityHooksCache,
     dialect: DialectCache,
-    response_transform_hook: ResponseTransformCache,
-    sse_event_transform_hook: SseEventTransformCache,
 }
 
 impl PrincipalView {
@@ -136,8 +104,6 @@ impl PrincipalView {
             None,
             ObservabilityHooksCache::Inherit,
             DialectCache::Inherit,
-            ResponseTransformCache::None,
-            SseEventTransformCache::None,
         ));
         Self::from_db(&[principal], principal_chains)
     }
@@ -176,19 +142,12 @@ impl PrincipalView {
                 });
                 let principal_id = principal.name.clone();
                 name_aliases.insert(principal.id.to_string(), principal_id.clone());
-                let (
-                    router_pipeline,
-                    observability_hooks,
-                    dialect,
-                    response_transform_hook,
-                    sse_event_transform_hook,
-                ) = principal_chains.remove(&principal_id).unwrap_or((
-                    None,
-                    ObservabilityHooksCache::Inherit,
-                    DialectCache::Inherit,
-                    ResponseTransformCache::None,
-                    SseEventTransformCache::None,
-                ));
+                let (router_pipeline, observability_hooks, dialect) =
+                    principal_chains.remove(&principal_id).unwrap_or((
+                        None,
+                        ObservabilityHooksCache::Inherit,
+                        DialectCache::Inherit,
+                    ));
                 let default_router_pipeline = Arc::new(RouterPipelineCache::empty(
                     principal.router_terminal_strategy.clone(),
                 ));
@@ -205,8 +164,6 @@ impl PrincipalView {
                     default_router_pipeline,
                     observability_hooks,
                     dialect,
-                    response_transform_hook,
-                    sse_event_transform_hook,
                 };
 
                 (principal_id, cached)
@@ -318,21 +275,7 @@ impl PrincipalSpecCached {
     ) -> &'a Arc<dyn UpstreamDialect> {
         match &self.dialect {
             DialectCache::Inherit => fallback,
-            DialectCache::Explicit(handle) => handle,
-        }
-    }
-
-    pub fn response_transform_hook(&self) -> Option<&Arc<dyn ResponseTransformHook>> {
-        match &self.response_transform_hook {
-            ResponseTransformCache::None => None,
-            ResponseTransformCache::Explicit(hook) => Some(hook),
-        }
-    }
-
-    pub fn sse_event_transform_hook(&self) -> Option<&Arc<dyn SseEventTransformHook>> {
-        match &self.sse_event_transform_hook {
-            SseEventTransformCache::None => None,
-            SseEventTransformCache::Explicit(hook) => Some(hook),
+            DialectCache::Explicit(cache) => &cache.dialect,
         }
     }
 }
@@ -403,8 +346,6 @@ mod tests {
             )),
             observability_hooks: hooks,
             dialect: DialectCache::Inherit,
-            response_transform_hook: ResponseTransformCache::None,
-            sse_event_transform_hook: SseEventTransformCache::None,
         }
     }
 

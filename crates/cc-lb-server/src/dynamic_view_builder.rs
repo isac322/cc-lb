@@ -11,7 +11,7 @@ use cc_lb_config::{AnthropicOAuthConfig, PromptCacheShadowConfig};
 use cc_lb_dialect_anthropic::AnthropicDirectDialect;
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
-    ResponseTransformCache, RouterPipelineCache, SseEventTransformCache,
+    RouterPipelineCache, ShapePluginCache,
 };
 use cc_lb_engine::builtin_filters::cache_affinity::CacheAffinityFilter;
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
@@ -29,8 +29,7 @@ use cc_lb_plugin_api::{
     Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate,
 };
 use cc_lb_runtime_wasmtime::{
-    WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeResponseTransformHook,
-    WasmtimeRuntime, WasmtimeSseEventTransformHook, WasmtimeUpstreamDialect,
+    WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeRuntime, WasmtimeUpstreamDialect,
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
@@ -103,24 +102,6 @@ async fn register_observe_slot(
 ) -> Result<Arc<cc_lb_runtime_wasmtime::PluginSlot>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
     let wasm = read_wasm_for_manifest(manifest).await?;
     runtime.register_observe(slot_key.clone(), manifest.name.clone(), &wasm)
-}
-
-async fn register_transform_response_slot(
-    runtime: &Arc<WasmtimeRuntime>,
-    slot_key: &cc_lb_plugin_api::SlotKey,
-    manifest: &PluginManifest,
-) -> Result<Arc<cc_lb_runtime_wasmtime::PluginSlot>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
-    let wasm = read_wasm_for_manifest(manifest).await?;
-    runtime.register_transform_response(slot_key.clone(), manifest.name.clone(), &wasm)
-}
-
-async fn register_transform_sse_event_slot(
-    runtime: &Arc<WasmtimeRuntime>,
-    slot_key: &cc_lb_plugin_api::SlotKey,
-    manifest: &PluginManifest,
-) -> Result<Arc<cc_lb_runtime_wasmtime::PluginSlot>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
-    let wasm = read_wasm_for_manifest(manifest).await?;
-    runtime.register_transform_sse_event(slot_key.clone(), manifest.name.clone(), &wasm)
 }
 
 async fn read_wasm_for_manifest(
@@ -632,8 +613,6 @@ async fn build_principal_chains(
         PluginSlot::Router,
         PluginSlot::ObservabilityHook,
         PluginSlot::Shape,
-        PluginSlot::TransformResponse,
-        PluginSlot::TransformSseEvent,
     ];
     let mut chain_entries: HashMap<(Uuid, PluginSlot), Vec<PluginChainEntry>> = stores
         .plugin_registry
@@ -658,16 +637,6 @@ async fn build_principal_chains(
             PluginSlot::ObservabilityHook,
         );
         let shape_entries = take_chain_entries(&mut chain_entries, principal.id, PluginSlot::Shape);
-        let response_transform_entries = take_chain_entries(
-            &mut chain_entries,
-            principal.id,
-            PluginSlot::TransformResponse,
-        );
-        let sse_event_transform_entries = take_chain_entries(
-            &mut chain_entries,
-            principal.id,
-            PluginSlot::TransformSseEvent,
-        );
 
         let router = build_router_pipeline(
             stores,
@@ -738,81 +707,55 @@ async fn build_principal_chains(
             let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
             })?;
-            let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
-            let manifest = PluginManifest {
-                pure: true,
-                name: registry_entry.name.clone(),
-                artifact: wasm_path.to_string_lossy().into_owned(),
-                wire_version: None,
-                config: entry.config,
-                metadata: std::collections::BTreeMap::new(),
-            };
-            let slot_key =
-                cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
-            registered_slot_keys.insert(slot_key.clone());
-            match register_shape_slot(runtime, &slot_key, &manifest).await {
-                Ok(slot) => {
-                    let handle: Arc<dyn cc_lb_plugin_api::UpstreamDialect> =
-                        Arc::new(WasmtimeUpstreamDialect::new(slot, runtime.config_arc()));
-                    DialectCache::Explicit(handle)
-                }
-                Err(error) => {
-                    tracing::error!(
-                        principal = %principal.name,
-                        plugin = %manifest.name,
-                        chain_entry_id = %entry.id,
-                        %error,
-                        "skipping shape chain entry: instantiation failed; principal falls back to route dialect",
-                    );
-                    DialectCache::Inherit
+            if registry_entry_unsupported_slot(registry_entry, PluginSlot::Shape) {
+                tracing::warn!(
+                    target: "cc_lb_server::drift",
+                    principal = %principal.name,
+                    plugin = registry_entry.name.as_str(),
+                    chain_entry_id = %entry.id,
+                    wasm_registry_id = %registry_entry.id,
+                    requested_slot = PluginSlot::Shape.as_str(),
+                    supported_slots = ?registry_entry.supported_slots,
+                    "skipping shape chain entry: registry entry does not support requested slot",
+                );
+                DialectCache::Inherit
+            } else {
+                let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
+                let manifest = PluginManifest {
+                    pure: true,
+                    name: registry_entry.name.clone(),
+                    artifact: wasm_path.to_string_lossy().into_owned(),
+                    wire_version: None,
+                    config: entry.config,
+                    metadata: std::collections::BTreeMap::new(),
+                };
+                let slot_key =
+                    cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
+                registered_slot_keys.insert(slot_key.clone());
+                match register_shape_slot(runtime, &slot_key, &manifest).await {
+                    Ok(slot) => {
+                        let handle: Arc<dyn cc_lb_plugin_api::UpstreamDialect> = Arc::new(
+                            WasmtimeUpstreamDialect::new(slot.clone(), runtime.config_arc()),
+                        );
+                        DialectCache::Explicit(ShapePluginCache { dialect: handle })
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            principal = %principal.name,
+                            plugin = %manifest.name,
+                            chain_entry_id = %entry.id,
+                            %error,
+                            "skipping shape chain entry: instantiation failed; principal falls back to route dialect",
+                        );
+                        DialectCache::Inherit
+                    }
                 }
             }
         } else {
             DialectCache::Inherit
         };
 
-        let response_transform = if let Some(entry) = response_transform_entries.into_iter().next()
-        {
-            build_response_transform_cache(
-                stores,
-                runtime,
-                data_dir,
-                principal,
-                entry,
-                &registry,
-                &mut registered_slot_keys,
-            )
-            .await?
-        } else {
-            ResponseTransformCache::None
-        };
-
-        let sse_event_transform =
-            if let Some(entry) = sse_event_transform_entries.into_iter().next() {
-                build_sse_event_transform_cache(
-                    stores,
-                    runtime,
-                    data_dir,
-                    principal,
-                    entry,
-                    &registry,
-                    &mut registered_slot_keys,
-                )
-                .await?
-            } else {
-                SseEventTransformCache::None
-            };
-
-        chains.insert(
-            principal.name.clone(),
-            (
-                router,
-                hooks,
-                dialect,
-                response_transform,
-                sse_event_transform,
-            ),
-        );
+        chains.insert(principal.name.clone(), (router, hooks, dialect));
     }
     Ok((chains, registered_slot_keys))
 }
@@ -989,102 +932,6 @@ async fn build_router_pipeline(
         terminal: principal.router_terminal_strategy.clone(),
         instantiation_error: None,
     })))
-}
-
-async fn build_response_transform_cache(
-    stores: &Stores,
-    runtime: &Arc<WasmtimeRuntime>,
-    data_dir: &Path,
-    principal: &PrincipalRecord,
-    entry: cc_lb_storage_api::PluginChainEntry,
-    registry: &HashMap<Uuid, cc_lb_storage_api::WasmRegistryEntry>,
-    registered_slot_keys: &mut HashSet<cc_lb_plugin_api::SlotKey>,
-) -> Result<ResponseTransformCache, RebindError> {
-    let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
-    })?;
-    if registry_entry_unsupported_slot(registry_entry, PluginSlot::TransformResponse) {
-        tracing::warn!(
-            target: "cc_lb_server::drift",
-            principal = %principal.name,
-            plugin = registry_entry.name.as_str(),
-            chain_entry_id = %entry.id,
-            wasm_registry_id = %registry_entry.id,
-            requested_slot = PluginSlot::TransformResponse.as_str(),
-            supported_slots = ?registry_entry.supported_slots,
-            "skipping transform_response chain entry: registry entry does not support requested slot",
-        );
-        return Ok(ResponseTransformCache::None);
-    }
-    let manifest = manifest_for_chain_entry(stores, data_dir, registry, &entry).await?;
-    let slot_key = cc_lb_plugin_api::SlotKey::new(
-        principal.name.clone(),
-        format!("{}:transform_response", manifest.name),
-    );
-    registered_slot_keys.insert(slot_key.clone());
-    match register_transform_response_slot(runtime, &slot_key, &manifest).await {
-        Ok(slot) => Ok(ResponseTransformCache::Explicit(Arc::new(
-            WasmtimeResponseTransformHook::new(slot, runtime.config_arc()),
-        ))),
-        Err(error) => {
-            tracing::error!(
-                principal = %principal.name,
-                plugin = %manifest.name,
-                chain_entry_id = %entry.id,
-                %error,
-                "skipping transform_response chain entry: instantiation failed",
-            );
-            Ok(ResponseTransformCache::None)
-        }
-    }
-}
-
-async fn build_sse_event_transform_cache(
-    stores: &Stores,
-    runtime: &Arc<WasmtimeRuntime>,
-    data_dir: &Path,
-    principal: &PrincipalRecord,
-    entry: cc_lb_storage_api::PluginChainEntry,
-    registry: &HashMap<Uuid, cc_lb_storage_api::WasmRegistryEntry>,
-    registered_slot_keys: &mut HashSet<cc_lb_plugin_api::SlotKey>,
-) -> Result<SseEventTransformCache, RebindError> {
-    let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
-    })?;
-    if registry_entry_unsupported_slot(registry_entry, PluginSlot::TransformSseEvent) {
-        tracing::warn!(
-            target: "cc_lb_server::drift",
-            principal = %principal.name,
-            plugin = registry_entry.name.as_str(),
-            chain_entry_id = %entry.id,
-            wasm_registry_id = %registry_entry.id,
-            requested_slot = PluginSlot::TransformSseEvent.as_str(),
-            supported_slots = ?registry_entry.supported_slots,
-            "skipping transform_sse_event chain entry: registry entry does not support requested slot",
-        );
-        return Ok(SseEventTransformCache::None);
-    }
-    let manifest = manifest_for_chain_entry(stores, data_dir, registry, &entry).await?;
-    let slot_key = cc_lb_plugin_api::SlotKey::new(
-        principal.name.clone(),
-        format!("{}:transform_sse_event", manifest.name),
-    );
-    registered_slot_keys.insert(slot_key.clone());
-    match register_transform_sse_event_slot(runtime, &slot_key, &manifest).await {
-        Ok(slot) => Ok(SseEventTransformCache::Explicit(Arc::new(
-            WasmtimeSseEventTransformHook::new(slot, runtime.config_arc()),
-        ))),
-        Err(error) => {
-            tracing::error!(
-                principal = %principal.name,
-                plugin = %manifest.name,
-                chain_entry_id = %entry.id,
-                %error,
-                "skipping transform_sse_event chain entry: instantiation failed",
-            );
-            Ok(SseEventTransformCache::None)
-        }
-    }
 }
 
 async fn apply_upstreams(

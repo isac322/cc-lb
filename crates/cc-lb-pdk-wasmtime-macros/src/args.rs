@@ -66,6 +66,7 @@ pub(crate) struct HandlerArgs {
     pub(crate) description: String,
     pub(crate) usage: String,
     pub(crate) view: bool,
+    pub(crate) mode: HandlerMode,
 }
 
 impl Parse for HandlerArgs {
@@ -76,6 +77,7 @@ impl Parse for HandlerArgs {
         let mut description = None;
         let mut usage = None;
         let mut view = false;
+        let mut mode = HandlerMode::Active;
         for meta in metas {
             match meta {
                 Meta::Path(path)
@@ -108,19 +110,35 @@ impl Parse for HandlerArgs {
                 Meta::NameValue(nv) if nv.path.is_ident("usage") => {
                     usage = Some(expect_string(&nv)?)
                 }
+                Meta::NameValue(nv) if nv.path.is_ident("mode") => {
+                    let value = expect_string(&nv)?;
+                    mode = HandlerMode::from_str(&value).ok_or_else(|| {
+                        Error::new_spanned(
+                            &nv.value,
+                            "expected `mode = \"active\"` or `mode = \"noop\"`",
+                        )
+                    })?;
+                }
                 Meta::Path(path) if path.is_ident("view") => view = true,
                 other => {
                     return Err(Error::new_spanned(
                         other,
-                        "expected `<kind>`, `wire = 1`, `description = \"...\"`, `usage = \"...\"`, or `view`",
+                        "expected `<kind>`, `wire = 1`, `description = \"...\"`, `usage = \"...\"`, `mode = \"active\"|\"noop\"`, or `view`",
                     ));
                 }
             }
         }
+        let kind = kind.ok_or_else(|| {
+            Error::new(Span::call_site(), "#[handler] missing required hook kind")
+        })?;
+        if mode == HandlerMode::Noop && !kind.supports_noop_mode() {
+            return Err(Error::new(
+                Span::call_site(),
+                "`mode = \"noop\"` is only valid for transform_response and transform_sse_event handlers",
+            ));
+        }
         Ok(Self {
-            kind: kind.ok_or_else(|| {
-                Error::new(Span::call_site(), "#[handler] missing required hook kind")
-            })?,
+            kind,
             wire_version: wire_version.ok_or_else(|| {
                 Error::new(Span::call_site(), "#[handler] missing required `wire`")
             })?,
@@ -134,7 +152,31 @@ impl Parse for HandlerArgs {
                 Error::new(Span::call_site(), "#[handler] missing required `usage`")
             })?,
             view,
+            mode,
         })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HandlerMode {
+    Active,
+    Noop,
+}
+
+impl HandlerMode {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(Self::Active),
+            "noop" => Some(Self::Noop),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Noop => "noop",
+        }
     }
 }
 
@@ -167,6 +209,10 @@ impl HandlerKind {
             Self::TransformResponse => "transform_response",
             Self::TransformSseEvent => "transform_sse_event",
         }
+    }
+
+    pub(crate) const fn supports_noop_mode(self) -> bool {
+        matches!(self, Self::TransformResponse | Self::TransformSseEvent)
     }
 
     pub(crate) fn export_name(self) -> &'static str {
@@ -230,6 +276,7 @@ pub(crate) struct DiscoveredHandler {
     pub(crate) description: String,
     pub(crate) usage: String,
     pub(crate) view: bool,
+    pub(crate) mode: HandlerMode,
 }
 
 pub(crate) fn collect_handlers(module: &ItemMod) -> syn::Result<Vec<DiscoveredHandler>> {
@@ -254,6 +301,7 @@ pub(crate) fn collect_handlers(module: &ItemMod) -> syn::Result<Vec<DiscoveredHa
                 description: args.description,
                 usage: args.usage,
                 view: args.view,
+                mode: args.mode,
             });
         }
     }

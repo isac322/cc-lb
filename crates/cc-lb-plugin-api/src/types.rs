@@ -48,12 +48,8 @@ pub enum PluginSlot {
     Router,
     /// Observability hook slot for receiving request lifecycle events.
     ObservabilityHook,
-    /// Request shaping slot for producing upstream-specific requests.
+    /// Request/response shaping slot for upstream-specific requests and response hooks.
     Shape,
-    /// Buffered response transform slot.
-    TransformResponse,
-    /// SSE event response transform slot.
-    TransformSseEvent,
 }
 
 impl PluginSlot {
@@ -63,8 +59,6 @@ impl PluginSlot {
             Self::Router => "router",
             Self::ObservabilityHook => "observability_hook",
             Self::Shape => "shape",
-            Self::TransformResponse => "transform_response",
-            Self::TransformSseEvent => "transform_sse_event",
         }
     }
 
@@ -74,8 +68,6 @@ impl PluginSlot {
             "router" => Some(Self::Router),
             "observability_hook" => Some(Self::ObservabilityHook),
             "shape" => Some(Self::Shape),
-            "transform_response" => Some(Self::TransformResponse),
-            "transform_sse_event" => Some(Self::TransformSseEvent),
             _ => None,
         }
     }

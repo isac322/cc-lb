@@ -640,8 +640,6 @@ async fn find_chain_entry(
                 PluginSlot::Router,
                 PluginSlot::ObservabilityHook,
                 PluginSlot::Shape,
-                PluginSlot::TransformResponse,
-                PluginSlot::TransformSseEvent,
             ] {
                 let entries = storage.list_chain_for_principal(principal.id, slot).await?;
                 if let Some(entry) = entries.into_iter().find(|entry| entry.id == id) {
@@ -674,8 +672,6 @@ async fn infer_reorder_chain(
         PluginSlot::Router,
         PluginSlot::ObservabilityHook,
         PluginSlot::Shape,
-        PluginSlot::TransformResponse,
-        PluginSlot::TransformSseEvent,
     ] {
         let chain = storage
             .list_chain_for_principal(principal_id, slot)
@@ -869,12 +865,6 @@ fn parse_slot(value: &str) -> Option<SlotParam> {
             Some(SlotParam::Stored(PluginSlot::ObservabilityHook))
         }
         "Shape" | "shape" => Some(SlotParam::Stored(PluginSlot::Shape)),
-        "TransformResponse" | "transform_response" => {
-            Some(SlotParam::Stored(PluginSlot::TransformResponse))
-        }
-        "TransformSseEvent" | "transform_sse_event" => {
-            Some(SlotParam::Stored(PluginSlot::TransformSseEvent))
-        }
         "build_signer" | "sign" | "on_unauthorized" => Some(SlotParam::RuntimeOnly),
         _ => None,
     }

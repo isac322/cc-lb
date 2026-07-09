@@ -2,10 +2,7 @@ use std::sync::Arc;
 
 use cc_lb_plugin_api::SlotKey;
 
-use crate::cache::{
-    call_filter_hook, call_observe_hook, call_shape_hook, call_transform_response_hook,
-    call_transform_sse_event_hook,
-};
+use crate::cache::{call_filter_hook, call_observe_hook, call_shape_hook};
 use crate::{PluginCell, SlotKind, WasmtimeRuntime, WasmtimeRuntimeError};
 
 impl WasmtimeRuntime {
@@ -62,26 +59,6 @@ impl WasmtimeRuntime {
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
         self.dispatch(slot_key, SlotKind::Observe, |cell| {
             call_observe_hook(cell, input)
-        })
-    }
-
-    pub fn call_transform_response(
-        &self,
-        slot_key: &SlotKey,
-        input: &[u8],
-    ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.dispatch(slot_key, SlotKind::TransformResponse, |cell| {
-            call_transform_response_hook(cell, input).map(|bytes| bytes.as_slice().to_vec())
-        })
-    }
-
-    pub fn call_transform_sse_event(
-        &self,
-        slot_key: &SlotKey,
-        input: &[u8],
-    ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.dispatch(slot_key, SlotKind::TransformSseEvent, |cell| {
-            call_transform_sse_event_hook(cell, input).map(|bytes| bytes.as_slice().to_vec())
         })
     }
 }

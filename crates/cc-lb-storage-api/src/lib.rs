@@ -45,7 +45,7 @@ pub use upstream_subscription_metadata::*;
 pub use upstream_subscription_quota::*;
 pub use upstream_subscription_quota_checkpoint::*;
 pub use uuid::Uuid as UpstreamRecordId;
-pub use validation::{validate_identifier, validate_sse_batching_knobs};
+pub use validation::validate_identifier;
 pub use warmup_attempts::*;
 
 pub type RepoError = StorageError;

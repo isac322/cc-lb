@@ -4,7 +4,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
-    ResponseTransformCache, RouterPipelineCache, SseEventTransformCache,
+    RouterPipelineCache,
 };
 use cc_lb_plugin_api::{
     FilterError, FilterOutput, FilterPlugin, Principal, RequestContext, TerminalStrategy,
@@ -129,8 +129,6 @@ fn view_with_pipeline(
                 router_pipeline,
                 ObservabilityHooksCache::Inherit,
                 DialectCache::Inherit,
-                ResponseTransformCache::None,
-                SseEventTransformCache::None,
             ),
         );
     }

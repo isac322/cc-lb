@@ -9,8 +9,7 @@ use cc_lb_engine::api_keys::builtin_authn::{BuiltinAuthError, BuiltinAuthn};
 use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_engine::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalView, ResponseTransformCache,
-    RouterPipelineCache, SseEventTransformCache,
+    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
 };
 use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
 use cc_lb_plugin_api::{
@@ -166,13 +165,7 @@ fn principal_view(
     if let Some((router, obs)) = chain {
         chains.insert(
             principal_id.to_owned(),
-            (
-                Some(router),
-                obs,
-                DialectCache::Inherit,
-                ResponseTransformCache::None,
-                SseEventTransformCache::None,
-            ),
+            (Some(router), obs, DialectCache::Inherit),
         );
     }
     Arc::new(PrincipalView::for_tests(

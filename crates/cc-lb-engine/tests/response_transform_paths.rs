@@ -9,16 +9,17 @@ use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
-    ResponseTransformCache, RouterPipelineCache, SseEventTransformCache,
+    RouterPipelineCache, ShapePluginCache,
 };
 use cc_lb_engine::{
     DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
     UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
-    ObserveEvent, Principal, PrincipalKind, ResponseTransformError, ResponseTransformHook,
-    SignedRequest, SseEvent, SseEventTransformHook, TerminalStrategy, TransformResponseRequest,
-    TransformResponseResult, TransformSseEventRequest, TransformSseEventResult,
+    DialectError, ObserveEvent, Principal, PrincipalKind, RequestContext, ResponseTransformError,
+    ResponseTransformHook, ShapedRequest, ShapedRequestBuilder, SignedRequest, SseEvent,
+    SseEventTransformHook, TerminalStrategy, TransformResponseRequest, TransformResponseResult,
+    TransformSseEventRequest, TransformSseEventResult, Upstream, UpstreamDialect,
 };
 use cc_lb_storage_api::principal::PrincipalRecord;
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
@@ -434,6 +435,24 @@ async fn sse_transform_failure_before_output_fails_open_raw() {
 }
 
 #[tokio::test]
+async fn sse_transform_invalid_event_name_fails_open_without_injection() {
+    let transform = Arc::new(InvalidEventNameSseTransform);
+    let lifecycle = lifecycle_with_transforms(None, Some(transform), sse_dispatch(false));
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":false}"#,
+        )))
+        .await
+        .expect("lifecycle handles SSE response");
+    let (_status, _headers, body) = collect_body(response).await;
+
+    assert_eq!(body, sse_upstream_body(false));
+    let text = std::str::from_utf8(&body).expect("sse body is utf8");
+    assert!(!text.contains("event: injected"));
+}
+
+#[tokio::test]
 async fn sse_transform_failure_after_transformed_output_terminates_classified() {
     let transform = Arc::new(FailAfterFirstSseTransform::default());
     let lifecycle = lifecycle_with_transforms(None, Some(transform), sse_dispatch(false));
@@ -505,6 +524,10 @@ fn lifecycle_with_transforms_and_hook(
     dispatcher: Arc<dyn UpstreamDispatch>,
     hook: Arc<RecordingHook>,
 ) -> Lifecycle {
+    let dialect = Arc::new(ShapeTransformDialect::new(
+        response_transform,
+        sse_transform,
+    ));
     let state = TestState::default();
     let mut chains: HashMap<String, PrincipalRoutingArtifacts> = HashMap::new();
     chains.insert(
@@ -514,9 +537,7 @@ fn lifecycle_with_transforms_and_hook(
                 TerminalStrategy::FirstPick,
             ))),
             ObservabilityHooksCache::Inherit,
-            DialectCache::Inherit,
-            ResponseTransformCache::from_optional(response_transform),
-            SseEventTransformCache::from_optional(sse_transform),
+            DialectCache::Explicit(ShapePluginCache { dialect }),
         ),
     );
     let principal = PrincipalRecord {
@@ -555,6 +576,51 @@ fn lifecycle_with_transforms_and_hook(
         LifecycleConfig::default(),
         Arc::new(cc_lb_engine::SystemClock),
     )
+}
+
+struct ShapeTransformDialect {
+    response_transform: Option<Arc<dyn ResponseTransformHook>>,
+    sse_transform: Option<Arc<dyn SseEventTransformHook>>,
+}
+
+impl ShapeTransformDialect {
+    fn new(
+        response_transform: Option<Arc<dyn ResponseTransformHook>>,
+        sse_transform: Option<Arc<dyn SseEventTransformHook>>,
+    ) -> Self {
+        Self {
+            response_transform,
+            sse_transform,
+        }
+    }
+}
+
+impl UpstreamDialect for ShapeTransformDialect {
+    fn shape(
+        &self,
+        ctx: &RequestContext,
+        _upstream: &Upstream,
+        _principal: &Principal,
+        builder: &mut ShapedRequestBuilder,
+    ) -> Result<ShapedRequest, DialectError> {
+        let mut url = Url::parse("http://upstream.local/").expect("test URL parses");
+        url.set_path(ctx.path.trim_start_matches('/'));
+        url.set_query(ctx.query.as_deref());
+        Ok(builder.shaped_request(
+            url,
+            ctx.method.clone(),
+            ctx.downstream_headers.clone(),
+            ctx.body_bytes.clone(),
+        ))
+    }
+
+    fn response_transform_hook(&self) -> Option<&dyn ResponseTransformHook> {
+        self.response_transform.as_deref()
+    }
+
+    fn sse_event_transform_hook(&self) -> Option<&dyn SseEventTransformHook> {
+        self.sse_transform.as_deref()
+    }
 }
 
 fn buffered_dispatch() -> Arc<dyn UpstreamDispatch> {
@@ -848,6 +914,22 @@ impl SseEventTransformHook for SseUsageMutatingTransform {
             });
         }
         Ok(TransformSseEventResult::Unchanged)
+    }
+}
+
+struct InvalidEventNameSseTransform;
+
+impl SseEventTransformHook for InvalidEventNameSseTransform {
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        Ok(TransformSseEventResult::Replace {
+            events: vec![SseEvent {
+                event: format!("{}\nevent: injected", request.event.event),
+                data: request.event.data,
+            }],
+        })
     }
 }
 

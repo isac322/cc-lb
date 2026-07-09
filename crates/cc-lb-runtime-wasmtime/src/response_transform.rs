@@ -5,6 +5,7 @@ use cc_lb_plugin_api::{
     TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
     TransformSseEventResult, Upstream,
 };
+use cc_lb_plugin_wire::metadata::HookMode;
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
 use cc_lb_plugin_wire::{
     ArchivedTransformResponseResult, ArchivedTransformSseEventResult, ClaimRef, HeaderRef,
@@ -15,27 +16,33 @@ use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 
 use crate::cache::{call_transform_response_hook, call_transform_sse_event_hook};
-use crate::cell::{PluginCell, PluginSlot};
+use crate::cell::PluginCell;
 use crate::error::WasmtimeRuntimeError;
 
 pub struct WasmtimeResponseTransformHook {
     cell: Arc<PluginCell>,
     runtime_config: Arc<crate::HotEngineConfig>,
     wire_version: Option<WireVersion>,
+    mode: HookMode,
 }
 
 impl WasmtimeResponseTransformHook {
-    pub fn new(slot: Arc<PluginSlot>, runtime_config: Arc<crate::HotEngineConfig>) -> Self {
-        let cell = slot.current.load_full();
-        let wire_version = cell
+    pub(crate) fn from_cell(
+        cell: Arc<PluginCell>,
+        runtime_config: Arc<crate::HotEngineConfig>,
+    ) -> Self {
+        let metadata = cell
             .metadata
             .hooks
-            .get(HookKind::TransformResponse.as_str())
-            .and_then(|metadata| WireVersion::from_u8(metadata.wire_version));
+            .get(HookKind::TransformResponse.as_str());
+        let wire_version =
+            metadata.and_then(|metadata| WireVersion::from_u8(metadata.wire_version));
+        let mode = metadata.map_or(HookMode::Active, |metadata| metadata.mode);
         Self {
             cell,
             runtime_config,
             wire_version,
+            mode,
         }
     }
 }
@@ -45,6 +52,9 @@ impl ResponseTransformHook for WasmtimeResponseTransformHook {
         &self,
         request: TransformResponseRequest,
     ) -> Result<TransformResponseResult, ResponseTransformError> {
+        if self.mode.is_noop() {
+            return Ok(TransformResponseResult::Unchanged);
+        }
         let in_bytes = host_to_wire_transform_response(&request).map_err(|e| {
             response_runtime_error(format!("rkyv encode TransformResponseRequest: {e}"))
         })?;
@@ -52,7 +62,7 @@ impl ResponseTransformHook for WasmtimeResponseTransformHook {
             Some(WireVersion::V1) => call_transform_response_hook(&self.cell, in_bytes.as_slice()),
             None => {
                 return Err(response_runtime_error(
-                    "transform_response slot is missing transform_response metadata".to_owned(),
+                    "shape plugin is missing transform_response metadata".to_owned(),
                 ));
             }
         }
@@ -69,20 +79,26 @@ pub struct WasmtimeSseEventTransformHook {
     cell: Arc<PluginCell>,
     runtime_config: Arc<crate::HotEngineConfig>,
     wire_version: Option<WireVersion>,
+    mode: HookMode,
 }
 
 impl WasmtimeSseEventTransformHook {
-    pub fn new(slot: Arc<PluginSlot>, runtime_config: Arc<crate::HotEngineConfig>) -> Self {
-        let cell = slot.current.load_full();
-        let wire_version = cell
+    pub(crate) fn from_cell(
+        cell: Arc<PluginCell>,
+        runtime_config: Arc<crate::HotEngineConfig>,
+    ) -> Self {
+        let metadata = cell
             .metadata
             .hooks
-            .get(HookKind::TransformSseEvent.as_str())
-            .and_then(|metadata| WireVersion::from_u8(metadata.wire_version));
+            .get(HookKind::TransformSseEvent.as_str());
+        let wire_version =
+            metadata.and_then(|metadata| WireVersion::from_u8(metadata.wire_version));
+        let mode = metadata.map_or(HookMode::Active, |metadata| metadata.mode);
         Self {
             cell,
             runtime_config,
             wire_version,
+            mode,
         }
     }
 }
@@ -92,6 +108,9 @@ impl SseEventTransformHook for WasmtimeSseEventTransformHook {
         &self,
         request: TransformSseEventRequest,
     ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        if self.mode.is_noop() {
+            return Ok(TransformSseEventResult::Unchanged);
+        }
         let in_bytes = host_to_wire_transform_sse_event(&request).map_err(|e| {
             response_runtime_error(format!("rkyv encode TransformSseEventRequest: {e}"))
         })?;
@@ -99,7 +118,7 @@ impl SseEventTransformHook for WasmtimeSseEventTransformHook {
             Some(WireVersion::V1) => call_transform_sse_event_hook(&self.cell, in_bytes.as_slice()),
             None => {
                 return Err(response_runtime_error(
-                    "transform_sse_event slot is missing transform_sse_event metadata".to_owned(),
+                    "shape plugin is missing transform_sse_event metadata".to_owned(),
                 ));
             }
         }

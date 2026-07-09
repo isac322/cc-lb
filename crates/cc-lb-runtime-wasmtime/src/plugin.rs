@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use cc_lb_plugin_api::{
     FilterError, FilterOutput, FilterPlugin, PerCandidateReason, Principal, PrincipalKind,
-    RequestContext, SlotKey, UpstreamCandidate,
+    RequestContext, ResponseTransformHook, SlotKey, SseEventTransformHook, UpstreamCandidate,
 };
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
 use cc_lb_plugin_wire::{
@@ -37,6 +37,7 @@ use uuid::Uuid;
 use crate::cache::call_filter_hook;
 use crate::cell::{PluginCell, PluginSlot};
 use crate::error::WasmtimeRuntimeError;
+use crate::response_transform::{WasmtimeResponseTransformHook, WasmtimeSseEventTransformHook};
 
 /// `FilterPlugin` adapter backed by a wasmtime `PluginSlot`. The
 /// adapter **snapshots** the slot's [`PluginCell`] at construction
@@ -410,6 +411,8 @@ pub struct WasmtimeUpstreamDialect {
     cell: Arc<PluginCell>,
     runtime_config: Arc<crate::HotEngineConfig>,
     wire_version: Option<WireVersion>,
+    response_transform_hook: Option<WasmtimeResponseTransformHook>,
+    sse_event_transform_hook: Option<WasmtimeSseEventTransformHook>,
 }
 
 impl WasmtimeUpstreamDialect {
@@ -420,10 +423,34 @@ impl WasmtimeUpstreamDialect {
             .hooks
             .get(HookKind::Shape.as_str())
             .and_then(|m| WireVersion::from_u8(m.wire_version));
+        let response_transform_hook = cell
+            .metadata
+            .hooks
+            .get(HookKind::TransformResponse.as_str())
+            .filter(|metadata| !metadata.mode.is_noop())
+            .map(|_| {
+                WasmtimeResponseTransformHook::from_cell(
+                    Arc::clone(&cell),
+                    Arc::clone(&runtime_config),
+                )
+            });
+        let sse_event_transform_hook = cell
+            .metadata
+            .hooks
+            .get(HookKind::TransformSseEvent.as_str())
+            .filter(|metadata| !metadata.mode.is_noop())
+            .map(|_| {
+                WasmtimeSseEventTransformHook::from_cell(
+                    Arc::clone(&cell),
+                    Arc::clone(&runtime_config),
+                )
+            });
         Self {
             cell,
             runtime_config,
             wire_version,
+            response_transform_hook,
+            sse_event_transform_hook,
         }
     }
 }
@@ -483,6 +510,18 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
             self.runtime_config.shape_origin_policy,
             &self.runtime_config.wire_bounds,
         )
+    }
+
+    fn response_transform_hook(&self) -> Option<&dyn ResponseTransformHook> {
+        self.response_transform_hook
+            .as_ref()
+            .map(|hook| hook as &dyn ResponseTransformHook)
+    }
+
+    fn sse_event_transform_hook(&self) -> Option<&dyn SseEventTransformHook> {
+        self.sse_event_transform_hook
+            .as_ref()
+            .map(|hook| hook as &dyn SseEventTransformHook)
     }
 }
 

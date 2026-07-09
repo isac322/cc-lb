@@ -24,10 +24,7 @@ mod response_transform;
 #[cfg(test)]
 mod tests;
 
-pub use cache::{
-    DEFAULT_ALIGN, call_filter_hook, call_observe_hook, call_shape_hook,
-    call_transform_response_hook, call_transform_sse_event_hook,
-};
+pub use cache::{DEFAULT_ALIGN, call_filter_hook, call_observe_hook, call_shape_hook};
 pub use cc_lb_plugin_wire::schema::HookKind;
 pub use cc_lb_plugin_wire::schema::HookKind as SlotKind;
 pub use cell::{PluginCell, PluginSlot};
@@ -36,7 +33,6 @@ pub use error::WasmtimeRuntimeError;
 pub use inspect::{ModuleInspection, inspect_wasm};
 pub use module::{admit_wasm, compile_module};
 pub use plugin::{WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeUpstreamDialect};
-pub use response_transform::{WasmtimeResponseTransformHook, WasmtimeSseEventTransformHook};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -135,24 +131,6 @@ impl WasmtimeRuntime {
         wasm_bytes: &[u8],
     ) -> Result<Arc<PluginSlot>, WasmtimeRuntimeError> {
         self.register(SlotKind::Observe, slot_key, name, wasm_bytes)
-    }
-
-    pub fn register_transform_response(
-        &self,
-        slot_key: SlotKey,
-        name: impl Into<String>,
-        wasm_bytes: &[u8],
-    ) -> Result<Arc<PluginSlot>, WasmtimeRuntimeError> {
-        self.register(SlotKind::TransformResponse, slot_key, name, wasm_bytes)
-    }
-
-    pub fn register_transform_sse_event(
-        &self,
-        slot_key: SlotKey,
-        name: impl Into<String>,
-        wasm_bytes: &[u8],
-    ) -> Result<Arc<PluginSlot>, WasmtimeRuntimeError> {
-        self.register(SlotKind::TransformSseEvent, slot_key, name, wasm_bytes)
     }
 
     fn register(

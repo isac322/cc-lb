@@ -54,12 +54,8 @@ where
     list_chains_for_principals_returns_ordered_and_filtered(storage).await?;
     router_multi_entry_ordered_on_storage(storage).await?;
     insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage(storage).await?;
-    insert_chain_entry_rejects_duplicate_for_transform_response_slot_on_storage(storage).await?;
-    insert_chain_entry_rejects_duplicate_for_transform_sse_event_slot_on_storage(storage).await?;
     router_reorder_preserves_invariants_on_storage(storage).await?;
     shape_singleton_preserved_on_storage(storage).await?;
-    transform_response_singleton_preserved_on_storage(storage).await?;
-    transform_sse_event_singleton_preserved_on_storage(storage).await?;
     insert_chain_entry_allows_multi_for_observability_hook_on_storage(storage).await?;
     refcount_increment_on_chain_insert(storage).await?;
     update_chain_entry_bumps_revision(storage).await?;
@@ -640,88 +636,6 @@ async fn shape_singleton_preserved_on_storage<S: PluginRegistryStore + Principal
 }
 
 plugin_registry_scenario!(
-    transform_response_singleton_preserved,
-    transform_response_singleton_preserved_on_storage
-);
-
-async fn transform_response_singleton_preserved_on_storage<
-    S: PluginRegistryStore + PrincipalStore,
->(
-    storage: &S,
-) -> Result<()> {
-    let (principal, plugin) =
-        principal_and_plugin(storage, 141, "plugin-transform-response-still-singleton").await?;
-    let first = storage
-        .insert_chain_entry(chain_with_slot(
-            principal,
-            PluginSlot::TransformResponse,
-            plugin.id,
-            sparse_order::STEP,
-        ))
-        .await?;
-    let err = storage
-        .insert_chain_entry(chain_with_slot(
-            principal,
-            PluginSlot::TransformResponse,
-            plugin.id,
-            sparse_order::STEP * 2,
-        ))
-        .await
-        .expect_err("transform_response slot must remain singleton");
-    ensure!(
-        matches!(
-            err,
-            StorageError::PluginChainConflict {
-                reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id }
-            } if existing_entry_id == first.id
-        ),
-        "transform_response slot singleton constraint preserved"
-    );
-    Ok(())
-}
-
-plugin_registry_scenario!(
-    transform_sse_event_singleton_preserved,
-    transform_sse_event_singleton_preserved_on_storage
-);
-
-async fn transform_sse_event_singleton_preserved_on_storage<
-    S: PluginRegistryStore + PrincipalStore,
->(
-    storage: &S,
-) -> Result<()> {
-    let (principal, plugin) =
-        principal_and_plugin(storage, 142, "plugin-transform-sse-event-still-singleton").await?;
-    let first = storage
-        .insert_chain_entry(chain_with_slot(
-            principal,
-            PluginSlot::TransformSseEvent,
-            plugin.id,
-            sparse_order::STEP,
-        ))
-        .await?;
-    let err = storage
-        .insert_chain_entry(chain_with_slot(
-            principal,
-            PluginSlot::TransformSseEvent,
-            plugin.id,
-            sparse_order::STEP * 2,
-        ))
-        .await
-        .expect_err("transform_sse_event slot must remain singleton");
-    ensure!(
-        matches!(
-            err,
-            StorageError::PluginChainConflict {
-                reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id }
-            } if existing_entry_id == first.id
-        ),
-        "transform_sse_event slot singleton constraint preserved"
-    );
-    Ok(())
-}
-
-plugin_registry_scenario!(
     insert_chain_entry_rejects_duplicate_for_shape_slot,
     insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage
 );
@@ -762,88 +676,6 @@ async fn insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage<
 }
 
 plugin_registry_scenario!(
-    insert_chain_entry_rejects_duplicate_for_transform_response_slot,
-    insert_chain_entry_rejects_duplicate_for_transform_response_slot_on_storage
-);
-
-async fn insert_chain_entry_rejects_duplicate_for_transform_response_slot_on_storage<
-    S: PluginRegistryStore + PrincipalStore,
->(
-    storage: &S,
-) -> Result<()> {
-    let (principal, plugin) =
-        principal_and_plugin(storage, 138, "plugin-transform-response-singleton").await?;
-    let first = storage
-        .insert_chain_entry(chain_with_slot(
-            principal,
-            PluginSlot::TransformResponse,
-            plugin.id,
-            sparse_order::STEP,
-        ))
-        .await?;
-    let err = storage
-        .insert_chain_entry(chain_with_slot(
-            principal,
-            PluginSlot::TransformResponse,
-            plugin.id,
-            sparse_order::STEP * 2,
-        ))
-        .await
-        .expect_err("duplicate transform_response slot insert conflicts");
-    ensure!(
-        matches!(
-            err,
-            StorageError::PluginChainConflict {
-                reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id }
-            } if existing_entry_id == first.id
-        ),
-        "duplicate transform_response slot returns typed singleton conflict"
-    );
-    Ok(())
-}
-
-plugin_registry_scenario!(
-    insert_chain_entry_rejects_duplicate_for_transform_sse_event_slot,
-    insert_chain_entry_rejects_duplicate_for_transform_sse_event_slot_on_storage
-);
-
-async fn insert_chain_entry_rejects_duplicate_for_transform_sse_event_slot_on_storage<
-    S: PluginRegistryStore + PrincipalStore,
->(
-    storage: &S,
-) -> Result<()> {
-    let (principal, plugin) =
-        principal_and_plugin(storage, 139, "plugin-transform-sse-event-singleton").await?;
-    let first = storage
-        .insert_chain_entry(chain_with_slot(
-            principal,
-            PluginSlot::TransformSseEvent,
-            plugin.id,
-            sparse_order::STEP,
-        ))
-        .await?;
-    let err = storage
-        .insert_chain_entry(chain_with_slot(
-            principal,
-            PluginSlot::TransformSseEvent,
-            plugin.id,
-            sparse_order::STEP * 2,
-        ))
-        .await
-        .expect_err("duplicate transform_sse_event slot insert conflicts");
-    ensure!(
-        matches!(
-            err,
-            StorageError::PluginChainConflict {
-                reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id }
-            } if existing_entry_id == first.id
-        ),
-        "duplicate transform_sse_event slot returns typed singleton conflict"
-    );
-    Ok(())
-}
-
-plugin_registry_scenario!(
     insert_chain_entry_allows_multi_for_observability_hook,
     insert_chain_entry_allows_multi_for_observability_hook_on_storage
 );
@@ -877,146 +709,6 @@ async fn insert_chain_entry_allows_multi_for_observability_hook_on_storage<
         listed.len() == 2,
         "observability hook allows multiple entries"
     );
-    Ok(())
-}
-
-plugin_registry_scenario!(
-    insert_chain_entry_rejects_non_default_batching_for_transform_slots,
-    insert_chain_entry_rejects_non_default_batching_for_transform_slots_on_storage
-);
-
-async fn insert_chain_entry_rejects_non_default_batching_for_transform_slots_on_storage<
-    S: PluginRegistryStore + PrincipalStore,
->(
-    storage: &S,
-) -> Result<()> {
-    let (principal, plugin) = principal_and_plugin(storage, 150, "plugin-batching-reject").await?;
-
-    let err = storage
-        .insert_chain_entry(chain_with_batching(
-            principal,
-            PluginSlot::TransformResponse,
-            plugin.id,
-            sparse_order::STEP,
-            true,
-            1,
-            100,
-        ))
-        .await
-        .expect_err("sse_per_event = true must be rejected for TransformResponse");
-    ensure!(
-        matches!(err, StorageError::InvalidInput { ref field, .. } if field == "sse_per_event"),
-        "sse_per_event rejected"
-    );
-
-    let err = storage
-        .insert_chain_entry(chain_with_batching(
-            principal,
-            PluginSlot::TransformSseEvent,
-            plugin.id,
-            sparse_order::STEP,
-            false,
-            5,
-            100,
-        ))
-        .await
-        .expect_err("batched_events_per_flush != 1 must be rejected for TransformSseEvent");
-    ensure!(
-        matches!(err, StorageError::InvalidInput { ref field, .. } if field == "batched_events_per_flush"),
-        "batched_events_per_flush rejected"
-    );
-
-    let err = storage
-        .insert_chain_entry(chain_with_batching(
-            principal,
-            PluginSlot::TransformResponse,
-            plugin.id,
-            sparse_order::STEP,
-            false,
-            1,
-            500,
-        ))
-        .await
-        .expect_err("batched_flush_ms != 100 must be rejected for TransformResponse");
-    ensure!(
-        matches!(err, StorageError::InvalidInput { ref field, .. } if field == "batched_flush_ms"),
-        "batched_flush_ms rejected"
-    );
-
-    Ok(())
-}
-
-plugin_registry_scenario!(
-    update_chain_entry_rejects_non_default_batching_for_transform_slots,
-    update_chain_entry_rejects_non_default_batching_for_transform_slots_on_storage
-);
-
-async fn update_chain_entry_rejects_non_default_batching_for_transform_slots_on_storage<
-    S: PluginRegistryStore + PrincipalStore,
->(
-    storage: &S,
-) -> Result<()> {
-    let (principal, plugin) =
-        principal_and_plugin(storage, 151, "plugin-batching-update-reject").await?;
-    let entry = storage
-        .insert_chain_entry(chain_with_slot(
-            principal,
-            PluginSlot::TransformResponse,
-            plugin.id,
-            sparse_order::STEP,
-        ))
-        .await?;
-
-    let err = storage
-        .update_chain_entry(
-            entry.id,
-            entry.revision,
-            PluginChainEntryUpdate {
-                sse_per_event: Some(true),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect_err("updating sse_per_event = true must be rejected for TransformResponse");
-    ensure!(
-        matches!(err, StorageError::InvalidInput { ref field, .. } if field == "sse_per_event"),
-        "sse_per_event update rejected"
-    );
-
-    let err = storage
-        .update_chain_entry(
-            entry.id,
-            entry.revision,
-            PluginChainEntryUpdate {
-                batched_events_per_flush: Some(10),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect_err(
-            "updating batched_events_per_flush != 1 must be rejected for TransformResponse",
-        );
-    ensure!(
-        matches!(err, StorageError::InvalidInput { ref field, .. } if field == "batched_events_per_flush"),
-        "batched_events_per_flush update rejected"
-    );
-
-    let err = storage
-        .update_chain_entry(
-            entry.id,
-            entry.revision,
-            PluginChainEntryUpdate {
-                batched_flush_ms: Some(200),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect_err("updating batched_flush_ms != 100 must be rejected for TransformResponse");
-    ensure!(
-        matches!(err, StorageError::InvalidInput { ref field, .. } if field == "batched_flush_ms"),
-        "batched_flush_ms update rejected"
-    );
-
     Ok(())
 }
 
@@ -1938,27 +1630,6 @@ fn chain_with_slot(
     }
 }
 
-fn chain_with_batching(
-    principal_id: Uuid,
-    slot: PluginSlot,
-    wasm_registry_id: Uuid,
-    order: i64,
-    sse_per_event: bool,
-    batched_events_per_flush: u32,
-    batched_flush_ms: u64,
-) -> PluginChainEntryInput {
-    PluginChainEntryInput {
-        principal_id,
-        slot,
-        order,
-        wasm_registry_id,
-        config: json!({}),
-        sse_per_event,
-        batched_events_per_flush,
-        batched_flush_ms,
-    }
-}
-
 fn filter_hook_metadata() -> BTreeMap<String, HookMetadata> {
     BTreeMap::from([(
         "filter".to_owned(),
@@ -1966,6 +1637,7 @@ fn filter_hook_metadata() -> BTreeMap<String, HookMetadata> {
             wire_version: default_wire_version(),
             description: "filter hook".to_owned(),
             usage: "called by router".to_owned(),
+            mode: Default::default(),
         },
     )])
 }

@@ -141,17 +141,13 @@ sections, and one `cc_lb.plugin.v1` metadata custom section.
 
 ## Hook Contracts
 
-cc-lb currently supports five hook kinds. A wasm artifact may implement one or
-more hooks, and upload-time `slot_kind=filter|shape|observe|transform_response|transform_sse_event`
-selects which hook the registration targets.
+cc-lb supports three plugin slot kinds. A wasm artifact may implement one or more hooks, and upload-time `slot_kind=filter|shape|observe` selects which slot the registration targets.
 
-| Hook | Export | Request type | Response type | Use |
+| Slot | Export | Request type | Response type | Use |
 |---|---|---|---|---|
 | `filter` | `cc_lb_filter` | `FilterRequest` | `FilterResponse` | Keep or reject upstream candidates. |
-| `shape` | `cc_lb_shape` | `ShapeRequest` | `ShapeResponse` | Produce the upstream-bound request. |
+| `shape` | `cc_lb_shape`<br>`cc_lb_transform_response`<br>`cc_lb_transform_sse_event` | `ShapeRequest`<br>`TransformResponseRequest`<br>`TransformSseEventRequest` | `ShapeResponse`<br>`TransformResponseResult`<br>`TransformSseEventResult` | Unified slot that produces the upstream-bound request and transforms downstream responses (both buffered and SSE). |
 | `observe` | `cc_lb_observe` | `ObserveEvent` | none | Receive lifecycle events for side effects. |
-| `transform_response` | `cc_lb_transform_response` | `TransformResponseRequest` | `TransformResponseResult` | Rewrite a buffered upstream response before delivery. |
-| `transform_sse_event` | `cc_lb_transform_sse_event` | `TransformSseEventRequest` | `TransformSseEventResult` | Rewrite each upstream SSE event before delivery. |
 
 Filter example:
 
@@ -184,26 +180,65 @@ pub fn filter(req: FilterRequest) -> FilterResponse {
 }
 ```
 
-Shape example:
+Shape example (Unified Slot):
+
+A plugin registered to the `shape` slot must implement all three wire hook functions: request shaping, buffered response transform, and SSE event transform. If your plugin only needs to shape requests or only needs to transform responses, you must explicitly implement no-op handlers for the other hooks.
+
+Here is an example of a complete shape plugin that shapes requests and provides explicit no-op handlers for response transformation:
 
 ```rust
-use cc_lb_plugin_wire::v1::{Header, ShapeRequest, ShapeResponse};
+use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
+use cc_lb_plugin_wire::v1::{
+    Header, ShapeRequest, ShapeResponse,
+    TransformResponseRequest, TransformResponseResult,
+    TransformSseEventRequest, TransformSseEventResult,
+};
 
-#[handler(
-    shape,
-    wire = 1,
-    description = "Builds the upstream Anthropic-compatible request.",
-    usage = "Attach to shape slots that require URL rewriting.",
+#[cc_lb_plugin(
+    name = "request-only-shaper",
+    version = "0.1.0",
+    description = "Shapes requests and passes responses through unchanged.",
+    usage = "Attach to shape slots.",
 )]
-pub fn shape(req: ShapeRequest) -> ShapeResponse {
-    ShapeResponse {
-        url: Box::from(format!("https://api.anthropic.com{}", req.path)),
-        method: req.method,
-        headers: Box::from([Header {
-            name: Box::from("content-type"),
-            value: Box::from(&b"application/json"[..]),
-        }]),
-        body: req.body,
+mod request_only_shaper {
+    use super::*;
+
+    #[handler(
+        shape,
+        wire = 1,
+        description = "Builds the upstream request.",
+        usage = "Attach to shape slots.",
+    )]
+    pub fn shape(req: ShapeRequest) -> ShapeResponse {
+        ShapeResponse {
+            url: Box::from(format!("https://api.anthropic.com{}", req.path)),
+            method: req.method,
+            headers: Box::from([Header {
+                name: Box::from("content-type"),
+                value: Box::from(&b"application/json"[..]),
+            }]),
+            body: req.body,
+        }
+    }
+
+    #[handler(
+        transform_response,
+        wire = 1,
+        description = "No-op buffered response transform.",
+        usage = "Required by the unified shape slot.",
+    )]
+    pub fn transform_response(_req: TransformResponseRequest) -> TransformResponseResult {
+        TransformResponseResult::Unchanged
+    }
+
+    #[handler(
+        transform_sse_event,
+        wire = 1,
+        description = "No-op SSE event transform.",
+        usage = "Required by the unified shape slot.",
+    )]
+    pub fn transform_sse_event(_req: TransformSseEventRequest) -> TransformSseEventResult {
+        TransformSseEventResult::Unchanged
     }
 }
 ```
@@ -249,7 +284,7 @@ Required per-hook fields:
 Upload rejection names relevant to plugin authors include:
 
 - `missing_part`: a required multipart field is absent.
-- `invalid_slot_kind`: `slot_kind` is not `filter`, `shape`, `observe`, `transform_response`, or `transform_sse_event`.
+- `invalid_slot_kind`: `slot_kind` is not `filter`, `shape`, or `observe`.
 - `invalid_wasm_magic`: uploaded bytes do not start with the wasm magic.
 - `invalid_wasm_length`: uploaded bytes are too short to be wasm.
 - `wasm_too_large`: the wasm exceeds the 32 MiB upload limit.

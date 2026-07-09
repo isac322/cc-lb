@@ -5,8 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalView, ResponseTransformCache,
-    RouterPipelineCache, SseEventTransformCache,
+    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
 };
 use cc_lb_engine::lifecycle::{PreviewRouteError, PreviewRouteInput};
 use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
@@ -182,8 +181,6 @@ fn principal_view_with_pipeline(filters: Vec<Arc<dyn FilterPlugin>>) -> Arc<Prin
             Some(pipeline),
             ObservabilityHooksCache::Inherit,
             DialectCache::Inherit,
-            ResponseTransformCache::None,
-            SseEventTransformCache::None,
         ),
     );
     Arc::new(PrincipalView::for_tests(
@@ -208,8 +205,6 @@ fn principal_view_with_broken_pipeline() -> Arc<PrincipalView> {
             Some(pipeline),
             ObservabilityHooksCache::Inherit,
             DialectCache::Inherit,
-            ResponseTransformCache::None,
-            SseEventTransformCache::None,
         ),
     );
     Arc::new(PrincipalView::for_tests(

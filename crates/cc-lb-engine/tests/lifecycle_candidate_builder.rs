@@ -6,8 +6,7 @@ use bytes::Bytes;
 use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
 use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalView, ResponseTransformCache,
-    RouterPipelineCache, SseEventTransformCache,
+    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
 };
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, Body, DispatchError, DynamicView, DynamicViewBuilder,
@@ -186,8 +185,6 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
             Some(pipeline),
             ObservabilityHooksCache::Inherit,
             DialectCache::Inherit,
-            ResponseTransformCache::None,
-            SseEventTransformCache::None,
         ),
     );
     let principal_view = Arc::new(PrincipalView::from_db(

@@ -7,7 +7,6 @@ use cc_lb_storage_api::{
     PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
     PluginRegistryStore, PluginSlot, StorageError, StorageResult, WasmBlob, WasmBlobRecord,
     WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
-    validate_sse_batching_knobs,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -298,12 +297,6 @@ impl PluginRegistryStore for PostgresStorage {
         &self,
         input: PluginChainEntryInput,
     ) -> StorageResult<PluginChainEntry> {
-        validate_sse_batching_knobs(
-            input.slot,
-            input.sse_per_event,
-            input.batched_events_per_flush,
-            input.batched_flush_ms,
-        )?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let sha: Vec<u8> =
             sqlx::query_scalar("SELECT sha256 FROM wasm_registry_v2 WHERE id = $1 FOR UPDATE")
@@ -436,12 +429,6 @@ impl PluginRegistryStore for PostgresStorage {
         if let Some(value) = update.batched_flush_ms {
             current.batched_flush_ms = value;
         }
-        validate_sse_batching_knobs(
-            current.slot,
-            current.sse_per_event,
-            current.batched_events_per_flush,
-            current.batched_flush_ms,
-        )?;
         let row = sqlx::query("UPDATE plugin_chains_v2 SET config=$3, sse_per_event=$4, batched_events_per_flush=$5, batched_flush_ms=$6, revision=revision+1 WHERE id=$1 AND revision=$2 RETURNING *")
             .bind(id).bind(u64_to_i64(expected_revision, "plugin_chain.revision")?).bind(current.config).bind(current.sse_per_event).bind(i32::try_from(current.batched_events_per_flush).map_err(|_| StorageError::Fatal { message: "batched_events_per_flush exceeds i32".to_owned() })?).bind(u64_to_i64(current.batched_flush_ms, "plugin_chain.batched_flush_ms")?)
             .fetch_one(&mut *tx).await.map_err(map_sqlx_error)?;
@@ -765,10 +752,7 @@ fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEn
 }
 
 fn is_singleton_slot(slot: PluginSlot) -> bool {
-    matches!(
-        slot,
-        PluginSlot::Shape | PluginSlot::TransformResponse | PluginSlot::TransformSseEvent
-    )
+    matches!(slot, PluginSlot::Shape)
 }
 
 fn chain_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PluginChainEntry> {

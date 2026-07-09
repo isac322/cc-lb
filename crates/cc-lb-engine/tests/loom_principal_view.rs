@@ -6,8 +6,7 @@ mod principal_view_swap {
 
     use arc_swap::ArcSwap;
     use cc_lb_engine::api_keys::principal_view::{
-        DialectCache, ObservabilityHooksCache, PrincipalView, ResponseTransformCache,
-        RouterPipelineCache, SseEventTransformCache,
+        DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
     };
     use cc_lb_plugin_api::{
         FilterError, FilterOutput, FilterPlugin, ObservabilityError, ObservabilityHook,
@@ -102,8 +101,6 @@ mod principal_view_swap {
                 })),
                 ObservabilityHooksCache::Explicit(vec![StdArc::new(StubHook::new(generation))]),
                 DialectCache::Inherit,
-                ResponseTransformCache::None,
-                SseEventTransformCache::None,
             ),
         );
 

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -56,7 +56,7 @@ struct UploadParts {
     slot_kind: Option<String>,
 }
 
-const SLOT_KIND_NAMES: &str = "filter|shape|observe|transform_response|transform_sse_event";
+const SLOT_KIND_NAMES: &str = "filter|shape|observe";
 
 pub fn router() -> Router<AdminState> {
     let limiter = UploadRateLimitState::default();
@@ -441,8 +441,6 @@ fn parse_slot_kind(value: &str) -> Result<(HookKind, PluginSlot), Response> {
         "filter" => Ok((HookKind::Filter, PluginSlot::Router)),
         "shape" => Ok((HookKind::Shape, PluginSlot::Shape)),
         "observe" => Ok((HookKind::Observe, PluginSlot::ObservabilityHook)),
-        "transform_response" => Ok((HookKind::TransformResponse, PluginSlot::TransformResponse)),
-        "transform_sse_event" => Ok((HookKind::TransformSseEvent, PluginSlot::TransformSseEvent)),
         other => Err(json_error(
             StatusCode::BAD_REQUEST,
             "invalid_slot_kind",
@@ -487,17 +485,21 @@ async fn inspect_with_wasmtime(
 }
 
 fn supported_slots_from_inspection(inspection: &ModuleInspection) -> Vec<PluginSlot> {
-    inspection
-        .hook_versions
-        .keys()
-        .map(|hook| match hook {
-            HookKind::Filter => PluginSlot::Router,
-            HookKind::Shape => PluginSlot::Shape,
-            HookKind::Observe => PluginSlot::ObservabilityHook,
-            HookKind::TransformResponse => PluginSlot::TransformResponse,
-            HookKind::TransformSseEvent => PluginSlot::TransformSseEvent,
-        })
-        .collect()
+    let mut slots = BTreeSet::new();
+    for hook in inspection.hook_versions.keys() {
+        match hook {
+            HookKind::Filter => {
+                slots.insert(PluginSlot::Router);
+            }
+            HookKind::Shape | HookKind::TransformResponse | HookKind::TransformSseEvent => {
+                slots.insert(PluginSlot::Shape);
+            }
+            HookKind::Observe => {
+                slots.insert(PluginSlot::ObservabilityHook);
+            }
+        }
+    }
+    slots.into_iter().collect()
 }
 
 async fn materialize_cache(state: &AdminState, sha256_hex: &str, bytes: &[u8]) -> io::Result<()> {
@@ -660,14 +662,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_slot_kind_accepts_response_transform_hooks() {
-        assert_eq!(
-            parse_slot_kind("transform_response").expect("valid transform response slot"),
-            (HookKind::TransformResponse, PluginSlot::TransformResponse)
-        );
-        assert_eq!(
-            parse_slot_kind("transform_sse_event").expect("valid transform sse slot"),
-            (HookKind::TransformSseEvent, PluginSlot::TransformSseEvent)
-        );
+    fn parse_slot_kind_rejects_response_transform_hooks() {
+        assert!(parse_slot_kind("transform_response").is_err());
+        assert!(parse_slot_kind("transform_sse_event").is_err());
     }
 }
