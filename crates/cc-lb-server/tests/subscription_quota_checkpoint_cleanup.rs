@@ -1,6 +1,6 @@
 mod subscription_quota_checkpoint_cleanup_support;
 
-use cc_lb_storage_api::MetaStore;
+use cc_lb_storage_api::{MetaStore, UpstreamSubscriptionQuotaStore};
 use serde_json::json;
 
 use subscription_quota_checkpoint_cleanup_support::*;
@@ -42,6 +42,36 @@ async fn compact_subscription_quota_history_drops_raw_table_after_validated_back
     assert_eq!(integrity_check(&storage).await?, "ok");
     assert!(storage.get_meta_value(BACKFILL_MARKER_KEY).await?.is_some());
     assert!(storage.get_meta_value(CLEANUP_MARKER_KEY).await?.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn subscription_quota_writes_continue_after_cleanup_drops_raw_table() -> anyhow::Result<()> {
+    let (dir, storage) = open_storage().await?;
+    let path = storage_path(dir.path());
+    insert_raw_observations(&storage, &[observation(10_000, 1)]).await?;
+    drop(storage);
+    assert_success(&run_compact_cleanup(&path)?);
+
+    let storage = open_sqlite_storage(&path).await?;
+    let mut next = observation(20_000, 2);
+    next.utilization = Some(0.50);
+    storage.put_subscription_quota(&next).await?;
+
+    assert_eq!(
+        table_exists(&storage, "upstream_subscription_quota_observations_v1").await?,
+        0
+    );
+    assert_eq!(
+        table_count(&storage, "upstream_subscription_quota_checkpoints_v1").await?,
+        2
+    );
+    assert_eq!(
+        storage
+            .list_latest_subscription_quota_for_upstreams(&[next.upstream_id])
+            .await?,
+        [next]
+    );
     Ok(())
 }
 

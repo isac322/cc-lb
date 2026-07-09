@@ -20,9 +20,12 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
         &self,
         records: &[SubscriptionQuotaObservationRecord],
     ) -> StorageResult<()> {
+        let raw_observations_present = self.raw_subscription_quota_observations_present().await?;
         let mut tx = self.begin_immediate().await?;
         for record in records {
-            insert_observation(&mut tx, record).await?;
+            if raw_observations_present {
+                insert_observation(&mut tx, record).await?;
+            }
             upsert_latest(&mut tx, record).await?;
             insert_checkpoint_if_changed(&mut tx, &SubscriptionQuotaCheckpointRecord::from(record))
                 .await?;
