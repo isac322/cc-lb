@@ -107,6 +107,40 @@ async fn cache_keepalive_survives_create_get_and_put_clear() {
 }
 
 #[tokio::test]
+async fn cache_keepalive_omitted_on_update_remains_unchanged() {
+    let (_dir, storage) = temp_storage().await;
+    let state = test_state(Config::default(), Some(storage));
+    let (created, etag) = create_principal(
+        state.clone(),
+        json!({
+            "name": "kp-preserve",
+            "kind": "machine",
+            "cache_keepalive": {
+                "enabled": true,
+                "refresh_lead_time_5m_secs": 42,
+                "max_refreshes_per_session": 5
+            }
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().expect("principal id").to_owned();
+
+    let (put_status, put_body) = authed_put_json(
+        app(state.clone()),
+        &format!("/admin/v1/principals/{id}"),
+        &etag,
+        json!({ "name": "kp-preserve-renamed" }),
+    )
+    .await;
+
+    assert_eq!(put_status, StatusCode::OK, "put failed: {put_body:?}");
+    assert_eq!(put_body["name"], "kp-preserve-renamed");
+    assert_eq!(put_body["cache_keepalive"]["enabled"], Value::Bool(true));
+    assert_eq!(put_body["cache_keepalive"]["refresh_lead_time_5m_secs"], 42);
+    assert_eq!(put_body["cache_keepalive"]["max_refreshes_per_session"], 5);
+}
+
+#[tokio::test]
 async fn cache_keepalive_rejects_unimplemented_llm_judge_on_create() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));

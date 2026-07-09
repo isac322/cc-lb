@@ -50,6 +50,10 @@ pub(super) struct Fixture {
 
 impl Fixture {
     pub(super) async fn new() -> Self {
+        Self::new_with_upstream_kind(UpstreamKind::AnthropicOauth).await
+    }
+
+    pub(super) async fn new_with_upstream_kind(upstream_kind: UpstreamKind) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let sqlite_path = dir.path().join("cc-lb.sqlite");
         let database_url = format!("sqlite://{}", sqlite_path.display());
@@ -66,7 +70,7 @@ impl Fixture {
             storage.as_ref(),
             UpstreamCreate {
                 name: "fake-upstream".to_owned(),
-                kind: UpstreamKind::AnthropicOauth,
+                kind: upstream_kind,
                 base_url: Some(Url::parse("http://fake-upstream.local/").expect("base URL parses")),
                 api_key_ciphertext: None,
                 oauth_token_generation: None,
@@ -116,6 +120,31 @@ impl Fixture {
             signer_calls,
             upstream_id: upstream.id,
         }
+    }
+
+    pub(super) async fn replace_encrypted_payload(&self, payload: Vec<u8>) {
+        sqlx::query(
+            "UPDATE cache_keepalive_sessions SET encrypted_payload = ? WHERE session_key_hash = ?",
+        )
+        .bind(payload)
+        .bind("session-hash")
+        .execute(self.storage.pool())
+        .await
+        .expect("replace encrypted payload");
+    }
+
+    pub(super) fn encrypt_generation_payload(&self, generation: u64, plaintext: &[u8]) -> Vec<u8> {
+        self.aead
+            .encrypt(
+                plaintext,
+                &crate::scheduler_dispatch::cache_keepalive_payload_aad(
+                    "principal",
+                    "session-hash",
+                    self.upstream_id,
+                    generation,
+                ),
+            )
+            .expect("encrypt test payload")
     }
 
     pub(super) fn enqueuer(

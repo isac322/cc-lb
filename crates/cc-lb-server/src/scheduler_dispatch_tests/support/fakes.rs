@@ -19,6 +19,40 @@ use crate::cache_keepalive_enqueuer::CacheKeepaliveTaskPusher;
 #[derive(Default)]
 pub(in crate::scheduler_dispatch::tests) struct RecordingHttp {
     pub(in crate::scheduler_dispatch::tests) requests: Mutex<Vec<CapturedRequest>>,
+    response: Mutex<RecordingHttpResponse>,
+}
+
+enum RecordingHttpResponse {
+    Json(Value),
+    Status(StatusCode, Value),
+}
+
+impl Default for RecordingHttpResponse {
+    fn default() -> Self {
+        Self::Json(json!({
+            "content": [],
+            "stop_reason": "max_tokens",
+            "usage": {"cache_read_input_tokens": 10, "input_tokens": 0, "output_tokens": 0}
+        }))
+    }
+}
+
+impl RecordingHttp {
+    pub(in crate::scheduler_dispatch::tests) fn return_cache_miss(&self) {
+        *self.response.lock().expect("response lock") = RecordingHttpResponse::Json(json!({
+            "content": [],
+            "stop_reason": "max_tokens",
+            "usage": {"cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
+        }));
+    }
+
+    pub(in crate::scheduler_dispatch::tests) fn return_status(
+        &self,
+        status: StatusCode,
+        body: Value,
+    ) {
+        *self.response.lock().expect("response lock") = RecordingHttpResponse::Status(status, body);
+    }
 }
 
 #[derive(Clone)]
@@ -42,11 +76,10 @@ impl UpstreamDispatch for RecordingHttp {
                 headers: request.headers().clone(),
                 body: request.body().clone(),
             });
-        Ok(json_response(json!({
-            "content": [],
-            "stop_reason": "max_tokens",
-            "usage": {"cache_read_input_tokens": 10, "input_tokens": 0, "output_tokens": 0}
-        })))
+        match &*self.response.lock().expect("response lock") {
+            RecordingHttpResponse::Json(body) => Ok(json_response(StatusCode::OK, body.clone())),
+            RecordingHttpResponse::Status(status, body) => Ok(json_response(*status, body.clone())),
+        }
     }
 }
 
@@ -124,9 +157,9 @@ impl CacheKeepaliveTaskPusher for FailingPusher {
     }
 }
 
-fn json_response(body: Value) -> Response<Body> {
+fn json_response(status: StatusCode, body: Value) -> Response<Body> {
     let mut response = Response::new(Body::from(Bytes::from(body.to_string())));
-    *response.status_mut() = StatusCode::OK;
+    *response.status_mut() = status;
     response.headers_mut().insert(
         ::http::header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),

@@ -208,3 +208,94 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn mark_latest_terminal_only_mutates_active_latest_session() {
+    let (_dir, storage) = storage().await;
+    let first = storage
+        .replace_from_real_request(&replace_request(b"ciphertext-one", 100))
+        .await
+        .expect("insert first session");
+    let second = storage
+        .replace_from_real_request(&replace_request(b"ciphertext-two", 110))
+        .await
+        .expect("replace session");
+
+    assert_eq!(first.generation, 1);
+    assert_eq!(second.generation, 2);
+    assert!(
+        storage
+            .mark_latest_cache_keepalive_terminal(
+                "session-hash",
+                CacheKeepaliveTerminalReason::Cancelled,
+                120,
+            )
+            .await
+            .expect("mark latest terminal")
+    );
+    assert!(
+        !storage
+            .mark_latest_cache_keepalive_terminal(
+                "session-hash",
+                CacheKeepaliveTerminalReason::CacheMiss,
+                121,
+            )
+            .await
+            .expect("terminal row no-op")
+    );
+
+    let record = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("row exists");
+    assert_eq!(record.generation, 2);
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        record.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::Cancelled)
+    );
+}
+
+#[tokio::test]
+async fn purge_stale_pending_keeps_enqueued_work() {
+    let (_dir, storage) = storage().await;
+    let pending = storage
+        .replace_from_real_request(&replace_request(b"pending", 100))
+        .await
+        .expect("insert pending session");
+    let mut enqueued_request = replace_request(b"enqueued", 110);
+    enqueued_request.session_key_hash = "old-enqueued".to_owned();
+    let enqueued = storage
+        .replace_from_real_request(&enqueued_request)
+        .await
+        .expect("insert enqueued session");
+    assert!(
+        storage
+            .mark_cache_keepalive_enqueued("old-enqueued", enqueued.generation, 111)
+            .await
+            .expect("mark enqueued")
+    );
+
+    let removed = storage
+        .purge_cache_keepalive_stale_pending(112)
+        .await
+        .expect("purge stale pending");
+
+    assert_eq!(pending.enqueue_state, CacheKeepaliveEnqueueState::Pending);
+    assert_eq!(removed, 1);
+    assert!(
+        storage
+            .get_cache_keepalive_session("session-hash")
+            .await
+            .expect("load pending after purge")
+            .is_none()
+    );
+    assert!(
+        storage
+            .get_cache_keepalive_session("old-enqueued")
+            .await
+            .expect("load enqueued after purge")
+            .is_some()
+    );
+}

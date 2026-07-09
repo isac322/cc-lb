@@ -11,12 +11,15 @@ use cc_lb_storage_api::principal::{Limit, LimitKind};
 use cc_lb_storage_api::types::UpstreamKind;
 use cc_lb_storage_api::types::{Limit as TypesLimit, LimitKind as TypesLimitKind};
 use cc_lb_storage_api::{
-    AnthropicApiKeyCredential, ApiKeyRecord, AuditEntry, BackendKind, BucketKind, ConfigDraftState,
-    HistoryEntry, HistorySummary, IssuedKey, KeyStatus, OAuthCredentials, PrincipalCreate,
-    PrincipalKind, PrincipalKindLite, PrincipalLimitIdentityKind, PrincipalLimitKind,
-    PrincipalLimitState, RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState,
-    RequestEvent, RequestEventUpstream, StorageError, StoredApiKeyRecord, StoredHistoryEntry,
-    UsageRollup, UsageRollupKey, UsageRollupResolution, UsageRollupRun,
+    AnthropicApiKeyCredential, ApiKeyRecord, AuditEntry, BackendKind, BucketKind,
+    CacheKeepaliveConfig, CacheKeepaliveEnqueueState, CacheKeepaliveSessionRecord,
+    CacheKeepaliveSessionStatus, CacheKeepaliveTerminalReason, CacheTtl, ClassifierConfig,
+    ConfigDraftState, HistoryEntry, HistorySummary, IssuedKey, JudgeResponseFormat, KeyStatus,
+    LlmJudgeConfig, OAuthCredentials, PrincipalCreate, PrincipalKind, PrincipalKindLite,
+    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, RequestCacheBreakpoint,
+    RequestCacheBreakpointSource, RequestCacheState, RequestEvent, RequestEventUpstream,
+    StorageError, StoredApiKeyRecord, StoredHistoryEntry, UsageRollup, UsageRollupKey,
+    UsageRollupResolution, UsageRollupRun,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -313,6 +316,51 @@ backend = 'sqlite'"
         }],
         cache_keepalive: None,
     });
+
+    assert_json_roundtrip(CacheKeepaliveConfig {
+        enabled: true,
+        refresh_lead_time_5m_secs: 45,
+        refresh_lead_time_1h_secs: 600,
+        max_refreshes_per_session: 8,
+        max_total_duration_secs: 7_200,
+        snapshot_max_bytes: 262_144,
+        classifier: ClassifierConfig {
+            extra_wait_for_user_tools: vec!["ask_human".to_owned()],
+            treat_end_turn_as_ambiguous: true,
+            llm_judge: Some(LlmJudgeConfig {
+                provider: "anthropic".to_owned(),
+                model: "claude-haiku-4-5".to_owned(),
+                api_key_secret_ref: "secret://judge".to_owned(),
+                base_url: Some("https://judge.local".to_owned()),
+                response_format: JudgeResponseFormat::JsonObject,
+                last_n_messages: 3,
+                max_tokens: 64,
+                temperature: 0.0,
+                timeout_secs: 4,
+            }),
+        },
+    });
+    assert_json_roundtrip(CacheKeepaliveSessionRecord {
+        session_key_hash: "session-hash".to_owned(),
+        principal_id: "principal_a".to_owned(),
+        upstream_id: Uuid::from_u128(0x77777777777777777777777777777777),
+        generation: 4,
+        refresh_count: 2,
+        first_scheduled_at_unix_secs: 1_716_000_100,
+        cache_anchor_at_unix_secs: 1_716_000_200,
+        run_at_unix_secs: 1_716_000_470,
+        ttl: CacheTtl::Ttl5m,
+        status: CacheKeepaliveSessionStatus::Terminal,
+        enqueue_state: CacheKeepaliveEnqueueState::Enqueued,
+        current_job_key: "cache_keepalive:session-hash:4".to_owned(),
+        encrypted_payload: vec![1, 2, 3, 4],
+        terminal_reason: Some(CacheKeepaliveTerminalReason::CacheMiss),
+        expires_at_unix_secs: 1_716_000_500,
+        created_at_unix_secs: 1_716_000_100,
+        updated_at_unix_secs: 1_716_000_300,
+    });
+    assert_json_roundtrip(CacheKeepaliveTerminalReason::UnsupportedProvider);
+    assert_json_roundtrip(CacheTtl::Ttl1h);
 }
 
 #[test]

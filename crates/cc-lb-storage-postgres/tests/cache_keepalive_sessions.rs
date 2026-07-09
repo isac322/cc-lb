@@ -38,6 +38,7 @@ async fn run_conformance(url: &str) -> Result<()> {
     update_payload_only_mutates_matching_pending_generation(&storage).await?;
     cache_hit_reschedule_preserves_duration_anchor_and_rejects_stale_generation(&storage).await?;
     conditional_enqueue_terminal_and_purge_are_generation_safe(&storage).await?;
+    mark_latest_terminal_only_mutates_active_latest_session(&storage).await?;
     purge_stale_pending_keeps_enqueued_work(&storage).await?;
     concurrent_replace_from_real_request_bumps_each_generation(&storage).await?;
     concurrent_hit_reschedule_allows_only_one_generation_cas(&storage).await?;
@@ -204,6 +205,51 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe(
             .get_cache_keepalive_session("terminal-session")
             .await?
             .is_none()
+    );
+    Ok(())
+}
+
+async fn mark_latest_terminal_only_mutates_active_latest_session(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let session_key_hash = "latest-terminal";
+    let first = storage
+        .replace_from_real_request(&replace_request(session_key_hash, b"ciphertext-one", 100))
+        .await?;
+    let second = storage
+        .replace_from_real_request(&replace_request(session_key_hash, b"ciphertext-two", 110))
+        .await?;
+
+    assert_eq!(first.generation, 1);
+    assert_eq!(second.generation, 2);
+    assert!(
+        storage
+            .mark_latest_cache_keepalive_terminal(
+                session_key_hash,
+                CacheKeepaliveTerminalReason::Cancelled,
+                120,
+            )
+            .await?
+    );
+    assert!(
+        !storage
+            .mark_latest_cache_keepalive_terminal(
+                session_key_hash,
+                CacheKeepaliveTerminalReason::CacheMiss,
+                121,
+            )
+            .await?
+    );
+
+    let record = storage
+        .get_cache_keepalive_session(session_key_hash)
+        .await?
+        .expect("row exists");
+    assert_eq!(record.generation, 2);
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        record.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::Cancelled)
     );
     Ok(())
 }

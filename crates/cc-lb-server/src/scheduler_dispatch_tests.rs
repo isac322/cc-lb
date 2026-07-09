@@ -3,8 +3,10 @@ use super::*;
 #[path = "scheduler_dispatch_tests/support.rs"]
 mod support;
 
+use ::http::StatusCode;
 use cc_lb_engine::cache_keepalive::CacheKeepaliveEnqueuer;
 use cc_lb_scheduler::retry::JobOutcome;
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
 };
@@ -74,6 +76,175 @@ async fn hit_reschedule_enqueue_failure_terminalizes_new_generation() {
         .expect("load session")
         .expect("session exists");
     assert_eq!(record.generation, 2);
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        record.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::DispatchError)
+    );
+}
+
+#[tokio::test]
+async fn cache_keepalive_job_terminalizes_on_decrypt_failure() {
+    let fixture = Fixture::new().await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    fixture.replace_encrypted_payload(vec![0; 32]).await;
+    let dispatch = fixture.dispatch(pusher);
+
+    let outcome = dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("dispatch cache keepalive job");
+
+    assert!(matches!(outcome, JobOutcome::Done));
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        record.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::DecryptFailed)
+    );
+    let requests = fixture.http.requests.lock().expect("requests lock").clone();
+    assert!(requests.is_empty());
+}
+
+#[tokio::test]
+async fn cache_keepalive_job_terminalizes_on_deserialization_failure() {
+    let fixture = Fixture::new().await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    let encrypted = fixture.encrypt_generation_payload(1, br#"{}"#);
+    fixture.replace_encrypted_payload(encrypted).await;
+    let dispatch = fixture.dispatch(pusher);
+
+    let outcome = dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("dispatch cache keepalive job");
+
+    assert!(matches!(outcome, JobOutcome::Done));
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        record.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::DecryptFailed)
+    );
+    let requests = fixture.http.requests.lock().expect("requests lock").clone();
+    assert!(requests.is_empty());
+}
+
+#[tokio::test]
+async fn cache_keepalive_miss_terminalizes_session() {
+    let fixture = Fixture::new().await;
+    fixture.http.return_cache_miss();
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    let dispatch = fixture.dispatch(pusher);
+
+    let outcome = dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("dispatch cache keepalive job");
+
+    assert!(matches!(outcome, JobOutcome::Done));
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        record.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::CacheMiss)
+    );
+}
+
+#[tokio::test]
+async fn cache_keepalive_unsupported_provider_terminalizes_session() {
+    let fixture = Fixture::new_with_upstream_kind(UpstreamKind::AnthropicApiKey).await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    let dispatch = fixture.dispatch(pusher);
+
+    let outcome = dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("dispatch cache keepalive job");
+
+    assert!(matches!(outcome, JobOutcome::Done));
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        record.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::UnsupportedProvider)
+    );
+    let requests = fixture.http.requests.lock().expect("requests lock").clone();
+    assert!(requests.is_empty());
+}
+
+#[tokio::test]
+async fn cache_keepalive_dispatch_error_terminalizes_session() {
+    let fixture = Fixture::new().await;
+    fixture.http.return_status(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        serde_json::json!({"error":"boom"}),
+    );
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    let dispatch = fixture.dispatch(pusher);
+
+    let outcome = dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("dispatch cache keepalive job");
+
+    assert!(matches!(outcome, JobOutcome::Done));
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
     assert_eq!(
         record.terminal_reason,

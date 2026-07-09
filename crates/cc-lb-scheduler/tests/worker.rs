@@ -7,6 +7,7 @@ use std::time::Duration;
 use apalis::prelude::{IntervalStrategy, Status, StrategyBuilder, TaskSink};
 use cc_lb_clock::SystemClock;
 use cc_lb_config::SchedulerConfig;
+use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
@@ -16,6 +17,7 @@ use cc_lb_scheduler::worker::{
     AdaptiveJob, CronJob, SchedulerBackend, SchedulerCtx, SqliteSchedulerStorage,
     build_adaptive_worker,
 };
+use cc_lb_storage_api::CacheTtl;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -58,7 +60,7 @@ async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
     .bind(queue)
     .fetch_all(&pool)
     .await?;
-    assert_eq!(done_count, 3, "statuses: {statuses:?}");
+    assert_eq!(done_count, 4, "statuses: {statuses:?}");
     Ok(())
 }
 
@@ -188,11 +190,24 @@ async fn sqlite_test_db() -> Result<SqliteTestDb, Box<dyn std::error::Error>> {
     Ok(SqliteTestDb { pool, _dir: dir })
 }
 
-fn entity_jobs(upstream_id: Uuid) -> [AdaptiveJob; 3] {
+fn entity_jobs(upstream_id: Uuid) -> [AdaptiveJob; 4] {
     [
         AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1)),
         AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
         AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(upstream_id, 1)),
+        AdaptiveJob::CacheKeepalive(CacheKeepaliveJob {
+            session_key_hash: "worker-session".to_owned(),
+            generation: 1,
+            principal_id: "principal".to_owned(),
+            upstream_id,
+            ttl: CacheTtl::Ttl5m,
+            cache_anchor_at_unix_secs: 100,
+            expires_at_unix_secs: 400,
+            refresh_delay_secs: 270,
+            max_refreshes: 3,
+            max_total_duration_secs: 600,
+            traceparent: None,
+        }),
     ]
 }
 
