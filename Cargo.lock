@@ -1283,6 +1283,7 @@ name = "cc-lb-storage-api"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "bytes",
  "cc-lb-aead",
  "cc-lb-contract",

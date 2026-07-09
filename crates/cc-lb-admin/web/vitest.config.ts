@@ -9,7 +9,7 @@ export default defineConfig({
         test: {
           name: 'lib',
           environment: 'node',
-          include: ['src/lib/**/*.test.ts', 'src/components/ui/latency/**/*.test.ts', 'src/routes/**/*.test.ts'],
+          include: ['src/lib/**/*.test.ts', 'src/components/ui/latency/**/*.test.ts', 'src/routes/**/*.test.ts', 'src/components/upstreams/**/*.test.ts'],
           exclude: ['src/lib/hooks/__tests__/**'],
         },
       },

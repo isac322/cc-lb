@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
+    SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
     SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSeriesQuery,
     SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
     SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
@@ -25,7 +26,11 @@ where
     series_max_points_per_series_downsamples(Arc::clone(&backend)).await?;
     process_start_marker_persists_with_sample_kind(Arc::clone(&backend)).await?;
     empty_upstream_ids_returns_empty(Arc::clone(&backend)).await?;
-    series_filters_observed_at_window(backend).await?;
+    series_filters_observed_at_window(Arc::clone(&backend)).await?;
+    checkpoint_writer_latest_freshness(Arc::clone(&backend)).await?;
+    checkpoint_writer_decrease(Arc::clone(&backend)).await?;
+    checkpoint_series_anchor_merge(Arc::clone(&backend)).await?;
+    checkpoint_history(backend).await?;
     Ok(())
 }
 
@@ -355,11 +360,475 @@ scenario!(series_filters_observed_at_window, |storage| async move {
         .map(|bucket| bucket.sample_count)
         .sum::<u32>();
     ensure!(
-        count == 2,
-        "only observations within inclusive bounds should remain"
+        count == 3,
+        "series should include the left-anchor checkpoint plus inclusive in-range checkpoints"
     );
     Ok(())
 });
+
+scenario!(checkpoint_writer_latest_freshness, |storage| async move {
+    let upstream = upstream_id(24);
+    let first = observation(upstream, 0, 1, SubscriptionQuotaSource::Header, 0.31);
+    let mut after_heartbeat =
+        observation(upstream, 31_000, 2, SubscriptionQuotaSource::Header, 0.31);
+    after_heartbeat.resets_at_unix_secs = first.resets_at_unix_secs;
+    let mut freshest = observation(upstream, 35_000, 3, SubscriptionQuotaSource::Header, 0.31);
+    freshest.resets_at_unix_secs = first.resets_at_unix_secs;
+    storage
+        .put_subscription_quota_batch(&[first.clone(), after_heartbeat, freshest.clone()])
+        .await?;
+
+    let latest = storage
+        .list_latest_subscription_quota_for_upstreams(&[upstream])
+        .await?;
+    ensure!(
+        latest == [freshest],
+        "latest sidecar should advance on unchanged observations"
+    );
+
+    let checkpoints = storage
+        .list_latest_subscription_quota_checkpoints_for_upstreams(&[upstream])
+        .await?;
+    ensure!(
+        checkpoints.len() == 1,
+        "unchanged quota state should create one checkpoint"
+    );
+    ensure!(
+        checkpoints[0].changed_at_unix_millis == first.observed_at_unix_millis,
+        "duplicate semantic checkpoint should leave first checkpoint latest"
+    );
+    Ok(())
+});
+
+scenario!(checkpoint_writer_decrease, |storage| async move {
+    let upstream = upstream_id(25);
+    let first = observation(upstream, 0, 1, SubscriptionQuotaSource::Header, 0.31);
+    let decreased = observation(upstream, 1_000, 2, SubscriptionQuotaSource::Header, 0.30);
+    storage
+        .put_subscription_quota_batch(&[first, decreased.clone()])
+        .await?;
+
+    let checkpoints = storage
+        .list_latest_subscription_quota_checkpoints_for_upstreams(&[upstream])
+        .await?;
+    ensure!(
+        checkpoints.len() == 1,
+        "utilization decrease should insert a checkpoint"
+    );
+    ensure!(
+        checkpoints[0].changed_at_unix_millis == decreased.observed_at_unix_millis,
+        "latest checkpoint should be the decrease"
+    );
+    ensure!(
+        checkpoints[0].utilization == decreased.utilization,
+        "decrease payload should be persisted exactly"
+    );
+    Ok(())
+});
+
+scenario!(checkpoint_series_anchor_merge, |storage| async move {
+    let upstream = upstream_id(26);
+    let header_anchor = checkpoint(&observation(
+        upstream,
+        30_000,
+        1,
+        SubscriptionQuotaSource::Header,
+        0.10,
+    ));
+    let header_first_change = checkpoint(&observation(
+        upstream,
+        75_000,
+        2,
+        SubscriptionQuotaSource::Header,
+        0.20,
+    ));
+    let header_second_change = checkpoint(&observation(
+        upstream,
+        90_000,
+        3,
+        SubscriptionQuotaSource::Header,
+        0.40,
+    ));
+    let header_late_change = checkpoint(&observation(
+        upstream,
+        180_000,
+        4,
+        SubscriptionQuotaSource::Header,
+        0.60,
+    ));
+    let api_anchor = checkpoint(&observation(
+        upstream,
+        45_000,
+        5,
+        SubscriptionQuotaSource::Api,
+        0.80,
+    ));
+    let api_change = checkpoint(&observation(
+        upstream,
+        120_000,
+        6,
+        SubscriptionQuotaSource::Api,
+        0.70,
+    ));
+    storage
+        .put_subscription_quota_checkpoints(&[
+            header_anchor,
+            header_first_change,
+            header_second_change,
+            header_late_change,
+            api_anchor,
+            api_change,
+        ])
+        .await?;
+
+    let header_series = storage
+        .list_subscription_quota_series(series_query(
+            upstream,
+            60_000,
+            240_000,
+            60,
+            10,
+            SubscriptionQuotaSourceMerge::Header,
+        ))
+        .await?;
+    ensure!(header_series.len() == 1, "expected one header series");
+    let header_buckets = &header_series[0].buckets;
+    assert_bucket_starts(header_buckets, &[0, 60, 120, 180, 240])?;
+    ensure!(
+        header_buckets[0].utilization_last == Some(0.10),
+        "left-anchor bucket should carry the pre-since header checkpoint"
+    );
+    ensure!(
+        header_buckets[1].sample_count == 2,
+        "same-minute header changes should remain distinct inside the bucket"
+    );
+    ensure!(
+        header_buckets[1].observed_at_unix_millis_last == Some(90_000),
+        "same-minute bucket should preserve the exact timestamp of the last checkpoint"
+    );
+    ensure!(
+        header_buckets[2].sample_count == 0 && header_buckets[2].utilization_last == Some(0.40),
+        "gap bucket should carry forward the latest header checkpoint without adding a change count"
+    );
+    ensure!(
+        header_buckets[2].observed_at_unix_millis_last == Some(90_000),
+        "carry-forward bucket should keep the exact source checkpoint timestamp"
+    );
+    ensure!(
+        header_buckets
+            .iter()
+            .all(|bucket| bucket.sources_seen == [SubscriptionQuotaSource::Header]),
+        "header series should not contain api provenance"
+    );
+
+    let api_series = storage
+        .list_subscription_quota_series(series_query(
+            upstream,
+            60_000,
+            180_000,
+            60,
+            10,
+            SubscriptionQuotaSourceMerge::Api,
+        ))
+        .await?;
+    ensure!(api_series.len() == 1, "expected one api series");
+    let api_buckets = &api_series[0].buckets;
+    assert_bucket_starts(api_buckets, &[0, 60, 120, 180])?;
+    ensure!(
+        api_buckets[0].utilization_last == Some(0.80)
+            && api_buckets[1].utilization_last == Some(0.80)
+            && api_buckets[2].utilization_last == Some(0.70),
+        "api stream should carry forward independently of header checkpoints"
+    );
+    ensure!(
+        api_buckets
+            .iter()
+            .all(|bucket| bucket.sources_seen == [SubscriptionQuotaSource::Api]),
+        "api series should not contain header provenance"
+    );
+
+    let merged_upstream = upstream_id(27);
+    storage
+        .put_subscription_quota_checkpoints(&[
+            checkpoint(&observation(
+                merged_upstream,
+                60_000,
+                7,
+                SubscriptionQuotaSource::Header,
+                0.30,
+            )),
+            checkpoint(&observation(
+                merged_upstream,
+                90_000,
+                8,
+                SubscriptionQuotaSource::Api,
+                0.90,
+            )),
+        ])
+        .await?;
+    let merged_series = storage
+        .list_subscription_quota_series(series_query(
+            merged_upstream,
+            60_000,
+            119_999,
+            60,
+            10,
+            SubscriptionQuotaSourceMerge::Merged,
+        ))
+        .await?;
+    ensure!(merged_series.len() == 1, "expected one merged series");
+    let merged_bucket = &merged_series[0].buckets[0];
+    ensure!(
+        merged_bucket.sample_count == 2
+            && merged_bucket.utilization_min == Some(0.30)
+            && merged_bucket.utilization_avg == Some(0.60)
+            && merged_bucket.utilization_max == Some(0.90)
+            && merged_bucket.utilization_last == Some(0.90)
+            && merged_bucket.observed_at_unix_millis_last == Some(90_000)
+            && merged_bucket.sources_seen
+                == [
+                    SubscriptionQuotaSource::Header,
+                    SubscriptionQuotaSource::Api
+                ],
+        "merged checkpoint bucket should match the existing read-time merge policy on equivalent data"
+    );
+
+    let no_anchor_upstream = upstream_id(28);
+    storage
+        .put_subscription_quota_checkpoint(&checkpoint(&observation(
+            no_anchor_upstream,
+            180_000,
+            9,
+            SubscriptionQuotaSource::Header,
+            0.50,
+        )))
+        .await?;
+    let no_anchor_series = storage
+        .list_subscription_quota_series(series_query(
+            no_anchor_upstream,
+            60_000,
+            240_000,
+            60,
+            10,
+            SubscriptionQuotaSourceMerge::Header,
+        ))
+        .await?;
+    ensure!(no_anchor_series.len() == 1, "expected one no-anchor series");
+    let no_anchor_buckets = &no_anchor_series[0].buckets;
+    assert_bucket_starts(no_anchor_buckets, &[180, 240])?;
+    ensure!(
+        no_anchor_buckets[0].utilization_last == Some(0.50),
+        "series without a left anchor should start at the first real checkpoint"
+    );
+    Ok(())
+});
+
+pub async fn checkpoint_history<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: UpstreamSubscriptionQuotaStore,
+{
+    checkpoint_history_suppresses_duplicate_semantic_state(Arc::clone(&backend)).await?;
+    checkpoint_history_returns_left_anchor_and_in_range_rows(Arc::clone(&backend)).await?;
+    checkpoint_history_keeps_sources_separate(Arc::clone(&backend)).await?;
+    checkpoint_history_orders_same_millis_ties_deterministically(backend).await?;
+    Ok(())
+}
+
+scenario!(
+    checkpoint_history_suppresses_duplicate_semantic_state,
+    |storage| async move {
+        let upstream = upstream_id(20);
+        let first = checkpoint(&observation(
+            upstream,
+            100,
+            1,
+            SubscriptionQuotaSource::Header,
+            0.4,
+        ));
+        let mut duplicate = first.clone();
+        duplicate.changed_at_unix_millis = 200;
+        duplicate.sample_id = Uuid::from_u128(2);
+        duplicate.representative_claim = Some("changed-evidence".to_owned());
+        duplicate.ingested_at_unix_millis = 201;
+
+        let first_inserted = storage
+            .put_subscription_quota_checkpoint(&first.clone())
+            .await?;
+        ensure!(first_inserted == 1, "first semantic state should insert");
+
+        let duplicate_inserted = storage
+            .put_subscription_quota_checkpoint(&duplicate)
+            .await?;
+        ensure!(
+            duplicate_inserted == 0,
+            "persisted duplicate semantic state should be skipped on a later call"
+        );
+
+        let latest = storage
+            .list_latest_subscription_quota_checkpoints_for_upstreams(&[upstream])
+            .await?;
+        ensure!(
+            latest == [first],
+            "latest checkpoint should remain first row"
+        );
+        Ok(())
+    }
+);
+
+scenario!(
+    checkpoint_history_returns_left_anchor_and_in_range_rows,
+    |storage| async move {
+        let upstream = upstream_id(21);
+        let checkpoints = [
+            checkpoint(&observation(
+                upstream,
+                100,
+                1,
+                SubscriptionQuotaSource::Header,
+                0.1,
+            )),
+            checkpoint(&observation(
+                upstream,
+                200,
+                2,
+                SubscriptionQuotaSource::Header,
+                0.2,
+            )),
+            checkpoint(&observation(
+                upstream,
+                300,
+                3,
+                SubscriptionQuotaSource::Header,
+                0.3,
+            )),
+        ];
+        storage
+            .put_subscription_quota_checkpoints(&checkpoints)
+            .await?;
+
+        let ranges = storage
+            .list_subscription_quota_checkpoint_ranges(checkpoint_query(upstream, 150, 250))
+            .await?;
+        ensure!(ranges.len() == 1, "expected one checkpoint range");
+        ensure!(
+            ranges[0].left_anchor.as_ref() == Some(&checkpoints[0]),
+            "last checkpoint before since should be returned as anchor"
+        );
+        ensure!(
+            ranges[0].checkpoints == [checkpoints[1].clone()],
+            "range should include only checkpoints inside inclusive bounds"
+        );
+
+        let no_anchor = storage
+            .list_subscription_quota_checkpoint_ranges(checkpoint_query(upstream, 50, 150))
+            .await?;
+        ensure!(
+            no_anchor.len() == 1,
+            "in-range checkpoint should create range"
+        );
+        ensure!(
+            no_anchor[0].left_anchor.is_none(),
+            "range before first checkpoint must not invent an anchor"
+        );
+        ensure!(
+            no_anchor[0].checkpoints == [checkpoints[0].clone()],
+            "first checkpoint should be returned without synthetic zero state"
+        );
+
+        let empty_before_first = storage
+            .list_subscription_quota_checkpoint_ranges(checkpoint_query(upstream, 0, 50))
+            .await?;
+        ensure!(
+            empty_before_first.is_empty(),
+            "range before first checkpoint must not invent zero or null state"
+        );
+        Ok(())
+    }
+);
+
+scenario!(
+    checkpoint_history_keeps_sources_separate,
+    |storage| async move {
+        let upstream = upstream_id(22);
+        let header = checkpoint(&observation(
+            upstream,
+            100,
+            1,
+            SubscriptionQuotaSource::Header,
+            0.2,
+        ));
+        let api = checkpoint(&observation(
+            upstream,
+            100,
+            2,
+            SubscriptionQuotaSource::Api,
+            0.8,
+        ));
+        storage
+            .put_subscription_quota_checkpoints(&[header.clone(), api.clone()])
+            .await?;
+
+        let ranges = storage
+            .list_subscription_quota_checkpoint_ranges(checkpoint_query(upstream, 0, 200))
+            .await?;
+        ensure!(ranges.len() == 2, "header and api should remain separate");
+        ensure!(
+            ranges[0].source == SubscriptionQuotaSource::Header,
+            "header range should sort before api by source key"
+        );
+        ensure!(
+            ranges[1].source == SubscriptionQuotaSource::Api,
+            "api range should remain physical api stream"
+        );
+        ensure!(
+            ranges[0].checkpoints == [header] && ranges[1].checkpoints == [api],
+            "source streams should not collapse"
+        );
+        Ok(())
+    }
+);
+
+scenario!(
+    checkpoint_history_orders_same_millis_ties_deterministically,
+    |storage| async move {
+        let upstream = upstream_id(23);
+        let first_sample = checkpoint(&observation(
+            upstream,
+            500,
+            1,
+            SubscriptionQuotaSource::Header,
+            0.1,
+        ));
+        let second_sample = checkpoint(&observation(
+            upstream,
+            500,
+            2,
+            SubscriptionQuotaSource::Header,
+            0.2,
+        ));
+        storage
+            .put_subscription_quota_checkpoints(&[second_sample.clone(), first_sample.clone()])
+            .await?;
+
+        let ranges = storage
+            .list_subscription_quota_checkpoint_ranges(checkpoint_query(upstream, 0, 1_000))
+            .await?;
+        ensure!(ranges.len() == 1, "expected one same-millis range");
+        ensure!(
+            ranges[0].checkpoints == [first_sample.clone(), second_sample.clone()],
+            "same-millis checkpoints should sort by sample_id ascending"
+        );
+        let latest = storage
+            .list_latest_subscription_quota_checkpoints_for_upstreams(&[upstream])
+            .await?;
+        ensure!(
+            latest == [second_sample],
+            "latest tie should be deterministic by greatest sample_id"
+        );
+        Ok(())
+    }
+);
 
 fn observation(
     upstream_id: Uuid,
@@ -414,6 +883,42 @@ fn series_query(
         max_points_per_series,
         source_merge,
     }
+}
+
+fn checkpoint(record: &SubscriptionQuotaObservationRecord) -> SubscriptionQuotaCheckpointRecord {
+    SubscriptionQuotaCheckpointRecord::from(record)
+}
+
+fn checkpoint_query(
+    upstream_id: Uuid,
+    since_unix_millis: u64,
+    until_unix_millis: u64,
+) -> SubscriptionQuotaCheckpointRangeQuery {
+    SubscriptionQuotaCheckpointRangeQuery {
+        upstream_ids: vec![upstream_id],
+        windows: vec![SubscriptionQuotaWindow::FiveHour],
+        sources: vec![
+            SubscriptionQuotaSource::Header,
+            SubscriptionQuotaSource::Api,
+        ],
+        since_unix_millis,
+        until_unix_millis,
+    }
+}
+
+fn assert_bucket_starts(
+    buckets: &[cc_lb_storage_api::SubscriptionQuotaBucket],
+    expected: &[u64],
+) -> Result<()> {
+    let actual = buckets
+        .iter()
+        .map(|bucket| bucket.bucket_start_unix_secs)
+        .collect::<Vec<_>>();
+    ensure!(
+        actual == expected,
+        "bucket starts {actual:?} should equal {expected:?}"
+    );
+    Ok(())
 }
 
 fn upstream_id(value: u128) -> Uuid {

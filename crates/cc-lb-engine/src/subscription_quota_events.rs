@@ -1,11 +1,9 @@
-use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_storage_api::{
     Storage, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
-    SubscriptionQuotaSource, SubscriptionQuotaWindow,
+    SubscriptionQuotaSource,
 };
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
@@ -129,13 +127,12 @@ async fn run_subscription_quota_writer(
     cancel: CancellationToken,
 ) {
     let config = normalize_config(config);
-    let mut dedup = HashMap::<DedupKey, PersistedFingerprint>::new();
     loop {
         let first = tokio::select! {
             _ = cancel.cancelled() => {
                 let mut batch = Vec::new();
                 drain_remaining(&mut receiver, &mut batch);
-                flush_batch(&storage, &mut dedup, batch, &config).await;
+                flush_batch(&storage, batch).await;
                 return;
             }
             record = receiver.recv() => record,
@@ -155,20 +152,20 @@ async fn run_subscription_quota_writer(
             tokio::select! {
                 _ = cancel.cancelled() => {
                     drain_remaining(&mut receiver, &mut batch);
-                    flush_batch(&storage, &mut dedup, batch, &config).await;
+                    flush_batch(&storage, batch).await;
                     return;
                 }
                 _ = &mut flush_sleep => break,
                 count = receiver.recv_many(&mut batch, remaining) => {
                     if count == 0 {
-                        flush_batch(&storage, &mut dedup, batch, &config).await;
+                        flush_batch(&storage, batch).await;
                         return;
                     }
                 }
             }
         }
 
-        flush_batch(&storage, &mut dedup, batch, &config).await;
+        flush_batch(&storage, batch).await;
     }
 }
 
@@ -189,113 +186,14 @@ fn drain_remaining(
     }
 }
 
-async fn flush_batch(
-    storage: &Arc<dyn Storage>,
-    dedup: &mut HashMap<DedupKey, PersistedFingerprint>,
-    batch: Vec<SubscriptionQuotaObservationRecord>,
-    config: &SubscriptionQuotaWriterConfig,
-) {
+async fn flush_batch(storage: &Arc<dyn Storage>, batch: Vec<SubscriptionQuotaObservationRecord>) {
     if batch.is_empty() {
         return;
     }
-    let mut records = Vec::with_capacity(batch.len());
-    for record in batch {
-        let key = DedupKey::from(&record);
-        let fingerprint = Fingerprint::from(&record);
-        if let Some(previous) = dedup.get(&key)
-            && previous.fingerprint == fingerprint
-            && elapsed_secs(
-                previous.last_persisted_unix_millis,
-                record.observed_at_unix_millis,
-            ) < config.dedup_elapsed_override_secs
-        {
-            metrics::counter!("subscription_quota_worker_drop").increment(1);
-            continue;
-        }
-        dedup.insert(
-            key,
-            PersistedFingerprint {
-                fingerprint,
-                last_persisted_unix_millis: record.observed_at_unix_millis,
-            },
-        );
-        records.push(record);
-    }
-    if records.is_empty() {
-        return;
-    }
 
-    metrics::histogram!("subscription_quota_writer_batch_size").record(records.len() as f64);
-    if let Err(error) = storage.put_subscription_quota_batch(&records).await {
+    metrics::histogram!("subscription_quota_writer_batch_size").record(batch.len() as f64);
+    if let Err(error) = storage.put_subscription_quota_batch(&batch).await {
         metrics::counter!("subscription_quota_writer_error").increment(1);
-        tracing::warn!(error = %error, batch_size = records.len(), "subscription quota batch persistence failed");
+        tracing::warn!(error = %error, batch_size = batch.len(), "subscription quota batch persistence failed");
     }
-}
-
-fn elapsed_secs(previous_unix_millis: u64, current_unix_millis: u64) -> u64 {
-    current_unix_millis
-        .saturating_sub(previous_unix_millis)
-        .saturating_div(1_000)
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct DedupKey {
-    upstream_id: Uuid,
-    window: SubscriptionQuotaWindow,
-    source: SubscriptionQuotaSource,
-}
-
-impl From<&SubscriptionQuotaObservationRecord> for DedupKey {
-    fn from(record: &SubscriptionQuotaObservationRecord) -> Self {
-        Self {
-            upstream_id: record.upstream_id,
-            window: record.window,
-            source: record.source,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Fingerprint(u64);
-
-impl From<&SubscriptionQuotaObservationRecord> for Fingerprint {
-    fn from(record: &SubscriptionQuotaObservationRecord) -> Self {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        record.utilization.map(f64::to_bits).hash(&mut hasher);
-        record.status.hash(&mut hasher);
-        record.resets_at_unix_secs.hash(&mut hasher);
-        record
-            .surpassed_threshold
-            .map(f64::to_bits)
-            .hash(&mut hasher);
-        record.representative_claim.hash(&mut hasher);
-        record
-            .fallback_percentage
-            .map(f64::to_bits)
-            .hash(&mut hasher);
-        record.fallback_available.hash(&mut hasher);
-        record.overage_in_use.hash(&mut hasher);
-        record
-            .overage_period_monthly_utilization
-            .map(f64::to_bits)
-            .hash(&mut hasher);
-        record.upgrade_paths.hash(&mut hasher);
-        record.disabled_reason.hash(&mut hasher);
-        record.extra_usage_enabled.hash(&mut hasher);
-        record
-            .extra_usage_monthly_limit
-            .map(f64::to_bits)
-            .hash(&mut hasher);
-        record
-            .extra_usage_used_credits
-            .map(f64::to_bits)
-            .hash(&mut hasher);
-        Self(hasher.finish())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PersistedFingerprint {
-    fingerprint: Fingerprint,
-    last_persisted_unix_millis: u64,
 }

@@ -11,6 +11,7 @@ dto-roundtrip = []
 
 [dependencies]
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 cc-lb-aead = { version = "0.1.0", path = "../cc-lb-aead" }
