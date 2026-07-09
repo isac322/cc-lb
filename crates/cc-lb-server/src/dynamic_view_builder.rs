@@ -35,9 +35,9 @@ use cc_lb_runtime_wasmtime::{
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, AuditStore, MetadataTierMappingOverrideRecord,
-    OrganizationMetadataStore, PlanTierRatioRecord, PlanTierStore, PluginRegistryStore, PluginSlot,
-    PrincipalRecord, PrincipalStore, PromptCacheObservationStore, RateLimitKind, StorageError,
-    StorageResult, TierResolutionSource, UpstreamPlanTierRecord,
+    OrganizationMetadataStore, PlanTierRatioRecord, PlanTierStore, PluginChainEntry,
+    PluginRegistryStore, PluginSlot, PrincipalRecord, PrincipalStore, PromptCacheObservationStore,
+    RateLimitKind, StorageError, StorageResult, TierResolutionSource, UpstreamPlanTierRecord,
     UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
     UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
 };
@@ -624,29 +624,50 @@ async fn build_principal_chains(
     RebindError,
 > {
     let registry = list_registry_by_id(stores).await?;
+    let principal_ids = principals
+        .iter()
+        .map(|principal| principal.id)
+        .collect::<Vec<_>>();
+    let slots = [
+        PluginSlot::Router,
+        PluginSlot::ObservabilityHook,
+        PluginSlot::Shape,
+        PluginSlot::TransformResponse,
+        PluginSlot::TransformSseEvent,
+    ];
+    let mut chain_entries: HashMap<(Uuid, PluginSlot), Vec<PluginChainEntry>> = stores
+        .plugin_registry
+        .list_chains_for_principals(&principal_ids, &slots)
+        .await?
+        .into_iter()
+        .fold(HashMap::new(), |mut entries, entry| {
+            entries
+                .entry((entry.principal_id, entry.slot))
+                .or_insert_with(Vec::new)
+                .push(entry);
+            entries
+        });
     let mut chains = HashMap::new();
     let mut registered_slot_keys: HashSet<cc_lb_plugin_api::SlotKey> = HashSet::new();
     for principal in principals {
-        let router_entries = stores
-            .plugin_registry
-            .list_chain_for_principal(principal.id, PluginSlot::Router)
-            .await?;
-        let hook_entries = stores
-            .plugin_registry
-            .list_chain_for_principal(principal.id, PluginSlot::ObservabilityHook)
-            .await?;
-        let shape_entries = stores
-            .plugin_registry
-            .list_chain_for_principal(principal.id, PluginSlot::Shape)
-            .await?;
-        let response_transform_entries = stores
-            .plugin_registry
-            .list_chain_for_principal(principal.id, PluginSlot::TransformResponse)
-            .await?;
-        let sse_event_transform_entries = stores
-            .plugin_registry
-            .list_chain_for_principal(principal.id, PluginSlot::TransformSseEvent)
-            .await?;
+        let router_entries =
+            take_chain_entries(&mut chain_entries, principal.id, PluginSlot::Router);
+        let hook_entries = take_chain_entries(
+            &mut chain_entries,
+            principal.id,
+            PluginSlot::ObservabilityHook,
+        );
+        let shape_entries = take_chain_entries(&mut chain_entries, principal.id, PluginSlot::Shape);
+        let response_transform_entries = take_chain_entries(
+            &mut chain_entries,
+            principal.id,
+            PluginSlot::TransformResponse,
+        );
+        let sse_event_transform_entries = take_chain_entries(
+            &mut chain_entries,
+            principal.id,
+            PluginSlot::TransformSseEvent,
+        );
 
         let router = build_router_pipeline(
             stores,
@@ -666,14 +687,7 @@ async fn build_principal_chains(
             let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
             })?;
-            let registry_entry = stores
-                .plugin_registry
-                .get_registry_entry_by_sha(registry_entry.sha256)
-                .await?
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, "plugin registry sha not found")
-                })?;
-            if registry_entry_unsupported_slot(&registry_entry, PluginSlot::ObservabilityHook) {
+            if registry_entry_unsupported_slot(registry_entry, PluginSlot::ObservabilityHook) {
                 tracing::warn!(
                     target: "cc_lb_server::drift",
                     principal = %principal.name,
@@ -689,7 +703,7 @@ async fn build_principal_chains(
             let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
             let manifest = PluginManifest {
                 pure: true,
-                name: registry_entry.name,
+                name: registry_entry.name.clone(),
                 artifact: wasm_path.to_string_lossy().into_owned(),
                 wire_version: None,
                 config: entry.config,
@@ -727,17 +741,10 @@ async fn build_principal_chains(
             let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
             })?;
-            let registry_entry = stores
-                .plugin_registry
-                .get_registry_entry_by_sha(registry_entry.sha256)
-                .await?
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, "plugin registry sha not found")
-                })?;
             let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
             let manifest = PluginManifest {
                 pure: true,
-                name: registry_entry.name,
+                name: registry_entry.name.clone(),
                 artifact: wasm_path.to_string_lossy().into_owned(),
                 wire_version: None,
                 config: entry.config,
@@ -817,6 +824,16 @@ async fn build_principal_chains(
     Ok((chains, registered_slot_keys))
 }
 
+fn take_chain_entries(
+    entries: &mut HashMap<(Uuid, PluginSlot), Vec<PluginChainEntry>>,
+    principal_id: Uuid,
+    slot: PluginSlot,
+) -> Vec<PluginChainEntry> {
+    let mut chain = entries.remove(&(principal_id, slot)).unwrap_or_default();
+    chain.sort_by_key(|entry| (entry.order, entry.id));
+    chain
+}
+
 async fn list_registry_by_id(
     stores: &Stores,
 ) -> StorageResult<HashMap<uuid::Uuid, cc_lb_storage_api::WasmRegistryEntry>> {
@@ -859,15 +876,10 @@ async fn manifest_for_chain_entry(
     let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
     })?;
-    let registry_entry = stores
-        .plugin_registry
-        .get_registry_entry_by_sha(registry_entry.sha256)
-        .await?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "plugin registry sha not found"))?;
     let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
     Ok(PluginManifest {
         pure: true,
-        name: registry_entry.name,
+        name: registry_entry.name.clone(),
         artifact: wasm_path.to_string_lossy().into_owned(),
         wire_version: None,
         config: entry.config.clone(),

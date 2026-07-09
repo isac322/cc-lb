@@ -71,7 +71,7 @@ impl WasmtimeRuntime {
         input: &[u8],
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
         self.dispatch(slot_key, SlotKind::TransformResponse, |cell| {
-            call_transform_response_hook(cell, input)
+            call_transform_response_hook(cell, input).map(|bytes| bytes.as_slice().to_vec())
         })
     }
 
@@ -81,7 +81,7 @@ impl WasmtimeRuntime {
         input: &[u8],
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
         self.dispatch(slot_key, SlotKind::TransformSseEvent, |cell| {
-            call_transform_sse_event_hook(cell, input)
+            call_transform_sse_event_hook(cell, input).map(|bytes| bytes.as_slice().to_vec())
         })
     }
 }

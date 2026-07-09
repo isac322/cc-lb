@@ -367,6 +367,30 @@ impl PluginRegistryStore for PostgresStorage {
         rows.into_iter().map(chain_from_row).collect()
     }
 
+    async fn list_chains_for_principals(
+        &self,
+        principal_ids: &[Uuid],
+        slots: &[PluginSlot],
+    ) -> StorageResult<Vec<PluginChainEntry>> {
+        if principal_ids.is_empty() || slots.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let slot_names = slots
+            .iter()
+            .map(|slot| slot.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let rows = sqlx::query(
+            "SELECT * FROM plugin_chains_v2 WHERE principal_id = ANY($1) AND slot = ANY($2) ORDER BY principal_id ASC, slot ASC, order_value ASC, id ASC",
+        )
+        .bind(principal_ids.to_vec())
+        .bind(slot_names)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        rows.into_iter().map(chain_from_row).collect()
+    }
+
     async fn update_chain_entry(
         &self,
         id: Uuid,

@@ -130,6 +130,47 @@ async fn buffered_unchanged_preserves_compressed_upstream_bytes() {
 }
 
 #[tokio::test]
+async fn buffered_header_only_transform_preserves_compressed_upstream_bytes() {
+    let compressed = gzip_bytes(&buffered_upstream_body());
+    let transform = Arc::new(HeaderOnlyBufferedTransform::default());
+    let lifecycle = lifecycle_with_transforms(
+        Some(transform.clone()),
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers: json_headers(compressed.len(), true),
+            body: compressed.clone(),
+        }),
+    );
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":false}"#,
+        )))
+        .await
+        .expect("lifecycle handles compressed header-only transform");
+    let (_status, headers, body) = collect_body(response).await;
+
+    assert_eq!(body, compressed);
+    assert_eq!(
+        headers.get(CONTENT_ENCODING),
+        Some(&HeaderValue::from_static("gzip"))
+    );
+    assert_eq!(
+        headers
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok()),
+        Some(body.len().to_string().as_str())
+    );
+    assert_eq!(
+        headers.get("x-plugin-header"),
+        Some(&HeaderValue::from_static("kept"))
+    );
+    assert!(headers.get("x-api-key").is_none());
+    assert_eq!(transform.seen_bodies(), vec![buffered_upstream_body()]);
+}
+
+#[tokio::test]
 async fn buffered_unsupported_encoding_skips_transform() {
     let transform = Arc::new(BufferedToolNameTransform::default());
     let mut headers = json_headers(buffered_upstream_body().len(), false);
@@ -238,6 +279,72 @@ async fn sse_transform_rewrites_content_block_start_event() {
         transform.seen_events(),
         vec!["content_block_start".to_owned(), "message_stop".to_owned()]
     );
+}
+
+#[tokio::test]
+async fn sse_transform_receives_sanitized_response_headers() {
+    let transform = Arc::new(HeaderCapturingSseTransform::default());
+    let mut headers = sse_headers();
+    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("123"));
+    headers.insert("x-cc-lb-secret", HeaderValue::from_static("remove-me"));
+    headers.insert("x-ratelimit-limit", HeaderValue::from_static("remove-me"));
+    headers.insert("authorization", HeaderValue::from_static("Bearer secret"));
+    headers.insert("x-safe-header", HeaderValue::from_static("keep-me"));
+    let lifecycle = lifecycle_with_transforms(
+        None,
+        Some(transform.clone()),
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers,
+            body: sse_upstream_body(false),
+        }),
+    );
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true}"#,
+        )))
+        .await
+        .expect("lifecycle handles SSE response");
+    let (_status, _headers, _body) = collect_body(response).await;
+    let seen = transform.seen_headers();
+    assert!(!seen.is_empty());
+    let first = &seen[0];
+    assert!(first.get(CONTENT_LENGTH).is_none());
+    assert!(first.get("x-cc-lb-secret").is_none());
+    assert!(first.get("x-ratelimit-limit").is_none());
+    assert!(first.get("authorization").is_none());
+    assert_eq!(
+        first.get("x-safe-header"),
+        Some(&HeaderValue::from_static("keep-me"))
+    );
+}
+
+#[tokio::test]
+async fn sse_unchanged_transform_preserves_raw_event_bytes() {
+    let transform = Arc::new(UnchangedSseTransform::default());
+    let body =
+        Bytes::from_static(b": keep-this-comment\nevent: ping\ndata: {\"type\":\"ping\"}\n\n");
+    let lifecycle = lifecycle_with_transforms(
+        None,
+        Some(transform.clone()),
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers: sse_headers(),
+            body: body.clone(),
+        }),
+    );
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true}"#,
+        )))
+        .await
+        .expect("lifecycle handles unchanged SSE response");
+    let (_status, _headers, output) = collect_body(response).await;
+
+    assert_eq!(output, body);
+    assert_eq!(transform.seen_events(), vec!["ping".to_owned()]);
 }
 
 #[tokio::test]
@@ -566,6 +673,37 @@ impl ResponseTransformHook for UnchangedBufferedTransform {
 }
 
 #[derive(Default)]
+struct HeaderOnlyBufferedTransform {
+    seen: Mutex<Vec<Bytes>>,
+}
+
+impl HeaderOnlyBufferedTransform {
+    fn seen_bodies(&self) -> Vec<Bytes> {
+        self.seen.lock().expect("seen lock").clone()
+    }
+}
+
+impl ResponseTransformHook for HeaderOnlyBufferedTransform {
+    fn transform_response(
+        &self,
+        request: TransformResponseRequest,
+    ) -> Result<TransformResponseResult, ResponseTransformError> {
+        self.seen
+            .lock()
+            .expect("seen lock")
+            .push(request.body.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-plugin-header", HeaderValue::from_static("kept"));
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+        Ok(TransformResponseResult::Replace {
+            status: None,
+            headers: Some(headers),
+            body: None,
+        })
+    }
+}
+
+#[derive(Default)]
 struct SseToolNameTransform {
     seen: Mutex<Vec<String>>,
 }
@@ -597,6 +735,54 @@ impl SseEventTransformHook for SseToolNameTransform {
                 }],
             });
         }
+        Ok(TransformSseEventResult::Unchanged)
+    }
+}
+
+#[derive(Default)]
+struct UnchangedSseTransform {
+    seen: Mutex<Vec<String>>,
+}
+
+impl UnchangedSseTransform {
+    fn seen_events(&self) -> Vec<String> {
+        self.seen.lock().expect("seen lock").clone()
+    }
+}
+
+impl SseEventTransformHook for UnchangedSseTransform {
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        self.seen
+            .lock()
+            .expect("seen lock")
+            .push(request.event.event);
+        Ok(TransformSseEventResult::Unchanged)
+    }
+}
+
+#[derive(Default)]
+struct HeaderCapturingSseTransform {
+    seen_headers: Mutex<Vec<HeaderMap>>,
+}
+
+impl HeaderCapturingSseTransform {
+    fn seen_headers(&self) -> Vec<HeaderMap> {
+        self.seen_headers.lock().expect("seen headers lock").clone()
+    }
+}
+
+impl SseEventTransformHook for HeaderCapturingSseTransform {
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        self.seen_headers
+            .lock()
+            .expect("seen headers lock")
+            .push(request.response_headers);
         Ok(TransformSseEventResult::Unchanged)
     }
 }

@@ -10,7 +10,7 @@ use cc_lb_storage_api::{
     WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
 };
 use serde_json::Value;
-use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
+use sqlx::{QueryBuilder, Row, Sqlite, Transaction, sqlite::SqliteRow};
 use uuid::Uuid;
 
 use crate::{SqliteStorage, map_sqlx_error};
@@ -349,6 +349,40 @@ impl PluginRegistryStore for SqliteStorage {
         .fetch_all(self.pool())
         .await
         .map_err(map_sqlx_error)?;
+        rows.into_iter().map(chain_from_row).collect()
+    }
+
+    async fn list_chains_for_principals(
+        &self,
+        principal_ids: &[Uuid],
+        slots: &[PluginSlot],
+    ) -> StorageResult<Vec<PluginChainEntry>> {
+        if principal_ids.is_empty() || slots.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut query =
+            QueryBuilder::<Sqlite>::new("SELECT * FROM plugin_chains_v2 WHERE principal_id IN (");
+        {
+            let mut principal_bindings = query.separated(", ");
+            for principal_id in principal_ids {
+                principal_bindings.push_bind(principal_id.to_string());
+            }
+        }
+        query.push(") AND slot IN (");
+        {
+            let mut slot_bindings = query.separated(", ");
+            for slot in slots {
+                slot_bindings.push_bind(slot.as_str());
+            }
+        }
+        query.push(") ORDER BY principal_id ASC, slot ASC, order_value ASC, id ASC");
+
+        let rows = query
+            .build()
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_sqlx_error)?;
         rows.into_iter().map(chain_from_row).collect()
     }
 

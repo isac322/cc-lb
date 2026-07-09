@@ -91,9 +91,7 @@ fn probe_transform_response_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRun
         })?;
     let output = call_transform_response_hook(cell, input.as_slice())
         .map_err(|error| probe_failed(HookKind::TransformResponse, error.to_string()))?;
-    let mut aligned = AlignedVec::<16>::with_capacity(output.len());
-    aligned.extend_from_slice(&output);
-    rkyv::access::<ArchivedTransformResponseResult, RkyvError>(&aligned).map_err(|error| {
+    rkyv::access::<ArchivedTransformResponseResult, RkyvError>(&output).map_err(|error| {
         probe_failed(
             HookKind::TransformResponse,
             format!("decode TransformResponseResult: {error}"),
@@ -112,9 +110,7 @@ fn probe_transform_sse_event_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRu
         })?;
     let output = call_transform_sse_event_hook(cell, input.as_slice())
         .map_err(|error| probe_failed(HookKind::TransformSseEvent, error.to_string()))?;
-    let mut aligned = AlignedVec::<16>::with_capacity(output.len());
-    aligned.extend_from_slice(&output);
-    rkyv::access::<ArchivedTransformSseEventResult, RkyvError>(&aligned).map_err(|error| {
+    rkyv::access::<ArchivedTransformSseEventResult, RkyvError>(&output).map_err(|error| {
         probe_failed(
             HookKind::TransformSseEvent,
             format!("decode TransformSseEventResult: {error}"),

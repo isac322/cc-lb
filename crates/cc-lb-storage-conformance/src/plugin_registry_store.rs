@@ -51,6 +51,7 @@ where
     registry_label_update_with_stale_revision_conflicts(storage).await?;
     chain_insert_preserves_sparse_order(storage).await?;
     list_chain_for_principal_returns_ordered(storage).await?;
+    list_chains_for_principals_returns_ordered_and_filtered(storage).await?;
     router_multi_entry_ordered_on_storage(storage).await?;
     insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage(storage).await?;
     router_reorder_preserves_invariants_on_storage(storage).await?;
@@ -415,6 +416,76 @@ pub async fn list_chain_for_principal_returns_ordered<S: PluginRegistryStore + P
         .await?;
     ensure!(listed.len() == 2, "chain list includes both entries");
     ensure!(listed[0].order < listed[1].order, "chain list is ordered");
+    Ok(())
+}
+
+pub async fn list_chains_for_principals_returns_ordered_and_filtered<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let (first_principal, first_plugin) =
+        principal_and_plugin(storage, 23, "plugin-chain-batch-first").await?;
+    let (second_principal, second_plugin) =
+        principal_and_plugin(storage, 24, "plugin-chain-batch-second").await?;
+    let (ignored_principal, ignored_plugin) =
+        principal_and_plugin(storage, 25, "plugin-chain-batch-ignored").await?;
+
+    let first_late = storage
+        .insert_chain_entry(chain_with_slot(
+            first_principal,
+            PluginSlot::ObservabilityHook,
+            first_plugin.id,
+            sparse_order::STEP * 2,
+        ))
+        .await?;
+    let first_early = storage
+        .insert_chain_entry(chain_with_slot(
+            first_principal,
+            PluginSlot::ObservabilityHook,
+            first_plugin.id,
+            sparse_order::STEP,
+        ))
+        .await?;
+    let second_router = storage
+        .insert_chain_entry(chain_with_slot(
+            second_principal,
+            PluginSlot::Router,
+            second_plugin.id,
+            sparse_order::STEP,
+        ))
+        .await?;
+    storage
+        .insert_chain_entry(chain_with_slot(
+            ignored_principal,
+            PluginSlot::Router,
+            ignored_plugin.id,
+            sparse_order::STEP,
+        ))
+        .await?;
+
+    let listed = storage
+        .list_chains_for_principals(
+            &[first_principal, second_principal],
+            &[PluginSlot::ObservabilityHook, PluginSlot::Router],
+        )
+        .await?;
+    let listed_ids = listed.iter().map(|entry| entry.id).collect::<Vec<_>>();
+
+    ensure!(
+        listed_ids == vec![first_early.id, first_late.id, second_router.id],
+        "batched chain list is filtered and ordered by principal, slot, and order"
+    );
+
+    let empty = storage
+        .list_chains_for_principals(&[], &[PluginSlot::Router])
+        .await?;
+    ensure!(empty.is_empty(), "empty principal filter returns no chains");
+
+    let empty = storage
+        .list_chains_for_principals(&[first_principal], &[])
+        .await?;
+    ensure!(empty.is_empty(), "empty slot filter returns no chains");
     Ok(())
 }
 

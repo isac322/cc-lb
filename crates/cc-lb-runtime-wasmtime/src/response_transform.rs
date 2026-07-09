@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use cc_lb_plugin_api::{
-    Principal, ResponseTransformError, ResponseTransformHook, SseEventTransformHook,
+    Principal, PrincipalKind, ResponseTransformError, ResponseTransformHook, SseEventTransformHook,
     TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
     TransformSseEventResult, Upstream,
 };
@@ -21,14 +21,21 @@ use crate::error::WasmtimeRuntimeError;
 pub struct WasmtimeResponseTransformHook {
     cell: Arc<PluginCell>,
     runtime_config: Arc<crate::HotEngineConfig>,
+    wire_version: Option<WireVersion>,
 }
 
 impl WasmtimeResponseTransformHook {
     pub fn new(slot: Arc<PluginSlot>, runtime_config: Arc<crate::HotEngineConfig>) -> Self {
         let cell = slot.current.load_full();
+        let wire_version = cell
+            .metadata
+            .hooks
+            .get(HookKind::TransformResponse.as_str())
+            .and_then(|metadata| WireVersion::from_u8(metadata.wire_version));
         Self {
             cell,
             runtime_config,
+            wire_version,
         }
     }
 }
@@ -41,13 +48,7 @@ impl ResponseTransformHook for WasmtimeResponseTransformHook {
         let in_bytes = host_to_wire_transform_response(&request).map_err(|e| {
             response_runtime_error(format!("rkyv encode TransformResponseRequest: {e}"))
         })?;
-        let out_bytes = match self
-            .cell
-            .metadata
-            .hooks
-            .get(HookKind::TransformResponse.as_str())
-            .and_then(|m| WireVersion::from_u8(m.wire_version))
-        {
+        let out_bytes = match self.wire_version {
             Some(WireVersion::V1) => call_transform_response_hook(&self.cell, in_bytes.as_slice()),
             None => {
                 return Err(response_runtime_error(
@@ -57,7 +58,7 @@ impl ResponseTransformHook for WasmtimeResponseTransformHook {
         }
         .map_err(runtime_error_to_response_transform)?;
         reject_oversized_output(
-            &out_bytes,
+            out_bytes.as_slice(),
             self.runtime_config.wire_bounds.output_body_bytes,
         )?;
         wire_to_host_transform_response(&out_bytes)
@@ -67,14 +68,21 @@ impl ResponseTransformHook for WasmtimeResponseTransformHook {
 pub struct WasmtimeSseEventTransformHook {
     cell: Arc<PluginCell>,
     runtime_config: Arc<crate::HotEngineConfig>,
+    wire_version: Option<WireVersion>,
 }
 
 impl WasmtimeSseEventTransformHook {
     pub fn new(slot: Arc<PluginSlot>, runtime_config: Arc<crate::HotEngineConfig>) -> Self {
         let cell = slot.current.load_full();
+        let wire_version = cell
+            .metadata
+            .hooks
+            .get(HookKind::TransformSseEvent.as_str())
+            .and_then(|metadata| WireVersion::from_u8(metadata.wire_version));
         Self {
             cell,
             runtime_config,
+            wire_version,
         }
     }
 }
@@ -87,13 +95,7 @@ impl SseEventTransformHook for WasmtimeSseEventTransformHook {
         let in_bytes = host_to_wire_transform_sse_event(&request).map_err(|e| {
             response_runtime_error(format!("rkyv encode TransformSseEventRequest: {e}"))
         })?;
-        let out_bytes = match self
-            .cell
-            .metadata
-            .hooks
-            .get(HookKind::TransformSseEvent.as_str())
-            .and_then(|m| WireVersion::from_u8(m.wire_version))
-        {
+        let out_bytes = match self.wire_version {
             Some(WireVersion::V1) => call_transform_sse_event_hook(&self.cell, in_bytes.as_slice()),
             None => {
                 return Err(response_runtime_error(
@@ -103,7 +105,7 @@ impl SseEventTransformHook for WasmtimeSseEventTransformHook {
         }
         .map_err(runtime_error_to_response_transform)?;
         reject_oversized_output(
-            &out_bytes,
+            out_bytes.as_slice(),
             self.runtime_config.wire_bounds.output_body_bytes,
         )?;
         wire_to_host_transform_sse_event(&out_bytes)
@@ -125,7 +127,7 @@ fn host_to_wire_transform_response(
         request_id: request.request_id.as_str(),
         principal: PrincipalRef {
             id: request.principal.id.as_str(),
-            kind: principal_kind.as_str(),
+            kind: principal_kind,
             claims: &claim_refs,
         },
         upstream,
@@ -158,7 +160,7 @@ fn host_to_wire_transform_sse_event(
         request_id: request.request_id.as_str(),
         principal: PrincipalRef {
             id: request.principal.id.as_str(),
-            kind: principal_kind.as_str(),
+            kind: principal_kind,
             claims: &claim_refs,
         },
         upstream,
@@ -173,12 +175,13 @@ fn host_to_wire_transform_sse_event(
 }
 
 fn wire_to_host_transform_response(
-    bytes: &[u8],
+    bytes: &AlignedVec<16>,
 ) -> Result<TransformResponseResult, ResponseTransformError> {
-    let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
-    aligned.extend_from_slice(bytes);
-    let archived = rkyv::access::<ArchivedTransformResponseResult, RkyvError>(&aligned)
+    let archived = rkyv::access::<ArchivedTransformResponseResult, RkyvError>(bytes)
         .map_err(|e| response_runtime_error(format!("rkyv access TransformResponseResult: {e}")))?;
+    if let ArchivedTransformResponseResult::Unchanged = archived {
+        return Ok(TransformResponseResult::Unchanged);
+    }
     let result: cc_lb_plugin_wire::TransformResponseResult =
         rkyv::deserialize::<cc_lb_plugin_wire::TransformResponseResult, RkyvError>(archived)
             .map_err(|e| {
@@ -201,12 +204,17 @@ fn wire_to_host_transform_response(
 }
 
 fn wire_to_host_transform_sse_event(
-    bytes: &[u8],
+    bytes: &AlignedVec<16>,
 ) -> Result<TransformSseEventResult, ResponseTransformError> {
-    let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
-    aligned.extend_from_slice(bytes);
-    let archived = rkyv::access::<ArchivedTransformSseEventResult, RkyvError>(&aligned)
+    let archived = rkyv::access::<ArchivedTransformSseEventResult, RkyvError>(bytes)
         .map_err(|e| response_runtime_error(format!("rkyv access TransformSseEventResult: {e}")))?;
+    match archived {
+        ArchivedTransformSseEventResult::Unchanged => {
+            return Ok(TransformSseEventResult::Unchanged);
+        }
+        ArchivedTransformSseEventResult::Drop => return Ok(TransformSseEventResult::Drop),
+        ArchivedTransformSseEventResult::Replace { .. } => {}
+    }
     let result: cc_lb_plugin_wire::TransformSseEventResult =
         rkyv::deserialize::<cc_lb_plugin_wire::TransformSseEventResult, RkyvError>(archived)
             .map_err(|e| {
@@ -293,11 +301,14 @@ fn headers_from_wire(
     Ok(out)
 }
 
-fn principal_kind_to_wire(principal: &Principal) -> String {
-    serde_json::to_value(&principal.kind)
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .unwrap_or_else(|| "unknown".to_owned())
+fn principal_kind_to_wire(principal: &Principal) -> &'static str {
+    match principal.kind {
+        PrincipalKind::ApiKey => "api_key",
+        PrincipalKind::OAuthSubject => "oauth_subject",
+        PrincipalKind::InternalKey => "internal_key",
+        PrincipalKind::WorkloadIdentity => "workload_identity",
+        PrincipalKind::SubscriptionBearer => "subscription_bearer",
+    }
 }
 
 fn upstream_base_url(upstream: &Upstream) -> Option<String> {

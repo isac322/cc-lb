@@ -2038,10 +2038,10 @@ impl Lifecycle {
         let usage = semantic_body
             .as_ref()
             .map_or_else(UsageCounts::default, |body| usage_from_json_body(body));
-        let mut downstream_body = body.clone();
+        let mut downstream_body = body;
         if let (Some(hook), Some(semantic_body)) = (
             transform_ctx.response_transform_hook.as_ref(),
-            semantic_body.as_ref(),
+            semantic_body,
         ) {
             match hook.transform_response(TransformResponseRequest {
                 request_id: event_ctx.request_id.clone(),
@@ -2057,9 +2057,8 @@ impl Lifecycle {
                 Ok(result) => {
                     let transformed = apply_buffered_transform_result(
                         parts.status,
-                        parts.headers.clone(),
-                        body.clone(),
-                        semantic_body.clone(),
+                        std::mem::take(&mut parts.headers),
+                        downstream_body,
                         result,
                     );
                     parts.status = transformed.status;
@@ -2364,10 +2363,11 @@ impl Lifecycle {
     ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
-        let response_headers = sanitized_response_headers_for_plugin(&parts.headers);
         let usage_decoder = UsageDecoder::from_headers(&parts.headers);
         let transform_requested = transform_ctx.sse_event_transform_hook.is_some();
         let transform_decode_supported = usage_decoder.unsupported_encoding().is_none();
+        let response_headers = (transform_requested && transform_decode_supported)
+            .then(|| sanitized_response_headers_for_plugin(&parts.headers));
         if transform_requested && transform_decode_supported {
             sanitize_downstream_stream_headers(&mut parts.headers);
         }
@@ -2573,59 +2573,64 @@ impl Lifecycle {
                                     }
                                 }
                                 if sse_transform_active {
-                                    let outgoing = match transform_sse_event_bytes(
-                                        transform_ctx.sse_event_transform_hook.as_ref(),
-                                        &transform_ctx,
-                                        &event_ctx,
-                                        status,
-                                        &response_headers,
-                                        raw.clone(),
-                                    ) {
-                                        SseTransformOutcome::Emit(bytes) => {
-                                            transformed_output_started = true;
-                                            bytes
-                                        }
-                                        SseTransformOutcome::Drop => {
-                                            transformed_output_started = true;
-                                            continue;
-                                        }
-                                        SseTransformOutcome::FailOpen => {
-                                            if transformed_output_started {
-                                                let error = ResponseTransformError::Runtime {
-                                                    reason: "failed to parse SSE event after transform output started".to_owned(),
-                                                };
-                                                let frame = make_response_transform_error_frame(&error);
-                                                observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                                    batch_index,
-                                                    event_count: 1,
-                                                    total_bytes: frame.len(),
-                                                });
-                                                stream_transform_error = Some(error);
-                                                yield Ok::<Bytes, Infallible>(frame);
-                                                break;
+                                    let outgoing = if let Some(response_headers) = response_headers.as_ref() {
+                                        match transform_sse_event_bytes(
+                                            transform_ctx.sse_event_transform_hook.as_ref(),
+                                            &transform_ctx,
+                                            &event_ctx,
+                                            status,
+                                            response_headers,
+                                            raw.clone(),
+                                        ) {
+                                            SseTransformOutcome::Emit(bytes) => {
+                                                transformed_output_started = true;
+                                                bytes
                                             }
-                                            sse_transform_active = false;
-                                            raw
-                                        }
-                                        SseTransformOutcome::Error(error) => {
-                                            tracing::warn!(
-                                                request_id = %event_ctx.request_id,
-                                                %error,
-                                                "sse response transform failed"
-                                            );
-                                            if transformed_output_started {
-                                                let frame = make_response_transform_error_frame(&error);
-                                                observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                                    batch_index,
-                                                    event_count: 1,
-                                                    total_bytes: frame.len(),
-                                                });
-                                                stream_transform_error = Some(error);
-                                                yield Ok::<Bytes, Infallible>(frame);
-                                                break;
+                                            SseTransformOutcome::Drop => {
+                                                transformed_output_started = true;
+                                                continue;
                                             }
-                                            raw
+                                            SseTransformOutcome::FailOpen => {
+                                                if transformed_output_started {
+                                                    let error = ResponseTransformError::Runtime {
+                                                        reason: "failed to parse SSE event after transform output started".to_owned(),
+                                                    };
+                                                    let frame = make_response_transform_error_frame(&error);
+                                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                                        batch_index,
+                                                        event_count: 1,
+                                                        total_bytes: frame.len(),
+                                                    });
+                                                    stream_transform_error = Some(error);
+                                                    yield Ok::<Bytes, Infallible>(frame);
+                                                    break;
+                                                }
+                                                sse_transform_active = false;
+                                                raw
+                                            }
+                                            SseTransformOutcome::Error(error) => {
+                                                tracing::warn!(
+                                                    request_id = %event_ctx.request_id,
+                                                    %error,
+                                                    "sse response transform failed"
+                                                );
+                                                if transformed_output_started {
+                                                    let frame = make_response_transform_error_frame(&error);
+                                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                                        batch_index,
+                                                        event_count: 1,
+                                                        total_bytes: frame.len(),
+                                                    });
+                                                    stream_transform_error = Some(error);
+                                                    yield Ok::<Bytes, Infallible>(frame);
+                                                    break;
+                                                }
+                                                raw
+                                            }
                                         }
+                                    } else {
+                                        sse_transform_active = false;
+                                        raw
                                     };
                                     observe_many(hooks.as_slice(), ObserveEvent::Chunk {
                                         batch_index,
@@ -3400,7 +3405,6 @@ fn apply_buffered_transform_result(
     upstream_status: StatusCode,
     upstream_headers: HeaderMap,
     upstream_body: Bytes,
-    semantic_body: Bytes,
     result: TransformResponseResult,
 ) -> BufferedTransformParts {
     match result {
@@ -3414,11 +3418,21 @@ fn apply_buffered_transform_result(
             headers,
             body,
         } => {
-            let body = body.unwrap_or(semantic_body);
+            let (body, content_encoding) = match body {
+                Some(body) => (body, None),
+                None => {
+                    let content_encoding = upstream_headers.get(CONTENT_ENCODING).cloned();
+                    (upstream_body, content_encoding)
+                }
+            };
             let headers = headers.unwrap_or(upstream_headers);
             BufferedTransformParts {
                 status: status.unwrap_or(upstream_status),
-                headers: sanitize_downstream_response_headers(headers, body.len()),
+                headers: sanitize_downstream_response_headers(
+                    headers,
+                    body.len(),
+                    content_encoding,
+                ),
                 body,
             }
         }
@@ -3431,8 +3445,15 @@ fn sanitized_response_headers_for_plugin(headers: &HeaderMap) -> HeaderMap {
     sanitized
 }
 
-fn sanitize_downstream_response_headers(mut headers: HeaderMap, body_len: usize) -> HeaderMap {
+fn sanitize_downstream_response_headers(
+    mut headers: HeaderMap,
+    body_len: usize,
+    content_encoding: Option<HeaderValue>,
+) -> HeaderMap {
     sanitize_host_owned_headers(&mut headers);
+    if let Some(content_encoding) = content_encoding {
+        headers.insert(CONTENT_ENCODING, content_encoding);
+    }
     if let Ok(value) = HeaderValue::from_str(&body_len.to_string()) {
         headers.insert(CONTENT_LENGTH, value);
     }
@@ -3476,7 +3497,7 @@ fn transform_sse_event_bytes(
     let Some(hook) = hook else {
         return SseTransformOutcome::FailOpen;
     };
-    let Some(event) = parse_sse_event(raw) else {
+    let Some(event) = parse_sse_event(raw.clone()) else {
         return SseTransformOutcome::FailOpen;
     };
     match hook.transform_sse_event(TransformSseEventRequest {
@@ -3490,9 +3511,7 @@ fn transform_sse_event_bytes(
         response_headers: response_headers.clone(),
         event: event.clone(),
     }) {
-        Ok(TransformSseEventResult::Unchanged) => {
-            SseTransformOutcome::Emit(format_sse_events(&[event]))
-        }
+        Ok(TransformSseEventResult::Unchanged) => SseTransformOutcome::Emit(raw),
         Ok(TransformSseEventResult::Replace { events }) => {
             SseTransformOutcome::Emit(format_sse_events(&events))
         }

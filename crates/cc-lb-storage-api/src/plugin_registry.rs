@@ -299,6 +299,20 @@ pub trait PluginRegistryStore: Send + Sync {
         slot: PluginSlot,
     ) -> StorageResult<Vec<PluginChainEntry>>;
 
+    async fn list_chains_for_principals(
+        &self,
+        principal_ids: &[Uuid],
+        slots: &[PluginSlot],
+    ) -> StorageResult<Vec<PluginChainEntry>> {
+        let mut entries = Vec::new();
+        for principal_id in principal_ids {
+            for slot in slots {
+                entries.extend(self.list_chain_for_principal(*principal_id, *slot).await?);
+            }
+        }
+        Ok(entries)
+    }
+
     async fn update_chain_entry(
         &self,
         id: Uuid,
