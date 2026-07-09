@@ -2034,6 +2034,7 @@ impl Lifecycle {
             .as_ref()
             .map_or_else(UsageCounts::default, |body| usage_from_json_body(body));
         let mut downstream_body = body;
+        let mut buffered_transform_error: Option<ResponseTransformError> = None;
         if let (Some(hook), Some(semantic_body)) = (
             transform_ctx.dialect.response_transform_hook(),
             semantic_body,
@@ -2066,6 +2067,7 @@ impl Lifecycle {
                         %error,
                         "response transform failed open to original upstream response"
                     );
+                    buffered_transform_error = Some(error);
                 }
             }
         }
@@ -2103,16 +2105,24 @@ impl Lifecycle {
                 usage: to_usage_snapshot(&usage),
                 source: cc_lb_contract::UsageSource::NonStreamBody,
             });
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
-                event_id: o.event_id().to_owned(),
-                result: Ok(cc_lb_contract::StreamSuccess {
+            let stream_result = if let Some(error) = buffered_transform_error.as_ref() {
+                Err(cc_lb_contract::StreamError {
+                    error_type: "response_transform_error".to_owned(),
+                    error_message: error.to_string(),
+                })
+            } else {
+                Ok(cc_lb_contract::StreamSuccess {
                     usage: to_usage_snapshot(&usage),
                     sse_event_count: 0,
                     body_bytes: Some(downstream_body.len() as u64),
                     body_chunk_count: Some(body_chunk_count),
                     first_body_chunk_ms,
                     ..Default::default()
-                }),
+                })
+            };
+            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
+                event_id: o.event_id().to_owned(),
+                result: stream_result,
             });
             o.set_termination_timings(
                 None,
@@ -2130,6 +2140,8 @@ impl Lifecycle {
                 };
                 o.emit_provider_error(code, status.as_str(), "upstream");
                 o.set_terminal(status, code);
+            } else if buffered_transform_error.is_some() {
+                o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
             } else {
                 o.set_success_status(status);
             }

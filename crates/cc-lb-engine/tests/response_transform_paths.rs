@@ -23,12 +23,17 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_storage_api::principal::PrincipalRecord;
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
+use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_sqlite::SqliteStorage;
 use http::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue, Response, StatusCode};
 use url::Url;
 use uuid::Uuid;
 
-use common::{RecordingHook, TestAuthn, TestRouter, TestState, collect_body, messages_request};
+use common::{
+    RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState, collect_body,
+    messages_request,
+};
 
 #[tokio::test]
 async fn buffered_transform_rewrites_tool_name_and_sanitizes_headers() {
@@ -224,6 +229,65 @@ async fn buffered_transform_failure_fails_open_to_original_response() {
         Some(body.len().to_string())
     );
     assert!(headers.get(CONTENT_ENCODING).is_none());
+}
+
+#[tokio::test]
+async fn buffered_transform_failure_is_observed_as_error() -> Result<(), Box<dyn std::error::Error>>
+{
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "response-transform-observation.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let transform = Arc::new(FailingBufferedTransform);
+    let lifecycle = lifecycle_with_transforms(Some(transform), None, buffered_dispatch())
+        .with_event_bus(test_bus.bus_arc());
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":false}"#,
+        )))
+        .await
+        .expect("lifecycle handles buffered response");
+    let (status, _headers, body) = collect_body(response).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, buffered_upstream_body());
+
+    let events = wait_for_events(storage.as_ref(), 1).await?;
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert_eq!(event.status, StatusCode::OK.as_u16());
+    assert_eq!(event.error_code.as_deref(), Some("upstream_stream_error"));
+    Ok(())
+}
+
+async fn sqlite_storage(
+    dir: &tempfile::TempDir,
+    file_name: &str,
+) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
+    let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+            .await?;
+    storage.initialize(BackendKind::Sqlite).await?;
+    Ok(storage)
+}
+
+async fn wait_for_events(
+    storage: &dyn RequestEventStore,
+    expected: usize,
+) -> Result<Vec<cc_lb_storage_api::types::RequestEvent>, Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let events = RequestEventStore::query_request_events(storage, 0, u64::MAX, 10).await?;
+        if events.len() >= expected {
+            return Ok(events);
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("expected {expected} request event(s), got {}", events.len());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 #[tokio::test]
