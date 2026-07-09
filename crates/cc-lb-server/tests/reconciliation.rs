@@ -18,7 +18,7 @@ use cc_lb_storage_api::{
     PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
     PromptCacheObservationStore, StorageResult, SubscriptionQuotaCheckpointRange,
     SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaObservationRecord, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
+    SubscriptionQuotaSample, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
     UpstreamCreate, UpstreamPlanTierRecord, UpstreamRateLimitObservationRecord,
     UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
     UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob,
@@ -501,9 +501,9 @@ struct EmptySubscriptionQuotaStore;
 
 #[async_trait]
 impl UpstreamSubscriptionQuotaStore for EmptySubscriptionQuotaStore {
-    async fn put_subscription_quota_batch(
+    async fn record_subscription_quota_samples(
         &self,
-        _records: &[SubscriptionQuotaObservationRecord],
+        _records: &[SubscriptionQuotaSample],
     ) -> StorageResult<()> {
         Ok(())
     }
@@ -511,7 +511,7 @@ impl UpstreamSubscriptionQuotaStore for EmptySubscriptionQuotaStore {
     async fn list_latest_subscription_quota_for_upstreams(
         &self,
         _upstream_ids: &[Uuid],
-    ) -> StorageResult<Vec<SubscriptionQuotaObservationRecord>> {
+    ) -> StorageResult<Vec<SubscriptionQuotaSample>> {
         Ok(Vec::new())
     }
 

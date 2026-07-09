@@ -1,7 +1,7 @@
 use cc_lb_engine::SubscriptionQuotaSink;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_storage_api::{
-    SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
     SubscriptionQuotaStatus, SubscriptionQuotaWindow,
 };
 use serde::Deserialize;
@@ -71,7 +71,7 @@ fn records_from_usage(
     upstream_id: Uuid,
     usage: UsageBody,
     observed_at_unix_millis: u64,
-) -> Vec<SubscriptionQuotaObservationRecord> {
+) -> Vec<SubscriptionQuotaSample> {
     let mut records = Vec::new();
     push_window(
         &mut records,
@@ -121,7 +121,7 @@ fn records_from_usage(
 }
 
 fn push_window(
-    records: &mut Vec<SubscriptionQuotaObservationRecord>,
+    records: &mut Vec<SubscriptionQuotaSample>,
     upstream_id: Uuid,
     window: SubscriptionQuotaWindow,
     usage: Option<UsageWindow>,
@@ -153,8 +153,8 @@ fn base_record(
     extra_usage_enabled: Option<bool>,
     extra_usage_monthly_limit: Option<f64>,
     extra_usage_used_credits: Option<f64>,
-) -> SubscriptionQuotaObservationRecord {
-    SubscriptionQuotaObservationRecord {
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
         upstream_id,
         window,
         source: SubscriptionQuotaSource::Api,

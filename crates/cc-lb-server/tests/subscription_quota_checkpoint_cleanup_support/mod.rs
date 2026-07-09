@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
+    BackendKind, MetaStore, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSource, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
 };
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -73,7 +73,7 @@ pub async fn insert_large_raw_history(storage: &SqliteStorage) -> anyhow::Result
 
 pub async fn insert_raw_observations(
     storage: &SqliteStorage,
-    rows: &[SubscriptionQuotaObservationRecord],
+    rows: &[SubscriptionQuotaSample],
 ) -> anyhow::Result<()> {
     for row in rows {
         sqlx::query(
@@ -114,7 +114,7 @@ pub async fn insert_raw_observations(
 
 pub async fn insert_latest_row(
     storage: &SqliteStorage,
-    row: &SubscriptionQuotaObservationRecord,
+    row: &SubscriptionQuotaSample,
 ) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO upstream_subscription_quota_latest_v1 \
@@ -229,8 +229,8 @@ pub fn output_json(output: &Output) -> anyhow::Result<Value> {
 pub fn observation(
     observed_at_unix_millis: u64,
     sample_id: u128,
-) -> SubscriptionQuotaObservationRecord {
-    SubscriptionQuotaObservationRecord {
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
         upstream_id: Uuid::from_u128(0x7788),
         window: SubscriptionQuotaWindow::FiveHour,
         source: SubscriptionQuotaSource::Header,

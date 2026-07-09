@@ -4,7 +4,7 @@ use std::sync::Arc;
 use cc_lb_engine::SubscriptionQuotaCacheLike;
 use cc_lb_plugin_api::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_storage_api::{
-    StorageResult, SubscriptionQuotaObservationRecord, SubscriptionQuotaSource,
+    StorageResult, SubscriptionQuotaSample, SubscriptionQuotaSource,
     SubscriptionQuotaStatus, SubscriptionQuotaWindow,
 };
 use parking_lot::RwLock;
@@ -83,7 +83,7 @@ impl SubscriptionQuotaCache {
     pub fn upsert_observation(
         &self,
         upstream_id: Uuid,
-        record: &SubscriptionQuotaObservationRecord,
+        record: &SubscriptionQuotaSample,
     ) {
         let snapshot = MergedQuotaSnapshot::from_record(record);
         let mut guard = self.inner.write();
@@ -128,7 +128,7 @@ impl SubscriptionQuotaCache {
 }
 
 impl MergedQuotaSnapshot {
-    fn from_record(record: &SubscriptionQuotaObservationRecord) -> Self {
+    fn from_record(record: &SubscriptionQuotaSample) -> Self {
         Self {
             source: match record.source {
                 SubscriptionQuotaSource::Header => MergedSource::Header,
@@ -154,7 +154,7 @@ impl MergedQuotaSnapshot {
 }
 
 impl SubscriptionQuotaCacheLike for SubscriptionQuotaCache {
-    fn upsert_observation(&self, record: &SubscriptionQuotaObservationRecord) {
+    fn upsert_observation(&self, record: &SubscriptionQuotaSample) {
         self.upsert_observation(record.upstream_id, record);
     }
 

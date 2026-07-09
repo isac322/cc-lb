@@ -56,7 +56,7 @@ async fn subscription_quota_writes_continue_after_cleanup_drops_raw_table() -> a
     let storage = open_sqlite_storage(&path).await?;
     let mut next = observation(20_000, 2);
     next.utilization = Some(0.50);
-    storage.put_subscription_quota(&next).await?;
+    storage.record_subscription_quota_sample(&next).await?;
 
     assert_eq!(
         table_exists(&storage, "upstream_subscription_quota_observations_v1").await?,

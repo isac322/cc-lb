@@ -1,6 +1,6 @@
 use cc_lb_clock::unix_millis;
 use cc_lb_storage_api::{
-    StorageError, SubscriptionQuotaCheckpointRecord, SubscriptionQuotaObservationRecord,
+    StorageError, SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample,
     SubscriptionQuotaSemanticFingerprint, SubscriptionQuotaSource, SubscriptionQuotaWindow,
 };
 use serde::{Deserialize, Serialize};
@@ -146,7 +146,7 @@ async fn ensure_empty_checkpoint_table(
 
 async fn read_ordered_observations(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-) -> Result<Vec<SubscriptionQuotaObservationRecord>, SubscriptionQuotaCheckpointBackfillError> {
+) -> Result<Vec<SubscriptionQuotaSample>, SubscriptionQuotaCheckpointBackfillError> {
     let rows = sqlx::query(
         "SELECT * FROM upstream_subscription_quota_observations_v1 \
          ORDER BY upstream_id ASC, window ASC, source ASC, observed_at_unix_millis ASC, sample_id ASC",
@@ -162,7 +162,7 @@ async fn read_ordered_observations(
 
 fn parse_observation_row(
     row: SqliteRow,
-) -> Result<SubscriptionQuotaObservationRecord, SubscriptionQuotaCheckpointBackfillError> {
+) -> Result<SubscriptionQuotaSample, SubscriptionQuotaCheckpointBackfillError> {
     row_to_record(row).map_err(
         |source| SubscriptionQuotaCheckpointBackfillError::MalformedRows {
             malformed_rows: 1,
@@ -172,7 +172,7 @@ fn parse_observation_row(
 }
 
 fn expected_checkpoints(
-    observations: &[SubscriptionQuotaObservationRecord],
+    observations: &[SubscriptionQuotaSample],
 ) -> Result<ExpectedCheckpoints, SubscriptionQuotaCheckpointBackfillError> {
     let mut latest = BTreeMap::<ReplayKey, SubscriptionQuotaSemanticFingerprint>::new();
     let mut checkpoints = Vec::new();

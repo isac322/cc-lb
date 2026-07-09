@@ -1,12 +1,12 @@
 use cc_lb_storage_api::{
-    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaObservationRecord,
+    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample,
     SubscriptionQuotaSampleKind, SubscriptionQuotaSemanticFingerprint, SubscriptionQuotaSource,
     SubscriptionQuotaStatus, SubscriptionQuotaWindow,
 };
 use uuid::Uuid;
 
-fn semantic_checkpoint_base_record() -> SubscriptionQuotaObservationRecord {
-    SubscriptionQuotaObservationRecord {
+fn semantic_checkpoint_base_record() -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
         upstream_id: Uuid::from_u128(1),
         window: SubscriptionQuotaWindow::FiveHour,
         source: SubscriptionQuotaSource::Header,
@@ -32,9 +32,9 @@ fn semantic_checkpoint_base_record() -> SubscriptionQuotaObservationRecord {
 }
 
 fn semantic_checkpoint_fingerprint(
-    record: &SubscriptionQuotaObservationRecord,
+    record: &SubscriptionQuotaSample,
 ) -> SubscriptionQuotaSemanticFingerprint {
-    SubscriptionQuotaSemanticFingerprint::from_observation(record)
+    SubscriptionQuotaSemanticFingerprint::from_sample(record)
 }
 
 #[test]

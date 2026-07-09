@@ -5,7 +5,7 @@ use cc_lb_plugin_api::types::{CacheScore, TtlClass, WarmCacheEntry};
 use cc_lb_plugin_api::{
     Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
 };
-use cc_lb_storage_api::SubscriptionQuotaObservationRecord;
+use cc_lb_storage_api::SubscriptionQuotaSample;
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use uuid::Uuid;
@@ -180,7 +180,7 @@ impl TestSubscriptionQuotaCache {
 }
 
 impl SubscriptionQuotaCacheLike for TestSubscriptionQuotaCache {
-    fn upsert_observation(&self, _record: &SubscriptionQuotaObservationRecord) {}
+    fn upsert_observation(&self, _record: &SubscriptionQuotaSample) {}
 
     fn snapshot_for_upstream(
         &self,

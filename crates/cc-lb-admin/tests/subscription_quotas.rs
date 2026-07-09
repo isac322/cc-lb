@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_storage_api::{
     RequestEvent, RequestEventStore, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
     SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
     UsageRollupStore,
 };
@@ -208,7 +208,7 @@ async fn subscription_quota_checkpoint_analysis_uses_exact_checkpoint_intervals(
         .unwrap();
     server
         .storage
-        .put_subscription_quota(&quota_observation(
+        .record_subscription_quota_sample(&quota_observation(
             latest_only_upstream_id,
             2_000,
             15,
@@ -349,7 +349,7 @@ async fn create_oauth_upstream(server: &admin_test_common::SpawnedAdminServer, n
 }
 
 fn checkpoint_record(
-    record: SubscriptionQuotaObservationRecord,
+    record: SubscriptionQuotaSample,
 ) -> SubscriptionQuotaCheckpointRecord {
     SubscriptionQuotaCheckpointRecord::from(&record)
 }
@@ -361,7 +361,7 @@ fn quota_observation(
     source: SubscriptionQuotaSource,
     utilization: f64,
     status: Option<SubscriptionQuotaStatus>,
-) -> SubscriptionQuotaObservationRecord {
+) -> SubscriptionQuotaSample {
     quota_observation_with_status_and_reset(
         upstream_id,
         observed_at_unix_secs,
@@ -380,7 +380,7 @@ fn quota_observation_with_reset(
     source: SubscriptionQuotaSource,
     utilization: f64,
     resets_at_unix_secs: u64,
-) -> SubscriptionQuotaObservationRecord {
+) -> SubscriptionQuotaSample {
     quota_observation_with_status_and_reset(
         upstream_id,
         observed_at_unix_secs,
@@ -400,8 +400,8 @@ fn quota_observation_with_status_and_reset(
     utilization: f64,
     status: Option<SubscriptionQuotaStatus>,
     resets_at_unix_secs: u64,
-) -> SubscriptionQuotaObservationRecord {
-    SubscriptionQuotaObservationRecord {
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
         upstream_id,
         window: SubscriptionQuotaWindow::FiveHour,
         source,

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     StorageError, StorageResult, SubscriptionQuotaBucket, SubscriptionQuotaCheckpointRange,
     SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaLatestRecord, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaLatestRecord, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSemanticFingerprint, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
     SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
     SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
@@ -19,9 +19,9 @@ use crate::{
 
 #[async_trait]
 impl UpstreamSubscriptionQuotaStore for PostgresStorage {
-    async fn put_subscription_quota_batch(
+    async fn record_subscription_quota_samples(
         &self,
-        records: &[SubscriptionQuotaObservationRecord],
+        records: &[SubscriptionQuotaSample],
     ) -> StorageResult<()> {
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         for record in records {
@@ -307,7 +307,7 @@ fn range_for_key(key: CheckpointKey) -> SubscriptionQuotaCheckpointRange {
 
 async fn upsert_latest(
     conn: &mut PgConnection,
-    record: &SubscriptionQuotaObservationRecord,
+    record: &SubscriptionQuotaSample,
 ) -> StorageResult<()> {
     let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
     sqlx::query(
@@ -386,7 +386,7 @@ fn decode_upgrade_paths(raw: Option<String>) -> StorageResult<Option<Vec<String>
     }
 }
 
-fn row_to_record(row: PgRow) -> StorageResult<SubscriptionQuotaObservationRecord> {
+fn row_to_record(row: PgRow) -> StorageResult<SubscriptionQuotaSample> {
     let window = parse_window(&row.try_get::<String, _>("window").map_err(map_sqlx_error)?)?;
     let source = parse_source(&row.try_get::<String, _>("source").map_err(map_sqlx_error)?)?;
     let sample_kind = parse_sample_kind(
@@ -399,7 +399,7 @@ fn row_to_record(row: PgRow) -> StorageResult<SubscriptionQuotaObservationRecord
         .as_deref()
         .map(parse_status)
         .transpose()?;
-    Ok(SubscriptionQuotaObservationRecord {
+    Ok(SubscriptionQuotaSample {
         upstream_id: row.try_get("upstream_id").map_err(map_sqlx_error)?,
         window,
         source,
@@ -559,7 +559,7 @@ struct CheckpointStream {
 
 #[derive(Debug)]
 struct BucketPoint {
-    record: SubscriptionQuotaObservationRecord,
+    record: SubscriptionQuotaSample,
     is_change: bool,
 }
 
@@ -657,8 +657,8 @@ fn bucket_start_unix_secs(timestamp_unix_millis: u64, bucket_secs: u64) -> u64 {
 
 fn record_from_checkpoint(
     checkpoint: &SubscriptionQuotaCheckpointRecord,
-) -> SubscriptionQuotaObservationRecord {
-    SubscriptionQuotaObservationRecord {
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
         upstream_id: checkpoint.upstream_id,
         window: checkpoint.window,
         source: checkpoint.source,

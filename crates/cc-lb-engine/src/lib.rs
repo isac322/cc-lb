@@ -158,7 +158,7 @@ pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop}
 pub use lifecycle::{
     AuthLimitSubject, Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig,
     LimitCostEstimator, LimitSubjectProvider, ProxyError, RequestKind, UpstreamDispatch,
-    build_candidates, observe_rate_limits, observe_subscription_quota_headers,
+    build_candidates, observe_rate_limits, build_subscription_quota_samples,
     parse_request_cache_breakpoints,
 };
 pub use lifecycle_api_key_metrics_subscriber::{
@@ -233,7 +233,7 @@ pub use subscription_metadata_hook::{
 #[cfg(not(loom))]
 pub use subscription_quota_events::{
     SubscriptionQuotaEnqueueError, SubscriptionQuotaSink, SubscriptionQuotaWriterConfig,
-    start_subscription_quota_writer, unified_observation_to_record,
+    start_subscription_quota_writer, unified_observation_to_sample,
 };
 #[cfg(not(loom))]
 pub use terminal_observer::LifecycleContext;

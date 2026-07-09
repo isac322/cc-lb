@@ -3,7 +3,7 @@ use std::process::{Command, Output};
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, SubscriptionQuotaCheckpointRecord, SubscriptionQuotaObservationRecord,
+    BackendKind, MetaStore, SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample,
     SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaStatus,
     SubscriptionQuotaWindow,
 };
@@ -122,7 +122,7 @@ fn run_compact(storage_path: &Path) -> anyhow::Result<Output> {
 
 async fn insert_raw_observations(
     storage: &SqliteStorage,
-    rows: &[SubscriptionQuotaObservationRecord],
+    rows: &[SubscriptionQuotaSample],
 ) -> anyhow::Result<()> {
     for row in rows {
         sqlx::query(
@@ -195,7 +195,7 @@ fn output_completed_at(output: &Output) -> anyhow::Result<u64> {
         .unwrap_or_default())
 }
 
-fn quota_fixture_rows() -> Vec<SubscriptionQuotaObservationRecord> {
+fn quota_fixture_rows() -> Vec<SubscriptionQuotaSample> {
     let upstream = Uuid::from_u128(0x4242);
     let mut stable_claim = observation(upstream, 2_000, 2, SubscriptionQuotaSource::Header, 0.10);
     stable_claim.representative_claim = Some("claim-churn".to_owned());
@@ -213,7 +213,7 @@ fn quota_fixture_rows() -> Vec<SubscriptionQuotaObservationRecord> {
 }
 
 fn expected_checkpoints(
-    rows: &[SubscriptionQuotaObservationRecord],
+    rows: &[SubscriptionQuotaSample],
 ) -> Vec<SubscriptionQuotaCheckpointRecord> {
     [2usize, 0, 3, 4, 5]
         .into_iter()
@@ -233,8 +233,8 @@ fn observation(
     sample_id: u128,
     source: SubscriptionQuotaSource,
     utilization: f64,
-) -> SubscriptionQuotaObservationRecord {
-    SubscriptionQuotaObservationRecord {
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
         upstream_id,
         window: SubscriptionQuotaWindow::FiveHour,
         source,
