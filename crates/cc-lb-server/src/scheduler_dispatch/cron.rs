@@ -191,15 +191,16 @@ impl SchedulerDispatch {
         // Poll upstreams concurrently so one slow/hanging upstream cannot
         // consume the shared 60s tick budget and starve the rest (the prior
         // sequential loop did exactly that). Per-call/job timeouts unchanged.
-        let results =
-            futures_util::future::join_all(upstream_ids.into_iter().map(|upstream_id| async move {
+        let results = futures_util::future::join_all(upstream_ids.into_iter().map(
+            |upstream_id| async move {
                 (
                     upstream_id,
                     self.poll_and_record_oauth_usage(upstream_id, traceparent)
                         .await,
                 )
-            }))
-            .await;
+            },
+        ))
+        .await;
         let mut stats = OAuthUsagePollTickStats::default();
         for (upstream_id, result) in results {
             match result {
