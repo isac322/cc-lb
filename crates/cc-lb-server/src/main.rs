@@ -5,9 +5,6 @@ use std::process::ExitCode;
 use cc_lb_server::app::{BuildError, ServeError};
 use cc_lb_server::cli::{Cli, Command, ConfigCommand, DoctorCommand};
 use cc_lb_server::doctor::{self, DoctorError};
-use cc_lb_server::subscription_quota_checkpoint_backfill::{
-    self, SubscriptionQuotaBackfillCliError,
-};
 use cc_lb_server::{run_serve, validate};
 use clap::FromArgMatches;
 
@@ -16,7 +13,6 @@ enum RunError {
     Serve(cc_lb_server::app::ServeError),
     Cli(clap::Error),
     Doctor(DoctorError),
-    SubscriptionQuotaBackfill(SubscriptionQuotaBackfillCliError),
     Runtime(std::io::Error),
     Help(std::io::Error),
 }
@@ -54,19 +50,6 @@ fn main() -> ExitCode {
         }
         Err(RunError::Doctor(error)) => {
             eprintln!("doctor: failed: {error}");
-            ExitCode::FAILURE
-        }
-        Err(RunError::SubscriptionQuotaBackfill(
-            SubscriptionQuotaBackfillCliError::MissingSqliteStoragePath { path },
-        )) => {
-            eprintln!(
-                "{}",
-                serde_json::json!({ "error": "storage not found", "path": path })
-            );
-            ExitCode::from(2)
-        }
-        Err(RunError::SubscriptionQuotaBackfill(error)) => {
-            eprintln!("subscription quota checkpoint backfill: failed: {error}");
             ExitCode::FAILURE
         }
         Err(RunError::Runtime(error)) => {
@@ -143,22 +126,6 @@ fn run() -> Result<(), RunError> {
             runtime
                 .block_on(doctor::run_list_abandoned_chain_entries(clock))
                 .map_err(RunError::Doctor)
-        }
-        Some(Command::CompactSubscriptionQuotaHistory {
-            storage_path,
-            drop_raw_observations,
-        }) => {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(RunError::Runtime)?;
-            runtime
-                .block_on(subscription_quota_checkpoint_backfill::run(
-                    clock,
-                    storage_path,
-                    drop_raw_observations,
-                ))
-                .map_err(RunError::SubscriptionQuotaBackfill)
         }
         None => {
             let mut command = Cli::command();

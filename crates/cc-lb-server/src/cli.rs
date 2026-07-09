@@ -42,24 +42,6 @@ pub enum Command {
         #[command(subcommand)]
         command: DoctorCommand,
     },
-    /// Compact subscription quota history into change-only checkpoints.
-    ///
-    /// Replays raw observations to create sparse checkpoints with exact timestamps.
-    /// This separates history from freshness, as the latest cache still updates on
-    /// every observation. Source provenance (header and api) is preserved and merged
-    /// at read time.
-    CompactSubscriptionQuotaHistory {
-        /// Path to the SQLite database file; required with --drop-raw-observations.
-        #[arg(long, value_name = "PATH")]
-        storage_path: Option<PathBuf>,
-        /// Drop the raw observations table and VACUUM the database after validation.
-        ///
-        /// This is a destructive operation that reclaims disk space. It validates
-        /// checkpoint parity before dropping any data. If validation fails, it aborts.
-        /// This flag is rejected unless --storage-path is explicit.
-        #[arg(long, action = ArgAction::SetTrue)]
-        drop_raw_observations: bool,
-    },
 }
 
 #[cfg(test)]

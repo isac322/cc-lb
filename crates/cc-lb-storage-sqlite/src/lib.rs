@@ -9,15 +9,6 @@ use sqlx::{
 
 pub mod adapter;
 
-pub use adapter::subscription_quota_backfill::{
-    SUBSCRIPTION_QUOTA_CHECKPOINT_BACKFILL_MARKER_KEY, SubscriptionQuotaCheckpointBackfillError,
-    SubscriptionQuotaCheckpointBackfillReport,
-};
-pub use adapter::subscription_quota_cleanup::{
-    SUBSCRIPTION_QUOTA_CHECKPOINT_CLEANUP_MARKER_KEY, SubscriptionQuotaCheckpointCleanupError,
-    SubscriptionQuotaCheckpointCleanupReport,
-};
-
 #[derive(Clone)]
 pub struct SqliteStorage {
     pool: SqlitePool,
