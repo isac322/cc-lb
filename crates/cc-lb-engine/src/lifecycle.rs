@@ -1967,6 +1967,7 @@ impl Lifecycle {
         }
 
         let (mut parts, mut body) = response.into_parts();
+        strip_hop_by_hop(&mut parts.headers);
         let body_collect_started = Instant::now();
         let mut first_body_chunk_at: Option<Instant> = None;
         let mut body_buf: Vec<u8> = Vec::new();
