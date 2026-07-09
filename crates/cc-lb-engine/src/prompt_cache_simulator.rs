@@ -279,10 +279,18 @@ fn explicit_cache_ttl(value: &Value) -> Option<String> {
 }
 
 fn block_digest(block: &V3PromptCacheBlock) -> [u8; 32] {
+    let value = match &block.value {
+        Value::Object(map) => {
+            let mut value = map.clone();
+            value.remove("cache_control");
+            Value::Object(value)
+        }
+        value => value.clone(),
+    };
     let hash_input = json!({
         "source": source_name(block.source),
         "path": &block.path,
-        "value": &block.value,
+        "value": value,
     });
     let bytes = serde_json::to_vec(&hash_input).unwrap_or_default();
     let mut hasher = Sha256::new();
@@ -442,6 +450,44 @@ mod tests {
             !lookback
                 .iter()
                 .any(|prefix| prefix.content_block_index == 0)
+        );
+    }
+
+    #[test]
+    fn moved_cache_control_keeps_prior_content_prefix_matchable() {
+        let previous = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role":"user","content": [
+                {"type":"text","text":"stable first block"},
+                {"type":"text","text":"stable second block","cache_control":{"type":"ephemeral"}}
+            ]}]
+        });
+        let current = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role":"user","content": [
+                {"type":"text","text":"stable first block"},
+                {"type":"text","text":"stable second block"},
+                {"type":"text","text":"new suffix block","cache_control":{"type":"ephemeral"}}
+            ]}]
+        });
+
+        let previous = analyze_v3_prompt_cache(&previous, canonical_model_id("claude-sonnet-4-5"));
+        let current = analyze_v3_prompt_cache(&current, canonical_model_id("claude-sonnet-4-5"));
+        let previous_breakpoint = previous
+            .breakpoints
+            .first()
+            .expect("previous request has cache breakpoint");
+        let current_prior_prefix = current.breakpoints[0]
+            .lookback_prefixes
+            .iter()
+            .find(|prefix| prefix.content_block_index == previous_breakpoint.block_index)
+            .expect("current lookback includes previous breakpoint block");
+
+        assert_eq!(previous_breakpoint.block_index, 1);
+        assert_eq!(current_prior_prefix.content_block_index, 1);
+        assert_eq!(
+            previous_breakpoint.prefix_key,
+            current_prior_prefix.prefix_key
         );
     }
 
