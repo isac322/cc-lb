@@ -20,6 +20,7 @@ mod module;
 mod plugin;
 pub mod policy;
 mod probe;
+mod response_transform;
 #[cfg(test)]
 mod tests;
 

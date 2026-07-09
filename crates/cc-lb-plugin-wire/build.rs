@@ -102,6 +102,46 @@ fn main() {
         },
         SchemaEntry {
             impl_generics: "",
+            ty: "TransformResponseRequest",
+            descriptor: "TransformResponseRequest{body:Box<[u8]>,canonical_model_id:Box<str>,principal:Principal,request_id:Box<str>,request_method:Box<str>,request_path:Box<str>,response_headers:Box<[Header]>,response_status:u16,upstream:Upstream}",
+        },
+        SchemaEntry {
+            impl_generics: "<'a>",
+            ty: "TransformResponseRequestRef<'a>",
+            descriptor: "TransformResponseRequestRef{body:&[u8],canonical_model_id:&str,principal:PrincipalRef,request_id:&str,request_method:&str,request_path:&str,response_headers:&[HeaderRef],response_status:u16,upstream:UpstreamRef}",
+        },
+        SchemaEntry {
+            impl_generics: "",
+            ty: "TransformResponseResult",
+            descriptor: "TransformResponseResult[Unchanged,Replace{body:Option<Box<[u8]>>,headers:Option<Box<[Header]>>,status:Option<u16>} ]",
+        },
+        SchemaEntry {
+            impl_generics: "",
+            ty: "SseEvent",
+            descriptor: "SseEvent{data:Box<[u8]>,event:Box<str>}",
+        },
+        SchemaEntry {
+            impl_generics: "<'a>",
+            ty: "SseEventRef<'a>",
+            descriptor: "SseEventRef{data:&[u8],event:&str}",
+        },
+        SchemaEntry {
+            impl_generics: "",
+            ty: "TransformSseEventRequest",
+            descriptor: "TransformSseEventRequest{canonical_model_id:Box<str>,event:SseEvent,principal:Principal,request_id:Box<str>,request_method:Box<str>,request_path:Box<str>,response_headers:Box<[Header]>,response_status:u16,upstream:Upstream}",
+        },
+        SchemaEntry {
+            impl_generics: "<'a>",
+            ty: "TransformSseEventRequestRef<'a>",
+            descriptor: "TransformSseEventRequestRef{canonical_model_id:&str,event:SseEventRef,principal:PrincipalRef,request_id:&str,request_method:&str,request_path:&str,response_headers:&[HeaderRef],response_status:u16,upstream:UpstreamRef}",
+        },
+        SchemaEntry {
+            impl_generics: "",
+            ty: "TransformSseEventResult",
+            descriptor: "TransformSseEventResult[Unchanged,Replace{events:Box<[SseEvent]>},Drop]",
+        },
+        SchemaEntry {
+            impl_generics: "",
             ty: "ObserveEvent",
             descriptor: "ObserveEvent[RequestStarted{request_id:Box<str>,downstream_user_agent:Option<Box<str>>},AuthnComplete{principal_id:Box<str>,principal_kind:Box<str>},UpstreamChosen{upstream:Upstream},Chunk{batch_index:u64,event_count:u64,total_bytes:u64},RequestFinished{status:u16,input_tokens:Option<u64>,output_tokens:Option<u64>,cache_creation_input_tokens:Option<u64>,cache_read_input_tokens:Option<u64>,duration_ms:u64},Error{code:Box<str>,message:Box<str>,source:Box<str>}]",
         },

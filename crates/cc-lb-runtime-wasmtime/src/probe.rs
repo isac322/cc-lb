@@ -1,17 +1,22 @@
 use std::sync::Arc;
 
-use cc_lb_plugin_wire::metadata::PluginMetadata;
+use cc_lb_plugin_wire::metadata::{HookMode, PluginMetadata};
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
 use cc_lb_plugin_wire::v1::{
-    ArchivedFilterResponse, ArchivedShapeResponse, CachePricingSummary, FilterRequest, Header,
-    ObserveEvent, Principal, ShapeRequest, Upstream,
+    ArchivedFilterResponse, ArchivedShapeResponse, ArchivedTransformResponseResult,
+    ArchivedTransformSseEventResult, CachePricingSummary, FilterRequest, Header, ObserveEvent,
+    Principal, ShapeRequest, SseEvent, TransformResponseRequest, TransformSseEventRequest,
+    Upstream,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 use wasmtime::InstancePre;
 
 use crate::budget::StoreBudget;
-use crate::cache::{call_filter_hook, call_observe_hook, call_shape_hook};
+use crate::cache::{
+    call_filter_hook, call_observe_hook, call_shape_hook, call_transform_response_hook,
+    call_transform_sse_event_hook,
+};
 use crate::cell::PluginCell;
 use crate::engine::HostState;
 use crate::error::WasmtimeRuntimeError;
@@ -23,6 +28,17 @@ pub(crate) fn probe_hook_dispatch(
     metadata: &PluginMetadata,
     memory_max_pages: u32,
 ) -> Result<(), WasmtimeRuntimeError> {
+    if matches!(
+        hook,
+        HookKind::TransformResponse | HookKind::TransformSseEvent
+    ) && metadata
+        .hooks
+        .get(hook.as_str())
+        .is_some_and(|hook_metadata| hook_metadata.mode == HookMode::Noop)
+    {
+        return Ok(());
+    }
+
     let cell = Arc::new(PluginCell {
         version_id: 0,
         instance_pre,
@@ -36,6 +52,8 @@ pub(crate) fn probe_hook_dispatch(
         (HookKind::Filter, WireVersion::V1) => probe_filter_v1(&cell),
         (HookKind::Shape, WireVersion::V1) => probe_shape_v1(&cell),
         (HookKind::Observe, WireVersion::V1) => probe_observe_v1(&cell),
+        (HookKind::TransformResponse, WireVersion::V1) => probe_transform_response_v1(&cell),
+        (HookKind::TransformSseEvent, WireVersion::V1) => probe_transform_sse_event_v1(&cell),
     }
 }
 
@@ -71,6 +89,44 @@ fn probe_observe_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRuntimeError> 
     })?;
     call_observe_hook(cell, input.as_slice())
         .map_err(|error| probe_failed(HookKind::Observe, error.to_string()))?;
+    Ok(())
+}
+
+fn probe_transform_response_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRuntimeError> {
+    let input =
+        rkyv::to_bytes::<RkyvError>(&sample_transform_response_request()).map_err(|error| {
+            probe_failed(
+                HookKind::TransformResponse,
+                format!("encode TransformResponseRequest: {error}"),
+            )
+        })?;
+    let output = call_transform_response_hook(cell, input.as_slice())
+        .map_err(|error| probe_failed(HookKind::TransformResponse, error.to_string()))?;
+    rkyv::access::<ArchivedTransformResponseResult, RkyvError>(&output).map_err(|error| {
+        probe_failed(
+            HookKind::TransformResponse,
+            format!("decode TransformResponseResult: {error}"),
+        )
+    })?;
+    Ok(())
+}
+
+fn probe_transform_sse_event_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRuntimeError> {
+    let input =
+        rkyv::to_bytes::<RkyvError>(&sample_transform_sse_event_request()).map_err(|error| {
+            probe_failed(
+                HookKind::TransformSseEvent,
+                format!("encode TransformSseEventRequest: {error}"),
+            )
+        })?;
+    let output = call_transform_sse_event_hook(cell, input.as_slice())
+        .map_err(|error| probe_failed(HookKind::TransformSseEvent, error.to_string()))?;
+    rkyv::access::<ArchivedTransformSseEventResult, RkyvError>(&output).map_err(|error| {
+        probe_failed(
+            HookKind::TransformSseEvent,
+            format!("decode TransformSseEventResult: {error}"),
+        )
+    })?;
     Ok(())
 }
 
@@ -115,6 +171,41 @@ fn sample_observe_event() -> ObserveEvent {
     ObserveEvent::RequestStarted {
         request_id: Box::from("probe-req-1"),
         downstream_user_agent: Some(Box::from("cc-lb-probe/1.0")),
+    }
+}
+
+fn sample_transform_response_request() -> TransformResponseRequest {
+    TransformResponseRequest {
+        request_id: Box::from("probe-req-1"),
+        principal: synth_principal(),
+        upstream: Upstream::AnthropicDirect {
+            base_url: Some(Box::from("https://example.test")),
+        },
+        request_method: Box::from("POST"),
+        request_path: Box::from("/v1/messages"),
+        canonical_model_id: Box::from("claude-3-haiku-20240307"),
+        response_status: 200,
+        response_headers: Box::new([hdr("content-type", "application/json")]),
+        body: Box::from(&br#"{"content":[]}"#[..]),
+    }
+}
+
+fn sample_transform_sse_event_request() -> TransformSseEventRequest {
+    TransformSseEventRequest {
+        request_id: Box::from("probe-req-1"),
+        principal: synth_principal(),
+        upstream: Upstream::AnthropicDirect {
+            base_url: Some(Box::from("https://example.test")),
+        },
+        request_method: Box::from("POST"),
+        request_path: Box::from("/v1/messages"),
+        canonical_model_id: Box::from("claude-3-haiku-20240307"),
+        response_status: 200,
+        response_headers: Box::new([hdr("content-type", "text/event-stream")]),
+        event: SseEvent {
+            event: Box::from("content_block_start"),
+            data: Box::from(&br#"{"type":"content_block_start"}"#[..]),
+        },
     }
 }
 

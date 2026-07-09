@@ -134,3 +134,20 @@ pub enum ObservabilityError {
         reason: String,
     },
 }
+
+/// Response transform failures returned by response-transform hooks.
+#[derive(Debug, Error)]
+pub enum ResponseTransformError {
+    /// Runtime error during response transformation.
+    #[error("response transform runtime error: {reason}")]
+    Runtime {
+        /// Redacted runtime failure reason.
+        reason: String,
+    },
+    /// Trap error from a wasm response transform.
+    #[error("response transform trap: {reason}")]
+    Trap {
+        /// Redacted trap failure reason.
+        reason: String,
+    },
+}

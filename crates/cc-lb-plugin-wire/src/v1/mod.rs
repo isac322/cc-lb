@@ -321,6 +321,105 @@ pub struct ShapeResponse {
     pub body: Box<[u8]>,
 }
 
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
+#[rkyv(derive(Debug))]
+pub struct TransformResponseRequest {
+    pub request_id: Box<str>,
+    pub principal: Principal,
+    pub upstream: Upstream,
+    pub request_method: Box<str>,
+    pub request_path: Box<str>,
+    pub canonical_model_id: Box<str>,
+    pub response_status: u16,
+    pub response_headers: Box<[Header]>,
+    pub body: Box<[u8]>,
+}
+
+#[derive(Archive, Serialize)]
+pub struct TransformResponseRequestRef<'a> {
+    #[rkyv(with = InlineAsBox)]
+    pub request_id: &'a str,
+    pub principal: PrincipalRef<'a>,
+    pub upstream: UpstreamRef<'a>,
+    #[rkyv(with = InlineAsBox)]
+    pub request_method: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub request_path: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub canonical_model_id: &'a str,
+    pub response_status: u16,
+    #[rkyv(with = InlineAsBox)]
+    pub response_headers: &'a [HeaderRef<'a>],
+    #[rkyv(with = InlineAsBox)]
+    pub body: &'a [u8],
+}
+
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
+#[rkyv(derive(Debug))]
+pub enum TransformResponseResult {
+    Unchanged,
+    Replace {
+        status: Option<u16>,
+        headers: Option<Box<[Header]>>,
+        body: Option<Box<[u8]>>,
+    },
+}
+
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
+#[rkyv(derive(Debug))]
+pub struct SseEvent {
+    pub event: Box<str>,
+    pub data: Box<[u8]>,
+}
+
+#[derive(Archive, Serialize)]
+pub struct SseEventRef<'a> {
+    #[rkyv(with = InlineAsBox)]
+    pub event: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub data: &'a [u8],
+}
+
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
+#[rkyv(derive(Debug))]
+pub struct TransformSseEventRequest {
+    pub request_id: Box<str>,
+    pub principal: Principal,
+    pub upstream: Upstream,
+    pub request_method: Box<str>,
+    pub request_path: Box<str>,
+    pub canonical_model_id: Box<str>,
+    pub response_status: u16,
+    pub response_headers: Box<[Header]>,
+    pub event: SseEvent,
+}
+
+#[derive(Archive, Serialize)]
+pub struct TransformSseEventRequestRef<'a> {
+    #[rkyv(with = InlineAsBox)]
+    pub request_id: &'a str,
+    pub principal: PrincipalRef<'a>,
+    pub upstream: UpstreamRef<'a>,
+    #[rkyv(with = InlineAsBox)]
+    pub request_method: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub request_path: &'a str,
+    #[rkyv(with = InlineAsBox)]
+    pub canonical_model_id: &'a str,
+    pub response_status: u16,
+    #[rkyv(with = InlineAsBox)]
+    pub response_headers: &'a [HeaderRef<'a>],
+    pub event: SseEventRef<'a>,
+}
+
+#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
+#[rkyv(derive(Debug))]
+pub enum TransformSseEventResult {
+    Unchanged,
+    Replace { events: Box<[SseEvent]> },
+    Drop,
+}
+
 /// Lifecycle event delivered to the observe hook. rkyv mirror of
 /// `cc_lb_plugin_api::ObserveEvent`.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]

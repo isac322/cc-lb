@@ -618,6 +618,14 @@ plugins = ["missing-plugin"]
         assert!(entries.is_empty());
     }
 
+    #[test]
+    fn parse_plugin_slot_rejects_response_transform_slots() {
+        assert_eq!(parse_plugin_slot("transform_response"), None);
+        assert_eq!(parse_plugin_slot("TransformResponse"), None);
+        assert_eq!(parse_plugin_slot("transform_sse_event"), None);
+        assert_eq!(parse_plugin_slot("TransformSseEvent"), None);
+    }
+
     async fn fixture() -> (tempfile::TempDir, Storage) {
         let dir = tempfile::tempdir().unwrap();
         let database_url = format!("sqlite://{}", dir.path().join("storage.sqlite").display());

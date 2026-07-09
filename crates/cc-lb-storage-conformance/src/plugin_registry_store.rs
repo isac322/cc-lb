@@ -51,6 +51,7 @@ where
     registry_label_update_with_stale_revision_conflicts(storage).await?;
     chain_insert_preserves_sparse_order(storage).await?;
     list_chain_for_principal_returns_ordered(storage).await?;
+    list_chains_for_principals_returns_ordered_and_filtered(storage).await?;
     router_multi_entry_ordered_on_storage(storage).await?;
     insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage(storage).await?;
     router_reorder_preserves_invariants_on_storage(storage).await?;
@@ -415,6 +416,97 @@ pub async fn list_chain_for_principal_returns_ordered<S: PluginRegistryStore + P
         .await?;
     ensure!(listed.len() == 2, "chain list includes both entries");
     ensure!(listed[0].order < listed[1].order, "chain list is ordered");
+    Ok(())
+}
+
+pub async fn list_chains_for_principals_returns_ordered_and_filtered<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let (first_principal, first_plugin) =
+        principal_and_plugin(storage, 160, "plugin-chain-batch-first").await?;
+    let (second_principal, second_plugin) =
+        principal_and_plugin(storage, 161, "plugin-chain-batch-second").await?;
+    let (ignored_principal, ignored_plugin) =
+        principal_and_plugin(storage, 162, "plugin-chain-batch-ignored").await?;
+
+    let first_late = storage
+        .insert_chain_entry(chain_with_slot(
+            first_principal,
+            PluginSlot::ObservabilityHook,
+            first_plugin.id,
+            sparse_order::STEP * 2,
+        ))
+        .await?;
+    let first_early = storage
+        .insert_chain_entry(chain_with_slot(
+            first_principal,
+            PluginSlot::ObservabilityHook,
+            first_plugin.id,
+            sparse_order::STEP,
+        ))
+        .await?;
+    let second_router = storage
+        .insert_chain_entry(chain_with_slot(
+            second_principal,
+            PluginSlot::Router,
+            second_plugin.id,
+            sparse_order::STEP,
+        ))
+        .await?;
+    storage
+        .insert_chain_entry(chain_with_slot(
+            ignored_principal,
+            PluginSlot::Router,
+            ignored_plugin.id,
+            sparse_order::STEP,
+        ))
+        .await?;
+
+    let listed = storage
+        .list_chains_for_principals(
+            &[first_principal, second_principal],
+            &[PluginSlot::ObservabilityHook, PluginSlot::Router],
+        )
+        .await?;
+
+    let mut expected_groups = vec![
+        (
+            first_principal,
+            PluginSlot::ObservabilityHook,
+            vec![first_early.id, first_late.id],
+        ),
+        (second_principal, PluginSlot::Router, vec![second_router.id]),
+    ];
+    expected_groups.sort_by_key(|g| (g.0, g.1));
+
+    let mut actual_groups = std::collections::BTreeMap::new();
+    for entry in listed {
+        actual_groups
+            .entry((entry.principal_id, entry.slot))
+            .or_insert_with(Vec::new)
+            .push(entry.id);
+    }
+
+    let actual_groups_vec: Vec<_> = actual_groups
+        .into_iter()
+        .map(|(k, v)| (k.0, k.1, v))
+        .collect();
+    ensure!(
+        actual_groups_vec == expected_groups,
+        "batched chain list is filtered and ordered by principal, slot, and order"
+    );
+
+    let empty = storage
+        .list_chains_for_principals(&[], &[PluginSlot::Router])
+        .await?;
+    ensure!(empty.is_empty(), "empty principal filter returns no chains");
+
+    let empty = storage
+        .list_chains_for_principals(&[first_principal], &[])
+        .await?;
+    ensure!(empty.is_empty(), "empty slot filter returns no chains");
     Ok(())
 }
 
@@ -1545,6 +1637,7 @@ fn filter_hook_metadata() -> BTreeMap<String, HookMetadata> {
             wire_version: default_wire_version(),
             description: "filter hook".to_owned(),
             usage: "called by router".to_owned(),
+            mode: Default::default(),
         },
     )])
 }

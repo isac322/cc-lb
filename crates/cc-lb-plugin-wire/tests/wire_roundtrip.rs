@@ -12,7 +12,10 @@ use cc_lb_plugin_wire::{
     ArchivedFilterRequest, ArchivedObserveEvent, ArchivedShapeRequest, CachePricingSummary,
     CachePricingSummaryRef, Claim, ClaimRef, FilterRequest, FilterRequestRef, Header, HeaderRef,
     ObserveEvent, Principal, PrincipalRef, QueryRef, ShapeRequest, ShapeRequestRef, ShapeResponse,
-    Upstream, UpstreamCandidate, UpstreamCandidateRef, UpstreamRef, WireSchema,
+    SseEvent, SseEventRef, TransformResponseRequest, TransformResponseRequestRef,
+    TransformResponseResult, TransformSseEventRequest, TransformSseEventRequestRef,
+    TransformSseEventResult, Upstream, UpstreamCandidate, UpstreamCandidateRef, UpstreamRef,
+    WireSchema,
     schema::{HookKind, WireVersion},
 };
 use rkyv::rancor::Error;
@@ -212,6 +215,123 @@ fn shape_response_round_trips() {
 }
 
 #[test]
+fn transform_response_request_ref_encodes_to_owned_wire() {
+    let claim_refs = [ClaimRef {
+        key: "scope",
+        value: b"inference",
+    }];
+    let header_refs = [HeaderRef {
+        name: "content-type",
+        value: b"application/json",
+    }];
+    let req_ref = TransformResponseRequestRef {
+        request_id: "req-transform",
+        principal: PrincipalRef {
+            id: "tenant-a",
+            kind: "api_key",
+            claims: &claim_refs,
+        },
+        upstream: UpstreamRef::AnthropicDirect { base_url: None },
+        request_method: "POST",
+        request_path: "/v1/messages",
+        canonical_model_id: "claude-test",
+        response_status: 200,
+        response_headers: &header_refs,
+        body: b"{\"content\":[]}",
+    };
+    let bytes = rkyv::to_bytes::<Error>(&req_ref).expect("encode ref");
+    let archived =
+        rkyv::access::<cc_lb_plugin_wire::ArchivedTransformResponseRequest, Error>(&bytes)
+            .expect("access owned");
+    let body: &[u8] = &archived.body;
+    assert_eq!(body, b"{\"content\":[]}");
+    let request_id: &str = &archived.request_id;
+    assert_eq!(request_id, "req-transform");
+}
+
+#[test]
+fn transform_response_result_round_trips() {
+    let result = TransformResponseResult::Replace {
+        status: Some(202),
+        headers: Some(Box::new([header("x-plugin", "yes")])),
+        body: Some(Box::from(&b"{\"ok\":true}"[..])),
+    };
+    let bytes = rkyv::to_bytes::<Error>(&result).expect("encode");
+    let archived =
+        rkyv::access::<cc_lb_plugin_wire::ArchivedTransformResponseResult, Error>(&bytes)
+            .expect("access");
+    let owned: TransformResponseResult =
+        rkyv::deserialize::<TransformResponseResult, Error>(archived).expect("deserialize");
+    match owned {
+        TransformResponseResult::Replace { status, body, .. } => {
+            assert_eq!(status, Some(202));
+            assert_eq!(body.as_deref(), Some(&b"{\"ok\":true}"[..]));
+        }
+        TransformResponseResult::Unchanged => panic!("variant mismatch"),
+    }
+}
+
+#[test]
+fn transform_sse_event_request_ref_encodes_to_owned_wire() {
+    let header_refs = [HeaderRef {
+        name: "content-type",
+        value: b"text/event-stream",
+    }];
+    let event_ref = SseEventRef {
+        event: "content_block_start",
+        data: br#"{"type":"content_block_start"}"#,
+    };
+    let req_ref = TransformSseEventRequestRef {
+        request_id: "req-sse",
+        principal: PrincipalRef {
+            id: "tenant-a",
+            kind: "api_key",
+            claims: &[],
+        },
+        upstream: UpstreamRef::AnthropicDirect { base_url: None },
+        request_method: "POST",
+        request_path: "/v1/messages",
+        canonical_model_id: "claude-test",
+        response_status: 200,
+        response_headers: &header_refs,
+        event: event_ref,
+    };
+    let bytes = rkyv::to_bytes::<Error>(&req_ref).expect("encode ref");
+    let archived =
+        rkyv::access::<cc_lb_plugin_wire::ArchivedTransformSseEventRequest, Error>(&bytes)
+            .expect("access owned");
+    let event_name: &str = &archived.event.event;
+    let data: &[u8] = &archived.event.data;
+    assert_eq!(event_name, "content_block_start");
+    assert_eq!(data, br#"{"type":"content_block_start"}"#);
+}
+
+#[test]
+fn transform_sse_event_result_round_trips() {
+    let result = TransformSseEventResult::Replace {
+        events: Box::new([SseEvent {
+            event: Box::from("content_block_start"),
+            data: Box::from(&br#"{"rewritten":true}"#[..]),
+        }]),
+    };
+    let bytes = rkyv::to_bytes::<Error>(&result).expect("encode");
+    let archived =
+        rkyv::access::<cc_lb_plugin_wire::ArchivedTransformSseEventResult, Error>(&bytes)
+            .expect("access");
+    let owned: TransformSseEventResult =
+        rkyv::deserialize::<TransformSseEventResult, Error>(archived).expect("deserialize");
+    match owned {
+        TransformSseEventResult::Replace { events } => {
+            assert_eq!(events.len(), 1);
+            assert_eq!(&*events[0].event, "content_block_start");
+        }
+        TransformSseEventResult::Unchanged | TransformSseEventResult::Drop => {
+            panic!("variant mismatch")
+        }
+    }
+}
+
+#[test]
 fn observe_event_request_started_round_trips() {
     let ev = ObserveEvent::RequestStarted {
         request_id: Box::from("req-3"),
@@ -290,6 +410,8 @@ fn schema_fingerprints_and_sections_are_distinct() {
         <FilterRequest as WireSchema>::FINGERPRINT,
         <ShapeRequest as WireSchema>::FINGERPRINT,
         <ObserveEvent as WireSchema>::FINGERPRINT,
+        <TransformResponseRequest as WireSchema>::FINGERPRINT,
+        <TransformSseEventRequest as WireSchema>::FINGERPRINT,
     ];
     for i in 0..fingerprints.len() {
         for j in i + 1..fingerprints.len() {
@@ -313,6 +435,16 @@ fn schema_fingerprints_and_sections_are_distinct() {
         format!(
             "{}.{}",
             HookKind::Observe.section_prefix(),
+            WireVersion::V1.as_str()
+        ),
+        format!(
+            "{}.{}",
+            HookKind::TransformResponse.section_prefix(),
+            WireVersion::V1.as_str()
+        ),
+        format!(
+            "{}.{}",
+            HookKind::TransformSseEvent.section_prefix(),
             WireVersion::V1.as_str()
         ),
     ];

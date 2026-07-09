@@ -16,9 +16,10 @@ use cc_lb_plugin_api::types::{
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, FilterError, FilterOutput, InternalError, InternalErrorKind,
     InternalErrorStage, ObservabilityHook, ObserveEvent, Principal, PrincipalKind, RequestContext,
-    RetryDecision, RouterPlugin, RoutingTrace, ShapedRequest, ShapedRequestBuilder, SignedRequest,
-    TerminalStrategy, Upstream, UpstreamCandidate, UpstreamDialect, UpstreamError,
-    UpstreamKind as CandidateUpstreamKind, shape_request, sign_request,
+    ResponseTransformError, RetryDecision, RouterPlugin, RoutingTrace, ShapedRequest,
+    ShapedRequestBuilder, SignedRequest, TerminalStrategy, TransformResponseRequest, Upstream,
+    UpstreamCandidate, UpstreamDialect, UpstreamError, UpstreamKind as CandidateUpstreamKind,
+    shape_request, sign_request,
 };
 use cc_lb_storage_api::{
     SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
@@ -1815,23 +1816,6 @@ impl Lifecycle {
             }
         }
 
-        if response.status().is_client_error() || response.status().is_server_error() {
-            strip_hop_by_hop(response.headers_mut());
-            self.attach_limit_headers(&mut response, active_limit.as_ref());
-            let status = response.status();
-            if let Some(o) = observer.as_ref() {
-                let code = if status.is_client_error() {
-                    error_codes::UPSTREAM_4XX
-                } else {
-                    error_codes::UPSTREAM_5XX
-                };
-                o.emit_provider_error(code, status.as_str(), "upstream");
-                o.set_terminal(status, code);
-                o.finish();
-            }
-            return Ok(response);
-        }
-
         let status = response.status();
         response = self
             .finish_success_response(
@@ -1847,6 +1831,13 @@ impl Lifecycle {
                     proxy_setup_ms: Some(proxy_setup_ms),
                     stage_timings: attempt_timings,
                     internal_errors,
+                },
+                ResponseTransformContext {
+                    principal: principal.clone(),
+                    upstream: route.upstream.clone(),
+                    request_method: ctx.method.clone(),
+                    request_path: ctx.path.clone(),
+                    dialect: route.dialect.clone(),
                 },
                 prompt_cache_observation_context,
                 observer.clone(),
@@ -1949,6 +1940,7 @@ impl Lifecycle {
         status: StatusCode,
         stream_hooks: StreamHooks,
         event_ctx: RequestEventContext,
+        transform_ctx: ResponseTransformContext,
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
         observer: Option<LifecycleContext>,
     ) -> Response<Body> {
@@ -1965,6 +1957,7 @@ impl Lifecycle {
                 stream_hooks,
                 active_limit.take(),
                 event_ctx.clone(),
+                transform_ctx,
                 prompt_cache_observation_context,
                 observer,
             );
@@ -1973,6 +1966,7 @@ impl Lifecycle {
         }
 
         let (mut parts, mut body) = response.into_parts();
+        strip_hop_by_hop(&mut parts.headers);
         let body_collect_started = Instant::now();
         let mut first_body_chunk_at: Option<Instant> = None;
         let mut body_buf: Vec<u8> = Vec::new();
@@ -2009,8 +2003,8 @@ impl Lifecycle {
             total_ms = duration_to_ms(duration),
             "request latency breakdown"
         );
-        let usage = match decode_full_body(&parts.headers, &body) {
-            Ok(Some(plaintext)) => usage_from_json_body(&plaintext),
+        let semantic_body = match decode_full_body(&parts.headers, &body) {
+            Ok(Some(plaintext)) => Some(Bytes::copy_from_slice(&plaintext)),
             Ok(None) => {
                 if let Some(encoding) = parts
                     .headers
@@ -2022,8 +2016,10 @@ impl Lifecycle {
                         content_encoding = encoding,
                         "skipping usage extraction: unsupported content-encoding"
                     );
+                    None
+                } else {
+                    Some(body.clone())
                 }
-                UsageCounts::default()
             }
             Err(error) => {
                 tracing::warn!(
@@ -2031,9 +2027,50 @@ impl Lifecycle {
                     %error,
                     "skipping usage extraction: failed to decode response body"
                 );
-                UsageCounts::default()
+                None
             }
         };
+        let usage = semantic_body
+            .as_ref()
+            .map_or_else(UsageCounts::default, |body| usage_from_json_body(body));
+        let mut downstream_body = body;
+        let mut buffered_transform_error: Option<ResponseTransformError> = None;
+        if let (Some(hook), Some(semantic_body)) = (
+            transform_ctx.dialect.response_transform_hook(),
+            semantic_body,
+        ) {
+            match hook.transform_response(TransformResponseRequest {
+                request_id: event_ctx.request_id.clone(),
+                principal: transform_ctx.principal.clone(),
+                upstream: transform_ctx.upstream.clone(),
+                request_method: transform_ctx.request_method.clone(),
+                request_path: transform_ctx.request_path.clone(),
+                canonical_model_id: event_ctx.canonical_model_id.clone(),
+                response_status: parts.status,
+                response_headers: sanitized_response_headers_for_plugin(&parts.headers),
+                body: semantic_body.clone(),
+            }) {
+                Ok(result) => {
+                    let transformed = apply_buffered_transform_result(
+                        parts.status,
+                        std::mem::take(&mut parts.headers),
+                        downstream_body,
+                        result,
+                    );
+                    parts.status = transformed.status;
+                    parts.headers = transformed.headers;
+                    downstream_body = transformed.body;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        request_id = %event_ctx.request_id,
+                        %error,
+                        "response transform failed open to original upstream response"
+                    );
+                    buffered_transform_error = Some(error);
+                }
+            }
+        }
         if let Some(o) = observer.as_ref()
             && usage.present
             && status == StatusCode::OK
@@ -2068,16 +2105,24 @@ impl Lifecycle {
                 usage: to_usage_snapshot(&usage),
                 source: cc_lb_contract::UsageSource::NonStreamBody,
             });
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
-                event_id: o.event_id().to_owned(),
-                result: Ok(cc_lb_contract::StreamSuccess {
+            let stream_result = if let Some(error) = buffered_transform_error.as_ref() {
+                Err(cc_lb_contract::StreamError {
+                    error_type: "response_transform_error".to_owned(),
+                    error_message: error.to_string(),
+                })
+            } else {
+                Ok(cc_lb_contract::StreamSuccess {
                     usage: to_usage_snapshot(&usage),
                     sse_event_count: 0,
-                    body_bytes: Some(body.len() as u64),
+                    body_bytes: Some(downstream_body.len() as u64),
                     body_chunk_count: Some(body_chunk_count),
                     first_body_chunk_ms,
                     ..Default::default()
-                }),
+                })
+            };
+            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
+                event_id: o.event_id().to_owned(),
+                result: stream_result,
             });
             o.set_termination_timings(
                 None,
@@ -2087,10 +2132,35 @@ impl Lifecycle {
                 first_body_chunk_ms,
             );
             o.set_internal_errors(event_ctx.internal_errors.clone());
-            o.set_success_status(status);
+            if status.is_client_error() || status.is_server_error() {
+                let code = if status.is_client_error() {
+                    error_codes::UPSTREAM_4XX
+                } else {
+                    error_codes::UPSTREAM_5XX
+                };
+                o.emit_provider_error(code, status.as_str(), "upstream");
+                o.set_terminal(status, code);
+            } else if buffered_transform_error.is_some() {
+                o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
+            } else {
+                o.set_success_status(status);
+            }
             o.finish();
         }
-        Response::from_parts(parts, Body::from(body))
+        observe_many(
+            stream_hooks.as_slice(),
+            ObserveEvent::RequestFinished {
+                status,
+                input_tokens: usage.present.then_some(usage.input_tokens),
+                output_tokens: usage.present.then_some(usage.output_tokens),
+                cache_creation_input_tokens: usage
+                    .present
+                    .then_some(usage.cache_creation_input_tokens),
+                cache_read_input_tokens: usage.present.then_some(usage.cache_read_input_tokens),
+                duration_ms: duration_to_ms(duration),
+            },
+        );
+        Response::from_parts(parts, Body::from(downstream_body))
     }
 
     fn emit_routing_failure_event(
@@ -2294,12 +2364,20 @@ impl Lifecycle {
         hooks: StreamHooks,
         active_limit: Option<ActiveLimit>,
         event_ctx: RequestEventContext,
+        transform_ctx: ResponseTransformContext,
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
         observer: Option<LifecycleContext>,
     ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
         let usage_decoder = UsageDecoder::from_headers(&parts.headers);
+        let transform_requested = transform_ctx.dialect.sse_event_transform_hook().is_some();
+        let transform_decode_supported = usage_decoder.unsupported_encoding().is_none();
+        let response_headers = (transform_requested && transform_decode_supported)
+            .then(|| sanitized_response_headers_for_plugin(&parts.headers));
+        if transform_requested && transform_decode_supported {
+            sanitize_downstream_stream_headers(&mut parts.headers);
+        }
         if let Some(encoding) = usage_decoder.unsupported_encoding() {
             tracing::warn!(
                 request_id = %event_ctx.request_id,
@@ -2329,12 +2407,16 @@ impl Lifecycle {
             let mut content_delta_count: u64 = 0;
             let mut ping_count: u64 = 0;
             let mut total_bytes: u64 = 0;
+            let mut sse_transform_active = transform_requested && transform_decode_supported;
+            let mut transformed_output_started = false;
+            let mut stream_transform_error: Option<ResponseTransformError> = None;
             let mut last_partial_at: Option<Instant> = None;
             let mut last_partial_output_tokens: u64 = 0;
             while let Some(frame) = body.frame().await {
                 match frame {
                     Ok(frame) => {
                         if let Ok(data) = frame.into_data() {
+                            let mut raw_passthrough_current_chunk = false;
                             let now = Instant::now();
                             if first_chunk_at.is_none() {
                                 first_chunk_at = Some(now);
@@ -2349,10 +2431,32 @@ impl Lifecycle {
                                         %error,
                                         "skipping streaming usage extraction: chunk decode failed"
                                     );
+                                        if sse_transform_active {
+                                            if transformed_output_started {
+                                            let transform_error = ResponseTransformError::Runtime {
+                                                reason: format!("streaming response decode failed after transform output: {error}"),
+                                            };
+                                            let frame = make_response_transform_error_frame(&transform_error);
+                                            observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                                batch_index,
+                                                event_count: 1,
+                                                total_bytes: frame.len(),
+                                            });
+                                            stream_transform_error = Some(transform_error);
+                                                yield Ok::<Bytes, Infallible>(frame);
+                                                break;
+                                            }
+                                            sse_transform_active = false;
+                                            raw_passthrough_current_chunk = true;
+                                        }
+                                    }
                                 }
-                            }
-                            while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
+                                while !raw_passthrough_current_chunk {
+                                    let Some(end) = usage_parser::find_sse_event_end(&buffer) else {
+                                        break;
+                                    };
                                 let raw = buffer.drain(..end).collect::<Vec<u8>>();
+                                let raw = Bytes::from(raw);
                                 let usage_update = accumulate_sse_usage(&raw, &mut usage);
                                 if let Some(o) = observer.as_ref()
                                     && let Some(err) =
@@ -2473,15 +2577,92 @@ impl Lifecycle {
                                         last_partial_output_tokens = usage.output_tokens;
                                     }
                                 }
+                                if sse_transform_active {
+                                    let outgoing = if let Some(response_headers) = response_headers.as_ref() {
+                                        match transform_sse_event_bytes(
+                                            transform_ctx.dialect.sse_event_transform_hook(),
+                                            &transform_ctx,
+                                            &event_ctx,
+                                            status,
+                                            response_headers,
+                                            raw.clone(),
+                                        ) {
+                                            SseTransformOutcome::Emit(bytes) => {
+                                                transformed_output_started = true;
+                                                bytes
+                                            }
+                                            SseTransformOutcome::Drop => {
+                                                transformed_output_started = true;
+                                                continue;
+                                            }
+                                            SseTransformOutcome::FailOpen => {
+                                                if transformed_output_started {
+                                                    let error = ResponseTransformError::Runtime {
+                                                        reason: "failed to parse SSE event after transform output started".to_owned(),
+                                                    };
+                                                    let frame = make_response_transform_error_frame(&error);
+                                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                                        batch_index,
+                                                        event_count: 1,
+                                                        total_bytes: frame.len(),
+                                                    });
+                                                    stream_transform_error = Some(error);
+                                                    yield Ok::<Bytes, Infallible>(frame);
+                                                    break;
+                                                }
+                                                sse_transform_active = false;
+                                                raw_passthrough_current_chunk = true;
+                                                Bytes::new()
+                                            }
+                                            SseTransformOutcome::Error(error) => {
+                                                tracing::warn!(
+                                                    request_id = %event_ctx.request_id,
+                                                    %error,
+                                                    "sse response transform failed"
+                                                );
+                                                    if transformed_output_started {
+                                                    let frame = make_response_transform_error_frame(&error);
+                                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                                        batch_index,
+                                                        event_count: 1,
+                                                        total_bytes: frame.len(),
+                                                    });
+                                                    stream_transform_error = Some(error);
+                                                        yield Ok::<Bytes, Infallible>(frame);
+                                                        break;
+                                                }
+                                                sse_transform_active = false;
+                                                raw_passthrough_current_chunk = true;
+                                                Bytes::new()
+                                            }
+                                        }
+                                    } else {
+                                        sse_transform_active = false;
+                                        raw_passthrough_current_chunk = true;
+                                        Bytes::new()
+                                    };
+                                    if raw_passthrough_current_chunk {
+                                        break;
+                                    }
+                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                        batch_index,
+                                        event_count: 1,
+                                        total_bytes: outgoing.len(),
+                                    });
+                                    batch_index = batch_index.saturating_add(1);
+                                    yield Ok::<Bytes, Infallible>(outgoing);
+                                }
                             }
-                            // Chunk fanout stays inline — high-volume, not bus-worthy.
-                            observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                batch_index,
-                                event_count: 1,
-                                total_bytes: data.len(),
-                            });
-                            batch_index = batch_index.saturating_add(1);
-                            yield Ok::<Bytes, Infallible>(data);
+                            if !sse_transform_active {
+                                // Chunk fanout stays inline — high-volume, not bus-worthy.
+                                observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                    batch_index,
+                                    event_count: 1,
+                                    total_bytes: data.len(),
+                                });
+                                batch_index = batch_index.saturating_add(1);
+                                yield Ok::<Bytes, Infallible>(data);
+                            }
                         }
                     }
                     Err(_source) => break,
@@ -2572,26 +2753,36 @@ impl Lifecycle {
                     let now_unix_secs = context.cache.clock_now_unix_secs();
                     record_thread_usage_from_response(&event_ctx, context, &usage, now_unix_secs);
                 }
-                o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
-                    event_id: o.event_id().to_owned(),
-                    result: Ok(cc_lb_contract::StreamSuccess {
-                        usage: to_usage_snapshot(&usage),
-                        sse_event_count,
-                        body_bytes: Some(total_bytes),
-                        body_chunk_count: Some(batch_index),
-                        first_body_chunk_ms: elapsed_ms(first_chunk_at),
-                        stream_message_start_ms: elapsed_ms(message_start_at),
-                        stream_content_block_start_ms: elapsed_ms(content_block_start_at),
-                        stream_first_content_delta_ms: elapsed_ms(first_content_delta_at),
-                        stream_last_content_delta_ms: elapsed_ms(last_content_delta_at),
-                        stream_message_stop_ms: elapsed_ms(message_stop_at),
-                        stream_last_chunk_ms: elapsed_ms(last_chunk_at),
-                        stream_total_ms: Some(stream_total_ms),
-                        content_delta_count: Some(content_delta_count),
-                        ping_count: Some(ping_count),
-                        inter_token_avg_ms,
-                    }),
-                });
+                if let Some(error) = stream_transform_error.as_ref() {
+                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
+                        event_id: o.event_id().to_owned(),
+                        result: Err(cc_lb_contract::StreamError {
+                            error_type: "response_transform_error".to_owned(),
+                            error_message: error.to_string(),
+                        }),
+                    });
+                } else {
+                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
+                        event_id: o.event_id().to_owned(),
+                        result: Ok(cc_lb_contract::StreamSuccess {
+                            usage: to_usage_snapshot(&usage),
+                            sse_event_count,
+                            body_bytes: Some(total_bytes),
+                            body_chunk_count: Some(batch_index),
+                            first_body_chunk_ms: elapsed_ms(first_chunk_at),
+                            stream_message_start_ms: elapsed_ms(message_start_at),
+                            stream_content_block_start_ms: elapsed_ms(content_block_start_at),
+                            stream_first_content_delta_ms: elapsed_ms(first_content_delta_at),
+                            stream_last_content_delta_ms: elapsed_ms(last_content_delta_at),
+                            stream_message_stop_ms: elapsed_ms(message_stop_at),
+                            stream_last_chunk_ms: elapsed_ms(last_chunk_at),
+                            stream_total_ms: Some(stream_total_ms),
+                            content_delta_count: Some(content_delta_count),
+                            ping_count: Some(ping_count),
+                            inter_token_avg_ms,
+                        }),
+                    });
+                }
                 o.set_termination_timings(
                     None,
                     None,
@@ -2600,9 +2791,29 @@ impl Lifecycle {
                     elapsed_ms(first_chunk_at),
                 );
                 o.set_internal_errors(event_ctx.internal_errors.clone());
-                o.set_success_status(status);
+                if stream_transform_error.is_some() {
+                    o.set_terminal(StatusCode::OK, error_codes::UPSTREAM_STREAM_ERROR);
+                } else if status.is_client_error() || status.is_server_error() {
+                    let code = if status.is_client_error() {
+                        error_codes::UPSTREAM_4XX
+                    } else {
+                        error_codes::UPSTREAM_5XX
+                    };
+                    o.emit_provider_error(code, status.as_str(), "upstream");
+                    o.set_terminal(status, code);
+                } else {
+                    o.set_success_status(status);
+                }
                 o.finish();
             }
+            observe_many(hooks.as_slice(), ObserveEvent::RequestFinished {
+                status,
+                input_tokens: usage.present.then_some(usage.input_tokens),
+                output_tokens: usage.present.then_some(usage.output_tokens),
+                cache_creation_input_tokens: usage.present.then_some(usage.cache_creation_input_tokens),
+                cache_read_input_tokens: usage.present.then_some(usage.cache_read_input_tokens),
+                duration_ms: stream_total_ms,
+            });
         };
         Response::from_parts(parts, Body::from_stream(stream))
     }
@@ -3170,14 +3381,20 @@ impl ActiveLimit {
 }
 
 #[derive(Clone)]
-struct RequestEventContext {
-    request_id: String,
-    thread_id: Option<String>,
-    canonical_model_id: String,
-    proxy_setup_ms: Option<u64>,
-    stage_timings: AttemptTimings,
-    internal_errors: Vec<InternalError>,
+pub(crate) struct RequestEventContext {
+    pub(crate) request_id: String,
+    pub(crate) thread_id: Option<String>,
+    pub(crate) canonical_model_id: String,
+    pub(crate) proxy_setup_ms: Option<u64>,
+    pub(crate) stage_timings: AttemptTimings,
+    pub(crate) internal_errors: Vec<InternalError>,
 }
+
+pub(crate) use crate::response_transform::{
+    ResponseTransformContext, SseTransformOutcome, apply_buffered_transform_result,
+    make_response_transform_error_frame, sanitize_downstream_stream_headers,
+    sanitized_response_headers_for_plugin, transform_sse_event_bytes,
+};
 
 #[derive(Clone, Default)]
 struct RequestCacheMetadata {
@@ -3237,7 +3454,7 @@ fn plugin_ttl_class(ttl: Option<&str>) -> TtlClass {
 }
 
 #[derive(Clone, Copy, Default)]
-struct AttemptTimings {
+pub(crate) struct AttemptTimings {
     bulkhead_wait_ms: Option<u64>,
     dns_ms: Option<u64>,
     connect_ms: Option<u64>,

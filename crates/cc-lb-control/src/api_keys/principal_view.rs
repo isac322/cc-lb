@@ -42,7 +42,12 @@ pub enum ObservabilityHooksCache {
 #[derive(Clone)]
 pub enum DialectCache {
     Inherit,
-    Explicit(Arc<dyn UpstreamDialect>),
+    Explicit(ShapePluginCache),
+}
+
+#[derive(Clone)]
+pub struct ShapePluginCache {
+    pub dialect: Arc<dyn UpstreamDialect>,
 }
 
 pub type PrincipalRoutingArtifacts = (
@@ -270,7 +275,7 @@ impl PrincipalSpecCached {
     ) -> &'a Arc<dyn UpstreamDialect> {
         match &self.dialect {
             DialectCache::Inherit => fallback,
-            DialectCache::Explicit(handle) => handle,
+            DialectCache::Explicit(cache) => &cache.dialect,
         }
     }
 }

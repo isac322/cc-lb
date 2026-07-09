@@ -17,7 +17,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use cc_lb_pdk_wasmtime::types::{
-    ArchivedShapeRequest, ArchivedUpstream, Header as WireHeader, ShapeResponse,
+    ArchivedShapeRequest, ArchivedTransformResponseRequest, ArchivedTransformSseEventRequest,
+    ArchivedUpstream, Header as WireHeader, ShapeResponse, TransformResponseResult,
+    TransformSseEventResult,
 };
 
 #[cc_lb_pdk_wasmtime::plugin(
@@ -67,9 +69,33 @@ mod passthrough {
             body: Box::from(body_ref),
         }
     }
+
+    #[cc_lb_pdk_wasmtime::handler(
+        transform_response,
+        wire = 1,
+        description = "Explicit no-op buffered response transform for shape-owned fixture",
+        usage = "Testing only. Declares that the shape plugin intentionally leaves buffered responses unchanged.",
+        mode = "noop",
+        view
+    )]
+    pub fn transform_response(_req: &ArchivedTransformResponseRequest) -> TransformResponseResult {
+        TransformResponseResult::Unchanged
+    }
+
+    #[cc_lb_pdk_wasmtime::handler(
+        transform_sse_event,
+        wire = 1,
+        description = "Explicit no-op SSE event transform for shape-owned fixture",
+        usage = "Testing only. Declares that the shape plugin intentionally leaves SSE events unchanged.",
+        mode = "noop",
+        view
+    )]
+    pub fn transform_sse_event(_req: &ArchivedTransformSseEventRequest) -> TransformSseEventResult {
+        TransformSseEventResult::Unchanged
+    }
 }
 
-pub use passthrough::shape;
+pub use passthrough::{shape, transform_response, transform_sse_event};
 
 fn upstream_base_url(upstream: &ArchivedUpstream) -> Option<String> {
     match upstream {

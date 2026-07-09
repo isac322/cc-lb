@@ -4,8 +4,10 @@ use std::sync::Arc;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
     DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext,
-    RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest, ShapedRequestBuilder,
-    SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
+    ResponseTransformError, ResponseTransformHook, RetryDecision, RouteDecision, RouteError,
+    RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError,
+    SignerFactory, SigningCapability, SseEventTransformHook, TransformResponseRequest,
+    TransformResponseResult, TransformSseEventRequest, TransformSseEventResult, Upstream,
     UpstreamCandidate, UpstreamDialect,
 };
 use http::{HeaderMap, Method};
@@ -15,6 +17,8 @@ struct DummyDialect;
 struct DummySigner;
 struct DummyFactory;
 struct DummyObserve;
+struct DummyResponseTransform;
+struct DummySseTransform;
 
 impl RouterPlugin for DummyRouter {
     fn route(
@@ -76,6 +80,24 @@ impl ObservabilityHook for DummyObserve {
     }
 }
 
+impl ResponseTransformHook for DummyResponseTransform {
+    fn transform_response(
+        &self,
+        _request: TransformResponseRequest,
+    ) -> Result<TransformResponseResult, ResponseTransformError> {
+        Ok(TransformResponseResult::Unchanged)
+    }
+}
+
+impl SseEventTransformHook for DummySseTransform {
+    fn transform_sse_event(
+        &self,
+        _request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        Ok(TransformSseEventResult::Unchanged)
+    }
+}
+
 #[test]
 fn all_traits_are_object_safe() {
     let _: Box<dyn RouterPlugin> = Box::new(DummyRouter);
@@ -83,4 +105,6 @@ fn all_traits_are_object_safe() {
     let _: Box<dyn Signer> = Box::new(DummySigner);
     let _: Box<dyn SignerFactory> = Box::new(DummyFactory);
     let _: Box<dyn ObservabilityHook> = Box::new(DummyObserve);
+    let _: Box<dyn ResponseTransformHook> = Box::new(DummyResponseTransform);
+    let _: Box<dyn SseEventTransformHook> = Box::new(DummySseTransform);
 }
