@@ -160,6 +160,12 @@ The migration to checkpoint-only history is complete and the legacy raw
 - The observation-flavored API was renamed to sample terminology
   (`SubscriptionQuotaObservationRecord` -> `SubscriptionQuotaSample`,
   `put_subscription_quota{,_batch}` -> `record_subscription_quota_sample{,s}`).
+- The vestigial `dedup_elapsed_override_secs` knob (the 30 s time-based
+  duplicate-suppression window described in the Context above) has been removed
+  from `SubscriptionQuotaConfig`, the writer config, and `config-schema.json`.
+  Checkpoint dedup is purely semantic-fingerprint based (see
+  `insert_checkpoint_if_changed`), so the time window was already dead code read
+  by nothing.
 
 The two-phase compaction/cleanup process described above is retained for
 historical context; that tooling no longer ships.

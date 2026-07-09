@@ -127,7 +127,6 @@ async fn write_records<const N: usize>(
         SubscriptionQuotaWriterConfig {
             batch_max_records: N,
             flush_max_ms: 1,
-            dedup_elapsed_override_secs: 30,
         },
         CancellationToken::new(),
     );

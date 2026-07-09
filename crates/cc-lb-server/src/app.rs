@@ -757,7 +757,6 @@ async fn build_app_with_storage_inner(
         SubscriptionQuotaWriterConfig {
             batch_max_records: config.subscription_quota.writer_batch_max_records as usize,
             flush_max_ms: config.subscription_quota.writer_flush_ms,
-            dedup_elapsed_override_secs: config.subscription_quota.dedup_elapsed_override_secs,
         },
         subscription_quota_writer_cancel.clone(),
     );

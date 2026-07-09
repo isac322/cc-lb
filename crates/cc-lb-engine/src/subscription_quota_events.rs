@@ -66,7 +66,6 @@ pub enum SubscriptionQuotaEnqueueError {
 pub struct SubscriptionQuotaWriterConfig {
     pub batch_max_records: usize,
     pub flush_max_ms: u64,
-    pub dedup_elapsed_override_secs: u64,
 }
 
 impl Default for SubscriptionQuotaWriterConfig {
@@ -74,7 +73,6 @@ impl Default for SubscriptionQuotaWriterConfig {
         Self {
             batch_max_records: 256,
             flush_max_ms: 100,
-            dedup_elapsed_override_secs: 30,
         }
     }
 }
@@ -172,7 +170,6 @@ fn normalize_config(config: SubscriptionQuotaWriterConfig) -> SubscriptionQuotaW
     SubscriptionQuotaWriterConfig {
         batch_max_records: config.batch_max_records.max(1),
         flush_max_ms: config.flush_max_ms.max(1),
-        dedup_elapsed_override_secs: config.dedup_elapsed_override_secs,
     }
 }
 
