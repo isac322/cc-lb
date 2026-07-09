@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cc_lb_plugin_api::SubscriptionQuotaCandidateSnapshot;
 use cc_lb_plugin_api::types::{CacheScore, TtlClass, WarmCacheEntry};
-use cc_lb_storage_api::SubscriptionQuotaObservationRecord;
+use cc_lb_storage_api::SubscriptionQuotaSample;
 use cc_lb_storage_api::types::{ApiKeyMutation, PrincipalLimitState, StoredApiKeyRecord};
 use uuid::Uuid;
 
@@ -24,7 +24,7 @@ pub struct PromptCacheThreadUsage {
 }
 
 pub trait SubscriptionQuotaCacheLike: Send + Sync {
-    fn upsert_observation(&self, record: &SubscriptionQuotaObservationRecord);
+    fn upsert_observation(&self, record: &SubscriptionQuotaSample);
 
     fn snapshot_for_upstream(
         &self,
@@ -104,7 +104,7 @@ pub enum PromptCacheObservationEnqueueError {
 pub struct NoopSubscriptionQuotaCache;
 
 impl SubscriptionQuotaCacheLike for NoopSubscriptionQuotaCache {
-    fn upsert_observation(&self, _record: &SubscriptionQuotaObservationRecord) {}
+    fn upsert_observation(&self, _record: &SubscriptionQuotaSample) {}
 
     fn snapshot_for_upstream(
         &self,
@@ -229,8 +229,8 @@ pub enum RuntimeStatusError {
     Failed(String),
 }
 
-pub trait SubscriptionQuotaObservationControl: Send + Sync {
-    fn upsert_observation(&self, record: &SubscriptionQuotaObservationRecord);
+pub trait SubscriptionQuotaSampleControl: Send + Sync {
+    fn upsert_observation(&self, record: &SubscriptionQuotaSample);
 
     fn snapshot_for_upstream(
         &self,
@@ -326,8 +326,8 @@ impl DynamicViewControl for DynamicViewHolder {
     }
 }
 
-impl SubscriptionQuotaObservationControl for NoopSubscriptionQuotaCache {
-    fn upsert_observation(&self, record: &SubscriptionQuotaObservationRecord) {
+impl SubscriptionQuotaSampleControl for NoopSubscriptionQuotaCache {
+    fn upsert_observation(&self, record: &SubscriptionQuotaSample) {
         SubscriptionQuotaCacheLike::upsert_observation(self, record);
     }
 

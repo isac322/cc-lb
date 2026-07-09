@@ -3,12 +3,12 @@
 //! Consumes `LifecycleEvent::UpstreamAttempt` (to correlate `upstream_id`
 //! with the event) and `LifecycleEvent::UpstreamResponseStarted` (to read
 //! Anthropic unified-quota headers). Reconstructs a `HeaderMap`, parses
-//! observations via `observe_subscription_quota_headers`, upserts them
+//! observations via `build_subscription_quota_samples`, upserts them
 //! into the shared `SubscriptionQuotaCacheLike`, and enqueues durable
 //! records into `SubscriptionQuotaSink` for the writer task.
 //!
 //! This subscriber owns the main request path. `Lifecycle::
-//! record_subscription_quota_observations` is retained solely for admin
+//! ingest_subscription_quota_headers` is retained solely for admin
 //! fire-now warmup and is not called on the proxy request path.
 
 use std::collections::HashMap;
@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::lifecycle::{SubscriptionQuotaCacheLike, observe_subscription_quota_headers};
+use crate::lifecycle::{SubscriptionQuotaCacheLike, build_subscription_quota_samples};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 
 pub const DEFAULT_SUBSCRIPTION_QUOTA_MAP_CAP: usize = 4096;
@@ -187,7 +187,7 @@ fn apply_observations(
     let observed_at_unix_millis = system_time_unix_millis(SystemTime::now());
     let header_map = header_map_from_snapshot(snapshot);
     let records =
-        observe_subscription_quota_headers(&header_map, upstream_id, observed_at_unix_millis);
+        build_subscription_quota_samples(&header_map, upstream_id, observed_at_unix_millis);
     if records.is_empty() {
         metrics::counter!(
             "cc_lb_contract_subscription_quota_events_total",
@@ -273,18 +273,18 @@ mod tests {
     use super::*;
     use cc_lb_plugin_api::SubscriptionQuotaCandidateSnapshot;
     use cc_lb_storage_api::{
-        SubscriptionQuotaObservationRecord, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
+        SubscriptionQuotaSample, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
     };
     use std::collections::BTreeMap;
     use std::sync::Mutex as StdMutex;
 
     #[derive(Default)]
     struct RecordingSubscriptionQuotaCache {
-        records: StdMutex<Vec<SubscriptionQuotaObservationRecord>>,
+        records: StdMutex<Vec<SubscriptionQuotaSample>>,
     }
 
     impl SubscriptionQuotaCacheLike for RecordingSubscriptionQuotaCache {
-        fn upsert_observation(&self, record: &SubscriptionQuotaObservationRecord) {
+        fn upsert_observation(&self, record: &SubscriptionQuotaSample) {
             self.records.lock().unwrap().push(record.clone());
         }
 

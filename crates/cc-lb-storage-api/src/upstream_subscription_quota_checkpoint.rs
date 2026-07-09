@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
     SubscriptionQuotaStatus, SubscriptionQuotaWindow,
 };
 
@@ -17,7 +17,7 @@ impl SubscriptionQuotaSemanticFingerprint {
         Self(bytes)
     }
 
-    pub fn from_observation(record: &SubscriptionQuotaObservationRecord) -> Self {
+    pub fn from_sample(record: &SubscriptionQuotaSample) -> Self {
         let mut bytes = Vec::with_capacity(256);
         bytes.push(SEMANTIC_FINGERPRINT_VERSION);
         write_optional_f64(&mut bytes, record.utilization);
@@ -41,9 +41,9 @@ impl SubscriptionQuotaSemanticFingerprint {
     }
 }
 
-impl SubscriptionQuotaObservationRecord {
+impl SubscriptionQuotaSample {
     pub fn semantic_checkpoint_fingerprint(&self) -> SubscriptionQuotaSemanticFingerprint {
-        SubscriptionQuotaSemanticFingerprint::from_observation(self)
+        SubscriptionQuotaSemanticFingerprint::from_sample(self)
     }
 }
 
@@ -77,8 +77,8 @@ pub struct SubscriptionQuotaCheckpointRecord {
     pub ingested_at_unix_millis: u64,
 }
 
-impl From<&SubscriptionQuotaObservationRecord> for SubscriptionQuotaCheckpointRecord {
-    fn from(record: &SubscriptionQuotaObservationRecord) -> Self {
+impl From<&SubscriptionQuotaSample> for SubscriptionQuotaCheckpointRecord {
+    fn from(record: &SubscriptionQuotaSample) -> Self {
         Self {
             upstream_id: record.upstream_id,
             window: record.window,

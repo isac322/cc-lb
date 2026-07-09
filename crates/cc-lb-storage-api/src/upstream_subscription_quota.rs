@@ -215,7 +215,7 @@ impl SubscriptionQuotaSourceMerge {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SubscriptionQuotaObservationRecord {
+pub struct SubscriptionQuotaSample {
     pub upstream_id: Uuid,
     pub window: SubscriptionQuotaWindow,
     pub source: SubscriptionQuotaSource,
@@ -242,7 +242,7 @@ pub struct SubscriptionQuotaObservationRecord {
     pub ingested_at_unix_millis: u64,
 }
 
-pub type SubscriptionQuotaLatestRecord = SubscriptionQuotaObservationRecord;
+pub type SubscriptionQuotaLatestRecord = SubscriptionQuotaSample;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubscriptionQuotaSeriesQuery {
@@ -281,23 +281,21 @@ pub struct SubscriptionQuotaSeries {
 
 #[async_trait]
 pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
-    /// Atomically appends every record to the legacy observations table,
-    /// upserts the latest sidecar row, and inserts change-only semantic
-    /// checkpoints per `(upstream_id, window, source)` in one transaction.
-    /// The latest UPSERT is monotonic: rows whose
+    /// Atomically upserts the latest sidecar row and inserts change-only
+    /// semantic checkpoints per `(upstream_id, window, source)` in one
+    /// transaction. The latest UPSERT is monotonic: rows whose
     /// `observed_at_unix_millis` is less than the existing latest are SKIPPED
-    /// for the sidecar but STILL APPENDED to observations and considered for
-    /// checkpoint history.
-    async fn put_subscription_quota_batch(
+    /// for the sidecar but still considered for checkpoint history.
+    async fn record_subscription_quota_samples(
         &self,
-        records: &[SubscriptionQuotaObservationRecord],
+        records: &[SubscriptionQuotaSample],
     ) -> StorageResult<()>;
 
-    async fn put_subscription_quota(
+    async fn record_subscription_quota_sample(
         &self,
-        record: &SubscriptionQuotaObservationRecord,
+        record: &SubscriptionQuotaSample,
     ) -> StorageResult<()> {
-        self.put_subscription_quota_batch(std::slice::from_ref(record))
+        self.record_subscription_quota_samples(std::slice::from_ref(record))
             .await
     }
 
@@ -308,8 +306,8 @@ pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
         upstream_ids: &[Uuid],
     ) -> StorageResult<Vec<SubscriptionQuotaLatestRecord>>;
 
-    /// Server-side bucketed downsample of the raw observations table. The
-    /// caller specifies bucket width and per-series point cap. The backend
+    /// Server-side bucketed downsample of the change-only checkpoint history.
+    /// The caller specifies bucket width and per-series point cap. The backend
     /// MUST honor `query.sources` and `query.windows` filters and the
     /// `query.source_merge` policy (per-source series vs merged-per-window).
     async fn list_subscription_quota_series(

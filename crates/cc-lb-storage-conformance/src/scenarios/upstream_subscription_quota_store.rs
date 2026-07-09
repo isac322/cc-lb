@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
     SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSeriesQuery,
+    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSeriesQuery,
     SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
     SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
 };
@@ -49,7 +49,7 @@ macro_rules! scenario {
 scenario!(append_then_list_latest_roundtrip, |storage| async move {
     let upstream = upstream_id(1);
     let record = observation(upstream, 100, 1, SubscriptionQuotaSource::Header, 0.25);
-    storage.put_subscription_quota(&record).await?;
+    storage.record_subscription_quota_sample(&record).await?;
     let latest = storage
         .list_latest_subscription_quota_for_upstreams(&[upstream])
         .await?;
@@ -67,7 +67,7 @@ scenario!(
         let first = observation(upstream, 100, 1, SubscriptionQuotaSource::Header, 0.1);
         let second = observation(upstream, 100, 2, SubscriptionQuotaSource::Header, 0.2);
         storage
-            .put_subscription_quota_batch(&[first.clone(), second.clone()])
+            .record_subscription_quota_samples(&[first.clone(), second.clone()])
             .await?;
         let series = storage
             .list_subscription_quota_series(series_query(
@@ -100,7 +100,7 @@ scenario!(
     |storage| async move {
         let upstream = upstream_id(3);
         storage
-            .put_subscription_quota_batch(&[
+            .record_subscription_quota_samples(&[
                 observation(upstream, 100, 1, SubscriptionQuotaSource::Header, 0.1),
                 observation(upstream, 110, 2, SubscriptionQuotaSource::Api, 0.2),
             ])
@@ -120,8 +120,8 @@ scenario!(latest_is_monotonic_in_millis, |storage| async move {
     let upstream = upstream_id(4);
     let newer = observation(upstream, 200, 1, SubscriptionQuotaSource::Header, 0.9);
     let older = observation(upstream, 100, 2, SubscriptionQuotaSource::Header, 0.1);
-    storage.put_subscription_quota(&newer).await?;
-    storage.put_subscription_quota(&older).await?;
+    storage.record_subscription_quota_sample(&newer).await?;
+    storage.record_subscription_quota_sample(&older).await?;
     let latest = storage
         .list_latest_subscription_quota_for_upstreams(&[upstream])
         .await?;
@@ -148,7 +148,7 @@ scenario!(
     |storage| async move {
         let upstream = upstream_id(5);
         storage
-            .put_subscription_quota_batch(&[
+            .record_subscription_quota_samples(&[
                 observation(upstream, 0, 1, SubscriptionQuotaSource::Header, 0.1),
                 observation(upstream, 30_000, 2, SubscriptionQuotaSource::Header, 0.3),
                 observation(upstream, 60_000, 3, SubscriptionQuotaSource::Header, 0.6),
@@ -187,7 +187,7 @@ scenario!(
     |storage| async move {
         let upstream = upstream_id(6);
         storage
-            .put_subscription_quota_batch(&[
+            .record_subscription_quota_samples(&[
                 observation(upstream, 100, 1, SubscriptionQuotaSource::Header, 0.1),
                 observation(upstream, 100, 2, SubscriptionQuotaSource::Api, 0.2),
             ])
@@ -220,7 +220,7 @@ scenario!(
     |storage| async move {
         let upstream = upstream_id(7);
         storage
-            .put_subscription_quota_batch(&[
+            .record_subscription_quota_samples(&[
                 observation(upstream, 100, 1, SubscriptionQuotaSource::Header, 0.1),
                 observation(upstream, 100, 2, SubscriptionQuotaSource::Api, 0.8),
             ])
@@ -263,7 +263,7 @@ scenario!(
                 )
             })
             .collect::<Vec<_>>();
-        storage.put_subscription_quota_batch(&records).await?;
+        storage.record_subscription_quota_samples(&records).await?;
         let series = storage
             .list_subscription_quota_series(series_query(
                 upstream,
@@ -288,7 +288,7 @@ scenario!(
         let upstream = upstream_id(11);
         let mut marker = observation(upstream, 100, 1, SubscriptionQuotaSource::Header, 0.0);
         marker.sample_kind = SubscriptionQuotaSampleKind::ProcessStart;
-        storage.put_subscription_quota(&marker).await?;
+        storage.record_subscription_quota_sample(&marker).await?;
         let latest = storage
             .list_latest_subscription_quota_for_upstreams(&[upstream])
             .await?;
@@ -297,7 +297,7 @@ scenario!(
             "marker kind should persist"
         );
         let sample = observation(upstream, 200, 2, SubscriptionQuotaSource::Header, 0.5);
-        storage.put_subscription_quota(&sample).await?;
+        storage.record_subscription_quota_sample(&sample).await?;
         let latest = storage
             .list_latest_subscription_quota_for_upstreams(&[upstream])
             .await?;
@@ -336,7 +336,7 @@ scenario!(empty_upstream_ids_returns_empty, |storage| async move {
 scenario!(series_filters_observed_at_window, |storage| async move {
     let upstream = upstream_id(13);
     storage
-        .put_subscription_quota_batch(&[
+        .record_subscription_quota_samples(&[
             observation(upstream, 50, 1, SubscriptionQuotaSource::Header, 0.1),
             observation(upstream, 100, 2, SubscriptionQuotaSource::Header, 0.2),
             observation(upstream, 200, 3, SubscriptionQuotaSource::Header, 0.3),
@@ -375,7 +375,7 @@ scenario!(checkpoint_writer_latest_freshness, |storage| async move {
     let mut freshest = observation(upstream, 35_000, 3, SubscriptionQuotaSource::Header, 0.31);
     freshest.resets_at_unix_secs = first.resets_at_unix_secs;
     storage
-        .put_subscription_quota_batch(&[first.clone(), after_heartbeat, freshest.clone()])
+        .record_subscription_quota_samples(&[first.clone(), after_heartbeat, freshest.clone()])
         .await?;
 
     let latest = storage
@@ -405,7 +405,7 @@ scenario!(checkpoint_writer_decrease, |storage| async move {
     let first = observation(upstream, 0, 1, SubscriptionQuotaSource::Header, 0.31);
     let decreased = observation(upstream, 1_000, 2, SubscriptionQuotaSource::Header, 0.30);
     storage
-        .put_subscription_quota_batch(&[first, decreased.clone()])
+        .record_subscription_quota_samples(&[first, decreased.clone()])
         .await?;
 
     let checkpoints = storage
@@ -836,8 +836,8 @@ fn observation(
     sample_id: u64,
     source: SubscriptionQuotaSource,
     utilization: f64,
-) -> SubscriptionQuotaObservationRecord {
-    SubscriptionQuotaObservationRecord {
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
         upstream_id,
         window: SubscriptionQuotaWindow::FiveHour,
         source,
@@ -885,7 +885,7 @@ fn series_query(
     }
 }
 
-fn checkpoint(record: &SubscriptionQuotaObservationRecord) -> SubscriptionQuotaCheckpointRecord {
+fn checkpoint(record: &SubscriptionQuotaSample) -> SubscriptionQuotaCheckpointRecord {
     SubscriptionQuotaCheckpointRecord::from(record)
 }
 

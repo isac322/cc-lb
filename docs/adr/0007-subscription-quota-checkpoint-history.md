@@ -141,3 +141,31 @@ If any validation check fails, the process aborts immediately and rolls back the
 - Add admin API tests proving `/series`, `/analysis`, and `/aggregate` interpret checkpoint history consistently.
 - Add frontend QA proving the quota chart renders step-series gaps from API-provided anchors and does not invent zeroes.
 - Production deploy must back up the SQLite database, stop the service for cutover/backfill/drop/VACUUM if required, verify schema and row-count invariants, verify `PRAGMA integrity_check`, restart, and confirm real traffic succeeds.
+
+## Update (2026-07-09): raw observations removed
+
+The migration to checkpoint-only history is complete and the legacy raw
+`upstream_subscription_quota_observations_v1` table has been retired:
+
+- Live write paths no longer append raw observations; they only upsert the
+  latest sidecar and insert change-only checkpoints.
+- The one-time backfill/cleanup tooling (the
+  `compact-subscription-quota-history --drop-raw-observations` CLI and its
+  SQLite backfill/cleanup adapters) has been deleted.
+- Final forward-only drop migrations retire the table on any database that
+  still has it: SQLite `0045_drop_subscription_quota_observations.sql` and
+  Postgres `0075_drop_subscription_quota_observations.sql`. Historical
+  migrations are left immutable, so a fresh database briefly creates the table
+  and then drops it.
+- The observation-flavored API was renamed to sample terminology
+  (`SubscriptionQuotaObservationRecord` -> `SubscriptionQuotaSample`,
+  `put_subscription_quota{,_batch}` -> `record_subscription_quota_sample{,s}`).
+- The vestigial `dedup_elapsed_override_secs` knob (the 30 s time-based
+  duplicate-suppression window described in the Context above) has been removed
+  from `SubscriptionQuotaConfig`, the writer config, and `config-schema.json`.
+  Checkpoint dedup is purely semantic-fingerprint based (see
+  `insert_checkpoint_if_changed`), so the time window was already dead code read
+  by nothing.
+
+The two-phase compaction/cleanup process described above is retained for
+historical context; that tooling no longer ships.

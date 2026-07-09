@@ -4,7 +4,7 @@ use cc_lb_server::warmup::execute::{
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
+    BackendKind, MetaStore, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSource, SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamCreate,
     UpstreamStore, UpstreamSubscriptionQuotaStore, UpstreamWarmupAttemptStore,
     WarmupAttemptListFilters, WarmupAttemptOutcome, WarmupAttemptStatus, WarmupAttemptTrigger,
@@ -39,7 +39,7 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
         .await
         .expect("upstream creates");
     storage
-        .put_subscription_quota(&previous_quota(upstream.id))
+        .record_subscription_quota_sample(&previous_quota(upstream.id))
         .await
         .expect("previous quota inserts");
 
@@ -185,8 +185,8 @@ fn five_hour_observation(resets_at_unix_secs: u64) -> UnifiedQuotaObservation {
     }
 }
 
-fn previous_quota(upstream_id: Uuid) -> SubscriptionQuotaObservationRecord {
-    SubscriptionQuotaObservationRecord {
+fn previous_quota(upstream_id: Uuid) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
         upstream_id,
         window: SubscriptionQuotaWindow::FiveHour,
         source: SubscriptionQuotaSource::Header,

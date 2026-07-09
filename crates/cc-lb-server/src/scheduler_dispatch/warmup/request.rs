@@ -1,6 +1,6 @@
 use cc_lb_engine::clock::unix_secs;
 #[allow(deprecated)]
-use cc_lb_engine::subscription_quota_events::unified_observation_to_record;
+use cc_lb_engine::subscription_quota_events::unified_observation_to_sample;
 use cc_lb_engine::{UnifiedQuotaObservation, parse_anthropic_unified_headers};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
@@ -205,7 +205,7 @@ impl SchedulerDispatch {
         let observed_at_unix_millis = now_unix_millis(&*self.clock);
         for observation in observations {
             let record =
-                unified_observation_to_record(upstream_id, observation, observed_at_unix_millis);
+                unified_observation_to_sample(upstream_id, observation, observed_at_unix_millis);
             self.subscription_quota_cache
                 .upsert_observation(upstream_id, &record);
             self.subscription_quota_sink

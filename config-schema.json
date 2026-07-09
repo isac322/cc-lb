@@ -311,7 +311,6 @@
     "subscription_quota": {
       "$ref": "#/$defs/SubscriptionQuotaConfig",
       "default": {
-        "dedup_elapsed_override_secs": 30,
         "routing_max_staleness_secs": 1800,
         "writer_batch_max_records": 256,
         "writer_channel_capacity": 4096,
@@ -1318,12 +1317,6 @@
     "SubscriptionQuotaConfig": {
       "type": "object",
       "properties": {
-        "dedup_elapsed_override_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 30,
-          "minimum": 0
-        },
         "routing_max_staleness_secs": {
           "type": "integer",
           "format": "uint64",
