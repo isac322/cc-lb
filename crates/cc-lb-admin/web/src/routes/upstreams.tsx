@@ -1343,7 +1343,7 @@ function DetailView({
                           return windows.map((windowName) => (
                             <Area
                               key={windowName}
-                              type="stepAfter"
+                              type="monotone"
                               dataKey={windowName}
                               stroke={getWindowColor(windowName).stroke}
                               strokeWidth={1.4}
