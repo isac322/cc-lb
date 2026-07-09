@@ -16,11 +16,10 @@ use cc_lb_plugin_api::types::{
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, FilterError, FilterOutput, InternalError, InternalErrorKind,
     InternalErrorStage, ObservabilityHook, ObserveEvent, Principal, PrincipalKind, RequestContext,
-    ResponseTransformError, ResponseTransformHook, RetryDecision, RouterPlugin, RoutingTrace,
-    ShapedRequest, ShapedRequestBuilder, SignedRequest, SseEvent, SseEventTransformHook,
-    TerminalStrategy, TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
-    TransformSseEventResult, Upstream, UpstreamCandidate, UpstreamDialect, UpstreamError,
-    UpstreamKind as CandidateUpstreamKind, shape_request, sign_request,
+    ResponseTransformError, RetryDecision, RouterPlugin, RoutingTrace, ShapedRequest,
+    ShapedRequestBuilder, SignedRequest, TerminalStrategy, TransformResponseRequest, Upstream,
+    UpstreamCandidate, UpstreamDialect, UpstreamError, UpstreamKind as CandidateUpstreamKind,
+    shape_request, sign_request,
 };
 use cc_lb_storage_api::{
     SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
@@ -28,8 +27,8 @@ use cc_lb_storage_api::{
     types::{RequestCacheBreakpoint, RequestCacheBreakpointSource, StoredApiKeyRecord},
     upstream::UpstreamKind as StorageUpstreamKind,
 };
-use http::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
-use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
+use http::header::{CONTENT_TYPE, RETRY_AFTER};
+use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -59,7 +58,6 @@ use crate::rate_limit_headers::{
 use crate::request_timing::{
     REQUEST_STAGE_TIMINGS, RequestStageTimings, finalize_connection_reused_if_unset,
 };
-use crate::sse_error_frame::make_error_frame;
 use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{LifecycleContext, error_codes};
@@ -3369,200 +3367,20 @@ impl ActiveLimit {
 }
 
 #[derive(Clone)]
-struct RequestEventContext {
-    request_id: String,
-    thread_id: Option<String>,
-    canonical_model_id: String,
-    proxy_setup_ms: Option<u64>,
-    stage_timings: AttemptTimings,
-    internal_errors: Vec<InternalError>,
+pub(crate) struct RequestEventContext {
+    pub(crate) request_id: String,
+    pub(crate) thread_id: Option<String>,
+    pub(crate) canonical_model_id: String,
+    pub(crate) proxy_setup_ms: Option<u64>,
+    pub(crate) stage_timings: AttemptTimings,
+    pub(crate) internal_errors: Vec<InternalError>,
 }
 
-#[derive(Clone)]
-struct ResponseTransformContext {
-    principal: Principal,
-    upstream: Upstream,
-    request_method: Method,
-    request_path: String,
-    response_transform_hook: Option<Arc<dyn ResponseTransformHook>>,
-    sse_event_transform_hook: Option<Arc<dyn SseEventTransformHook>>,
-}
-
-struct BufferedTransformParts {
-    status: StatusCode,
-    headers: HeaderMap,
-    body: Bytes,
-}
-
-enum SseTransformOutcome {
-    Emit(Bytes),
-    Drop,
-    FailOpen,
-    Error(ResponseTransformError),
-}
-
-fn apply_buffered_transform_result(
-    upstream_status: StatusCode,
-    upstream_headers: HeaderMap,
-    upstream_body: Bytes,
-    result: TransformResponseResult,
-) -> BufferedTransformParts {
-    match result {
-        TransformResponseResult::Unchanged => BufferedTransformParts {
-            status: upstream_status,
-            headers: upstream_headers,
-            body: upstream_body,
-        },
-        TransformResponseResult::Replace {
-            status,
-            headers,
-            body,
-        } => {
-            let (body, content_encoding) = match body {
-                Some(body) => (body, None),
-                None => {
-                    let content_encoding = upstream_headers.get(CONTENT_ENCODING).cloned();
-                    (upstream_body, content_encoding)
-                }
-            };
-            let headers = headers.unwrap_or(upstream_headers);
-            BufferedTransformParts {
-                status: status.unwrap_or(upstream_status),
-                headers: sanitize_downstream_response_headers(
-                    headers,
-                    body.len(),
-                    content_encoding,
-                ),
-                body,
-            }
-        }
-    }
-}
-
-fn sanitized_response_headers_for_plugin(headers: &HeaderMap) -> HeaderMap {
-    let mut sanitized = headers.clone();
-    sanitize_host_owned_headers(&mut sanitized);
-    sanitized
-}
-
-fn sanitize_downstream_response_headers(
-    mut headers: HeaderMap,
-    body_len: usize,
-    content_encoding: Option<HeaderValue>,
-) -> HeaderMap {
-    sanitize_host_owned_headers(&mut headers);
-    if let Some(content_encoding) = content_encoding {
-        headers.insert(CONTENT_ENCODING, content_encoding);
-    }
-    if let Ok(value) = HeaderValue::from_str(&body_len.to_string()) {
-        headers.insert(CONTENT_LENGTH, value);
-    }
-    headers
-}
-
-fn sanitize_downstream_stream_headers(headers: &mut HeaderMap) {
-    sanitize_host_owned_headers(headers);
-}
-
-fn sanitize_host_owned_headers(headers: &mut HeaderMap) {
-    strip_hop_by_hop(headers);
-    headers.remove(CONTENT_ENCODING);
-    headers.remove(CONTENT_LENGTH);
-    let remove_names = headers
-        .keys()
-        .filter(|name| {
-            let name = name.as_str();
-            name.starts_with("x-cc-lb-")
-                || name.starts_with("anthropic-ratelimit-")
-                || name.starts_with("x-ratelimit-")
-                || name == "authorization"
-                || name == "proxy-authorization"
-                || name == "x-api-key"
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    for name in remove_names {
-        headers.remove(name);
-    }
-}
-
-fn transform_sse_event_bytes(
-    hook: Option<&Arc<dyn SseEventTransformHook>>,
-    transform_ctx: &ResponseTransformContext,
-    event_ctx: &RequestEventContext,
-    response_status: StatusCode,
-    response_headers: &HeaderMap,
-    raw: Bytes,
-) -> SseTransformOutcome {
-    let Some(hook) = hook else {
-        return SseTransformOutcome::FailOpen;
-    };
-    let Some(event) = parse_sse_event(raw.clone()) else {
-        return SseTransformOutcome::FailOpen;
-    };
-    match hook.transform_sse_event(TransformSseEventRequest {
-        request_id: event_ctx.request_id.clone(),
-        principal: transform_ctx.principal.clone(),
-        upstream: transform_ctx.upstream.clone(),
-        request_method: transform_ctx.request_method.clone(),
-        request_path: transform_ctx.request_path.clone(),
-        canonical_model_id: event_ctx.canonical_model_id.clone(),
-        response_status,
-        response_headers: response_headers.clone(),
-        event: event.clone(),
-    }) {
-        Ok(TransformSseEventResult::Unchanged) => SseTransformOutcome::Emit(raw),
-        Ok(TransformSseEventResult::Replace { events }) => {
-            SseTransformOutcome::Emit(format_sse_events(&events))
-        }
-        Ok(TransformSseEventResult::Drop) => SseTransformOutcome::Drop,
-        Err(error) => SseTransformOutcome::Error(error),
-    }
-}
-
-fn parse_sse_event(raw: Bytes) -> Option<SseEvent> {
-    let text = std::str::from_utf8(&raw).ok()?;
-    let mut event = String::new();
-    let mut data = Vec::new();
-    for line in text.lines() {
-        if let Some(name) = line.strip_prefix("event:") {
-            event = name.trim_start().to_owned();
-            continue;
-        }
-        if let Some(payload) = line.strip_prefix("data:") {
-            if !data.is_empty() {
-                data.push(b'\n');
-            }
-            data.extend_from_slice(payload.trim_start().as_bytes());
-        }
-    }
-    Some(SseEvent {
-        event,
-        data: Bytes::from(data),
-    })
-}
-
-fn format_sse_events(events: &[SseEvent]) -> Bytes {
-    let mut output = Vec::new();
-    for event in events {
-        if !event.event.is_empty() {
-            output.extend_from_slice(b"event: ");
-            output.extend_from_slice(event.event.as_bytes());
-            output.extend_from_slice(b"\n");
-        }
-        for line in event.data.split(|byte| *byte == b'\n') {
-            output.extend_from_slice(b"data: ");
-            output.extend_from_slice(line);
-            output.extend_from_slice(b"\n");
-        }
-        output.extend_from_slice(b"\n");
-    }
-    Bytes::from(output)
-}
-
-fn make_response_transform_error_frame(error: &ResponseTransformError) -> Bytes {
-    make_error_frame("response_transform_error", &error.to_string())
-}
+pub(crate) use crate::response_transform::{
+    ResponseTransformContext, SseTransformOutcome, apply_buffered_transform_result,
+    make_response_transform_error_frame, sanitize_downstream_stream_headers,
+    sanitized_response_headers_for_plugin, transform_sse_event_bytes,
+};
 
 #[derive(Clone, Default)]
 struct RequestCacheMetadata {
@@ -3622,7 +3440,7 @@ fn plugin_ttl_class(ttl: Option<&str>) -> TtlClass {
 }
 
 #[derive(Clone, Copy, Default)]
-struct AttemptTimings {
+pub(crate) struct AttemptTimings {
     bulkhead_wait_ms: Option<u64>,
     dns_ms: Option<u64>,
     connect_ms: Option<u64>,

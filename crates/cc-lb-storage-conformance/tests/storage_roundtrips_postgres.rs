@@ -178,6 +178,22 @@ fn plugin_registry_insert_chain_entry_rejects_duplicate_for_shape_slot_postgres(
 }
 
 #[test]
+fn plugin_registry_insert_chain_entry_rejects_duplicate_for_transform_response_slot_postgres() {
+    run_postgres_scenario(
+        "insert_chain_entry_rejects_duplicate_for_transform_response_slot",
+        plugin_registry_store::insert_chain_entry_rejects_duplicate_for_transform_response_slot,
+    );
+}
+
+#[test]
+fn plugin_registry_insert_chain_entry_rejects_duplicate_for_transform_sse_event_slot_postgres() {
+    run_postgres_scenario(
+        "insert_chain_entry_rejects_duplicate_for_transform_sse_event_slot",
+        plugin_registry_store::insert_chain_entry_rejects_duplicate_for_transform_sse_event_slot,
+    );
+}
+
+#[test]
 fn plugin_registry_router_reorder_preserves_invariants_postgres() {
     run_postgres_scenario(
         "router_reorder_preserves_invariants",
@@ -194,10 +210,42 @@ fn plugin_registry_shape_singleton_preserved_postgres() {
 }
 
 #[test]
+fn plugin_registry_transform_response_singleton_preserved_postgres() {
+    run_postgres_scenario(
+        "transform_response_singleton_preserved",
+        plugin_registry_store::transform_response_singleton_preserved,
+    );
+}
+
+#[test]
+fn plugin_registry_transform_sse_event_singleton_preserved_postgres() {
+    run_postgres_scenario(
+        "transform_sse_event_singleton_preserved",
+        plugin_registry_store::transform_sse_event_singleton_preserved,
+    );
+}
+
+#[test]
 fn plugin_registry_insert_chain_entry_allows_multi_for_observability_hook_postgres() {
     run_postgres_scenario(
         "insert_chain_entry_allows_multi_for_observability_hook",
         plugin_registry_store::insert_chain_entry_allows_multi_for_observability_hook,
+    );
+}
+
+#[test]
+fn plugin_registry_insert_chain_entry_rejects_non_default_batching_for_transform_slots_postgres() {
+    run_postgres_scenario(
+        "insert_chain_entry_rejects_non_default_batching_for_transform_slots",
+        plugin_registry_store::insert_chain_entry_rejects_non_default_batching_for_transform_slots,
+    );
+}
+
+#[test]
+fn plugin_registry_update_chain_entry_rejects_non_default_batching_for_transform_slots_postgres() {
+    run_postgres_scenario(
+        "update_chain_entry_rejects_non_default_batching_for_transform_slots",
+        plugin_registry_store::update_chain_entry_rejects_non_default_batching_for_transform_slots,
     );
 }
 

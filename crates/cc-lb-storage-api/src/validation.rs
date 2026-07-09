@@ -1,4 +1,38 @@
-use crate::{StorageError, StorageResult};
+use crate::{PluginSlot, StorageError, StorageResult};
+
+pub fn validate_sse_batching_knobs(
+    slot: PluginSlot,
+    sse_per_event: bool,
+    batched_events_per_flush: u32,
+    batched_flush_ms: u64,
+) -> StorageResult<()> {
+    if matches!(
+        slot,
+        PluginSlot::TransformResponse | PluginSlot::TransformSseEvent
+    ) {
+        if sse_per_event {
+            return Err(StorageError::InvalidInput {
+                field: "sse_per_event".to_string(),
+                reason: "sse_per_event is not supported for response-transform slots".to_string(),
+            });
+        }
+        if batched_events_per_flush != 1 {
+            return Err(StorageError::InvalidInput {
+                field: "batched_events_per_flush".to_string(),
+                reason: "batched_events_per_flush is not supported for response-transform slots"
+                    .to_string(),
+            });
+        }
+        if batched_flush_ms != 100 {
+            return Err(StorageError::InvalidInput {
+                field: "batched_flush_ms".to_string(),
+                reason: "batched_flush_ms is not supported for response-transform slots"
+                    .to_string(),
+            });
+        }
+    }
+    Ok(())
+}
 
 pub fn validate_identifier(name: &str, value: &str) -> StorageResult<()> {
     if value.is_empty() {

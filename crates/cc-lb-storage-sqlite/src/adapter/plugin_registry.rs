@@ -8,6 +8,7 @@ use cc_lb_storage_api::{
     PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
     PluginRegistryStore, PluginSlot, RepoError, StorageError, StorageResult, WasmBlob,
     WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
+    validate_sse_batching_knobs,
 };
 use serde_json::Value;
 use sqlx::{QueryBuilder, Row, Sqlite, Transaction, sqlite::SqliteRow};
@@ -277,6 +278,12 @@ impl PluginRegistryStore for SqliteStorage {
         &self,
         input: PluginChainEntryInput,
     ) -> StorageResult<PluginChainEntry> {
+        validate_sse_batching_knobs(
+            input.slot,
+            input.sse_per_event,
+            input.batched_events_per_flush,
+            input.batched_flush_ms,
+        )?;
         let mut tx = self.begin_immediate().await?;
         let sha256 = sha_for_registry_id_in_tx(&mut tx, input.wasm_registry_id)
             .await?
@@ -423,6 +430,12 @@ impl PluginRegistryStore for SqliteStorage {
         if let Some(value) = update.batched_flush_ms {
             current.batched_flush_ms = value;
         }
+        validate_sse_batching_knobs(
+            current.slot,
+            current.sse_per_event,
+            current.batched_events_per_flush,
+            current.batched_flush_ms,
+        )?;
         let row = sqlx::query(
             "UPDATE plugin_chains_v2 SET config = ?, sse_per_event = ?, batched_events_per_flush = ?, batched_flush_ms = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ? AND revision = ? RETURNING *",
         )
@@ -849,7 +862,10 @@ fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEn
 }
 
 fn is_singleton_slot(slot: PluginSlot) -> bool {
-    matches!(slot, PluginSlot::Shape)
+    matches!(
+        slot,
+        PluginSlot::Shape | PluginSlot::TransformResponse | PluginSlot::TransformSseEvent
+    )
 }
 
 fn conflict(message: &str) -> StorageError {

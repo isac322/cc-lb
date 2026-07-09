@@ -22,8 +22,8 @@
 use std::sync::Arc;
 
 use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, PerCandidateReason, Principal, RequestContext,
-    SlotKey, UpstreamCandidate,
+    FilterError, FilterOutput, FilterPlugin, PerCandidateReason, Principal, PrincipalKind,
+    RequestContext, SlotKey, UpstreamCandidate,
 };
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
 use cc_lb_plugin_wire::{
@@ -50,6 +50,7 @@ pub struct WasmtimeFilterPlugin {
     plugin_id: Uuid,
     plugin_name: String,
     runtime_config: Arc<crate::HotEngineConfig>,
+    wire_version: Option<WireVersion>,
 }
 
 impl WasmtimeFilterPlugin {
@@ -64,12 +65,18 @@ impl WasmtimeFilterPlugin {
         runtime_config: Arc<crate::HotEngineConfig>,
     ) -> Self {
         let cell = slot.current.load_full();
+        let wire_version = cell
+            .metadata
+            .hooks
+            .get(HookKind::Filter.as_str())
+            .and_then(|m| WireVersion::from_u8(m.wire_version));
         Self {
             slot_key,
             cell,
             plugin_id,
             plugin_name: plugin_name.into(),
             runtime_config,
+            wire_version,
         }
     }
 }
@@ -91,15 +98,13 @@ impl FilterPlugin for WasmtimeFilterPlugin {
             reason: format!("rkyv encode request: {e}"),
         })?;
 
-        let out_bytes = match self
-            .cell
-            .metadata
-            .hooks
-            .get(HookKind::Filter.as_str())
-            .and_then(|m| WireVersion::from_u8(m.wire_version))
-        {
+        let out_bytes = match self.wire_version {
             Some(WireVersion::V1) => call_filter_hook(&self.cell, in_bytes.as_slice()),
-            None => unreachable!("filter slot has filter metadata"),
+            None => {
+                return Err(FilterError::Runtime {
+                    reason: "plugin metadata missing filter hook".to_owned(),
+                });
+            }
         }
         .map_err(runtime_error_to_filter)?;
         // Wire-bound cap on filter output; matches the DEFAULT_FILES_CAP_BYTES
@@ -255,7 +260,7 @@ fn host_to_wire_request(
         body: ctx.body_bytes.as_ref(),
         principal: PrincipalRef {
             id: principal.id.as_str(),
-            kind: principal_kind_str.as_str(),
+            kind: principal_kind_str,
             claims: &claim_refs,
         },
         candidates: &candidate_refs,
@@ -263,11 +268,18 @@ fn host_to_wire_request(
     rkyv::to_bytes::<RkyvError>(&request)
 }
 
-fn principal_kind_to_wire(principal: &Principal) -> String {
-    serde_json::to_value(&principal.kind)
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .unwrap_or_else(|| "unknown".to_owned())
+fn principal_kind_str(kind: &PrincipalKind) -> &'static str {
+    match kind {
+        PrincipalKind::ApiKey => "api_key",
+        PrincipalKind::OAuthSubject => "oauth_subject",
+        PrincipalKind::InternalKey => "internal_key",
+        PrincipalKind::WorkloadIdentity => "workload_identity",
+        PrincipalKind::SubscriptionBearer => "subscription_bearer",
+    }
+}
+
+fn principal_kind_to_wire(principal: &Principal) -> &'static str {
+    principal_kind_str(&principal.kind)
 }
 
 /// Downstream-request headers that must NEVER cross the plugin
@@ -397,14 +409,21 @@ fn per_candidate_reason_from_label(decision: &str, reason: &str) -> PerCandidate
 pub struct WasmtimeUpstreamDialect {
     cell: Arc<PluginCell>,
     runtime_config: Arc<crate::HotEngineConfig>,
+    wire_version: Option<WireVersion>,
 }
 
 impl WasmtimeUpstreamDialect {
     pub fn new(slot: Arc<PluginSlot>, runtime_config: Arc<crate::HotEngineConfig>) -> Self {
         let cell = slot.current.load_full();
+        let wire_version = cell
+            .metadata
+            .hooks
+            .get(HookKind::Shape.as_str())
+            .and_then(|m| WireVersion::from_u8(m.wire_version));
         Self {
             cell,
             runtime_config,
+            wire_version,
         }
     }
 }
@@ -427,15 +446,13 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
             reason: format!("rkyv encode ShapeRequest: {e}"),
         })?;
 
-        let out_bytes = match self
-            .cell
-            .metadata
-            .hooks
-            .get(HookKind::Shape.as_str())
-            .and_then(|m| WireVersion::from_u8(m.wire_version))
-        {
+        let out_bytes = match self.wire_version {
             Some(WireVersion::V1) => crate::cache::call_shape_hook(&self.cell, in_bytes.as_slice()),
-            None => unreachable!("shape slot has shape metadata"),
+            None => {
+                return Err(cc_lb_plugin_api::DialectError::UnsupportedRequest {
+                    reason: "plugin metadata missing shape hook".to_owned(),
+                });
+            }
         }
         .map_err(runtime_error_to_dialect)?;
         let out_bound = self.runtime_config.wire_bounds.output_body_bytes;
@@ -542,7 +559,7 @@ fn host_to_wire_shape_request(
         body: ctx.body_bytes.as_ref(),
         principal: PrincipalRef {
             id: principal.id.as_str(),
-            kind: principal_kind_str.as_str(),
+            kind: principal_kind_str,
             claims: &claim_refs,
         },
         upstream: upstream_ref,
@@ -651,13 +668,19 @@ fn wire_to_host_shaped_request(
 /// [`WasmtimeFilterPlugin`] for the atomic hot-swap rationale.
 pub struct WasmtimeObservabilityHookPlugin {
     cell: Arc<PluginCell>,
+    wire_version: Option<WireVersion>,
 }
 
 impl WasmtimeObservabilityHookPlugin {
     pub fn new(slot: Arc<PluginSlot>, runtime_config: Arc<crate::HotEngineConfig>) -> Self {
         let _ = runtime_config;
         let cell = slot.current.load_full();
-        Self { cell }
+        let wire_version = cell
+            .metadata
+            .hooks
+            .get(HookKind::Observe.as_str())
+            .and_then(|m| WireVersion::from_u8(m.wire_version));
+        Self { cell, wire_version }
     }
 }
 
@@ -672,17 +695,15 @@ impl cc_lb_plugin_api::ObservabilityHook for WasmtimeObservabilityHookPlugin {
                 reason: format!("rkyv encode ObserveEvent: {e}"),
             }
         })?;
-        match self
-            .cell
-            .metadata
-            .hooks
-            .get(HookKind::Observe.as_str())
-            .and_then(|m| WireVersion::from_u8(m.wire_version))
-        {
+        match self.wire_version {
             Some(WireVersion::V1) => {
                 crate::cache::call_observe_hook(&self.cell, in_bytes.as_slice())
             }
-            None => unreachable!("observe slot has observe metadata"),
+            None => {
+                return Err(cc_lb_plugin_api::ObservabilityError::Dropped {
+                    reason: "plugin metadata missing observe hook".to_owned(),
+                });
+            }
         }
         .map_err(|e| cc_lb_plugin_api::ObservabilityError::Dropped {
             reason: e.to_string(),
@@ -706,11 +727,7 @@ fn host_observe_event_to_wire(
         },
         Host::AuthnComplete { principal_id, kind } => Wire::AuthnComplete {
             principal_id: principal_id.into_boxed_str(),
-            principal_kind: serde_json::to_value(&kind)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .unwrap_or_else(|| "unknown".to_owned())
-                .into_boxed_str(),
+            principal_kind: Box::from(principal_kind_str(&kind)),
         },
         Host::UpstreamChosen { upstream } => Wire::UpstreamChosen {
             upstream: host_upstream_to_wire(&upstream),

@@ -681,8 +681,6 @@ async fn build_principal_chains(
         .await?;
 
         let mut hooks = Vec::new();
-        let mut hook_entries = hook_entries;
-        hook_entries.sort_by_key(|entry| entry.order);
         for entry in hook_entries {
             let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
@@ -736,8 +734,7 @@ async fn build_principal_chains(
             ObservabilityHooksCache::Explicit(hooks)
         };
 
-        let dialect = if let Some(entry) = shape_entries.into_iter().min_by_key(|entry| entry.order)
-        {
+        let dialect = if let Some(entry) = shape_entries.into_iter().next() {
             let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
             })?;
@@ -774,9 +771,7 @@ async fn build_principal_chains(
             DialectCache::Inherit
         };
 
-        let response_transform = if let Some(entry) = response_transform_entries
-            .into_iter()
-            .min_by_key(|entry| entry.order)
+        let response_transform = if let Some(entry) = response_transform_entries.into_iter().next()
         {
             build_response_transform_cache(
                 stores,
@@ -792,23 +787,21 @@ async fn build_principal_chains(
             ResponseTransformCache::None
         };
 
-        let sse_event_transform = if let Some(entry) = sse_event_transform_entries
-            .into_iter()
-            .min_by_key(|entry| entry.order)
-        {
-            build_sse_event_transform_cache(
-                stores,
-                runtime,
-                data_dir,
-                principal,
-                entry,
-                &registry,
-                &mut registered_slot_keys,
-            )
-            .await?
-        } else {
-            SseEventTransformCache::None
-        };
+        let sse_event_transform =
+            if let Some(entry) = sse_event_transform_entries.into_iter().next() {
+                build_sse_event_transform_cache(
+                    stores,
+                    runtime,
+                    data_dir,
+                    principal,
+                    entry,
+                    &registry,
+                    &mut registered_slot_keys,
+                )
+                .await?
+            } else {
+                SseEventTransformCache::None
+            };
 
         chains.insert(
             principal.name.clone(),

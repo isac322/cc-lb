@@ -254,6 +254,32 @@ async fn apply_plugin_chain(
                 supported_slot_names(&registry_entry).join(", ")
             )));
         }
+        if matches!(
+            slot,
+            PluginSlot::TransformResponse | PluginSlot::TransformSseEvent
+        ) {
+            if plugin.sse_per_event().is_some_and(|v| v) {
+                return Err(BootstrapError::InvalidSpec(format!(
+                    "plugin {} ({}) has sse_per_event set, which is not supported for response-transform slots",
+                    registry_entry.name.as_str(),
+                    registry_entry.id
+                )));
+            }
+            if plugin.batched_events_per_flush().is_some_and(|v| v != 1) {
+                return Err(BootstrapError::InvalidSpec(format!(
+                    "plugin {} ({}) has batched_events_per_flush set to a non-default value, which is not supported for response-transform slots",
+                    registry_entry.name.as_str(),
+                    registry_entry.id
+                )));
+            }
+            if plugin.batched_flush_ms().is_some_and(|v| v != 100) {
+                return Err(BootstrapError::InvalidSpec(format!(
+                    "plugin {} ({}) has batched_flush_ms set to a non-default value, which is not supported for response-transform slots",
+                    registry_entry.name.as_str(),
+                    registry_entry.id
+                )));
+            }
+        }
         resolved.push((plugin, slot, registry_entry));
     }
 

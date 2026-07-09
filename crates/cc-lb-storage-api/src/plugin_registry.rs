@@ -299,6 +299,9 @@ pub trait PluginRegistryStore: Send + Sync {
         slot: PluginSlot,
     ) -> StorageResult<Vec<PluginChainEntry>>;
 
+    /// Lists plugin chain entries for multiple principals and slots.
+    ///
+    /// Callers must not rely on cross-principal/slot global order; per-slot chain order is what matters.
     async fn list_chains_for_principals(
         &self,
         principal_ids: &[Uuid],

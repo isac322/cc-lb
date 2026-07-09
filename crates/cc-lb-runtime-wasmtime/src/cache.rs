@@ -60,34 +60,28 @@ enum HookFn {
     TransformSseEvent,
 }
 
-enum HookOutput {
-    Bytes(Vec<u8>),
-    Aligned(AlignedVec<16>),
+trait OutputBuffer: Sized {
+    fn empty() -> Self;
+    fn copy_from_slice(slice: &[u8]) -> Self;
 }
 
-#[derive(Clone, Copy)]
-enum HookOutputMode {
-    Bytes,
-    Aligned,
-}
-
-impl HookOutput {
-    fn into_bytes(self) -> Vec<u8> {
-        match self {
-            Self::Bytes(bytes) => bytes,
-            Self::Aligned(bytes) => bytes.as_slice().to_vec(),
-        }
+impl OutputBuffer for Vec<u8> {
+    fn empty() -> Self {
+        Vec::new()
     }
+    fn copy_from_slice(slice: &[u8]) -> Self {
+        slice.to_vec()
+    }
+}
 
-    fn into_aligned(self) -> AlignedVec<16> {
-        match self {
-            Self::Aligned(bytes) => bytes,
-            Self::Bytes(bytes) => {
-                let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
-                aligned.extend_from_slice(&bytes);
-                aligned
-            }
-        }
+impl OutputBuffer for AlignedVec<16> {
+    fn empty() -> Self {
+        AlignedVec::with_capacity(0)
+    }
+    fn copy_from_slice(slice: &[u8]) -> Self {
+        let mut aligned = AlignedVec::with_capacity(slice.len());
+        aligned.extend_from_slice(slice);
+        aligned
     }
 }
 
@@ -122,7 +116,7 @@ pub fn call_filter_hook(
     cell: &Arc<PluginCell>,
     input: &[u8],
 ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-    call_hook(cell, input, HookFn::Filter).map(HookOutput::into_bytes)
+    call_hook(cell, input, HookFn::Filter)
 }
 
 /// Synchronous shape call. Input is rkyv-encoded `ShapeRequest`,
@@ -131,7 +125,7 @@ pub fn call_shape_hook(
     cell: &Arc<PluginCell>,
     input: &[u8],
 ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-    call_hook(cell, input, HookFn::Shape).map(HookOutput::into_bytes)
+    call_hook(cell, input, HookFn::Shape)
 }
 
 /// Synchronous observe call. Guest returns `(0, 0)`; the returned
@@ -140,51 +134,34 @@ pub fn call_observe_hook(
     cell: &Arc<PluginCell>,
     input: &[u8],
 ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-    call_hook(cell, input, HookFn::Observe).map(HookOutput::into_bytes)
+    call_hook(cell, input, HookFn::Observe)
 }
 
 pub fn call_transform_response_hook(
     cell: &Arc<PluginCell>,
     input: &[u8],
 ) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
-    call_hook_aligned(cell, input, HookFn::TransformResponse)
+    call_hook(cell, input, HookFn::TransformResponse)
 }
 
 pub fn call_transform_sse_event_hook(
     cell: &Arc<PluginCell>,
     input: &[u8],
 ) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
-    call_hook_aligned(cell, input, HookFn::TransformSseEvent)
+    call_hook(cell, input, HookFn::TransformSseEvent)
 }
 
-fn call_hook(
+fn call_hook<O: OutputBuffer>(
     cell: &Arc<PluginCell>,
     input: &[u8],
     hook: HookFn,
-) -> Result<HookOutput, WasmtimeRuntimeError> {
-    call_hook_with_output(cell, input, hook, HookOutputMode::Bytes)
-}
-
-fn call_hook_aligned(
-    cell: &Arc<PluginCell>,
-    input: &[u8],
-    hook: HookFn,
-) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
-    call_hook_with_output(cell, input, hook, HookOutputMode::Aligned).map(HookOutput::into_aligned)
-}
-
-fn call_hook_with_output(
-    cell: &Arc<PluginCell>,
-    input: &[u8],
-    hook: HookFn,
-    output_mode: HookOutputMode,
-) -> Result<HookOutput, WasmtimeRuntimeError> {
+) -> Result<O, WasmtimeRuntimeError> {
     let _store_permit = cell
         .store_budget
         .try_acquire()
         .inspect_err(record_pool_saturation)?;
     let mut wi = build_worker_instance(cell, hook).inspect_err(record_pool_saturation)?;
-    execute_call(&mut wi, cell, input, hook, output_mode)
+    execute_call(&mut wi, cell, input, hook)
 }
 
 fn record_pool_saturation(err: &WasmtimeRuntimeError) {
@@ -194,13 +171,12 @@ fn record_pool_saturation(err: &WasmtimeRuntimeError) {
     }
 }
 
-fn execute_call(
+fn execute_call<O: OutputBuffer>(
     wi: &mut WorkerInstance,
     cell: &PluginCell,
     input: &[u8],
     hook: HookFn,
-    output_mode: HookOutputMode,
-) -> Result<HookOutput, WasmtimeRuntimeError> {
+) -> Result<O, WasmtimeRuntimeError> {
     let start = Instant::now();
     // Reuse the cell's owned `Arc<str>` label instead of `.to_string()`
     // per emission — SharedString accepts `Arc<str>` directly, avoiding
@@ -208,7 +184,7 @@ fn execute_call(
     let plugin: Arc<str> = Arc::clone(&cell.plugin_name);
     let hook_label = hook.metric_label();
 
-    let result = execute_call_inner(wi, input, hook, output_mode);
+    let result = execute_call_inner(wi, input, hook);
 
     metrics::histogram!(
         "cc_lb_plugin_call_duration_seconds",
@@ -233,12 +209,11 @@ fn execute_call(
     result
 }
 
-fn execute_call_inner(
+fn execute_call_inner<O: OutputBuffer>(
     wi: &mut WorkerInstance,
     input: &[u8],
     hook: HookFn,
-    output_mode: HookOutputMode,
-) -> Result<HookOutput, WasmtimeRuntimeError> {
+) -> Result<O, WasmtimeRuntimeError> {
     let WorkerInstance {
         store,
         memory,
@@ -318,7 +293,7 @@ fn execute_call_inner(
     // violation; collapsing it into empty bytes here would hide the
     // bug from downstream rkyv decode.
     let out_bytes = if matches!(hook, HookFn::Observe) && out_ptr == 0 && out_len == 0 {
-        empty_hook_output(output_mode)
+        O::empty()
     } else if out_ptr == 0 || out_len == 0 {
         return Err(WasmtimeRuntimeError::ModuleRejected {
             reason: format!(
@@ -343,7 +318,7 @@ fn execute_call_inner(
                 ),
             });
         }
-        let bytes = copy_hook_output(&mem_view[out_ptr as usize..out_end], output_mode);
+        let bytes = O::copy_from_slice(&mem_view[out_ptr as usize..out_end]);
 
         // Skip `cc_lb_free(out_ptr, out_len, ..)` on the output
         // buffer: the surrounding pure-mode contract drops the whole
@@ -359,22 +334,4 @@ fn execute_call_inner(
     };
 
     Ok(out_bytes)
-}
-
-fn empty_hook_output(output_mode: HookOutputMode) -> HookOutput {
-    match output_mode {
-        HookOutputMode::Bytes => HookOutput::Bytes(Vec::new()),
-        HookOutputMode::Aligned => HookOutput::Aligned(AlignedVec::<16>::with_capacity(0)),
-    }
-}
-
-fn copy_hook_output(bytes: &[u8], output_mode: HookOutputMode) -> HookOutput {
-    match output_mode {
-        HookOutputMode::Bytes => HookOutput::Bytes(bytes.to_vec()),
-        HookOutputMode::Aligned => {
-            let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
-            aligned.extend_from_slice(bytes);
-            HookOutput::Aligned(aligned)
-        }
-    }
 }
