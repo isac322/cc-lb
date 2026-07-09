@@ -1,7 +1,7 @@
 use cc_lb_storage_api::{
-    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample,
-    SubscriptionQuotaSampleKind, SubscriptionQuotaSemanticFingerprint, SubscriptionQuotaSource,
-    SubscriptionQuotaStatus, SubscriptionQuotaWindow,
+    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSemanticFingerprint, SubscriptionQuotaSource, SubscriptionQuotaStatus,
+    SubscriptionQuotaWindow,
 };
 use uuid::Uuid;
 

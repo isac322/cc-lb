@@ -18,9 +18,9 @@ use cc_lb_storage_api::{
     PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
     PromptCacheObservationStore, StorageResult, SubscriptionQuotaCheckpointRange,
     SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaSample, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
-    UpstreamCreate, UpstreamPlanTierRecord, UpstreamRateLimitObservationRecord,
-    UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
+    SubscriptionQuotaSample, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery, UpstreamCreate,
+    UpstreamPlanTierRecord, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
+    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
     UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob,
     WasmRegistryEntry, WasmRegistryEntryInput,
 };

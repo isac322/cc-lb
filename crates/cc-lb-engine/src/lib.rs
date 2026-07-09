@@ -158,7 +158,7 @@ pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop}
 pub use lifecycle::{
     AuthLimitSubject, Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig,
     LimitCostEstimator, LimitSubjectProvider, ProxyError, RequestKind, UpstreamDispatch,
-    build_candidates, observe_rate_limits, build_subscription_quota_samples,
+    build_candidates, build_subscription_quota_samples, observe_rate_limits,
     parse_request_cache_breakpoints,
 };
 pub use lifecycle_api_key_metrics_subscriber::{

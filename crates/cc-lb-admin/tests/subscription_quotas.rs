@@ -5,10 +5,9 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventStore, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
-    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
-    UsageRollupStore,
+    RequestEvent, RequestEventStore, SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample,
+    SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaStatus,
+    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore, UsageRollupStore,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -348,9 +347,7 @@ async fn create_oauth_upstream(server: &admin_test_common::SpawnedAdminServer, n
         .expect("created upstream id is uuid")
 }
 
-fn checkpoint_record(
-    record: SubscriptionQuotaSample,
-) -> SubscriptionQuotaCheckpointRecord {
+fn checkpoint_record(record: SubscriptionQuotaSample) -> SubscriptionQuotaCheckpointRecord {
     SubscriptionQuotaCheckpointRecord::from(&record)
 }
 

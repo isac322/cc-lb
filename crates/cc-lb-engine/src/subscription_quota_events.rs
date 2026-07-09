@@ -2,8 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_storage_api::{
-    Storage, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
-    SubscriptionQuotaSource,
+    Storage, SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
 };
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
