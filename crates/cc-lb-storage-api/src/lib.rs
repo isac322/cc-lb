@@ -16,6 +16,7 @@ pub mod upstream;
 pub mod upstream_rate_limit;
 pub mod upstream_subscription_metadata;
 pub mod upstream_subscription_quota;
+pub mod upstream_subscription_quota_checkpoint;
 pub mod validation;
 pub mod warmup_attempts;
 
@@ -42,6 +43,7 @@ pub use upstream::*;
 pub use upstream_rate_limit::*;
 pub use upstream_subscription_metadata::*;
 pub use upstream_subscription_quota::*;
+pub use upstream_subscription_quota_checkpoint::*;
 pub use uuid::Uuid as UpstreamRecordId;
 pub use validation::validate_identifier;
 pub use warmup_attempts::*;

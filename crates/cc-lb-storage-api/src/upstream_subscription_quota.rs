@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::StorageResult;
+use crate::{
+    SubscriptionQuotaCheckpointRange, SubscriptionQuotaCheckpointRangeQuery,
+    SubscriptionQuotaCheckpointRecord,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SubscriptionQuotaWindow {
@@ -277,11 +281,13 @@ pub struct SubscriptionQuotaSeries {
 
 #[async_trait]
 pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
-    /// Atomically appends every record to the observations table AND upserts
-    /// the latest sidecar row per `(upstream_id, window, source)` in one
-    /// transaction. The latest UPSERT is monotonic: rows whose
+    /// Atomically appends every record to the legacy observations table,
+    /// upserts the latest sidecar row, and inserts change-only semantic
+    /// checkpoints per `(upstream_id, window, source)` in one transaction.
+    /// The latest UPSERT is monotonic: rows whose
     /// `observed_at_unix_millis` is less than the existing latest are SKIPPED
-    /// for the sidecar but STILL APPENDED to observations.
+    /// for the sidecar but STILL APPENDED to observations and considered for
+    /// checkpoint history.
     async fn put_subscription_quota_batch(
         &self,
         records: &[SubscriptionQuotaObservationRecord],
@@ -310,4 +316,35 @@ pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
         &self,
         query: SubscriptionQuotaSeriesQuery,
     ) -> StorageResult<Vec<SubscriptionQuotaSeries>>;
+
+    /// Inserts semantic checkpoints, skipping a row when the latest persisted
+    /// checkpoint for `(upstream_id, window, source)` has the same semantic
+    /// fingerprint. Returns the number of rows inserted.
+    async fn put_subscription_quota_checkpoints(
+        &self,
+        records: &[SubscriptionQuotaCheckpointRecord],
+    ) -> StorageResult<usize>;
+
+    async fn put_subscription_quota_checkpoint(
+        &self,
+        record: &SubscriptionQuotaCheckpointRecord,
+    ) -> StorageResult<usize> {
+        self.put_subscription_quota_checkpoints(std::slice::from_ref(record))
+            .await
+    }
+
+    /// Returns the latest checkpoint for every physical `(upstream_id, window,
+    /// source)` key intersecting the given upstream IDs. Empty input returns empty.
+    async fn list_latest_subscription_quota_checkpoints_for_upstreams(
+        &self,
+        upstream_ids: &[Uuid],
+    ) -> StorageResult<Vec<SubscriptionQuotaCheckpointRecord>>;
+
+    /// Returns per-source checkpoint ranges. Each range includes the last
+    /// checkpoint before `since_unix_millis` as `left_anchor` when available,
+    /// plus all checkpoints inside `[since_unix_millis, until_unix_millis]`.
+    async fn list_subscription_quota_checkpoint_ranges(
+        &self,
+        query: SubscriptionQuotaCheckpointRangeQuery,
+    ) -> StorageResult<Vec<SubscriptionQuotaCheckpointRange>>;
 }
