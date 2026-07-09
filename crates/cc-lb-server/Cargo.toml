@@ -69,6 +69,7 @@ cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 clap = { workspace = true, features = ["derive"] }
+futures-util = "0.3"
 http.workspace = true
 http-body-util.workspace = true
 hex.workspace = true
