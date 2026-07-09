@@ -1089,6 +1089,7 @@ function DetailView({
                           dataKey="unix"
                           type="number"
                           domain={[sinceUnixSecs, nowUnixSecs]}
+                          allowDataOverflow
                           tick={{
                             fill: 'var(--color-text-faint)',
                             fontSize: 10,
