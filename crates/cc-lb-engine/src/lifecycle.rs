@@ -1950,7 +1950,11 @@ impl Lifecycle {
         observer: Option<LifecycleContext>,
     ) -> Response<Body> {
         let mut active_limit = active_limit;
-        if is_sse_response(response.headers()) {
+        if active_limit
+            .as_ref()
+            .is_some_and(|active_limit| active_limit.request.stream)
+            || is_sse_response(response.headers())
+        {
             let response_status = response.status();
             let mut response = self.relay_response(
                 response,
@@ -3322,6 +3326,7 @@ impl RequestBodyView {
 struct LimitRequest {
     model: String,
     max_tokens: i64,
+    stream: bool,
 }
 
 impl LimitRequest {
@@ -3336,6 +3341,10 @@ impl LimitRequest {
                 .and_then(|v| v.get("max_tokens"))
                 .and_then(Value::as_i64)
                 .unwrap_or(0),
+            stream: value
+                .and_then(|v| v.get("stream"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         }
     }
 }
