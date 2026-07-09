@@ -16,7 +16,6 @@ See [docs/runtime-management.md](docs/runtime-management.md) for the full API an
 
 - [Upstream warm-up](./docs/upstream-warmup.md): keep Anthropic 5h windows ticking
 - [Distributed Scheduler](./docs/scheduler.md): topology, retry classes, metrics, and runbook
-- [Subscription quota checkpoint cleanup](./docs/runbook/subscription-quota-checkpoint-cleanup.md): offline backfill/drop/VACUUM runbook for reclaiming raw quota-history storage
 
 ## Plugin authors
 

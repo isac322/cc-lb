@@ -30,5 +30,5 @@ pub use traits::{
     DynamicViewControl, LimitControl, ManagedKeyControl, NoopSubscriptionQuotaCache,
     PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
     PromptCacheObservationSinkLike, PromptCacheThreadUsage, RuntimeStatusControl,
-    RuntimeStatusError, SubscriptionQuotaCacheLike, SubscriptionQuotaObservationControl,
+    RuntimeStatusError, SubscriptionQuotaCacheLike, SubscriptionQuotaSampleControl,
 };

@@ -663,8 +663,6 @@ pub struct SubscriptionQuotaConfig {
     pub writer_flush_ms: u64,
     #[serde(default = "default_subscription_quota_writer_channel_capacity")]
     pub writer_channel_capacity: u32,
-    #[serde(default = "default_subscription_quota_dedup_elapsed_override_secs")]
-    pub dedup_elapsed_override_secs: u64,
     #[serde(default = "default_subscription_quota_routing_max_staleness_secs")]
     pub routing_max_staleness_secs: u64,
 }
@@ -675,7 +673,6 @@ impl Default for SubscriptionQuotaConfig {
             writer_batch_max_records: 256,
             writer_flush_ms: 100,
             writer_channel_capacity: 4096,
-            dedup_elapsed_override_secs: 30,
             routing_max_staleness_secs: 1800,
         }
     }
@@ -1447,10 +1444,6 @@ fn default_subscription_quota_writer_flush_ms() -> u64 {
 
 fn default_subscription_quota_writer_channel_capacity() -> u32 {
     SubscriptionQuotaConfig::default().writer_channel_capacity
-}
-
-fn default_subscription_quota_dedup_elapsed_override_secs() -> u64 {
-    SubscriptionQuotaConfig::default().dedup_elapsed_override_secs
 }
 
 fn default_subscription_quota_routing_max_staleness_secs() -> u64 {

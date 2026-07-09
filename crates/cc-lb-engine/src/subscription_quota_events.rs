@@ -2,8 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_storage_api::{
-    Storage, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
-    SubscriptionQuotaSource,
+    Storage, SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
 };
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
@@ -13,17 +12,17 @@ use uuid::Uuid;
 
 use crate::rate_limit_headers::UnifiedQuotaObservation;
 
-/// Build a header-sourced `SubscriptionQuotaObservationRecord` from a parsed
+/// Build a header-sourced `SubscriptionQuotaSample` from a parsed
 /// unified quota observation. Mirrors the pass-through performed by
-/// `lifecycle.rs::record_subscription_quota_observations` and avoids
+/// `lifecycle.rs::ingest_subscription_quota_headers` and avoids
 /// duplicating field-by-field construction in callers (e.g. warm-up loop,
 /// fire-now admin handler).
-pub fn unified_observation_to_record(
+pub fn unified_observation_to_sample(
     upstream_id: Uuid,
     observation: UnifiedQuotaObservation,
     observed_at_unix_millis: u64,
-) -> SubscriptionQuotaObservationRecord {
-    SubscriptionQuotaObservationRecord {
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
         upstream_id,
         window: observation.window,
         source: SubscriptionQuotaSource::Header,
@@ -52,7 +51,7 @@ pub const DEFAULT_SUBSCRIPTION_QUOTA_CHANNEL_CAPACITY: usize = 4096;
 
 #[derive(Clone, Debug)]
 pub struct SubscriptionQuotaSink {
-    tx: Arc<Sender<SubscriptionQuotaObservationRecord>>,
+    tx: Arc<Sender<SubscriptionQuotaSample>>,
 }
 
 #[derive(Debug, Error)]
@@ -67,7 +66,6 @@ pub enum SubscriptionQuotaEnqueueError {
 pub struct SubscriptionQuotaWriterConfig {
     pub batch_max_records: usize,
     pub flush_max_ms: u64,
-    pub dedup_elapsed_override_secs: u64,
 }
 
 impl Default for SubscriptionQuotaWriterConfig {
@@ -75,17 +73,16 @@ impl Default for SubscriptionQuotaWriterConfig {
         Self {
             batch_max_records: 256,
             flush_max_ms: 100,
-            dedup_elapsed_override_secs: 30,
         }
     }
 }
 
 impl SubscriptionQuotaSink {
-    pub fn new() -> (Self, Receiver<SubscriptionQuotaObservationRecord>) {
+    pub fn new() -> (Self, Receiver<SubscriptionQuotaSample>) {
         Self::with_capacity(DEFAULT_SUBSCRIPTION_QUOTA_CHANNEL_CAPACITY)
     }
 
-    pub fn with_capacity(capacity: usize) -> (Self, Receiver<SubscriptionQuotaObservationRecord>) {
+    pub fn with_capacity(capacity: usize) -> (Self, Receiver<SubscriptionQuotaSample>) {
         let bounded_capacity = capacity.max(1);
         let (tx, rx) = mpsc::channel(bounded_capacity);
         (Self { tx: Arc::new(tx) }, rx)
@@ -93,7 +90,7 @@ impl SubscriptionQuotaSink {
 
     pub fn enqueue(
         &self,
-        record: SubscriptionQuotaObservationRecord,
+        record: SubscriptionQuotaSample,
     ) -> Result<(), SubscriptionQuotaEnqueueError> {
         match self.tx.try_send(record) {
             Ok(()) => Ok(()),
@@ -111,7 +108,7 @@ impl SubscriptionQuotaSink {
 
 pub fn start_subscription_quota_writer(
     storage: Arc<dyn Storage>,
-    receiver: Receiver<SubscriptionQuotaObservationRecord>,
+    receiver: Receiver<SubscriptionQuotaSample>,
     config: SubscriptionQuotaWriterConfig,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
@@ -122,7 +119,7 @@ pub fn start_subscription_quota_writer(
 
 async fn run_subscription_quota_writer(
     storage: Arc<dyn Storage>,
-    mut receiver: Receiver<SubscriptionQuotaObservationRecord>,
+    mut receiver: Receiver<SubscriptionQuotaSample>,
     config: SubscriptionQuotaWriterConfig,
     cancel: CancellationToken,
 ) {
@@ -173,26 +170,25 @@ fn normalize_config(config: SubscriptionQuotaWriterConfig) -> SubscriptionQuotaW
     SubscriptionQuotaWriterConfig {
         batch_max_records: config.batch_max_records.max(1),
         flush_max_ms: config.flush_max_ms.max(1),
-        dedup_elapsed_override_secs: config.dedup_elapsed_override_secs,
     }
 }
 
 fn drain_remaining(
-    receiver: &mut Receiver<SubscriptionQuotaObservationRecord>,
-    batch: &mut Vec<SubscriptionQuotaObservationRecord>,
+    receiver: &mut Receiver<SubscriptionQuotaSample>,
+    batch: &mut Vec<SubscriptionQuotaSample>,
 ) {
     while let Ok(record) = receiver.try_recv() {
         batch.push(record);
     }
 }
 
-async fn flush_batch(storage: &Arc<dyn Storage>, batch: Vec<SubscriptionQuotaObservationRecord>) {
+async fn flush_batch(storage: &Arc<dyn Storage>, batch: Vec<SubscriptionQuotaSample>) {
     if batch.is_empty() {
         return;
     }
 
     metrics::histogram!("subscription_quota_writer_batch_size").record(batch.len() as f64);
-    if let Err(error) = storage.put_subscription_quota_batch(&batch).await {
+    if let Err(error) = storage.record_subscription_quota_samples(&batch).await {
         metrics::counter!("subscription_quota_writer_error").increment(1);
         tracing::warn!(error = %error, batch_size = batch.len(), "subscription quota batch persistence failed");
     }

@@ -23,7 +23,7 @@ use cc_lb_engine::warmup_attempts::{
     WarmupAttemptExecution, WarmupAttemptExecutionResult, execute_warmup_attempt,
 };
 use cc_lb_engine::{
-    UnifiedQuotaObservation, observe_subscription_quota_headers, parse_anthropic_unified_headers,
+    UnifiedQuotaObservation, build_subscription_quota_samples, parse_anthropic_unified_headers,
 };
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
@@ -819,12 +819,12 @@ async fn record_fire_now_subscription_quota_observations(
         let observed_at = UNIX_EPOCH
             .checked_add(Duration::from_millis(observed_at_unix_millis))
             .ok_or_else(|| invalid_warmup_state("warmup observed timestamp overflow"))?;
-        lifecycle.record_subscription_quota_observations(headers, upstream_id, observed_at);
+        lifecycle.ingest_subscription_quota_headers(headers, upstream_id, observed_at);
         return Ok(());
     }
-    let records = observe_subscription_quota_headers(headers, upstream_id, observed_at_unix_millis);
+    let records = build_subscription_quota_samples(headers, upstream_id, observed_at_unix_millis);
     if !records.is_empty() {
-        storage.put_subscription_quota_batch(&records).await?;
+        storage.record_subscription_quota_samples(&records).await?;
     }
     Ok(())
 }

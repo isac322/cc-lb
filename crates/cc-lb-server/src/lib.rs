@@ -32,7 +32,6 @@ pub mod signal;
 pub mod state_machine;
 pub mod storage_factory;
 pub mod subscription_quota_cache;
-pub mod subscription_quota_checkpoint_backfill;
 pub mod tls;
 pub mod validate;
 pub mod version;

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     StorageError, StorageResult, SubscriptionQuotaBucket, SubscriptionQuotaCheckpointRange,
     SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaLatestRecord, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaLatestRecord, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSemanticFingerprint, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
     SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
     SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
@@ -16,16 +16,12 @@ use crate::{SqliteStorage, map_sqlx_error};
 
 #[async_trait]
 impl UpstreamSubscriptionQuotaStore for SqliteStorage {
-    async fn put_subscription_quota_batch(
+    async fn record_subscription_quota_samples(
         &self,
-        records: &[SubscriptionQuotaObservationRecord],
+        records: &[SubscriptionQuotaSample],
     ) -> StorageResult<()> {
-        let raw_observations_present = self.raw_subscription_quota_observations_present().await?;
         let mut tx = self.begin_immediate().await?;
         for record in records {
-            if raw_observations_present {
-                insert_observation(&mut tx, record).await?;
-            }
             upsert_latest(&mut tx, record).await?;
             insert_checkpoint_if_changed(&mut tx, &SubscriptionQuotaCheckpointRecord::from(record))
                 .await?;
@@ -34,11 +30,11 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
         Ok(())
     }
 
-    async fn put_subscription_quota(
+    async fn record_subscription_quota_sample(
         &self,
-        record: &SubscriptionQuotaObservationRecord,
+        record: &SubscriptionQuotaSample,
     ) -> StorageResult<()> {
-        self.put_subscription_quota_batch(std::slice::from_ref(record))
+        self.record_subscription_quota_samples(std::slice::from_ref(record))
             .await
     }
 
@@ -381,51 +377,9 @@ fn range_for_key(key: CheckpointKey) -> SubscriptionQuotaCheckpointRange {
     }
 }
 
-async fn insert_observation(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    record: &SubscriptionQuotaObservationRecord,
-) -> StorageResult<()> {
-    let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
-    sqlx::query(
-        "INSERT INTO upstream_subscription_quota_observations_v1 \
-         (upstream_id, window, source, sample_kind, observed_at_unix_millis, sample_id, \
-           utilization, status, resets_at_unix_secs, surpassed_threshold, representative_claim, \
-           fallback_percentage, fallback_available, overage_in_use, overage_period_monthly_utilization, upgrade_paths, \
-           disabled_reason, \
-           extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits, ingested_at_unix_millis) \
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) \
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(record.upstream_id.to_string())
-    .bind(record.window.as_str())
-    .bind(record.source.as_str())
-    .bind(record.sample_kind.as_str())
-    .bind(u64_to_i64(record.observed_at_unix_millis, "subscription quota observed_at_unix_millis")?)
-    .bind(record.sample_id.to_string())
-    .bind(record.utilization)
-    .bind(record.status.map(SubscriptionQuotaStatus::as_str))
-    .bind(record.resets_at_unix_secs.map(|value| u64_to_i64(value, "subscription quota resets_at_unix_secs")).transpose()?)
-    .bind(record.surpassed_threshold)
-    .bind(&record.representative_claim)
-    .bind(record.fallback_percentage)
-    .bind(record.fallback_available)
-    .bind(record.overage_in_use)
-    .bind(record.overage_period_monthly_utilization)
-    .bind(upgrade_paths_json)
-    .bind(&record.disabled_reason)
-    .bind(record.extra_usage_enabled)
-    .bind(record.extra_usage_monthly_limit)
-    .bind(record.extra_usage_used_credits)
-    .bind(u64_to_i64(record.ingested_at_unix_millis, "subscription quota ingested_at_unix_millis")?)
-    .execute(&mut **tx)
-    .await
-    .map_err(map_sqlx_error)?;
-    Ok(())
-}
-
 async fn upsert_latest(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    record: &SubscriptionQuotaObservationRecord,
+    record: &SubscriptionQuotaSample,
 ) -> StorageResult<()> {
     let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
     sqlx::query(
@@ -504,7 +458,7 @@ fn decode_upgrade_paths(raw: Option<String>) -> StorageResult<Option<Vec<String>
     }
 }
 
-pub(super) fn row_to_record(row: SqliteRow) -> StorageResult<SubscriptionQuotaObservationRecord> {
+pub(super) fn row_to_record(row: SqliteRow) -> StorageResult<SubscriptionQuotaSample> {
     let window = parse_window(&row.try_get::<String, _>("window").map_err(map_sqlx_error)?)?;
     let source = parse_source(&row.try_get::<String, _>("source").map_err(map_sqlx_error)?)?;
     let sample_kind = parse_sample_kind(
@@ -524,7 +478,7 @@ pub(super) fn row_to_record(row: SqliteRow) -> StorageResult<SubscriptionQuotaOb
         .try_get::<String, _>("sample_id")
         .map_err(map_sqlx_error)?;
 
-    Ok(SubscriptionQuotaObservationRecord {
+    Ok(SubscriptionQuotaSample {
         upstream_id: parse_uuid(&upstream_id, "subscription quota upstream_id")?,
         window,
         source,
@@ -694,7 +648,7 @@ struct CheckpointStream {
 
 #[derive(Debug)]
 struct BucketPoint {
-    record: SubscriptionQuotaObservationRecord,
+    record: SubscriptionQuotaSample,
     is_change: bool,
 }
 
@@ -792,8 +746,8 @@ fn bucket_start_unix_secs(timestamp_unix_millis: u64, bucket_secs: u64) -> u64 {
 
 fn record_from_checkpoint(
     checkpoint: &SubscriptionQuotaCheckpointRecord,
-) -> SubscriptionQuotaObservationRecord {
-    SubscriptionQuotaObservationRecord {
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
         upstream_id: checkpoint.upstream_id,
         window: checkpoint.window,
         source: checkpoint.source,

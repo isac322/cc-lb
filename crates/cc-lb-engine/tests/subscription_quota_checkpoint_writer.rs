@@ -5,9 +5,9 @@ use cc_lb_engine::{
     start_subscription_quota_writer,
 };
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, Storage, SubscriptionQuotaObservationRecord,
-    SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaStatus,
-    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
+    BackendKind, MetaStore, Storage, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSource, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
+    UpstreamSubscriptionQuotaStore,
 };
 use cc_lb_storage_sqlite::SqliteStorage;
 use tokio_util::sync::CancellationToken;
@@ -117,7 +117,7 @@ async fn checkpoint_writer_decrease() -> Result<(), Box<dyn std::error::Error>> 
 
 async fn write_records<const N: usize>(
     storage: Arc<SqliteStorage>,
-    records: [SubscriptionQuotaObservationRecord; N],
+    records: [SubscriptionQuotaSample; N],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (sink, receiver) = SubscriptionQuotaSink::with_capacity(N);
     let storage_for_writer: Arc<dyn Storage> = storage;
@@ -127,7 +127,6 @@ async fn write_records<const N: usize>(
         SubscriptionQuotaWriterConfig {
             batch_max_records: N,
             flush_max_ms: 1,
-            dedup_elapsed_override_secs: 30,
         },
         CancellationToken::new(),
     );
@@ -158,8 +157,8 @@ fn observation(
     observed_at_unix_millis: u64,
     sample_id: u128,
     utilization: f64,
-) -> SubscriptionQuotaObservationRecord {
-    SubscriptionQuotaObservationRecord {
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
         upstream_id,
         window: SubscriptionQuotaWindow::FiveHour,
         source: SubscriptionQuotaSource::Api,

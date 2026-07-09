@@ -22,7 +22,7 @@ use cc_lb_plugin_api::{
     shape_request, sign_request,
 };
 use cc_lb_storage_api::{
-    SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
     UpstreamRateLimitObservationRecord, UpstreamRecord,
     types::{RequestCacheBreakpoint, RequestCacheBreakpointSource, StoredApiKeyRecord},
     upstream::UpstreamKind as StorageUpstreamKind,
@@ -2201,7 +2201,7 @@ impl Lifecycle {
 
     /// Admin fire-now warmup only. Main request path feeds
     /// `lifecycle_subscription_quota_subscriber` via UpstreamResponseStarted events.
-    pub fn record_subscription_quota_observations(
+    pub fn ingest_subscription_quota_headers(
         &self,
         headers: &HeaderMap,
         upstream_id: Uuid,
@@ -2212,7 +2212,7 @@ impl Lifecycle {
         }
         let observed_at_unix_millis = system_time_to_unix_millis(observed_at);
         for record in
-            observe_subscription_quota_headers(headers, upstream_id, observed_at_unix_millis)
+            build_subscription_quota_samples(headers, upstream_id, observed_at_unix_millis)
         {
             if let Some(cache) = &self.subscription_quota_cache {
                 cache.upsert_observation(&record);
@@ -2838,14 +2838,14 @@ pub fn observe_rate_limits(
         .collect()
 }
 
-pub fn observe_subscription_quota_headers(
+pub fn build_subscription_quota_samples(
     headers: &HeaderMap,
     upstream_id: Uuid,
     observed_at_unix_millis: u64,
-) -> Vec<SubscriptionQuotaObservationRecord> {
+) -> Vec<SubscriptionQuotaSample> {
     parse_anthropic_unified_headers(headers)
         .into_iter()
-        .map(|observation| SubscriptionQuotaObservationRecord {
+        .map(|observation| SubscriptionQuotaSample {
             upstream_id,
             window: observation.window,
             source: SubscriptionQuotaSource::Header,
@@ -4586,7 +4586,7 @@ mod tests {
     }
 
     #[test]
-    fn observe_subscription_quota_headers_builds_header_sample_records() {
+    fn build_subscription_quota_samples_from_headers() {
         let upstream_id = Uuid::new_v4();
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -4624,7 +4624,7 @@ mod tests {
             HeaderValue::from_static("team_growth,max_5x"),
         );
 
-        let records = observe_subscription_quota_headers(&headers, upstream_id, 123_456);
+        let records = build_subscription_quota_samples(&headers, upstream_id, 123_456);
 
         assert_eq!(records.len(), 2);
         let unified = records

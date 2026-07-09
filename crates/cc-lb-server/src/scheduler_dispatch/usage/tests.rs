@@ -1,6 +1,6 @@
 use super::*;
 
-fn parse(body: &str) -> Vec<SubscriptionQuotaObservationRecord> {
+fn parse(body: &str) -> Vec<SubscriptionQuotaSample> {
     let usage: UsageBody = serde_json::from_str(body).expect("usage body parses");
     records_from_usage(Uuid::nil(), usage, 1_700_000_000_000)
 }
