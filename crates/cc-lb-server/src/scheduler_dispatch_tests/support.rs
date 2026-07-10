@@ -147,6 +147,29 @@ impl Fixture {
             .expect("encrypt test payload")
     }
 
+    pub(super) async fn expire_session(&self) {
+        sqlx::query(
+            "UPDATE cache_keepalive_sessions SET expires_at = 1 WHERE session_key_hash = ?",
+        )
+        .bind("session-hash")
+        .execute(self.storage.pool())
+        .await
+        .expect("expire session");
+    }
+
+    pub(super) fn revoke_principal(&self) {
+        let current = self.dynamic_view.load();
+        let mut disabled = principal_record_with_id("principal");
+        disabled.enabled = false;
+        let view = DynamicViewBuilder::from_view(&current)
+            .principal_view(Arc::new(PrincipalView::from_db(
+                &[disabled],
+                std::collections::HashMap::new(),
+            )))
+            .build();
+        self.dynamic_view.store(view);
+    }
+
     pub(super) fn enqueuer(
         &self,
         pusher: Arc<dyn CacheKeepaliveTaskPusher>,

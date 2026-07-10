@@ -1,31 +1,22 @@
+use cc_lb_control::api_keys::principal_view::PrincipalStatus;
 use cc_lb_engine::cache_keepalive::{DispatchOutcome, PersistedRequestSnapshot, RequestSnapshot};
 use cc_lb_engine::clock::unix_secs;
 use cc_lb_scheduler::error::Result as SchedulerResult;
-use cc_lb_scheduler::jobs::cache_keepalive::{CacheKeepaliveJob, CacheKeepaliveJobHandler};
+use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::AdaptiveJob;
 use cc_lb_storage_api::{
-    CacheKeepaliveHitRefreshRequest, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
+    CacheKeepaliveHitRefreshRequest, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
+    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
 };
 
 use super::{SchedulerDispatch, cache_keepalive_payload_aad};
-use crate::scheduler_dispatch::outcomes::cache_keepalive_outcome;
 
 impl SchedulerDispatch {
     pub(super) async fn dispatch_cache_keepalive(
         &self,
         job: CacheKeepaliveJob,
     ) -> SchedulerResult<JobOutcome> {
-        let outcome = CacheKeepaliveJobHandler::new(self.storage.as_ref())
-            .handle(job.clone())
-            .await?;
-        if !matches!(
-            outcome,
-            cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJobOutcome::Ready
-        ) {
-            return cache_keepalive_outcome(outcome);
-        }
-
         let Some(record) = CacheKeepaliveSessionStore::get_cache_keepalive_session(
             self.storage.as_ref(),
             &job.session_key_hash,
@@ -35,8 +26,22 @@ impl SchedulerDispatch {
         else {
             return Ok(JobOutcome::Noop);
         };
-        if record.generation != job.generation {
+        if record.generation != job.generation
+            || record.status == CacheKeepaliveSessionStatus::Terminal
+        {
             return Ok(JobOutcome::Noop);
+        }
+
+        if unix_secs(self.clock.now()) >= record.expires_at_unix_secs {
+            self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::Expired)
+                .await?;
+            return Ok(JobOutcome::Done);
+        }
+
+        if !self.cache_keepalive_still_authorized(&record) {
+            self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::Cancelled)
+                .await?;
+            return Ok(JobOutcome::Done);
         }
 
         let aad = cache_keepalive_payload_aad(
@@ -97,6 +102,17 @@ impl SchedulerDispatch {
                 .await?;
                 Ok(JobOutcome::Done)
             }
+        }
+    }
+
+    fn cache_keepalive_still_authorized(&self, record: &CacheKeepaliveSessionRecord) -> bool {
+        let view = self.dynamic_view.load();
+        if view.principal_view.principal_status(&record.principal_id) != PrincipalStatus::Active {
+            return false;
+        }
+        match view.principal_view.allowed_upstreams(&record.principal_id) {
+            Some(allowed) if !allowed.is_empty() => allowed.contains(&record.upstream_id),
+            _ => true,
         }
     }
 
