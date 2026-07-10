@@ -118,7 +118,6 @@ async fn cancel_terminalizes_active_session_without_deleting_pending_job() {
     enqueuer
         .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
             session_key_hash: "session-hash".to_owned(),
-            principal_id: "principal".to_owned(),
             reason: cc_lb_engine::cache_keepalive::CancelReason::UserTurnDetected,
         })
         .await
@@ -195,7 +194,6 @@ fn enqueue_request() -> CacheKeepaliveEnqueueRequest {
     CacheKeepaliveEnqueueRequest {
         session_key_hash: "session-hash".to_owned(),
         principal_id: "principal".to_owned(),
-        upstream_id: Uuid::from_u128(42),
         cache_anchor_age: std::time::Duration::from_secs(30),
         params: ScheduleParams {
             delay: std::time::Duration::from_secs(240),

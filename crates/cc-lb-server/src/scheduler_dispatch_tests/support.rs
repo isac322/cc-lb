@@ -211,7 +211,6 @@ impl Fixture {
         CacheKeepaliveEnqueueRequest {
             session_key_hash: "session-hash".to_owned(),
             principal_id: "principal".to_owned(),
-            upstream_id: self.upstream_id,
             cache_anchor_age: Duration::ZERO,
             params: ScheduleParams {
                 delay: Duration::from_secs(1),

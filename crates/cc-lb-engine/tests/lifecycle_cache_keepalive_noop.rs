@@ -18,7 +18,9 @@ use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
 use http::{Response, StatusCode};
 use uuid::Uuid;
 
-use common::{RecordingHook, TestAuthn, TestRouter, TestState, collect_body, lifecycle_with_parts};
+use common::{
+    RecordingHook, TestAuthn, TestRouter, TestState, collect_body, lifecycle_with_parts, settle,
+};
 
 #[tokio::test]
 async fn cache_keepalive_without_scheduler_is_response_noop() {
@@ -102,6 +104,7 @@ async fn cache_keepalive_enqueue_failure_does_not_change_proxy_response() {
         .expect("lifecycle handles request despite keepalive enqueue failure");
 
     let (status, _headers, body) = collect_body(response).await;
+    settle().await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, upstream_body);
     assert_eq!(calls.load(Ordering::Relaxed), 1);

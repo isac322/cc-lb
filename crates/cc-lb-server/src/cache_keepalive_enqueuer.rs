@@ -75,7 +75,7 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
             &CacheKeepaliveReplaceRequest {
                 session_key_hash: request.session_key_hash.clone(),
                 principal_id: request.principal_id.clone(),
-                upstream_id: request.upstream_id,
+                upstream_id: request.snapshot.upstream_id,
                 cache_anchor_at_unix_secs,
                 ttl: request.snapshot.ttl,
                 run_at_unix_secs,
@@ -186,8 +186,7 @@ fn terminal_reason_from_cancel(reason: CancelReason) -> CacheKeepaliveTerminalRe
         | CancelReason::NoCacheControl
         | CancelReason::UserTurnDetected
         | CancelReason::SnapshotTooLarge
-        | CancelReason::Shutdown
-        | CancelReason::ProcessCapExceeded => CacheKeepaliveTerminalReason::Cancelled,
+        | CancelReason::Shutdown => CacheKeepaliveTerminalReason::Cancelled,
     }
 }
 

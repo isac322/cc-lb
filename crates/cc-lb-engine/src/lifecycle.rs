@@ -902,7 +902,6 @@ pub struct Lifecycle {
     subscription_quota_sink: Option<SubscriptionQuotaSink>,
     subscription_metadata_hook: Option<MetadataHookHandle>,
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
-    keepalive_scheduler: Option<Arc<crate::cache_keepalive::KeepaliveScheduler>>,
     cache_keepalive_enqueuer: Option<Arc<dyn crate::cache_keepalive::CacheKeepaliveEnqueuer>>,
     clock: ClockHandle,
     rng: Mutex<StdRng>,
@@ -943,7 +942,6 @@ impl Lifecycle {
             subscription_quota_sink: None,
             subscription_metadata_hook: None,
             subscription_quota_cache: None,
-            keepalive_scheduler: None,
             cache_keepalive_enqueuer: None,
             clock,
             rng: Mutex::new(rand::make_rng()),
@@ -969,19 +967,10 @@ impl Lifecycle {
             subscription_quota_sink: None,
             subscription_metadata_hook: None,
             subscription_quota_cache: None,
-            keepalive_scheduler: None,
             cache_keepalive_enqueuer: None,
             clock,
             rng: Mutex::new(rand::make_rng()),
         }
-    }
-
-    pub fn with_keepalive_scheduler(
-        mut self,
-        scheduler: Arc<crate::cache_keepalive::KeepaliveScheduler>,
-    ) -> Self {
-        self.keepalive_scheduler = Some(scheduler);
-        self
     }
 
     pub fn with_cache_keepalive_enqueuer(
@@ -1397,8 +1386,7 @@ impl Lifecycle {
             kind: PrincipalKind::ApiKey,
             claims: serde_json::Map::new(),
         };
-        let track_keepalive_response = (self.keepalive_scheduler.is_some()
-            || self.cache_keepalive_enqueuer.is_some())
+        let track_keepalive_response = self.cache_keepalive_enqueuer.is_some()
             && cached.cache_keepalive().is_some()
             && !cache_metadata.cache_breakpoints.is_empty();
         if track_keepalive_response {
@@ -1878,7 +1866,6 @@ impl Lifecycle {
         let status = response.status();
         let keepalive_completion = keepalive_shaped_body.take().map(|shaped_body| {
             crate::cache_keepalive::LifecycleKeepaliveContext {
-                request_body: ctx.body_bytes.clone(),
                 principal: principal.clone(),
                 cache_metadata: cache_metadata.clone(),
                 upstream_id: resolved_upstream_id,
@@ -2150,12 +2137,10 @@ impl Lifecycle {
             (keepalive_completion, response_body_json.as_ref())
         {
             crate::cache_keepalive::LifecycleKeepalive::new(
-                self.keepalive_scheduler.clone(),
                 self.cache_keepalive_enqueuer.clone(),
                 Arc::clone(&self.dynamic_view),
             )
             .on_response_completed(
-                &context.request_body,
                 response_json,
                 &context.principal,
                 &context.cache_metadata,
@@ -2163,8 +2148,7 @@ impl Lifecycle {
                 context.shaped_body,
                 &context.downstream_headers,
                 first_body_chunk_at.map_or(duration, |anchor| anchor.elapsed()),
-            )
-            .await;
+            );
         }
         if let Some(o) = observer.as_ref()
             && usage.present
@@ -2498,7 +2482,6 @@ impl Lifecycle {
         let limit_engine = self.limit_engine.clone();
         let prompt_cache_shadow_enabled = self.config.prompt_cache_shadow.enabled;
         let keepalive = crate::cache_keepalive::LifecycleKeepalive::new(
-            self.keepalive_scheduler.clone(),
             self.cache_keepalive_enqueuer.clone(),
             Arc::clone(&self.dynamic_view),
         );
@@ -2833,7 +2816,6 @@ impl Lifecycle {
                 && let Some(response_json) = keepalive_response.into_value()
             {
                 keepalive.on_response_completed(
-                    &context.request_body,
                     &response_json,
                     &context.principal,
                     &context.cache_metadata,
@@ -2841,7 +2823,7 @@ impl Lifecycle {
                     context.shaped_body,
                     &context.downstream_headers,
                     message_start_at.map_or(relay_start.elapsed(), |anchor| anchor.elapsed()),
-                ).await;
+                );
             }
             let elapsed_ms = |to: Option<Instant>| {
                 to.map(|t| duration_to_ms(t.saturating_duration_since(relay_start)))

@@ -18,7 +18,9 @@ use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
 use http::{Response, StatusCode};
 use uuid::Uuid;
 
-use common::{RecordingHook, TestAuthn, TestRouter, TestState, collect_body, lifecycle_with_parts};
+use common::{
+    RecordingHook, TestAuthn, TestRouter, TestState, collect_body, lifecycle_with_parts, settle,
+};
 
 #[tokio::test]
 async fn cache_keepalive_user_turn_cancels_durable_without_scheduler() {
@@ -34,6 +36,7 @@ async fn cache_keepalive_user_turn_cancels_durable_without_scheduler() {
     .await;
 
     let (status, _headers, body) = collect_body(response).await;
+    settle().await;
     assert_eq!(status, StatusCode::OK);
     assert!(String::from_utf8_lossy(&body).contains("msg_user_turn"));
     assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -53,6 +56,7 @@ async fn cache_keepalive_ambiguous_cancels_durable_without_scheduler() {
     .await;
 
     let (status, _headers, body) = collect_body(response).await;
+    settle().await;
     assert_eq!(status, StatusCode::OK);
     assert!(String::from_utf8_lossy(&body).contains("msg_ambiguous"));
     assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -72,6 +76,7 @@ async fn cache_keepalive_cancel_failure_does_not_change_proxy_response() {
     .await;
 
     let (status, _headers, body) = collect_body(response).await;
+    settle().await;
     assert_eq!(status, StatusCode::OK);
     assert!(String::from_utf8_lossy(&body).contains("msg_cancel_fail"));
     assert_eq!(calls.load(Ordering::Relaxed), 1);

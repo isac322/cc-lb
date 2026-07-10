@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use apalis_core::task::{Task, builder::TaskBuilder};
 use cc_lb_storage_api::{
     CacheKeepaliveGenerationCheck, CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore,
     CacheTtl, StorageError, cache_keepalive_job_key,
@@ -30,17 +29,6 @@ pub struct CacheKeepaliveJob {
 impl CacheKeepaliveJob {
     pub fn idempotency_key(&self) -> String {
         cache_keepalive_job_key(&self.session_key_hash, self.generation)
-    }
-
-    pub fn into_apalis_task<Ctx, IdType>(self, run_at_unix_secs: u64) -> Task<Self, Ctx, IdType>
-    where
-        Ctx: Default,
-    {
-        let idempotency_key = self.idempotency_key();
-        TaskBuilder::<Self, Ctx, IdType>::new(self)
-            .run_at_timestamp(run_at_unix_secs)
-            .with_idempotency_key(idempotency_key)
-            .build()
     }
 }
 

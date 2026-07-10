@@ -12,15 +12,13 @@ use cc_lb_plugin_api::{
 use cc_lb_storage_api::principal::{Limit, PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
-use http::{HeaderMap, HeaderValue, Response, StatusCode};
+use http::{HeaderValue, Response, StatusCode};
 use serde_json::{Value, json};
 use url::Url;
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub(crate) struct SignerCall {
-    pub(crate) label: &'static str,
-    pub(crate) downstream_api_key: String,
     pub(crate) upstream_name: String,
 }
 
@@ -32,15 +30,13 @@ pub(crate) struct RecordingSignerFactory {
 impl ApiKeyAwareSignerFactory for RecordingSignerFactory {
     fn with_router_choice(
         &self,
-        api_key: String,
+        _api_key: String,
         router_chosen_upstream_name: String,
     ) -> Arc<dyn SignerFactory> {
         self.calls
             .lock()
             .expect("signer log lock")
             .push(SignerCall {
-                label: self.label,
-                downstream_api_key: api_key,
                 upstream_name: router_chosen_upstream_name,
             });
         Arc::new(RecordingSigner { label: self.label })
@@ -76,43 +72,6 @@ impl Signer for RecordingSigner {
 
     async fn on_unauthorized(&self, _err: &cc_lb_plugin_api::UpstreamError) -> RetryDecision {
         RetryDecision::Fail
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct RecordingKeepaliveDispatch {
-    requests: Mutex<Vec<CapturedRequest>>,
-}
-
-impl RecordingKeepaliveDispatch {
-    pub(crate) fn requests(&self) -> Vec<CapturedRequest> {
-        self.requests.lock().expect("requests lock").clone()
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct CapturedRequest {
-    pub(crate) url: String,
-    pub(crate) headers: HeaderMap,
-    pub(crate) body: Bytes,
-}
-
-#[async_trait]
-impl UpstreamDispatch for RecordingKeepaliveDispatch {
-    async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
-        self.requests
-            .lock()
-            .expect("requests lock")
-            .push(CapturedRequest {
-                url: request.url().to_string(),
-                headers: request.headers().clone(),
-                body: request.body().clone(),
-            });
-        Ok(json_response(json!({
-            "content": [],
-            "stop_reason": "max_tokens",
-            "usage": {"cache_read_input_tokens": 123, "input_tokens": 0, "output_tokens": 0}
-        })))
     }
 }
 

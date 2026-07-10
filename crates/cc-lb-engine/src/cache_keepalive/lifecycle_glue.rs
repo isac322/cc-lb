@@ -16,13 +16,12 @@ use cc_lb_storage_api::CacheTtl;
 
 use crate::lifecycle::RequestCacheMetadata;
 
-use super::{CancelReason, HeuristicClassifier, KeepaliveScheduler, RequestSnapshot, SessionKey};
+use super::{CancelReason, HeuristicClassifier, RequestSnapshot, SessionKey};
 
 #[derive(Clone)]
 pub struct CacheKeepaliveEnqueueRequest {
     pub session_key_hash: String,
     pub principal_id: String,
-    pub upstream_id: Uuid,
     pub cache_anchor_age: Duration,
     pub params: super::ScheduleParams,
     pub snapshot: RequestSnapshot,
@@ -31,7 +30,6 @@ pub struct CacheKeepaliveEnqueueRequest {
 #[derive(Clone, Debug)]
 pub struct CacheKeepaliveCancelRequest {
     pub session_key_hash: String,
-    pub principal_id: String,
     pub reason: CancelReason,
 }
 
@@ -40,7 +38,6 @@ impl fmt::Debug for CacheKeepaliveEnqueueRequest {
         f.debug_struct("CacheKeepaliveEnqueueRequest")
             .field("session_key_hash", &self.session_key_hash)
             .field("principal_id", &self.principal_id)
-            .field("upstream_id", &self.upstream_id)
             .field("cache_anchor_age", &self.cache_anchor_age)
             .field("params", &self.params)
             .field("snapshot", &"<redacted>")
@@ -67,7 +64,6 @@ pub trait CacheKeepaliveEnqueuer: Send + Sync {
 
 #[derive(Clone)]
 pub(crate) struct LifecycleKeepaliveContext {
-    pub(crate) request_body: Bytes,
     pub(crate) principal: Principal,
     pub(crate) cache_metadata: RequestCacheMetadata,
     pub(crate) upstream_id: Uuid,
@@ -77,28 +73,26 @@ pub(crate) struct LifecycleKeepaliveContext {
 
 #[derive(Clone)]
 pub(crate) struct LifecycleKeepalive {
-    scheduler: Option<Arc<KeepaliveScheduler>>,
     enqueuer: Option<Arc<dyn CacheKeepaliveEnqueuer>>,
     dynamic_view: Arc<DynamicViewHolder>,
 }
 
 impl LifecycleKeepalive {
     pub(crate) fn new(
-        scheduler: Option<Arc<KeepaliveScheduler>>,
         enqueuer: Option<Arc<dyn CacheKeepaliveEnqueuer>>,
         dynamic_view: Arc<DynamicViewHolder>,
     ) -> Self {
         Self {
-            scheduler,
             enqueuer,
             dynamic_view,
         }
     }
 
+    /// Detaches classification and the serial keep-alive storage writes onto a
+    /// background task so the client response path never awaits them.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn on_response_completed(
+    pub(crate) fn on_response_completed(
         &self,
-        request_body: &[u8],
         response_body_json: &serde_json::Value,
         principal: &Principal,
         cache_metadata: &RequestCacheMetadata,
@@ -107,10 +101,42 @@ impl LifecycleKeepalive {
         downstream_headers: &HeaderMap,
         cache_anchor_age: Duration,
     ) {
-        if self.scheduler.is_none() && self.enqueuer.is_none() {
+        if self.enqueuer.is_none() {
             return;
         }
-        let _ = request_body;
+        let this = self.clone();
+        let response_body_json = response_body_json.clone();
+        let principal = principal.clone();
+        let cache_metadata = cache_metadata.clone();
+        let downstream_headers = downstream_headers.clone();
+        tokio::spawn(async move {
+            this.persist_completion(
+                &response_body_json,
+                &principal,
+                &cache_metadata,
+                upstream_id,
+                shaped_body,
+                &downstream_headers,
+                cache_anchor_age,
+            )
+            .await;
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_completion(
+        &self,
+        response_body_json: &serde_json::Value,
+        principal: &Principal,
+        cache_metadata: &RequestCacheMetadata,
+        upstream_id: uuid::Uuid,
+        shaped_body: Bytes,
+        downstream_headers: &HeaderMap,
+        cache_anchor_age: Duration,
+    ) {
+        let Some(enqueuer) = self.enqueuer.as_ref() else {
+            return;
+        };
         let view = self.dynamic_view.load();
         let Some(cached) = view.principal_view.get(&principal.id) else {
             return;
@@ -129,9 +155,8 @@ impl LifecycleKeepalive {
             return;
         };
         let principal_name: Arc<str> = Arc::from(principal.id.as_str());
-        let Some(url) = keepalive_snapshot_url() else {
-            return;
-        };
+        let url =
+            Url::parse(KEEPALIVE_SNAPSHOT_URL).expect("cache keep-alive snapshot URL is valid");
         let snapshot = match RequestSnapshot::capture(
             url,
             http::Method::POST,
@@ -141,7 +166,7 @@ impl LifecycleKeepalive {
             ttl,
             config.snapshot_max_bytes as usize,
         ) {
-            Ok(snapshot) => Arc::new(snapshot),
+            Ok(snapshot) => snapshot,
             Err(super::SnapshotError::TooLarge { actual, max }) => {
                 tracing::warn!(
                     target: "cache_keepalive",
@@ -150,11 +175,7 @@ impl LifecycleKeepalive {
                     max,
                     "skipping cache keep-alive snapshot: shaped body exceeds cap"
                 );
-                if !self.scheduler.as_ref().is_some_and(|scheduler| {
-                    scheduler.cancel(&session_key, CancelReason::SnapshotTooLarge)
-                }) {
-                    super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
-                }
+                super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
                 return;
             }
             Err(error) => {
@@ -172,17 +193,15 @@ impl LifecycleKeepalive {
             super::TurnDecision::AgentInTurn => {
                 let params =
                     super::ScheduleParams::from_cache_anchor_age(config, ttl, cache_anchor_age);
-                if let Some(enqueuer) = self.enqueuer.as_ref()
-                    && let Err(error) = enqueuer
-                        .enqueue_cache_keepalive(CacheKeepaliveEnqueueRequest {
-                            session_key_hash: session_key.to_string(),
-                            principal_id: principal.id.clone(),
-                            upstream_id,
-                            cache_anchor_age,
-                            params: params.clone(),
-                            snapshot: (*snapshot).clone(),
-                        })
-                        .await
+                if let Err(error) = enqueuer
+                    .enqueue_cache_keepalive(CacheKeepaliveEnqueueRequest {
+                        session_key_hash: session_key.to_string(),
+                        principal_id: principal.id.clone(),
+                        cache_anchor_age,
+                        params,
+                        snapshot,
+                    })
+                    .await
                 {
                     tracing::warn!(
                         target: "cache_keepalive",
@@ -190,9 +209,6 @@ impl LifecycleKeepalive {
                         %error,
                         "durable cache keep-alive enqueue failed"
                     );
-                }
-                if let Some(scheduler) = self.scheduler.as_ref() {
-                    scheduler.schedule_or_replace(session_key, snapshot, params, principal_name);
                 }
             }
             super::TurnDecision::UserTurn => {
@@ -221,14 +237,10 @@ impl LifecycleKeepalive {
         principal: &Principal,
         reason: CancelReason,
     ) {
-        if let Some(scheduler) = self.scheduler.as_ref() {
-            scheduler.cancel(session_key, reason);
-        }
         if let Some(enqueuer) = self.enqueuer.as_ref()
             && let Err(error) = enqueuer
                 .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
                     session_key_hash: session_key.to_string(),
-                    principal_id: principal.id.clone(),
                     reason,
                 })
                 .await
@@ -345,9 +357,7 @@ fn cache_keepalive_principal_uuid(principal_id: &str) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-fn keepalive_snapshot_url() -> Option<Url> {
-    Url::parse("https://api.anthropic.com/v1/messages").ok()
-}
+const KEEPALIVE_SNAPSHOT_URL: &str = "https://api.anthropic.com/v1/messages";
 
 #[cfg(test)]
 mod tests {
