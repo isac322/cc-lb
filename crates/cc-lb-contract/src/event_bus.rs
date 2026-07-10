@@ -29,7 +29,7 @@ pub const DEFAULT_LIFECYCLE_BROADCAST_CAPACITY: usize = 2048;
 ///
 /// See `.omo/plans/dashboard-live-tail-redesign.md` §3.4 for the field
 /// classification rationale.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RequestEventPartial {
     pub event_id: String,
     pub request_id: String,
@@ -107,6 +107,22 @@ pub struct RequestEventPartial {
     pub matched_v3_cache_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrh_key_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_urgency_5h: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_urgency_7d: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_urgency_combined: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_weight_factor: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_cache_multiplier: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_warning_multiplier: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_effective_weight: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_uniform_fallback: Option<bool>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_ms: Option<u64>,
@@ -132,7 +148,7 @@ pub struct RequestEventPartial {
     pub first_body_chunk_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FinalRequestEventUpdate {
     pub event: RequestEvent,
     pub cursor: u64,
@@ -155,7 +171,7 @@ impl RequestEventPhase {
 }
 
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "phase", content = "payload", rename_all = "snake_case")]
 pub enum RequestEventUpdate {
     Partial(RequestEventPartial),
