@@ -314,6 +314,14 @@ export const RequestEventPartialSchema = z.looseObject({
   cost_cache_read_micros: z.number().nullable().optional(),
   cache_control_block_count: z.number().nullable().optional(),
   cache_prefix_hash: z.string().nullable().optional(),
+  quota_urgency_5h: z.number().nullable().optional(),
+  quota_urgency_7d: z.number().nullable().optional(),
+  quota_urgency_combined: z.number().nullable().optional(),
+  quota_weight_factor: z.number().nullable().optional(),
+  quota_cache_multiplier: z.number().nullable().optional(),
+  quota_warning_multiplier: z.number().nullable().optional(),
+  quota_effective_weight: z.number().nullable().optional(),
+  quota_uniform_fallback: z.boolean().nullable().optional(),
   auth_ms: z.number().nullable().optional(),
   route_ms: z.number().nullable().optional(),
   limit_reserve_ms: z.number().nullable().optional(),
@@ -328,7 +336,7 @@ export const RequestEventPartialSchema = z.looseObject({
 });
 
 export const FinalRequestEventUpdateSchema = z.object({
-  event: z.any(),
+  event: z.custom<RequestEvent>(),
   cursor: z.number(),
 });
 
@@ -431,6 +439,14 @@ export interface RequestEvent {
   cache_creation_input_tokens_5m?: number;
   cache_creation_input_tokens_1h?: number;
   cache_read_input_tokens?: number;
+  readonly quota_urgency_5h?: number | null;
+  readonly quota_urgency_7d?: number | null;
+  readonly quota_urgency_combined?: number | null;
+  readonly quota_weight_factor?: number | null;
+  readonly quota_cache_multiplier?: number | null;
+  readonly quota_warning_multiplier?: number | null;
+  readonly quota_effective_weight?: number | null;
+  readonly quota_uniform_fallback?: boolean | null;
   cost_usd_micros?: number;
   cost_input_micros?: number;
   cost_output_micros?: number;

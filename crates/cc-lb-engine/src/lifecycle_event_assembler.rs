@@ -280,6 +280,32 @@ impl Partial {
                     .and_then(|parse| parse.matched_v3_cache_key.clone())
             }),
             wrh_key_source: route_wrh_key_source,
+            quota_urgency_5h: self.route.as_ref().and_then(|route| route.quota_urgency_5h),
+            quota_urgency_7d: self.route.as_ref().and_then(|route| route.quota_urgency_7d),
+            quota_urgency_combined: self
+                .route
+                .as_ref()
+                .and_then(|route| route.quota_urgency_combined),
+            quota_weight_factor: self
+                .route
+                .as_ref()
+                .and_then(|route| route.quota_weight_factor),
+            quota_cache_multiplier: self
+                .route
+                .as_ref()
+                .and_then(|route| route.quota_cache_multiplier),
+            quota_warning_multiplier: self
+                .route
+                .as_ref()
+                .and_then(|route| route.quota_warning_multiplier),
+            quota_effective_weight: self
+                .route
+                .as_ref()
+                .and_then(|route| route.quota_effective_weight),
+            quota_uniform_fallback: self
+                .route
+                .as_ref()
+                .and_then(|route| route.quota_uniform_fallback),
             auth_ms: self.auth.as_ref().and_then(|auth| auth.auth_ms),
             route_ms,
             limit_reserve_ms: self.limit_reserve_ms,
@@ -984,6 +1010,38 @@ fn finalize_base(
         cache_value_micros,
         formula_winner_upstream_id,
         kept_upstream_id,
+        quota_urgency_5h: partial
+            .route
+            .as_ref()
+            .and_then(|route| route.quota_urgency_5h),
+        quota_urgency_7d: partial
+            .route
+            .as_ref()
+            .and_then(|route| route.quota_urgency_7d),
+        quota_urgency_combined: partial
+            .route
+            .as_ref()
+            .and_then(|route| route.quota_urgency_combined),
+        quota_weight_factor: partial
+            .route
+            .as_ref()
+            .and_then(|route| route.quota_weight_factor),
+        quota_cache_multiplier: partial
+            .route
+            .as_ref()
+            .and_then(|route| route.quota_cache_multiplier),
+        quota_warning_multiplier: partial
+            .route
+            .as_ref()
+            .and_then(|route| route.quota_warning_multiplier),
+        quota_effective_weight: partial
+            .route
+            .as_ref()
+            .and_then(|route| route.quota_effective_weight),
+        quota_uniform_fallback: partial
+            .route
+            .as_ref()
+            .and_then(|route| route.quota_uniform_fallback),
         wrh_key_source,
         lineage_would_have_predicted_read_tokens,
         lineage_would_have_picked_upstream_id,
@@ -1076,8 +1134,13 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use cc_lb_contract::{
-        AuthFailure, CostBreakdown, EngineMetricsHook, HeaderSnapshot, NoopMetricsHook,
-        ParseFailure, RequestEventPhase, RouteInfo, StreamError, StreamSuccess, UsageSource,
+        AuthFailure, BusReceiver, CostBreakdown, EngineMetricsHook, HeaderSnapshot,
+        NoopMetricsHook, ParseFailure, RequestEventPhase, RouteInfo, StreamError, StreamSuccess,
+        UsageSource,
+    };
+    use cc_lb_plugin_api::types::{
+        CandidateUrgency, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
+        TerminalDecision, TerminalStrategy, WrhKeySource,
     };
     use cc_lb_storage_api::{RequestEvent, StorageResult};
     use metrics::{Counter, CounterFn, Key, KeyName, Metadata, Recorder, SharedString, Unit};
@@ -1189,6 +1252,9 @@ mod tests {
     fn noop_metrics() -> Arc<dyn EngineMetricsHook> {
         Arc::new(NoopMetricsHook)
     }
+
+    include!("lifecycle_event_assembler_quota_support_test.rs");
+    include!("lifecycle_event_assembler_quota_tests.rs");
 
     #[tokio::test(flavor = "current_thread")]
     async fn success_terminated_persists_row() {
@@ -1543,6 +1609,14 @@ mod tests {
                 cache_value_micros: None,
                 formula_winner_upstream_id: None,
                 kept_upstream_id: None,
+                quota_urgency_5h: None,
+                quota_urgency_7d: None,
+                quota_urgency_combined: None,
+                quota_weight_factor: None,
+                quota_cache_multiplier: None,
+                quota_warning_multiplier: None,
+                quota_effective_weight: None,
+                quota_uniform_fallback: None,
                 wrh_key_source: None,
                 lineage_would_have_predicted_read_tokens: None,
                 lineage_would_have_picked_upstream_id: None,
@@ -1712,6 +1786,14 @@ mod tests {
                 cache_value_micros: None,
                 formula_winner_upstream_id: None,
                 kept_upstream_id: None,
+                quota_urgency_5h: None,
+                quota_urgency_7d: None,
+                quota_urgency_combined: None,
+                quota_weight_factor: None,
+                quota_cache_multiplier: None,
+                quota_warning_multiplier: None,
+                quota_effective_weight: None,
+                quota_uniform_fallback: None,
                 wrh_key_source: None,
                 lineage_would_have_predicted_read_tokens: None,
                 lineage_would_have_picked_upstream_id: None,
