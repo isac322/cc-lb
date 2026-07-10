@@ -1,5 +1,12 @@
 #![cfg(feature = "sqlite")]
 
+#[path = "support/request_event_quota_sqlite.rs"]
+mod request_event_quota_sqlite;
+#[path = "support/request_event_quota.rs"]
+mod request_event_quota_support;
+
+request_event_quota_sqlite::define_request_event_quota_sqlite_tests!();
+
 use std::{future::Future, sync::Arc};
 
 use async_trait::async_trait;

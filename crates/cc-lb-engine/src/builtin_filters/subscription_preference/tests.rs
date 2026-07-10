@@ -7,8 +7,8 @@
 //! - C — Reset semantics
 //! - D — Overage / extra_usage assessment
 //! - E — Model relevance (5h + 7d, excludes unstable model-specific windows)
-//! - F — Urgency numerics (headroom exponent, remaining_secs, max over windows)
-//! - G — Capacity multiplier (Pro / team_standard / cap saturation / overage)
+//! - F — ADR 0008 pressure numerics and frozen v10 overage urgency
+//! - G — Capacity-ratio independence across pressure, weight, and distribution
 //! - H — WRH selection: uniform fallback, single candidate, determinism, spread
 //! - I — Anti-stampede distribution
 //! - J — Live-snapshot regression (four-upstream production fixture)
@@ -26,6 +26,10 @@ const HAIKU_MODEL: &str = "claude-haiku-4-5-20251001";
 const MODEL_AGNOSTIC: &str = "claude-3-5-haiku-default";
 const WINDOW_SEVEN_DAY_SONNET: &str = "7d_sonnet";
 const WINDOW_SEVEN_DAY_OPUS: &str = "7d_opus";
+const V10_RENDEZVOUS_SALT_ORACLE: &str =
+    "cc-lb:subscription-preference:v10:symmetric-cache-value:2026-07-07";
+const V11_RENDEZVOUS_SALT_ORACLE: &str =
+    "cc-lb:subscription-preference:v11:use-it-or-lose-it-quota-pressure:2026-07-10";
 
 const T0_SECS: u64 = 1_700_000_000;
 
@@ -427,13 +431,288 @@ fn always_ignores_7d_opus_window() {
 // =============================================================================
 
 #[test]
-fn runbear_30min_headroom_beats_bearmax_4h_headroom() {
-    // Q1: shorter remaining beats longer remaining when headroom is similar.
-    // Example Org: util=0.22 remain=30min (1800s) → urgency ∝ (0.78)^2 / 1800 ≈ 3.38e-4.
-    // bear:    util=0.05 remain=4h  (14400s) → urgency ∝ (0.95)^2 / 14400 ≈ 6.27e-5.
-    // Example Org wins > 80% of the time under WRH.
-    let Example Org = oauth_at_t0(
-        "Example Org",
+fn quota_pressure_golden_values() {
+    // Given: representative half-window, combined-window, and floor-bound snapshots.
+    let five_hour = oauth_at_t0(
+        "five-hour",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.25)
+                .status("allowed")
+                .reset_at(T0_SECS + 9_000)
+                .build(),
+        ],
+    );
+    let seven_day = oauth_at_t0(
+        "seven-day",
+        2,
+        vec![
+            fresh(WINDOW_SEVEN_DAY)
+                .util(0.25)
+                .status("allowed")
+                .reset_at(T0_SECS + 302_400)
+                .build(),
+        ],
+    );
+    let combined = oauth_at_t0(
+        "combined",
+        3,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.25)
+                .status("allowed")
+                .reset_at(T0_SECS + 9_000)
+                .build(),
+            fresh(WINDOW_SEVEN_DAY)
+                .util(0.25)
+                .status("allowed")
+                .reset_at(T0_SECS + 302_400)
+                .build(),
+        ],
+    );
+    let floor_bound = oauth_at_t0(
+        "floor-bound",
+        4,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.0)
+                .status("allowed")
+                .reset_at(T0_SECS + 1)
+                .build(),
+        ],
+    );
+    let config = FilterConfig::default();
+
+    // When: base pressure is assessed for each ADR golden scenario.
+    let five_hour_pressure = assess_candidate(&five_hour, 0, &[WINDOW_FIVE_HOUR], &config)
+        .expect("five-hour candidate is assessable")
+        .quota_urgency_combined;
+    let seven_day_pressure = assess_candidate(&seven_day, 0, &[WINDOW_SEVEN_DAY], &config)
+        .expect("seven-day candidate is assessable")
+        .quota_urgency_combined;
+    let combined_pressure =
+        assess_candidate(&combined, 0, &[WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY], &config)
+            .expect("combined candidate is assessable")
+            .quota_urgency_combined;
+    let floor_pressure = assess_candidate(&floor_bound, 0, &[WINDOW_FIVE_HOUR], &config)
+        .expect("floor-bound candidate is assessable")
+        .quota_urgency_combined;
+    let weekly_gamma_one_pressure = pressure_from_ratios(
+        0.75,
+        0.5,
+        BaseWindowPressureConfig {
+            window_len_secs: SEVEN_DAY_WINDOW_LEN_SECS,
+            gamma: 1.0,
+            target_floor: SEVEN_DAY_TARGET_FLOOR,
+        },
+    );
+
+    // Then: the values match ADR 0008, including the linear-gamma control.
+    assert!((five_hour_pressure - 0.405_465_108_108_164_4).abs() <= 1e-12);
+    assert!((seven_day_pressure - 0.613_409_262_276_148).abs() <= 1e-12);
+    assert!((weekly_gamma_one_pressure - 0.405_465_108_108_164_4).abs() <= 1e-12);
+    assert!((combined_pressure - 0.621_654_592_904_933_6).abs() <= 1e-12);
+    assert!((floor_pressure - 4.605_170_185_988_092).abs() <= 1e-12);
+}
+
+#[test]
+fn assessment_preserves_base_pressure_components() {
+    // Given: a KnownBase candidate with distinct 5h and 7d pressures.
+    let candidate = oauth_at_t0(
+        "base",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.25)
+                .status("allowed")
+                .reset_at(T0_SECS + 9_000)
+                .build(),
+            fresh(WINDOW_SEVEN_DAY)
+                .util(0.25)
+                .status("allowed")
+                .reset_at(T0_SECS + 302_400)
+                .build(),
+        ],
+    );
+
+    // When: the private assessment is built once at the candidate boundary.
+    let assessment = assess_candidate(
+        &candidate,
+        0,
+        &[WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY],
+        &FilterConfig::default(),
+    )
+    .expect("base candidate is assessable");
+
+    // Then: both components and their combined pressure remain available internally.
+    assert_eq!(assessment.tier, Tier::KnownBase);
+    assert!((assessment.quota_urgency_5h - 0.405_465_108_108_164_4).abs() <= 1e-12);
+    assert!((assessment.quota_urgency_7d - 0.613_409_262_276_148).abs() <= 1e-12);
+    assert!((assessment.quota_urgency_combined - 0.621_654_592_904_933_6).abs() <= 1e-12);
+    assert_eq!(assessment.overage_urgency, 0.0);
+}
+
+#[test]
+fn assessment_preserves_overage_raw_urgency_separately() {
+    // Given: a base-blocked candidate with usable overage.
+    let candidate = oauth_at_t0(
+        "overage",
+        1,
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(0.25).status("allowed").build(),
+        ],
+    );
+
+    // When: the candidate is assessed into the Overage tier.
+    let assessment = assess_candidate(
+        &candidate,
+        0,
+        &[WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY],
+        &FilterConfig::default(),
+    )
+    .expect("overage candidate is assessable");
+
+    // Then: raw v10 overage urgency is separate and base components are zero.
+    assert_eq!(assessment.tier, Tier::Overage);
+    assert_eq!(assessment.quota_urgency_5h, 0.0);
+    assert_eq!(assessment.quota_urgency_7d, 0.0);
+    assert_eq!(assessment.quota_urgency_combined, 0.0);
+    assert_eq!(assessment.overage_urgency, overage_urgency(Some(0.25)));
+}
+
+#[test]
+fn quota_pressure_zero_for_unusable_windows_and_full_utilization() {
+    // Given: every unusable-window shape plus one usable control window.
+    let cases = [
+        oauth_at_t0("missing", 1, Vec::new()),
+        oauth_at_t0(
+            "stale",
+            2,
+            vec![
+                stale(WINDOW_FIVE_HOUR)
+                    .util(0.25)
+                    .reset_at(T0_SECS + 9_000)
+                    .build(),
+            ],
+        ),
+        oauth_at_t0(
+            "missing-utilization",
+            3,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .status("allowed")
+                    .reset_at(T0_SECS + 9_000)
+                    .build(),
+            ],
+        ),
+        oauth_at_t0(
+            "missing-reset",
+            4,
+            vec![fresh(WINDOW_FIVE_HOUR).util(0.25).status("allowed").build()],
+        ),
+        oauth_at_t0(
+            "elapsed",
+            5,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .util(0.25)
+                    .status("allowed")
+                    .reset_at(T0_SECS)
+                    .build(),
+            ],
+        ),
+        oauth_at_t0(
+            "non-finite",
+            6,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .util(f64::NAN)
+                    .status("allowed")
+                    .reset_at(T0_SECS + 9_000)
+                    .build(),
+            ],
+        ),
+        oauth_at_t0(
+            "full",
+            7,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .util(1.0)
+                    .status("allowed")
+                    .reset_at(T0_SECS + 9_000)
+                    .build(),
+            ],
+        ),
+    ];
+    let usable = oauth_at_t0(
+        "usable",
+        8,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.25)
+                .status("allowed")
+                .reset_at(T0_SECS + 9_000)
+                .build(),
+        ],
+    );
+    let config = FilterConfig::default();
+
+    // When: every case is reduced to its base-window pressure contribution.
+    let pressures = cases.map(|candidate| {
+        assess_candidate(&candidate, 0, &[WINDOW_FIVE_HOUR], &config)
+            .map_or(0.0, |assessment| assessment.quota_urgency_combined)
+    });
+    let usable_pressure = assess_candidate(&usable, 0, &[WINDOW_FIVE_HOUR], &config)
+        .expect("usable candidate is assessable")
+        .quota_urgency_combined;
+
+    // Then: unusable/full windows are zero and the control proves real v11 math ran.
+    assert_eq!(pressures, [0.0; 7]);
+    assert!((usable_pressure - 0.405_465_108_108_164_4).abs() <= 1e-12);
+}
+
+#[test]
+fn quota_pressure_ignores_capacity_ratio() {
+    // Given: identical pressure inputs attached to radically different plan capacities.
+    let quota = || {
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.25)
+                .status("allowed")
+                .reset_at(T0_SECS + 9_000)
+                .build(),
+            fresh(WINDOW_SEVEN_DAY)
+                .util(0.25)
+                .status("allowed")
+                .reset_at(T0_SECS + 302_400)
+                .build(),
+        ]
+    };
+    let small = with_plan(oauth_at_t0("small", 1, quota()), 1.0);
+    let large = with_plan(oauth_at_t0("large", 2, quota()), 20.0);
+    let config = FilterConfig::default();
+
+    // When: base pressure is assessed independently for each candidate.
+    let small_pressure =
+        assess_candidate(&small, 0, &[WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY], &config)
+            .expect("small-plan candidate is assessable")
+            .quota_urgency_combined;
+    let large_pressure =
+        assess_candidate(&large, 0, &[WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY], &config)
+            .expect("large-plan candidate is assessable")
+            .quota_urgency_combined;
+
+    // Then: plan capacity cannot alter raw base pressure.
+    assert_eq!(small_pressure, large_pressure);
+}
+
+#[test]
+fn short_reset_underuse_has_greater_pressure_and_share() {
+    // Q1: ADR 0008 pressure prefers quota at greater risk of expiring unused.
+    let example_org = oauth_at_t0(
+        "example-org",
         1,
         vec![
             fresh(WINDOW_FIVE_HOUR)
@@ -466,18 +745,20 @@ fn runbear_30min_headroom_beats_bearmax_4h_headroom() {
     );
     let dist = wrh_distribution(&[Example Org.clone(), bear.clone()], MODEL_AGNOSTIC, 2000);
     let runbear_share = *dist.get(&Example Org.upstream_id).unwrap_or(&0) as f64 / 2000.0;
+    let output = filter_for_model(&[Example Org.clone(), bear.clone()], MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("trace present");
+    let runbear_pressure = candidate_urgency_for(&trace, Example Org.upstream_id).quota_urgency;
+    let bear_pressure = candidate_urgency_for(&trace, bear.upstream_id).quota_urgency;
+    assert!(runbear_pressure > bear_pressure);
     assert!(
-        runbear_share > 0.75,
-        "Example Org should win most requests, got share={runbear_share}"
+        (0.65..=0.78).contains(&runbear_share),
+        "ADR 0008 neutral factors should give Example Org a majority without starving bear; got share={runbear_share}"
     );
 }
 
 #[test]
-fn window_urgency_aggregation_uses_max() {
-    // Q2: candidate has 5h with tight urgency (util 0.5, remain 60s) plus
-    // 7d with essentially zero urgency (util 0.5, remain 1 year). The 5h
-    // number must dominate — a competing candidate with only the loose
-    // 7d must lose overwhelmingly.
+fn combined_pressure_is_dominated_by_tight_window() {
+    // Q2: ADR 0008 smoothmax remains dominated by the tight 5h pressure.
     let tight_5h = oauth_at_t0(
         "tight-5h",
         1,
@@ -516,9 +797,13 @@ fn window_urgency_aggregation_uses_max() {
         1000,
     );
     let tight_share = *dist.get(&tight_5h.upstream_id).unwrap_or(&0) as f64 / 1000.0;
+    let output = filter_for_model(&[tight_5h.clone(), loose_only], MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("trace present");
+    let tight_pressure = candidate_urgency_for(&trace, tight_5h.upstream_id).quota_urgency;
+    assert!(tight_pressure > 0.0);
     assert!(
-        tight_share > 0.99,
-        "tight 5h must dominate via max-over-windows, got share={tight_share}"
+        (0.75..=0.90).contains(&tight_share),
+        "the neutral baseline keeps the loose peer selectable while tight 5h pressure dominates; got share={tight_share}"
     );
 }
 
@@ -527,9 +812,8 @@ fn resets_at_missing_window_excluded_from_urgency() {
     // Q4: two identical candidates except one has resets_at populated on 5h
     // and the other doesn't. Both windows still classify as
     // CurrentPositive (fresh + allowed), so both stay in KnownBase. The
-    // one without resets_at contributes 0 urgency → fallback path
-    // makes them equal only through the uniform floor; but the with-reset
-    // candidate has a strictly positive urgency, so it wins the WRH.
+    // one without resets_at contributes zero pressure but remains selectable
+    // through ADR 0008's neutral factor.
     let with_reset = oauth_at_t0(
         "with-reset",
         1,
@@ -560,18 +844,22 @@ fn resets_at_missing_window_excluded_from_urgency() {
         1000,
     );
     let with_reset_share = *dist.get(&with_reset.upstream_id).unwrap_or(&0) as f64 / 1000.0;
+    let output = filter_for_model(&[with_reset.clone(), no_reset.clone()], MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("trace present");
+    let with_reset_weight = candidate_urgency_for(&trace, with_reset.upstream_id);
+    let no_reset_weight = candidate_urgency_for(&trace, no_reset.upstream_id);
+    assert!(with_reset_weight.quota_urgency > 0.0);
+    assert_eq!(no_reset_weight.quota_urgency, 0.0);
+    assert_eq!(no_reset_weight.effective_weight, 1.0);
     assert!(
-        with_reset_share > 0.99,
-        "with-reset should win — no-reset urgency is zero, so with-reset dominates WRH; got share={with_reset_share}"
+        (0.58..=0.72).contains(&with_reset_share),
+        "with-reset pressure should bias WRH without zeroing the no-reset peer; got share={with_reset_share}"
     );
 }
 
 #[test]
-fn high_util_short_remaining_loses_to_low_util_long_remaining() {
-    // Q5: A (util 0.10 remain 4h) vs B (util 0.90 remain 5min).
-    // Urgency A ∝ (0.9)^2 / 14400 ≈ 5.63e-5.
-    // Urgency B ∝ (0.1)^2 / 300 ≈ 3.33e-5.
-    // A should win the majority of picks; (1-u)^2 collapses B's contribution.
+fn high_util_short_remaining_has_greater_pressure_and_share() {
+    // Q5: ADR 0008 compares remaining quota against the time-shaped target.
     let low_util_long = oauth_at_t0(
         "low-util-long",
         1,
@@ -610,24 +898,30 @@ fn high_util_short_remaining_loses_to_low_util_long_remaining() {
         2000,
     );
     let low_share = *dist.get(&low_util_long.upstream_id).unwrap_or(&0) as f64 / 2000.0;
+    let output = filter_for_model(
+        &[low_util_long.clone(), high_util_short.clone()],
+        MODEL_AGNOSTIC,
+    );
+    let trace = output.subscription_preference.expect("trace present");
+    let low_pressure = candidate_urgency_for(&trace, low_util_long.upstream_id).quota_urgency;
+    let high_pressure = candidate_urgency_for(&trace, high_util_short.upstream_id).quota_urgency;
+    assert!(high_pressure > low_pressure);
     assert!(
-        low_share > 0.55,
-        "low-util long remaining must beat high-util short remaining; got share={low_share}"
+        (0.22..=0.36).contains(&low_share),
+        "ADR 0008 should favor the short-reset candidate while the neutral baseline keeps both selectable; got share={low_share}"
     );
 }
 
 // =============================================================================
-// Section G — Capacity multiplier
+// Section G — Capacity ratio is metadata only under ADR 0008
 // =============================================================================
 
 #[test]
-fn pro_plan_ratio_gives_capacity_multiplier_1() {
-    // Pro (ratio=1.0) → multiplier=1.0. Compare against a candidate whose
-    // ratio is None (defaults to UNKNOWN_CAPACITY_RATIO=1.0). Under
-    // identical util/remain, they should tie → uniform pick ~50/50.
-    let pro = with_plan(
+fn plan_capacity_ratio_does_not_change_base_pressure() {
+    // Given: identical base snapshots with an explicit ratio and without one.
+    let explicit_ratio = with_plan(
         oauth_at_t0(
-            "pro",
+            "explicit-ratio",
             1,
             vec![
                 fresh(WINDOW_FIVE_HOUR)
@@ -642,10 +936,10 @@ fn pro_plan_ratio_gives_capacity_multiplier_1() {
                     .build(),
             ],
         ),
-        1.0,
+        20.0,
     );
-    let unknown = oauth_at_t0(
-        "unknown",
+    let absent_ratio = oauth_at_t0(
+        "absent-ratio",
         2,
         vec![
             fresh(WINDOW_FIVE_HOUR)
@@ -660,22 +954,33 @@ fn pro_plan_ratio_gives_capacity_multiplier_1() {
                 .build(),
         ],
     );
-    let dist = wrh_distribution(&[pro.clone(), unknown.clone()], MODEL_AGNOSTIC, 2000);
-    let pro_share = *dist.get(&pro.upstream_id).unwrap_or(&0) as f64 / 2000.0;
-    assert!(
-        (0.40..=0.60).contains(&pro_share),
-        "pro (ratio=1.0) and unknown (ratio defaulting to 1.0) should split evenly; got pro share={pro_share}"
+
+    // When: ADR 0008 assesses and scores the base bucket.
+    let output = filter_for_model(
+        &[explicit_ratio.clone(), absent_ratio.clone()],
+        MODEL_AGNOSTIC,
     );
+    let trace = output.subscription_preference.expect("trace present");
+    let explicit = candidate_urgency_for(&trace, explicit_ratio.upstream_id);
+    let absent = candidate_urgency_for(&trace, absent_ratio.upstream_id);
+
+    // Then: capacity metadata cannot alter any base-pressure component.
+    assert!(explicit.quota_urgency > 0.0);
+    assert_eq!(explicit.quota_urgency_5h, absent.quota_urgency_5h);
+    assert_eq!(explicit.quota_urgency_7d, absent.quota_urgency_7d);
+    assert_eq!(
+        explicit.quota_urgency_combined,
+        absent.quota_urgency_combined
+    );
+    assert_eq!(explicit.quota_urgency, absent.quota_urgency);
 }
 
 #[test]
-fn team_standard_between_pro_and_saturated() {
-    // team_standard ratio=1.25 → multiplier=sqrt(1.25)≈1.118.
-    // vs pro (ratio=1.0 → mult=1.0). At identical util/remaining,
-    // team wins ~52.8% (1.118 / (1.118 + 1.0)).
-    let pro = with_plan(
+fn plan_capacity_ratio_does_not_change_base_effective_weight() {
+    // Given: identical positive-pressure candidates with different plan ratios.
+    let first = with_plan(
         oauth_at_t0(
-            "pro",
+            "first",
             1,
             vec![
                 fresh(WINDOW_FIVE_HOUR)
@@ -692,9 +997,9 @@ fn team_standard_between_pro_and_saturated() {
         ),
         1.0,
     );
-    let team = with_plan(
+    let second = with_plan(
         oauth_at_t0(
-            "team",
+            "second",
             2,
             vec![
                 fresh(WINDOW_FIVE_HOUR)
@@ -711,97 +1016,436 @@ fn team_standard_between_pro_and_saturated() {
         ),
         1.25,
     );
-    let dist = wrh_distribution(&[pro.clone(), team.clone()], MODEL_AGNOSTIC, 2000);
-    let team_share = *dist.get(&team.upstream_id).unwrap_or(&0) as f64 / 2000.0;
-    assert!(
-        (0.47..=0.60).contains(&team_share),
-        "team_standard (~52.8% expected) should sit between pro and saturated; got team share={team_share}"
+
+    // When: the filter composes quota, cache, and warning factors.
+    let output = filter_for_model(&[first.clone(), second.clone()], MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("trace present");
+    let first_weight = candidate_urgency_for(&trace, first.upstream_id);
+    let second_weight = candidate_urgency_for(&trace, second.upstream_id);
+
+    // Then: plan ratio changes neither the quota factor nor effective weight.
+    assert!(!first_weight.quota_uniform_fallback);
+    assert_eq!(
+        first_weight.quota_weight_factor,
+        second_weight.quota_weight_factor
+    );
+    assert_eq!(first_weight.cache_weight_multiplier, 1.0);
+    assert_eq!(second_weight.cache_weight_multiplier, 1.0);
+    assert_eq!(first_weight.warning_multiplier, 1.0);
+    assert_eq!(second_weight.warning_multiplier, 1.0);
+    assert_eq!(
+        first_weight.effective_weight,
+        second_weight.effective_weight
     );
 }
 
 #[test]
-fn equal_util_equal_remaining_unequal_plan_saturates_capacity_cap() {
-    // Ratio=5 and ratio=20 both saturate the sqrt-then-cap at 2.0.
-    // Their urgencies are numerically identical → distribution is ~50/50.
-    let five_x = with_plan(
-        oauth_at_t0(
-            "5x",
-            1,
-            vec![
-                fresh(WINDOW_FIVE_HOUR)
-                    .util(0.3)
-                    .status("allowed")
-                    .reset_at(T0_SECS + 3600)
-                    .build(),
-                fresh(WINDOW_SEVEN_DAY)
-                    .util(0.3)
-                    .status("allowed")
-                    .reset_at(T0_SECS + 6 * 86_400)
-                    .build(),
-            ],
-        ),
-        5.0,
+fn plan_capacity_ratio_does_not_change_base_distribution() {
+    // Given: a non-uniform base bucket and the same IDs/snapshots with swapped ratios.
+    let on_pace = healthy_known_base_at_util("on-pace", 1, 0.90);
+    let urgent = oauth_at_t0(
+        "urgent",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.10)
+                .status("allowed")
+                .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS / 2)
+                .build(),
+            fresh(WINDOW_SEVEN_DAY)
+                .util(0.10)
+                .status("allowed")
+                .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS / 2)
+                .build(),
+        ],
     );
-    let twenty_x = with_plan(
-        oauth_at_t0(
-            "20x",
-            2,
-            vec![
-                fresh(WINDOW_FIVE_HOUR)
-                    .util(0.3)
-                    .status("allowed")
-                    .reset_at(T0_SECS + 3600)
-                    .build(),
-                fresh(WINDOW_SEVEN_DAY)
-                    .util(0.3)
-                    .status("allowed")
-                    .reset_at(T0_SECS + 6 * 86_400)
-                    .build(),
-            ],
-        ),
-        20.0,
-    );
-    let dist = wrh_distribution(&[five_x.clone(), twenty_x.clone()], MODEL_AGNOSTIC, 2000);
-    let five_share = *dist.get(&five_x.upstream_id).unwrap_or(&0) as f64 / 2000.0;
-    assert!(
-        (0.42..=0.58).contains(&five_share),
-        "5x and 20x should tie at capacity cap; got 5x share={five_share}"
+    let original_ratios = [
+        with_plan(on_pace.clone(), 1.0),
+        with_plan(urgent.clone(), 20.0),
+    ];
+    let swapped_ratios = [with_plan(on_pace, 20.0), with_plan(urgent, 1.0)];
+
+    // When: both fixtures route the same deterministic request sequence.
+    let original_distribution = wrh_distribution(&original_ratios, MODEL_AGNOSTIC, 2000);
+    let swapped_distribution = wrh_distribution(&swapped_ratios, MODEL_AGNOSTIC, 2000);
+
+    // Then: plan capacity metadata cannot change a single routing outcome.
+    assert_eq!(
+        original_distribution, swapped_distribution,
+        "ADR 0008 distribution must be independent of plan_capacity_ratio"
     );
 }
 
 #[test]
-fn overage_tier_does_not_apply_capacity_multiplier() {
-    // Two overage-only candidates with identical overage util but very
-    // different plan_capacity_ratio. Since overage-tier urgency does NOT
-    // include the multiplier, they must split ~50/50.
-    let small = with_plan(
+fn plan_capacity_ratio_does_not_change_overage_weight_or_distribution() {
+    // Given: identical overage candidates routed with original and swapped plan ratios.
+    let first = oauth_at_t0(
+        "first",
+        1,
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(0.3).status("allowed").build(),
+        ],
+    );
+    let second = oauth_at_t0(
+        "second",
+        2,
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(0.3).status("allowed").build(),
+        ],
+    );
+    let original_ratios = [
+        with_plan(first.clone(), 1.0),
+        with_plan(second.clone(), 20.0),
+    ];
+    let swapped_ratios = [with_plan(first, 20.0), with_plan(second, 1.0)];
+
+    // When: the original fixture is scored and both route the same request sequence.
+    let output = filter_for_model(&original_ratios, MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("trace present");
+    let first_weight = candidate_urgency_for(&trace, original_ratios[0].upstream_id);
+    let second_weight = candidate_urgency_for(&trace, original_ratios[1].upstream_id);
+    let original_distribution = wrh_distribution(&original_ratios, MODEL_AGNOSTIC, 2000);
+    let swapped_distribution = wrh_distribution(&swapped_ratios, MODEL_AGNOSTIC, 2000);
+
+    // Then: capacity metadata affects neither v10 overage weight nor winners.
+    assert_eq!(first_weight.quota_urgency, second_weight.quota_urgency);
+    assert_eq!(
+        first_weight.quota_weight_factor,
+        second_weight.quota_weight_factor
+    );
+    assert_eq!(
+        first_weight.effective_weight,
+        second_weight.effective_weight
+    );
+    assert_eq!(
+        original_distribution, swapped_distribution,
+        "overage distribution must be independent of plan_capacity_ratio"
+    );
+}
+
+#[test]
+fn overage_urgency_characterization_remains_v10() {
+    // Given: a readable overage utilization and the existing unknown fallback.
+    let expected_known = 0.75f64.powi(HEADROOM_EXPONENT) / (OVERAGE_REMAINING_NOMINAL_SECS as f64);
+
+    // When: the unchanged overage urgency formula evaluates both inputs.
+    let known = overage_urgency(Some(0.25));
+    let unknown = overage_urgency(None);
+
+    // Then: v10 overage headroom and fallback behavior remain characterized.
+    assert_eq!(known, expected_known);
+    assert_eq!(unknown, OVERAGE_UNKNOWN_WEIGHT);
+}
+
+#[test]
+fn cache_hot_on_pace_effective_weight_is_finite() {
+    // Given: an on-pace KnownBase bucket with one cache-hot candidate.
+    let cached = with_live_cache(
         oauth_at_t0(
-            "small",
+            "cached",
             1,
             vec![
-                fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
-                fresh(WINDOW_OVERAGE).util(0.3).status("allowed").build(),
+                fresh(WINDOW_FIVE_HOUR).util(0.0).status("allowed").build(),
+                fresh(WINDOW_SEVEN_DAY).util(0.0).status("allowed").build(),
             ],
         ),
-        1.0,
+        250_000,
     );
-    let big = with_plan(
+    let peer = oauth_at_t0(
+        "peer",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.0).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.0).status("allowed").build(),
+        ],
+    );
+
+    // When: the filter scores the uniform-pressure bucket.
+    let output = filter_for_model(&[cached.clone(), peer], MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("trace present");
+    let cached_weight = candidate_urgency_for(&trace, cached.upstream_id);
+
+    // Then: the neutral factor keeps the cache multiplier finite and effective.
+    assert_eq!(cached_weight.quota_urgency, 0.0);
+    assert_eq!(cached_weight.quota_weight_factor, 1.0);
+    assert!(cached_weight.effective_weight.is_finite());
+    assert_eq!(
+        cached_weight.effective_weight,
+        cached_weight.quota_weight_factor
+            * cached_weight.cache_weight_multiplier
+            * cached_weight.warning_multiplier
+    );
+}
+
+#[test]
+fn base_uniform_quota_factor_is_one() {
+    // Given: two on-pace base candidates whose pressure sum is below EPSILON.
+    let candidates = vec![
+        healthy_known_base_at_util("a", 1, 0.0),
+        healthy_known_base_at_util("b", 2, 0.0),
+    ];
+
+    // When: the filter scores their bucket.
+    let output = filter_for_model(&candidates, MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("trace present");
+
+    // Then: effective weight exposes the neutral quota factor of 1.0.
+    for candidate in &trace.candidates {
+        assert_eq!(candidate.quota_urgency, 0.0);
+        assert_eq!(candidate.quota_weight_factor, 1.0);
+        assert!(candidate.quota_uniform_fallback);
+        assert_eq!(candidate.cache_weight_multiplier, 1.0);
+        assert_eq!(candidate.warning_multiplier, 1.0);
+        assert_eq!(candidate.effective_weight, 1.0);
+    }
+}
+
+#[test]
+fn base_non_uniform_quota_factor_is_one_plus_pressure() {
+    // Given: a base bucket containing distinct positive combined pressures.
+    let candidates = vec![
         oauth_at_t0(
-            "big",
-            2,
+            "urgent",
+            1,
             vec![
-                fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
-                fresh(WINDOW_OVERAGE).util(0.3).status("allowed").build(),
+                fresh(WINDOW_FIVE_HOUR)
+                    .util(0.10)
+                    .status("allowed")
+                    .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS / 2)
+                    .build(),
+                fresh(WINDOW_SEVEN_DAY)
+                    .util(0.10)
+                    .status("allowed")
+                    .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS / 2)
+                    .build(),
             ],
         ),
-        20.0,
+        healthy_known_base_at_util("less-urgent", 2, 0.90),
+    ];
+
+    // When: the filter scores their bucket.
+    let output = filter_for_model(&candidates, MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("trace present");
+
+    // Then: each base factor is its own 1 + combined pressure.
+    for candidate in &trace.candidates {
+        let expected = 1.0 + candidate.quota_urgency;
+        assert!(
+            (candidate.effective_weight - expected).abs() <= 1e-12,
+            "effective weight {} must equal 1 + combined pressure {}",
+            candidate.effective_weight,
+            candidate.quota_urgency,
+        );
+    }
+}
+
+#[test]
+fn warning_multiplier_is_point_two_in_mixed_pressure_bucket() {
+    // Given: one warning-positive candidate in a non-uniform base bucket.
+    let warning = oauth_at_t0(
+        "warning",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.10)
+                .status("allowed_warning")
+                .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS / 2)
+                .build(),
+            fresh(WINDOW_SEVEN_DAY)
+                .util(0.10)
+                .status("allowed")
+                .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS / 2)
+                .build(),
+        ],
     );
-    let dist = wrh_distribution(&[small.clone(), big.clone()], MODEL_AGNOSTIC, 2000);
-    let small_share = *dist.get(&small.upstream_id).unwrap_or(&0) as f64 / 2000.0;
+    let peer = healthy_known_base_at_util("peer", 2, 0.90);
+
+    // When: the filter scores their bucket.
+    let output = filter_for_model(&[warning.clone(), peer], MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("trace present");
+    let warning_weight = candidate_urgency_for(&trace, warning.upstream_id);
+
+    // Then: warning remains a final 0.20 multiplier on the base quota factor.
+    assert_eq!(warning_weight.warning_multiplier, WARNING_MULTIPLIER);
+    let expected = (1.0 + warning_weight.quota_urgency) * WARNING_MULTIPLIER;
+    assert!((warning_weight.effective_weight - expected).abs() <= 1e-12);
+}
+
+#[test]
+fn warning_multiplier_is_point_two_in_uniform_pressure_bucket() {
+    // Given: a warning-positive candidate in an all-on-pace base bucket.
+    let warning = oauth_at_t0(
+        "warning",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.0)
+                .status("allowed_warning")
+                .build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.0).status("allowed").build(),
+        ],
+    );
+    let peer = oauth_at_t0(
+        "peer",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.0).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.0).status("allowed").build(),
+        ],
+    );
+
+    // When: the filter scores their uniform bucket.
+    let output = filter_for_model(&[warning.clone(), peer], MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("trace present");
+    let warning_weight = candidate_urgency_for(&trace, warning.upstream_id);
+
+    // Then: the neutral quota factor still receives the unchanged 0.20 warning multiplier.
+    assert_eq!(warning_weight.quota_urgency, 0.0);
+    assert_eq!(warning_weight.warning_multiplier, WARNING_MULTIPLIER);
+    assert_eq!(warning_weight.effective_weight, WARNING_MULTIPLIER);
+}
+
+#[test]
+fn overage_non_uniform_weight_matches_v10() {
+    // Given: two overage candidates with distinct v10 raw urgencies.
+    let low_util = oauth_at_t0(
+        "low-util",
+        1,
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(0.25).status("allowed").build(),
+        ],
+    );
+    let high_util = oauth_at_t0(
+        "high-util",
+        2,
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(0.75).status("allowed").build(),
+        ],
+    );
+    let request_id = "overage-v10-non-uniform";
+
+    // When: the filter scores the overage bucket.
+    let output = SubscriptionPreferenceFilter::new()
+        .filter(
+            &ctx_with_request_id(MODEL_AGNOSTIC, request_id),
+            &principal(),
+            &[low_util.clone(), high_util.clone()],
+        )
+        .expect("builtin filter cannot fail");
+    let trace = output.subscription_preference.expect("trace present");
+    let low_expected = 0.5625 / 2_592_000.0;
+    let high_expected = 0.0625 / 2_592_000.0;
+    let low_score = -hash_to_open_unit(rendezvous_hash(
+        V10_RENDEZVOUS_SALT_ORACLE,
+        request_id,
+        low_util.upstream_id,
+    ))
+    .ln()
+        / low_expected;
+    let high_score = -hash_to_open_unit(rendezvous_hash(
+        V10_RENDEZVOUS_SALT_ORACLE,
+        request_id,
+        high_util.upstream_id,
+    ))
+    .ln()
+        / high_expected;
+
+    // Then: weights and winner are byte-for-byte v10 raw-urgency behavior.
+    let low_trace = candidate_urgency_for(&trace, low_util.upstream_id);
+    let high_trace = candidate_urgency_for(&trace, high_util.upstream_id);
+    assert_eq!(low_trace.quota_weight_factor, low_expected);
+    assert_eq!(low_trace.effective_weight, low_expected);
+    assert_eq!(high_trace.quota_weight_factor, high_expected);
+    assert_eq!(high_trace.effective_weight, high_expected);
+    assert!(low_score < high_score, "v10 salt must select UUID seed 1");
+    assert_eq!(output.kept_upstream_ids, vec![upstream_id(1)]);
+}
+
+#[test]
+fn overage_uniform_fallback_matches_v10() {
+    // Given: two allowed overage candidates whose v10 urgency sum is below EPSILON.
+    let first = oauth_at_t0(
+        "first",
+        1,
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE)
+                .util(0.999_999)
+                .status("allowed")
+                .build(),
+        ],
+    );
+    let second = oauth_at_t0(
+        "second",
+        2,
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE)
+                .util(0.999_999)
+                .status("allowed")
+                .build(),
+        ],
+    );
+    let request_id = "overage-v10-uniform";
+
+    // When: the filter scores the overage bucket.
+    let output = SubscriptionPreferenceFilter::new()
+        .filter(
+            &ctx_with_request_id(MODEL_AGNOSTIC, request_id),
+            &principal(),
+            &[first.clone(), second.clone()],
+        )
+        .expect("builtin filter cannot fail");
+    let trace = output.subscription_preference.expect("trace present");
+    let first_v10_hash = rendezvous_hash(V10_RENDEZVOUS_SALT_ORACLE, request_id, first.upstream_id);
+    let second_v10_hash =
+        rendezvous_hash(V10_RENDEZVOUS_SALT_ORACLE, request_id, second.upstream_id);
+    let first_v11_hash = rendezvous_hash(V11_RENDEZVOUS_SALT_ORACLE, request_id, first.upstream_id);
+    let second_v11_hash =
+        rendezvous_hash(V11_RENDEZVOUS_SALT_ORACLE, request_id, second.upstream_id);
+
+    // Then: v10 uniform fallback uses factor 1.0 and the raw hash tie-break outcome.
+    assert_eq!(first.upstream_id, upstream_id(1));
+    assert_eq!(second.upstream_id, upstream_id(2));
     assert!(
-        (0.42..=0.58).contains(&small_share),
-        "overage tier ignores capacity multiplier; got small share={small_share}"
+        second_v10_hash > first_v10_hash,
+        "v10 salt must select UUID seed 2"
     );
+    assert!(
+        first_v11_hash > second_v11_hash,
+        "v11 salt must select UUID seed 1 for this distinguishing fixture"
+    );
+    for candidate in &trace.candidates {
+        assert!(candidate.quota_urgency < EPSILON);
+        assert_eq!(candidate.quota_weight_factor, 1.0);
+        assert_eq!(candidate.effective_weight, 1.0);
+        assert!(candidate.quota_uniform_fallback);
+    }
+    assert_eq!(output.kept_upstream_ids, vec![upstream_id(2)]);
+}
+
+#[test]
+fn unknown_probe_quota_factor_is_one() {
+    // Given: two OAuth candidates with no usable quota snapshots.
+    let candidates = vec![oauth_at_t0("a", 1, vec![]), oauth_at_t0("b", 2, vec![])];
+
+    // When: the filter scores the UnknownProbe bucket.
+    let output = filter_for_model(&candidates, MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("trace present");
+
+    // Then: unknown probes always use the neutral factor 1.0.
+    assert_eq!(
+        trace.chosen_tier,
+        cc_lb_plugin_api::SubscriptionTier::UnknownProbe
+    );
+    for candidate in &trace.candidates {
+        assert_eq!(candidate.quota_urgency, 0.0);
+        assert_eq!(candidate.effective_weight, 1.0);
+    }
 }
 
 // =============================================================================
@@ -1083,30 +1727,30 @@ fn example_snapshot_four_upstreams_produces_expected_wrh_distribution() {
 
     let dist = wrh_distribution(&candidates, MODEL_AGNOSTIC, 2000);
     let share = |id: Uuid| *dist.get(&id).unwrap_or(&0) as f64 / 2000.0;
-
-    // Expected shares (see fixture): Example Org ~55.4%, isac ~16.3%, bh322 ~14.9%, bear ~13.4%.
     let runbear_share = share(runbear_id);
     let isac_share = share(isac_id);
     let bh322_share = share(bh322_id);
     let bear_share = share(bear_id);
-
-    assert!(
-        (0.48..=0.63).contains(&runbear_share),
-        "Example Org share {runbear_share} outside expected 48-63%"
-    );
-    assert!(
-        (0.10..=0.20).contains(&isac_share),
-        "isac share {isac_share} outside expected 10-22%"
-    );
-    assert!(
-        (0.09..=0.21).contains(&bh322_share),
-        "bh322 share {bh322_share} outside expected 9-21%"
-    );
-    assert!(
-        (0.08..=0.20).contains(&bear_share),
-        "bear share {bear_share} outside expected 8-20%"
-    );
-    // Sanity: total sums to 1 (no dropped candidates).
+    let trace = filter_for_model(&candidates, MODEL_AGNOSTIC)
+        .subscription_preference
+        .expect("trace present");
+    let total_weight: f64 = trace
+        .candidates
+        .iter()
+        .map(|candidate| candidate.effective_weight)
+        .sum();
+    for (name, id, observed_share) in [
+        ("Example Org", runbear_id, runbear_share),
+        ("example-peer", isac_id, isac_share),
+        ("example-secondary-max", bh322_id, bh322_share),
+        ("example-org", bear_id, bear_share),
+    ] {
+        let expected_share = candidate_urgency_for(&trace, id).effective_weight / total_weight;
+        assert!(
+            (observed_share - expected_share).abs() <= 0.10,
+            "{name} share {observed_share} must track ADR 0008 WRH weight share {expected_share}"
+        );
+    }
     let total = runbear_share + isac_share + bh322_share + bear_share;
     assert!(
         (0.995..=1.005).contains(&total),
@@ -1307,7 +1951,7 @@ fn unknown_cache_pricing_omits_cache_terms_without_cache_boost() {
     let trace = out.subscription_preference.expect("trace present");
     let cached_urgency = candidate_urgency_for(&trace, cached.upstream_id);
     assert_eq!(cached_urgency.cache_ratio, 0.0);
-    assert!((cached_urgency.cache_weight_multiplier - 1.0).abs() < CROSSOVER_TOLERANCE);
+    assert!((cached_urgency.cache_weight_multiplier - 1.0).abs() < WEIGHT_TOLERANCE);
 }
 
 // =============================================================================
@@ -1479,9 +2123,9 @@ fn with_plan(mut candidate: UpstreamCandidate, ratio: f64) -> UpstreamCandidate 
 }
 
 /// Attach a live prompt-cache observation with the given
-/// `predicted_cache_read_tokens` to a candidate. Used by v7 crossover
-/// tests to synthesise a bucket where cache-hit depth varies per
-/// candidate; the max within the bucket drives the exponential boost.
+/// `predicted_cache_read_tokens` to a candidate. Cache-factor tests vary this
+/// value per candidate; the maximum positive cache value in the bucket
+/// normalizes each exponential multiplier.
 fn with_live_cache(mut candidate: UpstreamCandidate, read_tokens: u32) -> UpstreamCandidate {
     let cache_key = format!("v3-cache-{}", candidate.upstream_id);
     candidate.cache_score = Some(cc_lb_plugin_api::types::CacheScore {
@@ -1841,13 +2485,12 @@ fn stateless_requests_never_populate_previous_tier() {
 }
 
 // =============================================================================
-// Section L — v7 cache-weighted WRH: exponential cache boost with 99% crossover.
-// See docs/adr/0004-cache-weighted-subscription-preference.md.
+// Section L — ADR 0008 quota factor composed with the ADR 0004 cache multiplier.
 // =============================================================================
 
 use crate::builtin_filters::subscription_preference::CACHE_LOG_BOOST;
 
-const CROSSOVER_TOLERANCE: f64 = 1e-9;
+const WEIGHT_TOLERANCE: f64 = 1e-9;
 const FIVE_HOUR_RESET_SECS: u64 = 18_000;
 const SEVEN_DAY_RESET_SECS: u64 = 604_800;
 
@@ -1881,19 +2524,15 @@ fn candidate_urgency_for(
         .expect("candidate urgency must be present in trace")
 }
 
-fn expected_quota_urgency(util: f64) -> f64 {
-    (1.0 - util).powi(2) / (FIVE_HOUR_RESET_SECS as f64)
-}
-
 fn expected_cache_weight_multiplier(cache_ratio: f64) -> f64 {
     (CACHE_LOG_BOOST * cache_ratio).exp()
 }
 
 #[test]
-fn warm_low_util_pins_cache_holder() {
+fn effective_weight_is_quota_factor_times_cache_and_warning_multipliers() {
     // Given: example-org util 0.30 with 250K cache; Example Org util 0.10 with 15K cache.
     // When: subscription filter scores the candidates.
-    // Then: bear effective_weight ≈ 0.3916, Example Org ≈ 7.99e-5; bear wins ≈99.98% of draws.
+    // Then: ADR 0008's neutral quota factor preserves the cache multiplier.
     let bear = with_live_cache(healthy_known_base_at_util("example-org", 1, 0.30), 250_000);
     let Example Org = with_live_cache(healthy_known_base_at_util("Example Org", 2, 0.10), 15_000);
     let filter = SubscriptionPreferenceFilter::new();
@@ -1904,30 +2543,43 @@ fn warm_low_util_pins_cache_holder() {
     let trace = out.subscription_preference.expect("trace present");
     let bear_urg = candidate_urgency_for(&trace, bear.upstream_id);
     let runbear_urg = candidate_urgency_for(&trace, Example Org.upstream_id);
-    let bear_expected = expected_quota_urgency(0.30) * expected_cache_weight_multiplier(1.0);
-    let runbear_expected =
-        expected_quota_urgency(0.10) * expected_cache_weight_multiplier(15_000.0 / 250_000.0);
+    let bear_expected = bear_urg.quota_weight_factor
+        * bear_urg.cache_weight_multiplier
+        * bear_urg.warning_multiplier;
+    let runbear_expected = runbear_urg.quota_weight_factor
+        * runbear_urg.cache_weight_multiplier
+        * runbear_urg.warning_multiplier;
     assert!(
-        (bear_urg.effective_weight - bear_expected).abs() < CROSSOVER_TOLERANCE,
+        (bear_urg.cache_weight_multiplier - expected_cache_weight_multiplier(1.0)).abs()
+            < WEIGHT_TOLERANCE
+    );
+    assert!(
+        (runbear_urg.cache_weight_multiplier
+            - expected_cache_weight_multiplier(15_000.0 / 250_000.0))
+        .abs()
+            < WEIGHT_TOLERANCE
+    );
+    assert!(
+        (bear_urg.effective_weight - bear_expected).abs() < WEIGHT_TOLERANCE,
         "bear effective_weight {} vs expected {}",
         bear_urg.effective_weight,
         bear_expected,
     );
     assert!(
-        (runbear_urg.effective_weight - runbear_expected).abs() < CROSSOVER_TOLERANCE,
+        (runbear_urg.effective_weight - runbear_expected).abs() < WEIGHT_TOLERANCE,
         "Example Org effective_weight {} vs expected {}",
         runbear_urg.effective_weight,
         runbear_expected,
     );
     assert!(
         bear_urg.effective_weight > runbear_urg.effective_weight * 1000.0,
-        "at util 0.30 example-org must dominate (effective_weight ratio >= 1000×) to win >99.9%"
+        "cache-hot candidate must retain the larger composed effective weight"
     );
 }
 
 #[test]
-fn warm_95_percent_still_pins_cache_holder() {
-    // v7 crossover point ≈ 0.99. At util 0.95 example-org must still dominate ≈96% win share.
+fn on_pace_quota_factor_is_one_before_cache_multiplier() {
+    // Given: two on-pace candidates with different cache values.
     let bear = with_live_cache(healthy_known_base_at_util("example-org", 1, 0.95), 250_000);
     let Example Org = with_live_cache(healthy_known_base_at_util("Example Org", 2, 0.10), 15_000);
     let filter = SubscriptionPreferenceFilter::new();
@@ -1938,33 +2590,22 @@ fn warm_95_percent_still_pins_cache_holder() {
     let trace = out.subscription_preference.expect("trace present");
     let bear_urg = candidate_urgency_for(&trace, bear.upstream_id);
     let runbear_urg = candidate_urgency_for(&trace, Example Org.upstream_id);
-    let bear_expected = expected_quota_urgency(0.95) * expected_cache_weight_multiplier(1.0);
-    let runbear_expected =
-        expected_quota_urgency(0.10) * expected_cache_weight_multiplier(15_000.0 / 250_000.0);
-    assert!(
-        (bear_urg.effective_weight - bear_expected).abs() < CROSSOVER_TOLERANCE,
-        "bear effective_weight {} vs expected {}",
-        bear_urg.effective_weight,
-        bear_expected,
-    );
-    assert!(
-        (runbear_urg.effective_weight - runbear_expected).abs() < CROSSOVER_TOLERANCE,
-        "Example Org effective_weight {} vs expected {}",
+
+    // Then: ADR 0008 supplies factor 1.0 before the independent cache multiplier.
+    assert_eq!(bear_urg.quota_urgency, 0.0);
+    assert_eq!(runbear_urg.quota_urgency, 0.0);
+    assert_eq!(bear_urg.quota_weight_factor, 1.0);
+    assert_eq!(runbear_urg.quota_weight_factor, 1.0);
+    assert_eq!(bear_urg.effective_weight, bear_urg.cache_weight_multiplier);
+    assert_eq!(
         runbear_urg.effective_weight,
-        runbear_expected,
-    );
-    let ratio = bear_urg.effective_weight / runbear_urg.effective_weight;
-    assert!(
-        ratio > 20.0,
-        "at util 0.95 example-org effective_weight/Example Org ratio must exceed 20 (≈96%+ win); got {ratio}"
+        runbear_urg.cache_weight_multiplier
     );
 }
 
 #[test]
-fn warm_99_percent_starts_spreading_at_crossover() {
-    // Calibration target: at bear util 0.99 with cache_ratio 1.0, effective_weight
-    // equals Example Org at util 0.10 with cache_ratio 0.06. |Δ| below crossover
-    // tolerance is the invariant CACHE_LOG_BOOST is calibrated for.
+fn cache_multiplier_ratio_depends_on_cache_value_not_on_pace_utilization() {
+    // Given: on-pace candidates at different utilization and cache ratios.
     let bear = with_live_cache(healthy_known_base_at_util("example-org", 1, 0.99), 250_000);
     let Example Org = with_live_cache(healthy_known_base_at_util("Example Org", 2, 0.10), 15_000);
     let filter = SubscriptionPreferenceFilter::new();
@@ -1975,12 +2616,12 @@ fn warm_99_percent_starts_spreading_at_crossover() {
     let trace = out.subscription_preference.expect("trace present");
     let bear_urg = candidate_urgency_for(&trace, bear.upstream_id);
     let runbear_urg = candidate_urgency_for(&trace, Example Org.upstream_id);
+    assert_eq!(bear_urg.quota_weight_factor, 1.0);
+    assert_eq!(runbear_urg.quota_weight_factor, 1.0);
+    let ratio = bear_urg.effective_weight / runbear_urg.effective_weight;
     assert!(
-        (bear_urg.effective_weight - runbear_urg.effective_weight).abs() < CROSSOVER_TOLERANCE,
-        "at util 0.99 example-org effective_weight ({}) must equal Example Org ({}) within {}",
-        bear_urg.effective_weight,
-        runbear_urg.effective_weight,
-        CROSSOVER_TOLERANCE,
+        (ratio - 8100.0).abs() < WEIGHT_TOLERANCE,
+        "on-pace factor 1.0 must leave the cache multiplier ratio at 8100; got {ratio}",
     );
 }
 
@@ -2032,9 +2673,8 @@ fn warm_cache_holder_blocked_spills_to_fresh_quota_peer() {
 }
 
 #[test]
-fn usage_warm_owner_beats_moderate_quota_disadvantage() {
-    // Given: a warm owner has the same production-shape disadvantage observed in
-    // ses_0c30 (~1.33x lower quota urgency), but strong provider usage lineage.
+fn usage_warm_owner_wins_when_quota_factors_are_neutral() {
+    // Given: an on-pace warm owner and peer, with strong provider usage lineage.
     let owner = with_live_cache(
         healthy_known_base_at_util("example-peer", 1, 0.20),
         590_000,
@@ -2051,28 +2691,44 @@ fn usage_warm_owner_beats_moderate_quota_disadvantage() {
     let owner_urg = candidate_urgency_for(&trace, owner.upstream_id);
     let peer_urg = candidate_urgency_for(&trace, quota_peer.upstream_id);
 
-    // Then: cache bonus multiplies the existing quota weight instead of allowing
-    // a modest quota advantage to recreate a hot Anthropic prompt cache elsewhere.
+    // Then: cache bonus multiplies the neutral quota factor instead of recreating
+    // a hot Anthropic prompt cache elsewhere.
     assert_eq!(trace.wrh_key_source, WrhKeySource::CacheHash);
-    assert!(
-        peer_urg.quota_urgency / owner_urg.quota_urgency > 1.30,
-        "fixture must preserve the observed moderate quota disadvantage"
-    );
+    assert_eq!(owner_urg.quota_urgency, 0.0);
+    assert_eq!(peer_urg.quota_urgency, 0.0);
     assert!(
         owner_urg.effective_weight > peer_urg.effective_weight,
-        "warm owner effective weight must beat moderate quota disadvantage"
+        "warm owner effective weight must win when quota factors are neutral"
     );
     assert_eq!(out.kept_upstream_ids, vec![owner.upstream_id]);
 }
 
 #[test]
 fn severe_quota_pressure_can_override_usage_cache_owner() {
-    // Given: a cache owner is nearly exhausted while a peer has plenty of quota.
+    // Given: a cache owner is on pace while a near-reset peer risks wasting quota.
     let owner = with_live_cache(
         healthy_known_base_at_util("example-peer", 1, 0.9999),
-        590_000,
+        100_000,
     );
-    let quota_peer = healthy_known_base_at_util("example-org", 2, 0.10);
+    let quota_peer = with_live_cache(
+        oauth_at_t0(
+            "example-org",
+            3,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .util(0.0)
+                    .status("allowed")
+                    .reset_at(T0_SECS + 60)
+                    .build(),
+                fresh(WINDOW_SEVEN_DAY)
+                    .util(0.0)
+                    .status("allowed")
+                    .reset_at(T0_SECS + 60)
+                    .build(),
+            ],
+        ),
+        95_000,
+    );
     let filter = SubscriptionPreferenceFilter::new();
     let ctx = ctx_with_thread_id(MODEL_AGNOSTIC, "req-1", "ses-severe-quota");
 
@@ -2084,9 +2740,11 @@ fn severe_quota_pressure_can_override_usage_cache_owner() {
     let owner_urg = candidate_urgency_for(&trace, owner.upstream_id);
     let peer_urg = candidate_urgency_for(&trace, quota_peer.upstream_id);
 
-    // Then: cache locality is not an absolute v9-style pin; severe quota pressure
-    // can still select the fresh peer.
+    // Then: cache locality remains multiplicative, while severe positive pressure
+    // can still select the use-it-or-lose-it peer.
     assert_eq!(trace.wrh_key_source, WrhKeySource::CacheHash);
+    assert_eq!(owner_urg.quota_urgency, 0.0);
+    assert!(peer_urg.quota_urgency > 4.0);
     assert!(
         peer_urg.effective_weight > owner_urg.effective_weight,
         "fresh quota peer must beat a near-exhausted cache owner"
@@ -2096,8 +2754,7 @@ fn severe_quota_pressure_can_override_usage_cache_owner() {
 
 #[test]
 fn all_cold_reduces_to_pure_quota_wrh_distribution() {
-    // v7 must collapse to v6 uniform-quota behaviour when no candidate has any cache
-    // signal (cache_ratio=0 across the pool → multiplier=1 → effective_weight=quota_urgency).
+    // Without cache signal, ADR 0008 effective weight is exactly 1 + base pressure.
     let candidates = vec![
         example_snapshot_example_org(),
         example_snapshot_example_peer(),
@@ -2114,13 +2771,13 @@ fn all_cold_reduces_to_pure_quota_wrh_distribution() {
         assert_eq!(candidate.predicted_cache_read_tokens, 0);
         assert_eq!(candidate.cache_ratio, 0.0);
         assert!(
-            (candidate.cache_weight_multiplier - 1.0).abs() < CROSSOVER_TOLERANCE,
+            (candidate.cache_weight_multiplier - 1.0).abs() < WEIGHT_TOLERANCE,
             "cold candidate must have cache_weight_multiplier=1.0, got {}",
             candidate.cache_weight_multiplier,
         );
         assert!(
-            (candidate.effective_weight - candidate.quota_urgency).abs() < CROSSOVER_TOLERANCE,
-            "cold candidate effective_weight ({}) must equal quota_urgency ({})",
+            (candidate.effective_weight - (1.0 + candidate.quota_urgency)).abs() < WEIGHT_TOLERANCE,
+            "cold candidate effective_weight ({}) must equal 1 + quota_urgency ({})",
             candidate.effective_weight,
             candidate.quota_urgency,
         );
@@ -2160,19 +2817,20 @@ fn tier_ordering_never_broken_by_cache_boost() {
 }
 
 #[test]
-fn cache_boost_calibration_at_99_percent() {
-    // Direct assertion of the CACHE_LOG_BOOST calibration target. See ADR 0004.
-    let bear_quota = expected_quota_urgency(0.99);
-    let runbear_quota = expected_quota_urgency(0.10);
-    let bear_effective = bear_quota * expected_cache_weight_multiplier(1.0);
-    let runbear_effective = runbear_quota * expected_cache_weight_multiplier(15_000.0 / 250_000.0);
+fn cache_multiplier_calibration_ratio_is_8100() {
+    // Given: the retained ADR 0004 cache-ratio calibration points.
+    let cache_hot_multiplier = expected_cache_weight_multiplier(1.0);
+    let cache_peer_multiplier = expected_cache_weight_multiplier(15_000.0 / 250_000.0);
+
+    // When: their current multiplicative ratio is evaluated without quota inputs.
+    let multiplier_ratio = cache_hot_multiplier / cache_peer_multiplier;
+
+    // Then: the cache factor alone retains the calibrated 8100 ratio.
     assert!(
-        (bear_effective - runbear_effective).abs() < CROSSOVER_TOLERANCE,
-        "CACHE_LOG_BOOST={} miscalibrated: bear (util=0.99, ratio=1.0) effective_weight {} \
-         must equal Example Org (util=0.10, ratio=0.06) {} within {}",
+        (multiplier_ratio - 8100.0).abs() < WEIGHT_TOLERANCE,
+        "CACHE_LOG_BOOST={} must produce multiplier ratio 8100, got {} within {}",
         CACHE_LOG_BOOST,
-        bear_effective,
-        runbear_effective,
-        CROSSOVER_TOLERANCE,
+        multiplier_ratio,
+        WEIGHT_TOLERANCE,
     );
 }

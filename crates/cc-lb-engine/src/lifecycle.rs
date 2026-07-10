@@ -1522,6 +1522,8 @@ impl Lifecycle {
         };
         let route_ms = duration_to_ms(route_start.elapsed());
         let routing_trace_value = pipeline_result.routing_trace(terminal_decision.clone());
+        let selected_quota_candidate =
+            resolved_candidate_urgency(&routing_trace_value, resolved_upstream_id);
         let selected_cache_score = pipeline_result
             .candidates
             .iter()
@@ -1580,6 +1582,22 @@ impl Lifecycle {
                     formula_winner_upstream_id: subscription_trace
                         .and_then(|trace| trace.formula_winner_upstream_id),
                     kept_upstream_id: subscription_trace.and_then(|trace| trace.kept_upstream_id),
+                    quota_urgency_5h: selected_quota_candidate
+                        .and_then(|candidate| candidate.quota_urgency_5h),
+                    quota_urgency_7d: selected_quota_candidate
+                        .and_then(|candidate| candidate.quota_urgency_7d),
+                    quota_urgency_combined: selected_quota_candidate
+                        .and_then(|candidate| candidate.quota_urgency_combined),
+                    quota_weight_factor: selected_quota_candidate
+                        .map(|candidate| candidate.quota_weight_factor),
+                    quota_cache_multiplier: selected_quota_candidate
+                        .map(|candidate| candidate.cache_weight_multiplier),
+                    quota_warning_multiplier: selected_quota_candidate
+                        .map(|candidate| candidate.warning_multiplier),
+                    quota_effective_weight: selected_quota_candidate
+                        .map(|candidate| candidate.effective_weight),
+                    quota_uniform_fallback: selected_quota_candidate
+                        .map(|candidate| candidate.quota_uniform_fallback),
                     wrh_key_source: subscription_trace.map(|trace| match trace.wrh_key_source {
                         cc_lb_plugin_api::types::WrhKeySource::CacheHash => "cache_hash".to_owned(),
                         cc_lb_plugin_api::types::WrhKeySource::RequestId => "request_id".to_owned(),
@@ -2893,6 +2911,18 @@ fn subscription_preference_trace(
         .stages
         .iter()
         .find_map(|stage| stage.subscription_preference.as_ref())
+}
+
+pub(crate) fn resolved_candidate_urgency(
+    routing_trace: &RoutingTrace,
+    resolved_upstream_id: Uuid,
+) -> Option<&cc_lb_plugin_api::types::CandidateUrgency> {
+    subscription_preference_trace(routing_trace).and_then(|trace| {
+        trace
+            .candidates
+            .iter()
+            .find(|candidate| candidate.upstream_id == resolved_upstream_id)
+    })
 }
 
 fn execute_filter_pipeline(

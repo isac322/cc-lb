@@ -1,5 +1,12 @@
 #![cfg(feature = "postgres")]
 
+#[path = "support/request_event_quota_postgres.rs"]
+mod request_event_quota_postgres;
+#[path = "support/request_event_quota.rs"]
+mod request_event_quota_support;
+
+request_event_quota_postgres::define_request_event_quota_postgres_tests!();
+
 use std::{future::Future, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;

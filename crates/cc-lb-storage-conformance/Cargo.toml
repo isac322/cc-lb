@@ -9,7 +9,7 @@ publish = false
 [features]
 default = ["sqlite"]
 postgres = ["dep:cc-lb-storage-postgres", "dep:sqlx"]
-sqlite = []
+sqlite = ["dep:sqlx"]
 
 [dependencies]
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }

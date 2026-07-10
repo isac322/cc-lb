@@ -6,27 +6,19 @@
 //!    that keeps the Anthropic base plan strictly higher priority than the
 //!    overage bucket.
 //! 2. Within the winning tier, a Weighted Rendezvous Hash (WRH, Vilkonis) using
-//!    per-candidate urgency as the weight. Urgency for base tiers is
-//!    `capacity_multiplier * (1 - util)^2 / remaining_secs`, taken as the max
-//!    over relevant base windows. Overage-tier urgency uses a fixed nominal
-//!    30-day denominator and does not apply the capacity multiplier.
+//!    a tier-specific quota factor multiplied by cache and warning factors.
+//!    Base pressure is the weighted smoothmax of 5h and 7d use-it-or-lose-it
+//!    pressure. Overage urgency retains its fixed nominal 30-day denominator.
 //! 3. A deterministic tiebreak if two candidates produce numerically identical
 //!    WRH scores (rendezvous_hash DESC, upstream_id ASC).
 //!
 //! ## Design rationale
 //!
-//! The previous algorithm used a scalar `min_headroom + positive_ratio -
-//! warning_penalty` score with a rendezvous hash as a secondary tiebreak. In
-//! practice `f64::total_cmp` on the score never tied, so the rendezvous hash
-//! never fired and traffic funnelled to whichever candidate had the highest
-//! headroom. See the production trace at 2026-07-04 where 78% of cache-miss
-//! traffic landed on `example-org` even though four upstreams were healthy.
-//!
-//! WRH restores load spread. The urgency weight biases the distribution
-//! towards candidates that will hit their reset first, and the capacity
-//! multiplier lifts small-plan upstreams so their effective "burnable minutes
-//! remaining" competes fairly with the large Max/Team plans they otherwise
-//! lose to on raw headroom.
+//! ADR 0008 base pressure compares utilization with the target burn pace for
+//! the time remaining before reset. Positive pressure raises the base quota
+//! factor above its neutral `1.0`; on-pace buckets use `1.0` uniformly. The
+//! candidate `plan_capacity_ratio` remains available as metadata for analytics
+//! but does not affect pressure, tiering, WRH weight, or distribution.
 //!
 //! ## Windows
 //!
@@ -68,22 +60,17 @@ pub(crate) const WINDOW_UNIFIED: &str = "unified";
 
 // -- Algorithm constants. ---------------------------------------------------
 
-/// Exponent applied to per-window headroom `(1 - util)` before dividing by
-/// remaining seconds. Q5 requires strong bias against near-full candidates.
+/// Exponent retained by the v10 overage urgency formula.
 pub(crate) const HEADROOM_EXPONENT: i32 = 2;
 
-/// Upper bound on the plan capacity multiplier. Prevents 20x plans from
-/// dominating pure headroom math; anything above cap saturates.
-pub(crate) const CAPACITY_CAP: f64 = 2.0;
-
-/// Fallback capacity ratio when the upstream has no plan metadata cached
-/// (either the OAuth org poll has never completed or the plan is not in the
-/// classification table).
-pub(crate) const UNKNOWN_CAPACITY_RATIO: f64 = 1.0;
-
-/// Floor on the remaining-seconds denominator, so a resets-at-in-3-seconds
-/// candidate does not blow past finite arithmetic.
-pub(crate) const MIN_REMAIN_SECS: u64 = 60;
+const FIVE_HOUR_WINDOW_LEN_SECS: u64 = 18_000;
+const SEVEN_DAY_WINDOW_LEN_SECS: u64 = 604_800;
+const FIVE_HOUR_GAMMA: f64 = 1.0;
+const SEVEN_DAY_GAMMA: f64 = 1.3;
+const FIVE_HOUR_TARGET_FLOOR: f64 = 0.01;
+const SEVEN_DAY_TARGET_FLOOR: f64 = 0.01;
+const SMOOTHMAX_P: f64 = 6.0;
+const SEVEN_DAY_SMOOTHMAX_WEIGHT: f64 = 1.0;
 
 /// Guard below which the aggregate WRH weight is treated as zero and the
 /// filter falls back to a uniform distribution.
@@ -104,10 +91,14 @@ pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
 /// algorithm/salt change from those caused by upstream or quota state
 /// changes. Bumped in lockstep with `RENDEZVOUS_SALT` — a `debug_assert`
 /// in `tests::rendezvous_salt_embeds_version` guards the invariant.
-pub(crate) const SALT_VERSION: &str = "v10";
+pub(crate) const SALT_VERSION: &str = "v11";
 
-/// Salt for the weighted-rendezvous hash. Bumped as a version stamp when the
-/// selection algorithm changes shape; older salts must never be reused.
+/// v11 salt for base and unknown-probe weighted-rendezvous selection. The
+/// overage tier deliberately retains its v10 salt so ADR 0008 does not move
+/// overage winners; traces still report the current v11 semantic era.
+///
+/// v11 (2026-07-10): exposes use-it-or-lose-it base pressure components and the
+/// tier-specific quota factor in all-candidate traces.
 ///
 /// v10 (2026-07-07): removes hidden threaded owner memory and cache-loss switch
 /// gates. Cache influence is folded into each candidate's WRH weight as
@@ -157,24 +148,21 @@ pub(crate) const SALT_VERSION: &str = "v10";
 /// v4 (2026-07-05): keyed WRH on `thread_id` so multi-turn sessions pinned
 /// while the prompt cache stayed warm. Deployed by PR #322 after the
 /// 2026-07-05 06:24 UTC scatter incident.
-const RENDEZVOUS_SALT: &str = "cc-lb:subscription-preference:v10:symmetric-cache-value:2026-07-07";
+const RENDEZVOUS_SALT: &str =
+    "cc-lb:subscription-preference:v11:use-it-or-lose-it-quota-pressure:2026-07-10";
+const OVERAGE_RENDEZVOUS_SALT: &str =
+    "cc-lb:subscription-preference:v10:symmetric-cache-value:2026-07-07";
 
 const CACHE_COST_BASIS_VERSION: &str = "v1";
 const WARNING_MULTIPLIER: f64 = 0.20;
 
-/// Exponent coefficient on the cache-weighted WRH multiplier.
-/// `cache_weight_multiplier_i = exp(CACHE_LOG_BOOST * cache_ratio_i)` sits on
-/// top of the quota urgency so a deeply cached upstream wins the intra-tier
-/// draw through ~95% utilisation and hands off probabilistically around 99%.
+/// Exponent coefficient on the cache-weighted WRH multiplier:
+/// `cache_weight_multiplier = exp(CACHE_LOG_BOOST * cache_ratio)`.
 ///
-/// Calibration: `ln(8100) / 0.94`. Chosen so that example-org at util=0.99 with
-/// cache_ratio=1.0 has the same `effective_weight` as Example Org at util=0.10
-/// with cache_ratio=0.06 (i.e. only the shared BP0 hash), same
-/// `remaining_secs` and `capacity_multiplier`. That is the crossover point
-/// observed in the 2026-07-05 / 2026-07-06 ses_0d40 incidents — see
-/// docs/adr/0004 for the numeric derivation. Changing this constant without
-/// re-deriving that calibration will shift where the fresh-quota peer starts
-/// winning; test `cache_boost_calibration_at_99_percent` guards the equality.
+/// The retained ADR 0004 calibration is `ln(8100) / 0.94`, so cache ratios
+/// `1.0` and `0.06` differ by a multiplier of exactly 8100. ADR 0008 composes
+/// this independently with the current quota factor and warning multiplier;
+/// plan capacity and the deleted v10 base-headroom formula are not inputs.
 pub const CACHE_LOG_BOOST: f64 = 9.574_063_128_362_267;
 
 // -- Config knobs (compiled defaults today; expose per-principal later). ----
@@ -270,8 +258,7 @@ fn evaluate(
         .flat_map(|bucket| {
             let max_cache_value_micros =
                 max_positive_cache_value_micros(bucket, &ctx.cache_pricing);
-            let total_urgency_in_bucket: f64 = bucket.iter().map(|a| a.urgency).sum();
-            let uniform_fallback = total_urgency_in_bucket < EPSILON;
+            let total_urgency_in_bucket: f64 = bucket.iter().map(Assessment::tier_urgency).sum();
             bucket.iter().map(move |a| {
                 let cache_tokens = candidate_cache_read_tokens(a);
                 let cache_value_micros =
@@ -279,7 +266,10 @@ fn evaluate(
                 let cache_ratio =
                     cache_value_ratio_within_bucket(cache_value_micros, max_cache_value_micros);
                 let cache_weight_multiplier = cache_weight_multiplier(cache_ratio);
-                let quota_weight = if uniform_fallback { 1.0 } else { a.urgency };
+                let tier_urgency = a.tier_urgency();
+                let quota_weight =
+                    quota_weight_factor(a.tier, tier_urgency, total_urgency_in_bucket);
+                let quota_uniform_fallback = total_urgency_in_bucket < EPSILON;
                 let effective_weight =
                     quota_weight * cache_weight_multiplier * a.warning_multiplier;
                 let estimated_input_cost_micros =
@@ -290,7 +280,15 @@ fn evaluate(
                     upstream_id: a.candidate.upstream_id,
                     tier: tier_to_plugin_api(a.tier),
                     urgency: effective_weight,
-                    quota_urgency: a.urgency,
+                    quota_urgency: tier_urgency,
+                    quota_urgency_5h: matches!(a.tier, Tier::KnownBase | Tier::PartialBase)
+                        .then_some(a.quota_urgency_5h),
+                    quota_urgency_7d: matches!(a.tier, Tier::KnownBase | Tier::PartialBase)
+                        .then_some(a.quota_urgency_7d),
+                    quota_urgency_combined: matches!(a.tier, Tier::KnownBase | Tier::PartialBase)
+                        .then_some(a.quota_urgency_combined),
+                    quota_weight_factor: quota_weight,
+                    quota_uniform_fallback,
                     predicted_cache_read_tokens: cache_tokens,
                     predicted_cache_creation_tokens_5m: candidate_cache_creation_tokens_5m(a),
                     predicted_cache_creation_tokens_1h: candidate_cache_creation_tokens_1h(a),
@@ -429,12 +427,39 @@ enum Tier {
     UnknownProbe = 3,
 }
 
+const fn rendezvous_salt_for_tier(tier: Tier, current_salt: &'static str) -> &'static str {
+    match tier {
+        Tier::KnownBase | Tier::PartialBase | Tier::UnknownProbe => current_salt,
+        Tier::Overage => OVERAGE_RENDEZVOUS_SALT,
+    }
+}
+
 fn tier_to_plugin_api(tier: Tier) -> cc_lb_plugin_api::SubscriptionTier {
     match tier {
         Tier::KnownBase => cc_lb_plugin_api::SubscriptionTier::KnownBase,
         Tier::PartialBase => cc_lb_plugin_api::SubscriptionTier::PartialBase,
         Tier::Overage => cc_lb_plugin_api::SubscriptionTier::Overage,
         Tier::UnknownProbe => cc_lb_plugin_api::SubscriptionTier::UnknownProbe,
+    }
+}
+
+const fn quota_weight_factor(tier: Tier, urgency: f64, bucket_total_urgency: f64) -> f64 {
+    match tier {
+        Tier::KnownBase | Tier::PartialBase => {
+            if bucket_total_urgency < EPSILON {
+                1.0
+            } else {
+                1.0 + urgency
+            }
+        }
+        Tier::Overage => {
+            if bucket_total_urgency < EPSILON {
+                1.0
+            } else {
+                urgency
+            }
+        }
+        Tier::UnknownProbe => 1.0,
     }
 }
 
@@ -458,8 +483,32 @@ struct Assessment<'a> {
     candidate: &'a UpstreamCandidate,
     original_index: usize,
     tier: Tier,
-    urgency: f64,
+    quota_urgency_5h: f64,
+    quota_urgency_7d: f64,
+    quota_urgency_combined: f64,
+    overage_urgency: f64,
     warning_multiplier: f64,
+}
+
+impl Assessment<'_> {
+    const fn tier_urgency(&self) -> f64 {
+        match self.tier {
+            Tier::KnownBase | Tier::PartialBase => {
+                debug_assert!(self.quota_urgency_combined + EPSILON >= self.quota_urgency_5h);
+                debug_assert!(self.quota_urgency_combined + EPSILON >= self.quota_urgency_7d);
+                self.quota_urgency_combined
+            }
+            Tier::Overage => self.overage_urgency,
+            Tier::UnknownProbe => 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BaseWindowPressureConfig {
+    window_len_secs: u64,
+    gamma: f64,
+    target_floor: f64,
 }
 
 // -- Candidate assessment. --------------------------------------------------
@@ -471,33 +520,39 @@ fn assess_candidate<'a>(
     config: &FilterConfig,
 ) -> Option<Assessment<'a>> {
     let now_secs = candidate_estimated_now(candidate);
-    let multiplier = capacity_multiplier(candidate);
 
     let mut positive_count = 0u32;
     let mut warning_positive_count = 0u32;
     let mut hard_negative_count = 0u32;
-    let mut base_urgency = 0.0f64;
+    let mut five_hour_pressure = 0.0f64;
+    let mut seven_day_pressure = 0.0f64;
     for &window in base_windows {
         let snapshot = find_snapshot(candidate, window);
         let signal = classify_base_snapshot(snapshot, now_secs, config);
         match signal {
             BaseSignal::CurrentPositive => {
                 positive_count += 1;
-                if let Some(contribution) =
-                    window_urgency_contribution(snapshot, now_secs, multiplier)
-                    && contribution > base_urgency
-                {
-                    base_urgency = contribution;
+                match window {
+                    WINDOW_FIVE_HOUR => {
+                        five_hour_pressure = base_window_pressure(snapshot, now_secs);
+                    }
+                    WINDOW_SEVEN_DAY => {
+                        seven_day_pressure = base_window_pressure(snapshot, now_secs);
+                    }
+                    _ => {}
                 }
             }
             BaseSignal::WarningPositive => {
                 positive_count += 1;
                 warning_positive_count += 1;
-                if let Some(contribution) =
-                    window_urgency_contribution(snapshot, now_secs, multiplier)
-                    && contribution > base_urgency
-                {
-                    base_urgency = contribution;
+                match window {
+                    WINDOW_FIVE_HOUR => {
+                        five_hour_pressure = base_window_pressure(snapshot, now_secs);
+                    }
+                    WINDOW_SEVEN_DAY => {
+                        seven_day_pressure = base_window_pressure(snapshot, now_secs);
+                    }
+                    _ => {}
                 }
             }
             BaseSignal::HardNegative => hard_negative_count += 1,
@@ -505,31 +560,54 @@ fn assess_candidate<'a>(
         }
     }
     let total = base_windows.len() as u32;
+    let base_urgency = weighted_smoothmax(five_hour_pressure, seven_day_pressure);
 
     let overage = assess_overage(candidate, config);
     let base_proven_blocked = hard_negative_count > 0 || overage.base_exhausted_hint;
 
-    let (tier, urgency) = if base_proven_blocked {
-        if overage.ok {
-            (Tier::Overage, overage_urgency(overage.fresh_overage_util))
+    let (tier, quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, overage_urgency) =
+        if base_proven_blocked {
+            if overage.ok {
+                (
+                    Tier::Overage,
+                    0.0,
+                    0.0,
+                    0.0,
+                    overage_urgency(overage.fresh_overage_util),
+                )
+            } else {
+                return None;
+            }
+        } else if positive_count == total && total > 0 {
+            (
+                Tier::KnownBase,
+                five_hour_pressure,
+                seven_day_pressure,
+                base_urgency,
+                0.0,
+            )
+        } else if positive_count > 0 {
+            (
+                Tier::PartialBase,
+                five_hour_pressure,
+                seven_day_pressure,
+                base_urgency,
+                0.0,
+            )
+        } else if config.unknown_probe_enabled {
+            (Tier::UnknownProbe, 0.0, 0.0, 0.0, 0.0)
         } else {
             return None;
-        }
-    } else if positive_count == total && total > 0 {
-        (Tier::KnownBase, base_urgency)
-    } else if positive_count > 0 {
-        (Tier::PartialBase, base_urgency)
-    } else if config.unknown_probe_enabled {
-        (Tier::UnknownProbe, 0.0)
-    } else {
-        return None;
-    };
+        };
 
     Some(Assessment {
         candidate,
         original_index,
         tier,
-        urgency,
+        quota_urgency_5h,
+        quota_urgency_7d,
+        quota_urgency_combined,
+        overage_urgency,
         warning_multiplier: if warning_positive_count > 0 {
             WARNING_MULTIPLIER
         } else {
@@ -538,30 +616,69 @@ fn assess_candidate<'a>(
     })
 }
 
-/// Compute the WRH urgency contribution of a single base window. Returns
-/// `None` when the window should be excluded from urgency: non-fresh state,
-/// missing / non-finite utilization, or missing / already-elapsed `resets_at`.
-fn window_urgency_contribution(
+fn base_window_pressure(
     snapshot: Option<&SubscriptionQuotaCandidateSnapshot>,
     now_secs: u64,
-    multiplier: f64,
-) -> Option<f64> {
-    let snap = snapshot?;
+) -> f64 {
+    let Some(snap) = snapshot else {
+        return 0.0;
+    };
     if snap.state != SubscriptionQuotaDataState::Fresh {
-        return None;
+        return 0.0;
     }
-    let util = snap.utilization?;
+    let Some(util) = snap.utilization else {
+        return 0.0;
+    };
     if !util.is_finite() {
-        return None;
+        return 0.0;
     }
-    let resets_at = snap.resets_at_unix_secs?;
+    let Some(resets_at) = snap.resets_at_unix_secs else {
+        return 0.0;
+    };
     if resets_at <= now_secs {
-        return None;
+        return 0.0;
     }
-    let remaining_secs = (resets_at - now_secs).max(MIN_REMAIN_SECS) as f64;
-    let clamped_util = util.clamp(0.0, 1.0);
-    let headroom = (1.0 - clamped_util).powi(HEADROOM_EXPONENT);
-    Some(multiplier * headroom / remaining_secs)
+    let Some(pressure_config) = base_window_pressure_config(snap.window.as_str()) else {
+        return 0.0;
+    };
+
+    let remaining_ratio = 1.0 - util.clamp(0.0, 1.0);
+    let time_ratio =
+        ((resets_at - now_secs) as f64 / pressure_config.window_len_secs as f64).clamp(0.0, 1.0);
+    pressure_from_ratios(remaining_ratio, time_ratio, pressure_config)
+}
+
+fn pressure_from_ratios(
+    remaining_ratio: f64,
+    time_ratio: f64,
+    pressure_config: BaseWindowPressureConfig,
+) -> f64 {
+    let target = time_ratio
+        .powf(pressure_config.gamma)
+        .max(pressure_config.target_floor);
+    (remaining_ratio / target).ln().max(0.0)
+}
+
+fn base_window_pressure_config(window: &str) -> Option<BaseWindowPressureConfig> {
+    match window {
+        WINDOW_FIVE_HOUR => Some(BaseWindowPressureConfig {
+            window_len_secs: FIVE_HOUR_WINDOW_LEN_SECS,
+            gamma: FIVE_HOUR_GAMMA,
+            target_floor: FIVE_HOUR_TARGET_FLOOR,
+        }),
+        WINDOW_SEVEN_DAY => Some(BaseWindowPressureConfig {
+            window_len_secs: SEVEN_DAY_WINDOW_LEN_SECS,
+            gamma: SEVEN_DAY_GAMMA,
+            target_floor: SEVEN_DAY_TARGET_FLOOR,
+        }),
+        _ => None,
+    }
+}
+
+fn weighted_smoothmax(five_hour_pressure: f64, seven_day_pressure: f64) -> f64 {
+    (five_hour_pressure.powf(SMOOTHMAX_P)
+        + (SEVEN_DAY_SMOOTHMAX_WEIGHT * seven_day_pressure).powf(SMOOTHMAX_P))
+    .powf(1.0 / SMOOTHMAX_P)
 }
 
 fn overage_urgency(fresh_util: Option<f64>) -> f64 {
@@ -573,20 +690,6 @@ fn overage_urgency(fresh_util: Option<f64>) -> f64 {
         }
         _ => OVERAGE_UNKNOWN_WEIGHT,
     }
-}
-
-/// Map the upstream's plan capacity ratio to a WRH multiplier in `[0, 2.0]`.
-/// `sqrt` compresses the range so Pro (1.0), team_standard (1.25), and
-/// large Max/Team plans (5x, 6.25x, 20x) all sit within one order of
-/// magnitude, and the `CAPACITY_CAP` prevents 20x from dominating.
-fn capacity_multiplier(candidate: &UpstreamCandidate) -> f64 {
-    let ratio = candidate
-        .plan_capacity_ratio
-        .unwrap_or(UNKNOWN_CAPACITY_RATIO);
-    if !ratio.is_finite() || ratio <= 0.0 {
-        return UNKNOWN_CAPACITY_RATIO;
-    }
-    ratio.sqrt().min(CAPACITY_CAP)
 }
 
 fn classify_base_snapshot(
@@ -771,8 +874,7 @@ fn pick_within_tier<'a, 'b>(
     max_cache_value_micros: i64,
 ) -> TierSelection<'a, 'b> {
     debug_assert!(!bucket.is_empty());
-    let total_urgency: f64 = bucket.iter().map(|a| a.urgency).sum();
-    let uniform = total_urgency < EPSILON;
+    let total_urgency: f64 = bucket.iter().map(Assessment::tier_urgency).sum();
 
     if bucket.len() == 1 {
         return TierSelection { winner: &bucket[0] };
@@ -783,7 +885,7 @@ fn pick_within_tier<'a, 'b>(
         &bucket[0],
         routing_key,
         config,
-        uniform,
+        total_urgency,
         pricing,
         max_cache_value_micros,
     );
@@ -792,7 +894,7 @@ fn pick_within_tier<'a, 'b>(
             assessment,
             routing_key,
             config,
-            uniform,
+            total_urgency,
             pricing,
             max_cache_value_micros,
         );
@@ -1000,16 +1102,20 @@ fn wrh_key(
     assessment: &Assessment<'_>,
     routing_key: &str,
     config: &FilterConfig,
-    uniform: bool,
+    bucket_total_urgency: f64,
     pricing: &CachePricingSummary,
     max_cache_value_micros: i64,
 ) -> WrhKey {
     let hash = rendezvous_hash(
-        config.rendezvous_hash_salt,
+        rendezvous_salt_for_tier(assessment.tier, config.rendezvous_hash_salt),
         routing_key,
         assessment.candidate.upstream_id,
     );
-    let quota_weight = if uniform { 1.0 } else { assessment.urgency };
+    let quota_weight = quota_weight_factor(
+        assessment.tier,
+        assessment.tier_urgency(),
+        bucket_total_urgency,
+    );
     let cache_ratio = cache_value_ratio_within_bucket(
         candidate_cache_value_micros(assessment.candidate, pricing),
         max_cache_value_micros,
