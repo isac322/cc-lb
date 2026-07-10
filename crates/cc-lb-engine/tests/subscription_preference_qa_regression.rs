@@ -1,7 +1,8 @@
 use bytes::Bytes;
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_plugin_api::types::{
-    CachePricingSummary, CacheScore, CandidateUrgency, SubscriptionPreferenceTrace, WrhKeySource,
+    CachePricingSummary, CacheScore, CandidateUrgency, SubscriptionPreferenceTrace,
+    SubscriptionTier, WrhKeySource,
 };
 use cc_lb_plugin_api::{
     FilterPlugin, Principal, PrincipalKind, RequestContext, SubscriptionQuotaCandidateSnapshot,
@@ -76,6 +77,67 @@ fn reset_recent_has_lower_urgency_when_only_reset_time_differs() {
     assert!(fresh.effective_weight < soon.effective_weight);
 }
 
+#[test]
+fn v11_trace_contains_distinct_winner_and_loser_pressure() {
+    let first_base = oauth_candidate("first-base", 1, base_quota(0.25, 9_000));
+    let second_base = oauth_candidate("second-base", 2, base_quota(0.75, 9_000));
+    let partial_base = partial_base_candidate("partial-base", 3, base_quota(0.25, 9_000));
+    let overage = overage_candidate("overage", 4, 0.40);
+    let unknown = unknown_candidate("unknown", 5);
+
+    let result = route(
+        "req-v11-all-candidate-trace",
+        &[
+            first_base.clone(),
+            second_base.clone(),
+            partial_base.clone(),
+            overage.clone(),
+            unknown.clone(),
+        ],
+    );
+    let winner_id = result
+        .trace
+        .formula_winner_upstream_id
+        .expect("formula winner is traced");
+    let loser_id = if winner_id == first_base.upstream_id {
+        second_base.upstream_id
+    } else {
+        first_base.upstream_id
+    };
+    let winner = trace_candidate(&result.trace, winner_id);
+    let loser = trace_candidate(&result.trace, loser_id);
+    let partial = trace_candidate(&result.trace, partial_base.upstream_id);
+    let overage = trace_candidate(&result.trace, overage.upstream_id);
+    let unknown = trace_candidate(&result.trace, unknown.upstream_id);
+
+    assert_eq!(result.trace.rendezvous_salt_version.as_deref(), Some("v11"));
+    assert_ne!(winner.quota_urgency_combined, loser.quota_urgency_combined);
+    for base in [winner, loser, partial] {
+        assert!(base.quota_urgency_5h.is_some());
+        assert!(base.quota_urgency_7d.is_some());
+        assert_eq!(base.quota_urgency_combined, Some(base.quota_urgency));
+        assert_eq!(base.quota_weight_factor, 1.0 + base.quota_urgency);
+        assert!(!base.quota_uniform_fallback);
+        assert_eq!(base.urgency, base.effective_weight);
+    }
+    assert_eq!(partial.tier, SubscriptionTier::PartialBase);
+    assert_eq!(partial.quota_urgency_7d, Some(0.0));
+    assert_eq!(overage.quota_urgency_5h, None);
+    assert_eq!(overage.quota_urgency_7d, None);
+    assert_eq!(overage.quota_urgency_combined, None);
+    assert!(overage.quota_urgency > 0.0);
+    assert_eq!(overage.quota_weight_factor, overage.quota_urgency);
+    assert!(!overage.quota_uniform_fallback);
+    assert_eq!(overage.urgency, overage.effective_weight);
+    assert_eq!(unknown.quota_urgency_5h, None);
+    assert_eq!(unknown.quota_urgency_7d, None);
+    assert_eq!(unknown.quota_urgency_combined, None);
+    assert_eq!(unknown.quota_urgency, 0.0);
+    assert_eq!(unknown.quota_weight_factor, 1.0);
+    assert!(unknown.quota_uniform_fallback);
+    assert_eq!(unknown.urgency, unknown.effective_weight);
+}
+
 struct RouteResult {
     kept_upstream_id: Uuid,
     trace: SubscriptionPreferenceTrace,
@@ -130,6 +192,28 @@ fn oauth_candidate(name: &str, seed: u8, quota: BaseQuota) -> UpstreamCandidate 
         rate_limit_tier: None,
         seat_tier: None,
     }
+}
+
+fn partial_base_candidate(name: &str, seed: u8, quota: BaseQuota) -> UpstreamCandidate {
+    let mut candidate = oauth_candidate(name, seed, quota);
+    candidate
+        .subscription_quotas
+        .retain(|snapshot| snapshot.window == WINDOW_FIVE_HOUR);
+    candidate
+}
+
+fn overage_candidate(name: &str, seed: u8, utilization: f64) -> UpstreamCandidate {
+    let mut candidate = oauth_candidate(name, seed, base_quota(1.0, 9_000));
+    candidate
+        .subscription_quotas
+        .push(quota_snapshot("overage", utilization, T0_SECS + 2_592_000));
+    candidate
+}
+
+fn unknown_candidate(name: &str, seed: u8) -> UpstreamCandidate {
+    let mut candidate = oauth_candidate(name, seed, base_quota(0.0, 9_000));
+    candidate.subscription_quotas.clear();
+    candidate
 }
 
 fn quota_snapshots(quota: BaseQuota) -> Vec<SubscriptionQuotaCandidateSnapshot> {

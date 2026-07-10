@@ -581,6 +581,20 @@ fn candidate_urgency_json_len(candidate: &CandidateUrgency) -> usize {
         + f64_json_len(candidate.urgency)
         + ",\"quota_urgency\":".len()
         + f64_json_len(candidate.quota_urgency)
+        + ",\"quota_urgency_5h\":".len()
+        + option_f64_json_len(candidate.quota_urgency_5h)
+        + ",\"quota_urgency_7d\":".len()
+        + option_f64_json_len(candidate.quota_urgency_7d)
+        + ",\"quota_urgency_combined\":".len()
+        + option_f64_json_len(candidate.quota_urgency_combined)
+        + ",\"quota_weight_factor\":".len()
+        + f64_json_len(candidate.quota_weight_factor)
+        + ",\"quota_uniform_fallback\":".len()
+        + if candidate.quota_uniform_fallback {
+            "true".len()
+        } else {
+            "false".len()
+        }
         + ",\"predicted_cache_read_tokens\":".len()
         + candidate.predicted_cache_read_tokens.to_string().len()
         + ",\"predicted_cache_creation_tokens_5m\":".len()
@@ -628,6 +642,10 @@ fn wrh_key_source_json_len(source: WrhKeySource) -> usize {
 
 fn f64_json_len(value: f64) -> usize {
     if value.is_finite() { 24 } else { 4 }
+}
+
+fn option_f64_json_len(value: Option<f64>) -> usize {
+    value.map_or("null".len(), f64_json_len)
 }
 
 fn terminal_decision_json_len(terminal_decision: &TerminalDecision) -> usize {

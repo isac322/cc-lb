@@ -927,7 +927,7 @@ pub enum SubscriptionTier {
 /// Per-candidate weighted-rendezvous-hash urgency score and tier for one
 /// subscription-preference selection.
 ///
-/// Under salt v10 the `urgency` field is aliased to `effective_weight` so a
+/// Under salt v11 the `urgency` field is aliased to `effective_weight` so a
 /// consumer that only reads `urgency` still sees the current selection
 /// weight. Component fields expose the quota, cache, warning, and pricing
 /// inputs so operator queries can distinguish quota-driven changes from
@@ -941,8 +941,23 @@ pub struct CandidateUrgency {
     /// WRH selection weight actually used to score this candidate.
     pub urgency: f64,
     /// Pre-boost quota urgency component
-    /// (`capacity_multiplier * (1 - util)^2 / remaining_secs`).
+    /// (combined base pressure, raw overage urgency, or zero for unknown probes).
     pub quota_urgency: f64,
+    /// Five-hour use-it-or-lose-it pressure for base-tier candidates.
+    #[serde(default)]
+    pub quota_urgency_5h: Option<f64>,
+    /// Seven-day use-it-or-lose-it pressure for base-tier candidates.
+    #[serde(default)]
+    pub quota_urgency_7d: Option<f64>,
+    /// Combined use-it-or-lose-it pressure for base-tier candidates.
+    #[serde(default)]
+    pub quota_urgency_combined: Option<f64>,
+    /// Tier-specific quota factor multiplied into the final WRH weight.
+    #[serde(default = "default_quota_weight_factor")]
+    pub quota_weight_factor: f64,
+    /// Whether this candidate's tier bucket used uniform quota weighting.
+    #[serde(default)]
+    pub quota_uniform_fallback: bool,
     /// Predicted input tokens that can be read from cache.
     pub predicted_cache_read_tokens: u32,
     /// Predicted input tokens that would be written to 5-minute cache.
@@ -957,8 +972,8 @@ pub struct CandidateUrgency {
     pub cache_ratio: f64,
     /// `exp(CACHE_LOG_BOOST * cache_ratio)`. Values below 1.0 penalize cache
     /// whose missing write cost exceeds its read savings; values above 1.0
-    /// boost positive cache value. Multiplied onto `quota_urgency` to produce
-    /// `effective_weight`.
+    /// boost positive cache value. Multiplied onto `quota_weight_factor` to
+    /// produce `effective_weight`.
     pub cache_weight_multiplier: f64,
     /// Same-tier multiplier applied when base quota is warning-positive.
     pub warning_multiplier: f64,
@@ -988,12 +1003,32 @@ pub struct CandidateUrgency {
     pub token_estimate_source: Option<String>,
 }
 
+const fn default_quota_weight_factor() -> f64 {
+    1.0
+}
+
+fn option_f64_eq(left: Option<f64>, right: Option<f64>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.total_cmp(&right).is_eq(),
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+    }
+}
+
 impl PartialEq for CandidateUrgency {
     fn eq(&self, other: &Self) -> bool {
         self.upstream_id == other.upstream_id
             && self.tier == other.tier
             && self.urgency.total_cmp(&other.urgency).is_eq()
             && self.quota_urgency.total_cmp(&other.quota_urgency).is_eq()
+            && option_f64_eq(self.quota_urgency_5h, other.quota_urgency_5h)
+            && option_f64_eq(self.quota_urgency_7d, other.quota_urgency_7d)
+            && option_f64_eq(self.quota_urgency_combined, other.quota_urgency_combined)
+            && self
+                .quota_weight_factor
+                .total_cmp(&other.quota_weight_factor)
+                .is_eq()
+            && self.quota_uniform_fallback == other.quota_uniform_fallback
             && self.predicted_cache_read_tokens == other.predicted_cache_read_tokens
             && self.predicted_cache_creation_tokens_5m == other.predicted_cache_creation_tokens_5m
             && self.predicted_cache_creation_tokens_1h == other.predicted_cache_creation_tokens_1h
@@ -1672,6 +1707,40 @@ mod tests {
         assert!(decoded.previous_tier.is_none());
         assert_eq!(decoded.rendezvous_salt_version.as_deref(), Some("v9"));
         assert_eq!(decoded.cache_cost_basis_version.as_deref(), Some("v1"));
+    }
+
+    #[test]
+    fn subscription_preference_trace_deserializes_v10_fixture_old_fields() {
+        let payload = include_str!("../tests/fixtures/subscription_preference_trace_v10.json");
+        let decoded: SubscriptionPreferenceTrace = serde_json::from_str(payload).unwrap();
+        let candidate = decoded.candidates.first().unwrap();
+
+        assert_eq!(decoded.rendezvous_salt_version.as_deref(), Some("v10"));
+        assert_eq!(candidate.tier, SubscriptionTier::KnownBase);
+        assert_eq!(candidate.urgency, 0.75);
+        assert_eq!(candidate.quota_urgency, 0.25);
+        assert_eq!(candidate.effective_weight, 0.75);
+    }
+
+    #[test]
+    fn subscription_preference_trace_deserializes_v10_defaults() {
+        let payload = include_str!("../tests/fixtures/subscription_preference_trace_v10.json");
+        let decoded: SubscriptionPreferenceTrace = serde_json::from_str(payload).unwrap();
+        let candidate = decoded.candidates.first().unwrap();
+
+        assert_eq!(candidate.quota_urgency_5h, None);
+        assert_eq!(candidate.quota_urgency_7d, None);
+        assert_eq!(candidate.quota_urgency_combined, None);
+        assert_eq!(candidate.quota_weight_factor, 1.0);
+        assert!(!candidate.quota_uniform_fallback);
+        println!(
+            "Rust defaults: quota_urgency_5h={:?}, quota_urgency_7d={:?}, quota_urgency_combined={:?}, quota_weight_factor={}, quota_uniform_fallback={}",
+            candidate.quota_urgency_5h,
+            candidate.quota_urgency_7d,
+            candidate.quota_urgency_combined,
+            candidate.quota_weight_factor,
+            candidate.quota_uniform_fallback
+        );
     }
 
     #[test]
