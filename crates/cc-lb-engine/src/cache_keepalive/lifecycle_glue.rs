@@ -89,7 +89,10 @@ impl LifecycleKeepalive {
     }
 
     /// Detaches classification and the serial keep-alive storage writes onto a
-    /// background task so the client response path never awaits them.
+    /// background task so the client response path never awaits them. Loads the
+    /// principal's config and rejects an over-cap (or disabled) snapshot on the
+    /// borrowed inputs first, so an oversized request never pays for the deep
+    /// JSON clones the detached task would otherwise need.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_response_completed(
         &self,
@@ -102,6 +105,20 @@ impl LifecycleKeepalive {
         cache_anchor_age: Duration,
     ) {
         if self.enqueuer.is_none() {
+            return;
+        }
+        let view = self.dynamic_view.load();
+        let Some(config) = view
+            .principal_view
+            .get(&principal.id)
+            .and_then(|cached| cached.cache_keepalive())
+            .filter(|config| config.enabled)
+        else {
+            return;
+        };
+        if shaped_body.len() > config.snapshot_max_bytes as usize {
+            let principal_name: Arc<str> = Arc::from(principal.id.as_str());
+            super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
             return;
         }
         let this = self.clone();
