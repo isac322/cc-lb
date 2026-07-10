@@ -14,8 +14,8 @@ use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{
-    AdaptiveJob, CronJob, SchedulerBackend, SchedulerCtx, SqliteSchedulerStorage,
-    build_adaptive_worker,
+    AdaptiveJob, CronJob, SchedulerBackend, SchedulerCtx, SchedulerPushTask,
+    SqliteSchedulerStorage, build_adaptive_worker,
 };
 use cc_lb_storage_api::CacheTtl;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -131,6 +131,55 @@ async fn scheduler_backend_sqlite_push_job_uses_full_idempotency_index()
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+async fn scheduler_backend_routes_keepalive_to_dedicated_queue()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = sqlite_test_db().await?;
+    let pool = db.pool.clone();
+    cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
+    let config = fast_queue_config("adaptive");
+    let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
+        pool: pool.clone(),
+        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(
+            &pool, &config,
+        ),
+        clock: Arc::new(SystemClock),
+    });
+    let upstream_id = Uuid::new_v4();
+
+    backend
+        .push_keepalive_task(SchedulerPushTask {
+            args: AdaptiveJob::CacheKeepalive(keepalive_job(upstream_id)),
+            idempotency_key: Some("cache_keepalive:worker-session:1".to_owned()),
+            run_at_unix_secs: None,
+            max_attempts: None,
+        })
+        .await?;
+    backend
+        .push_adaptive_task(SchedulerPushTask {
+            args: AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(upstream_id, 1)),
+            idempotency_key: Some(format!("adaptive:metadata_refresh:{upstream_id}:1")),
+            run_at_unix_secs: None,
+            max_attempts: None,
+        })
+        .await?;
+
+    let by_queue: Vec<(String, i64)> =
+        sqlx::query_as("SELECT job_type, COUNT(*) FROM Jobs GROUP BY job_type ORDER BY job_type")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(
+        by_queue,
+        vec![
+            ("adaptive".to_owned(), 1),
+            ("cache_keepalive".to_owned(), 1)
+        ],
+        "keepalive must route to its own queue, isolated from the adaptive entity queue",
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
 async fn worker_sqlite_uses_default_entity_concurrency() {
     let ctx = SchedulerCtx::new(
         SchedulerConfig::default(),
@@ -195,20 +244,24 @@ fn entity_jobs(upstream_id: Uuid) -> [AdaptiveJob; 4] {
         AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1)),
         AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
         AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(upstream_id, 1)),
-        AdaptiveJob::CacheKeepalive(CacheKeepaliveJob {
-            session_key_hash: "worker-session".to_owned(),
-            generation: 1,
-            principal_id: "principal".to_owned(),
-            upstream_id,
-            ttl: CacheTtl::Ttl5m,
-            cache_anchor_at_unix_secs: 100,
-            expires_at_unix_secs: 400,
-            refresh_delay_secs: 270,
-            max_refreshes: 3,
-            max_total_duration_secs: 600,
-            traceparent: None,
-        }),
+        AdaptiveJob::CacheKeepalive(keepalive_job(upstream_id)),
     ]
+}
+
+fn keepalive_job(upstream_id: Uuid) -> CacheKeepaliveJob {
+    CacheKeepaliveJob {
+        session_key_hash: "worker-session".to_owned(),
+        generation: 1,
+        principal_id: "principal".to_owned(),
+        upstream_id,
+        ttl: CacheTtl::Ttl5m,
+        cache_anchor_at_unix_secs: 100,
+        expires_at_unix_secs: 400,
+        refresh_delay_secs: 270,
+        max_refreshes: 3,
+        max_total_duration_secs: 600,
+        traceparent: None,
+    }
 }
 
 fn done_scheduler_ctx() -> SchedulerCtx {

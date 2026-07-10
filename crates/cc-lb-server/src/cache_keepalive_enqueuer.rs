@@ -29,7 +29,7 @@ impl CacheKeepaliveTaskPusher for crate::scheduler_factory::SchedulerBackend {
         &self,
         task: SchedulerPushTask<AdaptiveJob>,
     ) -> SchedulerResult<()> {
-        self.push_adaptive_task(task).await
+        self.push_keepalive_task(task).await
     }
 }
 

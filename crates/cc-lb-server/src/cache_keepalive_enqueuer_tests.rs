@@ -49,13 +49,13 @@ async fn enqueue_persists_session_payload_and_apalis_job() {
 
     let jobs = backend
         .backend
-        .list_adaptive_tasks(&Filter {
+        .list_keepalive_tasks(&Filter {
             status: Some(TaskStatus::Pending),
             page: 1,
             page_size: Some(10),
         })
         .await
-        .expect("list adaptive jobs");
+        .expect("list cache keepalive jobs");
     assert_eq!(jobs.len(), 1);
     let job = &jobs[0];
     assert_eq!(
@@ -136,13 +136,13 @@ async fn cancel_terminalizes_active_session_without_deleting_pending_job() {
     );
     let jobs = backend
         .backend
-        .list_adaptive_tasks(&Filter {
+        .list_keepalive_tasks(&Filter {
             status: Some(TaskStatus::Pending),
             page: 1,
             page_size: Some(10),
         })
         .await
-        .expect("list adaptive jobs");
+        .expect("list cache keepalive jobs");
     assert_eq!(jobs.len(), 1);
 }
 

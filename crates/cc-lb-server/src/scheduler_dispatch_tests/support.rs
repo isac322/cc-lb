@@ -259,13 +259,13 @@ impl Fixture {
         let tasks = self
             .backend
             .backend
-            .list_adaptive_tasks(&Filter {
+            .list_keepalive_tasks(&Filter {
                 status: Some(TaskStatus::Pending),
                 page: 1,
                 page_size: Some(20),
             })
             .await
-            .expect("list adaptive tasks");
+            .expect("list cache keepalive tasks");
         tasks
             .into_iter()
             .find_map(|task| match task.args {

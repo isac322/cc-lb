@@ -8,7 +8,9 @@ use serde::de::DeserializeOwned;
 
 use crate::error::SchedulerError;
 
-use super::{ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, CronJob, SchedulerBackend};
+use super::{
+    ADAPTIVE_QUEUE, AdaptiveJob, CACHE_KEEPALIVE_QUEUE, CRON_QUEUE, CronJob, SchedulerBackend,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SchedulerTaskRow<Args> {
@@ -39,6 +41,22 @@ impl SchedulerBackend {
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => {
                 insert_postgres_task(&postgres.pool, ADAPTIVE_QUEUE, task).await
+            }
+        }
+    }
+
+    pub async fn push_keepalive_task(
+        &self,
+        task: SchedulerPushTask<AdaptiveJob>,
+    ) -> Result<(), SchedulerError> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(sqlite) => {
+                insert_sqlite_task(&sqlite.pool, CACHE_KEEPALIVE_QUEUE, task).await
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => {
+                insert_postgres_task(&postgres.pool, CACHE_KEEPALIVE_QUEUE, task).await
             }
         }
     }
@@ -80,6 +98,42 @@ impl SchedulerBackend {
                 .into_iter()
                 .map(postgres_task_to_row)
                 .collect(),
+        }
+    }
+
+    pub async fn list_keepalive_tasks(
+        &self,
+        filter: &Filter,
+    ) -> Result<Vec<SchedulerTaskRow<AdaptiveJob>>, SchedulerError> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(sqlite) => {
+                let storage = apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(
+                    &sqlite.pool,
+                    CACHE_KEEPALIVE_QUEUE,
+                );
+                storage
+                    .list_tasks(filter)
+                    .await
+                    .map_err(SchedulerError::Database)?
+                    .into_iter()
+                    .map(sqlite_task_to_row)
+                    .collect()
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => {
+                let storage = apalis_postgres::PostgresStorage::<AdaptiveJob>::new_with_config(
+                    &postgres.pool,
+                    &apalis_postgres::Config::new(CACHE_KEEPALIVE_QUEUE),
+                );
+                storage
+                    .list_tasks(filter)
+                    .await
+                    .map_err(SchedulerError::Database)?
+                    .into_iter()
+                    .map(postgres_task_to_row)
+                    .collect()
+            }
         }
     }
 
