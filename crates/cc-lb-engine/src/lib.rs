@@ -125,7 +125,8 @@ pub use cc_lb_control::dynamic_view::{
 #[cfg(not(loom))]
 pub use cc_lb_control::{
     NoopSubscriptionQuotaCache, PromptCacheObservationCacheLike,
-    PromptCacheObservationEnqueueError, PromptCacheObservationSinkLike, SubscriptionQuotaCacheLike,
+    PromptCacheObservationEnqueueError, PromptCacheObservationInput,
+    PromptCacheObservationSinkLike, SubscriptionQuotaCacheLike,
 };
 #[cfg(not(loom))]
 pub use cc_lb_plugin_api::ApiKeyAwareSignerFactory;

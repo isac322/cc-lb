@@ -164,7 +164,7 @@ fn observation(
             NOW_UNIX_SECS + 300
         },
         last_observed_at_unix_secs: NOW_UNIX_SECS.saturating_sub(60),
-        hash_schema_version: 3,
+        hash_schema_version: 4,
         prefix_content_block_index: u32::try_from(record_index).expect("record index fits u32"),
         estimated_prefix_tokens: 1_000 + record_index as u64,
         token_estimate_source: "local_tiktoken_v1".to_owned(),

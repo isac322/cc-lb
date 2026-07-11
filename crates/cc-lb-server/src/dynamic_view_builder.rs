@@ -305,12 +305,16 @@ pub(crate) fn new_prompt_cache_observation_cache(
     config: &PromptCacheShadowConfig,
     clock: cc_lb_engine::ClockHandle,
 ) -> Arc<PromptCacheObservationCache> {
-    Arc::new(PromptCacheObservationCache::new_with_debounce(
-        clock,
-        config.grace_margin_secs,
-        config.warm_set_cap,
-        config.refresh_debounce_secs,
-    ))
+    let cache = Arc::new(
+        PromptCacheObservationCache::new_with_debounce(
+            clock,
+            config.grace_margin_secs,
+            config.refresh_debounce_secs,
+        )
+        .with_max_entries_per_partition(config.max_live_entries_per_partition),
+    );
+    cache.spawn_expiry_sweeper();
+    cache
 }
 
 fn group_rate_limit_observations(
@@ -1622,7 +1626,6 @@ mod tests {
         let mut config = cc_lb_config::Config::default();
         config.prompt_cache_shadow.enabled = true;
         config.prompt_cache_shadow.grace_margin_secs = 99;
-        config.prompt_cache_shadow.warm_set_cap = 7;
         config.prompt_cache_shadow.refresh_debounce_secs = 123;
 
         let dynamic_view = build_view_with_config(&stores, &runtime, dir.path(), config).await;

@@ -386,7 +386,7 @@ fn observation_with_model(
         ttl_class,
         expires_at_unix_secs,
         last_observed_at_unix_secs,
-        hash_schema_version: 3,
+        hash_schema_version: 4,
         prefix_content_block_index: 7,
         estimated_prefix_tokens: 12_345,
         token_estimate_source: "local_tiktoken_v1".to_owned(),

@@ -99,7 +99,7 @@ fn record(index: u64) -> PromptCacheObservationRecord {
         ttl_class: TtlClass::Ephemeral5m,
         expires_at_unix_secs: 1_800 + index,
         last_observed_at_unix_secs: 1_500 + index,
-        hash_schema_version: 3,
+        hash_schema_version: 4,
         prefix_content_block_index: 0,
         estimated_prefix_tokens: 0,
         token_estimate_source: "local_tiktoken_v1".to_owned(),
