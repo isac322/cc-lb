@@ -4302,7 +4302,7 @@ mod tests {
     #[test]
     fn build_candidates_cache_score() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000201").unwrap();
-        let cache = TestPromptCacheObservationCache::new(32, TEST_MODEL).with_entries(
+        let cache = TestPromptCacheObservationCache::new(TEST_MODEL).with_entries(
             upstream_id,
             vec![
                 warm_entry("short", TtlClass::Ephemeral5m, 4_100_000_300, 12),
@@ -4355,7 +4355,7 @@ mod tests {
             "expected real tokenizer to exceed Sonnet threshold, got {prefix_token_count}"
         );
 
-        let cache = TestPromptCacheObservationCache::new(32, TEST_MODEL).with_entries(
+        let cache = TestPromptCacheObservationCache::new(TEST_MODEL).with_entries(
             upstream_id,
             vec![warm_entry(
                 &prefix_hash,
@@ -4392,7 +4392,7 @@ mod tests {
         const ITERATIONS: usize = 10_000;
         const ROUTING_BUDGET_P99_NANOS: u128 = 5_000_000;
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000299").unwrap();
-        let cache = TestPromptCacheObservationCache::new(32, TEST_MODEL).with_entries(
+        let cache = TestPromptCacheObservationCache::new(TEST_MODEL).with_entries(
             upstream_id,
             vec![
                 warm_entry("warm-prefix-a", TtlClass::Ephemeral1h, 4_100_003_600, 12),
@@ -4456,7 +4456,7 @@ mod tests {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000202").unwrap();
         let view = cache_score_view(
             upstream_id,
-            Arc::new(TestPromptCacheObservationCache::new(32, TEST_MODEL)),
+            Arc::new(TestPromptCacheObservationCache::new(TEST_MODEL)),
         );
         let breakpoints = vec![cache_breakpoint(0, "cold", 100, TtlClass::Ephemeral5m)];
 
@@ -4494,7 +4494,7 @@ mod tests {
     fn build_candidates_ignores_positive_thread_score_for_active_cache_score() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000204").unwrap();
         let thread_id = "thread-cache-positive";
-        let cache = TestPromptCacheObservationCache::new(32, TEST_MODEL).with_thread_score(
+        let cache = TestPromptCacheObservationCache::new(TEST_MODEL).with_thread_score(
             upstream_id,
             TEST_MODEL,
             thread_id,
@@ -4535,7 +4535,7 @@ mod tests {
     }
 
     #[test]
-    fn build_candidates_warm_set_cap_respected() {
+    fn build_candidates_considers_all_warm_entries() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000203").unwrap();
         let breakpoints = (0_u32..50)
             .map(|index| {
@@ -4555,7 +4555,7 @@ mod tests {
                 last_observed_at_unix_secs: 1_700_000_100 + u64::from(50 - index),
             })
             .collect::<Vec<_>>();
-        let cache = TestPromptCacheObservationCache::new(32, TEST_MODEL)
+        let cache = TestPromptCacheObservationCache::new(TEST_MODEL)
             .with_entries(upstream_id, warm_entries);
         let view = cache_score_view(upstream_id, Arc::new(cache));
 
@@ -4570,8 +4570,8 @@ mod tests {
         );
 
         let score = candidates[0].cache_score.as_ref().expect("cache score");
-        assert_eq!(score.predicted_cache_read_tokens, 32);
-        assert_eq!(score.matched_breakpoint_index, Some(31));
+        assert_eq!(score.predicted_cache_read_tokens, 50);
+        assert_eq!(score.matched_breakpoint_index, Some(49));
     }
 
     #[test]
@@ -5206,16 +5206,14 @@ mod tests {
     }
 
     struct TestPromptCacheObservationCache {
-        cap: usize,
         expected_model: &'static str,
         entries: HashMap<Uuid, Vec<WarmCacheEntry>>,
         thread_scores: HashMap<(Uuid, String, String), CacheScore>,
     }
 
     impl TestPromptCacheObservationCache {
-        fn new(cap: usize, expected_model: &'static str) -> Self {
+        fn new(expected_model: &'static str) -> Self {
             Self {
-                cap,
                 expected_model,
                 entries: HashMap::new(),
                 thread_scores: HashMap::new(),
@@ -5273,7 +5271,6 @@ mod tests {
                     .last_observed_at_unix_secs
                     .cmp(&left.last_observed_at_unix_secs)
             });
-            snapshot.truncate(self.cap);
             snapshot
         }
 

@@ -9,7 +9,6 @@ use uuid::Uuid;
 
 pub const HASH_SCHEMA_VERSION: u8 = cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
 
-const DEFAULT_WARM_SET_CAP: usize = 32;
 const DEFAULT_REFRESH_DEBOUNCE_SECS: u64 = 60;
 const THREAD_USAGE_CAP_PER_UPSTREAM: usize = 2048;
 const THREAD_USAGE_TTL_SECS: u64 = 5 * 60;
@@ -36,7 +35,6 @@ pub struct PromptCacheObservationCache {
     clock: ClockHandle,
     thread_usage: RwLock<ThreadUsageByUpstream>,
     grace_margin_secs: u64,
-    warm_set_cap: usize,
     refresh_debounce_secs: u64,
 }
 
@@ -72,19 +70,13 @@ struct ThreadUsageEntry {
 }
 
 impl PromptCacheObservationCache {
-    pub fn new(clock: ClockHandle, grace_margin_secs: u64, warm_set_cap: usize) -> Self {
-        Self::new_with_debounce(
-            clock,
-            grace_margin_secs,
-            warm_set_cap,
-            DEFAULT_REFRESH_DEBOUNCE_SECS,
-        )
+    pub fn new(clock: ClockHandle, grace_margin_secs: u64) -> Self {
+        Self::new_with_debounce(clock, grace_margin_secs, DEFAULT_REFRESH_DEBOUNCE_SECS)
     }
 
     pub fn new_with_debounce(
         clock: ClockHandle,
         grace_margin_secs: u64,
-        warm_set_cap: usize,
         refresh_debounce_secs: u64,
     ) -> Self {
         Self {
@@ -92,11 +84,6 @@ impl PromptCacheObservationCache {
             clock,
             thread_usage: RwLock::new(HashMap::new()),
             grace_margin_secs,
-            warm_set_cap: if warm_set_cap == 0 {
-                DEFAULT_WARM_SET_CAP
-            } else {
-                warm_set_cap
-            },
             refresh_debounce_secs,
         }
     }
@@ -209,7 +196,6 @@ impl PromptCacheObservationCache {
                 .last_observed_at_unix_secs
                 .cmp(&left.last_observed_at_unix_secs)
         });
-        snapshot.truncate(self.warm_set_cap);
         snapshot
     }
 
@@ -449,9 +435,9 @@ pub(crate) mod tests {
     const BASE_TS: u64 = 1_700_000_000;
     const MODEL: &str = "claude-sonnet-4-5-20250929";
 
-    fn cache_with_cap(warm_set_cap: usize) -> PromptCacheObservationCache {
+    fn test_cache() -> PromptCacheObservationCache {
         let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
-        PromptCacheObservationCache::new(clock, 30, warm_set_cap)
+        PromptCacheObservationCache::new(clock, 30)
     }
 
     fn base_now() -> u64 {
@@ -562,7 +548,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn hydrate_filters() {
         let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
-        let cache = PromptCacheObservationCache::new(clock, 30, 32);
+        let cache = PromptCacheObservationCache::new(clock, 30);
         let upstream_id = Uuid::new_v4();
         let store = MockStore::new(vec![
             storage_record(
@@ -614,7 +600,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn hydrate_cold_starts_schema_v3_keeps_v4() {
         let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
-        let cache = PromptCacheObservationCache::new(clock, 30, 32);
+        let cache = PromptCacheObservationCache::new(clock, 30);
         let upstream_id = Uuid::new_v4();
         let store = MockStore::new(vec![
             storage_record(
@@ -658,7 +644,7 @@ pub(crate) mod tests {
     #[test]
     fn refresh_debounce() {
         let clock = Arc::new(TestClock::new_at_secs(BASE_TS));
-        let cache = PromptCacheObservationCache::new_with_debounce(clock.clone(), 30, 32, 60);
+        let cache = PromptCacheObservationCache::new_with_debounce(clock.clone(), 30, 60);
         let upstream_id = Uuid::new_v4();
 
         upsert(
@@ -707,7 +693,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn hydrate_returns_zero_when_store_empty() {
         let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
-        let cache = PromptCacheObservationCache::new(clock, 30, 32);
+        let cache = PromptCacheObservationCache::new(clock, 30);
         let upstream_id = Uuid::new_v4();
         let store = MockStore::default();
 
@@ -728,7 +714,7 @@ pub(crate) mod tests {
 
     #[test]
     fn snapshot_asymmetric_ttl() {
-        let cache = cache_with_cap(32);
+        let cache = test_cache();
         let upstream_id = Uuid::new_v4();
         let now = base_now();
 
@@ -770,35 +756,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn snapshot_cap() {
-        let cache = cache_with_cap(2);
-        let upstream_id = Uuid::new_v4();
-        let now = base_now();
-
-        let mut request_breakpoints = Vec::new();
-        for index in 0..5 {
-            let prefix_hash = format!("hash-{index}");
-            upsert(
-                &cache,
-                upstream_id,
-                &prefix_hash,
-                TtlClass::Ephemeral5m,
-                now + 300,
-                now + index,
-            );
-            request_breakpoints.push((prefix_hash, TtlClass::Ephemeral5m));
-        }
-
-        let snapshot = cache.snapshot_for_upstream(upstream_id, MODEL, &request_breakpoints, now);
-
-        assert_eq!(snapshot.len(), 2);
-        assert_eq!(snapshot[0].prefix_hash, "hash-4");
-        assert_eq!(snapshot[1].prefix_hash, "hash-3");
-    }
-
-    #[test]
     fn upsert_replaces_existing_and_preserves_last_persisted_at() {
-        let cache = cache_with_cap(32);
+        let cache = test_cache();
         let upstream_id = Uuid::new_v4();
         let now = base_now();
         let key = (
@@ -834,7 +793,7 @@ pub(crate) mod tests {
 
     #[test]
     fn snapshot_excludes_expired_at_now() {
-        let cache = cache_with_cap(32);
+        let cache = test_cache();
         let upstream_id = Uuid::new_v4();
         let now = base_now();
 
@@ -871,7 +830,7 @@ pub(crate) mod tests {
 
     #[test]
     fn hit_upsert_extends_expiry_and_keeps_snapshot_warm() {
-        let cache = cache_with_cap(32);
+        let cache = test_cache();
         let upstream_id = Uuid::new_v4();
         let now = base_now();
         let original_expiry = now + 60;
@@ -920,7 +879,7 @@ pub(crate) mod tests {
 
     #[test]
     fn snapshot_filters_to_request_breakpoints_only() {
-        let cache = cache_with_cap(32);
+        let cache = test_cache();
         let upstream_id = Uuid::new_v4();
         let now = base_now();
 
@@ -954,7 +913,7 @@ pub(crate) mod tests {
 
     #[test]
     fn snapshot_ignores_other_upstream() {
-        let cache = cache_with_cap(32);
+        let cache = test_cache();
         let upstream_id = Uuid::new_v4();
         let other_upstream_id = Uuid::new_v4();
         let now = base_now();

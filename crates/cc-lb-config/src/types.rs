@@ -694,7 +694,6 @@ impl Default for SubscriptionQuotaConfig {
 /// - `enabled` (default: false) - gate all observation flow and sweeper spawn
 /// - `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed
 /// - `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence
-/// - `warm_set_cap` (default: 32) - max snapshot entries per upstream/model
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct PromptCacheShadowConfig {
@@ -704,8 +703,6 @@ pub struct PromptCacheShadowConfig {
     pub grace_margin_secs: u64,
     #[serde(default = "default_prompt_cache_shadow_refresh_debounce_secs")]
     pub refresh_debounce_secs: u64,
-    #[serde(default = "default_prompt_cache_shadow_warm_set_cap")]
-    pub warm_set_cap: usize,
 }
 
 impl Default for PromptCacheShadowConfig {
@@ -714,7 +711,6 @@ impl Default for PromptCacheShadowConfig {
             enabled: false,
             grace_margin_secs: 30,
             refresh_debounce_secs: 60,
-            warm_set_cap: 32,
         }
     }
 }
@@ -1463,10 +1459,6 @@ fn default_prompt_cache_shadow_grace_margin_secs() -> u64 {
 
 fn default_prompt_cache_shadow_refresh_debounce_secs() -> u64 {
     PromptCacheShadowConfig::default().refresh_debounce_secs
-}
-
-fn default_prompt_cache_shadow_warm_set_cap() -> usize {
-    PromptCacheShadowConfig::default().warm_set_cap
 }
 
 #[cfg(test)]
