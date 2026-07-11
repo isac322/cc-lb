@@ -346,14 +346,6 @@ fn serialized_prefix(canonical_model: &str, blocks: &[V3PromptCacheBlock]) -> Ve
     .unwrap_or_default()
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
-fn prefix_token_counts(canonical_model: &str, blocks: &[V3PromptCacheBlock]) -> Vec<u64> {
-    (0..blocks.len())
-        .map(|index| breakpoint_prefix_token_count(canonical_model, blocks, index))
-        .collect()
-}
-
 fn lookback_prefixes(
     chain: &PromptCachePrefixChain,
     block_index: usize,
@@ -526,6 +518,40 @@ mod tests {
 
         assert_eq!(analysis.breakpoints.len(), 2);
         assert_eq!(tokenizer_call_count(), 2);
+    }
+
+    #[test]
+    fn equal_bytes_128_blocks_does_not_scale() {
+        let one_breakpoint = |block_count: usize| {
+            let content = (0..block_count)
+                .map(|index| {
+                    if index == block_count - 1 {
+                        json!({"type":"text","text":format!("block-{index}"),"cache_control":{"type":"ephemeral"}})
+                    } else {
+                        json!({"type":"text","text":format!("block-{index}")})
+                    }
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "model": "claude-sonnet-4-5",
+                "messages": [{"role":"user","content": content}]
+            })
+        };
+
+        reset_tokenizer_call_count();
+        let _ =
+            analyze_v3_prompt_cache(&one_breakpoint(8), canonical_model_id("claude-sonnet-4-5"));
+        let calls_8 = tokenizer_call_count();
+
+        reset_tokenizer_call_count();
+        let _ = analyze_v3_prompt_cache(
+            &one_breakpoint(128),
+            canonical_model_id("claude-sonnet-4-5"),
+        );
+        let calls_128 = tokenizer_call_count();
+
+        assert_eq!(calls_8, 1);
+        assert_eq!(calls_128, 1);
     }
 
     #[test]

@@ -231,7 +231,7 @@ fn build_cache_score(
         });
 
     let matched_prefix_tokens = longest_match
-        .map(|(breakpoint, _, _)| breakpoint.prefix_token_count)
+        .map(|(breakpoint, _, entry)| matched_read_tokens(breakpoint, entry))
         .unwrap_or(0);
     let mut missing_breakpoints = request_breakpoints
         .iter()
@@ -260,9 +260,7 @@ fn build_cache_score(
     }
 
     Some(CacheScore {
-        predicted_cache_read_tokens: longest_match
-            .map(|(breakpoint, _, _)| saturating_u64_to_u32(breakpoint.prefix_token_count))
-            .unwrap_or(0),
+        predicted_cache_read_tokens: saturating_u64_to_u32(matched_prefix_tokens),
         predicted_cache_creation_tokens_5m: saturating_u64_to_u32(
             predicted_cache_creation_tokens_5m,
         ),
@@ -283,6 +281,16 @@ fn build_cache_score(
         token_estimate_source: longest_match
             .and_then(|(breakpoint, _, _)| breakpoint.token_estimate_source.clone()),
     })
+}
+
+fn matched_read_tokens(breakpoint: &CacheBreakpoint, entry: &WarmCacheEntry) -> u64 {
+    if entry.token_estimate_source == V3_TOKEN_ESTIMATE_SOURCE
+        && entry.hash_schema_version == HASH_SCHEMA_VERSION
+    {
+        entry.estimated_prefix_tokens
+    } else {
+        breakpoint.prefix_token_count
+    }
 }
 
 fn eligible_ttls(requested: TtlClass) -> Vec<TtlClass> {
@@ -361,7 +369,7 @@ mod cache_score_tests {
                 breakpoint(1, 300_000, TtlClass::Ephemeral5m),
                 breakpoint(2, 500_000, TtlClass::Ephemeral5m),
             ],
-            &[warm_entry("bp-1", TtlClass::Ephemeral5m)],
+            &[warm_entry("bp-1", TtlClass::Ephemeral5m, 300_000)],
         )
         .expect("cache score for cacheable request");
 
@@ -369,6 +377,58 @@ mod cache_score_tests {
         assert_eq!(score.predicted_cache_creation_tokens_1h, 0);
         assert_eq!(score.predicted_cache_creation_tokens_5m, 200_000);
         assert_eq!(score.matched_breakpoint_index, Some(1));
+    }
+
+    #[test]
+    fn build_cache_score_prices_read_from_matched_prefix_not_owning_breakpoint() {
+        let breakpoint = CacheBreakpoint {
+            block_index: 2,
+            source: CacheBreakpointSource::Message,
+            path: "messages.2.content".to_owned(),
+            message_index: Some(2),
+            prefix_hash: "bp-2".to_owned(),
+            prefix_token_count: 300_000,
+            requested_ttl: TtlClass::Ephemeral5m,
+            origin: BreakpointOrigin::Explicit,
+            lookback_prefixes: vec![
+                cc_lb_plugin_api::types::CacheLookbackPrefix {
+                    prefix_hash: "bp-2".to_owned(),
+                    content_block_index: 2,
+                    lookback_distance: 0,
+                },
+                cc_lb_plugin_api::types::CacheLookbackPrefix {
+                    prefix_hash: "warm-0".to_owned(),
+                    content_block_index: 0,
+                    lookback_distance: 2,
+                },
+            ],
+            token_estimate_source: Some("test".to_owned()),
+        };
+        let score = build_cache_score(
+            std::slice::from_ref(&breakpoint),
+            &[warm_entry("warm-0", TtlClass::Ephemeral5m, 100_000)],
+        )
+        .expect("cache score for cacheable request");
+
+        assert_eq!(score.predicted_cache_read_tokens, 100_000);
+        assert_eq!(score.predicted_cache_creation_tokens_5m, 200_000);
+        assert_eq!(score.matched_content_block_index, Some(0));
+    }
+
+    #[test]
+    fn build_cache_score_falls_back_to_breakpoint_count_on_incompatible_estimate_source() {
+        let mut entry = warm_entry("bp-1", TtlClass::Ephemeral5m, 999);
+        entry.token_estimate_source = "some_future_estimator".to_owned();
+        let score = build_cache_score(
+            &[
+                breakpoint(0, 100_000, TtlClass::Ephemeral1h),
+                breakpoint(1, 300_000, TtlClass::Ephemeral5m),
+            ],
+            std::slice::from_ref(&entry),
+        )
+        .expect("cache score for cacheable request");
+
+        assert_eq!(score.predicted_cache_read_tokens, 300_000);
     }
 
     #[test]
@@ -435,14 +495,18 @@ mod cache_score_tests {
         }
     }
 
-    fn warm_entry(prefix_hash: &str, ttl_class: TtlClass) -> WarmCacheEntry {
+    fn warm_entry(
+        prefix_hash: &str,
+        ttl_class: TtlClass,
+        estimated_prefix_tokens: u64,
+    ) -> WarmCacheEntry {
         WarmCacheEntry {
             prefix_hash: prefix_hash.to_owned(),
             expires_at_unix_secs: 1_700_000_300,
             ttl_class,
             last_observed_at_unix_secs: 1_700_000_000,
             content_block_index: 0,
-            estimated_prefix_tokens: 0,
+            estimated_prefix_tokens,
             token_estimate_source: "local_tiktoken_v1".to_owned(),
             hash_schema_version: 4,
         }
@@ -4335,8 +4399,8 @@ mod tests {
         let cache = TestPromptCacheObservationCache::new(TEST_MODEL).with_entries(
             upstream_id,
             vec![
-                warm_entry("short", TtlClass::Ephemeral5m, 4_100_000_300, 12),
-                warm_entry("long", TtlClass::Ephemeral1h, 4_100_003_600, 13),
+                warm_entry_priced("short", TtlClass::Ephemeral5m, 4_100_000_300, 12, 100),
+                warm_entry_priced("long", TtlClass::Ephemeral1h, 4_100_003_600, 13, 250),
             ],
         );
         let view = cache_score_view(upstream_id, Arc::new(cache));
@@ -4387,11 +4451,12 @@ mod tests {
 
         let cache = TestPromptCacheObservationCache::new(TEST_MODEL).with_entries(
             upstream_id,
-            vec![warm_entry(
+            vec![warm_entry_priced(
                 &prefix_hash,
                 TtlClass::Ephemeral1h,
                 4_100_003_600,
                 12,
+                prefix_token_count,
             )],
         );
         let view = cache_score_view(upstream_id, Arc::new(cache));
@@ -5402,13 +5467,29 @@ mod tests {
         expires_at_unix_secs: u64,
         observed_offset: u64,
     ) -> WarmCacheEntry {
+        warm_entry_priced(
+            prefix_hash,
+            ttl_class,
+            expires_at_unix_secs,
+            observed_offset,
+            0,
+        )
+    }
+
+    fn warm_entry_priced(
+        prefix_hash: &str,
+        ttl_class: TtlClass,
+        expires_at_unix_secs: u64,
+        observed_offset: u64,
+        estimated_prefix_tokens: u64,
+    ) -> WarmCacheEntry {
         WarmCacheEntry {
             prefix_hash: prefix_hash.to_owned(),
             expires_at_unix_secs,
             ttl_class,
             last_observed_at_unix_secs: 1_700_000_000 + observed_offset,
             content_block_index: 0,
-            estimated_prefix_tokens: 0,
+            estimated_prefix_tokens,
             token_estimate_source: "local_tiktoken_v1".to_owned(),
             hash_schema_version: 4,
         }
