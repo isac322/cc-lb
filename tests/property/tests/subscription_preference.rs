@@ -127,6 +127,26 @@ proptest! {
             candidate_with_headroom("b", 2, weight_headroom(second_weight)),
         ];
         let target = candidates[0].upstream_id.into_bytes();
+        let trace = filter
+            .filter(
+                &make_context("effective-weight-probe", MODEL_AGNOSTIC),
+                &make_principal(),
+                &candidates,
+            )
+            .expect("builtin filter cannot fail")
+            .subscription_preference
+            .expect("OAuth candidates must emit a subscription-preference trace");
+        let total_effective_weight: f64 = trace
+            .candidates
+            .iter()
+            .map(|candidate| candidate.effective_weight)
+            .sum();
+        let first_effective_weight = trace
+            .candidates
+            .iter()
+            .find(|candidate| candidate.upstream_id.into_bytes() == target)
+            .expect("trace contains the first candidate")
+            .effective_weight;
         let mut state = REQUEST_ID_SEED;
         let mut wins = 0u32;
 
@@ -138,7 +158,7 @@ proptest! {
         }
 
         let actual_share = f64::from(wins) / f64::from(SAMPLE_COUNT);
-        let expected_share = f64::from(first_weight) / f64::from(first_weight + second_weight);
+        let expected_share = first_effective_weight / total_effective_weight;
         prop_assert!(
             (actual_share - expected_share).abs() <= 0.10,
             "expected share {expected_share}, got {actual_share} for weights {first_weight}:{second_weight}",
