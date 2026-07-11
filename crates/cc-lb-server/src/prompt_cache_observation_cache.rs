@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use cc_lb_engine::clock::{ClockHandle, unix_secs};
-use cc_lb_engine::lifecycle::{PromptCacheObservationCacheLike, PromptCacheThreadUsage};
+use cc_lb_engine::lifecycle::{
+    PromptCacheObservationCacheLike, PromptCacheObservationInput, PromptCacheThreadUsage,
+};
 use cc_lb_plugin_api::types::{CacheScore, TtlClass, WarmCacheEntry};
 use cc_lb_storage_api::{PromptCacheObservationStore, StorageResult};
 use parking_lot::RwLock;
@@ -428,22 +430,24 @@ fn saturating_u64_to_u32(value: u64) -> u32 {
 }
 
 #[cfg(test)]
-static MAP_ENTRIES_INSPECTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    static MAP_ENTRIES_INSPECTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) fn map_entries_inspected_count() -> u64 {
-    MAP_ENTRIES_INSPECTED.load(std::sync::atomic::Ordering::Relaxed)
+    MAP_ENTRIES_INSPECTED.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
 pub(crate) fn reset_map_entries_inspected() {
-    MAP_ENTRIES_INSPECTED.store(0, std::sync::atomic::Ordering::Relaxed);
+    MAP_ENTRIES_INSPECTED.with(|inspected| inspected.set(0));
 }
 
 #[inline]
 fn record_map_entry_inspected() {
     #[cfg(test)]
-    MAP_ENTRIES_INSPECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    MAP_ENTRIES_INSPECTED.with(|inspected| inspected.set(inspected.get() + 1));
 }
 
 fn ttl_class_from_storage(ttl_class: cc_lb_storage_api::TtlClass) -> TtlClass {
@@ -488,15 +492,18 @@ impl PromptCacheObservationCacheLike for PromptCacheObservationCache {
         )
     }
 
-    fn upsert_observation(
-        &self,
-        upstream_id: Uuid,
-        canonical_model: String,
-        prefix_hash: String,
-        ttl_class: TtlClass,
-        expires_at_unix_secs: u64,
-        now_unix_secs: u64,
-    ) {
+    fn upsert_observation(&self, observation: PromptCacheObservationInput) {
+        let PromptCacheObservationInput {
+            upstream_id,
+            canonical_model,
+            prefix_hash,
+            ttl_class,
+            expires_at_unix_secs,
+            observed_at_unix_secs,
+            prefix_content_block_index,
+            estimated_prefix_tokens,
+            token_estimate_source,
+        } = observation;
         Self::upsert_observation(
             self,
             PromptCacheObservationUpsert {
@@ -505,10 +512,10 @@ impl PromptCacheObservationCacheLike for PromptCacheObservationCache {
                 prefix_hash,
                 ttl_class,
                 expires_at_unix_secs,
-                last_observed_at_unix_secs: now_unix_secs,
-                prefix_content_block_index: 0,
-                estimated_prefix_tokens: 0,
-                token_estimate_source: "unknown".to_owned(),
+                last_observed_at_unix_secs: observed_at_unix_secs,
+                prefix_content_block_index,
+                estimated_prefix_tokens,
+                token_estimate_source,
             },
         );
     }
@@ -619,6 +626,42 @@ pub(crate) mod tests {
             estimated_prefix_tokens: 0,
             token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
         });
+    }
+
+    #[test]
+    fn trait_upsert_preserves_live_metadata_before_hydration() {
+        let cache = test_cache();
+        let upstream_id = Uuid::new_v4();
+        let now_unix_secs = base_now();
+
+        PromptCacheObservationCacheLike::upsert_observation(
+            &cache,
+            PromptCacheObservationInput {
+                upstream_id,
+                canonical_model: MODEL.to_owned(),
+                prefix_hash: "live-prefix".to_owned(),
+                ttl_class: TtlClass::Ephemeral5m,
+                expires_at_unix_secs: now_unix_secs + 300,
+                observed_at_unix_secs: now_unix_secs,
+                prefix_content_block_index: 2,
+                estimated_prefix_tokens: 1_234,
+                token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+            },
+        );
+
+        let entry = (&cache as &dyn PromptCacheObservationCacheLike)
+            .lookup_warm_entry(
+                upstream_id,
+                MODEL,
+                "live-prefix",
+                &[TtlClass::Ephemeral5m],
+                now_unix_secs,
+            )
+            .expect("live trait upsert is immediately available before hydration");
+        assert_eq!(entry.content_block_index, 2);
+        assert_eq!(entry.estimated_prefix_tokens, 1_234);
+        assert_eq!(entry.token_estimate_source, V3_TOKEN_ESTIMATE_SOURCE);
+        assert_eq!(entry.hash_schema_version, 4);
     }
 
     #[test]

@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::lifecycle::{
     HASH_SCHEMA_VERSION, PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
-    PromptCacheObservationSinkLike,
+    PromptCacheObservationInput, PromptCacheObservationSinkLike,
 };
 
 pub struct PromptCacheObservationSubscriberHandle {
@@ -125,14 +125,20 @@ fn handle_event(
     }
     let now_unix_secs = cache.clock_now_unix_secs();
     for observation in observations {
-        cache.upsert_observation(
+        cache.upsert_observation(PromptCacheObservationInput {
             upstream_id,
-            canonical_model_id.clone(),
-            observation.prefix_hash.clone(),
-            observation.ttl_class,
-            observation.expires_at_unix_secs,
-            now_unix_secs,
-        );
+            canonical_model: canonical_model_id.clone(),
+            prefix_hash: observation.prefix_hash.clone(),
+            ttl_class: observation.ttl_class,
+            expires_at_unix_secs: observation.expires_at_unix_secs,
+            observed_at_unix_secs: now_unix_secs,
+            prefix_content_block_index: observation.prefix_content_block_index,
+            estimated_prefix_tokens: observation.estimated_prefix_tokens,
+            token_estimate_source: observation
+                .token_estimate_source
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned()),
+        });
         enqueue_observation(
             sink,
             cache,
@@ -248,6 +254,9 @@ mod tests {
         assert_eq!(upserts.len(), 1);
         assert_eq!(upserts[0].prefix_hash, "write");
         assert_eq!(upserts[0].canonical_model, TEST_MODEL);
+        assert_eq!(upserts[0].prefix_content_block_index, 1);
+        assert_eq!(upserts[0].estimated_prefix_tokens, 2_400);
+        assert_eq!(upserts[0].token_estimate_source, "test");
         let records = sink.records();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].v3_prefix_key, "write");
@@ -312,20 +321,14 @@ mod tests {
         Uuid::from_u128(0x231)
     }
 
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    struct RecordedPromptCacheUpsert {
-        canonical_model: String,
-        prefix_hash: String,
-    }
-
     #[derive(Default)]
     struct RecordingPromptCacheObservationCache {
-        upserts: Mutex<Vec<RecordedPromptCacheUpsert>>,
+        upserts: Mutex<Vec<PromptCacheObservationInput>>,
         refreshes: Mutex<HashMap<String, u64>>,
     }
 
     impl RecordingPromptCacheObservationCache {
-        fn upserts(&self) -> Vec<RecordedPromptCacheUpsert> {
+        fn upserts(&self) -> Vec<PromptCacheObservationInput> {
             self.upserts.lock().expect("upserts lock").clone()
         }
     }
@@ -341,22 +344,8 @@ mod tests {
             Vec::new()
         }
 
-        fn upsert_observation(
-            &self,
-            _upstream_id: Uuid,
-            canonical_model: String,
-            prefix_hash: String,
-            _ttl_class: TtlClass,
-            _expires_at_unix_secs: u64,
-            _now_unix_secs: u64,
-        ) {
-            self.upserts
-                .lock()
-                .expect("upserts lock")
-                .push(RecordedPromptCacheUpsert {
-                    canonical_model,
-                    prefix_hash,
-                });
+        fn upsert_observation(&self, observation: PromptCacheObservationInput) {
+            self.upserts.lock().expect("upserts lock").push(observation);
         }
 
         fn refresh_on_hit(

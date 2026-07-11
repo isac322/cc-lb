@@ -70,7 +70,8 @@ use cc_lb_control::dynamic_view::{
 };
 pub use cc_lb_control::{
     PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
-    PromptCacheObservationSinkLike, PromptCacheThreadUsage, SubscriptionQuotaCacheLike,
+    PromptCacheObservationInput, PromptCacheObservationSinkLike, PromptCacheThreadUsage,
+    SubscriptionQuotaCacheLike,
 };
 use cc_lb_observability::{redact_internal_errors, truncate_reason};
 
@@ -5778,19 +5779,9 @@ mod tests {
         );
     }
 
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    struct RecordedPromptCacheUpsert {
-        upstream_id: Uuid,
-        canonical_model: String,
-        prefix_hash: String,
-        ttl_class: TtlClass,
-        expires_at_unix_secs: u64,
-        now_unix_secs: u64,
-    }
-
     struct RecordingPromptCacheObservationCache {
         warm_entries: Vec<WarmCacheEntry>,
-        upserts: Mutex<Vec<RecordedPromptCacheUpsert>>,
+        upserts: Mutex<Vec<PromptCacheObservationInput>>,
         refreshes: Mutex<Vec<String>>,
         clock_now: u64,
         grace_secs: u64,
@@ -5817,7 +5808,7 @@ mod tests {
             self
         }
 
-        fn upserts(&self) -> Vec<RecordedPromptCacheUpsert> {
+        fn upserts(&self) -> Vec<PromptCacheObservationInput> {
             self.upserts.lock().expect("upserts lock").clone()
         }
     }
@@ -5841,26 +5832,8 @@ mod tests {
                 .collect()
         }
 
-        fn upsert_observation(
-            &self,
-            upstream_id: Uuid,
-            canonical_model: String,
-            prefix_hash: String,
-            ttl_class: TtlClass,
-            expires_at_unix_secs: u64,
-            now_unix_secs: u64,
-        ) {
-            self.upserts
-                .lock()
-                .expect("upserts lock")
-                .push(RecordedPromptCacheUpsert {
-                    upstream_id,
-                    canonical_model,
-                    prefix_hash,
-                    ttl_class,
-                    expires_at_unix_secs,
-                    now_unix_secs,
-                });
+        fn upsert_observation(&self, observation: PromptCacheObservationInput) {
+            self.upserts.lock().expect("upserts lock").push(observation);
         }
 
         fn refresh_on_hit(
@@ -5956,16 +5929,7 @@ mod tests {
             snapshot
         }
 
-        fn upsert_observation(
-            &self,
-            _upstream_id: Uuid,
-            _canonical_model: String,
-            _prefix_hash: String,
-            _ttl_class: TtlClass,
-            _expires_at_unix_secs: u64,
-            _now_unix_secs: u64,
-        ) {
-        }
+        fn upsert_observation(&self, _observation: PromptCacheObservationInput) {}
 
         fn refresh_on_hit(
             &self,

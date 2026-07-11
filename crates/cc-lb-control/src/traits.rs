@@ -23,6 +23,19 @@ pub struct PromptCacheThreadUsage {
     pub cache_creation_input_tokens_1h: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PromptCacheObservationInput {
+    pub upstream_id: Uuid,
+    pub canonical_model: String,
+    pub prefix_hash: String,
+    pub ttl_class: TtlClass,
+    pub expires_at_unix_secs: u64,
+    pub observed_at_unix_secs: u64,
+    pub prefix_content_block_index: u32,
+    pub estimated_prefix_tokens: u64,
+    pub token_estimate_source: String,
+}
+
 pub trait SubscriptionQuotaCacheLike: Send + Sync {
     fn upsert_observation(&self, record: &SubscriptionQuotaSample);
 
@@ -43,15 +56,7 @@ pub trait PromptCacheObservationCacheLike: Send + Sync {
         now_unix_secs: u64,
     ) -> Vec<WarmCacheEntry>;
 
-    fn upsert_observation(
-        &self,
-        upstream_id: Uuid,
-        canonical_model: String,
-        prefix_hash: String,
-        ttl_class: TtlClass,
-        expires_at_unix_secs: u64,
-        now_unix_secs: u64,
-    );
+    fn upsert_observation(&self, observation: PromptCacheObservationInput);
 
     fn refresh_on_hit(
         &self,
@@ -147,16 +152,7 @@ impl PromptCacheObservationCacheLike for NoopSubscriptionQuotaCache {
         Vec::new()
     }
 
-    fn upsert_observation(
-        &self,
-        _upstream_id: Uuid,
-        _canonical_model: String,
-        _prefix_hash: String,
-        _ttl_class: TtlClass,
-        _expires_at_unix_secs: u64,
-        _now_unix_secs: u64,
-    ) {
-    }
+    fn upsert_observation(&self, _observation: PromptCacheObservationInput) {}
 
     fn refresh_on_hit(
         &self,

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use cc_lb_engine::{PromptCacheObservationCacheLike, SubscriptionQuotaCacheLike};
+use cc_lb_engine::{
+    PromptCacheObservationCacheLike, PromptCacheObservationInput, SubscriptionQuotaCacheLike,
+};
 use cc_lb_plugin_api::types::{CacheScore, TtlClass, WarmCacheEntry};
 use cc_lb_plugin_api::{
     Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
@@ -129,16 +131,7 @@ impl PromptCacheObservationCacheLike for TestPromptCacheObservationCache {
             .unwrap_or_default()
     }
 
-    fn upsert_observation(
-        &self,
-        _upstream_id: Uuid,
-        _canonical_model: String,
-        _prefix_hash: String,
-        _ttl_class: TtlClass,
-        _expires_at_unix_secs: u64,
-        _now_unix_secs: u64,
-    ) {
-    }
+    fn upsert_observation(&self, _observation: PromptCacheObservationInput) {}
 
     fn refresh_on_hit(
         &self,

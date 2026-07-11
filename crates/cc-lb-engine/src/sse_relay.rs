@@ -725,7 +725,7 @@ mod tests {
     use crate::event_bus::InMemoryBus;
     use crate::lifecycle::{
         PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
-        PromptCacheObservationSinkLike,
+        PromptCacheObservationInput, PromptCacheObservationSinkLike,
     };
     use cc_lb_contract::LifecycleBusReceiver;
 
@@ -934,19 +934,11 @@ mod tests {
                 .collect()
         }
 
-        fn upsert_observation(
-            &self,
-            _upstream_id: Uuid,
-            _canonical_model: String,
-            prefix_hash: String,
-            _ttl_class: TtlClass,
-            expires_at_unix_secs: u64,
-            _now_unix_secs: u64,
-        ) {
+        fn upsert_observation(&self, observation: PromptCacheObservationInput) {
             self.upserts
                 .lock()
                 .expect("upserts lock")
-                .insert(prefix_hash, expires_at_unix_secs);
+                .insert(observation.prefix_hash, observation.expires_at_unix_secs);
         }
 
         fn refresh_on_hit(
