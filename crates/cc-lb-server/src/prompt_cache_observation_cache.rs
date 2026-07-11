@@ -24,15 +24,8 @@ pub struct PromptCacheObservationCache {
     #[allow(clippy::type_complexity)]
     entries: RwLock<
         HashMap<
-            Uuid,
-            HashMap<
-                (
-                    String, /*canonical_model*/
-                    String, /*prefix_hash*/
-                    TtlClass,
-                ),
-                CacheEntry,
-            >,
+            (Uuid, String /*canonical_model*/),
+            HashMap<(String /*prefix_hash*/, TtlClass), CacheEntry>,
         >,
     >,
     clock: ClockHandle,
@@ -40,7 +33,7 @@ pub struct PromptCacheObservationCache {
     grace_margin_secs: u64,
     refresh_debounce_secs: u64,
     max_entries_per_upstream: usize,
-    overloaded: RwLock<HashSet<Uuid>>,
+    overloaded: RwLock<HashSet<(Uuid, String /*canonical_model*/)>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -107,9 +100,9 @@ impl PromptCacheObservationCache {
 
     pub fn sweep_expired(&self, now_unix_secs: u64) -> usize {
         let mut removed = 0usize;
-        let survivors: HashMap<Uuid, usize> = {
+        let live_count: HashMap<(Uuid, String), usize> = {
             let mut guard = self.entries.write();
-            guard.retain(|_upstream_id, submap| {
+            guard.retain(|_partition_key, submap| {
                 let before = submap.len();
                 submap.retain(|_key, entry| entry.expires_at_unix_secs > now_unix_secs);
                 removed += before - submap.len();
@@ -117,14 +110,14 @@ impl PromptCacheObservationCache {
             });
             guard
                 .iter()
-                .map(|(id, submap)| (*id, submap.len()))
+                .map(|(key, submap)| (key.clone(), submap.len()))
                 .collect()
         };
         let exit_threshold = self.max_entries_per_upstream * 9 / 10;
         let mut overloaded = self.overloaded.write();
-        overloaded.retain(|upstream_id| {
-            survivors
-                .get(upstream_id)
+        overloaded.retain(|key| {
+            live_count
+                .get(key)
                 .is_some_and(|&live| live >= exit_threshold)
         });
         removed
@@ -199,25 +192,32 @@ impl PromptCacheObservationCache {
             token_estimate_source,
         } = observation;
         let mut guard = self.entries.write();
-        let entries = guard.entry(upstream_id).or_default();
-        let key = (canonical_model, prefix_hash, ttl_class);
-        if !entries.contains_key(&key) && entries.len() >= self.max_entries_per_upstream {
+        let partition = guard
+            .entry((upstream_id, canonical_model.clone()))
+            .or_default();
+        let key = (prefix_hash, ttl_class);
+        if !partition.contains_key(&key) && partition.len() >= self.max_entries_per_upstream {
             drop(guard);
-            if self.overloaded.write().insert(upstream_id) {
+            if self
+                .overloaded
+                .write()
+                .insert((upstream_id, canonical_model.clone()))
+            {
                 tracing::warn!(
                     upstream_id = %upstream_id,
+                    canonical_model,
                     ceiling = self.max_entries_per_upstream,
                     "prompt-cache observation partition overloaded; rejecting new entries and routing cache-negative until it drains"
                 );
             }
             return;
         }
-        let last_persisted_at_unix_secs = entries
+        let last_persisted_at_unix_secs = partition
             .get(&key)
             .map_or(last_observed_at_unix_secs, |entry| {
                 entry.last_persisted_at_unix_secs
             });
-        entries.insert(
+        partition.insert(
             key,
             CacheEntry {
                 expires_at_unix_secs,
@@ -239,14 +239,14 @@ impl PromptCacheObservationCache {
         now_unix_secs: u64,
     ) -> Vec<WarmCacheEntry> {
         let guard = self.entries.read();
-        let Some(entries) = guard.get(&upstream_id) else {
+        let Some(entries) = guard.get(&(upstream_id, canonical_model.to_owned())) else {
             return Vec::new();
         };
 
         let mut snapshot: Vec<WarmCacheEntry> = entries
             .iter()
-            .filter_map(|((entry_model, prefix_hash, entry_ttl_class), entry)| {
-                if entry_model != canonical_model || entry.expires_at_unix_secs <= now_unix_secs {
+            .filter_map(|((prefix_hash, entry_ttl_class), entry)| {
+                if entry.expires_at_unix_secs <= now_unix_secs {
                     return None;
                 }
                 let requested =
@@ -285,15 +285,16 @@ impl PromptCacheObservationCache {
         eligible_ttls: &[TtlClass],
         now_unix_secs: u64,
     ) -> Option<WarmCacheEntry> {
-        if self.overloaded.read().contains(&upstream_id) {
+        let partition_key = (upstream_id, canonical_model.to_owned());
+        if self.overloaded.read().contains(&partition_key) {
             return None;
         }
         let guard = self.entries.read();
-        let entries = guard.get(&upstream_id)?;
+        let entries = guard.get(&partition_key)?;
         let mut best: Option<WarmCacheEntry> = None;
         for ttl in eligible_ttls {
             record_map_entry_inspected();
-            let key = (canonical_model.to_owned(), prefix_hash.to_owned(), *ttl);
+            let key = (prefix_hash.to_owned(), *ttl);
             let Some(entry) = entries.get(&key) else {
                 continue;
             };
@@ -329,14 +330,10 @@ impl PromptCacheObservationCache {
         now_unix_secs: u64,
     ) -> bool {
         let mut guard = self.entries.write();
-        let Some(entries) = guard.get_mut(&upstream_id) else {
+        let Some(entries) = guard.get_mut(&(upstream_id, canonical_model.to_owned())) else {
             return false;
         };
-        let key = (
-            canonical_model.to_owned(),
-            prefix_hash.to_owned(),
-            ttl_class,
-        );
+        let key = (prefix_hash.to_owned(), ttl_class);
         let Some(entry) = entries.get_mut(&key) else {
             return false;
         };
@@ -703,6 +700,63 @@ pub(crate) mod tests {
         assert!(
             cache
                 .lookup_warm_entry(upstream, MODEL, "overflow", &[TtlClass::Ephemeral5m], now)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn overload_isolated_per_model() {
+        const SECOND_MODEL: &str = "claude-opus-4-1-20250805";
+
+        let cache = test_cache().with_max_entries_per_upstream(2);
+        let upstream = Uuid::new_v4();
+        let now = base_now();
+        for prefix_hash in ["model-a-0", "model-a-1", "model-a-overflow"] {
+            upsert(
+                &cache,
+                upstream,
+                prefix_hash,
+                TtlClass::Ephemeral5m,
+                now + 300,
+                now,
+            );
+        }
+        cache.upsert_observation(PromptCacheObservationUpsert {
+            upstream_id: upstream,
+            canonical_model: SECOND_MODEL.to_owned(),
+            prefix_hash: "model-b".to_owned(),
+            ttl_class: TtlClass::Ephemeral5m,
+            expires_at_unix_secs: now + 300,
+            last_observed_at_unix_secs: now,
+            prefix_content_block_index: 0,
+            estimated_prefix_tokens: 0,
+            token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+        });
+
+        assert_eq!(cache.map_len(), 3);
+        assert!(
+            cache
+                .entries
+                .read()
+                .get(&(upstream, SECOND_MODEL.to_owned()))
+                .is_some_and(
+                    |entries| entries.contains_key(&("model-b".to_owned(), TtlClass::Ephemeral5m,))
+                )
+        );
+        assert!(
+            cache
+                .lookup_warm_entry(
+                    upstream,
+                    SECOND_MODEL,
+                    "model-b",
+                    &[TtlClass::Ephemeral5m],
+                    now,
+                )
+                .is_some()
+        );
+        assert!(
+            cache
+                .lookup_warm_entry(upstream, MODEL, "model-a-0", &[TtlClass::Ephemeral5m], now,)
                 .is_none()
         );
     }
@@ -1246,14 +1300,11 @@ pub(crate) mod tests {
             TtlClass::Ephemeral5m,
             unix_secs(clock.now()),
         ));
-        let key = (
-            MODEL.to_owned(),
-            "debounced".to_owned(),
-            TtlClass::Ephemeral5m,
-        );
+        let partition_key = (upstream_id, MODEL.to_owned());
+        let key = ("debounced".to_owned(), TtlClass::Ephemeral5m);
         {
             let guard = cache.entries.read();
-            let entry = guard.get(&upstream_id).unwrap().get(&key).unwrap();
+            let entry = guard.get(&partition_key).unwrap().get(&key).unwrap();
             assert_eq!(entry.last_observed_at_unix_secs, BASE_TS + 30);
             assert_eq!(entry.last_persisted_at_unix_secs, BASE_TS);
         }
@@ -1267,7 +1318,7 @@ pub(crate) mod tests {
             unix_secs(clock.now()),
         ));
         let guard = cache.entries.read();
-        let entry = guard.get(&upstream_id).unwrap().get(&key).unwrap();
+        let entry = guard.get(&partition_key).unwrap().get(&key).unwrap();
         assert_eq!(entry.last_observed_at_unix_secs, BASE_TS + 70);
         assert_eq!(entry.last_persisted_at_unix_secs, BASE_TS + 70);
     }
@@ -1342,11 +1393,8 @@ pub(crate) mod tests {
         let cache = test_cache();
         let upstream_id = Uuid::new_v4();
         let now = base_now();
-        let key = (
-            MODEL.to_owned(),
-            "same-prefix".to_owned(),
-            TtlClass::Ephemeral5m,
-        );
+        let partition_key = (upstream_id, MODEL.to_owned());
+        let key = ("same-prefix".to_owned(), TtlClass::Ephemeral5m);
 
         upsert(
             &cache,
@@ -1366,7 +1414,7 @@ pub(crate) mod tests {
         );
 
         let guard = cache.entries.read();
-        let entry = guard.get(&upstream_id).unwrap().get(&key).unwrap();
+        let entry = guard.get(&partition_key).unwrap().get(&key).unwrap();
         assert_eq!(entry.expires_at_unix_secs, now + 120);
         assert_eq!(entry.last_observed_at_unix_secs, now + 10);
         assert_eq!(entry.last_persisted_at_unix_secs, now);
