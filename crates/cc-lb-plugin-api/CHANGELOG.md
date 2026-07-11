@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-api-v0.12.0...cc-lb-plugin-api-v0.13.0) - 2026-07-11
+
+### Fixed
+
+- *(cache)* make prompt-cache analysis lazy and TTL-aware ([#392](https://github.com/isac322/cc-lb/pull/392))
+
 ## [0.4.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-api-v0.3.0...cc-lb-plugin-api-v0.4.0) - 2026-07-03
 
 ### Added
