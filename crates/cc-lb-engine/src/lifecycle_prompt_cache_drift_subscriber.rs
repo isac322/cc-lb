@@ -319,6 +319,10 @@ mod tests {
     }
 
     fn route_completed(event_id: &str) -> LifecycleEvent {
+        route_completed_predicted(event_id, Some(30))
+    }
+
+    fn route_completed_predicted(event_id: &str, predicted: Option<u32>) -> LifecycleEvent {
         LifecycleEvent::RouteCompleted {
             event_id: eid(event_id),
             result: Ok(RouteInfo {
@@ -328,7 +332,7 @@ mod tests {
                 upstream_kind: None,
                 route_ms: None,
                 routing_trace: None,
-                predicted_cache_read_tokens: Some(30),
+                predicted_cache_read_tokens: predicted,
                 matched_v3_cache_key: None,
                 breakpoint_content_block_index: None,
                 matched_content_block_index: None,
@@ -400,6 +404,54 @@ mod tests {
         tx.send(parse_completed("drift-b")).await.unwrap();
         tx.send(route_completed("drift-b")).await.unwrap();
         tx.send(terminated("drift-b", 400)).await.unwrap();
+        drop(tx);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn predicted_hit_with_zero_read_records_negative_drift() {
+        let (tx, rx) = mpsc::channel(16);
+        let handle = spawn_lifecycle_prompt_cache_drift_subscriber(rx, true, noop_metrics());
+
+        tx.send(parse_completed("drift-disagree")).await.unwrap();
+        tx.send(route_completed_predicted("drift-disagree", Some(30)))
+            .await
+            .unwrap();
+        tx.send(LifecycleEvent::UsageObserved {
+            event_id: eid("drift-disagree"),
+            usage: UsageSnapshot {
+                cache_read_input_tokens: 0,
+                ..Default::default()
+            },
+            source: UsageSource::NonStreamBody,
+        })
+        .await
+        .unwrap();
+        tx.send(terminated("drift-disagree", 200)).await.unwrap();
+        drop(tx);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unpredicted_read_records_positive_drift() {
+        let (tx, rx) = mpsc::channel(16);
+        let handle = spawn_lifecycle_prompt_cache_drift_subscriber(rx, true, noop_metrics());
+
+        tx.send(parse_completed("drift-unknown")).await.unwrap();
+        tx.send(route_completed_predicted("drift-unknown", None))
+            .await
+            .unwrap();
+        tx.send(LifecycleEvent::UsageObserved {
+            event_id: eid("drift-unknown"),
+            usage: UsageSnapshot {
+                cache_read_input_tokens: 45,
+                ..Default::default()
+            },
+            source: UsageSource::NonStreamBody,
+        })
+        .await
+        .unwrap();
+        tx.send(terminated("drift-unknown", 200)).await.unwrap();
         drop(tx);
         handle.shutdown().await;
     }

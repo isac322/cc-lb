@@ -286,8 +286,6 @@ pub struct CacheLookbackPrefix {
     pub prefix_hash: String,
     /// Content-block index in the flattened `tools -> system -> messages` sequence.
     pub content_block_index: u32,
-    /// Estimated prefix tokens through this content block.
-    pub prefix_token_count: u64,
     /// Distance from the requested breakpoint: 0 for N, 19 for N-19.
     pub lookback_distance: u32,
 }
@@ -332,6 +330,14 @@ pub struct WarmCacheEntry {
     pub ttl_class: TtlClass,
     /// Last observed usage time in Unix seconds.
     pub last_observed_at_unix_secs: u64,
+    /// Content-block index of the cached prefix within the request.
+    pub content_block_index: u32,
+    /// Estimated prefix tokens for this cached prefix.
+    pub estimated_prefix_tokens: u64,
+    /// Source identifier of the prefix-token estimate.
+    pub token_estimate_source: String,
+    /// Hash schema version under which the cached key was derived.
+    pub hash_schema_version: u8,
 }
 
 /// Cache utility prediction for routing decisions.
@@ -1469,7 +1475,6 @@ mod tests {
             lookback_prefixes: vec![CacheLookbackPrefix {
                 prefix_hash: "abc123".to_owned(),
                 content_block_index: 0,
-                prefix_token_count: 100,
                 lookback_distance: 0,
             }],
             token_estimate_source: Some("local_tiktoken_v1".to_owned()),
@@ -1483,6 +1488,10 @@ mod tests {
             expires_at_unix_secs: 1700000000,
             ttl_class: TtlClass::Ephemeral1h,
             last_observed_at_unix_secs: 1699999000,
+            content_block_index: 0,
+            estimated_prefix_tokens: 0,
+            token_estimate_source: "local_tiktoken_v1".to_owned(),
+            hash_schema_version: 4,
         };
         let json = serde_json::to_string(&warm_entry).unwrap();
         let decoded: WarmCacheEntry = serde_json::from_str(&json).unwrap();
@@ -1621,7 +1630,6 @@ mod tests {
             lookback_prefixes: vec![CacheLookbackPrefix {
                 prefix_hash: "hash123".to_owned(),
                 content_block_index: 1,
-                prefix_token_count: 150,
                 lookback_distance: 0,
             }],
             token_estimate_source: Some("local_tiktoken_v1".to_owned()),

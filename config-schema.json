@@ -188,8 +188,8 @@
       "default": {
         "enabled": false,
         "grace_margin_secs": 30,
-        "refresh_debounce_secs": 60,
-        "warm_set_cap": 32
+        "max_live_entries_per_partition": 50000,
+        "refresh_debounce_secs": 60
       }
     },
     "runtime": {
@@ -938,7 +938,7 @@
       "additionalProperties": false
     },
     "PromptCacheShadowConfig": {
-      "description": "Prompt cache shadow mode configuration.\n\nControls the prompt cache observation cache behavior. When `enabled=false`, the cache layer\nis not constructed and observation flow is gated off at the lifecycle level for byte-equivalent\npre-T22 behavior (no observation enqueue, no snapshot, no sweeper). When `enabled=true`,\nthe full cache pipeline activates: observations from successful responses are decoded,\nupserted into the in-memory cache, and enqueued for persistent storage; `build_candidates`\nsnapshots cache state per upstream to compute cache scores.\n\nConfiguration keys and defaults:\n- `enabled` (default: false) - gate all observation flow and sweeper spawn\n- `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed\n- `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence\n- `warm_set_cap` (default: 32) - max snapshot entries per upstream/model",
+      "description": "Prompt cache shadow mode configuration.\n\nControls the prompt cache observation cache behavior. When `enabled=false`, the cache layer\nis not constructed and observation flow is gated off at the lifecycle level for byte-equivalent\npre-T22 behavior (no observation enqueue, no snapshot, no sweeper). When `enabled=true`,\nthe full cache pipeline activates: observations from successful responses are decoded,\nupserted into the in-memory cache, and enqueued for persistent storage; `build_candidates`\nreads cache state per `(upstream, canonical model)` partition to compute cache scores.\n\nConfiguration keys and defaults:\n- `enabled` (default: false) - gate all observation flow and sweeper spawn\n- `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed\n- `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence\n- `max_live_entries_per_partition` (default: 50000) - cache-negative admission ceiling for one\n  `(upstream, canonical model)` partition",
       "type": "object",
       "properties": {
         "enabled": {
@@ -951,16 +951,16 @@
           "default": 30,
           "minimum": 0
         },
+        "max_live_entries_per_partition": {
+          "type": "integer",
+          "format": "uint",
+          "default": 50000,
+          "minimum": 0
+        },
         "refresh_debounce_secs": {
           "type": "integer",
           "format": "uint64",
           "default": 60,
-          "minimum": 0
-        },
-        "warm_set_cap": {
-          "type": "integer",
-          "format": "uint",
-          "default": 32,
           "minimum": 0
         }
       }

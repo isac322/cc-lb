@@ -29,6 +29,7 @@ pub use subscription_metadata_hook::{
 pub use traits::{
     DynamicViewControl, LimitControl, ManagedKeyControl, NoopSubscriptionQuotaCache,
     PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
-    PromptCacheObservationSinkLike, PromptCacheThreadUsage, RuntimeStatusControl,
-    RuntimeStatusError, SubscriptionQuotaCacheLike, SubscriptionQuotaSampleControl,
+    PromptCacheObservationInput, PromptCacheObservationSinkLike, PromptCacheThreadUsage,
+    RuntimeStatusControl, RuntimeStatusError, SubscriptionQuotaCacheLike,
+    SubscriptionQuotaSampleControl,
 };

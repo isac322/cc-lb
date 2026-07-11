@@ -5,6 +5,11 @@ use serde_json::Value as JsonValue;
 use std::sync::OnceLock;
 use tiktoken_rs::o200k_base;
 
+#[cfg(test)]
+thread_local! {
+    static TOKENIZER_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Wraps the o200k_base tokenizer for consistent token counting across the proxy.
 pub struct PrefixTokenizer {
     encoder: tiktoken_rs::CoreBPE,
@@ -25,6 +30,8 @@ impl PrefixTokenizer {
 
     /// Count tokens in plain text.
     pub fn count_tokens(&self, text: &str) -> usize {
+        #[cfg(test)]
+        TOKENIZER_CALLS.with(|calls| calls.set(calls.get() + 1));
         self.encoder.encode_ordinary(text).len()
     }
 
@@ -40,6 +47,16 @@ impl PrefixTokenizer {
         let threshold = cache_threshold_tokens(canonical_model);
         prefix_tokens >= threshold
     }
+}
+
+#[cfg(test)]
+pub fn tokenizer_call_count() -> u64 {
+    TOKENIZER_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub fn reset_tokenizer_call_count() {
+    TOKENIZER_CALLS.with(|calls| calls.set(0));
 }
 
 /// Temporary threshold mapping. TODO(T3): Replace with import from model_resolution.

@@ -725,7 +725,7 @@ mod tests {
     use crate::event_bus::InMemoryBus;
     use crate::lifecycle::{
         PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
-        PromptCacheObservationSinkLike,
+        PromptCacheObservationInput, PromptCacheObservationSinkLike,
     };
     use cc_lb_contract::LifecycleBusReceiver;
 
@@ -865,7 +865,7 @@ mod tests {
                 upstream_id,
                 canonical_model_id: TEST_MODEL.to_owned(),
                 cache_breakpoints: vec![cache_breakpoint(0, "write", 1_600, TtlClass::Ephemeral5m)],
-                warm_entries_at_decision: Vec::new(),
+                selected_match: None,
                 cache,
             }),
             prompt_cache_observation_event_emitter,
@@ -894,7 +894,6 @@ mod tests {
             lookback_prefixes: vec![cc_lb_plugin_api::types::CacheLookbackPrefix {
                 prefix_hash: prefix_hash.to_owned(),
                 content_block_index: index,
-                prefix_token_count,
                 lookback_distance: 0,
             }],
             token_estimate_source: Some("test".to_owned()),
@@ -926,24 +925,20 @@ mod tests {
                             expires_at_unix_secs,
                             ttl_class: *ttl_class,
                             last_observed_at_unix_secs: now_unix_secs,
+                            content_block_index: 0,
+                            estimated_prefix_tokens: 0,
+                            token_estimate_source: "local_tiktoken_v1".to_owned(),
+                            hash_schema_version: 4,
                         })
                 })
                 .collect()
         }
 
-        fn upsert_observation(
-            &self,
-            _upstream_id: Uuid,
-            _canonical_model: String,
-            prefix_hash: String,
-            _ttl_class: TtlClass,
-            expires_at_unix_secs: u64,
-            _now_unix_secs: u64,
-        ) {
+        fn upsert_observation(&self, observation: PromptCacheObservationInput) {
             self.upserts
                 .lock()
                 .expect("upserts lock")
-                .insert(prefix_hash, expires_at_unix_secs);
+                .insert(observation.prefix_hash, observation.expires_at_unix_secs);
         }
 
         fn refresh_on_hit(

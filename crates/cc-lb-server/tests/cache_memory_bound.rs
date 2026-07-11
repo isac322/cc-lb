@@ -24,7 +24,7 @@ const BYTES_PER_MIB: usize = 1024 * 1024;
 async fn prompt_cache_100k_observations_under_200mib() {
     let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
     let now = unix_secs(clock.now());
-    let cache = PromptCacheObservationCache::new_with_debounce(clock, 30, 32, 60);
+    let cache = PromptCacheObservationCache::new_with_debounce(clock, 30, 60);
     let upstreams: Vec<Uuid> = (0..UPSTREAM_COUNT)
         .map(|upstream_index| Uuid::from_u128((upstream_index + 1) as u128))
         .collect();
