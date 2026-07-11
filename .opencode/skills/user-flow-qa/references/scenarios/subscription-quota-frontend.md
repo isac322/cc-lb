@@ -71,6 +71,11 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
   - Line is continuous across the visible span (left-anchor value carried to left edge);
     no fabricated 0% leading segment.
   - When Fable data exists, the pink `7d_fable` line is rendered on the chart, and the legend includes "7d (Fable)" with pink color.
+  - Range/freshness window gating (added with `quotaWindowVisibility.ts`): a window is drawn (Area + legend + reset/start markers) for the selected range ONLY when its latest `observed_at_unix_millis` is at or after `sinceUnixSecs` (i.e. `observed_at_unix_millis >= sinceUnixSecs * 1000`) AND the series carries a bucket with `bucket_start_unix_secs >= sinceUnixSecs`. This applies uniformly to every window including `5h`/`7d`. Consequences to assert:
+    - A window whose last observation predates the selected range is absent from that range's chart even if `/latest` still returns it.
+    - A window that has only a left-anchor bucket before `since` (no in-range checkpoint) is absent even if recently observed.
+    - `overage` additionally requires `extra_usage_enabled` or a non-null `extra_usage_monthly_limit`.
+    - When no window passes the gate, the chart shows the "No data in range" empty state rather than an empty axes-only plot.
 - Cross-check (API): the `series` payloads for 1h vs 6h may still be equal (backend returns
   anchor→until fill by design — see ADR 0007); the **frontend clip** is what must differ.
   So verdict is visual/x-domain, not payload bytes.
@@ -85,6 +90,11 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
   `7d_fable` card is rendered conditionally only when Fable data exists (state is not missing).
   When rendered, the `7d_fable` card displays "7d (Fable)" with pink color and correct utilization.
   Values agree with `/subscription-quotas/latest` for that upstream.
+  - Card freshness rules (added with `quotaWindowVisibility.ts` `selectQuotaCardSnapshots`):
+    - `5h` and `7d` cards ALWAYS render whenever the upstream has a latest response, including when their state is `missing` (they render "no data"/`—` via `SnapshotStatusComposite`). This is a hard requirement: the two default windows must never disappear.
+    - Model-scoped cards (`7d_sonnet`, `7d_opus`, `7d_fable`) render only when state is not `missing` AND `observed_at_unix_millis` is within the last week (`>= (nowUnixSecs - 604800) * 1000`, boundary inclusive). A model window last observed more than 7 days ago has its card removed even though `/latest` still returns it as `stale`.
+    - `overage` card unchanged: renders when non-missing AND (`extra_usage_enabled` or `extra_usage_monthly_limit` set).
+    - Card order follows `QUOTA_WINDOW_ORDER` (5h, 7d, 7d_sonnet, 7d_opus, 7d_fable, overage).
 
 ### TC-3 — Detail quota deficit + analysis caveats
 - Surface: detail → "Quota deficit" card + caveats list.
@@ -139,6 +149,21 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
     - On Mobile: The layout adapts gracefully (cards stack or wrap without clipping or horizontal overflow). The mini meters in the sidebar (if visible) or the detail cards are fully readable.
     - The transition occurs smoothly without layout shifts or broken elements.
 
+### TC-10 — Range-scoped stale window visibility (Desktop & Mobile) (documented, not yet executed)
+- Surface: Upstream detail page → "Subscription Quota" → "Quota History" chart + snapshot card grid.
+- Fix under test: `crates/cc-lb-admin/web/src/components/upstreams/quotaWindowVisibility.ts` (`selectVisibleGraphWindows`, `selectQuotaCardSnapshots`) wired into `upstreams.tsx` Legend, markers, Area, and card grid. Root cause: the chart legend/Area and the card grid derived their window set from the latest snapshot regardless of the selected range, so a window that stopped receiving data kept showing (a flat carried-forward line + a stale card). Freshness truth is per-window `observed_at_unix_millis` (MILLISECONDS) from the `/latest` sidecar, not `state` (which goes fresh→stale but never →missing for abandoned windows).
+- Seed (isolated instance): one OAuth upstream with, relative to now —
+  - `5h`: fresh (observed_at = now), in-range checkpoint.
+  - `7d`: fresh (observed_at = now), in-range checkpoint.
+  - `7d_sonnet`: STALE — observed_at ≈ 10 days ago, only a checkpoint ≈ 10 days ago (out of every range window, older than 1 week). `/latest` returns it with `state='stale'`, non-null `observed_at_unix_millis`.
+  - `7d_opus`: observed_at ≈ 2 days ago with an in-range checkpoint ≈ 2 days ago (inside the 7d window, outside 1h/6h/24h).
+  Seed SQLite then RESTART the backend so the cache-served `/latest` replays the rows.
+- Point-in-time (Given fixed seed):
+  - Graph, cycling 1h→6h→24h→7d: `7d (Sonnet)` NEVER appears (stale, out of range). `7d (Opus)` appears ONLY in the 7d range. `5h`/`7d` appear in ranges where they have in-range buckets.
+  - Cards: `5h` and `7d` ALWAYS present. `7d (Sonnet)` card ABSENT (observed > 7 days). `7d (Opus)` card PRESENT (observed 2 days ago). Assert `/latest` still returns `7d_sonnet` to prove the hiding is a frontend decision, not missing data.
+  - Mobile 375x667: no horizontal overflow (`document.documentElement.scrollWidth <= window.innerWidth`).
+- State-transition (When backend data changes): push `7d_opus` observed_at to > 1 week old, restart/repoll, reload → the `7d (Opus)` card DISAPPEARS and its chart line is gone in all ranges. Conversely, widening the selected range past a window's last observation reveals it (a window observed 3h ago is hidden at 1h but shown at 6h/24h/7d).
+
 ## 3. Verdict table (fill on execution)
 
 | TC | Surface | Result | Evidence |
@@ -152,6 +177,7 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
 | 7  | ApiUsageCard | N/A | non-OAuth surface, separate usage endpoint, code unchanged by fix |
 | 8  | QuotaObservedAt | **PASS** | relative observed-at "16초 전" rendered in TC-2 card; unit-tested |
 | 9  | Fable 5 Quota Transition | documented, not executed | TC-9 specs; Fable 5 model-scoped weekly quota transition case |
+| 10 | Range-scoped stale window visibility | documented, not executed | TC-10 specs; stale/out-of-range windows hidden from chart + model cards expire after 7d while 5h/7d always show |
 
 PASS = every executed TC meets Expected; the fix's target (TC-1) is the gating case.
 
@@ -164,6 +190,7 @@ Verdict: **PASS**. Fix isolated to the detail Quota History `<XAxis allowDataOve
 - Cleanup/backfill idempotency + writer-continues-after-drop: `crates/cc-lb-server/tests/subscription_quota_checkpoint_{cleanup,backfill,writer}.rs`.
 - Storage roundtrips: `crates/cc-lb-storage-sqlite/tests/storage_roundtrips_sqlite.rs` (+ postgres).
 - Frontend chart transform + carry-forward/no-zeroes: `crates/cc-lb-admin/web/src/components/upstreams/buildQuotaChartData.test.ts`; card/legend: ApiUsageCard/QuotaObservedAt tests.
+- Frontend range/freshness window gating (graph + card visibility selectors): `crates/cc-lb-admin/web/src/components/upstreams/quotaWindowVisibility.test.ts` (point-in-time + range-sweep and one-week-cutoff transitions).
 - OAuth ingestion from active limits: `crates/cc-lb-server/src/scheduler_dispatch/usage/tests.rs`.
 - Unified header parsing: `crates/cc-lb-engine/src/rate_limit_headers.rs`.
 - Fable routing preference: `crates/cc-lb-engine/src/builtin_filters/subscription_preference/tests.rs`.

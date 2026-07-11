@@ -59,6 +59,10 @@ import {
 } from '../components/upstreams/buildQuotaChartData';
 import { InlineNameEditor } from '../components/upstreams/InlineNameEditor';
 import { QuotaObservedAt } from '../components/upstreams/QuotaObservedAt';
+import {
+  selectQuotaCardSnapshots,
+  selectVisibleGraphWindows,
+} from '../components/upstreams/quotaWindowVisibility';
 import { SettingsCard } from '../components/upstreams/SettingsCard';
 import { WarmupCardMinimal } from '../components/upstreams/warmup/WarmupCardMinimal';
 import {
@@ -443,14 +447,6 @@ const DETAIL_WINDOWS = [
   '7d_fable',
   'overage',
 ];
-const SNAPSHOT_ORDER = [
-  '5h',
-  '7d',
-  '7d_sonnet',
-  '7d_opus',
-  '7d_fable',
-  'overage',
-];
 
 function windowLabel(windowName: string): string {
   switch (windowName) {
@@ -705,6 +701,16 @@ function DetailView({
       range,
     );
   }, [quotaSeries.data, selectedLatest, range]);
+
+  const visibleGraphWindows = useMemo(
+    () =>
+      selectVisibleGraphWindows({
+        latestWindows: selectedLatest?.windows,
+        series: quotaSeries.data?.series,
+        sinceUnixSecs,
+      }),
+    [selectedLatest, quotaSeries.data, sinceUnixSecs],
+  );
 
   const recent = useRecentEvents({
     upstream_id: upstream.id,
@@ -1066,7 +1072,7 @@ function DetailView({
                     <div className="h-full flex items-center justify-center text-text-faint text-sm">
                       Loading…
                     </div>
-                  ) : !chartData.rows.length ? (
+                  ) : !chartData.rows.length || !visibleGraphWindows.length ? (
                     <EmptyState title="No data in range" />
                   ) : (
                     <ResponsiveContainer width="100%" height={240}>
@@ -1233,31 +1239,10 @@ function DetailView({
                             color: 'var(--color-text-muted)',
                           }}
                           content={() => {
-                            const latest = selectedLatest;
-                            if (!latest) return null;
-                            const windows = ['5h', '7d', '7d_sonnet'];
-                            const opus = latest.windows.find(
-                              (w) => w.window === '7d_opus',
-                            );
-                            if (opus && opus.state !== 'missing')
-                              windows.push('7d_opus');
-                            const fable = latest.windows.find(
-                              (w) => w.window === '7d_fable',
-                            );
-                            if (fable && fable.state !== 'missing')
-                              windows.push('7d_fable');
-                            const overage = latest.windows.find(
-                              (w) => w.window === 'overage',
-                            );
-                            if (
-                              overage &&
-                              (overage.extra_usage_enabled ||
-                                overage.extra_usage_monthly_limit != null)
-                            )
-                              windows.push('overage');
+                            if (!visibleGraphWindows.length) return null;
                             return (
                               <div className="flex flex-wrap items-center justify-center gap-4 mt-2">
-                                {windows.map((windowName) => (
+                                {visibleGraphWindows.map((windowName) => (
                                   <div
                                     key={windowName}
                                     className="flex items-center gap-1.5"
@@ -1314,7 +1299,8 @@ function DetailView({
                             if (
                               marker.ts < sinceUnixSecs ||
                               marker.ts >
-                                nowUnixSecs + (nowUnixSecs - sinceUnixSecs)
+                                nowUnixSecs + (nowUnixSecs - sinceUnixSecs) ||
+                              !visibleGraphWindows.includes(marker.window)
                             )
                               return null;
                             const color = getWindowColor(marker.window);
@@ -1342,43 +1328,19 @@ function DetailView({
                             );
                           });
                         })()}
-                        {(() => {
-                          const latest = selectedLatest;
-                          if (!latest) return null;
-                          const windows = ['5h', '7d', '7d_sonnet'];
-                          const opus = latest.windows.find(
-                            (w) => w.window === '7d_opus',
-                          );
-                          if (opus && opus.state !== 'missing')
-                            windows.push('7d_opus');
-                          const fable = latest.windows.find(
-                            (w) => w.window === '7d_fable',
-                          );
-                          if (fable && fable.state !== 'missing')
-                            windows.push('7d_fable');
-                          const overage = latest.windows.find(
-                            (w) => w.window === 'overage',
-                          );
-                          if (
-                            overage &&
-                            (overage.extra_usage_enabled ||
-                              overage.extra_usage_monthly_limit != null)
-                          )
-                            windows.push('overage');
-                          return windows.map((windowName) => (
-                            <Area
-                              key={windowName}
-                              type="monotone"
-                              dataKey={windowName}
-                              stroke={getWindowColor(windowName).stroke}
-                              strokeWidth={1.4}
-                              fill={`url(#quota-detail-grad-${windowName})`}
-                              fillOpacity={1}
-                              isAnimationActive={false}
-                              connectNulls={false}
-                            />
-                          ));
-                        })()}
+                        {visibleGraphWindows.map((windowName) => (
+                          <Area
+                            key={windowName}
+                            type="monotone"
+                            dataKey={windowName}
+                            stroke={getWindowColor(windowName).stroke}
+                            strokeWidth={1.4}
+                            fill={`url(#quota-detail-grad-${windowName})`}
+                            fillOpacity={1}
+                            isAnimationActive={false}
+                            connectNulls={false}
+                          />
+                        ))}
                       </AreaChart>
                     </ResponsiveContainer>
                   )}
@@ -1411,206 +1373,177 @@ function DetailView({
               return (
                 <div className="space-y-4">
                   <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
-                    {(
-                      [
-                        '5h',
-                        '7d',
-                        '7d_sonnet',
-                        '7d_opus',
-                        '7d_fable',
-                        'overage',
-                      ] as const
-                    )
-                      .map((windowName) =>
-                        latest.windows.find(
-                          (snap) => snap.window === windowName,
-                        ),
-                      )
-                      .filter((snap): snap is NonNullable<typeof snap> => {
-                        if (!snap || snap.state === 'missing') return false;
-                        if (
-                          snap.window === 'overage' &&
-                          !snap.extra_usage_enabled &&
-                          snap.extra_usage_monthly_limit == null
-                        ) {
-                          return false;
-                        }
-                        return true;
-                      })
-                      .sort(
-                        (a, b) =>
-                          SNAPSHOT_ORDER.indexOf(a.window) -
-                          SNAPSHOT_ORDER.indexOf(b.window),
-                      )
-                      .map((snap) => {
-                        const color = getWindowColor(snap.window);
-                        const isOverage =
-                          snap.window === 'overage' &&
-                          (snap.extra_usage_enabled ||
-                            snap.extra_usage_monthly_limit != null);
-                        const windowAnalysis = analysis?.windows.find(
-                          (w) => w.window === snap.window,
-                        );
-                        const actualBurn =
-                          windowAnalysis?.actual_account_burn
-                            .utilization_per_second;
-                        const projBurn =
-                          windowAnalysis?.proxy_projected_burn
-                            .utilization_per_hour;
-                        const eta =
-                          windowAnalysis?.actual_account_burn.eta_to_limit_secs;
-                        const windowNotStarted =
-                          !isOverage &&
-                          (snap.utilization == null ||
-                            snap.resets_at_unix_secs == null ||
-                            snap.resets_at_unix_secs <= nowUnixSecs);
-                        const waitingForGrowth =
-                          !isOverage &&
-                          !windowNotStarted &&
-                          (!windowAnalysis ||
-                            windowAnalysis.actual_account_burn.reason ===
-                              'insufficient_growth_intervals');
-                        return (
-                          <Card key={snap.window}>
-                            <CardBody className="p-3 flex flex-col gap-1.5">
-                              <div className="flex items-center justify-between">
-                                <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                                  {windowLabel(snap.window)}
-                                </span>
-                              </div>
-                              <SnapshotStatusComposite snap={snap} />
-                              {isOverage ? (
-                                snap.extra_usage_monthly_limit != null &&
-                                snap.extra_usage_used_credits != null ? (
-                                  <>
-                                    <div className="text-xl font-medium tabular-nums">
-                                      {(
+                    {selectQuotaCardSnapshots({
+                      latestWindows: latest.windows,
+                      nowUnixSecs,
+                    }).map((snap) => {
+                      const color = getWindowColor(snap.window);
+                      const isOverage =
+                        snap.window === 'overage' &&
+                        (snap.extra_usage_enabled ||
+                          snap.extra_usage_monthly_limit != null);
+                      const windowAnalysis = analysis?.windows.find(
+                        (w) => w.window === snap.window,
+                      );
+                      const actualBurn =
+                        windowAnalysis?.actual_account_burn
+                          .utilization_per_second;
+                      const projBurn =
+                        windowAnalysis?.proxy_projected_burn
+                          .utilization_per_hour;
+                      const eta =
+                        windowAnalysis?.actual_account_burn.eta_to_limit_secs;
+                      const windowNotStarted =
+                        !isOverage &&
+                        (snap.utilization == null ||
+                          snap.resets_at_unix_secs == null ||
+                          snap.resets_at_unix_secs <= nowUnixSecs);
+                      const waitingForGrowth =
+                        !isOverage &&
+                        !windowNotStarted &&
+                        (!windowAnalysis ||
+                          windowAnalysis.actual_account_burn.reason ===
+                            'insufficient_growth_intervals');
+                      return (
+                        <Card key={snap.window}>
+                          <CardBody className="p-3 flex flex-col gap-1.5">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[11px] uppercase tracking-wider text-text-faint">
+                                {windowLabel(snap.window)}
+                              </span>
+                            </div>
+                            <SnapshotStatusComposite snap={snap} />
+                            {isOverage ? (
+                              snap.extra_usage_monthly_limit != null &&
+                              snap.extra_usage_used_credits != null ? (
+                                <>
+                                  <div className="text-xl font-medium tabular-nums">
+                                    {(
+                                      (snap.extra_usage_used_credits /
+                                        snap.extra_usage_monthly_limit) *
+                                      100
+                                    ).toFixed(1)}
+                                    %
+                                  </div>
+                                  <BaseMeter.Root
+                                    value={Math.min(
+                                      100,
+                                      Math.max(
+                                        0,
                                         (snap.extra_usage_used_credits /
                                           snap.extra_usage_monthly_limit) *
-                                        100
-                                      ).toFixed(1)}
-                                      %
-                                    </div>
-                                    <BaseMeter.Root
-                                      value={Math.min(
-                                        100,
-                                        Math.max(
-                                          0,
-                                          (snap.extra_usage_used_credits /
-                                            snap.extra_usage_monthly_limit) *
-                                            100,
-                                        ),
-                                      )}
-                                      max={100}
-                                      className="w-full h-1 bg-progress-track rounded-full overflow-hidden mt-1"
-                                    >
-                                      <BaseMeter.Track className="h-full">
-                                        <BaseMeter.Indicator
-                                          className="h-full rounded-full"
-                                          style={{
-                                            backgroundColor: color.fill,
-                                          }}
-                                        />
-                                      </BaseMeter.Track>
-                                    </BaseMeter.Root>
-                                    <div className="text-sm font-medium tabular-nums mt-1">
-                                      $
-                                      {(
-                                        snap.extra_usage_used_credits / 100
-                                      ).toFixed(2)}{' '}
-                                      / $
-                                      {(
-                                        snap.extra_usage_monthly_limit / 100
-                                      ).toLocaleString('en-US', {
-                                        minimumFractionDigits: 2,
-                                        maximumFractionDigits: 2,
-                                      })}{' '}
-                                      USD
-                                    </div>
-                                  </>
-                                ) : (
-                                  <span className="text-sm text-text-faint">
-                                    Enabled — no limit set
-                                  </span>
-                                )
+                                          100,
+                                      ),
+                                    )}
+                                    max={100}
+                                    className="w-full h-1 bg-progress-track rounded-full overflow-hidden mt-1"
+                                  >
+                                    <BaseMeter.Track className="h-full">
+                                      <BaseMeter.Indicator
+                                        className="h-full rounded-full"
+                                        style={{
+                                          backgroundColor: color.fill,
+                                        }}
+                                      />
+                                    </BaseMeter.Track>
+                                  </BaseMeter.Root>
+                                  <div className="text-sm font-medium tabular-nums mt-1">
+                                    $
+                                    {(
+                                      snap.extra_usage_used_credits / 100
+                                    ).toFixed(2)}{' '}
+                                    / $
+                                    {(
+                                      snap.extra_usage_monthly_limit / 100
+                                    ).toLocaleString('en-US', {
+                                      minimumFractionDigits: 2,
+                                      maximumFractionDigits: 2,
+                                    })}{' '}
+                                    USD
+                                  </div>
+                                </>
                               ) : (
-                                <div className="text-xl font-medium tabular-nums">
-                                  {snap.utilization == null
-                                    ? (snap.status ?? '—')
-                                    : `${(snap.utilization * 100).toFixed(1)}%`}
-                                </div>
-                              )}
-                              {!isOverage && snap.utilization != null && (
-                                <BaseMeter.Root
-                                  value={Math.min(
-                                    100,
-                                    Math.max(0, snap.utilization * 100),
-                                  )}
-                                  max={100}
-                                  className="w-full h-1 bg-progress-track rounded-full overflow-hidden mt-1"
-                                >
-                                  <BaseMeter.Track className="h-full">
-                                    <BaseMeter.Indicator
-                                      className="h-full rounded-full"
-                                      style={{ backgroundColor: color.fill }}
-                                    />
-                                  </BaseMeter.Track>
-                                </BaseMeter.Root>
-                              )}
-                              {windowNotStarted ? (
-                                <div className="text-[10px] text-text-faint font-mono mt-1">
-                                  not started — begins on first request or
-                                  warm-up
-                                </div>
-                              ) : snap.resets_at_unix_secs ? (
-                                <div className="text-[10px] text-text-faint font-mono mt-1">
-                                  <ResetCountdown
-                                    compact
-                                    ts={snap.resets_at_unix_secs * 1000}
+                                <span className="text-sm text-text-faint">
+                                  Enabled — no limit set
+                                </span>
+                              )
+                            ) : (
+                              <div className="text-xl font-medium tabular-nums">
+                                {snap.utilization == null
+                                  ? (snap.status ?? '—')
+                                  : `${(snap.utilization * 100).toFixed(1)}%`}
+                              </div>
+                            )}
+                            {!isOverage && snap.utilization != null && (
+                              <BaseMeter.Root
+                                value={Math.min(
+                                  100,
+                                  Math.max(0, snap.utilization * 100),
+                                )}
+                                max={100}
+                                className="w-full h-1 bg-progress-track rounded-full overflow-hidden mt-1"
+                              >
+                                <BaseMeter.Track className="h-full">
+                                  <BaseMeter.Indicator
+                                    className="h-full rounded-full"
+                                    style={{ backgroundColor: color.fill }}
                                   />
+                                </BaseMeter.Track>
+                              </BaseMeter.Root>
+                            )}
+                            {windowNotStarted ? (
+                              <div className="text-[10px] text-text-faint font-mono mt-1">
+                                not started — begins on first request or warm-up
+                              </div>
+                            ) : snap.resets_at_unix_secs ? (
+                              <div className="text-[10px] text-text-faint font-mono mt-1">
+                                <ResetCountdown
+                                  compact
+                                  ts={snap.resets_at_unix_secs * 1000}
+                                />
+                              </div>
+                            ) : null}
+                            {!isOverage && !windowNotStarted && (
+                              <div className="border-t border-subtle pt-1.5 mt-1.5 flex flex-col gap-1">
+                                <div className="flex items-baseline justify-between gap-2">
+                                  <span className="text-[10px] uppercase tracking-wider text-text-faint">
+                                    ETA to limit
+                                  </span>
+                                  <span className="font-mono tabular-nums text-sm">
+                                    {eta != null && eta <= 0 ? (
+                                      'Already saturated'
+                                    ) : (
+                                      <RelativeOffsetTime
+                                        compact
+                                        offsetSeconds={eta}
+                                      />
+                                    )}
+                                  </span>
                                 </div>
-                              ) : null}
-                              {!isOverage && !windowNotStarted && (
-                                <div className="border-t border-subtle pt-1.5 mt-1.5 flex flex-col gap-1">
-                                  <div className="flex items-baseline justify-between gap-2">
-                                    <span className="text-[10px] uppercase tracking-wider text-text-faint">
-                                      ETA to limit
-                                    </span>
-                                    <span className="font-mono tabular-nums text-sm">
-                                      {eta != null && eta <= 0 ? (
-                                        'Already saturated'
-                                      ) : (
-                                        <RelativeOffsetTime
-                                          compact
-                                          offsetSeconds={eta}
-                                        />
-                                      )}
-                                    </span>
-                                  </div>
-                                  <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-text-faint">
-                                    <span>burn</span>
-                                    <span className="tabular-nums">
-                                      {actualBurn == null
-                                        ? '—'
-                                        : `${(actualBurn * 60 * 100).toFixed(2)}%/min`}
-                                      {' · proj '}
-                                      {projBurn == null
-                                        ? '—'
-                                        : `${((projBurn / 60) * 100).toFixed(2)}%/min`}
-                                    </span>
-                                  </div>
-                                  {waitingForGrowth && (
-                                    <div className="text-[10px] text-amber-400">
-                                      Waiting for utilization to rise — burn
-                                      appears once growth is observed.
-                                    </div>
-                                  )}
+                                <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-text-faint">
+                                  <span>burn</span>
+                                  <span className="tabular-nums">
+                                    {actualBurn == null
+                                      ? '—'
+                                      : `${(actualBurn * 60 * 100).toFixed(2)}%/min`}
+                                    {' · proj '}
+                                    {projBurn == null
+                                      ? '—'
+                                      : `${((projBurn / 60) * 100).toFixed(2)}%/min`}
+                                  </span>
                                 </div>
-                              )}
-                            </CardBody>
-                          </Card>
-                        );
-                      })}
+                                {waitingForGrowth && (
+                                  <div className="text-[10px] text-amber-400">
+                                    Waiting for utilization to rise — burn
+                                    appears once growth is observed.
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </CardBody>
+                        </Card>
+                      );
+                    })}
                   </div>
                   {a5h?.deficit && (
                     <Card>
