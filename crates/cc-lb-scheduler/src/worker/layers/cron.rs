@@ -11,15 +11,12 @@ use crate::error::SchedulerError;
 use crate::middleware::TraceparentLayer;
 use crate::retry::RetryClass;
 
-use super::super::dispatch::{SingletonHandlerFn, singleton_job_handler};
-use super::super::{CRON_QUEUE, CronJob, SchedulerBackend, SchedulerCtx};
-
+#[cfg(feature = "postgres")]
+use super::super::backend::PostgresCronApalisStorage;
 #[cfg(feature = "sqlite")]
-type SqliteSingletonStorage = apalis_sqlite::SqliteStorage<
-    CronJob,
-    apalis_codec::json::JsonCodec<apalis_sqlite::CompactType>,
-    apalis_sqlite::fetcher::SqliteFetcher,
->;
+use super::super::backend::SqliteCronApalisStorage;
+use super::super::dispatch::{SingletonHandlerFn, singleton_job_handler};
+use super::super::{CRON_QUEUE, SchedulerBackend, SchedulerCtx};
 
 type CronWorkerFuture = Pin<Box<dyn Future<Output = Result<(), WorkerError>> + Send>>;
 
@@ -48,16 +45,13 @@ pub fn build_cron_worker_named(
     match backend {
         #[cfg(feature = "sqlite")]
         SchedulerBackend::Sqlite(sqlite) => Ok(build_sqlite_singleton_worker(
-            apalis_sqlite::SqliteStorage::<CronJob, (), ()>::new_in_queue(&sqlite.pool, CRON_QUEUE),
+            sqlite.cron_storage(),
             ctx,
             worker_name,
         )),
         #[cfg(feature = "postgres")]
         SchedulerBackend::Postgres(postgres) => Ok(build_postgres_singleton_worker(
-            apalis_postgres::PostgresStorage::<CronJob>::new_with_notify(
-                &postgres.pool,
-                &apalis_postgres::Config::new(CRON_QUEUE),
-            ),
+            postgres.cron_worker_storage(),
             ctx,
             worker_name,
         )),
@@ -66,7 +60,7 @@ pub fn build_cron_worker_named(
 
 #[cfg(feature = "sqlite")]
 fn build_sqlite_singleton_worker(
-    storage: SqliteSingletonStorage,
+    storage: SqliteCronApalisStorage,
     ctx: SchedulerCtx,
     worker_name: String,
 ) -> CronWorker {
@@ -96,12 +90,7 @@ fn build_sqlite_singleton_worker(
 
 #[cfg(feature = "postgres")]
 fn build_postgres_singleton_worker(
-    storage: apalis_postgres::PostgresStorage<
-        CronJob,
-        apalis_postgres::CompactType,
-        apalis_postgres::JsonCodec<apalis_postgres::CompactType>,
-        apalis_postgres::PgNotify,
-    >,
+    storage: PostgresCronApalisStorage,
     ctx: SchedulerCtx,
     worker_name: String,
 ) -> CronWorker {

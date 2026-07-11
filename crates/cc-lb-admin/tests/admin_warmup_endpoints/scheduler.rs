@@ -1,5 +1,5 @@
 use cc_lb_scheduler::admin::SchedulerAdminHandle;
-use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, AdaptiveJob, SchedulerBackend};
+use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, SchedulerBackend};
 use uuid::Uuid;
 
 pub const NEXT_SCHEDULED_AT: i64 = 1_900_000_000;
@@ -30,13 +30,7 @@ pub async fn scheduler_with_next_warmup(
     .execute(&pool)
     .await
     .expect("scheduler warmup job seeds");
-    let storage =
-        apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(&pool, ADAPTIVE_QUEUE);
     SchedulerAdminHandle::new(SchedulerBackend::Sqlite(
-        cc_lb_scheduler::worker::SqliteSchedulerStorage {
-            pool,
-            storage,
-            clock,
-        },
+        cc_lb_scheduler::worker::SqliteSchedulerBackend::new(pool, clock),
     ))
 }

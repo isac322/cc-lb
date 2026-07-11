@@ -5,7 +5,7 @@ use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
 use cc_lb_config::Config;
 use cc_lb_scheduler::admin::SchedulerAdminHandle;
-use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, AdaptiveJob, SchedulerBackend};
+use cc_lb_scheduler::worker::SchedulerBackend;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -88,13 +88,10 @@ pub async fn sqlite_fixture()
         .await?;
     apalis_sqlite::SqliteStorage::setup(&pool).await?;
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
-    let storage =
-        apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(&pool, ADAPTIVE_QUEUE);
-    let backend = SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerStorage {
-        pool: pool.clone(),
-        storage,
-        clock: std::sync::Arc::new(cc_lb_clock::SystemClock),
-    });
+    let backend = SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerBackend::new(
+        pool.clone(),
+        std::sync::Arc::new(cc_lb_clock::SystemClock),
+    ));
     Ok(RouteFixture {
         pool,
         handle: SchedulerAdminHandle::new(backend),
@@ -190,14 +187,9 @@ pub async fn postgres_fixture() -> Result<
         .await?;
     apalis_postgres::PostgresStorage::setup(&pool).await?;
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
-    let storage = apalis_postgres::PostgresStorage::<AdaptiveJob>::new_with_notify(
-        &pool,
-        &apalis_postgres::Config::new(ADAPTIVE_QUEUE),
+    let backend = SchedulerBackend::Postgres(
+        cc_lb_scheduler::worker::PostgresSchedulerBackend::new(pool.clone()),
     );
-    let backend = SchedulerBackend::Postgres(cc_lb_scheduler::worker::PostgresSchedulerStorage {
-        pool: pool.clone(),
-        storage,
-    });
     Ok(Some((
         admin,
         db,

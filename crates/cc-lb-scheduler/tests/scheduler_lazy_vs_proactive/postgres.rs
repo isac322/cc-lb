@@ -9,7 +9,7 @@ use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_scheduler::middleware::TraceparentLayer;
 use cc_lb_scheduler::retry::RetryClass;
 use cc_lb_scheduler::worker::{
-    ADAPTIVE_QUEUE, AdaptiveJob, PostgresApalisStorage, PostgresSchedulerStorage, SchedulerBackend,
+    ADAPTIVE_QUEUE, AdaptiveJob, PostgresApalisStorage, PostgresSchedulerBackend, SchedulerBackend,
 };
 use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
 use cc_lb_storage_api::{BackendKind, MetaStore};
@@ -56,10 +56,7 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
     storage.initialize(BackendKind::Postgres).await?;
 
     let config = postgres_queue_config();
-    let backend = SchedulerBackend::Postgres(PostgresSchedulerStorage {
-        pool: pool.clone(),
-        storage: apalis_postgres::PostgresStorage::<AdaptiveJob>::new_with_notify(&pool, &config),
-    });
+    let backend = SchedulerBackend::Postgres(PostgresSchedulerBackend::new(pool.clone()));
     let aead = Arc::new(AeadService::from_master_key([83; 32]));
     let oauth_cfg = Arc::new(AnthropicOAuthConfig {
         client_id: "test-client".to_owned(),

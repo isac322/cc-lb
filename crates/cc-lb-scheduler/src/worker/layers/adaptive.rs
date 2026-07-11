@@ -17,7 +17,7 @@ use super::super::PostgresApalisStorage;
 #[cfg(feature = "sqlite")]
 use super::super::SqliteApalisStorage;
 use super::super::dispatch::{EntityHandlerFn, entity_job_handler};
-use super::super::{ADAPTIVE_QUEUE, CACHE_KEEPALIVE_QUEUE, SchedulerBackend, SchedulerCtx};
+use super::super::{ADAPTIVE_QUEUE, SchedulerBackend, SchedulerCtx};
 
 type AdaptiveWorkerFuture = Pin<Box<dyn Future<Output = Result<(), WorkerError>> + Send>>;
 
@@ -58,7 +58,7 @@ pub(in crate::worker) fn build_backend_adaptive_worker_named(
         SchedulerBackend::Sqlite(sqlite) => {
             let concurrency = ctx.config.entity_concurrency;
             Ok(build_sqlite_worker(
-                sqlite.storage.clone(),
+                sqlite.adaptive_storage(),
                 ctx,
                 worker_name,
                 concurrency,
@@ -68,7 +68,7 @@ pub(in crate::worker) fn build_backend_adaptive_worker_named(
         SchedulerBackend::Postgres(postgres) => {
             let concurrency = ctx.config.entity_concurrency;
             Ok(build_postgres_worker(
-                postgres.storage.clone(),
+                postgres.adaptive_worker_storage(),
                 ctx,
                 worker_name,
                 concurrency,
@@ -90,17 +90,13 @@ pub(in crate::worker) fn build_backend_keepalive_worker_named(
         #[cfg(feature = "sqlite")]
         SchedulerBackend::Sqlite(sqlite) => {
             let concurrency = ctx.config.keepalive_concurrency;
-            let storage: SqliteApalisStorage =
-                apalis_sqlite::SqliteStorage::new_in_queue(&sqlite.pool, CACHE_KEEPALIVE_QUEUE);
+            let storage = sqlite.keepalive_storage();
             Ok(build_sqlite_worker(storage, ctx, worker_name, concurrency))
         }
         #[cfg(feature = "postgres")]
         SchedulerBackend::Postgres(postgres) => {
             let concurrency = ctx.config.keepalive_concurrency;
-            let storage: PostgresApalisStorage = apalis_postgres::PostgresStorage::new_with_notify(
-                &postgres.pool,
-                &apalis_postgres::Config::new(CACHE_KEEPALIVE_QUEUE),
-            );
+            let storage = postgres.keepalive_worker_storage();
             Ok(build_postgres_worker(
                 storage,
                 ctx,

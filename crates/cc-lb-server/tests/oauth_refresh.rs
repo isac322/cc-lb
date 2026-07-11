@@ -29,7 +29,7 @@ use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerCtx, SchedulerPushTask};
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
-use cc_lb_server::scheduler_factory::{SchedulerBackend, SqliteSchedulerStorage};
+use cc_lb_server::scheduler_factory::{SchedulerBackend, SqliteSchedulerBackend};
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh,
 };
@@ -514,14 +514,7 @@ async fn sqlite_scheduler_backend(clock: ClockHandle) -> SchedulerBackend {
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
         .await
         .expect("scheduler post-setup migrations apply");
-    SchedulerBackend::Sqlite(SqliteSchedulerStorage {
-        pool: pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::new_in_queue(
-            &pool,
-            cc_lb_scheduler::worker::ADAPTIVE_QUEUE,
-        ),
-        clock,
-    })
+    SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(pool, clock))
 }
 
 fn spawn_oauth_refresh_worker(

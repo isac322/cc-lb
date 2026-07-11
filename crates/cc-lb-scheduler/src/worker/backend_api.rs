@@ -37,10 +37,10 @@ impl SchedulerBackend {
     ) -> Result<(), SchedulerError> {
         match self {
             #[cfg(feature = "sqlite")]
-            Self::Sqlite(sqlite) => insert_sqlite_task(&sqlite.pool, ADAPTIVE_QUEUE, task).await,
+            Self::Sqlite(sqlite) => insert_sqlite_task(sqlite.pool(), ADAPTIVE_QUEUE, task).await,
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => {
-                insert_postgres_task(&postgres.pool, ADAPTIVE_QUEUE, task).await
+                insert_postgres_task(postgres.pool(), ADAPTIVE_QUEUE, task).await
             }
         }
     }
@@ -52,11 +52,11 @@ impl SchedulerBackend {
         match self {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(sqlite) => {
-                insert_sqlite_task(&sqlite.pool, CACHE_KEEPALIVE_QUEUE, task).await
+                insert_sqlite_task(sqlite.pool(), CACHE_KEEPALIVE_QUEUE, task).await
             }
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => {
-                insert_postgres_task(&postgres.pool, CACHE_KEEPALIVE_QUEUE, task).await
+                insert_postgres_task(postgres.pool(), CACHE_KEEPALIVE_QUEUE, task).await
             }
         }
     }
@@ -67,10 +67,10 @@ impl SchedulerBackend {
     ) -> Result<(), SchedulerError> {
         match self {
             #[cfg(feature = "sqlite")]
-            Self::Sqlite(sqlite) => insert_sqlite_task(&sqlite.pool, CRON_QUEUE, task).await,
+            Self::Sqlite(sqlite) => insert_sqlite_task(sqlite.pool(), CRON_QUEUE, task).await,
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => {
-                insert_postgres_task(&postgres.pool, CRON_QUEUE, task).await
+                insert_postgres_task(postgres.pool(), CRON_QUEUE, task).await
             }
         }
     }
@@ -81,37 +81,8 @@ impl SchedulerBackend {
     ) -> Result<Vec<SchedulerTaskRow<AdaptiveJob>>, SchedulerError> {
         match self {
             #[cfg(feature = "sqlite")]
-            Self::Sqlite(sqlite) => sqlite
-                .storage
-                .list_tasks(filter)
-                .await
-                .map_err(SchedulerError::Database)?
-                .into_iter()
-                .map(sqlite_task_to_row)
-                .collect(),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(postgres) => postgres
-                .storage
-                .list_tasks(filter)
-                .await
-                .map_err(SchedulerError::Database)?
-                .into_iter()
-                .map(postgres_task_to_row)
-                .collect(),
-        }
-    }
-
-    pub async fn list_keepalive_tasks(
-        &self,
-        filter: &Filter,
-    ) -> Result<Vec<SchedulerTaskRow<AdaptiveJob>>, SchedulerError> {
-        match self {
-            #[cfg(feature = "sqlite")]
             Self::Sqlite(sqlite) => {
-                let storage = apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(
-                    &sqlite.pool,
-                    CACHE_KEEPALIVE_QUEUE,
-                );
+                let storage = sqlite.adaptive_storage();
                 storage
                     .list_tasks(filter)
                     .await
@@ -122,10 +93,37 @@ impl SchedulerBackend {
             }
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => {
-                let storage = apalis_postgres::PostgresStorage::<AdaptiveJob>::new_with_config(
-                    &postgres.pool,
-                    &apalis_postgres::Config::new(CACHE_KEEPALIVE_QUEUE),
-                );
+                let storage = postgres.adaptive_operation_storage();
+                storage
+                    .list_tasks(filter)
+                    .await
+                    .map_err(SchedulerError::Database)?
+                    .into_iter()
+                    .map(postgres_task_to_row)
+                    .collect()
+            }
+        }
+    }
+
+    pub async fn list_keepalive_tasks(
+        &self,
+        filter: &Filter,
+    ) -> Result<Vec<SchedulerTaskRow<AdaptiveJob>>, SchedulerError> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(sqlite) => {
+                let storage = sqlite.keepalive_storage();
+                storage
+                    .list_tasks(filter)
+                    .await
+                    .map_err(SchedulerError::Database)?
+                    .into_iter()
+                    .map(sqlite_task_to_row)
+                    .collect()
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => {
+                let storage = postgres.keepalive_operation_storage();
                 storage
                     .list_tasks(filter)
                     .await
@@ -144,10 +142,7 @@ impl SchedulerBackend {
         match self {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(sqlite) => {
-                let storage = apalis_sqlite::SqliteStorage::<CronJob, (), ()>::new_in_queue(
-                    &sqlite.pool,
-                    CRON_QUEUE,
-                );
+                let storage = sqlite.cron_storage();
                 storage
                     .list_tasks(filter)
                     .await
@@ -158,10 +153,7 @@ impl SchedulerBackend {
             }
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => {
-                let storage = apalis_postgres::PostgresStorage::<CronJob>::new_with_config(
-                    &postgres.pool,
-                    &apalis_postgres::Config::new(CRON_QUEUE),
-                );
+                let storage = postgres.cron_operation_storage();
                 storage
                     .list_tasks(filter)
                     .await
