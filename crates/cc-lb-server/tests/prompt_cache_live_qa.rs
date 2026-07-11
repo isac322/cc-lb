@@ -34,6 +34,7 @@ async fn full_proxy_write_then_non_breakpoint_lookback_hit_preserves_cache_affin
     let mut read = ScriptedMessageResponse::ok();
     read.body["usage"]["cache_creation_input_tokens"] = json!(0);
     read.body["usage"]["cache_read_input_tokens"] = json!(3072);
+    read.delay = Duration::from_secs(3);
     script.push_response(creation);
     script.push_response(read);
     let fake_config = AppConfig {
@@ -88,6 +89,10 @@ refresh_debounce_secs = 0
         }]}]
     });
     let second_body = serde_json::to_string(&second_request).expect("serialize second request");
+    let second_request_started = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_secs() as i64;
     let second_response = common::http_post(server.proxy_addr, "/v1/messages", &second_body, &[])
         .await
         .expect("send second request through cc-lb proxy");
@@ -107,14 +112,11 @@ refresh_debounce_secs = 0
     assert_eq!(event.token_estimate_source, TOKEN_ESTIMATE_SOURCE);
 
     let observation = support::fetch_matched_observation(&pool, MODEL, &event).await;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_secs() as i64;
     assert_eq!(observation.ttl_class, "0");
     assert_eq!(observation.hash_schema_version, HASH_SCHEMA_VERSION);
     assert_eq!(observation.prefix_content_block_index, event.matched_index);
     assert!(observation.estimated_prefix_tokens > 0);
     assert_eq!(observation.token_estimate_source, TOKEN_ESTIMATE_SOURCE);
-    assert!(observation.expires_at > now);
+    assert!(observation.expires_at >= second_request_started + 269);
+    assert!(observation.expires_at <= second_request_started + 271);
 }
