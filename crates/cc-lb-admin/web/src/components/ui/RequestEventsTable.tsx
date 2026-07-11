@@ -24,7 +24,7 @@ const STATUS_TONE_TEXT: Record<'ok' | 'warn' | 'danger' | 'neutral', string> = {
 };
 
 interface RequestEventsTableProps {
-  events: RequestEventWithPhase[];
+  events: readonly RequestEventWithPhase[];
   principalNameMap: Map<string, string>;
   upstreamNameMap: Map<string, string>;
   loading?: boolean;

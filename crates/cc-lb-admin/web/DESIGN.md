@@ -131,3 +131,22 @@ Depth uses a mixed glass-and-border system already present in `index.css`:
 
 - Avoid heavy shadows; surface separation should come from glass, borders, and overlay tokens.
 - A simplified warmup card should show one primary status story, one primary action cluster, and one drawer entry point. Everything else should be summarized or moved behind disclosure.
+
+## 8. Time Controls & Bounded History
+
+### Time UX Contract
+- **Compact Controls**: Time ranges use a dense preset selector (`All time`, `1h`, `6h`, `24h`, `7d`, `Custom`) alongside optional `Since` and `Until` inputs.
+- **Timezone Awareness**: Custom bounds use dashboard-styled `YYYY-MM-DD HH:mm` text inputs interpreted in the user's effective configured timezone (via `useTimezone()`), not blindly in the browser's local timezone. Each field pairs the validated text entry with a date-only `react-day-picker` calendar: a Base UI popover at desktop width and the existing Base UI Modal surface below 1024px. Picking a date preserves an existing time or supplies the bound's start/end-of-day default. Since resolves to the first second of its displayed minute; inclusive Until resolves to the final second.
+- **Validation**: Invalid calendar values, nonexistent spring-forward times, and ambiguous fall-back times are deterministically distinguished with programmatically linked inline errors. URL bounds outside the JavaScript Date range or inverted Custom bounds are removed before rendering or querying.
+- **Draft & Persistence**: Presets compute a canonical `since_unix_secs` at selection time. Custom edits remain local until explicit Apply; Cancel or Escape restores the applied range without changing the URL. Custom ranges require and persist both `since_unix_secs` and `until_unix_secs`, and URL reloads reproduce the exact mode and applied bounds.
+
+### Bounded History & Client Pagination
+- **Request Rows & Client Pagination**: The client retains at most 500 finalized events plus 500 in-flight partials (and up to 500 eviction tombstones) in memory, which remains unchanged. To prevent CPU lag and long tasks, the log table uses client-side pagination to mount at most 50 data rows per page in the DOM. Table and row components retain `React.memo` optimization, and merged rows keep referential identity for unchanged events so live-tail updates do not re-render the whole page.
+- **Filtering & Pagination Rules**: Filters apply to the retained events before client pagination is calculated. Any route or filter change resets the current page to page 1. Shrink clamps are applied to prevent out-of-bounds pages.
+- **Status Classes**: Status filtering uses the backend's `status_class` contract (`2xx`, `3xx`, `4xx`, `5xx`) for recent history and live SSE, then applies the same class predicate to retained rows so stale live or placeholder data cannot leak across transitions.
+- **In-Progress Cost**: Once usage is observed for a priced model, partial rows and drawers show a token-derived `Estimated Cost`. This is display-only; authoritative final cost remains sourced from the termination-time `Priced` event used by billing and limit reconciliation.
+- **Export Behavior**: The Export action includes all filtered retained rows, not just the current page.
+- **Sentinel Behavior**: The backend infinite-scroll sentinel is only shown on the final client page, and it is still disabled when a session filter is active.
+- **Pagination Controls**: Controls are accessible, featuring labeled Prev and Next buttons and an `aria-live` region for screen readers.
+- **Backend Paging**: The exact 200, 200, 100 backend paging limits remain unchanged.
+- **Live Tailing**: Tailing is automatically paused when a fixed custom time range is selected, and resumes based on user preference when returning to a relative preset or "All time".

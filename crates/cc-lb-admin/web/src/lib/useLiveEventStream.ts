@@ -35,11 +35,17 @@ export interface LiveEventStreamState {
   forceReconnect: () => void;
 }
 
+export type LiveEventStreamOptions = {
+  readonly enabled?: boolean;
+};
+
 const PERMANENT_FAILURE_THRESHOLD_MS = 300_000;
 
 export function useLiveEventStream(
   filters: Record<string, string | undefined>,
+  options: LiveEventStreamOptions = {},
 ): LiveEventStreamState {
+  const enabled = options.enabled ?? true;
   const visibility = useVisibility();
   const queryClient = useQueryClient();
 
@@ -58,6 +64,9 @@ export function useLiveEventStream(
   // or needs to be accessed in callbacks without stale closures.
   const eventsMapRef = useRef<LiveEventMap>(new Map());
   const finalizedIdsRef = useRef<Set<string>>(new Set());
+  const tombstonesRef = useRef<Set<string>>(new Set());
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
   const clientRef = useRef<EventSourceClient | null>(null);
   const lastCursorRef = useRef<string | null>(null);
   const lastActivityAtRef = useRef<number | null>(null);
@@ -69,6 +78,7 @@ export function useLiveEventStream(
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const connectionGenerationRef = useRef(0);
 
   const clearReconnectTimeout = () => {
     if (reconnectTimeoutRef.current) {
@@ -113,10 +123,11 @@ export function useLiveEventStream(
       let changed = false;
       for (const [id, entry] of eventsMapRef.current.entries()) {
         if (entry.phase === 'partial') {
-          const ts_ms =
+          const lastUpdateMs =
+            entry.event.last_update_ms ??
             entry.event.ts_ms ??
             (entry.event.ts ? entry.event.ts * 1000 : null);
-          if (ts_ms != null && ts_ms < now - 5 * 60 * 1000) {
+          if (lastUpdateMs != null && lastUpdateMs < now - 5 * 60 * 1000) {
             eventsMapRef.current.delete(id);
             changed = true;
           }
@@ -155,7 +166,20 @@ export function useLiveEventStream(
   }, []);
 
   const connect = async (isBackfill = false) => {
+    const connectionGeneration = connectionGenerationRef.current + 1;
+    connectionGenerationRef.current = connectionGeneration;
+    const isCurrentConnection = () =>
+      enabledRef.current &&
+      connectionGenerationRef.current === connectionGeneration;
     clearReconnectTimeout();
+    if (!enabledRef.current) {
+      if (clientRef.current) {
+        clientRef.current.close();
+        clientRef.current = null;
+      }
+      updateStatus('idle');
+      return;
+    }
     if (clientRef.current) {
       clientRef.current.close();
     }
@@ -181,6 +205,7 @@ export function useLiveEventStream(
           next_cursor: number;
           exhausted: boolean;
         }>(`/admin/v1/events/delta?${deltaParams.toString()}`);
+        if (!isCurrentConnection()) return;
 
         let changed = false;
         for (const ev of res.events) {
@@ -196,6 +221,7 @@ export function useLiveEventStream(
               eventsMapRef.current,
               finalizedIdsRef.current,
               update,
+              tombstonesRef.current,
             )
           ) {
             changed = true;
@@ -203,18 +229,30 @@ export function useLiveEventStream(
         }
         if (changed) forceUpdate();
         updateCursor(res.next_cursor.toString());
-      } catch (err) {
-        console.error('Backfill failed', err);
+      } catch (error) {
+        if (!isCurrentConnection()) return;
+        if (error instanceof Error) {
+          console.error('Backfill failed', error);
+        } else {
+          throw error;
+        }
       } finally {
         isBackfilling = false;
-        // Flush queued events
-        let changed = false;
-        for (const msg of queuedEvents) {
-          if (handleMessage(msg)) changed = true;
+        if (isCurrentConnection()) {
+          // Flush queued events
+          let changed = false;
+          for (const msg of queuedEvents) {
+            if (handleMessage(msg)) changed = true;
+          }
+          if (changed) forceUpdate();
         }
-        if (changed) forceUpdate();
         queuedEvents = [];
       }
+    }
+
+    if (!isCurrentConnection()) {
+      if (!enabledRef.current) updateStatus('idle');
+      return;
     }
 
     const url = `/admin/events/stream?${params.toString()}`;
@@ -224,6 +262,7 @@ export function useLiveEventStream(
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       initialLastEventId: lastCursorRef.current ?? undefined,
       onConnect: () => {
+        if (!isCurrentConnection()) return;
         updateStatus('connecting');
         setError(null);
         permanentFailureRef.current = false;
@@ -234,9 +273,14 @@ export function useLiveEventStream(
         setReconnectAttempts(0);
       },
       onDisconnect: () => {
+        if (!isCurrentConnection()) {
+          updateStatus('idle');
+          return;
+        }
         updateStatus('reconnecting');
       },
       onScheduleReconnect: () => {
+        if (!isCurrentConnection()) return;
         updateStatus('reconnecting');
         reconnectAttemptsRef.current += 1;
         setReconnectAttempts(reconnectAttemptsRef.current);
@@ -263,6 +307,7 @@ export function useLiveEventStream(
         }
       },
       onMessage: (msg) => {
+        if (!isCurrentConnection()) return;
         if (isBackfilling) {
           queuedEvents.push(msg);
         } else {
@@ -277,6 +322,7 @@ export function useLiveEventStream(
     id?: string;
     data?: string;
   }): boolean => {
+    if (!enabledRef.current) return false;
     updateActivity();
 
     if (msg.event === 'heartbeat') {
@@ -292,6 +338,7 @@ export function useLiveEventStream(
     if (msg.event === 'reset') {
       eventsMapRef.current.clear();
       finalizedIdsRef.current.clear();
+      tombstonesRef.current.clear();
       updateCursor('');
       queryClient.invalidateQueries({ queryKey: qk.events(filters) });
 
@@ -328,13 +375,27 @@ export function useLiveEventStream(
       eventsMapRef.current,
       finalizedIdsRef.current,
       update,
+      tombstonesRef.current,
     );
   };
 
   // Main effect for connection lifecycle and visibility
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional
   useEffect(() => {
+    if (!enabled) {
+      connectionGenerationRef.current += 1;
+      clearReconnectTimeout();
+      if (clientRef.current) {
+        clientRef.current.close();
+        clientRef.current = null;
+      }
+      updateStatus('idle');
+      setError(null);
+      return;
+    }
+
     if (!visibility.online) {
+      connectionGenerationRef.current += 1;
       if (clientRef.current) {
         clientRef.current.close();
         clientRef.current = null;
@@ -345,6 +406,7 @@ export function useLiveEventStream(
     }
 
     if (visibility.gracePeriodElapsed) {
+      connectionGenerationRef.current += 1;
       if (clientRef.current) {
         clientRef.current.close();
         clientRef.current = null;
@@ -364,6 +426,7 @@ export function useLiveEventStream(
     }
 
     return () => {
+      connectionGenerationRef.current += 1;
       clearReconnectTimeout();
       if (clientRef.current) {
         clientRef.current.close();
@@ -374,6 +437,7 @@ export function useLiveEventStream(
     visibility.online,
     visibility.gracePeriodElapsed,
     visibility.visible,
+    enabled,
     JSON.stringify(filters),
   ]);
 
@@ -381,6 +445,7 @@ export function useLiveEventStream(
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional
   useEffect(() => {
     const handleAuthRequired = () => {
+      if (!enabledRef.current) return;
       if (clientRef.current) {
         clientRef.current.close();
         clientRef.current = null;
@@ -398,6 +463,10 @@ export function useLiveEventStream(
 
   const forceReconnect = () => {
     clearReconnectTimeout();
+    if (!enabledRef.current) {
+      updateStatus('idle');
+      return;
+    }
     updateStatus('reconnecting');
     connect();
   };
