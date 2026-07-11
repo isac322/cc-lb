@@ -20,7 +20,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use cc_lb_plugin_api::{Principal, PrincipalKind, SlotKey, Upstream};
+use cc_lb_plugin_api::{Principal, PrincipalKind, Upstream};
+use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::{WasmtimeRuntime, WasmtimeUpstreamDialect};
 use cc_lb_upstream::{DialectShapeContext, shape_request};
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
@@ -96,7 +97,11 @@ fn shape_passthrough_echoes_request() {
 
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let slot = runtime
-        .register_shape(SlotKey::global("test-shape"), "test-shape", &wasm_bytes)
+        .register_shape(
+            RuntimeSlotKey::global("test-shape"),
+            "test-shape",
+            &wasm_bytes,
+        )
         .expect("register_shape OK");
 
     let dialect = WasmtimeUpstreamDialect::new(slot, runtime.config_arc());

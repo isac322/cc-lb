@@ -15,7 +15,6 @@ crate-type = ["rlib"]
 
 [dependencies]
 cc-lb-domain.workspace = true
-cc-lb-plugin-api = { workspace = true }
 cc-lb-plugin-wire = { workspace = true, features = ["std"] }
 cc-lb-runtime-wasmtime = { workspace = true }
 rkyv = { workspace = true, features = ["std", "bytecheck"] }

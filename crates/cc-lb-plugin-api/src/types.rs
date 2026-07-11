@@ -20,35 +20,6 @@ pub use cc_lb_domain::{
     WarmCacheEntry, WrhKeySource,
 };
 
-/// Composite key identifying a plugin slot per principal × plugin name.
-///
-/// Used as the trait-level identity for [`crate::FilterPlugin`] via
-/// `FilterPlugin::slot_key` and as the runtime-side cache lookup key
-/// for the wasmtime per-worker `WorkerInstance` map.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-pub struct SlotKey {
-    /// Principal id this slot is bound to, or [`GLOBAL_PRINCIPAL`] for
-    /// proxy-wide globals.
-    pub principal: String,
-    /// Stable plugin name.
-    pub plugin: String,
-}
-
-impl SlotKey {
-    /// Build a per-principal slot key.
-    pub fn new(principal: impl Into<String>, plugin: impl Into<String>) -> Self {
-        Self {
-            principal: principal.into(),
-            plugin: plugin.into(),
-        }
-    }
-
-    /// Build a proxy-wide global slot key.
-    pub fn global(plugin: impl Into<String>) -> Self {
-        Self::new(GLOBAL_PRINCIPAL, plugin)
-    }
-}
-
 /// Per-principal quota window and model allow-list.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrincipalQuotas {

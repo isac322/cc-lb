@@ -19,7 +19,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cc_lb_domain::{PrincipalKind, Upstream};
-use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent, SlotKey};
+use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent};
+use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::{WasmtimeObservabilityHookPlugin, WasmtimeRuntime};
 use http::StatusCode;
 
@@ -52,7 +53,11 @@ fn setup() -> Option<WasmtimeObservabilityHookPlugin> {
     let wasm_bytes = load_wasm_or_skip()?;
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let slot = runtime
-        .register_observe(SlotKey::global("test-observe"), "test-observe", &wasm_bytes)
+        .register_observe(
+            RuntimeSlotKey::global("test-observe"),
+            "test-observe",
+            &wasm_bytes,
+        )
         .expect("register_observe OK");
     Some(WasmtimeObservabilityHookPlugin::new(
         slot,

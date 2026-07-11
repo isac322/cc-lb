@@ -22,7 +22,7 @@ pub mod types;
 pub use types::{
     CachePricingSummary, CandidateUrgency, CredentialStrategy, GLOBAL_PRINCIPAL, InternalError,
     InternalErrorKind, InternalErrorStage, PluginManifest, Principal, PrincipalKind,
-    PrincipalQuotas, RateLimitKind, RateLimitObservation, RoutingTrace, SlotKey,
+    PrincipalQuotas, RateLimitKind, RateLimitObservation, RoutingTrace,
     SubscriptionPreferenceTrace, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
     SubscriptionTier, TerminalStrategy, Upstream, UpstreamCandidate, UpstreamKind, default_pure,
 };

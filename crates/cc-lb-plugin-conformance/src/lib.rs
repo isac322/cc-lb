@@ -68,13 +68,12 @@
 pub mod fixtures;
 pub mod prelude;
 
-use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_wire::{
     ArchivedFilterResponse, ArchivedShapeResponse, FilterRequest, FilterResponse, ObserveEvent,
     ShapeRequest, ShapeResponse,
 };
 use cc_lb_runtime_wasmtime::{
-    HotEngineConfig, ModuleInspection, SlotKind, WasmtimeRuntime, inspect_wasm,
+    HotEngineConfig, ModuleInspection, RuntimeSlotKey, SlotKind, WasmtimeRuntime, inspect_wasm,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
@@ -206,7 +205,7 @@ impl<'a> ConformanceSuite<'a> {
     pub fn session(&self) -> PluginSession {
         let runtime = WasmtimeRuntime::new(self.engine_config.clone())
             .expect("wasmtime engine build must succeed");
-        let slot_key = SlotKey::global(self.plugin_name.clone());
+        let slot_key = RuntimeSlotKey::global(self.plugin_name.clone());
         match self.kind {
             ConformanceKind::Filter => runtime
                 .register_filter(slot_key.clone(), self.plugin_name.clone(), self.wasm)
@@ -265,7 +264,7 @@ impl<'a> ConformanceSuite<'a> {
 /// N-request tests pay one instantiate cost instead of N.
 pub struct PluginSession {
     runtime: WasmtimeRuntime,
-    slot_key: SlotKey,
+    slot_key: RuntimeSlotKey,
     kind: ConformanceKind,
 }
 
@@ -275,8 +274,8 @@ impl PluginSession {
         self.kind.slot_kind()
     }
 
-    /// The `SlotKey` the plugin is registered under.
-    pub fn slot_key(&self) -> &SlotKey {
+    /// The [`RuntimeSlotKey`] the plugin is registered under.
+    pub fn slot_key(&self) -> &RuntimeSlotKey {
         &self.slot_key
     }
 

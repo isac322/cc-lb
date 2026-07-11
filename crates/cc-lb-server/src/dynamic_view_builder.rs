@@ -81,27 +81,36 @@ pub enum RebindError {
 
 async fn register_filter_slot(
     runtime: &Arc<WasmtimeRuntime>,
-    slot_key: &cc_lb_plugin_api::SlotKey,
+    slot_key: &cc_lb_runtime_wasmtime::RuntimeSlotKey,
     manifest: &PluginManifest,
-) -> Result<Arc<cc_lb_runtime_wasmtime::PluginSlot>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
+) -> Result<
+    Arc<cc_lb_runtime_wasmtime::LoadedPluginSlot>,
+    cc_lb_runtime_wasmtime::WasmtimeRuntimeError,
+> {
     let wasm = read_wasm_for_manifest(manifest).await?;
     runtime.register_filter(slot_key.clone(), manifest.name.clone(), &wasm)
 }
 
 async fn register_shape_slot(
     runtime: &Arc<WasmtimeRuntime>,
-    slot_key: &cc_lb_plugin_api::SlotKey,
+    slot_key: &cc_lb_runtime_wasmtime::RuntimeSlotKey,
     manifest: &PluginManifest,
-) -> Result<Arc<cc_lb_runtime_wasmtime::PluginSlot>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
+) -> Result<
+    Arc<cc_lb_runtime_wasmtime::LoadedPluginSlot>,
+    cc_lb_runtime_wasmtime::WasmtimeRuntimeError,
+> {
     let wasm = read_wasm_for_manifest(manifest).await?;
     runtime.register_shape(slot_key.clone(), manifest.name.clone(), &wasm)
 }
 
 async fn register_observe_slot(
     runtime: &Arc<WasmtimeRuntime>,
-    slot_key: &cc_lb_plugin_api::SlotKey,
+    slot_key: &cc_lb_runtime_wasmtime::RuntimeSlotKey,
     manifest: &PluginManifest,
-) -> Result<Arc<cc_lb_runtime_wasmtime::PluginSlot>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
+) -> Result<
+    Arc<cc_lb_runtime_wasmtime::LoadedPluginSlot>,
+    cc_lb_runtime_wasmtime::WasmtimeRuntimeError,
+> {
     let wasm = read_wasm_for_manifest(manifest).await?;
     runtime.register_observe(slot_key.clone(), manifest.name.clone(), &wasm)
 }
@@ -609,7 +618,7 @@ async fn build_principal_chains(
 ) -> Result<
     (
         HashMap<String, PrincipalRoutingArtifacts>,
-        HashSet<cc_lb_plugin_api::SlotKey>,
+        HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey>,
     ),
     RebindError,
 > {
@@ -636,7 +645,7 @@ async fn build_principal_chains(
             entries
         });
     let mut chains = HashMap::new();
-    let mut registered_slot_keys: HashSet<cc_lb_plugin_api::SlotKey> = HashSet::new();
+    let mut registered_slot_keys: HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey> = HashSet::new();
     for principal in principals {
         let router_entries =
             take_chain_entries(&mut chain_entries, principal.id, PluginSlotKind::Router);
@@ -686,8 +695,10 @@ async fn build_principal_chains(
                 config: entry.config,
                 metadata: std::collections::BTreeMap::new(),
             };
-            let slot_key =
-                cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
+            let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
+                principal.name.clone(),
+                manifest.name.clone(),
+            );
             registered_slot_keys.insert(slot_key.clone());
             match register_observe_slot(runtime, &slot_key, &manifest).await {
                 Ok(slot) => {
@@ -739,8 +750,10 @@ async fn build_principal_chains(
                     config: entry.config,
                     metadata: std::collections::BTreeMap::new(),
                 };
-                let slot_key =
-                    cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
+                let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
+                    principal.name.clone(),
+                    manifest.name.clone(),
+                );
                 registered_slot_keys.insert(slot_key.clone());
                 match register_shape_slot(runtime, &slot_key, &manifest).await {
                     Ok(slot) => {
@@ -840,7 +853,7 @@ async fn build_router_pipeline(
     principal: &PrincipalRecord,
     mut router_entries: Vec<cc_lb_storage_api::PluginChainEntry>,
     registry: &HashMap<Uuid, cc_lb_storage_api::WasmRegistryEntry>,
-    registered_slot_keys: &mut HashSet<cc_lb_plugin_api::SlotKey>,
+    registered_slot_keys: &mut HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey>,
 ) -> Result<Option<Arc<RouterPipelineCache>>, RebindError> {
     if router_entries.is_empty() {
         return Ok(None);
@@ -904,8 +917,10 @@ async fn build_router_pipeline(
                 })));
             }
         };
-        let slot_key =
-            cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
+        let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
+            principal.name.clone(),
+            manifest.name.clone(),
+        );
         registered_slot_keys.insert(slot_key.clone());
         match register_filter_slot(runtime, &slot_key, &manifest).await {
             Ok(slot) => {

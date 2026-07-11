@@ -4,8 +4,10 @@ use std::sync::Arc;
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
 use cc_lb_domain::{Principal, PrincipalKind, Upstream};
-use cc_lb_plugin_api::{PluginManifest, SlotKey};
-use cc_lb_runtime_wasmtime::{WasmtimeRuntime, WasmtimeRuntimeError, WasmtimeUpstreamDialect};
+use cc_lb_plugin_api::PluginManifest;
+use cc_lb_runtime_wasmtime::{
+    RuntimeSlotKey, WasmtimeRuntime, WasmtimeRuntimeError, WasmtimeUpstreamDialect,
+};
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh, LazyRefreshHandle,
 };
@@ -124,7 +126,7 @@ pub async fn dispatch_warmup_with_dialect(
         .await
         .map_err(|error| WarmupDispatchError::Materialize(error.to_string()))?;
     let slot = params.runtime.register_shape(
-        SlotKey::new(synth_name.clone(), manifest.name.clone()),
+        RuntimeSlotKey::new(synth_name.clone(), manifest.name.clone()),
         manifest.name.clone(),
         &wasm_bytes,
     )?;

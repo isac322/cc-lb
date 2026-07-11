@@ -15,14 +15,13 @@
 //! provides no alignment guarantee.
 //!
 //! `slot_key()` lives on the [`FilterPlugin`] trait and returns the
-//! canonical [`SlotKey`] from `cc-lb-plugin-api`.
+//! canonical [`RuntimeSlotKey`] from this runtime crate.
 //!
 //! See `docs/rfc/0001-plugin-runtime-vnext.md` §FilterPlugin adapter.
 
 use std::sync::Arc;
 
 use cc_lb_domain::{Principal, PrincipalKind, UpstreamCandidate};
-use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
 use cc_lb_plugin_wire::{
     ArchivedFilterResponse, CachePricingSummaryRef, ClaimRef, FilterRequestRef, HeaderRef,
@@ -37,19 +36,20 @@ use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 use uuid::Uuid;
 
+use crate::RuntimeSlotKey;
 use crate::cache::call_filter_hook;
-use crate::cell::{PluginCell, PluginSlot};
+use crate::cell::{LoadedPluginSlot, PluginCell};
 use crate::error::WasmtimeRuntimeError;
 use crate::response_transform::{WasmtimeResponseTransformHook, WasmtimeSseEventTransformHook};
 
-/// `FilterPlugin` adapter backed by a wasmtime `PluginSlot`. The
+/// `FilterPlugin` adapter backed by a wasmtime `LoadedPluginSlot`. The
 /// adapter **snapshots** the slot's [`PluginCell`] at construction
 /// time so re-registering the same slot during the next dynamic-view
 /// rebuild cannot leak the new cell into the previous live view —
 /// each `DynamicView` keeps the adapter cells it was built with until
 /// it is itself replaced.
 pub struct WasmtimeFilterPlugin {
-    _slot_key: SlotKey,
+    _slot_key: RuntimeSlotKey,
     cell: Arc<PluginCell>,
     plugin_id: Uuid,
     plugin_name: String,
@@ -59,11 +59,11 @@ pub struct WasmtimeFilterPlugin {
 
 impl WasmtimeFilterPlugin {
     /// Snapshots `slot.current` for the lifetime of this adapter.
-    /// Subsequent re-registrations on the same `SlotKey` will not
+    /// Subsequent re-registrations on the same `RuntimeSlotKey` will not
     /// disturb this adapter's view of the plugin.
     pub fn new(
-        slot: Arc<PluginSlot>,
-        slot_key: SlotKey,
+        slot: Arc<LoadedPluginSlot>,
+        slot_key: RuntimeSlotKey,
         plugin_id: Uuid,
         plugin_name: impl Into<String>,
         runtime_config: Arc<crate::HotEngineConfig>,
@@ -415,7 +415,7 @@ pub struct WasmtimeUpstreamDialect {
 }
 
 impl WasmtimeUpstreamDialect {
-    pub fn new(slot: Arc<PluginSlot>, runtime_config: Arc<crate::HotEngineConfig>) -> Self {
+    pub fn new(slot: Arc<LoadedPluginSlot>, runtime_config: Arc<crate::HotEngineConfig>) -> Self {
         let cell = slot.current.load_full();
         let wire_version = cell
             .metadata
@@ -708,7 +708,7 @@ pub struct WasmtimeObservabilityHookPlugin {
 }
 
 impl WasmtimeObservabilityHookPlugin {
-    pub fn new(slot: Arc<PluginSlot>, runtime_config: Arc<crate::HotEngineConfig>) -> Self {
+    pub fn new(slot: Arc<LoadedPluginSlot>, runtime_config: Arc<crate::HotEngineConfig>) -> Self {
         let _ = runtime_config;
         let cell = slot.current.load_full();
         let wire_version = cell

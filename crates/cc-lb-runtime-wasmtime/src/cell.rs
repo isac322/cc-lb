@@ -1,4 +1,4 @@
-//! [`PluginCell`] and [`PluginSlot`] — the hot-swap unit.
+//! [`PluginCell`] and [`LoadedPluginSlot`] — the hot-swap unit.
 //!
 //! See RFC §Hot-swap. The `ArcSwap<PluginCell>` per slot is what makes
 //! a plugin replacement lock-free for in-flight readers.
@@ -67,13 +67,13 @@ fn format_hex(bytes: &[u8; 32]) -> String {
 /// registered as [`HookKind::Filter`] cannot later be replaced by a
 /// shape or observe plugin. [`WasmtimeRuntime::register_*`][crate::WasmtimeRuntime]
 /// rejects a kind switch with `ModuleRejected`.
-pub struct PluginSlot {
+pub struct LoadedPluginSlot {
     pub name: String,
     pub kind: HookKind,
     pub current: ArcSwap<PluginCell>,
 }
 
-impl PluginSlot {
+impl LoadedPluginSlot {
     pub fn new(name: impl Into<String>, kind: HookKind, initial: PluginCell) -> Self {
         Self {
             name: name.into(),
