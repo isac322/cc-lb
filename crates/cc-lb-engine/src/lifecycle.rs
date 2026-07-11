@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -126,7 +126,38 @@ pub enum PreviewRouteError {
     PipelineInstantiationError(String),
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct SelectedCacheMatch {
+    pub(crate) prefix_hash: String,
+    pub(crate) matched_breakpoint_block_index: u32,
+    pub(crate) content_block_index: u32,
+    pub(crate) ttl_class: TtlClass,
+    pub(crate) estimated_prefix_tokens: u64,
+    pub(crate) token_estimate_source: Option<String>,
+}
+
 pub fn build_candidates(
+    view: &DynamicView,
+    principal_id: &str,
+    request_kind: RequestKind,
+    canonical_model: &str,
+    request_breakpoints: &[CacheBreakpoint],
+    thread_id: Option<&str>,
+    clock: &dyn Clock,
+) -> Vec<UpstreamCandidate> {
+    build_candidates_with_matches(
+        view,
+        principal_id,
+        request_kind,
+        canonical_model,
+        request_breakpoints,
+        thread_id,
+        clock,
+    )
+    .0
+}
+
+pub(crate) fn build_candidates_with_matches(
     view: &DynamicView,
     principal_id: &str,
     request_kind: RequestKind,
@@ -134,16 +165,19 @@ pub fn build_candidates(
     request_breakpoints: &[CacheBreakpoint],
     _thread_id: Option<&str>,
     clock: &dyn Clock,
-) -> Vec<UpstreamCandidate> {
+) -> (Vec<UpstreamCandidate>, HashMap<Uuid, SelectedCacheMatch>) {
     let Some(allowed_upstreams) = view.principal_view.allowed_upstreams(principal_id) else {
-        return Vec::new();
+        return (Vec::new(), HashMap::new());
     };
 
-    let mut candidates: Vec<UpstreamCandidate> = {
+    let mut candidates: Vec<UpstreamCandidate> = Vec::new();
+    let mut selected_matches: HashMap<Uuid, SelectedCacheMatch> = HashMap::new();
+    {
         let rate_limit_cache = view.upstream_rate_limit_cache.read();
         let now_unix_millis = unix_now_ms(clock);
         let prompt_cache = view.prompt_cache_observation_cache_opt();
-        view.upstreams_snapshot()
+        for upstream in view
+            .upstreams_snapshot()
             .iter()
             .filter(|upstream| upstream.enabled)
             .filter(|upstream| upstream.deleted_at_unix_secs.is_none())
@@ -151,52 +185,71 @@ pub fn build_candidates(
             .filter(|upstream| {
                 allowed_upstreams.is_empty() || allowed_upstreams.contains(&upstream.id)
             })
-            .map(|upstream| {
-                let observed_rate_limits = rate_limit_cache
-                    .snapshots
-                    .get(&upstream.id)
-                    .cloned()
-                    .unwrap_or_default();
-                let observed_at_unix_secs = if observed_rate_limits.is_empty() {
-                    0
-                } else {
-                    rate_limit_cache.updated_at_unix_secs
-                };
-                let cache_score = prompt_cache.and_then(|cache| {
-                    let now_unix_secs = cache.clock_now_unix_secs();
-                    let matched = resolve_longest_warm_match(
-                        cache.as_ref(),
+        {
+            let observed_rate_limits = rate_limit_cache
+                .snapshots
+                .get(&upstream.id)
+                .cloned()
+                .unwrap_or_default();
+            let observed_at_unix_secs = if observed_rate_limits.is_empty() {
+                0
+            } else {
+                rate_limit_cache.updated_at_unix_secs
+            };
+            let cache_score = prompt_cache.and_then(|cache| {
+                let now_unix_secs = cache.clock_now_unix_secs();
+                let matched = resolve_longest_warm_match(
+                    cache.as_ref(),
+                    upstream.id,
+                    canonical_model,
+                    request_breakpoints,
+                    now_unix_secs,
+                );
+                let score = build_cache_score(request_breakpoints, matched.as_slice());
+                if let (Some(entry), Some(score_ref)) = (matched.as_ref(), score.as_ref())
+                    && let Some(prefix_hash) = score_ref.matched_v3_cache_key.clone()
+                {
+                    selected_matches.insert(
                         upstream.id,
-                        canonical_model,
-                        request_breakpoints,
-                        now_unix_secs,
+                        SelectedCacheMatch {
+                            prefix_hash,
+                            matched_breakpoint_block_index: score_ref
+                                .matched_breakpoint_index
+                                .unwrap_or(entry.content_block_index),
+                            content_block_index: score_ref
+                                .matched_content_block_index
+                                .unwrap_or(entry.content_block_index),
+                            ttl_class: entry.ttl_class,
+                            estimated_prefix_tokens: entry.estimated_prefix_tokens,
+                            token_estimate_source: score_ref.token_estimate_source.clone(),
+                        },
                     );
-                    build_cache_score(request_breakpoints, matched.as_slice())
-                });
-                let plan_info = view.plan_info_by_upstream.get(&upstream.id);
-                UpstreamCandidate {
-                    upstream_id: upstream.id,
-                    name: upstream.name.clone(),
-                    kind: upstream_kind_for_candidate(upstream.kind),
-                    observed_rate_limits,
-                    subscription_quotas: view.subscription_quota_cache.snapshot_for_upstream(
-                        upstream.id,
-                        now_unix_millis,
-                        view.subscription_quota_routing_max_staleness_secs,
-                    ),
-                    observed_at_unix_secs,
-                    cache_score,
-                    base_url: upstream.base_url.as_ref().map(|url| url.to_string()),
-                    plan_capacity_ratio: plan_info.map(|p| p.capacity_ratio),
-                    organization_type: plan_info.and_then(|p| p.organization_type.clone()),
-                    rate_limit_tier: plan_info.and_then(|p| p.rate_limit_tier.clone()),
-                    seat_tier: plan_info.and_then(|p| p.seat_tier.clone()),
                 }
-            })
-            .collect()
-    };
+                score
+            });
+            let plan_info = view.plan_info_by_upstream.get(&upstream.id);
+            candidates.push(UpstreamCandidate {
+                upstream_id: upstream.id,
+                name: upstream.name.clone(),
+                kind: upstream_kind_for_candidate(upstream.kind),
+                observed_rate_limits,
+                subscription_quotas: view.subscription_quota_cache.snapshot_for_upstream(
+                    upstream.id,
+                    now_unix_millis,
+                    view.subscription_quota_routing_max_staleness_secs,
+                ),
+                observed_at_unix_secs,
+                cache_score,
+                base_url: upstream.base_url.as_ref().map(|url| url.to_string()),
+                plan_capacity_ratio: plan_info.map(|p| p.capacity_ratio),
+                organization_type: plan_info.and_then(|p| p.organization_type.clone()),
+                rate_limit_tier: plan_info.and_then(|p| p.rate_limit_tier.clone()),
+                seat_tier: plan_info.and_then(|p| p.seat_tier.clone()),
+            });
+        }
+    }
     candidates.sort_unstable_by_key(|c| c.upstream_id);
-    candidates
+    (candidates, selected_matches)
 }
 
 fn build_cache_score(
@@ -744,7 +797,7 @@ pub struct PromptCacheObservationContext {
     pub(crate) upstream_id: Uuid,
     pub(crate) canonical_model_id: String,
     pub(crate) cache_breakpoints: Vec<CacheBreakpoint>,
-    pub(crate) warm_entries_at_decision: Vec<WarmCacheEntry>,
+    pub(crate) selected_match: Option<SelectedCacheMatch>,
     pub(crate) cache: Arc<dyn PromptCacheObservationCacheLike>,
 }
 
@@ -791,26 +844,17 @@ pub(crate) fn prompt_cache_observation_context(
     upstream_id: Uuid,
     canonical_model_id: &str,
     cache_breakpoints: &[CacheBreakpoint],
+    selected_match: Option<SelectedCacheMatch>,
 ) -> Option<PromptCacheObservationContext> {
     if canonical_model_id.is_empty() || cache_breakpoints.is_empty() {
         return None;
     }
     let cache = view.prompt_cache_observation_cache_opt()?.clone();
-    let request_breakpoint_hashes = cache_breakpoints
-        .iter()
-        .map(|breakpoint| (breakpoint.prefix_hash.clone(), breakpoint.requested_ttl))
-        .collect::<Vec<_>>();
-    let warm_entries_at_decision = cache.snapshot_for_upstream(
-        upstream_id,
-        canonical_model_id,
-        &request_breakpoint_hashes,
-        cache.clock_now_unix_secs(),
-    );
     Some(PromptCacheObservationContext {
         upstream_id,
         canonical_model_id: canonical_model_id.to_owned(),
         cache_breakpoints: cache_breakpoints.to_vec(),
-        warm_entries_at_decision,
+        selected_match,
         cache,
     })
 }
@@ -825,46 +869,26 @@ pub(crate) fn decode_prompt_cache_observations_pure(
     }
 
     let threshold = cache_threshold_tokens(&context.canonical_model_id) as u64;
-    let warm_match_for = |breakpoint: &CacheBreakpoint| {
-        context
-            .warm_entries_at_decision
-            .iter()
-            .filter(|entry| entry.prefix_hash == breakpoint.prefix_hash)
-            .max_by_key(|entry| entry.expires_at_unix_secs)
-    };
     let hit = (usage.cache_read_input_tokens > 0)
-        .then(|| {
-            context
-                .cache_breakpoints
-                .iter()
-                .filter_map(|breakpoint| {
-                    warm_match_for(breakpoint).map(|entry| (breakpoint, entry))
-                })
-                .max_by_key(|(breakpoint, _)| breakpoint.prefix_token_count)
-        })
+        .then_some(context.selected_match.as_ref())
         .flatten();
 
     let grace_secs = context.cache.grace_margin_secs();
     let mut observations = Vec::new();
     let mut dropped_below_threshold = 0_u32;
-    if let Some((breakpoint, warm_entry)) = hit {
-        if breakpoint.prefix_token_count >= threshold {
-            // Sliding TTL: Anthropic refreshes the prompt-cache lifetime on every
-            // hit (per the prompt-caching docs). Emit a fresh `now + ttl - grace`
-            // so downstream observation storage extends the window and the router
-            // does not falsely conclude the upstream went cold while it was still
-            // being kept warm by continuous reads.
+    if let Some(matched) = hit {
+        if matched.estimated_prefix_tokens >= threshold {
             observations.push(DecodedPromptCacheObservation {
-                prefix_hash: breakpoint.prefix_hash.clone(),
-                ttl_class: warm_entry.ttl_class,
+                prefix_hash: matched.prefix_hash.clone(),
+                ttl_class: matched.ttl_class,
                 expires_at_unix_secs: prompt_cache_observation_expires_at(
                     now_unix_secs,
-                    warm_entry.ttl_class,
+                    matched.ttl_class,
                     grace_secs,
                 ),
-                prefix_content_block_index: breakpoint.block_index,
-                estimated_prefix_tokens: breakpoint.prefix_token_count,
-                token_estimate_source: breakpoint.token_estimate_source.clone(),
+                prefix_content_block_index: matched.content_block_index,
+                estimated_prefix_tokens: matched.estimated_prefix_tokens,
+                token_estimate_source: matched.token_estimate_source.clone(),
                 kind: DecodedPromptCacheObservationKind::Hit,
             });
         } else {
@@ -873,7 +897,7 @@ pub(crate) fn decode_prompt_cache_observations_pure(
     }
 
     if usage.cache_creation_input_tokens > 0 {
-        let hit_block_index = hit.map(|(breakpoint, _)| breakpoint.block_index);
+        let hit_block_index = hit.map(|matched| matched.matched_breakpoint_block_index);
         for breakpoint in &context.cache_breakpoints {
             if hit_block_index.is_some_and(|hit_index| breakpoint.block_index <= hit_index) {
                 continue;
@@ -1671,7 +1695,7 @@ impl Lifecycle {
         }
 
         let route_start = Instant::now();
-        let candidates = build_candidates(
+        let (candidates, selected_cache_matches) = build_candidates_with_matches(
             &view,
             &principal.id,
             RequestKind::AnthropicMessages,
@@ -1883,6 +1907,7 @@ impl Lifecycle {
             resolved_upstream_id,
             &ctx.canonical_model_id,
             &ctx.cache_breakpoints,
+            selected_cache_matches.get(&resolved_upstream_id).cloned(),
         );
 
         let limit_reserve_start = Instant::now();
@@ -4825,10 +4850,7 @@ mod tests {
                 cache_breakpoint(1, "hit", 2_400, TtlClass::Ephemeral1h),
                 cache_breakpoint(2, "write", 3_200, TtlClass::Ephemeral5m),
             ],
-            warm_entries_at_decision: vec![
-                warm_entry("short", TtlClass::Ephemeral5m, now + 120, 1),
-                warm_entry("hit", TtlClass::Ephemeral1h, now + 3_000, 2),
-            ],
+            selected_match: Some(selected_match_hit("hit", 1, TtlClass::Ephemeral1h, 2_400)),
             cache: cache.clone(),
         };
 
@@ -4870,12 +4892,7 @@ mod tests {
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
-            warm_entries_at_decision: vec![warm_entry(
-                "hit",
-                TtlClass::Ephemeral5m,
-                near_expiry,
-                1,
-            )],
+            selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral5m, 2_400)),
             cache: cache.clone(),
         };
 
@@ -4928,7 +4945,7 @@ mod tests {
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
-            warm_entries_at_decision: vec![warm_entry("hit", TtlClass::Ephemeral5m, now + 30, 1)],
+            selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral5m, 2_400)),
             cache: cache.clone(),
         };
 
@@ -4968,7 +4985,7 @@ mod tests {
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 1_200, TtlClass::Ephemeral5m)],
-            warm_entries_at_decision: vec![warm_entry("hit", TtlClass::Ephemeral5m, now + 120, 1)],
+            selected_match: None,
             cache: cache.clone(),
         };
 
@@ -4994,7 +5011,7 @@ mod tests {
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(0, "tiny", 1_023, TtlClass::Ephemeral5m)],
-            warm_entries_at_decision: Vec::new(),
+            selected_match: None,
             cache: cache.clone(),
         };
 
@@ -5010,6 +5027,75 @@ mod tests {
         assert!(decoded.observations.is_empty());
         assert_eq!(decoded.dropped_below_threshold, 1);
         assert!(cache.upserts().is_empty());
+    }
+
+    #[test]
+    fn observation_uses_carried_match_under_concurrent_mutation() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000226").unwrap();
+        let now = 1_800_000_000;
+        let cache = Arc::new(
+            RecordingPromptCacheObservationCache::new(vec![warm_entry(
+                "stale-different",
+                TtlClass::Ephemeral5m,
+                now + 120,
+                1,
+            )])
+            .with_clock_now(now),
+        );
+        let context = PromptCacheObservationContext {
+            upstream_id,
+            canonical_model_id: TEST_MODEL.to_owned(),
+            cache_breakpoints: vec![
+                cache_breakpoint(0, "shallow", 1_200, TtlClass::Ephemeral5m),
+                cache_breakpoint(1, "hit", 2_400, TtlClass::Ephemeral1h),
+            ],
+            selected_match: Some(selected_match_hit("hit", 1, TtlClass::Ephemeral1h, 2_400)),
+            cache: cache.clone(),
+        };
+
+        let decoded = decode_prompt_cache_observations_pure(
+            &context,
+            PromptCacheUsage {
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 2_400,
+            },
+            now,
+        );
+
+        assert_eq!(decoded.observations.len(), 1);
+        assert_eq!(decoded.observations[0].prefix_hash, "hit");
+        assert_eq!(decoded.observations[0].ttl_class, TtlClass::Ephemeral1h);
+    }
+
+    #[test]
+    fn buffered_and_sse_observations_are_equal() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000227").unwrap();
+        let now = 1_800_000_000;
+        let cache =
+            Arc::new(RecordingPromptCacheObservationCache::new(Vec::new()).with_clock_now(now));
+        let context = PromptCacheObservationContext {
+            upstream_id,
+            canonical_model_id: TEST_MODEL.to_owned(),
+            cache_breakpoints: vec![
+                cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral1h),
+                cache_breakpoint(1, "write", 3_200, TtlClass::Ephemeral5m),
+            ],
+            selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral1h, 2_400)),
+            cache: cache.clone(),
+        };
+        let usage = PromptCacheUsage {
+            cache_creation_input_tokens: 800,
+            cache_read_input_tokens: 2_400,
+        };
+
+        let buffered = decode_prompt_cache_observations_pure(&context, usage, now);
+        let sse = decode_prompt_cache_observations_pure(&context, usage, now);
+
+        assert_eq!(buffered.observations, sse.observations);
+        assert_eq!(
+            buffered.dropped_below_threshold,
+            sse.dropped_below_threshold
+        );
     }
 
     #[test]
@@ -5607,6 +5693,22 @@ mod tests {
             observed_offset,
             0,
         )
+    }
+
+    fn selected_match_hit(
+        prefix_hash: &str,
+        block_index: u32,
+        ttl_class: TtlClass,
+        estimated_prefix_tokens: u64,
+    ) -> SelectedCacheMatch {
+        SelectedCacheMatch {
+            prefix_hash: prefix_hash.to_owned(),
+            matched_breakpoint_block_index: block_index,
+            content_block_index: block_index,
+            ttl_class,
+            estimated_prefix_tokens,
+            token_estimate_source: Some("local_tiktoken_v1".to_owned()),
+        }
     }
 
     fn warm_entry_priced(

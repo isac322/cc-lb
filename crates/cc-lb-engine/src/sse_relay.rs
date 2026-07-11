@@ -865,7 +865,7 @@ mod tests {
                 upstream_id,
                 canonical_model_id: TEST_MODEL.to_owned(),
                 cache_breakpoints: vec![cache_breakpoint(0, "write", 1_600, TtlClass::Ephemeral5m)],
-                warm_entries_at_decision: Vec::new(),
+                selected_match: None,
                 cache,
             }),
             prompt_cache_observation_event_emitter,
