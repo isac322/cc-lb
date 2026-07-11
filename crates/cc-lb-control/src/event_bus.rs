@@ -352,6 +352,35 @@ impl RequestEventBus for InMemoryBus {
     }
 
     fn publish_lifecycle(&self, event: LifecycleEvent) {
+        if matches!(
+            &event,
+            LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
+        ) {
+            let assembler_tx = {
+                let guard = match self.inner.lifecycle_assembler_tx.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                guard.clone()
+            };
+            if let Some(tx) = assembler_tx {
+                match tx.try_send(event) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(dropped)) => {
+                        record_dropped_events_by("lifecycle_assembler_full", 1);
+                        tracing::warn!(
+                            kind = dropped.kind(),
+                            event_id = %dropped.event_id(),
+                            "lifecycle assembler mpsc full; dropping event (request row may be missing)",
+                        );
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        tracing::debug!("lifecycle assembler mpsc closed");
+                    }
+                }
+            }
+            return;
+        }
         let _ = self.inner.lifecycle_broadcast_tx.send(event.clone());
 
         let writer_tx = {
@@ -821,6 +850,29 @@ mod tests {
         let wrt_b = rx_writer.recv().await.expect("writer b");
         assert_eq!(wrt_a.event_id(), "evt-req-1");
         assert_eq!(wrt_b.event_id(), "evt-req-2");
+    }
+
+    #[tokio::test]
+    async fn request_log_upstream_error_routes_only_to_assembler() {
+        let bus = InMemoryBus::new();
+        let LifecycleBusReceiver::InMemory(mut broadcast_rx) = bus.subscribe_lifecycle() else {
+            panic!("expected in-memory lifecycle receiver");
+        };
+        let mut assembler_rx = bus.attach_lifecycle_assembler(1);
+        let mut hook_rx = bus.attach_lifecycle_hook_adapter(1);
+        let mut writer_rx = bus.attach_lifecycle_writer(1);
+        let event = LifecycleEvent::RequestLogUpstreamErrorObserved {
+            event_id: "evt-private".into(),
+            error_type: "rate_limit_error".into(),
+            error_message: "bounded".into(),
+        };
+
+        bus.publish_lifecycle(event.clone());
+
+        assert_eq!(assembler_rx.try_recv().expect("assembler event"), event);
+        assert!(broadcast_rx.try_recv().is_err());
+        assert!(hook_rx.try_recv().is_err());
+        assert!(writer_rx.try_recv().is_err());
     }
 
     #[tokio::test]

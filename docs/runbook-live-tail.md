@@ -73,7 +73,7 @@ The finite label vocabulary is documented in `docs/metrics-live-tail.md` and enf
 Operationally important labels:
 
 - Reset reasons: `backfill_cap`, `bus_lagged`, `storage_error`.
-- Partial triggers: `request_started`, `route_completed`, `upstream_response_started`, `usage_observed`, `stream_completed`, `request_terminated`.
+- Partial triggers: `request_started`, `parse_completed`, `auth_completed`, `route_completed`, `upstream_response_started`, `usage_observed`, `stream_completed`, `request_terminated`. These eight snapshots are memory-only; only final request events are persisted.
 - Notify drop reasons: `queue_full`, `queue_closed`, `serialize_error`, `pg_error`.
 - Notify HTTP outcomes: `success`, `not_found`, `unauthorized`, `timeout`, `network_error`.
 

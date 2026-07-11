@@ -2,7 +2,7 @@
 
 ## Overview
 
-The live-tail system provides real-time request logging and metrics streaming for the cc-lb admin dashboard. It uses a storage-first-write and subscribe-then-drain design to guarantee three core invariants. First, I1 ensures a truthful live indicator, meaning the dashboard's live state matches the actual SSE stream receiving fresh data within a bounded window. Second, I2 guarantees lossless delivery from mount, meaning every event entering the system is delivered to the client at least once, even across disconnects, server restarts, or load-balancer failovers. Third, I3 establishes that these guarantees are structural, built directly into the cursor protocol and write ordering, rather than relying on ad-hoc client polling. By writing events to storage before broadcasting them, the system creates a single source of truth for the event sequence, allowing clients to resume streams seamlessly using cursors.
+The live-tail system provides real-time request logging and metrics streaming for the cc-lb admin dashboard. It uses a storage-first-write and subscribe-then-drain design to guarantee three core invariants. First, I1 ensures a truthful live indicator, meaning the dashboard's live state matches the actual SSE stream receiving fresh data within a bounded window. Second, I2 guarantees lossless delivery of durable final request rows from mount, including across disconnects, server restarts, and load-balancer failovers. In-flight partial snapshots are memory-only, best-effort updates: they are not replayed from storage and do not survive a producer restart. Third, I3 establishes that final-row guarantees are structural, built directly into the cursor protocol and write ordering, rather than relying on ad-hoc client polling. By writing final events to storage before broadcasting them, the system creates a single durable source of truth for the resumable event sequence.
 
 ## Component Diagram
 
@@ -88,7 +88,7 @@ sequenceDiagram
 
     %% Live Event Flow (Local)
     Note over Assembler: Proxy request lands; Lifecycle events observed
-    loop 6 Emission Triggers
+    loop 8 Memory-Only Emission Triggers
         Assembler->>Bus: RequestEventUpdate::Partial
         Bus->>Admin: RequestEventUpdate::Partial
         Admin->>Client: SSE frame (event: message, id: last_finalized_cursor)
@@ -105,6 +105,8 @@ sequenceDiagram
         CBus->>CAdmin: RequestEventUpdate::Partial
         CAdmin->>CClient: SSE frame (event: message, id: last_finalized_cursor)
     end
+
+    Note over Assembler,Bus: Triggers are request_started, parse_completed, auth_completed, route_completed, upstream_response_started, usage_observed, stream_completed, and request_terminated; partial snapshots are never persisted
 
     %% Finalization
     Assembler->>Storage: append_request_event(RequestEvent)
@@ -131,18 +133,18 @@ sequenceDiagram
 
 The server emits an `event: reset` frame to force the client to clear its local state and resync from scratch. This happens under three specific conditions:
 
-1. `backfill_cap`: The client's `Last-Event-ID` is more than 500 cursors behind the current head. Replaying a larger gap from storage would place excessive load on the database. The client should clear its state and perform a REST-delta backfill from the current head. This limit is defined by `BACKFILL_MAX_EVENTS = 500` at [crates/cc-lb-admin/src/events.rs:21](/home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/swift-otter/crates/cc-lb-admin/src/events.rs:21).
+1. `backfill_cap`: The client's `Last-Event-ID` is more than 500 cursors behind the current head. Replaying a larger gap from storage would place excessive load on the database. The client should clear its state and perform a REST-delta backfill from the current head. This limit is defined by `BACKFILL_MAX_EVENTS = 500` in [`crates/cc-lb-admin/src/events.rs`](../crates/cc-lb-admin/src/events.rs#L22).
 2. `bus_lagged`: The SSE subscriber's tokio broadcast receiver lags behind the publisher, resulting in a `Lagged(n)` error. This indicates that the consumer instance or client connection is slower than the event emission rate.
 3. `storage_error`: The storage tail poll fails due to database health issues or query timeouts.
 
 ### Protocol Invariants
 
 - **Event ID Unification**: The `event_id` is a single, lifecycle-generated UUID v7 key that is threaded through the entire pipeline. It identifies the request from the initial partial update to the final database row and the SSE frame `id:`. This prevents duplicate rows and ensures consistent identity, as described in the live-tail redesign plan §3.7.
-- **Cursor Semantics**: The `last_finalized_cursor` advances only from ordered storage-tail delivery. Local bus events (both partial and final) are emitted immediately to minimize latency, but they do not advance the client's resume watermark. This is because local bus events can race with the storage tail. The client uses the cursor to resume the stream safely without missing events, as implemented in `handle_events_stream` at [crates/cc-lb-admin/src/events_routes.rs:82](/home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/swift-otter/crates/cc-lb-admin/src/events_routes.rs:82).
+- **Cursor Semantics**: The `last_finalized_cursor` advances only from ordered storage-tail delivery. Local bus events (both partial and final) are emitted immediately to minimize latency, but they do not advance the client's resume watermark. This is because local bus events can race with the storage tail. The client uses the cursor to resume the stream safely without missing durable final rows, as implemented in [`handle_events_stream`](../crates/cc-lb-admin/src/events_routes.rs#L84).
 
 ## See Also
 
-- [Dashboard Live-Tail Redesign Plan](/home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/swift-otter/.omo/plans/dashboard-live-tail-redesign.md)
-- [Live-Tail Post-Deployment Follow-ups Plan](/home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/swift-otter/.omo/plans/live-tail-followups.md)
-- [Live-Tail Grafana Dashboard Guide](/home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/swift-otter/docs/live-tail-dashboard.md)
-- [Live-Tail Load Testing Guide](/home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/swift-otter/docs/live-tail-load-testing.md)
+- [Dashboard Live-Tail Redesign Plan](../.omo/plans/dashboard-live-tail-redesign.md)
+- [Live-Tail Post-Deployment Follow-ups Plan](../.omo/plans/live-tail-followups.md)
+- [Live-Tail Grafana Dashboard Guide](live-tail-dashboard.md)
+- [Live-Tail Load Testing Guide](live-tail-load-testing.md)

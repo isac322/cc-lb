@@ -4,7 +4,49 @@ import {
   fmtMsCompact,
   formatBigInteger,
   formatCostMicros,
+  getRequestOutcome,
 } from './format';
+
+describe('getRequestOutcome', () => {
+  it('returns partial for isPartial=true', () => {
+    expect(getRequestOutcome(true, 200, null)).toEqual({ type: 'partial' });
+  });
+  it('returns client_disconnected for 499 + client_closed_request', () => {
+    expect(getRequestOutcome(false, 499, 'client_closed_request')).toEqual({
+      type: 'client_disconnected',
+      status: 499,
+      error_code: 'client_closed_request',
+    });
+  });
+  it('returns completed for 499 with other error code', () => {
+    expect(getRequestOutcome(false, 499, 'other_error')).toEqual({
+      type: 'completed',
+      status: 499,
+      error_code: 'other_error',
+    });
+  });
+  it('returns completed for 0/terminal_dropped', () => {
+    expect(getRequestOutcome(false, 0, 'terminal_dropped')).toEqual({
+      type: 'completed',
+      status: 0,
+      error_code: 'terminal_dropped',
+    });
+  });
+  it('returns completed for 504/tower_timeout', () => {
+    expect(getRequestOutcome(false, 504, 'tower_timeout')).toEqual({
+      type: 'completed',
+      status: 504,
+      error_code: 'tower_timeout',
+    });
+  });
+  it('returns completed for 200', () => {
+    expect(getRequestOutcome(false, 200, null)).toEqual({
+      type: 'completed',
+      status: 200,
+      error_code: null,
+    });
+  });
+});
 
 describe('formatBigInteger', () => {
   it('returns dash for null/undefined', () => {

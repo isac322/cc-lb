@@ -1,10 +1,10 @@
 import { useMemo } from 'react';
-import type { RequestEvent } from '../../../lib/api';
 import { fmtN, fmtUsd } from '../../../lib/format';
+import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { type ActiveSliceControl, PieChart, type PieSlice } from './PieChart';
 import { SLICE_COLORS } from './sliceColors';
 
-export function buildTokenSlices(event: RequestEvent): PieSlice[] {
+export function buildTokenSlices(event: RequestEventWithPhase): PieSlice[] {
   const cache5m = event.cache_creation_input_tokens_5m;
   const cache1h = event.cache_creation_input_tokens_1h;
   const hasSplit = cache5m != null || cache1h != null;
@@ -85,7 +85,7 @@ export function TokenPie({
   event,
   control,
 }: {
-  event: RequestEvent;
+  event: RequestEventWithPhase;
   control?: ActiveSliceControl;
 }) {
   const slices = useMemo(() => buildTokenSlices(event), [event]);

@@ -25,6 +25,8 @@ pub mod clock;
 #[cfg(not(loom))]
 mod dns_cache;
 #[cfg(not(loom))]
+mod downstream_stream_drop_guard;
+#[cfg(not(loom))]
 mod drain;
 #[cfg(not(loom))]
 mod error_format;

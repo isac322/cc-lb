@@ -22,17 +22,16 @@ import {
   INPUT_CLASS,
   Section,
 } from '../components/ui/primitives';
-import {
-  RequestEventsTable,
-  SessionChip,
-} from '../components/ui/RequestEventsTable';
-import { eventTime, type RequestEvent } from '../lib/api';
+import { RequestEventsTable } from '../components/ui/RequestEventsTable';
+import { SessionChip } from '../components/ui/SessionChip';
+import { eventTime } from '../lib/api';
 import {
   usePrincipalNameMap,
   useRecentEventsInfinite,
   useUpstreamNameMap,
   useUpstreams,
 } from '../lib/queries';
+import type { RequestEventWithPhase } from '../lib/RequestEventTypes';
 import { useLiveEventStream } from '../lib/useLiveEventStream';
 
 const logsSearchSchema = z.object({
@@ -121,12 +120,17 @@ function LogsPage() {
       ? []
       : (recent.data?.pages.flatMap((p) => p.events) ?? []);
     const seen = new Set<string>();
-    const out: (RequestEvent & { _phase?: 'partial' | 'final' })[] = [];
-    for (const { phase, event: ev } of live.eventsMap.values()) {
+    const out: RequestEventWithPhase[] = [];
+    for (const entry of live.eventsMap.values()) {
+      const ev = entry.event;
       const key = ev.event_id ?? ev.request_id;
       if (!seen.has(key)) {
         seen.add(key);
-        out.push({ ...(ev as RequestEvent), _phase: phase });
+        if (entry.phase === 'final') {
+          out.push({ ...entry.event, _phase: 'final' });
+        } else {
+          out.push({ ...entry.event, _phase: 'partial' });
+        }
       }
     }
     for (const ev of historical) {

@@ -37,7 +37,6 @@ import {
   postJson,
   putJson,
   type RecentEventsPayload,
-  type RequestEvent,
   type RequestEventUpdate,
   type SeriesResponse,
   type SubscriptionMetadataResponse,
@@ -421,21 +420,31 @@ export function useRecentEventsInfinite(
   });
 }
 
+import type { RequestEventWithPhase } from './RequestEventTypes';
+
 function upsertLiveRequestEvent(
-  acc: RequestEvent[],
+  acc: RequestEventWithPhase[],
   update: RequestEventUpdate,
   cap: number,
-): RequestEvent[] {
-  const event =
-    update.phase === 'final' ? update.payload.event : update.payload;
-  const key = event.event_id ?? event.request_id;
+): RequestEventWithPhase[] {
+  let newEvent: RequestEventWithPhase;
+  let key: string | undefined;
+
+  if (update.phase === 'final') {
+    newEvent = { ...update.payload.event, _phase: 'final' };
+    key = update.payload.event.event_id ?? update.payload.event.request_id;
+  } else {
+    newEvent = { ...update.payload, _phase: 'partial' };
+    key = update.payload.event_id ?? update.payload.request_id;
+  }
+
   const idx = acc.findIndex((e) => (e.event_id ?? e.request_id) === key);
   if (idx >= 0) {
     const out = acc.slice();
-    out[idx] = event as RequestEvent;
+    out[idx] = newEvent;
     return out;
   }
-  return [event as RequestEvent, ...acc].slice(0, cap);
+  return [newEvent, ...acc].slice(0, cap);
 }
 
 export function useLiveRequestEvents(enabled: boolean, cap = 500) {
@@ -445,7 +454,7 @@ export function useLiveRequestEvents(enabled: boolean, cap = 500) {
     staleTime: Infinity,
     gcTime: Infinity,
     retry: false,
-    queryFn: streamedQuery<RequestEventUpdate, RequestEvent[]>({
+    queryFn: streamedQuery<RequestEventUpdate, RequestEventWithPhase[]>({
       streamFn: ({ signal }) => streamRequestEventUpdates(signal),
       initialValue: [],
       reducer: (acc, next) => upsertLiveRequestEvent(acc, next, cap),

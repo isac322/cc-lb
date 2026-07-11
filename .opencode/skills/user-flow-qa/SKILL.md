@@ -54,5 +54,6 @@ Create `references/scenarios/<feature>.md`, then add a row to the Scenario index
 |---|---|---|
 | Subscription quota — full stack | quota storage → endpoints (latest/series/analysis/aggregate/pool-history) → analysis/routing → admin dashboards, plus state transitions T1–T10 | `references/scenarios/subscription-quota-fullstack.md` |
 | Subscription quota — frontend | admin-web quota surfaces: Overview pool chart, upstream-detail Quota History + snapshot cards + deficit, sidebar meters; render + range windowing | `references/scenarios/subscription-quota-frontend.md` |
+| Request log observability | request logs correctly capture and display various request lifecycle events, including rate limits, slow streaming, client disconnects, and timeouts | `references/scenarios/request-log-observability.md` |
 
 _Add a row here for every new scenario._

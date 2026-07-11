@@ -517,6 +517,11 @@ pub enum LifecycleEvent {
         message: String,
         source: String,
     },
+    RequestLogUpstreamErrorObserved {
+        event_id: EventId,
+        error_type: String,
+        error_message: String,
+    },
     /// Usage counts were observed from an SSE frame or non-stream body.
     UsageObserved {
         event_id: EventId,
@@ -589,6 +594,7 @@ impl LifecycleEvent {
             | Self::UpstreamAttempt { event_id, .. }
             | Self::UpstreamResponseStarted { event_id, .. }
             | Self::ProviderErrorObserved { event_id, .. }
+            | Self::RequestLogUpstreamErrorObserved { event_id, .. }
             | Self::UsageObserved { event_id, .. }
             | Self::StreamCompleted { event_id, .. }
             | Self::RequestTerminated { event_id, .. }
@@ -610,6 +616,7 @@ impl LifecycleEvent {
             Self::UpstreamAttempt { .. } => "upstream_attempt",
             Self::UpstreamResponseStarted { .. } => "upstream_response_started",
             Self::ProviderErrorObserved { .. } => "provider_error_observed",
+            Self::RequestLogUpstreamErrorObserved { .. } => "request_log_upstream_error_observed",
             Self::UsageObserved { .. } => "usage_observed",
             Self::StreamCompleted { .. } => "stream_completed",
             Self::RequestTerminated { .. } => "request_terminated",
@@ -1129,6 +1136,12 @@ mod tests {
                 source: "provider".into(),
             }
             .kind(),
+            LifecycleEvent::RequestLogUpstreamErrorObserved {
+                event_id: sample_event_id(),
+                error_type: "rate_limit_error".into(),
+                error_message: "bounded".into(),
+            }
+            .kind(),
             LifecycleEvent::UsageObserved {
                 event_id: sample_event_id(),
                 usage: UsageSnapshot::default(),
@@ -1185,6 +1198,7 @@ mod tests {
                 "upstream_attempt",
                 "upstream_response_started",
                 "provider_error_observed",
+                "request_log_upstream_error_observed",
                 "usage_observed",
                 "stream_completed",
                 "request_terminated",
@@ -1198,17 +1212,10 @@ mod tests {
     #[test]
     fn event_id_accessor_returns_stable_reference() {
         let id = sample_event_id();
-        let event = LifecycleEvent::RequestTerminated {
+        let event = LifecycleEvent::RequestLogUpstreamErrorObserved {
             event_id: id.clone(),
-            reason: TerminationReason::Dropped,
-            client_status: 0,
-            duration_ms: 0,
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
-            proxy_setup_ms: None,
-            upstream_body_ms: None,
-            first_body_chunk_ms: None,
-            internal_errors: Vec::new(),
+            error_type: "api_error".into(),
+            error_message: "bounded".into(),
         };
         assert_eq!(event.event_id(), &id);
     }
