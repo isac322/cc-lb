@@ -1,0 +1,61 @@
+Task: T0 Capture golden serde byte fixtures + cadence labels from origin/master
+Session: codex:opencode-witty-sailor-20260711
+Worktree: /home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/witty-sailor
+
+Scope and baseline
+- Initial `git status --short`: clean.
+- `git diff --quiet origin/master -- crates/cc-lb-contract crates/cc-lb-plugin-api crates/cc-lb-storage-api crates/cc-lb-storage-sqlite`: exit 0; characterized product sources are byte-identical to origin/master.
+- Inspected RequestEvent, RoutingTrace and nested trace types, PluginSlot, KeyStatus, SQLite RequestEventStore::append_request_event, and the existing request-event compatibility tests before editing.
+- No product source, manifest, migration, schema, wire, PDK, routing, or storage behavior changed.
+
+Generated fixtures
+- Red proof: `timeout 300 cargo test -p cc-lb-storage-sqlite --test reassembly_serde_fixtures golden_serde_bytes_match_current_types_and_storage_path` failed because the committed golden fixture files did not yet exist.
+- Generation: `UPDATE_REASSEMBLY_FIXTURES=1 timeout 300 cargo test -p cc-lb-storage-sqlite --test reassembly_serde_fixtures golden_serde_bytes_match_current_types_and_storage_path`: exit 0, 1 passed.
+- The permanent test constructs the real RequestEvent and enum values, writes a fresh temporary fixture set, appends the RequestEvent through SQLite RequestEventStore::append_request_event, SELECTs request_events_v1.payload, and exact-byte compares every regenerated file with the committed file.
+- `tests/fixtures/reassembly/request_event.json`: 1579 bytes; jq parses; stages=1, SubscriptionPreferenceTrace stages=1, CacheAffinityTrace stages=1, terminal_decision=true, internal_errors=1.
+- `tests/fixtures/reassembly/request_events_v1_payload.json`: 1579 bytes; jq parses; produced by the live SQLite storage serialization path.
+- `tests/fixtures/reassembly/plugin_slots.json`: 39 bytes; jq parses; 3 values: router, observability_hook, shape.
+- `tests/fixtures/reassembly/key_statuses.json`: 31 bytes; jq parses; 3 values: active, disabled, revoked.
+- `cmp -s tests/fixtures/reassembly/request_event.json tests/fixtures/reassembly/request_events_v1_payload.json`: exit 0 on origin/master-compatible source.
+- The Rust test deserializes and re-serializes each committed fixture and compares exact bytes, not structural equality.
+
+Cadence labels
+- `.omo/evidence/cadence-labels.json` parses with jq and has exactly 40 entries.
+- Counts: 16 stable, 24 unstable, 5 published, 35 unpublished.
+- Core counts are 29 (16 stable + 13 unstable); plugin/test members are 11 unstable unpublished members.
+- Published set is exactly plugin-wire, pdk-wasmtime, pdk-wasmtime-macros, runtime-wasmtime, and plugin-conformance.
+- A cargo-metadata-derived final set (current members minus contract/plugin-api plus domain/upstream/routing/quota/request-log/lifecycle) exactly equals the 40 cadence-label keys.
+
+Automated verification
+- Focused exact-byte test run 1: exit 0, 1 passed, 0 failed, bounded by 300 seconds, reported duration 0 seconds.
+- Focused exact-byte test run 2: exit 0, 1 passed, 0 failed, bounded by 300 seconds, reported duration 1 second.
+- Post-format focused test: exit 0, 1 passed, 0 failed, bounded by 300 seconds, reported duration 2 seconds.
+- `timeout 600 cargo test -p cc-lb-storage-api request_event`: exit 0, 12 matched tests passed, bounded duration 19 seconds.
+- `timeout 1200 cargo check --workspace`: exit 0; post-format run bounded duration 2 seconds.
+- `timeout 300 cargo fmt --all -- --check`: initial exit 1 identified formatting only in the new test; formatting was corrected with apply_patch; final exit 0 in 1 second.
+- LSP diagnostics on `reassembly_serde_fixtures.rs`: no diagnostics.
+- Pure nonblank/noncomment LOC: 211, in the 200-250 warning band; the file has one responsibility (reassembly serde fixture generation and exact-byte characterization) and no product API.
+
+Manual QA and adversarial checks
+- stale_state (applicable): every focused test creates a fresh tempfile directory, regenerates all four artifacts from real types/storage, and exact-byte compares them; all three green runs matched.
+- dirty_worktree (applicable): initial status was clean; status before staging is inspected separately and only T0 paths are staged, with staged stat/diff recorded before commit.
+- misleading_success_output (applicable): independent jq assertions checked each file, exact sizes, enum counts, stage payload counts, terminal decision, and non-empty errors; cmp independently checked direct/stored bytes.
+- flaky_tests (applicable): focused exact-byte test passed twice consecutively without sleeps or retries; a third post-format run also passed.
+- hung_or_long_commands (applicable): Cargo commands used timeout bounds of 300, 600, or 1200 seconds and recorded duration/exit; no command hung. `/usr/bin/time` was unavailable, so zsh SECONDS was used for bounded-command timing.
+- malformed_input (not applicable): T0 adds fixed trusted golden data and no new untrusted-input parser. The required empty-content failure probe was still exercised independently.
+- prompt_injection (not applicable): no external or untrusted natural-language content enters this data surface.
+- cancel_resume (not applicable): fixture generation is a short atomic test with no resumable state.
+- repeated_interruptions (not applicable): no long-lived mutation, service, or interrupt-sensitive workflow is introduced.
+- Failure probe: a temporary copy with `routing_trace.stages=[]` and `internal_errors=[]` was rejected by the jq non-empty assertion; result `rejected`, exit 0 for the probe harness.
+
+Cleanup
+- The empty-content probe file under `/tmp` was removed (`cleanup=removed`).
+- SQLite databases and regenerated fixture directories are owned by tempfile guards and removed after each test.
+- No temporary generator, server, process, port, container, or database file remains; fixture generation is permanently scoped inside the characterization test.
+
+DoneClaim
+- Changed deliverables: one permanent characterization test, four generated fixture files, cadence-labels.json, this evidence file, and one JSONL ledger event.
+- Tests: focused exact-byte test 3/3 green after generation; storage-api request_event 12/12 matched green; cargo check workspace green; cargo fmt check green; LSP clean.
+- Manual QA: independent jq/cmp assertions above; empty-content rejection confirmed.
+- Cleanup: complete as recorded above.
+- Risks: the 211-pure-LOC test is in the warning band but remains below the 250-LOC defect threshold; no production behavior changed.
