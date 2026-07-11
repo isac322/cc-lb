@@ -286,8 +286,6 @@ pub struct CacheLookbackPrefix {
     pub prefix_hash: String,
     /// Content-block index in the flattened `tools -> system -> messages` sequence.
     pub content_block_index: u32,
-    /// Estimated prefix tokens through this content block.
-    pub prefix_token_count: u64,
     /// Distance from the requested breakpoint: 0 for N, 19 for N-19.
     pub lookback_distance: u32,
 }
@@ -1469,7 +1467,6 @@ mod tests {
             lookback_prefixes: vec![CacheLookbackPrefix {
                 prefix_hash: "abc123".to_owned(),
                 content_block_index: 0,
-                prefix_token_count: 100,
                 lookback_distance: 0,
             }],
             token_estimate_source: Some("local_tiktoken_v1".to_owned()),
@@ -1621,7 +1618,6 @@ mod tests {
             lookback_prefixes: vec![CacheLookbackPrefix {
                 prefix_hash: "hash123".to_owned(),
                 content_block_index: 1,
-                prefix_token_count: 150,
                 lookback_distance: 0,
             }],
             token_estimate_source: Some("local_tiktoken_v1".to_owned()),

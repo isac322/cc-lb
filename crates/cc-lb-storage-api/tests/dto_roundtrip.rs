@@ -156,7 +156,6 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
             lookback_prefixes: vec![RequestCacheLookbackPrefix {
                 prefix_hash: "fedcba9876543210".to_owned(),
                 content_block_index: 0,
-                prefix_token_count: 2048,
                 lookback_distance: 0,
             }],
             token_estimate_source: Some("local_tiktoken_v1".to_owned()),
@@ -393,7 +392,6 @@ fn batch_b_wire_snapshots_are_stable() {
             lookback_prefixes: vec![RequestCacheLookbackPrefix {
                 prefix_hash: "lookbackabcdef0123456789".to_owned(),
                 content_block_index: 6,
-                prefix_token_count: 3072,
                 lookback_distance: 1,
             }],
             token_estimate_source: Some("local_tiktoken_v1".to_owned()),
@@ -409,7 +407,6 @@ fn batch_b_wire_snapshots_are_stable() {
             "lookback_prefixes": [{
                 "prefix_hash": "lookbackabcdef0123456789",
                 "content_block_index": 6,
-                "prefix_token_count": 3072,
                 "lookback_distance": 1
             }],
             "token_estimate_source": "local_tiktoken_v1"
@@ -452,7 +449,6 @@ fn batch_b_wire_snapshots_are_stable() {
             lookback_prefixes: vec![RequestCacheLookbackPrefix {
                 prefix_hash: "lookbackabcdef0123456789".to_owned(),
                 content_block_index: 6,
-                prefix_token_count: 3072,
                 lookback_distance: 1,
             }],
             token_estimate_source: Some("local_tiktoken_v1".to_owned()),
@@ -583,7 +579,6 @@ fn batch_b_wire_snapshots_are_stable() {
             "lookback_prefixes": [{
                 "prefix_hash": "lookbackabcdef0123456789",
                 "content_block_index": 6,
-                "prefix_token_count": 3072,
                 "lookback_distance": 1
             }],
             "token_estimate_source": "local_tiktoken_v1"

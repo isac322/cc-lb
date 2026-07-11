@@ -226,13 +226,13 @@ fn build_cache_score(
         })
         .max_by(|left, right| {
             left.1
-                .prefix_token_count
-                .cmp(&right.1.prefix_token_count)
+                .content_block_index
+                .cmp(&right.1.content_block_index)
                 .then_with(|| right.1.lookback_distance.cmp(&left.1.lookback_distance))
         });
 
     let matched_prefix_tokens = longest_match
-        .map(|(_, prefix, _)| prefix.prefix_token_count)
+        .map(|(breakpoint, _, _)| breakpoint.prefix_token_count)
         .unwrap_or(0);
     let mut missing_breakpoints = request_breakpoints
         .iter()
@@ -262,7 +262,7 @@ fn build_cache_score(
 
     Some(CacheScore {
         predicted_cache_read_tokens: longest_match
-            .map(|(_, prefix, _)| saturating_u64_to_u32(prefix.prefix_token_count))
+            .map(|(breakpoint, _, _)| saturating_u64_to_u32(breakpoint.prefix_token_count))
             .unwrap_or(0),
         predicted_cache_creation_tokens_5m: saturating_u64_to_u32(
             predicted_cache_creation_tokens_5m,
@@ -400,7 +400,6 @@ mod cache_score_tests {
             lookback_prefixes: vec![cc_lb_plugin_api::types::CacheLookbackPrefix {
                 prefix_hash: format!("bp-{block_index}"),
                 content_block_index: block_index,
-                prefix_token_count,
                 lookback_distance: 0,
             }],
             token_estimate_source: Some("test".to_owned()),
@@ -3622,7 +3621,6 @@ impl RequestCacheMetadata {
                     .map(|prefix| CacheLookbackPrefix {
                         prefix_hash: prefix.prefix_hash.clone(),
                         content_block_index: saturating_u64_to_u32(prefix.content_block_index),
-                        prefix_token_count: prefix.prefix_token_count,
                         lookback_distance: saturating_u64_to_u32(prefix.lookback_distance),
                     })
                     .collect(),
@@ -3727,7 +3725,6 @@ fn request_cache_metadata_from_value(
                 .map(|prefix| cc_lb_contract::RequestCacheLookbackPrefix {
                     prefix_hash: prefix.prefix_key.clone(),
                     content_block_index: prefix.content_block_index,
-                    prefix_token_count: prefix.prefix_token_count,
                     lookback_distance: prefix.lookback_distance,
                 })
                 .collect(),
@@ -5356,7 +5353,6 @@ mod tests {
             lookback_prefixes: vec![CacheLookbackPrefix {
                 prefix_hash: prefix_hash.to_owned(),
                 content_block_index: index,
-                prefix_token_count,
                 lookback_distance: 0,
             }],
             token_estimate_source: Some("test".to_owned()),

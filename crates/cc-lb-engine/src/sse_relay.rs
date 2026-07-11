@@ -894,7 +894,6 @@ mod tests {
             lookback_prefixes: vec![cc_lb_plugin_api::types::CacheLookbackPrefix {
                 prefix_hash: prefix_hash.to_owned(),
                 content_block_index: index,
-                prefix_token_count,
                 lookback_distance: 0,
             }],
             token_estimate_source: Some("test".to_owned()),

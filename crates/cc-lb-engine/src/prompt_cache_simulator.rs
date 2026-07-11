@@ -56,11 +56,23 @@ pub struct V3PromptCacheBreakpoint {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct V3PromptCacheLookbackPrefix {
+pub struct V3StructuralLookback {
     pub prefix_key: String,
     pub content_block_index: u64,
-    pub prefix_token_count: u64,
     pub lookback_distance: u64,
+}
+
+pub type V3PromptCacheLookbackPrefix = V3StructuralLookback;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct V3StructuralBreakpoint {
+    pub block_index: u64,
+    pub source: V3PromptCacheBlockSource,
+    pub path: String,
+    pub message_index: Option<u64>,
+    pub ttl: Option<String>,
+    pub prefix_key: String,
+    pub lookback_prefixes: Vec<V3StructuralLookback>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -121,25 +133,33 @@ pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3Prompt
         PromptCacheSimulatorKey::seed(canonical_model),
         block_digests,
     );
-    let prefix_token_counts = prefix_token_counts(canonical_model, &blocks);
-    let breakpoints = blocks
-        .iter()
-        .enumerate()
-        .filter_map(|(index, block)| {
-            block.explicit_ttl.as_ref()?;
-            let prefix_key = chain.prefix_key_hex(index)?;
-            let prefix_token_count = prefix_token_counts.get(index).copied().unwrap_or(0);
-            let lookback_prefixes = lookback_prefixes(&chain, &prefix_token_counts, index);
-            Some(V3PromptCacheBreakpoint {
-                block_index: index as u64,
-                source: block.source,
-                path: block.path.clone(),
-                message_index: block.message_index,
-                ttl: block.explicit_ttl.clone(),
-                prefix_key,
-                prefix_token_count,
-                lookback_prefixes,
-            })
+    let structural_breakpoints = blocks.iter().enumerate().filter_map(|(index, block)| {
+        block.explicit_ttl.as_ref()?;
+        let prefix_key = chain.prefix_key_hex(index)?;
+        Some(V3StructuralBreakpoint {
+            block_index: index as u64,
+            source: block.source,
+            path: block.path.clone(),
+            message_index: block.message_index,
+            ttl: block.explicit_ttl.clone(),
+            prefix_key,
+            lookback_prefixes: lookback_prefixes(&chain, index),
+        })
+    });
+    let breakpoints = structural_breakpoints
+        .map(|breakpoint| V3PromptCacheBreakpoint {
+            block_index: breakpoint.block_index,
+            source: breakpoint.source,
+            path: breakpoint.path,
+            message_index: breakpoint.message_index,
+            ttl: breakpoint.ttl,
+            prefix_key: breakpoint.prefix_key,
+            prefix_token_count: breakpoint_prefix_token_count(
+                canonical_model,
+                &blocks,
+                breakpoint.block_index as usize,
+            ),
+            lookback_prefixes: breakpoint.lookback_prefixes,
         })
         .collect();
     V3PromptCacheAnalysis {
@@ -298,40 +318,53 @@ fn block_digest(block: &V3PromptCacheBlock) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn prefix_token_counts(canonical_model: &str, blocks: &[V3PromptCacheBlock]) -> Vec<u64> {
-    let mut counts = Vec::with_capacity(blocks.len());
-    let mut prefix = Vec::with_capacity(blocks.len());
-    for block in blocks {
-        prefix.push(json!({
+fn breakpoint_prefix_token_count(
+    canonical_model: &str,
+    blocks: &[V3PromptCacheBlock],
+    breakpoint_index: usize,
+) -> u64 {
+    let bytes = serialized_prefix(canonical_model, &blocks[..=breakpoint_index]);
+    std::str::from_utf8(&bytes)
+        .map(|text| PrefixTokenizer::global().count_tokens(text) as u64)
+        .unwrap_or(0)
+}
+
+fn serialized_prefix(canonical_model: &str, blocks: &[V3PromptCacheBlock]) -> Vec<u8> {
+    let prefix = blocks
+        .iter()
+        .map(|block| {
+            json!({
             "source": source_name(block.source),
             "value": block.value,
-        }));
-        let serialized = json!({
-            "model": canonical_model,
-            "content_blocks": &prefix,
-        });
-        let bytes = serde_json::to_vec(&serialized).unwrap_or_default();
-        let token_count = std::str::from_utf8(&bytes)
-            .map(|text| PrefixTokenizer::global().count_tokens(text) as u64)
-            .unwrap_or(0);
-        counts.push(token_count);
-    }
-    counts
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_vec(&json!({
+        "model": canonical_model,
+        "content_blocks": prefix,
+    }))
+    .unwrap_or_default()
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn prefix_token_counts(canonical_model: &str, blocks: &[V3PromptCacheBlock]) -> Vec<u64> {
+    (0..blocks.len())
+        .map(|index| breakpoint_prefix_token_count(canonical_model, blocks, index))
+        .collect()
 }
 
 fn lookback_prefixes(
     chain: &PromptCachePrefixChain,
-    prefix_token_counts: &[u64],
     block_index: usize,
 ) -> Vec<V3PromptCacheLookbackPrefix> {
     let start = block_index.saturating_sub(19);
     (start..=block_index)
         .rev()
         .filter_map(|index| {
-            Some(V3PromptCacheLookbackPrefix {
+            Some(V3StructuralLookback {
                 prefix_key: chain.prefix_key_hex(index)?,
                 content_block_index: index as u64,
-                prefix_token_count: prefix_token_counts.get(index).copied().unwrap_or(0),
                 lookback_distance: block_index.saturating_sub(index) as u64,
             })
         })
@@ -350,7 +383,10 @@ fn source_name(source: V3PromptCacheBlockSource) -> &'static str {
 mod tests {
     use serde_json::json;
 
-    use crate::model_resolution::canonical_model_id;
+    use crate::{
+        model_resolution::canonical_model_id,
+        tokenizer::{reset_tokenizer_call_count, tokenizer_call_count},
+    };
 
     use super::{
         PromptCachePrefixChain, PromptCacheSimulatorKey, V3PromptCacheBlockSource,
@@ -449,6 +485,125 @@ mod tests {
             !lookback
                 .iter()
                 .any(|prefix| prefix.content_block_index == 0)
+        );
+    }
+
+    #[test]
+    fn structural_pass_zero_tokenizer_calls() {
+        let content = (0..32)
+            .map(|index| json!({"type":"text","text":format!("block-{index}")}))
+            .collect::<Vec<_>>();
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role":"user","content": content}]
+        });
+
+        reset_tokenizer_call_count();
+        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+
+        assert!(analysis.breakpoints.is_empty());
+        assert_eq!(tokenizer_call_count(), 0);
+    }
+
+    #[test]
+    fn explicit_breakpoint_tokenize_bounded() {
+        let content = (0..8)
+            .map(|index| {
+                if index == 2 || index == 7 {
+                    json!({"type":"text","text":format!("block-{index}"),"cache_control":{"type":"ephemeral"}})
+                } else {
+                    json!({"type":"text","text":format!("block-{index}")})
+                }
+            })
+            .collect::<Vec<_>>();
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role":"user","content": content}]
+        });
+
+        reset_tokenizer_call_count();
+        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+
+        assert_eq!(analysis.breakpoints.len(), 2);
+        assert_eq!(tokenizer_call_count(), 2);
+    }
+
+    #[test]
+    fn structural_windows_n_n19_hit_n20_miss() {
+        let content = (0..25)
+            .map(|index| {
+                if index == 24 {
+                    json!({"type":"text","text":format!("block-{index}"),"cache_control":{"type":"ephemeral"}})
+                } else {
+                    json!({"type":"text","text":format!("block-{index}")})
+                }
+            })
+            .collect::<Vec<_>>();
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role":"user","content": content}]
+        });
+
+        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+        let indices = analysis.breakpoints[0]
+            .lookback_prefixes
+            .iter()
+            .map(|prefix| prefix.content_block_index)
+            .collect::<Vec<_>>();
+
+        assert_eq!(indices, (5_u64..=24).rev().collect::<Vec<_>>());
+        assert!(!indices.contains(&4));
+    }
+
+    #[test]
+    fn duplicate_prefix_retains_all_memberships() {
+        let content = (0..8)
+            .map(|index| {
+                if index == 4 || index == 7 {
+                    json!({"type":"text","text":format!("block-{index}"),"cache_control":{"type":"ephemeral"}})
+                } else {
+                    json!({"type":"text","text":format!("block-{index}")})
+                }
+            })
+            .collect::<Vec<_>>();
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role":"user","content": content}]
+        });
+
+        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+
+        assert_eq!(analysis.breakpoints.len(), 2);
+        assert!(analysis.breakpoints.iter().all(|breakpoint| {
+            breakpoint
+                .lookback_prefixes
+                .iter()
+                .any(|prefix| prefix.content_block_index == 3)
+        }));
+    }
+
+    #[test]
+    fn cache_control_excluded_from_block_digest() {
+        let five_minute = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role":"user","content": [{
+                "type":"text","text":"stable","cache_control":{"type":"ephemeral"}
+            }]}]
+        });
+        let one_hour = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role":"user","content": [{
+                "type":"text","text":"stable","cache_control":{"type":"ephemeral","ttl":"1h"}
+            }]}]
+        });
+
+        let five_minute =
+            analyze_v3_prompt_cache(&five_minute, canonical_model_id("claude-sonnet-4-5"));
+        let one_hour = analyze_v3_prompt_cache(&one_hour, canonical_model_id("claude-sonnet-4-5"));
+
+        assert_eq!(
+            five_minute.breakpoints[0].prefix_key,
+            one_hour.breakpoints[0].prefix_key
         );
     }
 

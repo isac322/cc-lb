@@ -357,7 +357,6 @@ pub struct RequestCacheBreakpoint {
 pub struct RequestCacheLookbackPrefix {
     pub prefix_hash: String,
     pub content_block_index: u64,
-    pub prefix_token_count: u64,
     pub lookback_distance: u64,
 }
 
