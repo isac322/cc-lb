@@ -187,6 +187,10 @@ impl PromptCacheObservationCache {
                     expires_at_unix_secs: entry.expires_at_unix_secs,
                     ttl_class: entry.ttl_class,
                     last_observed_at_unix_secs: entry.last_observed_at_unix_secs,
+                    content_block_index: entry.prefix_content_block_index,
+                    estimated_prefix_tokens: entry.estimated_prefix_tokens,
+                    token_estimate_source: entry.token_estimate_source.clone(),
+                    hash_schema_version: HASH_SCHEMA_VERSION,
                 })
             })
             .collect();
@@ -197,6 +201,46 @@ impl PromptCacheObservationCache {
                 .cmp(&left.last_observed_at_unix_secs)
         });
         snapshot
+    }
+
+    pub fn lookup_warm_entry(
+        &self,
+        upstream_id: Uuid,
+        canonical_model: &str,
+        prefix_hash: &str,
+        eligible_ttls: &[TtlClass],
+        now_unix_secs: u64,
+    ) -> Option<WarmCacheEntry> {
+        let guard = self.entries.read();
+        let entries = guard.get(&upstream_id)?;
+        let mut best: Option<WarmCacheEntry> = None;
+        for ttl in eligible_ttls {
+            record_map_entry_inspected();
+            let key = (canonical_model.to_owned(), prefix_hash.to_owned(), *ttl);
+            let Some(entry) = entries.get(&key) else {
+                continue;
+            };
+            if entry.expires_at_unix_secs <= now_unix_secs {
+                continue;
+            }
+            let candidate = WarmCacheEntry {
+                prefix_hash: prefix_hash.to_owned(),
+                expires_at_unix_secs: entry.expires_at_unix_secs,
+                ttl_class: entry.ttl_class,
+                last_observed_at_unix_secs: entry.last_observed_at_unix_secs,
+                content_block_index: entry.prefix_content_block_index,
+                estimated_prefix_tokens: entry.estimated_prefix_tokens,
+                token_estimate_source: entry.token_estimate_source.clone(),
+                hash_schema_version: HASH_SCHEMA_VERSION,
+            };
+            best = match best {
+                Some(current) if current.expires_at_unix_secs >= candidate.expires_at_unix_secs => {
+                    Some(current)
+                }
+                _ => Some(candidate),
+            };
+        }
+        best
     }
 
     pub fn refresh_on_hit(
@@ -308,6 +352,25 @@ fn saturating_u64_to_u32(value: u64) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+#[cfg(test)]
+static MAP_ENTRIES_INSPECTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn map_entries_inspected_count() -> u64 {
+    MAP_ENTRIES_INSPECTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_map_entries_inspected() {
+    MAP_ENTRIES_INSPECTED.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[inline]
+fn record_map_entry_inspected() {
+    #[cfg(test)]
+    MAP_ENTRIES_INSPECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn ttl_class_from_storage(ttl_class: cc_lb_storage_api::TtlClass) -> TtlClass {
     match ttl_class {
         cc_lb_storage_api::TtlClass::Ephemeral5m => TtlClass::Ephemeral5m,
@@ -328,6 +391,24 @@ impl PromptCacheObservationCacheLike for PromptCacheObservationCache {
             upstream_id,
             canonical_model,
             request_breakpoint_hashes,
+            now_unix_secs,
+        )
+    }
+
+    fn lookup_warm_entry(
+        &self,
+        upstream_id: Uuid,
+        canonical_model: &str,
+        prefix_hash: &str,
+        eligible_ttls: &[TtlClass],
+        now_unix_secs: u64,
+    ) -> Option<WarmCacheEntry> {
+        Self::lookup_warm_entry(
+            self,
+            upstream_id,
+            canonical_model,
+            prefix_hash,
+            eligible_ttls,
             now_unix_secs,
         )
     }
@@ -463,6 +544,181 @@ pub(crate) mod tests {
             estimated_prefix_tokens: 0,
             token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
         });
+    }
+
+    #[test]
+    fn lookup_warm_entry_hit_at_window_head_and_tail() {
+        let cache = test_cache();
+        let upstream = Uuid::new_v4();
+        let now = base_now();
+        upsert(
+            &cache,
+            upstream,
+            "head",
+            TtlClass::Ephemeral5m,
+            now + 300,
+            now,
+        );
+        upsert(
+            &cache,
+            upstream,
+            "tail",
+            TtlClass::Ephemeral1h,
+            now + 3600,
+            now,
+        );
+        let head = cache.lookup_warm_entry(
+            upstream,
+            MODEL,
+            "head",
+            &[TtlClass::Ephemeral5m, TtlClass::Ephemeral1h],
+            now,
+        );
+        assert_eq!(head.map(|entry| entry.prefix_hash), Some("head".to_owned()));
+        let tail = cache.lookup_warm_entry(upstream, MODEL, "tail", &[TtlClass::Ephemeral1h], now);
+        assert_eq!(tail.map(|entry| entry.prefix_hash), Some("tail".to_owned()));
+        assert!(
+            cache
+                .lookup_warm_entry(
+                    upstream,
+                    MODEL,
+                    "absent",
+                    &[TtlClass::Ephemeral5m, TtlClass::Ephemeral1h],
+                    now,
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lookup_warm_entry_ineligible_ttl_returns_none() {
+        let cache = test_cache();
+        let upstream = Uuid::new_v4();
+        let now = base_now();
+        upsert(
+            &cache,
+            upstream,
+            "k5m",
+            TtlClass::Ephemeral5m,
+            now + 300,
+            now,
+        );
+        assert!(
+            cache
+                .lookup_warm_entry(upstream, MODEL, "k5m", &[TtlClass::Ephemeral1h], now)
+                .is_none()
+        );
+        upsert(
+            &cache,
+            upstream,
+            "k1h",
+            TtlClass::Ephemeral1h,
+            now + 3600,
+            now,
+        );
+        let hit = cache.lookup_warm_entry(
+            upstream,
+            MODEL,
+            "k1h",
+            &[TtlClass::Ephemeral5m, TtlClass::Ephemeral1h],
+            now,
+        );
+        assert_eq!(
+            hit.map(|entry| entry.ttl_class),
+            Some(TtlClass::Ephemeral1h)
+        );
+    }
+
+    #[test]
+    fn same_key_greatest_expiry_eligible() {
+        let cache = test_cache();
+        let upstream = Uuid::new_v4();
+        let now = base_now();
+        upsert(
+            &cache,
+            upstream,
+            "shared",
+            TtlClass::Ephemeral5m,
+            now + 9000,
+            now,
+        );
+        upsert(
+            &cache,
+            upstream,
+            "shared",
+            TtlClass::Ephemeral1h,
+            now + 3600,
+            now,
+        );
+        let for_1h = cache
+            .lookup_warm_entry(upstream, MODEL, "shared", &[TtlClass::Ephemeral1h], now)
+            .expect("1h entry");
+        assert_eq!(for_1h.ttl_class, TtlClass::Ephemeral1h);
+        assert_eq!(for_1h.expires_at_unix_secs, now + 3600);
+        let for_5m = cache
+            .lookup_warm_entry(
+                upstream,
+                MODEL,
+                "shared",
+                &[TtlClass::Ephemeral5m, TtlClass::Ephemeral1h],
+                now,
+            )
+            .expect("either entry");
+        assert_eq!(for_5m.expires_at_unix_secs, now + 9000);
+    }
+
+    #[test]
+    fn lookup_warm_entry_expired_returns_none() {
+        let cache = test_cache();
+        let upstream = Uuid::new_v4();
+        let now = base_now();
+        upsert(&cache, upstream, "old", TtlClass::Ephemeral5m, now, now);
+        assert!(
+            cache
+                .lookup_warm_entry(
+                    upstream,
+                    MODEL,
+                    "old",
+                    &[TtlClass::Ephemeral5m, TtlClass::Ephemeral1h],
+                    now,
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lookup_warm_entry_inspects_bounded_entries() {
+        let cache = test_cache();
+        let upstream = Uuid::new_v4();
+        let now = base_now();
+        for index in 0..1000 {
+            upsert(
+                &cache,
+                upstream,
+                &format!("noise-{index}"),
+                TtlClass::Ephemeral5m,
+                now + 300,
+                now,
+            );
+        }
+        upsert(
+            &cache,
+            upstream,
+            "target",
+            TtlClass::Ephemeral5m,
+            now + 300,
+            now,
+        );
+        reset_map_entries_inspected();
+        let hit = cache.lookup_warm_entry(
+            upstream,
+            MODEL,
+            "target",
+            &[TtlClass::Ephemeral5m, TtlClass::Ephemeral1h],
+            now,
+        );
+        assert!(hit.is_some());
+        assert!(map_entries_inspected_count() <= 2);
     }
 
     #[derive(Clone, Default)]

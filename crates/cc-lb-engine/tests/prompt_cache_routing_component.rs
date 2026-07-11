@@ -46,6 +46,10 @@ fn built_candidate_cache_score_drives_subscription_preference_component_route() 
             expires_at_unix_secs: TEST_QUOTA_NOW_SECS + 300,
             ttl_class: TtlClass::Ephemeral5m,
             last_observed_at_unix_secs: TEST_QUOTA_NOW_SECS,
+            content_block_index: 0,
+            estimated_prefix_tokens: 0,
+            token_estimate_source: "local_tiktoken_v1".to_owned(),
+            hash_schema_version: 4,
         }],
     )]));
     let view = test_view(prompt_cache, owner_id, quota_peer_id);
@@ -152,6 +156,10 @@ fn moved_cache_control_keeps_warm_upstream_routed_by_cache_hash() {
             expires_at_unix_secs: TEST_QUOTA_NOW_SECS + 300,
             ttl_class: TtlClass::Ephemeral5m,
             last_observed_at_unix_secs: TEST_QUOTA_NOW_SECS,
+            content_block_index: 0,
+            estimated_prefix_tokens: 0,
+            token_estimate_source: "local_tiktoken_v1".to_owned(),
+            hash_schema_version: 4,
         }],
     )]));
     let view = test_view(prompt_cache, owner_id, quota_peer_id);

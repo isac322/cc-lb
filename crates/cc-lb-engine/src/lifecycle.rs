@@ -143,8 +143,6 @@ pub fn build_candidates(
         let rate_limit_cache = view.upstream_rate_limit_cache.read();
         let now_unix_millis = unix_now_ms(clock);
         let prompt_cache = view.prompt_cache_observation_cache_opt();
-        let request_breakpoint_hashes_with_ttl =
-            request_lookback_hashes_with_ttl(request_breakpoints);
         view.upstreams_snapshot()
             .iter()
             .filter(|upstream| upstream.enabled)
@@ -166,13 +164,14 @@ pub fn build_candidates(
                 };
                 let cache_score = prompt_cache.and_then(|cache| {
                     let now_unix_secs = cache.clock_now_unix_secs();
-                    let warm_entries = cache.snapshot_for_upstream(
+                    let matched = resolve_longest_warm_match(
+                        cache.as_ref(),
                         upstream.id,
                         canonical_model,
-                        &request_breakpoint_hashes_with_ttl,
+                        request_breakpoints,
                         now_unix_secs,
                     );
-                    build_cache_score(request_breakpoints, &warm_entries)
+                    build_cache_score(request_breakpoints, matched.as_slice())
                 });
                 let plan_info = view.plan_info_by_upstream.get(&upstream.id);
                 UpstreamCandidate {
@@ -286,18 +285,48 @@ fn build_cache_score(
     })
 }
 
-fn request_lookback_hashes_with_ttl(
+fn eligible_ttls(requested: TtlClass) -> Vec<TtlClass> {
+    match requested {
+        TtlClass::Ephemeral5m => vec![TtlClass::Ephemeral5m, TtlClass::Ephemeral1h],
+        TtlClass::Ephemeral1h => vec![TtlClass::Ephemeral1h],
+    }
+}
+
+fn resolve_longest_warm_match(
+    cache: &dyn PromptCacheObservationCacheLike,
+    upstream_id: Uuid,
+    canonical_model: &str,
     request_breakpoints: &[CacheBreakpoint],
-) -> Vec<(String, TtlClass)> {
-    request_breakpoints
+    now_unix_secs: u64,
+) -> Option<WarmCacheEntry> {
+    let mut candidates: Vec<_> = request_breakpoints
         .iter()
         .flat_map(|breakpoint| {
             breakpoint
                 .lookback_prefixes
                 .iter()
-                .map(move |prefix| (prefix.prefix_hash.clone(), breakpoint.requested_ttl))
+                .map(move |prefix| (breakpoint, prefix))
         })
-        .collect()
+        .collect();
+    candidates.sort_by(|(_, left), (_, right)| {
+        right
+            .content_block_index
+            .cmp(&left.content_block_index)
+            .then_with(|| left.lookback_distance.cmp(&right.lookback_distance))
+    });
+    for (breakpoint, prefix) in candidates {
+        let eligible = eligible_ttls(breakpoint.requested_ttl);
+        if let Some(entry) = cache.lookup_warm_entry(
+            upstream_id,
+            canonical_model,
+            &prefix.prefix_hash,
+            &eligible,
+            now_unix_secs,
+        ) {
+            return Some(entry);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -412,6 +441,10 @@ mod cache_score_tests {
             expires_at_unix_secs: 1_700_000_300,
             ttl_class,
             last_observed_at_unix_secs: 1_700_000_000,
+            content_block_index: 0,
+            estimated_prefix_tokens: 0,
+            token_estimate_source: "local_tiktoken_v1".to_owned(),
+            hash_schema_version: 4,
         }
     }
 }
@@ -4550,6 +4583,10 @@ mod tests {
                 expires_at_unix_secs: 4_100_000_300,
                 ttl_class: TtlClass::Ephemeral5m,
                 last_observed_at_unix_secs: 1_700_000_100 + u64::from(50 - index),
+                content_block_index: index,
+                estimated_prefix_tokens: u64::from(index + 1),
+                token_estimate_source: "local_tiktoken_v1".to_owned(),
+                hash_schema_version: 4,
             })
             .collect::<Vec<_>>();
         let cache = TestPromptCacheObservationCache::new(TEST_MODEL)
@@ -5370,6 +5407,10 @@ mod tests {
             expires_at_unix_secs,
             ttl_class,
             last_observed_at_unix_secs: 1_700_000_000 + observed_offset,
+            content_block_index: 0,
+            estimated_prefix_tokens: 0,
+            token_estimate_source: "local_tiktoken_v1".to_owned(),
+            hash_schema_version: 4,
         }
     }
 

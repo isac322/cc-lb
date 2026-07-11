@@ -925,6 +925,10 @@ mod tests {
                             expires_at_unix_secs,
                             ttl_class: *ttl_class,
                             last_observed_at_unix_secs: now_unix_secs,
+                            content_block_index: 0,
+                            estimated_prefix_tokens: 0,
+                            token_estimate_source: "local_tiktoken_v1".to_owned(),
+                            hash_schema_version: 4,
                         })
                 })
                 .collect()

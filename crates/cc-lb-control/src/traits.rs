@@ -85,6 +85,26 @@ pub trait PromptCacheObservationCacheLike: Send + Sync {
     fn grace_margin_secs(&self) -> u64;
 
     fn clock_now_unix_secs(&self) -> u64;
+
+    fn lookup_warm_entry(
+        &self,
+        upstream_id: Uuid,
+        canonical_model: &str,
+        prefix_hash: &str,
+        eligible_ttls: &[TtlClass],
+        now_unix_secs: u64,
+    ) -> Option<WarmCacheEntry> {
+        let requested: Vec<(String, TtlClass)> = eligible_ttls
+            .iter()
+            .map(|ttl| (prefix_hash.to_owned(), *ttl))
+            .collect();
+        self.snapshot_for_upstream(upstream_id, canonical_model, &requested, now_unix_secs)
+            .into_iter()
+            .filter(|entry| {
+                entry.prefix_hash == prefix_hash && eligible_ttls.contains(&entry.ttl_class)
+            })
+            .max_by_key(|entry| entry.expires_at_unix_secs)
+    }
 }
 
 pub trait PromptCacheObservationSinkLike: Send + Sync {
