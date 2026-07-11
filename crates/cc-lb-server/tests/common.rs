@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle as ThreadJoinHandle;
 
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate,
-    UpstreamStore,
+    BUILTIN_CACHE_AFFINITY_ID, BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore,
+    PluginSlot, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore,
     principal::Limit,
     types::{PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
 };
@@ -99,6 +99,12 @@ pub struct TestServer {
     pub _process: TestProcess,
 }
 
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self._fake.abort();
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ManagedTestKey {
     pub key_id: String,
@@ -115,6 +121,7 @@ pub async fn spawn_test_server_with_extra_config(extra_toml: &str) -> TestServer
         AppConfig::default(),
         AuthConfig::NoneMode,
         Vec::new(),
+        TestTopology::Single,
     )
     .await
 }
@@ -123,7 +130,28 @@ pub async fn spawn_test_server_with_fake_config(
     extra_toml: &str,
     fake_config: AppConfig,
 ) -> TestServer {
-    spawn_test_server_with_options(extra_toml, fake_config, AuthConfig::NoneMode, Vec::new()).await
+    spawn_test_server_with_options(
+        extra_toml,
+        fake_config,
+        AuthConfig::NoneMode,
+        Vec::new(),
+        TestTopology::Single,
+    )
+    .await
+}
+
+pub async fn spawn_test_server_with_two_upstreams(
+    extra_toml: &str,
+    fake_config: AppConfig,
+) -> TestServer {
+    spawn_test_server_with_options(
+        extra_toml,
+        fake_config,
+        AuthConfig::NoneMode,
+        Vec::new(),
+        TestTopology::CacheAffinityPair,
+    )
+    .await
 }
 
 pub async fn spawn_test_server_with_apikey_mode(
@@ -136,6 +164,7 @@ pub async fn spawn_test_server_with_apikey_mode(
         fake_config,
         AuthConfig::ApiKey,
         principal_limits,
+        TestTopology::Single,
     )
     .await
 }
@@ -143,6 +172,28 @@ pub async fn spawn_test_server_with_apikey_mode(
 enum AuthConfig {
     NoneMode,
     ApiKey,
+}
+
+#[derive(Clone, Copy)]
+enum TestTopology {
+    Single,
+    CacheAffinityPair,
+}
+
+impl TestTopology {
+    fn upstream_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Single => &["fake_anthropic"],
+            Self::CacheAffinityPair => &["fake_anthropic", "fake_anthropic_secondary"],
+        }
+    }
+
+    fn messages_cap_bytes(self) -> u64 {
+        match self {
+            Self::Single => 256,
+            Self::CacheAffinityPair => 131_072,
+        }
+    }
 }
 
 struct SpawnedTestServer {
@@ -167,6 +218,7 @@ async fn spawn_test_server_with_options(
     fake_config: AppConfig,
     auth_config: AuthConfig,
     principal_limits: Vec<Limit>,
+    topology: TestTopology,
 ) -> TestServer {
     let fake_listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -183,6 +235,7 @@ async fn spawn_test_server_with_options(
             fake_addr,
             &auth_config,
             principal_limits.clone(),
+            topology,
         )
         .await
         {
@@ -216,6 +269,7 @@ async fn spawn_test_server_attempt(
     fake_addr: SocketAddr,
     auth_config: &AuthConfig,
     principal_limits: Vec<Limit>,
+    topology: TestTopology,
 ) -> Result<SpawnedTestServer, StartupFailure> {
     let proxy_listener = reserve_addr();
     let admin_listener = reserve_addr();
@@ -233,8 +287,16 @@ async fn spawn_test_server_attempt(
         metrics_addr,
         extra_toml,
         auth_config,
+        topology.messages_cap_bytes(),
     );
-    let managed_key = seed_storage(&sqlite_path, fake_addr, auth_config, principal_limits).await;
+    let managed_key = seed_storage(
+        &sqlite_path,
+        fake_addr,
+        auth_config,
+        principal_limits,
+        topology,
+    )
+    .await;
 
     drop((proxy_listener, admin_listener, metrics_listener));
 
@@ -276,6 +338,7 @@ fn write_config(
         metrics_addr,
         "",
         &AuthConfig::NoneMode,
+        256,
     )
 }
 
@@ -286,6 +349,7 @@ fn write_config_with_extra(
     metrics_addr: SocketAddr,
     extra_toml: &str,
     auth_config: &AuthConfig,
+    messages_cap_bytes: u64,
 ) {
     let storage_path = path.with_file_name("cc-lb.sqlite");
     let data_dir = path.parent().expect("config path has parent");
@@ -323,7 +387,7 @@ admin_addr = "{admin_addr}"
 metrics_addr = "{metrics_addr}"
 
 [body]
-messages_cap_bytes = 256
+messages_cap_bytes = {messages_cap_bytes}
 files_cap_bytes = 1048576
 
 [timeouts]
@@ -378,6 +442,7 @@ async fn seed_storage(
     upstream_addr: SocketAddr,
     auth_config: &AuthConfig,
     principal_limits: Vec<Limit>,
+    topology: TestTopology,
 ) -> Option<ManagedTestKey> {
     let database_url = format!("sqlite://{}", storage_path.display());
     let storage = std::sync::Arc::new(
@@ -392,23 +457,26 @@ async fn seed_storage(
         .initialize(BackendKind::Sqlite)
         .await
         .expect("test storage initializes");
-    UpstreamStore::create(
-        storage.as_ref(),
-        UpstreamCreate {
-            name: "fake_anthropic".to_owned(),
-            kind: UpstreamKind::AnthropicApiKey,
-            base_url: Some(
-                Url::parse(&format!("http://{upstream_addr}")).expect("fake upstream URL parses"),
-            ),
-            api_key_ciphertext: Some(vec![0; 32]),
-            oauth_token_generation: None,
-            warmup_enabled: false,
-            warmup_dialect_plugin: None,
-        },
-    )
-    .await
-    .expect("seed upstream");
-    PrincipalStore::create(
+    for name in topology.upstream_names() {
+        UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                name: (*name).to_owned(),
+                kind: UpstreamKind::AnthropicApiKey,
+                base_url: Some(
+                    Url::parse(&format!("http://{upstream_addr}"))
+                        .expect("fake upstream URL parses"),
+                ),
+                api_key_ciphertext: Some(vec![0; 32]),
+                oauth_token_generation: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+            },
+        )
+        .await
+        .expect("seed upstream");
+    }
+    let principal = PrincipalStore::create(
         storage.as_ref(),
         PrincipalCreate {
             name: "api-key".to_owned(),
@@ -422,6 +490,23 @@ async fn seed_storage(
     )
     .await
     .expect("seed principal");
+    if matches!(topology, TestTopology::CacheAffinityPair) {
+        PluginRegistryStore::insert_chain_entry(
+            storage.as_ref(),
+            PluginChainEntryInput {
+                principal_id: principal.id,
+                slot: PluginSlot::Router,
+                order: 1_000,
+                wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID,
+                config: serde_json::json!({}),
+                sse_per_event: false,
+                batched_events_per_flush: 1,
+                batched_flush_ms: 100,
+            },
+        )
+        .await
+        .expect("seed cache-affinity router filter");
+    }
     match auth_config {
         AuthConfig::NoneMode => None,
         AuthConfig::ApiKey => {
