@@ -559,7 +559,7 @@ async fn write_finalized_rows(
             } else {
                 "written"
             };
-            metrics::counter!("cc_lb_contract_assembler_rows_total", "outcome" => outcome)
+            metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => outcome)
                 .increment(1);
         }
         Err(error) => {
@@ -596,7 +596,7 @@ async fn flush_expired_terminations(
                 .as_ref()
                 .expect("expired implies termination present");
             metrics::counter!(
-                "cc_lb_contract_assembler_rows_total",
+                "cc_lb_lifecycle_assembler_rows_total",
                 "outcome" => "written_after_grace"
             )
             .increment(1);
@@ -677,7 +677,7 @@ async fn handle_event(
         let is_orphan = existing.is_none();
         if is_orphan {
             metrics::counter!(
-                "cc_lb_contract_assembler_rows_total",
+                "cc_lb_lifecycle_assembler_rows_total",
                 "outcome" => "terminated_without_partial"
             )
             .increment(1);
@@ -1174,7 +1174,7 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
         metrics::counter!(
-            "cc_lb_contract_assembler_rows_total",
+            "cc_lb_lifecycle_assembler_rows_total",
             "outcome" => "orphan_ttl_evicted"
         )
         .increment(removed as u64);
@@ -1191,7 +1191,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     };
     partials.remove(&oldest_key);
     metrics::counter!(
-        "cc_lb_contract_assembler_rows_total",
+        "cc_lb_lifecycle_assembler_rows_total",
         "outcome" => "cap_evicted"
     )
     .increment(1);
@@ -1601,7 +1601,7 @@ mod tests {
     async fn request_terminated_before_started_writes_orphan_and_increments_metric() {
         let recorder = install_counting_recorder();
         let before = recorder.count_matching(
-            "cc_lb_contract_assembler_rows_total",
+            "cc_lb_lifecycle_assembler_rows_total",
             "terminated_without_partial",
         );
         let (tx, rx) = mpsc::channel(16);
@@ -1644,7 +1644,7 @@ mod tests {
         );
         assert!(
             recorder.count_matching(
-                "cc_lb_contract_assembler_rows_total",
+                "cc_lb_lifecycle_assembler_rows_total",
                 "terminated_without_partial",
             ) > before
         );

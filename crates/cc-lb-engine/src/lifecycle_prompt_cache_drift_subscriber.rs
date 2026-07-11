@@ -150,7 +150,7 @@ fn handle_event(
             emit_metrics(metrics, &partial, status, prompt_cache_shadow_enabled);
         } else {
             metrics::counter!(
-                "cc_lb_contract_prompt_cache_drift_events_total",
+                "cc_lb_lifecycle_prompt_cache_drift_events_total",
                 "outcome" => "terminated_without_partial"
             )
             .increment(1);
@@ -238,7 +238,7 @@ fn emit_metrics(
     )
     .record(f64::from(drift));
     metrics::counter!(
-        "cc_lb_contract_prompt_cache_drift_events_total",
+        "cc_lb_lifecycle_prompt_cache_drift_events_total",
         "outcome" => "observed"
     )
     .increment(1);
@@ -251,7 +251,7 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
         metrics::counter!(
-            "cc_lb_contract_prompt_cache_drift_events_total",
+            "cc_lb_lifecycle_prompt_cache_drift_events_total",
             "outcome" => "orphan_ttl_evicted"
         )
         .increment(removed as u64);
@@ -268,7 +268,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     };
     partials.remove(&oldest_key);
     metrics::counter!(
-        "cc_lb_contract_prompt_cache_drift_events_total",
+        "cc_lb_lifecycle_prompt_cache_drift_events_total",
         "outcome" => "cap_evicted"
     )
     .increment(1);

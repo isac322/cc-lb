@@ -156,7 +156,7 @@ This metric counts routing decisions won by each upstream in each subscription-p
 - `upstream` matches the upstream name (same convention as `cc_lb_requests_total` / `cc_lb_cache_hit_total`), NOT the UUID.
 - `principal_id` is the UUID string (same convention as `cclb_api_key_requests_total`).
 
-Bookkeeping counter `cc_lb_contract_routing_tier_events_total{outcome=emitted|missing_principal_id|orphan_ttl_evicted|cap_evicted}` tracks subscriber-side health without contaminating the main tier signal.
+Bookkeeping counter `cc_lb_lifecycle_routing_tier_events_total{outcome=emitted|missing_principal_id|orphan_ttl_evicted|cap_evicted}` tracks subscriber-side health without contaminating the main tier signal.
 
 ### Typical PromQL Query
 

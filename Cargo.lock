@@ -716,10 +716,10 @@ dependencies = [
  "cc-lb-aead",
  "cc-lb-clock",
  "cc-lb-config",
- "cc-lb-contract",
  "cc-lb-control",
  "cc-lb-domain",
  "cc-lb-engine",
+ "cc-lb-lifecycle",
  "cc-lb-oauth-protocol",
  "cc-lb-observability",
  "cc-lb-plugin-api",
@@ -807,21 +807,6 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "url",
-]
-
-[[package]]
-name = "cc-lb-contract"
-version = "0.1.0"
-dependencies = [
- "cc-lb-control",
- "cc-lb-domain",
- "cc-lb-lifecycle",
- "cc-lb-observability",
- "cc-lb-plugin-api",
- "cc-lb-request-log",
- "cc-lb-storage-api",
- "serde_json",
- "tokio",
 ]
 
 [[package]]

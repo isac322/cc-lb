@@ -209,7 +209,7 @@ pub async fn handle_events_stream(
 }
 
 // `Update` holds an inline `RequestEventUpdate` for the same reason the enum
-// itself keeps its payload inline (see `RequestEventUpdate` in cc-lb-contract):
+// itself keeps its payload inline (see `RequestEventUpdate` in cc-lb-request-log):
 // this value is stack-only per recv, boxing would trade an alloc-per-message
 // for no memory ceiling win.
 #[allow(clippy::large_enum_variant)]

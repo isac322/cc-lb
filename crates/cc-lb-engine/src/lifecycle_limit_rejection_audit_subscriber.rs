@@ -78,7 +78,7 @@ fn handle_event(audit_sink: &AuditWriterSink, event: LifecycleEvent) {
 
     let Some(violation) = limit_violation else {
         metrics::counter!(
-            "cc_lb_contract_limit_rejection_audit_events_total",
+            "cc_lb_lifecycle_limit_rejection_audit_events_total",
             "outcome" => "skipped_no_violation"
         )
         .increment(1);
@@ -86,7 +86,7 @@ fn handle_event(audit_sink: &AuditWriterSink, event: LifecycleEvent) {
     };
     let Some(subject) = subject else {
         metrics::counter!(
-            "cc_lb_contract_limit_rejection_audit_events_total",
+            "cc_lb_lifecycle_limit_rejection_audit_events_total",
             "outcome" => "skipped_no_subject"
         )
         .increment(1);
@@ -139,14 +139,14 @@ fn handle_event(audit_sink: &AuditWriterSink, event: LifecycleEvent) {
     match audit_sink.try_enqueue(entry) {
         Ok(()) => {
             metrics::counter!(
-                "cc_lb_contract_limit_rejection_audit_events_total",
+                "cc_lb_lifecycle_limit_rejection_audit_events_total",
                 "outcome" => "enqueued"
             )
             .increment(1);
         }
         Err(_) => {
             metrics::counter!(
-                "cc_lb_contract_limit_rejection_audit_events_total",
+                "cc_lb_lifecycle_limit_rejection_audit_events_total",
                 "outcome" => "dropped"
             )
             .increment(1);

@@ -152,7 +152,7 @@ fn emit_metric(
 ) {
     let Some(principal_id) = principal_id else {
         metrics::counter!(
-            "cc_lb_contract_routing_tier_events_total",
+            "cc_lb_lifecycle_routing_tier_events_total",
             "outcome" => "missing_principal_id"
         )
         .increment(1);
@@ -161,7 +161,7 @@ fn emit_metric(
 
     metrics.record_routing_tier_selection(tier, upstream_name, principal_id);
     metrics::counter!(
-        "cc_lb_contract_routing_tier_events_total",
+        "cc_lb_lifecycle_routing_tier_events_total",
         "outcome" => "emitted"
     )
     .increment(1);
@@ -183,7 +183,7 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
         metrics::counter!(
-            "cc_lb_contract_routing_tier_events_total",
+            "cc_lb_lifecycle_routing_tier_events_total",
             "outcome" => "orphan_ttl_evicted"
         )
         .increment(removed as u64);
@@ -200,7 +200,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     };
     partials.remove(&oldest_key);
     metrics::counter!(
-        "cc_lb_contract_routing_tier_events_total",
+        "cc_lb_lifecycle_routing_tier_events_total",
         "outcome" => "cap_evicted"
     )
     .increment(1);

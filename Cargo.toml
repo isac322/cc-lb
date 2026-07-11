@@ -36,8 +36,7 @@ cc-lb-routing = { path = "crates/cc-lb-routing", version = "0.1.0" }
 cc-lb-upstream = { path = "crates/cc-lb-upstream", version = "0.1.0" }
 cc-lb-plugin-api = { version = "0.13", path = "crates/cc-lb-plugin-api" }
 
-# Internal, unpublished — RFC-0002 event-driven lifecycle vocabulary.
-cc-lb-contract = { path = "crates/cc-lb-contract", version = "0.1.0" }
+# Internal, unpublished — RFC-0002 lifecycle transport.
 cc-lb-control = { path = "crates/cc-lb-control", version = "0.1.0" }
 
 cc-lb-runtime-wasmtime    = { path = "crates/cc-lb-runtime-wasmtime", version = "0.1.2" }
