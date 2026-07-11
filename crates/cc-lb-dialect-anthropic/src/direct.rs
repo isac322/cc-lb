@@ -1,6 +1,6 @@
+use cc_lb_domain::{Principal, Upstream};
 use cc_lb_plugin_api::{
-    DialectError, Principal, RequestContext, ShapedRequest, ShapedRequestBuilder, Upstream,
-    UpstreamDialect,
+    DialectError, RequestContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
 };
 use url::Url;
 

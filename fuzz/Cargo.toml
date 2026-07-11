@@ -8,6 +8,7 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
+cc-lb-domain = { path = "../crates/cc-lb-domain" }
 axum = "0.8"
 bytes = "1"
 cc-lb-engine = { path = "../crates/cc-lb-engine" }

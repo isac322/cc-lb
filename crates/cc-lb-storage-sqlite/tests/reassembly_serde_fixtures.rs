@@ -1,12 +1,11 @@
 use std::{fs, path::Path, sync::Arc};
 
-use cc_lb_plugin_api::{
-    InternalError, InternalErrorKind, InternalErrorStage, PluginSlot, RoutingTrace,
-    SubscriptionPreferenceTrace, SubscriptionTier, TerminalStrategy,
-    types::{
-        CacheAffinityCandidate, CacheAffinityTrace, StageDecision, TerminalDecision, WrhKeySource,
-    },
+use cc_lb_domain::{
+    CacheAffinityCandidate, CacheAffinityTrace, InternalError, InternalErrorKind,
+    InternalErrorStage, RoutingTrace, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
+    TerminalDecision, TerminalStrategy, WrhKeySource,
 };
+use cc_lb_plugin_api::PluginSlot;
 use cc_lb_storage_api::{BackendKind, KeyStatus, MetaStore, RequestEvent, RequestEventStore};
 use sqlx::Row;
 use uuid::Uuid;

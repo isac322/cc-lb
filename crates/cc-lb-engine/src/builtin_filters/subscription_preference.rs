@@ -36,12 +36,12 @@
 //! - Stale + `rejected` + future reset: hard negative (rejection still live).
 //! - Stale + `rejected` + past reset: unknown (rejection expired).
 
-use cc_lb_plugin_api::types::{CachePricingSummary, WrhKeySource};
-use cc_lb_plugin_api::{
-    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, FilterError,
-    FilterOutput, FilterPlugin, Principal, RequestContext, SubscriptionQuotaCandidateSnapshot,
-    SubscriptionQuotaDataState, UpstreamCandidate, UpstreamKind,
+use cc_lb_domain::{
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, CachePricingSummary,
+    Principal, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, UpstreamCandidate,
+    UpstreamKind, WrhKeySource,
 };
+use cc_lb_plugin_api::{FilterError, FilterOutput, FilterPlugin, RequestContext};
 use std::cmp::Ordering;
 use uuid::Uuid;
 
@@ -255,7 +255,7 @@ fn evaluate(
         }
     }
 
-    let all_assessments: Vec<cc_lb_plugin_api::CandidateUrgency> = buckets
+    let all_assessments: Vec<cc_lb_domain::CandidateUrgency> = buckets
         .iter()
         .flat_map(|bucket| {
             let max_cache_value_micros =
@@ -278,7 +278,7 @@ fn evaluate(
                     estimate_candidate_input_cost_micros(a.candidate, &ctx.cache_pricing)
                         .unwrap_or(0);
                 let cache_savings_ratio = cache_read_savings_ratio(a.candidate, &ctx.cache_pricing);
-                cc_lb_plugin_api::CandidateUrgency {
+                cc_lb_domain::CandidateUrgency {
                     upstream_id: a.candidate.upstream_id,
                     tier: tier_to_plugin_api(a.tier),
                     urgency: effective_weight,
@@ -351,7 +351,7 @@ fn evaluate(
         let chosen_tier = tier_to_plugin_api(formula_winner.tier);
         let kept_upstream_id = formula_winner.candidate.upstream_id;
 
-        let trace = cc_lb_plugin_api::SubscriptionPreferenceTrace {
+        let trace = cc_lb_domain::SubscriptionPreferenceTrace {
             chosen_tier,
             candidates: all_assessments,
             wrh_key_source,
@@ -440,12 +440,12 @@ const fn rendezvous_salt_for_tier(tier: Tier, current_salt: &'static str) -> &'s
     }
 }
 
-fn tier_to_plugin_api(tier: Tier) -> cc_lb_plugin_api::SubscriptionTier {
+fn tier_to_plugin_api(tier: Tier) -> cc_lb_domain::SubscriptionTier {
     match tier {
-        Tier::KnownBase => cc_lb_plugin_api::SubscriptionTier::KnownBase,
-        Tier::PartialBase => cc_lb_plugin_api::SubscriptionTier::PartialBase,
-        Tier::Overage => cc_lb_plugin_api::SubscriptionTier::Overage,
-        Tier::UnknownProbe => cc_lb_plugin_api::SubscriptionTier::UnknownProbe,
+        Tier::KnownBase => cc_lb_domain::SubscriptionTier::KnownBase,
+        Tier::PartialBase => cc_lb_domain::SubscriptionTier::PartialBase,
+        Tier::Overage => cc_lb_domain::SubscriptionTier::Overage,
+        Tier::UnknownProbe => cc_lb_domain::SubscriptionTier::UnknownProbe,
     }
 }
 

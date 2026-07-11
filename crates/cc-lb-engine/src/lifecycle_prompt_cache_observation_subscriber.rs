@@ -13,8 +13,7 @@ use cc_lb_contract::{
     EngineMetricsHook, LifecycleEvent, PromptCacheObservationKindWire, PromptCacheObservationWire,
 };
 use cc_lb_observability::cache_observation_dropped_reason;
-use cc_lb_plugin_api::types::TtlClass;
-use cc_lb_storage_api::{PromptCacheObservationRecord, TtlClass as StorageTtlClass};
+use cc_lb_storage_api::PromptCacheObservationRecord;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -179,7 +178,7 @@ fn enqueue_observation(
         upstream_id,
         canonical_model_id: canonical_model_id.to_owned(),
         v3_prefix_key: observation.prefix_hash.clone(),
-        ttl_class: ttl_to_storage(observation.ttl_class),
+        ttl_class: observation.ttl_class,
         expires_at_unix_secs: observation.expires_at_unix_secs,
         last_observed_at_unix_secs: now_unix_secs,
         hash_schema_version: HASH_SCHEMA_VERSION,
@@ -202,13 +201,6 @@ fn enqueue_observation(
     }
 }
 
-fn ttl_to_storage(t: TtlClass) -> StorageTtlClass {
-    match t {
-        TtlClass::Ephemeral5m => StorageTtlClass::Ephemeral5m,
-        TtlClass::Ephemeral1h => StorageTtlClass::Ephemeral1h,
-    }
-}
-
 fn increment_drop_metric(metrics: &dyn EngineMetricsHook, reason: &'static str, count: u32) {
     for _ in 0..count {
         metrics.record_cache_observation_dropped(reason);
@@ -221,7 +213,7 @@ mod tests {
     use std::sync::Mutex;
 
     use cc_lb_contract::{EngineMetricsHook, EventId, NoopMetricsHook};
-    use cc_lb_plugin_api::types::WarmCacheEntry;
+    use cc_lb_domain::WarmCacheEntry;
 
     use super::*;
 

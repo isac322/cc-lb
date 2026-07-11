@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 /// Pro-plan baseline. All other ratios are expressed relative to this value.
 pub const PRO_CAPACITY_RATIO: f64 = 1.0;
 
-pub use cc_lb_control::dynamic_view::PlanInfo;
+pub use cc_lb_domain::PlanInfo;
 
 /// Canonical plan tier. This is the typed key used by the DB ratio catalog
 /// (`plan_tier_ratio_history_v1.tier_key`) and the tier-mapping override table.

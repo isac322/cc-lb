@@ -838,7 +838,7 @@ async fn build_app_with_storage_inner(
 
     let replica_identity = {
         match replica::load_or_create_replica_id(&data_dir) {
-            Ok(id) => Some(cc_lb_contract::ReplicaIdentity { id }),
+            Ok(id) => Some(cc_lb_domain::ReplicaIdentity { id }),
             Err(e) => {
                 tracing::warn!(error = %e, "failed to load or create replica ID; proceeding without it");
                 None

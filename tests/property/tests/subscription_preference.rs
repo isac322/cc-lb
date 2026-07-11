@@ -368,7 +368,7 @@ fn make_context(request_id: &str, model: &str) -> RequestContext {
         body_bytes: Bytes::new(),
         cache_breakpoints: Vec::new(),
         canonical_model_id: model.to_owned(),
-        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
+        cache_pricing: cc_lb_domain::CachePricingSummary::default(),
     }
 }
 

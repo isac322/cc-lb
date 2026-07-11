@@ -9,16 +9,16 @@ use async_trait::async_trait;
 use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_config::PromptCacheShadowConfig;
-use cc_lb_plugin_api::types::{
+use cc_lb_domain::{
     BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix,
-    CachePricingSummary, CacheScore, StageDecision, TerminalDecision, TtlClass, WarmCacheEntry,
+    CachePricingSummary, CacheScore, InternalError, InternalErrorKind, InternalErrorStage,
+    Principal, PrincipalKind, RoutingTrace, StageDecision, TerminalDecision, TerminalStrategy,
+    TtlClass, Upstream, UpstreamCandidate, UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
 use cc_lb_plugin_api::{
-    ApiKeyAwareSignerFactory, FilterError, FilterOutput, InternalError, InternalErrorKind,
-    InternalErrorStage, ObservabilityHook, ObserveEvent, Principal, PrincipalKind, RequestContext,
-    ResponseTransformError, RetryDecision, RouterPlugin, RoutingTrace, ShapedRequest,
-    ShapedRequestBuilder, SignedRequest, TerminalStrategy, TransformResponseRequest, Upstream,
-    UpstreamCandidate, UpstreamDialect, UpstreamError, UpstreamKind as CandidateUpstreamKind,
+    ApiKeyAwareSignerFactory, FilterError, FilterOutput, ObservabilityHook, ObserveEvent,
+    RequestContext, ResponseTransformError, RetryDecision, RouterPlugin, ShapedRequest,
+    ShapedRequestBuilder, SignedRequest, TransformResponseRequest, UpstreamDialect, UpstreamError,
     shape_request, sign_request,
 };
 use cc_lb_storage_api::{
@@ -2173,8 +2173,8 @@ impl Lifecycle {
                     quota_uniform_fallback: selected_quota_candidate
                         .map(|candidate| candidate.quota_uniform_fallback),
                     wrh_key_source: subscription_trace.map(|trace| match trace.wrh_key_source {
-                        cc_lb_plugin_api::types::WrhKeySource::CacheHash => "cache_hash".to_owned(),
-                        cc_lb_plugin_api::types::WrhKeySource::RequestId => "request_id".to_owned(),
+                        cc_lb_domain::WrhKeySource::CacheHash => "cache_hash".to_owned(),
+                        cc_lb_domain::WrhKeySource::RequestId => "request_id".to_owned(),
                     }),
                     lineage_would_have_predicted_read_tokens: subscription_trace
                         .and_then(|trace| trace.lineage_would_have_predicted_read_tokens)
@@ -3621,7 +3621,7 @@ impl FilterPipelineResult {
 
 fn subscription_preference_trace(
     routing_trace: &RoutingTrace,
-) -> Option<&cc_lb_plugin_api::SubscriptionPreferenceTrace> {
+) -> Option<&cc_lb_domain::SubscriptionPreferenceTrace> {
     routing_trace
         .stages
         .iter()
@@ -3631,7 +3631,7 @@ fn subscription_preference_trace(
 pub(crate) fn resolved_candidate_urgency(
     routing_trace: &RoutingTrace,
     resolved_upstream_id: Uuid,
-) -> Option<&cc_lb_plugin_api::types::CandidateUrgency> {
+) -> Option<&cc_lb_domain::CandidateUrgency> {
     subscription_preference_trace(routing_trace).and_then(|trace| {
         trace
             .candidates
@@ -3754,7 +3754,7 @@ fn execute_filter_pipeline(
 struct ValidatedOutput {
     kept_upstream_ids: Vec<Uuid>,
     reason: String,
-    subscription_preference: Option<cc_lb_plugin_api::SubscriptionPreferenceTrace>,
+    subscription_preference: Option<cc_lb_domain::SubscriptionPreferenceTrace>,
     cache_affinity: Option<cc_lb_plugin_api::types::CacheAffinityTrace>,
 }
 
@@ -4008,7 +4008,7 @@ fn header_snapshot_from(headers: &HeaderMap) -> cc_lb_contract::HeaderSnapshot {
         let name_lc = name.as_str();
         let Ok(val) = value.to_str() else { continue };
         if name_lc.starts_with("anthropic-ratelimit-")
-            || cc_lb_contract::ANTHROPIC_IDENTITY_HEADERS.contains(&name_lc)
+            || cc_lb_domain::ANTHROPIC_IDENTITY_HEADERS.contains(&name_lc)
         {
             anthropic_headers.insert(name_lc.to_owned(), val.to_owned());
         }

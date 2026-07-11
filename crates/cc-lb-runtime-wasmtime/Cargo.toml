@@ -11,6 +11,7 @@ keywords = ["cc-lb", "plugin", "wasm", "wasmtime", "runtime"]
 categories = ["wasm", "web-programming"]
 
 [dependencies]
+cc-lb-domain.workspace = true
 cc-lb-plugin-api = { workspace = true }
 cc-lb-plugin-wire = { workspace = true, features = ["std"] }
 wasmtime.workspace = true

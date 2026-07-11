@@ -52,7 +52,7 @@ mod principal_view_swap {
                     for hook in hooks {
                         hook.observe(ObserveEvent::AuthnComplete {
                             principal_id: PRINCIPAL_ID.to_owned(),
-                            kind: cc_lb_plugin_api::PrincipalKind::ApiKey,
+                            kind: cc_lb_domain::PrincipalKind::ApiKey,
                         })
                         .expect("stub hook accepts authn event");
                     }

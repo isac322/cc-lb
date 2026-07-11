@@ -4,7 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cc_lb_storage_api::{PromptCacheObservationRecord, PromptCacheObservationStore, TtlClass};
+use cc_lb_domain::TtlClass;
+use cc_lb_storage_api::{PromptCacheObservationRecord, PromptCacheObservationStore};
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{
     AssertSqlSafe,

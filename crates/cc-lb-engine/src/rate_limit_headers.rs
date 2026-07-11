@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use cc_lb_plugin_api::{RateLimitKind, RateLimitObservation};
+use cc_lb_domain::{RateLimitKind, RateLimitObservation};
 use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow};
 use http::HeaderMap;
 
@@ -436,7 +436,7 @@ fn parse_csv_list(value: &str) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use cc_lb_plugin_api::{RateLimitKind, RateLimitObservation};
+    use cc_lb_domain::{RateLimitKind, RateLimitObservation};
     use http::header::{HeaderName, HeaderValue};
 
     use super::*;

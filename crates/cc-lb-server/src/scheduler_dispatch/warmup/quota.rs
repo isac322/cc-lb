@@ -1,4 +1,4 @@
-use cc_lb_plugin_api::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
+use cc_lb_domain::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_storage_api::UpstreamRecord;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{

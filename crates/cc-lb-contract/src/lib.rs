@@ -63,7 +63,7 @@ pub use event_bus::{
 
 use std::collections::BTreeMap;
 
-use cc_lb_plugin_api::{InternalError, RoutingTrace, types::TtlClass};
+use cc_lb_domain::{InternalError, RoutingTrace, TtlClass};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
@@ -99,21 +99,11 @@ impl EngineMetricsHook for NoopMetricsHook {
     fn record_routing_tier_selection(&self, _tier: &str, _upstream: &str, _principal_id: &str) {}
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplicaIdentity {
-    pub id: Uuid,
-}
+#[doc(hidden)]
+pub use cc_lb_domain::{ANTHROPIC_IDENTITY_HEADERS, PrincipalKindLite, ReplicaIdentity};
 
 pub trait ReplicaIdentityProvider: Send + Sync {
     fn replica_identity(&self) -> Option<ReplicaIdentity>;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum PrincipalKindLite {
-    Human,
-    #[default]
-    Machine,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -677,13 +667,6 @@ pub struct HeaderSnapshot {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub anthropic_headers: BTreeMap<String, String>,
 }
-
-/// Anthropic identity header slots that MUST be projected verbatim into
-/// `HeaderSnapshot::anthropic_headers` in addition to the
-/// `anthropic-ratelimit-*` prefix match. Producers use this list to
-/// build the map without duplicating string constants.
-pub const ANTHROPIC_IDENTITY_HEADERS: &[&str] =
-    &["anthropic-organization-id", "anthropic-account-uuid"];
 
 impl HeaderSnapshot {
     pub fn is_empty(&self) -> bool {

@@ -9,6 +9,10 @@ use async_trait::async_trait;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, PromptCacheShadowConfig};
 use cc_lb_dialect_anthropic::AnthropicDirectDialect;
+use cc_lb_domain::{
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, Principal, RateLimitObservation,
+    Upstream, UpstreamCandidate,
+};
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
     RouterPipelineCache, ShapePluginCache,
@@ -24,9 +28,8 @@ use cc_lb_engine::{
     UpstreamStatusSnapshot,
 };
 use cc_lb_plugin_api::{
-    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, FilterPlugin, PluginManifest,
-    Principal, RateLimitObservation, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate,
+    FilterPlugin, PluginManifest, RequestContext, RouteDecision, RouteError, RouterPlugin, Signer,
+    SignerError, SignerFactory,
 };
 use cc_lb_runtime_wasmtime::{
     WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeRuntime, WasmtimeUpstreamDialect,
@@ -340,12 +343,12 @@ fn rate_limit_observation(record: UpstreamRateLimitObservationRecord) -> RateLim
     }
 }
 
-fn rate_limit_kind(kind: RateLimitKind) -> cc_lb_plugin_api::RateLimitKind {
+fn rate_limit_kind(kind: RateLimitKind) -> cc_lb_domain::RateLimitKind {
     match kind {
-        RateLimitKind::Requests => cc_lb_plugin_api::RateLimitKind::Requests,
-        RateLimitKind::Tokens => cc_lb_plugin_api::RateLimitKind::Tokens,
-        RateLimitKind::InputTokens => cc_lb_plugin_api::RateLimitKind::InputTokens,
-        RateLimitKind::OutputTokens => cc_lb_plugin_api::RateLimitKind::OutputTokens,
+        RateLimitKind::Requests => cc_lb_domain::RateLimitKind::Requests,
+        RateLimitKind::Tokens => cc_lb_domain::RateLimitKind::Tokens,
+        RateLimitKind::InputTokens => cc_lb_domain::RateLimitKind::InputTokens,
+        RateLimitKind::OutputTokens => cc_lb_domain::RateLimitKind::OutputTokens,
     }
 }
 
@@ -1186,10 +1189,10 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
 mod tests {
     use std::collections::BTreeSet;
 
+    use cc_lb_domain::TtlClass as PluginTtlClass;
     use cc_lb_engine::clock::{Clock, TestClock};
     use cc_lb_engine::lifecycle::PromptCacheObservationCacheLike;
     use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
-    use cc_lb_plugin_api::types::TtlClass as PluginTtlClass;
     use cc_lb_storage_api::{
         BackendKind, MetaStore, PromptCacheObservationRecord, TtlClass as StorageTtlClass,
         UpstreamCreate,
@@ -1452,7 +1455,7 @@ mod tests {
             upstream_id: upstream.id,
             canonical_model_id: MODEL.to_owned(),
             v3_prefix_key: "sink-wiring-prefix".to_owned(),
-            ttl_class: cc_lb_storage_api::TtlClass::Ephemeral5m,
+            ttl_class: cc_lb_domain::TtlClass::Ephemeral5m,
             expires_at_unix_secs: 4_100_000_300,
             last_observed_at_unix_secs: 1_700_000_000,
             hash_schema_version: HASH_SCHEMA_VERSION,

@@ -1,0 +1,72 @@
+Task: T1 Create cc-lb-domain stable pure-value leaf
+Session: opencode:witty-sailor-t1-20260711
+Worktree: /home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/witty-sailor
+
+Scope and grounding
+- HEAD began at beeed31348aa5df6735df99f8867f0e9f0573ac1.
+- Read plan symbol-to-home lines 67-73, T1 lines 166-172, and transition convention lines 115-117.
+- Inspected plugin-api values/exports, contract ReplicaIdentity/PrincipalKindLite/ANTHROPIC_IDENTITY_HEADERS, control PlanInfo, storage-api TtlClass, manifests, T0 fixtures/tests, and codegraph blast radius before editing.
+- Initial status contained only two shared, unstaged T0 completion events already appended to .omo/start-work/ledger.jsonl; they were preserved.
+
+RED proof
+- Added cc-lb-domain manifest, empty library surface, and domain_compatibility API/serde expectations before production definitions.
+- `timeout 300 cargo test -p cc-lb-domain`: exit 101 in 13 seconds.
+- Correct failure: unresolved imports for the authoritative T1 public API from cc_lb_domain. No malformed fixture or unrelated compile failure.
+
+Implementation
+- Added unpublished crates/cc-lb-domain with responsibility modules: identity, upstream, quota, cache, routing/cache_affinity, routing/subscription, routing/trace, error, and plan.
+- Moved T1 pure values and constants only. No traits, event vocabulary, DTOs, Tokio, unsafe, side effects, or cc-lb dependencies were introduced.
+- Preserved derives, serde rename/default/skip/alias attributes, field order, defaults, methods, and CandidateUrgency's total_cmp-based PartialEq/Eq.
+- Replaced plugin-api and contract ownership with narrow #[doc(hidden)] re-exports; control keeps a hidden PlanInfo bridge.
+- Deleted storage-api's duplicate TtlClass and removed the now-redundant plugin/storage conversion functions; storage records use cc_lb_domain::TtlClass directly.
+- Re-pointed direct production and focused test consumers across control, engine, server, admin, observability, runtime, dialect/signers, storage adapters/conformance, and property tests.
+
+Serde/manual data-surface QA
+- Domain test extracts exact routing_trace and first internal_errors object bytes from tests/fixtures/reassembly/request_event.json, deserializes into domain values, and reserializes byte-identically.
+- UpstreamCandidate uses the T0 upstream identity and exact current baseline bytes.
+- TtlClass exact output is ["ephemeral5m","ephemeral1h"].
+- CandidateUrgency equality remains reflexive for identical NaN bit patterns through total_cmp.
+- T0 live SQLite serialization test regenerates request_event.json and request_events_v1_payload.json and exact-compares committed bytes.
+
+Verification
+- `cargo build -p cc-lb-domain`: exit 0, 1 second.
+- `cargo clippy -p cc-lb-domain --all-targets -- -D warnings`: exit 0, 10 seconds.
+- `cargo test -p cc-lb-domain`: two deterministic runs, 5/5 passed each, exits 0, durations 1 and 9 seconds.
+- T0 focused exact-byte test: two deterministic runs, 1/1 passed each, exits 0, durations 8 and 2 seconds.
+- `cargo test -p cc-lb-plugin-api`: exit 0, 32 seconds.
+- `cargo test -p cc-lb-contract`: exit 0, 3 seconds.
+- `cargo test -p cc-lb-control`: exit 0, 61 unit + 1 integration passed, 13 seconds.
+- `cargo test -p cc-lb-storage-api`: exit 0, all unit/integration tests passed, 24 seconds.
+- Focused dependent clippy for plugin-api, contract, control, and storage-api with all targets and -D warnings: exit 0, 10 seconds.
+- Final `cargo check --workspace`: exit 0, 19 seconds, timeout bound 1200 seconds.
+- Final `cargo fmt --all -- --check`: exit 0, 1 second.
+- Workspace-level Rust LSP diagnostics: 50-file capped scan, zero errors; targeted domain lib diagnostics also clean.
+
+Independent graph/static proof
+- `cargo metadata --format-version 1 --no-deps` reports cc-lb-domain publish=[] and direct dependencies exactly serde, serde_json, url, uuid; cc-lb dependency list is empty.
+- `cargo tree -e normal --prefix none -p cc-lb-domain` contains no package whose name starts cc-lb- below the root.
+- `rg -n 'enum TtlClass' crates --glob '*.rs' | wc -l`: 1, located in crates/cc-lb-domain/src/cache.rs.
+- `rg -n '^\s*(pub\s+)?trait\s' crates/cc-lb-domain/src --glob '*.rs' | wc -l`: 0.
+- Domain pure LOC maximum is 193 in tests/domain_compatibility.rs; largest production module is 118 pure LOC. No warning-band or oversized domain source exists.
+
+Adversarial probes
+- stale_state: applicable; committed T0 fixture subobjects and live SQLite payload exact-matched twice, and ownership definition scan found one TtlClass with moved definitions only in domain (pre-existing plugin-wire ABI values and storage-specific PrincipalKind are distinct non-T1 types).
+- dirty_worktree: applicable; status/diff are inspected before staging, .omo/boulder.json and .omo/plans are excluded, and only T1 implementation/tests/evidence plus the ledger are staged.
+- misleading_success_output: applicable; metadata JSON, cargo tree, bounded rg counts, fixture byte assertions, and LSP were inspected independently of build output.
+- flaky_tests: applicable; domain tests and focused exact-byte fixture test each passed twice without sleeps or retries.
+- hung_or_long_commands: applicable; broad Cargo commands were timeout-bounded and duration/exit recorded; none hung.
+- malformed_input: N/A because T1 moves trusted typed values and adds no parser boundary.
+- prompt_injection: N/A because no external natural-language input is consumed.
+- cancel_resume: N/A because no resumable workflow or persistent mutation is introduced.
+- repeated_interruptions: N/A because no long-lived process or interrupt-sensitive state is introduced.
+
+Cleanup receipt
+- No temporary source generator, service, process, port, container, or database remains.
+- Test databases and generated fixture directories are tempfile-owned and removed by RAII.
+- No .omo/boulder.json or plan checkbox was changed.
+
+DoneClaim
+- Deliverable: unpublished cc-lb-domain pure-value leaf, hidden compatibility bridges, canonical TtlClass, direct consumer dependencies/imports, exact serde/invariant tests, evidence, and ledger event.
+- Manual QA artifact: crates/cc-lb-domain/tests/domain_compatibility.rs plus committed T0 fixtures under tests/fixtures/reassembly.
+- Warning-band files: none in cc-lb-domain; import-only edits to pre-existing large consumer modules did not add responsibilities or increase their pure LOC.
+- Risks: plugin-api/contract/control hidden bridges intentionally remain until their later deletion todos; no behavior or wire bytes changed.

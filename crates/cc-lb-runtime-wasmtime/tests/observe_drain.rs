@@ -18,7 +18,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent, PrincipalKind, SlotKey, Upstream};
+use cc_lb_domain::{PrincipalKind, Upstream};
+use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent, SlotKey};
 use cc_lb_runtime_wasmtime::{WasmtimeObservabilityHookPlugin, WasmtimeRuntime};
 use http::StatusCode;
 

@@ -31,6 +31,7 @@ cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-contract = { workspace = true }
 cc-lb-control = { path = "../cc-lb-control" }
+cc-lb-domain.workspace = true
 cc-lb-engine = { path = "../cc-lb-engine" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }

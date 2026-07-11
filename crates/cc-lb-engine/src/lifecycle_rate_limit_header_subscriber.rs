@@ -264,7 +264,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_plugin_api::RateLimitKind;
+    use cc_lb_domain::RateLimitKind;
     use std::collections::BTreeMap;
 
     fn eid(s: &str) -> EventId {

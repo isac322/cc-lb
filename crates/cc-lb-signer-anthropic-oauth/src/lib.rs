@@ -11,9 +11,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, OAuthTokenBundle};
 use cc_lb_clock::{Clock, ClockHandle, unix_secs};
+use cc_lb_domain::Upstream;
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
-    SignerFactory, SigningCapability, Upstream, UpstreamError,
+    SignerFactory, SigningCapability, UpstreamError,
 };
 use cc_lb_storage_api::{
     OAuthCredentialStore, OAuthCredentials, StorageError, UpstreamRecord, UpstreamStore,
@@ -1817,11 +1818,11 @@ mod tests {
             body_bytes: Bytes::from_static(b"{}"),
             cache_breakpoints: Vec::new(),
             canonical_model_id: String::new(),
-            cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
+            cache_pricing: cc_lb_domain::CachePricingSummary::default(),
         };
-        let principal = cc_lb_plugin_api::Principal {
+        let principal = cc_lb_domain::Principal {
             id: "principal".to_owned(),
-            kind: cc_lb_plugin_api::PrincipalKind::OAuthSubject,
+            kind: cc_lb_domain::PrincipalKind::OAuthSubject,
             claims: serde_json::Map::new(),
         };
         shape_request(
@@ -1840,7 +1841,7 @@ mod tests {
             &self,
             _ctx: &RequestContext,
             _upstream: &Upstream,
-            _principal: &cc_lb_plugin_api::Principal,
+            _principal: &cc_lb_domain::Principal,
             builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
         ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
             let mut headers = HeaderMap::new();

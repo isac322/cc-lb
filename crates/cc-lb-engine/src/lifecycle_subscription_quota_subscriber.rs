@@ -271,7 +271,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_plugin_api::SubscriptionQuotaCandidateSnapshot;
+    use cc_lb_domain::SubscriptionQuotaCandidateSnapshot;
     use cc_lb_storage_api::{
         SubscriptionQuotaSample, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
     };

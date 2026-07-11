@@ -11,8 +11,8 @@ use axum::{
 };
 use cc_lb_clock::Clock;
 use cc_lb_control::DynamicViewHolder;
+use cc_lb_domain::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_engine::plan_capacity::{PRO_CAPACITY_RATIO, plan_capacity_ratio};
-use cc_lb_plugin_api::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaHistoryStore,
     PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord, Storage, StorageError,

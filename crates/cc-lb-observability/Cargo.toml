@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 bytes.workspace = true
 cc-lb-contract = { workspace = true }
+cc-lb-domain.workspace = true
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 http.workspace = true
 metrics.workspace = true

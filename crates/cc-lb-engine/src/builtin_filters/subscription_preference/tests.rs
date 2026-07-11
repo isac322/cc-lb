@@ -1510,7 +1510,7 @@ fn unknown_probe_quota_factor_is_one() {
     // Then: unknown probes always use the neutral factor 1.0.
     assert_eq!(
         trace.chosen_tier,
-        cc_lb_plugin_api::SubscriptionTier::UnknownProbe
+        cc_lb_domain::SubscriptionTier::UnknownProbe
     );
     for candidate in &trace.candidates {
         assert_eq!(candidate.quota_urgency, 0.0);
@@ -1841,16 +1841,10 @@ fn known_base_win_attaches_trace_with_chosen_tier() {
     let trace = output
         .subscription_preference
         .expect("KnownBase win must attach subscription_preference trace");
-    assert_eq!(
-        trace.chosen_tier,
-        cc_lb_plugin_api::SubscriptionTier::KnownBase
-    );
+    assert_eq!(trace.chosen_tier, cc_lb_domain::SubscriptionTier::KnownBase);
     assert_eq!(trace.candidates.len(), 2);
     for candidate in &trace.candidates {
-        assert_eq!(
-            candidate.tier,
-            cc_lb_plugin_api::SubscriptionTier::KnownBase
-        );
+        assert_eq!(candidate.tier, cc_lb_domain::SubscriptionTier::KnownBase);
         assert!(
             candidate.urgency > 0.0,
             "KnownBase candidate urgency must be positive, got {}",
@@ -2090,13 +2084,13 @@ fn ctx_with_thread_id(canonical_model: &str, request_id: &str, thread_id: &str) 
 
 fn ctx_with_unknown_cache_pricing(canonical_model: &str, request_id: &str) -> RequestContext {
     RequestContext {
-        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
+        cache_pricing: cc_lb_domain::CachePricingSummary::default(),
         ..ctx_with_request_id(canonical_model, request_id)
     }
 }
 
-fn test_cache_pricing() -> cc_lb_plugin_api::CachePricingSummary {
-    cc_lb_plugin_api::CachePricingSummary {
+fn test_cache_pricing() -> cc_lb_domain::CachePricingSummary {
+    cc_lb_domain::CachePricingSummary {
         status: "known".to_owned(),
         input_micros_per_million: Some(5_000_000),
         cache_creation_5m_micros_per_million: Some(6_250_000),
@@ -2198,7 +2192,7 @@ fn with_plan(mut candidate: UpstreamCandidate, ratio: f64) -> UpstreamCandidate 
 /// normalizes each exponential multiplier.
 fn with_live_cache(mut candidate: UpstreamCandidate, read_tokens: u32) -> UpstreamCandidate {
     let cache_key = format!("v3-cache-{}", candidate.upstream_id);
-    candidate.cache_score = Some(cc_lb_plugin_api::types::CacheScore {
+    candidate.cache_score = Some(cc_lb_domain::CacheScore {
         predicted_cache_read_tokens: read_tokens,
         predicted_cache_creation_tokens_5m: 0,
         predicted_cache_creation_tokens_1h: 0,
@@ -2584,9 +2578,9 @@ fn healthy_known_base_at_util(name: &str, id_seed: u8, util: f64) -> UpstreamCan
 }
 
 fn candidate_urgency_for(
-    trace: &cc_lb_plugin_api::SubscriptionPreferenceTrace,
+    trace: &cc_lb_domain::SubscriptionPreferenceTrace,
     upstream_id: Uuid,
-) -> &cc_lb_plugin_api::CandidateUrgency {
+) -> &cc_lb_domain::CandidateUrgency {
     trace
         .candidates
         .iter()

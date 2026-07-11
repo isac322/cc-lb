@@ -751,11 +751,11 @@ fn shaped_request() -> ShapedRequest {
         body_bytes: Bytes::from_static(b"{}"),
         cache_breakpoints: Vec::new(),
         canonical_model_id: String::new(),
-        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
+        cache_pricing: cc_lb_domain::CachePricingSummary::default(),
     };
-    let principal = cc_lb_plugin_api::Principal {
+    let principal = cc_lb_domain::Principal {
         id: "principal".to_owned(),
-        kind: cc_lb_plugin_api::PrincipalKind::OAuthSubject,
+        kind: cc_lb_domain::PrincipalKind::OAuthSubject,
         claims: serde_json::Map::new(),
     };
     shape_request(
@@ -787,7 +787,7 @@ impl UpstreamDialect for DirectDialect {
         &self,
         _ctx: &RequestContext,
         _upstream: &Upstream,
-        _principal: &cc_lb_plugin_api::Principal,
+        _principal: &cc_lb_domain::Principal,
         builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
     ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
         Ok(builder.shaped_request(

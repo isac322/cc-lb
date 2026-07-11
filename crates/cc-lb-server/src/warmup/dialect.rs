@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
+use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_plugin_api::{
-    PluginManifest, Principal, PrincipalKind, RequestContext, SignerFactory, SlotKey, Upstream,
-    shape_request, sign_request,
+    PluginManifest, RequestContext, SignerFactory, SlotKey, shape_request, sign_request,
 };
 use cc_lb_runtime_wasmtime::{WasmtimeRuntime, WasmtimeRuntimeError, WasmtimeUpstreamDialect};
 use cc_lb_signer_anthropic_oauth::{
@@ -146,7 +146,7 @@ pub async fn dispatch_warmup_with_dialect(
         body_bytes: Bytes::from(serde_json::to_vec(&body_json)?),
         cache_breakpoints: Vec::new(),
         canonical_model_id: WARMUP_MODEL.to_owned(),
-        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
+        cache_pricing: cc_lb_domain::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: params.upstream.id.to_string(),

@@ -28,6 +28,7 @@ license = "Apache-2.0"
 rust-version = "1.96.0"
 
 [workspace.dependencies]
+cc-lb-domain = { path = "crates/cc-lb-domain", version = "0.1.0" }
 cc-lb-plugin-api = { version = "0.13", path = "crates/cc-lb-plugin-api" }
 
 # Internal, unpublished — RFC-0002 event-driven lifecycle vocabulary.

@@ -10,6 +10,7 @@ publish = false
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-clock = { path = "../cc-lb-clock" }
+cc-lb-domain.workspace = true
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }

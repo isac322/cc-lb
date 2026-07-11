@@ -1,6 +1,6 @@
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_plugin_api::Upstream;
+use cc_lb_domain::Upstream;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
 use serde_json::{Value, json};

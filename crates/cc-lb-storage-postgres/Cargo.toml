@@ -12,6 +12,7 @@ postgres = []
 
 [dependencies]
 cc-lb-clock = { path = "../cc-lb-clock" }
+cc-lb-domain.workspace = true
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
 cc-lb-aead = { path = "../cc-lb-aead" }

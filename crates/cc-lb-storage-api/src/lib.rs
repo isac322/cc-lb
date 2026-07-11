@@ -36,9 +36,7 @@ pub use plan_tiers::*;
 pub use plugin_registry::*;
 pub use pool_quota_history::*;
 pub use principal::*;
-pub use prompt_cache_observation::{
-    PromptCacheObservationRecord, PromptCacheObservationStore, TtlClass,
-};
+pub use prompt_cache_observation::{PromptCacheObservationRecord, PromptCacheObservationStore};
 pub use runtime_change_notifier::*;
 pub use traits::{
     ApiKeyStore, AuditStore, CURRENT_CONTRACT_VERSION, ConfigStore, ManagedKeyStore, MetaStore,

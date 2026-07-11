@@ -110,8 +110,6 @@ pub use bulkhead::{
     Bulkhead, BulkheadDispatch, BulkheadError, BulkheadRegistry, BulkheadRuntimeConfig,
     ExecuteError, make_default_dispatcher, make_http_dispatcher_with_connector,
 };
-#[cfg(not(loom))]
-pub use cc_lb_contract::ReplicaIdentity;
 pub use cc_lb_control::audit_payload::AuditPayload;
 #[cfg(not(loom))]
 pub use cc_lb_control::audit_writer::{
@@ -128,6 +126,8 @@ pub use cc_lb_control::{
     PromptCacheObservationEnqueueError, PromptCacheObservationInput,
     PromptCacheObservationSinkLike, SubscriptionQuotaCacheLike,
 };
+#[cfg(not(loom))]
+pub use cc_lb_domain::ReplicaIdentity;
 #[cfg(not(loom))]
 pub use cc_lb_plugin_api::ApiKeyAwareSignerFactory;
 #[cfg(not(loom))]

@@ -718,6 +718,7 @@ dependencies = [
  "cc-lb-config",
  "cc-lb-contract",
  "cc-lb-control",
+ "cc-lb-domain",
  "cc-lb-engine",
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-api",
@@ -808,6 +809,7 @@ dependencies = [
 name = "cc-lb-contract"
 version = "0.1.0"
 dependencies = [
+ "cc-lb-domain",
  "cc-lb-plugin-api",
  "serde",
  "serde_json",
@@ -827,6 +829,7 @@ dependencies = [
  "cc-lb-clock",
  "cc-lb-config",
  "cc-lb-contract",
+ "cc-lb-domain",
  "cc-lb-plugin-api",
  "cc-lb-storage-api",
  "chrono",
@@ -857,9 +860,20 @@ name = "cc-lb-dialect-anthropic"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "cc-lb-domain",
  "cc-lb-plugin-api",
  "http",
  "url",
+]
+
+[[package]]
+name = "cc-lb-domain"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -880,6 +894,7 @@ dependencies = [
  "cc-lb-config",
  "cc-lb-contract",
  "cc-lb-control",
+ "cc-lb-domain",
  "cc-lb-observability",
  "cc-lb-plugin-api",
  "cc-lb-pricing",
@@ -953,6 +968,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "cc-lb-contract",
+ "cc-lb-domain",
  "cc-lb-plugin-api",
  "http",
  "insta",
@@ -999,6 +1015,7 @@ version = "0.13.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "cc-lb-domain",
  "http",
  "serde",
  "serde_json",
@@ -1012,6 +1029,7 @@ name = "cc-lb-plugin-conformance"
 version = "0.2.2"
 dependencies = [
  "blake3",
+ "cc-lb-domain",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "cc-lb-runtime-wasmtime",
@@ -1036,6 +1054,7 @@ dependencies = [
  "bytes",
  "cc-lb-clock",
  "cc-lb-contract",
+ "cc-lb-domain",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
  "futures-lite",
@@ -1064,6 +1083,7 @@ dependencies = [
  "async-stream",
  "axum",
  "bytes",
+ "cc-lb-domain",
  "cc-lb-engine",
  "cc-lb-plugin-api",
  "http",
@@ -1080,6 +1100,7 @@ dependencies = [
  "arc-swap",
  "blake3",
  "bytes",
+ "cc-lb-domain",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "http",
@@ -1172,6 +1193,7 @@ dependencies = [
  "cc-lb-contract",
  "cc-lb-control",
  "cc-lb-dialect-anthropic",
+ "cc-lb-domain",
  "cc-lb-engine",
  "cc-lb-oauth-protocol",
  "cc-lb-observability",
@@ -1238,6 +1260,7 @@ dependencies = [
  "axum",
  "bytes",
  "cc-lb-aead",
+ "cc-lb-domain",
  "cc-lb-plugin-api",
  "cc-lb-storage-api",
  "fake-anthropic",
@@ -1257,6 +1280,7 @@ dependencies = [
  "bytes",
  "cc-lb-aead",
  "cc-lb-clock",
+ "cc-lb-domain",
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-api",
  "cc-lb-storage-api",
@@ -1289,6 +1313,7 @@ dependencies = [
  "bytes",
  "cc-lb-aead",
  "cc-lb-contract",
+ "cc-lb-domain",
  "cc-lb-engine",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
@@ -1311,6 +1336,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "cc-lb-aead",
+ "cc-lb-domain",
  "cc-lb-engine",
  "cc-lb-plugin-wire",
  "cc-lb-storage-api",
@@ -1337,6 +1363,7 @@ dependencies = [
  "bytes",
  "cc-lb-aead",
  "cc-lb-clock",
+ "cc-lb-domain",
  "cc-lb-plugin-wire",
  "cc-lb-pricing",
  "cc-lb-storage-api",
@@ -1362,6 +1389,7 @@ dependencies = [
  "cc-lb-aead",
  "cc-lb-clock",
  "cc-lb-config",
+ "cc-lb-domain",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "cc-lb-storage-api",

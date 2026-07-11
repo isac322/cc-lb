@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use cc_lb_plugin_api::{FilterPlugin, ObservabilityHook, TerminalStrategy, UpstreamDialect};
+use cc_lb_domain::TerminalStrategy;
+use cc_lb_plugin_api::{FilterPlugin, ObservabilityHook, UpstreamDialect};
 use cc_lb_storage_api::principal::Limit as DbLimit;
 use cc_lb_storage_api::{CacheKeepaliveConfig, PrincipalKind as DbPrincipalKind, PrincipalRecord};
 use globset::{Glob, GlobSet, GlobSetBuilder};

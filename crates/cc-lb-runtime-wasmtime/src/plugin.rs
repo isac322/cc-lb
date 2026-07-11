@@ -459,7 +459,7 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
     fn shape(
         &self,
         ctx: &RequestContext,
-        upstream: &cc_lb_plugin_api::Upstream,
+        upstream: &cc_lb_domain::Upstream,
         principal: &Principal,
         builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
     ) -> Result<cc_lb_plugin_api::ShapedRequest, cc_lb_plugin_api::DialectError> {
@@ -525,9 +525,9 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
     }
 }
 
-fn host_upstream_to_wire(upstream: &cc_lb_plugin_api::Upstream) -> cc_lb_plugin_wire::Upstream {
+fn host_upstream_to_wire(upstream: &cc_lb_domain::Upstream) -> cc_lb_plugin_wire::Upstream {
     match upstream {
-        cc_lb_plugin_api::Upstream::AnthropicDirect { base_url } => {
+        cc_lb_domain::Upstream::AnthropicDirect { base_url } => {
             cc_lb_plugin_wire::Upstream::AnthropicDirect {
                 base_url: base_url.as_ref().map(|u| u.to_string().into_boxed_str()),
             }
@@ -550,7 +550,7 @@ fn runtime_error_to_dialect(err: WasmtimeRuntimeError) -> cc_lb_plugin_api::Dial
 
 fn host_to_wire_shape_request(
     ctx: &RequestContext,
-    upstream: &cc_lb_plugin_api::Upstream,
+    upstream: &cc_lb_domain::Upstream,
     principal: &Principal,
     cookie_redaction: bool,
 ) -> Result<AlignedVec<16>, RkyvError> {
@@ -581,7 +581,7 @@ fn host_to_wire_shape_request(
         })
         .collect();
     let base_url_str = match upstream {
-        cc_lb_plugin_api::Upstream::AnthropicDirect { base_url } => {
+        cc_lb_domain::Upstream::AnthropicDirect { base_url } => {
             base_url.as_ref().map(|u| u.to_string())
         }
     };
@@ -611,16 +611,16 @@ fn host_to_wire_shape_request(
 /// pinned host (e.g. an operator-configured `None` override).
 /// Callers that need origin equality treat `None` as "policy cannot
 /// be enforced for this upstream" and skip the guard.
-fn upstream_base_url(upstream: &cc_lb_plugin_api::Upstream) -> Option<url::Url> {
+fn upstream_base_url(upstream: &cc_lb_domain::Upstream) -> Option<url::Url> {
     match upstream {
-        cc_lb_plugin_api::Upstream::AnthropicDirect { base_url } => base_url.clone(),
+        cc_lb_domain::Upstream::AnthropicDirect { base_url } => base_url.clone(),
     }
 }
 
 fn wire_to_host_shaped_request(
     builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
     archived: &cc_lb_plugin_wire::ArchivedShapeResponse,
-    upstream: &cc_lb_plugin_api::Upstream,
+    upstream: &cc_lb_domain::Upstream,
     origin_policy: crate::policy::ShapeOriginPolicy,
     wire_bounds: &crate::policy::PluginWireBounds,
 ) -> Result<cc_lb_plugin_api::ShapedRequest, cc_lb_plugin_api::DialectError> {
@@ -810,7 +810,7 @@ fn host_observe_event_to_wire(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_plugin_api::PrincipalKind;
+    use cc_lb_domain::PrincipalKind;
     use cc_lb_plugin_wire::FilterResponse as WireFilterResponse;
     use cc_lb_plugin_wire::PerCandidateReason as WirePerCandidateReason;
 
@@ -844,7 +844,7 @@ mod tests {
             body_bytes: bytes::Bytes::from_static(b"{\"msg\":\"hi\"}"),
             cache_breakpoints: Vec::new(),
             canonical_model_id: "claude-fixture".to_owned(),
-            cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
+            cache_pricing: cc_lb_domain::CachePricingSummary::default(),
         }
     }
 

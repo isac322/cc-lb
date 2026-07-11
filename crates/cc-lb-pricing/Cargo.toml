@@ -11,6 +11,7 @@ arc-swap.workspace = true
 bytes.workspace = true
 cc-lb-contract = { workspace = true }
 cc-lb-clock = { path = "../cc-lb-clock" }
+cc-lb-domain.workspace = true
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 futures-lite = "2.6.1"
 http.workspace = true

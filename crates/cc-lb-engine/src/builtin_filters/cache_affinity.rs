@@ -11,11 +11,11 @@
 //! `BUILTIN_CACHE_AFFINITY_ID` and for backwards-compatibility with
 //! `request_events_v1` payloads that carry `cache_affinity` trace rows.
 
-use cc_lb_plugin_api::types::{CacheAffinityCandidate, CacheAffinityTrace};
-use cc_lb_plugin_api::{
-    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, FilterError, FilterOutput,
-    FilterPlugin, Principal, RequestContext, UpstreamCandidate,
+use cc_lb_domain::{
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, CacheAffinityCandidate,
+    CacheAffinityTrace, Principal, UpstreamCandidate,
 };
+use cc_lb_plugin_api::{FilterError, FilterOutput, FilterPlugin, RequestContext};
 use cc_lb_storage_api::PluginMetadata;
 use uuid::Uuid;
 
@@ -125,7 +125,7 @@ fn predicted_read_tokens(candidate: &UpstreamCandidate) -> u32 {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use cc_lb_plugin_api::types::CacheScore;
+    use cc_lb_domain::CacheScore;
     use cc_lb_plugin_api::{PrincipalKind, UpstreamKind};
     use http::Method;
 
@@ -258,7 +258,7 @@ mod tests {
             body_bytes: Bytes::new(),
             cache_breakpoints: Vec::new(),
             canonical_model_id: "claude".to_owned(),
-            cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
+            cache_pricing: cc_lb_domain::CachePricingSummary::default(),
         }
     }
 

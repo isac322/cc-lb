@@ -268,7 +268,7 @@ fn candidate<'a>(
 }
 
 fn trace_row_weight(
-    rows: &[cc_lb_plugin_api::CandidateUrgency],
+    rows: &[cc_lb_domain::CandidateUrgency],
     upstream_id: Uuid,
     label: &str,
 ) -> f64 {

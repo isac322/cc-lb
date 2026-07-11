@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use cc_lb_control::api_keys::principal_view::PrincipalView;
-use cc_lb_plugin_api::TerminalStrategy;
+use cc_lb_domain::TerminalStrategy;
 use cc_lb_storage_api::CacheKeepaliveConfig;
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use uuid::Uuid;

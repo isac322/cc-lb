@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use cc_lb_config::RestartRequiredField;
-use cc_lb_contract::ReplicaIdentity;
 use cc_lb_control::ApplyStatus;
+use cc_lb_domain::ReplicaIdentity;
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{

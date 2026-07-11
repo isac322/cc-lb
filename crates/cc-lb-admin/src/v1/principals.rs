@@ -6,7 +6,7 @@ use axum::{
     routing::{get, post},
 };
 use cc_lb_control::{AuditEntry, AuditPayload};
-use cc_lb_plugin_api::TerminalStrategy;
+use cc_lb_domain::TerminalStrategy;
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::{
     CacheKeepaliveConfig, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore,

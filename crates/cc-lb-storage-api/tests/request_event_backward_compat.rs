@@ -25,11 +25,11 @@ fn request_event_deserializes_old_payload_without_routing_trace_and_internal_err
 
 #[test]
 fn request_event_with_new_fields_round_trips() {
-    use cc_lb_plugin_api::{InternalError, InternalErrorKind, InternalErrorStage};
+    use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage};
 
     let original = RequestEvent {
         request_id: "req_new_fields".to_owned(),
-        routing_trace: Some(cc_lb_plugin_api::RoutingTrace {
+        routing_trace: Some(cc_lb_domain::RoutingTrace {
             stages: vec![],
             terminal_decision: Default::default(),
         }),
@@ -66,7 +66,7 @@ fn request_event_skips_serializing_none_routing_trace() {
 
 #[test]
 fn request_event_includes_populated_new_fields() {
-    use cc_lb_plugin_api::{InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace};
+    use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace};
 
     let event = RequestEvent {
         request_id: "req_with_trace".to_owned(),

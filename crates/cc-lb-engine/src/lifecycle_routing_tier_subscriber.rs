@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cc_lb_contract::{EngineMetricsHook, EventId, LifecycleEvent};
-use cc_lb_plugin_api::SubscriptionTier;
+use cc_lb_domain::SubscriptionTier;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 

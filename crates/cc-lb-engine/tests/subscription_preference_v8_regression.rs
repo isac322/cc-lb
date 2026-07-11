@@ -365,16 +365,16 @@ fn filter(candidates: &[UpstreamCandidate]) -> cc_lb_plugin_api::FilterOutput {
 }
 
 fn candidate_tier(
-    trace: &cc_lb_plugin_api::SubscriptionPreferenceTrace,
+    trace: &cc_lb_domain::SubscriptionPreferenceTrace,
     upstream_id: Uuid,
 ) -> SubscriptionTier {
     candidate_urgency(trace, upstream_id).tier
 }
 
 fn candidate_urgency(
-    trace: &cc_lb_plugin_api::SubscriptionPreferenceTrace,
+    trace: &cc_lb_domain::SubscriptionPreferenceTrace,
     upstream_id: Uuid,
-) -> &cc_lb_plugin_api::CandidateUrgency {
+) -> &cc_lb_domain::CandidateUrgency {
     trace
         .candidates
         .iter()

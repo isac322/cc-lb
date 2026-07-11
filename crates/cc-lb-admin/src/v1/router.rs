@@ -6,10 +6,10 @@ use axum::{
     routing::post,
 };
 use bytes::Bytes;
+use cc_lb_domain::RoutingTrace;
 use cc_lb_engine::lifecycle::{
     Lifecycle, PreviewRouteError, PreviewRouteInput, PreviewRouteOutcome,
 };
-use cc_lb_plugin_api::types::RoutingTrace;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;

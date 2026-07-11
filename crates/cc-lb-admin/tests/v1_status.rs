@@ -6,9 +6,9 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_config::{Config, DownstreamAuthMode};
-use cc_lb_contract::ReplicaIdentity;
 use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_control::{ApplyStatus, DynamicViewBuilder, UpstreamStatusEntry, UpstreamStatusSnapshot};
+use cc_lb_domain::ReplicaIdentity;
 use cc_lb_engine::{Lifecycle, LifecycleConfig};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{

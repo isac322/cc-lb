@@ -42,17 +42,11 @@ pub use types::{
     default_pure, shape_request, sign_request,
 };
 
-/// Stable registry id for the built-in cache-affinity router filter.
-pub const BUILTIN_CACHE_AFFINITY_ID: uuid::Uuid = uuid::Uuid::from_u128(1);
-
-/// Stable registry name for the built-in cache-affinity router filter.
-pub const BUILTIN_CACHE_AFFINITY_NAME: &str = "cache-affinity";
-
-/// Stable registry id for the built-in subscription-preference router filter.
-pub const BUILTIN_SUBSCRIPTION_PREFERENCE_ID: uuid::Uuid = uuid::Uuid::from_u128(2);
-
-/// Stable registry name for the built-in subscription-preference router filter.
-pub const BUILTIN_SUBSCRIPTION_PREFERENCE_NAME: &str = "subscription-preference";
+#[doc(hidden)]
+pub use cc_lb_domain::{
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_NAME,
+};
 
 mod private {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]

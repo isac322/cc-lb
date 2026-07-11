@@ -7,7 +7,7 @@ use cc_lb_contract::{
     ParseInfo, RequestCacheBreakpoint, RequestCacheState, RequestEventBus, RequestEventPartial,
     RequestEventUpdate, RequestEventUpstream, RouteInfo, TerminationReason, UsageSnapshot,
 };
-use cc_lb_plugin_api::{InternalError, RoutingTrace};
+use cc_lb_domain::{InternalError, RoutingTrace};
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;

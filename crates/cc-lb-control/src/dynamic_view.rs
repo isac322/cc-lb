@@ -1,9 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwap;
-use cc_lb_plugin_api::{
-    ApiKeyAwareSignerFactory, ObservabilityHook, RateLimitObservation, RouterPlugin,
-};
+#[doc(hidden)]
+pub use cc_lb_domain::PlanInfo;
+use cc_lb_domain::RateLimitObservation;
+use cc_lb_plugin_api::{ApiKeyAwareSignerFactory, ObservabilityHook, RouterPlugin};
 use cc_lb_storage_api::{UpstreamRateLimitObservationRecord, UpstreamRecord};
 use parking_lot::RwLock;
 use uuid::Uuid;
@@ -161,14 +162,6 @@ pub enum ApplyStatus {
     Active,
     Disabled,
     Error,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct PlanInfo {
-    pub organization_type: Option<String>,
-    pub rate_limit_tier: Option<String>,
-    pub seat_tier: Option<String>,
-    pub capacity_ratio: f64,
 }
 
 pub struct DynamicViewBuilder {

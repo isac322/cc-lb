@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use cc_lb_contract::{LifecycleEvent, RequestEventBus, TerminationReason};
-use cc_lb_plugin_api::InternalError;
+use cc_lb_domain::InternalError;
 use cc_lb_storage_api::types::PrincipalKindLite;
 use http::StatusCode;
 use uuid::Uuid;
