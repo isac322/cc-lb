@@ -332,7 +332,20 @@ export const RequestEventPartialSchema = z.looseObject({
   shape_ms: z.number().nullable().optional(),
   sign_ms: z.number().nullable().optional(),
   upstream_ttfb_ms: z.number().nullable().optional(),
+  upstream_body_ms: z.number().nullable().optional(),
   first_body_chunk_ms: z.number().nullable().optional(),
+  stream_message_start_ms: z.number().nullable().optional(),
+  stream_content_block_start_ms: z.number().nullable().optional(),
+  stream_first_content_delta_ms: z.number().nullable().optional(),
+  stream_last_content_delta_ms: z.number().nullable().optional(),
+  stream_message_stop_ms: z.number().nullable().optional(),
+  stream_last_chunk_ms: z.number().nullable().optional(),
+  stream_total_ms: z.number().nullable().optional(),
+  sse_event_count: z.number().nullable().optional(),
+  content_delta_count: z.number().nullable().optional(),
+  ping_count: z.number().nullable().optional(),
+  inter_token_avg_ms: z.number().nullable().optional(),
+  error_code: z.string().nullable().optional(),
 });
 
 export const FinalRequestEventUpdateSchema = z.object({

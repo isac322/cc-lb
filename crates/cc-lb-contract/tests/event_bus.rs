@@ -57,6 +57,34 @@ fn request_event_update_is_final_matches_phase() {
 }
 
 #[test]
+fn request_event_partial_roundtrip_preserves_optional_thread_id() {
+    // Given a partial wire payload enriched with a memory-only thread id.
+    let mut value = serde_json::to_value(sample_partial("req-thread")).expect("serialize partial");
+    value["thread_id"] = serde_json::json!("thread-123");
+
+    // When the payload crosses the Rust serde boundary.
+    let partial: RequestEventPartial = serde_json::from_value(value).expect("deserialize partial");
+    let restored = serde_json::to_value(partial).expect("serialize restored partial");
+
+    // Then the optional thread id survives the roundtrip.
+    assert_eq!(restored["thread_id"], "thread-123");
+}
+
+#[test]
+fn request_event_partial_without_thread_id_remains_backward_compatible() {
+    // Given the existing partial payload without a thread id.
+    let value = serde_json::to_value(sample_partial("req-legacy")).expect("serialize partial");
+    assert!(value.get("thread_id").is_none());
+
+    // When it crosses the Rust serde boundary.
+    let partial: RequestEventPartial = serde_json::from_value(value).expect("deserialize partial");
+    let restored = serde_json::to_value(partial).expect("serialize restored partial");
+
+    // Then the absent optional field stays omitted.
+    assert!(restored.get("thread_id").is_none());
+}
+
+#[test]
 fn bus_receiver_variants_compile_with_tokio_channels() {
     let (_broadcast_tx, broadcast_rx) = tokio::sync::broadcast::channel(1);
     let (_request_tx, request_rx) = tokio::sync::mpsc::channel(1);

@@ -694,7 +694,12 @@ function DetailView({
     upstream_id: upstream.id,
     limit: '5',
   });
-  const recentForUpstream = recent.data?.events ?? [];
+  const recentForUpstream = useMemo(() => {
+    return (recent.data?.events ?? []).map((e) => ({
+      ...e,
+      _phase: 'final' as const,
+    }));
+  }, [recent.data]);
 
   const isOauth = upstream.kind === 'anthropic_oauth';
   const subMeta = subscriptionMetadataQ.data?.subscription_metadata;

@@ -35,7 +35,7 @@ import {
   Sparkline,
 } from '../components/ui/primitives';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
-import { eventTime, type RequestEvent } from '../lib/api';
+import { eventTime } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import {
   usePrincipalNameMap,
@@ -46,6 +46,7 @@ import {
   useUpstreamNameMap,
   useUsage,
 } from '../lib/queries';
+import type { RequestEventWithPhase } from '../lib/RequestEventTypes';
 import { useLiveEventStream } from '../lib/useLiveEventStream';
 export const Route = createFileRoute('/')({
   component: OverviewPage,
@@ -784,12 +785,17 @@ function OverviewPage() {
   const recentRows = useMemo(() => {
     const historical = events.data?.pages.flatMap((p) => p.events) ?? [];
     const seen = new Set<string>();
-    const out: (RequestEvent & { _phase?: 'partial' | 'final' })[] = [];
-    for (const { phase, event: ev } of live.eventsMap.values()) {
+    const out: RequestEventWithPhase[] = [];
+    for (const entry of live.eventsMap.values()) {
+      const ev = entry.event;
       const key = ev.event_id ?? ev.request_id;
       if (!seen.has(key)) {
         seen.add(key);
-        out.push({ ...(ev as RequestEvent), _phase: phase });
+        if (entry.phase === 'final') {
+          out.push({ ...entry.event, _phase: 'final' });
+        } else {
+          out.push({ ...entry.event, _phase: 'partial' });
+        }
       }
     }
     for (const ev of historical) {

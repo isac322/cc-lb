@@ -45,6 +45,7 @@ use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as Li
 use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
 use crate::clock::{Clock, ClockHandle, unix_millis};
+use crate::downstream_stream_drop_guard::DownstreamStreamDropGuard;
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::ErrorNormalizer;
 use crate::hop_by_hop::strip_hop_by_hop;
@@ -62,9 +63,7 @@ use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest}
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{LifecycleContext, error_codes};
 use crate::usage_decoder::{UsageDecoder, decode_full_body};
-use crate::usage_parser::{
-    self, UsageCounts, accumulate_sse_usage, sse_event_name, usage_from_json_body,
-};
+use crate::usage_parser::{self, UsageCounts, accumulate_sse_usage, sse_event_name};
 use cc_lb_contract::{ReplicaIdentity, RequestEventBus};
 use cc_lb_control::dynamic_view::{
     DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
@@ -2092,9 +2091,17 @@ impl Lifecycle {
         let response_body_json = semantic_body
             .as_ref()
             .and_then(|body| sonic_rs::from_slice::<Value>(body).ok());
-        let usage = semantic_body
+        let observation = semantic_body
             .as_ref()
-            .map_or_else(UsageCounts::default, |body| usage_from_json_body(body));
+            .map_or_else(usage_parser::NonStreamObservation::default, |body| {
+                usage_parser::observe_non_stream_json_body(body)
+            });
+        let usage = observation.usage;
+        let canonical_upstream_error = if status.is_client_error() || status.is_server_error() {
+            observation.canonical_error
+        } else {
+            None
+        };
         let mut downstream_body = body;
         let mut buffered_transform_error: Option<ResponseTransformError> = None;
         if let (Some(hook), Some(semantic_body)) = (
@@ -2212,6 +2219,16 @@ impl Lifecycle {
             );
             o.set_internal_errors(event_ctx.internal_errors.clone());
             if status.is_client_error() || status.is_server_error() {
+                if let Some(error) = canonical_upstream_error {
+                    let (error_type, error_message) = error.into_parts();
+                    o.emit_lifecycle(
+                        cc_lb_contract::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                            event_id: o.event_id().to_owned(),
+                            error_type,
+                            error_message,
+                        },
+                    );
+                }
                 let code = if status.is_client_error() {
                     error_codes::UPSTREAM_4XX
                 } else {
@@ -2485,7 +2502,22 @@ impl Lifecycle {
             self.cache_keepalive_enqueuer.clone(),
             Arc::clone(&self.dynamic_view),
         );
+        let downstream_drop_guard = if status.is_client_error() || status.is_server_error() {
+            if let Some(o) = observer.as_ref() {
+                let code = if status.is_client_error() {
+                    error_codes::UPSTREAM_4XX
+                } else {
+                    error_codes::UPSTREAM_5XX
+                };
+                o.emit_provider_error(code, status.as_str(), "upstream");
+                o.set_terminal(status, code);
+            }
+            DownstreamStreamDropGuard::disarmed()
+        } else {
+            DownstreamStreamDropGuard::armed(observer.clone())
+        };
         let stream = async_stream::stream! {
+            let mut downstream_drop_guard = downstream_drop_guard;
             let mut usage_decoder = usage_decoder;
             let mut batch_index = 0_u64;
             let mut buffer: Vec<u8> = Vec::new();
@@ -2541,8 +2573,15 @@ impl Lifecycle {
                                                 total_bytes: frame.len(),
                                             });
                                             stream_transform_error = Some(transform_error);
-                                                yield Ok::<Bytes, Infallible>(frame);
-                                                break;
+                                            if let Some(o) = observer.as_ref() {
+                                                o.set_terminal(
+                                                    StatusCode::OK,
+                                                    error_codes::UPSTREAM_STREAM_ERROR,
+                                                );
+                                            }
+                                            downstream_drop_guard.disarm();
+                                            yield Ok::<Bytes, Infallible>(frame);
+                                            break;
                                             }
                                             sse_transform_active = false;
                                             raw_passthrough_current_chunk = true;
@@ -2571,6 +2610,7 @@ impl Lifecycle {
                                         StatusCode::OK,
                                         error_codes::UPSTREAM_STREAM_ERROR,
                                     );
+                                    downstream_drop_guard.disarm();
                                 }
                                 sse_event_count = sse_event_count.saturating_add(1);
                                 let event_name = sse_event_name(&raw);
@@ -2707,6 +2747,13 @@ impl Lifecycle {
                                                         total_bytes: frame.len(),
                                                     });
                                                     stream_transform_error = Some(error);
+                                                    if let Some(o) = observer.as_ref() {
+                                                        o.set_terminal(
+                                                            StatusCode::OK,
+                                                            error_codes::UPSTREAM_STREAM_ERROR,
+                                                        );
+                                                    }
+                                                    downstream_drop_guard.disarm();
                                                     yield Ok::<Bytes, Infallible>(frame);
                                                     break;
                                                 }
@@ -2728,8 +2775,15 @@ impl Lifecycle {
                                                         total_bytes: frame.len(),
                                                     });
                                                     stream_transform_error = Some(error);
-                                                        yield Ok::<Bytes, Infallible>(frame);
-                                                        break;
+                                                    if let Some(o) = observer.as_ref() {
+                                                        o.set_terminal(
+                                                            StatusCode::OK,
+                                                            error_codes::UPSTREAM_STREAM_ERROR,
+                                                        );
+                                                    }
+                                                    downstream_drop_guard.disarm();
+                                                    yield Ok::<Bytes, Infallible>(frame);
+                                                    break;
                                                 }
                                                 sse_transform_active = false;
                                                 raw_passthrough_current_chunk = true;
@@ -2768,6 +2822,7 @@ impl Lifecycle {
                     Err(_source) => break,
                 }
             }
+            downstream_drop_guard.disarm();
             match usage_decoder.finish() {
                 Ok(tail) if !tail.is_empty() => {
                     buffer.extend_from_slice(&tail);
@@ -2907,15 +2962,7 @@ impl Lifecycle {
                 o.set_internal_errors(event_ctx.internal_errors.clone());
                 if stream_transform_error.is_some() {
                     o.set_terminal(StatusCode::OK, error_codes::UPSTREAM_STREAM_ERROR);
-                } else if status.is_client_error() || status.is_server_error() {
-                    let code = if status.is_client_error() {
-                        error_codes::UPSTREAM_4XX
-                    } else {
-                        error_codes::UPSTREAM_5XX
-                    };
-                    o.emit_provider_error(code, status.as_str(), "upstream");
-                    o.set_terminal(status, code);
-                } else {
+                } else if !status.is_client_error() && !status.is_server_error() {
                     o.set_success_status(status);
                 }
                 o.finish();

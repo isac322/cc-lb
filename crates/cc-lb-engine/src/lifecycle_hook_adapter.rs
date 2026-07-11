@@ -152,6 +152,7 @@ fn handle_event(
             );
             return;
         }
+        LifecycleEvent::RequestLogUpstreamErrorObserved { .. } => return,
         _ => {}
     }
 
@@ -456,5 +457,24 @@ mod tests {
             }
             other => panic!("expected RequestFinished, got {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_log_upstream_error_direct_injection_emits_no_observe_error() {
+        let (tx, rx) = mpsc::channel(1);
+        let hook = Arc::new(RecordingHook::default());
+        let handle = spawn_observability_hook_adapter(rx, vec![hook.clone()]);
+
+        tx.send(LifecycleEvent::RequestLogUpstreamErrorObserved {
+            event_id: eid("request-log-private"),
+            error_type: "rate_limit_error".into(),
+            error_message: "bounded".into(),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        assert!(hook.events.lock().unwrap().is_empty());
     }
 }

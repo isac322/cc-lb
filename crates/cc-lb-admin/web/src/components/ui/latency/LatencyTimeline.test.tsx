@@ -1,6 +1,7 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { RequestEvent } from '../../../lib/api';
+import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import {
   buildSseMarkers,
   buildStageDetails,
@@ -8,14 +9,16 @@ import {
   LatencyTimeline,
 } from './LatencyTimeline';
 
-function ev(overrides: Partial<RequestEvent>): RequestEvent {
+function ev(overrides: Partial<RequestEvent>): RequestEventWithPhase {
   return {
+    ts: 1234567890,
     request_id: 'req_test',
     upstream: 'anthropic',
     status: 200,
     duration_ms: 0,
+    _phase: 'final',
     ...overrides,
-  } as RequestEvent;
+  } satisfies RequestEventWithPhase;
 }
 
 describe('buildStageDetails', () => {

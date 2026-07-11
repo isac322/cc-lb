@@ -20,6 +20,8 @@ impl ResetReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartialTrigger {
     RequestStarted,
+    ParseCompleted,
+    AuthCompleted,
     RouteCompleted,
     UpstreamResponseStarted,
     UsageObserved,
@@ -28,8 +30,10 @@ pub enum PartialTrigger {
 }
 
 impl PartialTrigger {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::RequestStarted,
+        Self::ParseCompleted,
+        Self::AuthCompleted,
         Self::RouteCompleted,
         Self::UpstreamResponseStarted,
         Self::UsageObserved,
@@ -40,6 +44,8 @@ impl PartialTrigger {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RequestStarted => "request_started",
+            Self::ParseCompleted => "parse_completed",
+            Self::AuthCompleted => "auth_completed",
             Self::RouteCompleted => "route_completed",
             Self::UpstreamResponseStarted => "upstream_response_started",
             Self::UsageObserved => "usage_observed",
@@ -162,6 +168,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "request_started",
+                "parse_completed",
+                "auth_completed",
                 "route_completed",
                 "upstream_response_started",
                 "usage_observed",

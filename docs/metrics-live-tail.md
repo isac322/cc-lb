@@ -4,7 +4,7 @@ This is the canonical metric inventory for the dashboard live-tail redesign. Lab
 
 | Metric | Type | Labels | Description | Expected steady state |
 | --- | --- | --- | --- | --- |
-| `sse_partials_published_total` | Counter | `trigger=request_started|route_completed|upstream_response_started|usage_observed|stream_completed|request_terminated` | Partial request snapshots published by the lifecycle assembler. | Increases with live request volume; `usage_observed` is throttled to about one update per event every 250 ms. |
+| `sse_partials_published_total` | Counter | `trigger=request_started|parse_completed|auth_completed|route_completed|upstream_response_started|usage_observed|stream_completed|request_terminated` | Memory-only partial request snapshots published by the lifecycle assembler; only final request events are persisted. | Increases with live request volume; `usage_observed` is throttled to about one update per event every 250 ms. |
 | `sse_partials_throttled_total` | Counter | none | Usage partial emissions skipped by the 250 ms per-`event_id` throttle. | Non-zero during active streaming; growth should correlate with streaming token cadence. |
 | `cc_lb_lifecycle_assembler_rows_total` | Counter | `outcome=written|written_orphan|written_after_grace|terminated_without_partial|orphan_ttl_evicted|cap_evicted` | Lifecycle assembler row outcomes, including orphan classification and map pressure evictions. | `written` dominates; orphan, TTL, and cap outcomes should be near zero. |
 | `sse_backfill_pages_total` | Counter | none | SSE backfill pages queried during initial connect or reconnect. | Increases with dashboard reconnects. |
@@ -26,7 +26,7 @@ This is the canonical metric inventory for the dashboard live-tail redesign. Lab
 ## Label Taxonomy
 
 - Reset reasons are `ResetReason::{BackfillCap, BusLagged, StorageError}`.
-- Partial triggers are `PartialTrigger::{RequestStarted, RouteCompleted, UpstreamResponseStarted, UsageObserved, StreamCompleted, RequestTerminated}`.
+- Partial triggers are `PartialTrigger::{RequestStarted, ParseCompleted, AuthCompleted, RouteCompleted, UpstreamResponseStarted, UsageObserved, StreamCompleted, RequestTerminated}`. All eight partial snapshots are memory-only; only the final request event is durable.
 - Notify drop reasons are `NotifyDropReason::{QueueFull, QueueClosed, SerializeError, PgError}`.
 - PG listener reconnect reasons are `PgListenerReconnectReason::{ConnectFailed, SubscribeFailed, RecvFailed}`.
 - Notify sent outcomes are `NotifySentOutcome::{Sent, TruncatedSent, Failed}`.

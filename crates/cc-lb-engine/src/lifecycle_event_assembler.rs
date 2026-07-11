@@ -243,6 +243,10 @@ impl Partial {
             upstream_id,
             upstream_name,
             model: self.model().map(str::to_owned),
+            thread_id: self
+                .parse
+                .as_ref()
+                .and_then(|parse| parse.thread_id.clone()),
             upstream_response_status: self.upstream_response_status,
             input_tokens: self.usage_seen.then_some(self.usage.input_tokens),
             output_tokens: self.usage_seen.then_some(self.usage.output_tokens),
@@ -355,6 +359,10 @@ impl Partial {
 fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
     match event {
         LifecycleEvent::RequestStarted { .. } => Some(PartialTrigger::RequestStarted),
+        LifecycleEvent::ParseCompleted { result: Ok(_), .. } => {
+            Some(PartialTrigger::ParseCompleted)
+        }
+        LifecycleEvent::AuthCompleted { result: Ok(_), .. } => Some(PartialTrigger::AuthCompleted),
         LifecycleEvent::RouteCompleted { .. } => Some(PartialTrigger::RouteCompleted),
         LifecycleEvent::UpstreamResponseStarted { .. } => {
             Some(PartialTrigger::UpstreamResponseStarted)
@@ -362,12 +370,13 @@ fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
         LifecycleEvent::UsageObserved { .. } => Some(PartialTrigger::UsageObserved),
         LifecycleEvent::StreamCompleted { .. } => Some(PartialTrigger::StreamCompleted),
         LifecycleEvent::RequestTerminated { .. } => Some(PartialTrigger::RequestTerminated),
-        LifecycleEvent::ParseCompleted { .. }
-        | LifecycleEvent::AuthCompleted { .. }
+        LifecycleEvent::ParseCompleted { result: Err(_), .. }
+        | LifecycleEvent::AuthCompleted { result: Err(_), .. }
         | LifecycleEvent::AuthenticationCompleted { .. }
         | LifecycleEvent::LimitDecision { .. }
         | LifecycleEvent::UpstreamAttempt { .. }
         | LifecycleEvent::ProviderErrorObserved { .. }
+        | LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
         | LifecycleEvent::Priced { .. }
         | LifecycleEvent::CacheObserved { .. }
         | LifecycleEvent::PromptCacheObservationsProduced { .. } => None,
@@ -847,6 +856,15 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 partial.stream_error_message = Some(error.error_message);
             }
         },
+        LifecycleEvent::RequestLogUpstreamErrorObserved {
+            error_type,
+            error_message,
+            ..
+        } => {
+            partial.stream_error_type = Some(error_type);
+            partial.stream_error_message = Some(error_message);
+        }
+        LifecycleEvent::ProviderErrorObserved { .. } => {}
         LifecycleEvent::RequestTerminated { .. } => {}
         LifecycleEvent::Priced { cost, .. } => {
             partial.cost = Some(cost);
@@ -1135,8 +1153,7 @@ mod tests {
     use async_trait::async_trait;
     use cc_lb_contract::{
         AuthFailure, BusReceiver, CostBreakdown, EngineMetricsHook, HeaderSnapshot,
-        NoopMetricsHook, ParseFailure, RequestEventPhase, RouteInfo, StreamError, StreamSuccess,
-        UsageSource,
+        NoopMetricsHook, ParseFailure, RouteInfo, StreamError, StreamSuccess, UsageSource,
     };
     use cc_lb_plugin_api::types::{
         CandidateUrgency, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
@@ -1357,6 +1374,55 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn request_log_upstream_error_populates_final_row_with_broad_code() {
+        let (tx, rx) = mpsc::channel(4);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let event_id = eid("request-log-upstream-error");
+
+        tx.send(LifecycleEvent::RequestStarted {
+            event_id: event_id.clone(),
+            request_id: "req-private-error".into(),
+            ts_ms: 1_730_000_000_000,
+            stream: false,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::RequestLogUpstreamErrorObserved {
+            event_id: event_id.clone(),
+            error_type: "rate_limit_error".into(),
+            error_message: "bounded".into(),
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id,
+            reason: TerminationReason::ErrorCode("upstream_4xx".into()),
+            client_status: 429,
+            duration_ms: 12,
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].error_code.as_deref(), Some("upstream_4xx"));
+        assert_eq!(
+            rows[0].upstream_error_type.as_deref(),
+            Some("rate_limit_error")
+        );
+        assert_eq!(rows[0].upstream_error_message.as_deref(), Some("bounded"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn parse_failed_terminated_still_persists_error_code() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
@@ -1563,6 +1629,94 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn request_started_then_route_publishes_ordered_enrichment_baseline() {
+        use crate::event_bus::InMemoryBus;
+        use cc_lb_contract::BusReceiver;
+
+        // Given an assembler with an in-memory subscriber.
+        let (tx, rx) = mpsc::channel(4);
+        let store = Arc::new(CapturingStore::default());
+        let bus = Arc::new(InMemoryBus::new());
+        let BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
+            panic!("expected InMemory receiver");
+        };
+        let event_id = eid("request-started-route-baseline");
+        let handle = spawn_request_event_assembler(
+            rx,
+            store,
+            Some(bus.clone() as Arc<dyn RequestEventBus>),
+            noop_metrics(),
+        );
+
+        // When RequestStarted and successful RouteCompleted arrive in order.
+        tx.send(LifecycleEvent::RequestStarted {
+            event_id: event_id.clone(),
+            request_id: "req-baseline".into(),
+            ts_ms: 1_730_000_000_000,
+            stream: true,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::RouteCompleted {
+            event_id: event_id.clone(),
+            result: Ok(RouteInfo {
+                upstream_id: Uuid::nil(),
+                upstream_name: "primary".to_owned(),
+                model: Some("claude-3-5-sonnet-20241022".to_owned()),
+                upstream_kind: Some("anthropic_key".to_owned()),
+                route_ms: Some(7),
+                routing_trace: None,
+                predicted_cache_read_tokens: None,
+                matched_v3_cache_key: None,
+                breakpoint_content_block_index: None,
+                matched_content_block_index: None,
+                lookback_distance: None,
+                predicted_cache_creation_tokens_5m: None,
+                predicted_cache_creation_tokens_1h: None,
+                token_estimate_source: None,
+                cache_value_micros: None,
+                formula_winner_upstream_id: None,
+                kept_upstream_id: None,
+                quota_urgency_5h: None,
+                quota_urgency_7d: None,
+                quota_urgency_combined: None,
+                quota_weight_factor: None,
+                quota_cache_multiplier: None,
+                quota_warning_multiplier: None,
+                quota_effective_weight: None,
+                quota_uniform_fallback: None,
+                wrh_key_source: None,
+                lineage_would_have_predicted_read_tokens: None,
+                lineage_would_have_picked_upstream_id: None,
+            }),
+            routing_trace: None,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        // Then the subscriber sees the initial request snapshot before route enrichment.
+        let first = broadcast_rx.try_recv().expect("RequestStarted partial");
+        let second = broadcast_rx.try_recv().expect("RouteCompleted partial");
+        assert!(broadcast_rx.try_recv().is_err());
+        let RequestEventUpdate::Partial(started) = first else {
+            panic!("expected RequestStarted partial");
+        };
+        let RequestEventUpdate::Partial(routed) = second else {
+            panic!("expected RouteCompleted partial");
+        };
+        assert_eq!(started.event_id, event_id);
+        assert_eq!(started.request_id, "req-baseline");
+        assert!(started.stream);
+        assert_eq!(started.model, None);
+        assert_eq!(started.upstream_name, None);
+        assert_eq!(routed.model.as_deref(), Some("claude-3-5-sonnet-20241022"));
+        assert_eq!(routed.upstream_name.as_deref(), Some("primary"));
+        assert_eq!(routed.route_ms, Some(7));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn full_lifecycle_publishes_throttled_partials_and_one_final() {
         use crate::event_bus::InMemoryBus;
         use cc_lb_contract::BusReceiver;
@@ -1586,6 +1740,31 @@ mod tests {
             request_id: "req-live-1".into(),
             ts_ms: 1_730_000_000_000,
             stream: true,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::ParseCompleted {
+            event_id: event_id.clone(),
+            result: Ok(ParseInfo {
+                path: "/v1/messages".to_owned(),
+                method: "POST".to_owned(),
+                model: Some("claude-3-5-sonnet-20241022".to_owned()),
+                stream: true,
+                body_bytes: 128,
+                thread_id: Some("thread-live-1".to_owned()),
+                ..ParseInfo::default()
+            }),
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::AuthCompleted {
+            event_id: event_id.clone(),
+            result: Ok(AuthInfo {
+                principal_id: "principal-live-1".to_owned(),
+                key_id: Some("key-live-1".to_owned()),
+                principal_kind: Some("api_key".to_owned()),
+                auth_ms: Some(5),
+            }),
         })
         .await
         .unwrap();
@@ -1704,14 +1883,48 @@ mod tests {
             updates.push(update);
         }
 
-        let partial_count = updates
+        let partials = updates
             .iter()
-            .filter(|update| update.phase() == RequestEventPhase::Partial)
-            .count();
-        assert!(
-            (5..=6).contains(&partial_count),
-            "expected 5-6 partials, got {partial_count}: {updates:?}"
+            .filter_map(|update| match update {
+                RequestEventUpdate::Partial(partial) => Some(partial),
+                RequestEventUpdate::Final(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            partials.len(),
+            8,
+            "unexpected partial sequence: {updates:?}"
         );
+        assert!(partials.iter().all(|partial| partial.event_id == event_id));
+
+        let started = partials[0];
+        assert_eq!(started.request_id, "req-live-1");
+        assert!(started.stream);
+        assert_eq!(started.model, None);
+        assert_eq!(started.principal_id, None);
+        assert_eq!(started.upstream_name, None);
+
+        let parsed = partials[1];
+        let parsed_json = serde_json::to_value(parsed).expect("serialize Parse partial");
+        assert_eq!(parsed_json["thread_id"], "thread-live-1");
+        assert_eq!(parsed.model.as_deref(), Some("claude-3-5-sonnet-20241022"));
+        assert_eq!(parsed.principal_id, None);
+        assert_eq!(parsed.upstream_name, None);
+
+        let authenticated = partials[2];
+        assert_eq!(
+            authenticated.principal_id.as_deref(),
+            Some("principal-live-1")
+        );
+        assert_eq!(authenticated.key_id.as_deref(), Some("key-live-1"));
+        assert_eq!(authenticated.principal_kind.as_deref(), Some("api_key"));
+        assert_eq!(authenticated.upstream_name, None);
+
+        let routed = partials[3];
+        assert_eq!(routed.upstream_name.as_deref(), Some("primary"));
+        assert_eq!(routed.upstream_id, Some(Uuid::nil()));
+        assert_eq!(routed.route_ms, Some(7));
+
         let finals: Vec<_> = updates
             .iter()
             .filter_map(|update| match update {
@@ -1722,6 +1935,80 @@ mod tests {
         assert_eq!(finals.len(), 1);
         assert_eq!(finals[0].cursor, 1);
         assert_eq!(finals[0].event.event_id.as_deref(), Some(event_id.as_str()));
+        assert!(matches!(updates.last(), Some(RequestEventUpdate::Final(_))));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_and_auth_failures_emit_no_enrichment_partials_and_finalize_once() {
+        use crate::event_bus::InMemoryBus;
+        use cc_lb_contract::BusReceiver;
+
+        // Given an assembler subscribed before a request begins.
+        let (tx, rx) = mpsc::channel(8);
+        let store = Arc::new(CapturingStore::default());
+        let bus = Arc::new(InMemoryBus::new());
+        let BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
+            panic!("expected InMemory receiver");
+        };
+        let event_id = eid("parse-auth-failure-control");
+        let handle = spawn_request_event_assembler(
+            rx,
+            store.clone(),
+            Some(bus.clone() as Arc<dyn RequestEventBus>),
+            noop_metrics(),
+        );
+
+        // When parsing and authentication both fail before termination.
+        tx.send(LifecycleEvent::RequestStarted {
+            event_id: event_id.clone(),
+            request_id: "req-failure-control".to_owned(),
+            ts_ms: 1_730_000_000_000,
+            stream: false,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::ParseCompleted {
+            event_id: event_id.clone(),
+            result: Err(ParseFailure::InvalidJson),
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::AuthCompleted {
+            event_id: event_id.clone(),
+            result: Err(AuthFailure::AuthenticationFailed {
+                http_status: 401,
+                reason: Some("invalid_key".to_owned()),
+            }),
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id: event_id.clone(),
+            reason: TerminationReason::ErrorCode("invalid_request".to_owned()),
+            client_status: 400,
+            duration_ms: 9,
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        // Then neither failed stage emits an empty frame and finalization happens once.
+        let mut updates = Vec::new();
+        while let Ok(update) = broadcast_rx.try_recv() {
+            updates.push(update);
+        }
+        assert_eq!(updates.len(), 3, "unexpected failure sequence: {updates:?}");
+        assert!(matches!(updates[0], RequestEventUpdate::Partial(_)));
+        assert!(matches!(updates[1], RequestEventUpdate::Partial(_)));
+        assert!(matches!(updates[2], RequestEventUpdate::Final(_)));
+        assert_eq!(store.rows.lock().unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]

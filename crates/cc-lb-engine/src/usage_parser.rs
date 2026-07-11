@@ -13,6 +13,8 @@
 use serde_json::Value;
 
 const UPSTREAM_ERROR_MESSAGE_MAX_BYTES: usize = 1024;
+const UPSTREAM_ERROR_TYPE_MAX_BYTES: usize = 256;
+const TRUNCATION_MARKER: &str = "...";
 
 /// Cumulative token + extended usage state extracted from a single request's
 /// SSE stream (or non-stream JSON body).
@@ -55,6 +57,63 @@ pub(crate) struct SseUsageUpdate {
 pub(crate) struct UpstreamStreamError {
     pub(crate) error_type: Option<String>,
     pub(crate) error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BoundedErrorType(String);
+
+impl BoundedErrorType {
+    fn parse(value: &str) -> Option<Self> {
+        (value.len() <= UPSTREAM_ERROR_TYPE_MAX_BYTES).then(|| Self(value.to_owned()))
+    }
+
+    fn into_string(self) -> String {
+        self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BoundedErrorMessage(String);
+
+impl BoundedErrorMessage {
+    fn parse(value: &str) -> Self {
+        if value.len() <= UPSTREAM_ERROR_MESSAGE_MAX_BYTES {
+            return Self(value.to_owned());
+        }
+        let mut end = UPSTREAM_ERROR_MESSAGE_MAX_BYTES - TRUNCATION_MARKER.len();
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut bounded = String::with_capacity(end + TRUNCATION_MARKER.len());
+        bounded.push_str(&value[..end]);
+        bounded.push_str(TRUNCATION_MARKER);
+        Self(bounded)
+    }
+
+    fn into_string(self) -> String {
+        self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CanonicalUpstreamError {
+    error_type: BoundedErrorType,
+    error_message: BoundedErrorMessage,
+}
+
+impl CanonicalUpstreamError {
+    pub(crate) fn into_parts(self) -> (String, String) {
+        (
+            self.error_type.into_string(),
+            self.error_message.into_string(),
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NonStreamObservation {
+    pub(crate) usage: UsageCounts,
+    pub(crate) canonical_error: Option<CanonicalUpstreamError>,
 }
 
 /// Find the byte offset of the next SSE event terminator (`\n\n`, `\r\r`, or
@@ -136,13 +195,17 @@ pub(crate) fn accumulate_sse_usage(raw: &[u8], usage: &mut UsageCounts) -> SseUs
     update
 }
 
-/// Parse a non-stream Anthropic Messages API JSON response body into
-/// `UsageCounts`. Returns an empty (`present=false`) value if the body is not
-/// valid JSON or carries no `usage` object.
-pub(crate) fn usage_from_json_body(body: &[u8]) -> UsageCounts {
+pub(crate) fn observe_non_stream_json_body(body: &[u8]) -> NonStreamObservation {
     let Ok(value) = sonic_rs::from_slice::<Value>(body) else {
-        return UsageCounts::default();
+        return NonStreamObservation::default();
     };
+    NonStreamObservation {
+        usage: usage_from_value(&value),
+        canonical_error: canonical_upstream_error_from_value(&value),
+    }
+}
+
+fn usage_from_value(value: &Value) -> UsageCounts {
     let Some(usage_value) = value.get("usage") else {
         return UsageCounts::default();
     };
@@ -152,6 +215,17 @@ pub(crate) fn usage_from_json_body(body: &[u8]) -> UsageCounts {
     };
     merge_usage_value(&mut usage, usage_value);
     usage
+}
+
+fn canonical_upstream_error_from_value(value: &Value) -> Option<CanonicalUpstreamError> {
+    if value.get("type").and_then(Value::as_str) != Some("error") {
+        return None;
+    }
+    let (error_type, error_message) = bounded_upstream_error(value);
+    Some(CanonicalUpstreamError {
+        error_type: error_type?,
+        error_message: error_message?,
+    })
 }
 
 /// Detect a mid-stream `event: error` (or `data: {"type":"error",...}`)
@@ -179,19 +253,27 @@ pub(crate) fn detect_mid_stream_error(raw: &[u8]) -> Option<UpstreamStreamError>
     if !is_error {
         return None;
     }
-    let error_obj = value.get("error");
-    let error_type = error_obj
-        .and_then(|e| e.get("type"))
-        .and_then(Value::as_str)
-        .map(|s| s.to_owned());
-    let error_message = error_obj
-        .and_then(|e| e.get("message"))
-        .and_then(Value::as_str)
-        .map(truncate_for_storage);
+    let (error_type, error_message) = bounded_upstream_error(&value);
     Some(UpstreamStreamError {
-        error_type,
-        error_message,
+        error_type: error_type.map(BoundedErrorType::into_string),
+        error_message: error_message.map(BoundedErrorMessage::into_string),
     })
+}
+
+fn bounded_upstream_error(
+    value: &Value,
+) -> (Option<BoundedErrorType>, Option<BoundedErrorMessage>) {
+    let error_obj = value.get("error");
+    (
+        error_obj
+            .and_then(|error| error.get("type"))
+            .and_then(Value::as_str)
+            .and_then(BoundedErrorType::parse),
+        error_obj
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .map(BoundedErrorMessage::parse),
+    )
 }
 
 fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
@@ -265,20 +347,6 @@ fn parse_cache_creation_split(usage: &Value) -> (u64, u64, u64) {
         .and_then(Value::as_u64)
         .unwrap_or(0);
     (flat, flat, 0)
-}
-
-fn truncate_for_storage(s: &str) -> String {
-    if s.len() <= UPSTREAM_ERROR_MESSAGE_MAX_BYTES {
-        return s.to_owned();
-    }
-    let mut end = UPSTREAM_ERROR_MESSAGE_MAX_BYTES;
-    while !s.is_char_boundary(end) && end > 0 {
-        end -= 1;
-    }
-    let mut truncated = String::with_capacity(end + 3);
-    truncated.push_str(&s[..end]);
-    truncated.push_str("...");
-    truncated
 }
 
 #[cfg(test)]
@@ -383,15 +451,159 @@ mod tests {
     }
 
     #[test]
-    fn truncates_long_upstream_error_messages() {
+    fn stream_error_message_cap_includes_truncation_marker() {
         let long_msg = "x".repeat(UPSTREAM_ERROR_MESSAGE_MAX_BYTES + 200);
         let raw = format!(
             "event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"e\",\"message\":\"{long_msg}\"}}}}\n\n"
         );
         let err = detect_mid_stream_error(raw.as_bytes()).expect("detected");
         let msg = err.error_message.expect("message present");
-        assert!(msg.len() <= UPSTREAM_ERROR_MESSAGE_MAX_BYTES + 3);
+        assert!(msg.len() <= UPSTREAM_ERROR_MESSAGE_MAX_BYTES);
         assert!(msg.ends_with("..."));
+    }
+
+    #[test]
+    fn canonical_error_body_extracts_structured_fields() {
+        // Given
+        let body = br#"{"type":"error","error":{"type":"rate_limit_error","message":"forced fake rate limit response"}}"#;
+
+        // When
+        let error = observe_non_stream_json_body(body)
+            .canonical_error
+            .expect("canonical error");
+
+        // Then
+        assert_eq!(error.error_type.0, "rate_limit_error");
+        assert_eq!(error.error_message.0, "forced fake rate limit response");
+    }
+
+    #[test]
+    fn canonical_error_message_cap_includes_marker_on_utf8_boundary() {
+        // Given
+        let long_message = format!("{}🙂tail", "a".repeat(1023));
+        let body = serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": long_message,
+            }
+        })
+        .to_string();
+
+        // When
+        let error = observe_non_stream_json_body(body.as_bytes())
+            .canonical_error
+            .expect("canonical error with long message");
+
+        // Then
+        assert_eq!(
+            error.error_message.0.len(),
+            UPSTREAM_ERROR_MESSAGE_MAX_BYTES
+        );
+        assert!(error.error_message.0.is_char_boundary(1021));
+        assert_eq!(error.error_message.0, format!("{}...", "a".repeat(1021)));
+    }
+
+    #[test]
+    fn canonical_error_message_preserves_exact_cap_and_bounds_ascii_and_emoji_excess() {
+        // Given
+        let cases = [
+            ("a".repeat(1024), false),
+            ("a".repeat(1025), true),
+            ("🙂".repeat(256), false),
+            ("🙂".repeat(257), true),
+        ];
+
+        // When / Then
+        for (message, truncated) in cases {
+            let body = serde_json::json!({
+                "type": "error",
+                "error": { "type": "api_error", "message": message },
+            })
+            .to_string();
+            let error = observe_non_stream_json_body(body.as_bytes())
+                .canonical_error
+                .expect("canonical error");
+            assert!(error.error_message.0.len() <= UPSTREAM_ERROR_MESSAGE_MAX_BYTES);
+            assert_eq!(error.error_message.0.ends_with("..."), truncated);
+            if !truncated {
+                assert_eq!(error.error_message.0, message);
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_error_type_accepts_256_bytes_and_rejects_oversized_values() {
+        // Given
+        let cases = [
+            ("a".repeat(256), true),
+            ("a".repeat(257), false),
+            ("🙂".repeat(64), true),
+            ("🙂".repeat(65), false),
+        ];
+
+        // When / Then
+        for (error_type, accepted) in cases {
+            let body = serde_json::json!({
+                "type": "error",
+                "error": { "type": error_type, "message": "bounded" },
+            })
+            .to_string();
+            let error = observe_non_stream_json_body(body.as_bytes()).canonical_error;
+            assert_eq!(error.is_some(), accepted, "type bytes={}", error_type.len());
+        }
+    }
+
+    #[test]
+    fn canonical_error_body_rejects_malformed_or_wrong_shapes() {
+        // Given
+        let controls: &[&[u8]] = &[
+            b"",
+            b"not-json",
+            br#"{"type":"message","error":{"type":"rate_limit_error","message":"no"}}"#,
+            br#"{"type":"error","error":{"message":"missing type"}}"#,
+            br#"{"type":"error","error":{"type":"rate_limit_error"}}"#,
+        ];
+
+        // When / Then
+        for body in controls {
+            assert!(observe_non_stream_json_body(body).canonical_error.is_none());
+        }
+    }
+
+    #[test]
+    fn non_stream_observation_combines_usage_and_canonical_error() {
+        // Given
+        let body = br#"{"type":"error","error":{"type":"rate_limit_error","message":"bounded"},"usage":{"input_tokens":12,"output_tokens":3}}"#;
+
+        // When
+        let observation = observe_non_stream_json_body(body);
+
+        // Then
+        assert_eq!(observation.usage.input_tokens, 12);
+        assert_eq!(observation.usage.output_tokens, 3);
+        let error = observation.canonical_error.expect("canonical error");
+        assert_eq!(error.error_type.0, "rate_limit_error");
+        assert_eq!(error.error_message.0, "bounded");
+    }
+
+    #[test]
+    fn non_stream_observation_rejects_malformed_error_shapes() {
+        // Given
+        let controls: &[&[u8]] = &[
+            b"",
+            b"not-json",
+            br#"{"type":"message","error":{"type":"rate_limit_error","message":"no"}}"#,
+            br#"{"type":"error","error":{"message":"missing type"}}"#,
+            br#"{"type":"error","error":{"type":"rate_limit_error"}}"#,
+        ];
+
+        // When / Then
+        for body in controls {
+            let observation = observe_non_stream_json_body(body);
+            assert_eq!(observation.usage, UsageCounts::default());
+            assert!(observation.canonical_error.is_none());
+        }
     }
 
     #[test]
@@ -460,7 +672,7 @@ mod tests {
             }
         })
         .to_string();
-        let usage = usage_from_json_body(body.as_bytes());
+        let usage = observe_non_stream_json_body(body.as_bytes()).usage;
         assert!(usage.present);
         assert_eq!(usage.input_tokens, 50);
         assert_eq!(usage.output_tokens, 100);

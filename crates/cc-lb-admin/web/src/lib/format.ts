@@ -45,6 +45,23 @@ export function formatCostMicros(micros?: number | null): string {
   return `$${usd.toFixed(4)}`;
 }
 
+export type RequestOutcome =
+  | { type: 'partial' }
+  | { type: 'client_disconnected'; status: number; error_code: string }
+  | { type: 'completed'; status: number; error_code?: string | null };
+
+export function getRequestOutcome(
+  isPartial: boolean,
+  status: number,
+  error_code?: string | null,
+): RequestOutcome {
+  if (isPartial) return { type: 'partial' };
+  if (status === 499 && error_code === 'client_closed_request') {
+    return { type: 'client_disconnected', status, error_code };
+  }
+  return { type: 'completed', status, error_code };
+}
+
 export function statusTone(s: number): 'ok' | 'warn' | 'danger' | 'neutral' {
   if (s >= 500) return 'danger';
   if (s >= 400) return 'warn';

@@ -1,8 +1,8 @@
 import type React from 'react';
-import type { RequestEvent } from '../../../lib/api';
 import { fmtMs, fmtMsCompact } from '../../../lib/format';
+import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { cx, Hint } from '../primitives';
-import { Sparkline } from '../RequestEventsTable';
+import { Sparkline } from '../Sparkline';
 import { computeStageGroups, deriveSetupOverhead } from './computeStageGroups';
 
 function pctOf(value: number | null | undefined, denom: number): number {
@@ -73,12 +73,18 @@ export function LatencyCell({
   event: e,
   isPartial,
 }: {
-  event: RequestEvent;
+  event: RequestEventWithPhase;
   isPartial?: boolean;
 }) {
   const groups = computeStageGroups(e);
-  const { value, unit } = fmtMsCompact(e.duration_ms);
-  const duration = isPartial ? (e.elapsed_ms ?? 0) : (e.duration_ms ?? 0);
+  const { value, unit } = fmtMsCompact(
+    e._phase === 'final' ? e.duration_ms : 0,
+  );
+  const duration = isPartial
+    ? (e.elapsed_ms ?? 0)
+    : e._phase === 'final'
+      ? e.duration_ms
+      : 0;
 
   const setup_overhead_ms = deriveSetupOverhead(e);
 
@@ -150,13 +156,22 @@ export function LatencyCell({
             { label: 'Body', value: e.upstream_body_ms },
             {
               label: 'First content delta',
-              value: e.stream_first_content_delta_ms,
+              value:
+                e._phase === 'final'
+                  ? e.stream_first_content_delta_ms
+                  : undefined,
             },
             {
               label: 'Last content delta',
-              value: e.stream_last_content_delta_ms,
+              value:
+                e._phase === 'final'
+                  ? e.stream_last_content_delta_ms
+                  : undefined,
             },
-            { label: 'Inter-token avg', value: e.inter_token_avg_ms },
+            {
+              label: 'Inter-token avg',
+              value: e._phase === 'final' ? e.inter_token_avg_ms : undefined,
+            },
           ]}
         />
 
@@ -166,8 +181,14 @@ export function LatencyCell({
           total={groups.internalPost}
           duration={duration}
           items={[
-            { label: 'Observability', value: e.observability_post_ms },
-            { label: 'Limit reconcile', value: e.limit_reconcile_ms },
+            {
+              label: 'Observability',
+              value: e._phase === 'final' ? e.observability_post_ms : undefined,
+            },
+            {
+              label: 'Limit reconcile',
+              value: e._phase === 'final' ? e.limit_reconcile_ms : undefined,
+            },
           ]}
         />
       </div>
@@ -177,7 +198,7 @@ export function LatencyCell({
           <span className="h-2 w-2 shrink-0" />
           <span className="text-text-faint flex-1">Total</span>
           <span className="tabular-nums text-text w-14 text-right">
-            {fmtMs(e.duration_ms)}
+            {fmtMs(e._phase === 'final' ? e.duration_ms : 0)}
           </span>
           <span className="tabular-nums text-text-faint w-9 text-right">
             {duration > 0 ? '100%' : '—'}

@@ -117,7 +117,7 @@ export function PieChart({
   const centerSecondary = centerSecondaryParts.join(' · ');
 
   return (
-    <div className="px-4 py-3">
+    <div className="px-4 py-3 w-full min-w-0">
       <svg
         viewBox={`0 0 ${size} ${size}`}
         className="w-full aspect-square block"

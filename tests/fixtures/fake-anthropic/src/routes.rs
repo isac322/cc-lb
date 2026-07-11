@@ -653,6 +653,17 @@ async fn mode_response(mode: FakeMode) -> Option<Response> {
                 .insert(RETRY_AFTER, HeaderValue::from_static("1"));
             Some(response)
         }
+        FakeMode::RateLimitedLong => {
+            let mut response = error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                &long_rate_limit_error_message(),
+            );
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+            Some(response)
+        }
         FakeMode::ServerError => Some(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "api_error",
@@ -671,6 +682,22 @@ async fn mode_response(mode: FakeMode) -> Option<Response> {
         | FakeMode::TamperUnknownEvent
         | FakeMode::TruncateMidStream => None,
     }
+}
+
+fn long_rate_limit_error_message() -> String {
+    let unbroken_token = "z".repeat(600);
+    [
+        "forced fake long rate limit response",
+        "your organization exceeded its request quota for this rolling window",
+        "opaque-diagnostic-token-follows-with-no-whitespace-so-the-drawer-must-wrap-one-continuous-run:",
+        unbroken_token.as_str(),
+        "context: this canonical error message is intentionally longer than the proxy's 1024-byte upstream_error_message cap",
+        "so request-log QA can prove the storage and admin-API truncation boundary is enforced marker-inclusive",
+        "and prove the admin-web drawer renders the whole message wrapped, selectable, and non-clipped",
+        "across mobile 375, tablet 768, and desktop 1280 widths without overflowing its container",
+        "trace: upstream=fake-anthropic mode=429-long window=organization scope=v1-messages retry=window-reset",
+    ]
+    .join("\n")
 }
 
 fn auth_failure(state: &AppState, headers: &HeaderMap) -> Option<Response> {

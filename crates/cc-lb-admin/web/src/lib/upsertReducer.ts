@@ -6,7 +6,8 @@ import type {
 
 export type LiveEventMap = Map<
   string,
-  { phase: 'partial' | 'final'; event: RequestEvent | RequestEventPartial }
+  | { phase: 'partial'; event: RequestEventPartial }
+  | { phase: 'final'; event: RequestEvent }
 >;
 
 export function upsertLiveEvent(
@@ -33,7 +34,7 @@ export function upsertLiveEvent(
     if (!existing || existing.phase === 'partial') {
       eventsMap.set(eventId, {
         phase: 'partial',
-        event: update.payload as unknown as RequestEventPartial,
+        event: update.payload,
       });
       return true;
     }
@@ -44,7 +45,7 @@ export function upsertLiveEvent(
     // Rule 2: incoming.phase == 'final' -> REPLACE entire, add to finalizedIds
     eventsMap.set(eventId, {
       phase: 'final',
-      event: update.payload.event as unknown as RequestEvent,
+      event: update.payload.event,
     });
     finalizedIds.add(eventId);
     return true;
