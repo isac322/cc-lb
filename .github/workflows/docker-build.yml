@@ -1,14 +1,15 @@
 name: docker-build
 
 # Build the production image whenever the Docker build inputs change, so a
-# Dockerfile/.dockerignore edit can't silently break the image (hadolint in
-# deploy.yml only lints; it never actually compiles). Source-only changes are
-# covered by ci.yml and deliberately do NOT trigger this heavy release build.
+# Dockerfile/.dockerignore/build-script edit can't silently break the image
+# (hadolint in deploy.yml only lints; it never actually compiles). Source-only
+# changes are covered by ci.yml and deliberately do NOT trigger this build.
 on:
   pull_request:
     paths:
       - 'Dockerfile'
       - '.dockerignore'
+      - 'scripts/build-cc-lb.sh'
       - '.github/workflows/docker-build.yml'
   push:
     branches:
@@ -16,6 +17,7 @@ on:
     paths:
       - 'Dockerfile'
       - '.dockerignore'
+      - 'scripts/build-cc-lb.sh'
       - '.github/workflows/docker-build.yml'
 
 concurrency:
@@ -24,45 +26,66 @@ concurrency:
 
 jobs:
   build:
-    # Self-hosted arm64: xx cross-compiles every target arch from arm64 with no
-    # QEMU, and only here can the build reach the in-cluster sccache/GHA cache
-    # server (a GitHub-hosted runner can't see arc-systems.svc).
+    # Self-hosted arm64: the compile is cached on the node's local-disk sccache
+    # store (/opt/sccache hostPath), reachable only from this runner. The image
+    # is assembled in three steps because a BuildKit RUN can't bind a writable
+    # host dir, so the cached compile has to run outside BuildKit via `docker run`.
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
 
-      # network=host lets the compile reach the in-cluster Garage S3 store over
-      # the pod network (garage.arc-systems.svc.cluster.local is in the dind's
-      # NO_PROXY); the RUN-step host network needs the network.host entitlement,
-      # allowed on both the builder (buildkitd-flags) and the build (allow: below).
       - uses: docker/setup-buildx-action@v4
-        with:
-          driver-opts: network=host
-          buildkitd-flags: --allow-insecure-entitlement network.host
 
-      # GIT_SHA / SOURCE_DATE_EPOCH are pinned to stable values on purpose: this
-      # never-published verification image doesn't need a real commit sha, and
-      # stable build metadata maximises sccache reuse.
-      - name: Build image (cross-compile, sccache S3 cache)
+      # 1) Build the real Dockerfile toolchain stage (validates the builder setup
+      #    and gives us an image to compile in). load: into the dind's docker.
+      - name: Build builder image (cross toolchain)
         uses: docker/build-push-action@v7
         with:
           context: .
+          target: builder
           load: true
-          network: host
-          allow: network.host
-          tags: cc-lb:ci
-          build-args: |
-            GIT_SHA=0000000
-            SOURCE_DATE_EPOCH=0
-            SCCACHE_BUCKET=sccache
-            SCCACHE_ENDPOINT=garage.arc-systems.svc.cluster.local:3900
-            SCCACHE_REGION=garage
-            SCCACHE_S3_USE_SSL=false
-          secrets: |
-            AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
-            AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+          tags: cc-lb-builder:ci
 
-      # A successful build already proves both storage backends compile (default
+      # 2) Compile via the SAME script the Dockerfile uses, with sccache bound to
+      #    the node's local-disk cache. Runs in the dind, which mounts the
+      #    /opt/sccache hostPath (see .deploy/arc-cc-lb-values.yaml); the runner
+      #    workspace is the shared `work` emptyDir, visible to the dind at the same
+      #    path. SKIP_SPA=1 mirrors the cargo CI jobs (no Bun/network dependency;
+      #    the real SPA build is covered by cd + web.yml). Fail-open: if the store
+      #    is absent the compile just runs uncached.
+      - name: Compile (host-bind sccache on the node's local disk)
+        run: |
+          rm -rf "${GITHUB_WORKSPACE}/ci-out"
+          mkdir -p "${GITHUB_WORKSPACE}/ci-out"
+          docker run --rm \
+            -v /opt/sccache:/sccache \
+            -v "${GITHUB_WORKSPACE}:/src" \
+            -v "${GITHUB_WORKSPACE}/ci-out:/out" \
+            -w /src \
+            -e SCCACHE_DIR=/sccache \
+            -e OUT_DIR=/out \
+            -e GIT_SHA=0000000 \
+            -e SOURCE_DATE_EPOCH=0 \
+            -e FEATURES=sqlite,postgres \
+            -e SKIP_SPA=1 \
+            -e TARGETPLATFORM=linux/arm64 \
+            cc-lb-builder:ci \
+            sh /src/scripts/build-cc-lb.sh
+
+      # 3) Package the prebuilt binary into the real distroless runtime stage,
+      #    reusing the Dockerfile's runtime-base so the runtime config isn't
+      #    duplicated here.
+      - name: Package image from the prebuilt binary
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: package
+          load: true
+          tags: cc-lb:ci
+          build-contexts: |
+            bin=${{ github.workspace }}/ci-out
+
+      # A successful compile already proves both storage backends build (default
       # FEATURES=sqlite,postgres); this just confirms the static binary runs.
       - name: Smoke test
         run: docker run --rm cc-lb:ci --version

@@ -102,6 +102,10 @@ template:
           - {name: dind-sock, mountPath: /var/run}
           - {name: dind-externals, mountPath: /home/runner/externals}
           - {name: registry-proxy-ca, mountPath: /registry-proxy-ca}
+          # docker-build.yml compiles the image via `docker run -v /opt/sccache`,
+          # which resolves paths in THIS dind's filesystem; mount the shared
+          # sccache hostPath here so that host-bind cache reaches the node store.
+          - {name: sccache-cache, mountPath: /opt/sccache}
     volumes:
       - {name: dind-sock, emptyDir: {}}
       - {name: dind-externals, emptyDir: {}}

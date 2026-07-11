@@ -10,8 +10,11 @@
 #     binary that runs on `scratch`/distroless-static with zero shared libs.
 #   * `cc-lb-admin/build.rs` shells out to Bun to build + embed the dashboard
 #     SPA; build scripts run on BUILDPLATFORM, so a BUILDPLATFORM Bun is enough.
-#   * `cc-lb-runtime-wasmtime/build.rs` force-builds wasm32 test fixtures unless
-#     CC_LB_SKIP_WASM_FIXTURE_BUILD=1 — mandatory for a server release build.
+#   * The actual compile lives in scripts/build-cc-lb.sh (one source of truth):
+#     the `compiled` stage runs it in BuildKit (cd / local), and the docker-build
+#     CI job runs the SAME script via `docker run` off the `builder` image with a
+#     host-bind sccache cache — a BuildKit RUN can't bind a writable host dir, so
+#     the cached compile has to happen outside BuildKit.
 #   * TLS uses rustls + webpki-roots (CA roots compiled into the binary), so the
 #     final image needs no system CA certificates.
 #
@@ -28,7 +31,11 @@ FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0 AS xx
 # ---- Bun (musl) for the cc-lb-admin dashboard SPA build; runs on BUILDPLATFORM ----
 FROM --platform=$BUILDPLATFORM oven/bun:1.3.14-alpine AS bun
 
-# ---- Builder ----
+# ---- Builder: cross toolchain only, NO source, NO compile ----
+# Kept compile-free on purpose: the docker-build CI job builds this stage as an
+# image and `docker run`s scripts/build-cc-lb.sh against a bind-mounted workspace
+# with a host-bind sccache cache. The in-BuildKit `compiled` stage below is the
+# cd / local path.
 FROM --platform=$BUILDPLATFORM rust:1.96.0-alpine AS builder
 SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 
@@ -36,11 +43,11 @@ SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 #            .cargo/config.toml rust-lld, which is expected and correct).
 # git:       cc-lb-server/build.rs reads `git rev-parse` (falls back gracefully).
 # libstdc++/libgcc: Bun's runtime dependencies on Alpine.
-# sccache:   compiler cache; enabled when the S3 cache credentials are mounted (CI).
+# sccache:   compiler cache; enabled by the docker-run CI path via SCCACHE_DIR.
 # hadolint ignore=DL3018
 RUN apk add --no-cache clang lld git libstdc++ libgcc sccache
 
-# xx scripts (xx-cargo, xx-apk, xx-verify, xx-info, ...).
+# xx scripts (xx-cargo, xx-apk, xx-verify, ...).
 COPY --from=xx / /
 
 # BUILDPLATFORM Bun + a `bunx` alias (package.json build script calls `bunx`).
@@ -57,103 +64,65 @@ RUN xx-apk add --no-cache musl-dev gcc
 # Ensure the resolved Rust target triple is installed for cross builds.
 RUN rustup target add "$(xx-cargo --print-target-triple)"
 
-WORKDIR /src
-COPY . .
-
-# Build-time metadata / knobs.
+# ---- Compiled: run the shared build script in BuildKit (cd / local path) ----
+FROM builder AS compiled
+ARG BUILDPLATFORM
+# Build-time metadata / knobs (consumed by scripts/build-cc-lb.sh via the env).
 ARG GIT_SHA=""
 ARG SOURCE_DATE_EPOCH=""
-# Cargo feature set for cc-lb-server. The default ships BOTH storage backends in
-# one binary; the backend is chosen at runtime via `[storage] kind` in the config
-# ("sqlite" or "postgres"). Override to slim the image to a single backend, e.g.
-# `--build-arg FEATURES=sqlite` or `--build-arg FEATURES=postgres`.
+# The default ships BOTH storage backends in one binary; the backend is chosen at
+# runtime via `[storage] kind` ("sqlite" or "postgres"). Override to slim, e.g.
+# `--build-arg FEATURES=sqlite`.
 ARG FEATURES="sqlite,postgres"
 # Set to 1 to skip building the dashboard SPA (ships a placeholder page).
 ARG SKIP_SPA="0"
-# sccache S3-compatible cache backend (the in-cluster Garage store). Empty by
-# default so local builds and the cd job compile uncached; the docker-build CI
-# workflow passes these plus the AWS_* credential secrets.
-ARG SCCACHE_BUCKET=""
-ARG SCCACHE_ENDPOINT=""
-ARG SCCACHE_REGION=""
-ARG SCCACHE_S3_USE_SSL=""
 
-# Compile the static musl binary. The cargo download caches (registry/git) and
-# the Bun install cache are reused across builds. The target dir is intentionally
-# NOT cache-mounted: cc-lb-admin/build.rs regenerates its embedded SPA (web/dist)
-# into the freshly COPYed source tree every build, and a persisted target dir
-# makes cargo skip that build script on a warm rebuild -> missing web/dist -> fail.
+WORKDIR /src
+COPY . .
+
+# The cargo download caches (registry/git) and the Bun install cache are reused
+# across builds. The target dir is intentionally NOT cache-mounted:
+# cc-lb-admin/build.rs regenerates its embedded SPA (web/dist) into the freshly
+# COPYed source tree every build, and a persisted target dir makes cargo skip
+# that build script on a warm rebuild -> missing web/dist -> fail. The docker-run
+# CI path caches at the compiler level (sccache) instead.
 RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
     --mount=type=cache,id=bun-${BUILDPLATFORM},sharing=locked,target=/root/.bun/install/cache \
-    --mount=type=secret,id=AWS_ACCESS_KEY_ID,required=false \
-    --mount=type=secret,id=AWS_SECRET_ACCESS_KEY,required=false \
-<<EOF
-# A declared ARG is exported into this RUN's env; an empty SOURCE_DATE_EPOCH
-# makes ring's cc/clang C build abort, so drop it unless a real value was passed.
-if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then unset SOURCE_DATE_EPOCH; fi
-# cc-lb-runtime-wasmtime/build.rs would otherwise force a wasm32 fixture build.
-export CC_LB_SKIP_WASM_FIXTURE_BUILD=1
-export GIT_SHA="${GIT_SHA}"
-if [ "${SKIP_SPA}" = "1" ]; then export CC_LB_ADMIN_SKIP_SPA=1; fi
+    sh /src/scripts/build-cc-lb.sh
 
-# sccache with an S3-compatible backend (the in-cluster Garage store) = a
-# persistent, cross-run compiler cache. Fail-open: without S3 credentials (local
-# builds, or the GitHub-hosted cd job that can't reach the in-cluster store)
-# sccache stays off and the build compiles uncached rather than failing. The
-# native GHA cache backend is deliberately NOT used here: the in-cluster cache
-# server only speaks the JSON Actions API while sccache/opendal sends protobuf,
-# so it rejects every request (falcondev-oss/github-actions-cache-server#164).
-AWS_ACCESS_KEY_ID="$(cat /run/secrets/AWS_ACCESS_KEY_ID 2>/dev/null || true)"
-AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/AWS_SECRET_ACCESS_KEY 2>/dev/null || true)"
-if [ -n "${AWS_ACCESS_KEY_ID}" ] && [ -n "${AWS_SECRET_ACCESS_KEY}" ] && [ -n "${SCCACHE_BUCKET}" ]; then
-  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-  export SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION SCCACHE_S3_USE_SSL
-  # SCCACHE_IGNORE_SERVER_IO_ERROR keeps a Garage outage non-fatal (compile uncached).
-  export RUSTC_WRAPPER=sccache SCCACHE_IGNORE_SERVER_IO_ERROR=1 CARGO_INCREMENTAL=0
-  # Disable the server idle-timeout (default 600s): the fat-LTO final link runs
-  # >10min with no compiler calls and would otherwise reap the server mid-build.
-  export SCCACHE_IDLE_TIMEOUT=0
-  echo "sccache: S3 backend enabled (bucket=${SCCACHE_BUCKET}, endpoint=${SCCACHE_ENDPOINT})"
-else
-  echo "sccache: no S3 credentials, compiling uncached"
-fi
-
-xx-cargo build --release --locked \
-  -p cc-lb-server \
-  --no-default-features --features "${FEATURES}" \
-  --target-dir /src/target
-if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats; sccache --stop-server || true; fi
-
-triple="$(xx-cargo --print-target-triple)"
-# Copy the binary out of the ephemeral target dir into the thin /out layer.
-install -Dm0755 "/src/target/${triple}/release/cc-lb" /out/cc-lb
-xx-verify --static /out/cc-lb
-
-# Minimal passwd/group so the scratch image can run as a real nonroot user.
-install -d /out/etc
-echo 'nonroot:x:65532:65532:nonroot:/home/nonroot:/sbin/nologin' > /out/etc/passwd
-echo 'nonroot:x:65532:' > /out/etc/group
-EOF
+# ---- Runtime base: distroless config shared by the distroless + package images ----
+# Ships /etc/passwd, a nonroot user (65532), /tmp, and CA certs — a safe,
+# debuggable base while staying ~2 MB over the static binary. Digest-pinned for
+# reproducible builds (:nonroot is a rolling tag); bump it alongside the other
+# base images (freshen-deps).
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240 AS runtime-base
+USER 65532:65532
+EXPOSE 8080 9090 9091
+ENTRYPOINT ["/usr/local/bin/cc-lb"]
+CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
 
 # ---- Final: scratch (opt-in via `--target runtime-scratch`; smallest image) ----
 FROM scratch AS runtime-scratch
-COPY --link --from=builder /out/etc/passwd /etc/passwd
-COPY --link --from=builder /out/etc/group /etc/group
-COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
+COPY --link --from=compiled /out/etc/passwd /etc/passwd
+COPY --link --from=compiled /out/etc/group /etc/group
+COPY --link --from=compiled /out/cc-lb /usr/local/bin/cc-lb
 USER 65532:65532
 EXPOSE 8080 9090 9091
 ENTRYPOINT ["/usr/local/bin/cc-lb"]
 CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
 
-# ---- Final: distroless static (DEFAULT target) ----
-# Ships /etc/passwd, a nonroot user (65532), /tmp, and CA certs — a safe,
-# debuggable base while staying ~2 MB over the static binary.
-# Digest-pinned for reproducible builds (:nonroot is a rolling tag); bump it
-# alongside the other base images (freshen-deps).
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240 AS distroless
-COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
-USER 65532:65532
-EXPOSE 8080 9090 9091
-ENTRYPOINT ["/usr/local/bin/cc-lb"]
-CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
+# ---- Package: distroless image from a prebuilt binary (docker-build CI path) ----
+# The CI job compiles via `docker run` (host-bind sccache) then packages the
+# result with `--build-context bin=<out> --target package`, reusing runtime-base
+# so the runtime config isn't duplicated in the workflow. Only built when the
+# `bin` build-context is supplied.
+FROM runtime-base AS package
+# `bin` is a named build-context (docker buildx --build-context bin=<dir>), not a
+# stage alias, which hadolint DL3022 can't see.
+# hadolint ignore=DL3022
+COPY --link --from=bin cc-lb /usr/local/bin/cc-lb
+
+# ---- Final: distroless static (DEFAULT target; cd / local in-BuildKit build) ----
+FROM runtime-base AS distroless
+COPY --link --from=compiled /out/cc-lb /usr/local/bin/cc-lb
