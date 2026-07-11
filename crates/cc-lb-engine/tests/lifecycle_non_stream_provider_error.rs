@@ -111,8 +111,7 @@ async fn noncanonical_non_stream_429_captures_raw_body_as_error_message()
 }
 
 #[tokio::test]
-async fn empty_non_stream_429_records_no_error_body()
--> Result<(), Box<dyn std::error::Error>> {
+async fn empty_non_stream_429_records_no_error_body() -> Result<(), Box<dyn std::error::Error>> {
     // Given / When
     let observed = observe_non_stream_429(Bytes::new()).await?;
 

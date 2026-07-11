@@ -2712,8 +2712,7 @@ impl Lifecycle {
         } else {
             None
         };
-        let raw_upstream_error_message = if (status.is_client_error()
-            || status.is_server_error())
+        let raw_upstream_error_message = if (status.is_client_error() || status.is_server_error())
             && canonical_upstream_error.is_none()
         {
             semantic_body
