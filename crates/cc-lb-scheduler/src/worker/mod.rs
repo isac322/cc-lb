@@ -16,12 +16,18 @@ use tokio_util::sync::CancellationToken;
 use crate::error::SchedulerError;
 use crate::retry::JobOutcome;
 
+mod backend;
 mod backend_api;
 mod cron;
 mod dispatch;
 mod jobs;
 mod layers;
 
+pub use backend::SchedulerBackend;
+#[cfg(feature = "postgres")]
+pub use backend::{PostgresApalisStorage, PostgresSchedulerBackend};
+#[cfg(feature = "sqlite")]
+pub use backend::{SqliteApalisStorage, SqliteSchedulerBackend};
 pub use backend_api::{Filter, SchedulerPushTask, SchedulerTaskRow, TaskStatus};
 pub use jobs::{AdaptiveJob, CronJob};
 pub use layers::{AdaptiveWorker, CronWorker, build_cron_worker};
@@ -62,44 +68,6 @@ impl SchedulerCtx {
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum SchedulerBackend {
-    #[cfg(feature = "sqlite")]
-    Sqlite(SqliteSchedulerStorage),
-    #[cfg(feature = "postgres")]
-    Postgres(PostgresSchedulerStorage),
-}
-
-#[cfg(feature = "sqlite")]
-pub type SqliteApalisStorage = apalis_sqlite::SqliteStorage<
-    AdaptiveJob,
-    apalis_codec::json::JsonCodec<apalis_sqlite::CompactType>,
-    apalis_sqlite::fetcher::SqliteFetcher,
->;
-
-#[cfg(feature = "sqlite")]
-#[derive(Clone)]
-pub struct SqliteSchedulerStorage {
-    pub pool: sqlx::SqlitePool,
-    pub storage: SqliteApalisStorage,
-    pub clock: ClockHandle,
-}
-
-#[cfg(feature = "postgres")]
-pub type PostgresApalisStorage = apalis_postgres::PostgresStorage<
-    AdaptiveJob,
-    apalis_postgres::CompactType,
-    apalis_postgres::JsonCodec<apalis_postgres::CompactType>,
-    apalis_postgres::PgNotify,
->;
-
-#[cfg(feature = "postgres")]
-#[derive(Clone)]
-pub struct PostgresSchedulerStorage {
-    pub pool: sqlx::PgPool,
-    pub storage: PostgresApalisStorage,
-}
-
 impl SchedulerBackend {
     pub async fn spawn(
         &self,
@@ -121,17 +89,22 @@ impl SchedulerBackend {
         match self {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(sqlite) => {
-                let queue = sqlite.storage.config().queue().as_ref().to_owned();
-                crate::sqlite_enqueue::push_entity_job(&sqlite.pool, &queue, job, &*sqlite.clock)
-                    .await?;
+                crate::sqlite_enqueue::push_entity_job(
+                    sqlite.pool(),
+                    ADAPTIVE_QUEUE,
+                    job,
+                    sqlite.clock(),
+                )
+                .await?;
             }
             #[cfg(feature = "postgres")]
-            Self::Postgres(postgres) => postgres
-                .storage
-                .clone()
-                .push(job)
-                .await
-                .map_err(|error| SchedulerError::Job(error.to_string()))?,
+            Self::Postgres(postgres) => {
+                let mut storage = postgres.adaptive_operation_storage();
+                storage
+                    .push(job)
+                    .await
+                    .map_err(|error| SchedulerError::Job(error.to_string()))?;
+            }
         }
         Ok(())
     }
@@ -440,26 +413,6 @@ async fn run_singleton_consumer_loop(
         if !sleep_or_cancel(jitter(backoff, &*ctx.clock), &cancel).await {
             return;
         }
-    }
-}
-
-#[cfg(feature = "sqlite")]
-impl std::fmt::Debug for SqliteSchedulerStorage {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SqliteSchedulerStorage")
-            .field("pool", &self.pool)
-            .finish_non_exhaustive()
-    }
-}
-
-#[cfg(feature = "postgres")]
-impl std::fmt::Debug for PostgresSchedulerStorage {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PostgresSchedulerStorage")
-            .field("pool", &self.pool)
-            .finish_non_exhaustive()
     }
 }
 

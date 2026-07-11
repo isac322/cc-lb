@@ -25,7 +25,7 @@ use cc_lb_scheduler::worker::{
     ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, CronJob, SchedulerBackend, SchedulerCtx,
 };
 #[cfg(feature = "sqlite")]
-use cc_lb_scheduler::worker::{SqliteSchedulerStorage, build_adaptive_worker, build_cron_worker};
+use cc_lb_scheduler::worker::{SqliteSchedulerBackend, build_adaptive_worker, build_cron_worker};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tempfile::TempDir;
@@ -83,13 +83,10 @@ async fn run_entity_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> 
         storage.push(job).await?;
     }
 
-    let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
-        pool: pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(
-            pool, &config,
-        ),
-        clock: Arc::new(SystemClock),
-    });
+    let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
+        pool.clone(),
+        Arc::new(SystemClock),
+    ));
     build_adaptive_worker(
         &backend,
         SchedulerCtx::new(
@@ -113,14 +110,10 @@ async fn run_singleton_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error
         storage.push(job).await?;
     }
 
-    let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
-        pool: pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(
-            pool,
-            ADAPTIVE_QUEUE,
-        ),
-        clock: Arc::new(SystemClock),
-    });
+    let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
+        pool.clone(),
+        Arc::new(SystemClock),
+    ));
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
     tokio::spawn(async move {

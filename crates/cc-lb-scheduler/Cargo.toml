@@ -58,6 +58,10 @@ uuid = { workspace = true }
 name = "spike_uniqueness_postgres"
 required-features = ["postgres"]
 
+[[test]]
+name = "worker_restart_lifetime_postgres"
+required-features = ["postgres"]
+
 [dev-dependencies]
 async-trait = { workspace = true }
 axum.workspace = true

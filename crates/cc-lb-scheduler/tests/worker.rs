@@ -14,8 +14,8 @@ use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{
-    AdaptiveJob, CronJob, SchedulerBackend, SchedulerCtx, SchedulerPushTask,
-    SqliteSchedulerStorage, build_adaptive_worker,
+    ADAPTIVE_QUEUE, AdaptiveJob, CronJob, SchedulerBackend, SchedulerCtx, SchedulerPushTask,
+    SqliteSchedulerBackend, build_adaptive_worker,
 };
 use cc_lb_storage_api::CacheTtl;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -28,7 +28,7 @@ async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
 -> Result<(), Box<dyn std::error::Error>> {
     let db = sqlite_test_db().await?;
     let pool = db.pool.clone();
-    let queue = "entity_worker_sqlite";
+    let queue = ADAPTIVE_QUEUE;
     let config = fast_queue_config(queue);
     let mut storage =
         apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(&pool, &config);
@@ -38,13 +38,10 @@ async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
         storage.push(job).await?;
     }
 
-    let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
-        pool: pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(
-            &pool, &config,
-        ),
-        clock: Arc::new(SystemClock),
-    });
+    let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
+        pool.clone(),
+        Arc::new(SystemClock),
+    ));
     let worker = build_adaptive_worker(&backend, done_scheduler_ctx())?;
     worker.run_for(Duration::from_secs(5)).await?;
 
@@ -81,14 +78,10 @@ async fn scheduler_backend_sqlite_push_job_uses_full_idempotency_index()
     let db = sqlite_test_db().await?;
     let pool = db.pool.clone();
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
-    let config = fast_queue_config("adaptive");
-    let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
-        pool: pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(
-            &pool, &config,
-        ),
-        clock: Arc::new(SystemClock),
-    });
+    let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
+        pool.clone(),
+        Arc::new(SystemClock),
+    ));
     let upstream_id = Uuid::new_v4();
 
     backend
@@ -136,14 +129,10 @@ async fn scheduler_backend_routes_keepalive_to_dedicated_queue()
     let db = sqlite_test_db().await?;
     let pool = db.pool.clone();
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
-    let config = fast_queue_config("adaptive");
-    let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
-        pool: pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(
-            &pool, &config,
-        ),
-        clock: Arc::new(SystemClock),
-    });
+    let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
+        pool.clone(),
+        Arc::new(SystemClock),
+    ));
     let upstream_id = Uuid::new_v4();
 
     backend

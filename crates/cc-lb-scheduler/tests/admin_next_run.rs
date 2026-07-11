@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use cc_lb_clock::SystemClock;
 use cc_lb_scheduler::admin::SchedulerAdminHandle;
-use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, AdaptiveJob, SchedulerBackend};
+use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, SchedulerBackend};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -20,14 +20,8 @@ async fn next_run_for_upstream_returns_earliest_active_warmup() {
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
         .await
         .expect("scheduler migrations apply");
-    let storage =
-        apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(&pool, ADAPTIVE_QUEUE);
     let handle = SchedulerAdminHandle::new(SchedulerBackend::Sqlite(
-        cc_lb_scheduler::worker::SqliteSchedulerStorage {
-            pool: pool.clone(),
-            storage,
-            clock: Arc::new(SystemClock),
-        },
+        cc_lb_scheduler::worker::SqliteSchedulerBackend::new(pool.clone(), Arc::new(SystemClock)),
     ));
     let upstream_id = Uuid::from_u128(0x1234_5678_90ab_cdef_1234_5678_90ab_cdef);
 
@@ -104,14 +98,8 @@ async fn next_run_for_upstream_returns_none_without_active_warmup() {
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
         .await
         .expect("scheduler migrations apply");
-    let storage =
-        apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(&pool, ADAPTIVE_QUEUE);
     let handle = SchedulerAdminHandle::new(SchedulerBackend::Sqlite(
-        cc_lb_scheduler::worker::SqliteSchedulerStorage {
-            pool,
-            storage,
-            clock: Arc::new(SystemClock),
-        },
+        cc_lb_scheduler::worker::SqliteSchedulerBackend::new(pool, Arc::new(SystemClock)),
     ));
 
     let next_run = handle
