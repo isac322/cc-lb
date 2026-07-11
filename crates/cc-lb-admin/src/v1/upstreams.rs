@@ -1102,6 +1102,7 @@ pub(super) fn warmup_bootstrap_task(
             "adaptive:warmup:{upstream_id}:bootstrap:{seed_secs}"
         )),
         run_at_unix_secs: Some(seed_secs),
+        max_attempts: None,
     }
 }
 

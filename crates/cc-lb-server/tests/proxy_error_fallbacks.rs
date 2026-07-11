@@ -45,6 +45,7 @@ async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestR
             allowed_models: Vec::new(),
             allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
+            cache_keepalive: None,
         },
         1,
     )

@@ -987,6 +987,7 @@ fn oauth_bootstrap_tasks(upstream_id: Uuid, seed_secs: u64) -> [SchedulerPushTas
             "adaptive:oauth_refresh:{upstream_id}:bootstrap:{seed_secs}"
         )),
         run_at_unix_secs: Some(seed_secs),
+        max_attempts: None,
     }]
 }
 

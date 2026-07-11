@@ -20,6 +20,7 @@ fn principal_record_router_terminal_strategy_defaults_to_first_pick() {
         created_at_unix_secs: 1000,
         updated_at_unix_secs: 1000,
         router_terminal_strategy: TerminalStrategy::FirstPick,
+        cache_keepalive: None,
     };
 
     assert_eq!(record.router_terminal_strategy, TerminalStrategy::FirstPick);
@@ -64,6 +65,7 @@ fn principal_record_router_terminal_strategy_serialization_roundtrip() {
         created_at_unix_secs: 1000,
         updated_at_unix_secs: 2000,
         router_terminal_strategy: TerminalStrategy::Random,
+        cache_keepalive: None,
     };
 
     let json_str = serde_json::to_string(&original).expect("should serialize");
@@ -97,6 +99,7 @@ fn principal_record_router_terminal_strategy_all_variants() {
             created_at_unix_secs: 1000,
             updated_at_unix_secs: 1000,
             router_terminal_strategy: strategy.clone(),
+            cache_keepalive: None,
         };
 
         let json_str = serde_json::to_string(&record).expect("should serialize");

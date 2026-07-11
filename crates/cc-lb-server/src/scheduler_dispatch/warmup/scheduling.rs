@@ -18,5 +18,6 @@ pub(super) fn next_warmup_task(
         args: AdaptiveJob::Warmup(job),
         idempotency_key: Some(job.idempotency_key(resets_at_unix_secs)),
         run_at_unix_secs: Some(run_at_unix_secs),
+        max_attempts: None,
     }
 }

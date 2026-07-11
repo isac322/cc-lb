@@ -124,6 +124,7 @@ where
                 allowed_upstreams: None,
                 default_limits: None,
                 router_terminal_strategy: None,
+                cache_keepalive: None,
             },
             BASE_TS + 1,
         )
@@ -476,6 +477,7 @@ fn principal_create(index: usize) -> PrincipalCreate {
         allowed_models: vec!["claude-sonnet-*".to_owned()],
         allowed_upstreams: vec![],
         default_limits: limits(),
+        cache_keepalive: None,
     }
 }
 

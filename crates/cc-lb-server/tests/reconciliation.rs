@@ -92,6 +92,7 @@ async fn create_principal(storage: &Storage, name: &str) -> PrincipalRecord {
             allowed_models: Vec::new(),
             allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
+            cache_keepalive: None,
         },
         1,
     )

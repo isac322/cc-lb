@@ -100,6 +100,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
             allowed_models: Vec::new(),
             allowed_upstreams: vec![target.id],
             default_limits: Vec::new(),
+            cache_keepalive: None,
         },
         now_secs(),
     )

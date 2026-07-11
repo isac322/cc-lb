@@ -992,6 +992,7 @@ async fn seed_runtime_state_full_v2(
             allowed_models,
             allowed_upstreams,
             default_limits,
+            cache_keepalive: None,
         },
         now_secs(),
     )

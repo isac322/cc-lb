@@ -406,6 +406,14 @@ pub async fn collect_body(response: Response<Body>) -> (StatusCode, HeaderMap, B
     (status, headers, body)
 }
 
+/// Deterministically drain the detached keepalive persist task the proxy path
+/// spawns post-response (current-thread runtime: these yields run it to done).
+pub async fn settle() {
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+}
+
 pub async fn signed_request(base_url: &str) -> SignedRequest {
     let upstream = Upstream::AnthropicDirect { base_url: None };
     let ctx = RequestContext {

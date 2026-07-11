@@ -61,6 +61,7 @@ async fn create_principal(
             allowed_models: Vec::new(),
             allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
+            cache_keepalive: None,
         },
         1,
     )

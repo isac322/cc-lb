@@ -475,6 +475,8 @@ pub struct SchedulerConfig {
     pub entity_concurrency: usize,
     #[serde(default = "default_scheduler_singleton_concurrency")]
     pub singleton_concurrency: usize,
+    #[serde(default = "default_scheduler_keepalive_concurrency")]
+    pub keepalive_concurrency: usize,
     #[serde(default)]
     pub staleness: SchedulerStalenessConfig,
     #[serde(default)]
@@ -491,6 +493,7 @@ impl Default for SchedulerConfig {
             dlq_retention_days: 30,
             entity_concurrency: 8,
             singleton_concurrency: 2,
+            keepalive_concurrency: 4,
             staleness: SchedulerStalenessConfig::default(),
             pgbouncer_transaction_mode: false,
         }
@@ -1375,6 +1378,10 @@ fn default_scheduler_entity_concurrency() -> usize {
 
 fn default_scheduler_singleton_concurrency() -> usize {
     SchedulerConfig::default().singleton_concurrency
+}
+
+fn default_scheduler_keepalive_concurrency() -> usize {
+    SchedulerConfig::default().keepalive_concurrency
 }
 
 fn default_scheduler_warmup_effect_retention_days() -> u32 {

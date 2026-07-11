@@ -151,6 +151,7 @@ fn principal(terminal: TerminalStrategy) -> PrincipalRecord {
         created_at_unix_secs: 0,
         updated_at_unix_secs: 0,
         router_terminal_strategy: terminal,
+        cache_keepalive: None,
     }
 }
 

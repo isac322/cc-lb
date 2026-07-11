@@ -86,6 +86,7 @@ expression: "SchedulerConfig::default()"
   "dlq_retention_days": 30,
   "entity_concurrency": 8,
   "singleton_concurrency": 2,
+  "keepalive_concurrency": 4,
   "staleness": {
     "warmup_effect_retention_days": 30
   },

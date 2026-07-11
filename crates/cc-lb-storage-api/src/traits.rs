@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use crate::{
     BackendKind, RuntimeChangeNotifier, StorageError, StorageResult,
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
+    cache_keepalive_sessions::CacheKeepaliveSessionStore,
     organization_metadata::OrganizationMetadataStore,
     prompt_cache_observation::PromptCacheObservationStore, types::*,
     upstream_rate_limit::UpstreamRateLimitStateStore,
@@ -307,6 +308,7 @@ pub trait Storage:
     + PromptCacheObservationStore
     + OrganizationMetadataStore
     + AnthropicCompatibilityKvStore
+    + CacheKeepaliveSessionStore
     + UsageRollupStore
     + OAuthCredentialStore
     + ApiKeyStore
@@ -336,6 +338,7 @@ impl<T> Storage for T where
         + PromptCacheObservationStore
         + OrganizationMetadataStore
         + AnthropicCompatibilityKvStore
+        + CacheKeepaliveSessionStore
         + UsageRollupStore
         + OAuthCredentialStore
         + ApiKeyStore

@@ -9,7 +9,8 @@ use cc_lb_control::{AuditEntry, AuditPayload};
 use cc_lb_plugin_api::TerminalStrategy;
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::{
-    PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate, StorageError,
+    CacheKeepaliveConfig, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore,
+    PrincipalUpdate, StorageError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -62,6 +63,8 @@ struct CreatePrincipalBody {
     allowed_upstreams: Vec<Uuid>,
     #[serde(default)]
     default_limits: Vec<Limit>,
+    #[serde(default)]
+    cache_keepalive: Option<CacheKeepaliveConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +73,20 @@ struct UpdatePrincipalBody {
     allowed_models: Option<Vec<String>>,
     allowed_upstreams: Option<Vec<Uuid>>,
     default_limits: Option<Vec<Limit>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    cache_keepalive: Option<Option<CacheKeepaliveConfig>>,
+}
+
+fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +110,8 @@ struct PrincipalResponse {
     allowed_models: Vec<String>,
     allowed_upstreams: Vec<Uuid>,
     default_limits: Vec<Limit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_keepalive: Option<CacheKeepaliveConfig>,
 }
 
 #[derive(Debug, Serialize)]
@@ -128,6 +147,9 @@ async fn create_principal(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
+    if unsupported_llm_judge(body.cache_keepalive.as_ref()) {
+        return unsupported_llm_judge_response();
+    }
 
     let input = PrincipalCreate {
         name: body.name,
@@ -135,6 +157,7 @@ async fn create_principal(
         allowed_models: body.allowed_models,
         allowed_upstreams: body.allowed_upstreams,
         default_limits: body.default_limits,
+        cache_keepalive: body.cache_keepalive,
     };
 
     match PrincipalStore::create(
@@ -226,6 +249,11 @@ async fn update_principal(
     let Some(expected_revision) = if_match_revision(&headers) else {
         return error_response(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
     };
+    if let Some(Some(config)) = body.cache_keepalive.as_ref()
+        && unsupported_llm_judge(Some(config))
+    {
+        return unsupported_llm_judge_response();
+    }
     let fields_changed = update_fields_changed(&body);
     update_principal_record(
         state,
@@ -237,6 +265,7 @@ async fn update_principal(
             allowed_upstreams: body.allowed_upstreams,
             default_limits: body.default_limits,
             router_terminal_strategy: None,
+            cache_keepalive: body.cache_keepalive,
         },
         fields_changed,
     )
@@ -522,6 +551,7 @@ fn principal_response(record: PrincipalRecord) -> PrincipalResponse {
         allowed_models: record.allowed_models,
         allowed_upstreams: record.allowed_upstreams,
         default_limits: record.default_limits,
+        cache_keepalive: record.cache_keepalive,
     }
 }
 
@@ -548,6 +578,9 @@ fn update_fields_changed(body: &UpdatePrincipalBody) -> Vec<&'static str> {
     }
     if body.default_limits.is_some() {
         fields.push("default_limits");
+    }
+    if body.cache_keepalive.is_some() {
+        fields.push("cache_keepalive");
     }
     fields
 }
@@ -658,6 +691,24 @@ fn storage_unavailable() -> axum::response::Response {
 
 fn error_response(status: StatusCode, code: &str) -> axum::response::Response {
     (status, Json(json!({ "error": code }))).into_response()
+}
+
+fn unsupported_llm_judge(config: Option<&CacheKeepaliveConfig>) -> bool {
+    config
+        .and_then(|config| config.classifier.llm_judge.as_ref())
+        .is_some()
+}
+
+fn unsupported_llm_judge_response() -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": "unsupported_cache_keepalive_llm_judge",
+            "field": "cache_keepalive.classifier.llm_judge",
+            "reason": "llm_judge is not implemented in this release"
+        })),
+    )
+        .into_response()
 }
 
 fn emit_audit(state: &AdminState, payload: AuditPayload) {

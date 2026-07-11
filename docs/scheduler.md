@@ -59,6 +59,7 @@ The table below lists every job type registered in the scheduler. This list is d
 | **OAuthRefreshJob** | Entity | `entity:oauth_refresh:<upstream_id>:<expires_at_unix_secs>` | Entity | Enqueued by watchdog, proactively, or lazily when token is near expiry | `apalis.jobs` full unique idempotency key | 10s |
 | **AnthropicCompatRefreshJob** | Entity | `entity:anthropic_compat_refresh:<key>` | Entity | Enqueued via Reconcile for each compatibility key | `anthropic_compat_refresh_claims` | 10s |
 | **MetadataRefreshJob** | Entity | `entity:metadata_refresh:<upstream_id>:<generation>` | Entity | Enqueued after OAuth refresh completes | `metadata_refresh_claims` | 10s |
+| **CacheKeepaliveJob** | Entity | `cache_keepalive:<session_key_hash>:<generation>` | Maintenance (`max_attempts=1`) | Enqueued after an eligible Anthropic response begins at `message_start` / first response event | `cache_keepalive_sessions` generation fence + `apalis.jobs` idempotency key | TTL lead time |
 | **UsageRollupJob** | Singleton | `singleton:usage_rollup` | Maintenance | Every 30s (with jitter) | `usage_rollups` | 5s |
 | **UsagePruneJob** | Singleton | `singleton:usage_prune` | Maintenance | Every 24h (86,400s) | `request_events`, `audit_log` | 60s |
 | **PromptCacheObservationPurgeJob** | Singleton | `singleton:prompt_cache_purge` | Maintenance | Every 10m (600s) | `prompt_cache_observations` | 10s |
@@ -96,6 +97,7 @@ The scheduler now relies on Apalis Jobs as the durable coordination point for sc
 
 - **Scheduling State (Apalis)**: Apalis owns the queueing state, visibility timeouts, retry attempts, and full `(job_type, idempotency_key)` uniqueness. Warmup and OAuth refresh coordination use this path.
 - **Domain Cursor State (cc-lb)**: Jobs that need domain progress markers, such as OAuth usage polling, keep their own cursor tables. Those tables track business progress, not duplicate scheduler queues.
+- **Cache Keepalive Fence (`cache_keepalive_sessions`)**: Prompt-cache keepalive uses Apalis for timer transport only. The current session generation, encrypted payload, TTL anchor, and enqueue state live in `cache_keepalive_sessions`. Every new real request and every successful cache-hit self-reschedule bumps the generation, and each Apalis row is keyed as `cache_keepalive:<session_key_hash>:<generation>` so stale queued/running work becomes a no-op instead of refreshing the wrong cache prefix.
 
 This design ensures duplicate enqueues collapse at the Jobs table while retryable `Failed` rows can still be treated as active work. It preserves the at-least-once external execution model defined in D-arch-1 without redundant scheduler-side state tables.
 
@@ -108,6 +110,7 @@ The scheduler does not use leader election. Cluster-safe cron is achieved entire
 - **Storage Dedups**: The unique `(job_type, idempotency_key)` index on `apalis.jobs` (Postgres) and `Jobs` (SQLite) collapses simultaneous pushes to exactly one row per tick. The producer swallows the resulting `SQLSTATE 23505` / `SQLite constraint 2067` violations as expected.
 - **Any Worker Executes**: Apalis workers on every replica poll the queue via `FOR UPDATE SKIP LOCKED`; whichever worker wins the row-level claim runs the job.
 - **SQLite Deployments**: SQLite is single-process by design (see `AGENTS.md` storage rules); the same code path runs but there is no clustering concern.
+- **Cache Keepalive Deployments**: SQLite is supported for local development, CI, and bounded single-node operation. Production multi-replica / HA keepalive scheduling requires Postgres so Apalis claims and the `cache_keepalive_sessions` fence are visible to every replica. Redis is intentionally not a scheduler backend for keepalive because it does not share the SQL transaction/fence boundary used by storage-backed signing and payload retention.
 
 This design revokes decision ID D-arch-6 (which specified advisory-lock leader election). It is stateless, has no handover window, and reserves zero dedicated database connections for coordination.
 
@@ -130,6 +133,7 @@ The scheduler defines three distinct retry classes to handle different failure m
   - Base delay: 60s
   - Max delay: 60s
   - Backoff curve: No retries (fails fast)
+- **Cache keepalive override**: `CacheKeepaliveJob` is enqueued with `max_attempts=1` even though it is an entity-shaped Apalis row. Cache misses, stale generations, decrypt failures, unsupported providers, and dispatch errors are business outcomes recorded as terminal/noop state and metrics; they must not rely on Apalis retries.
 
 ## 7. Scheduler Failures and Admin Endpoint
 
@@ -137,6 +141,7 @@ When a job exhausts its retry class, it remains in a terminal `Failed` or `Kille
 
 - **Ticket Model**: Terminal Apalis rows are the failure tickets. This satisfies the "ticket/metric only, no auto-page" promise defined in D-cut-3 without a `scheduler_failures` table.
 - **Triage Endpoint**: Operators can query `GET /admin/scheduler/failures` to read and triage these failures. The endpoint supports filtering by `job_type` and returns details about the failure, including the last error message and the number of attempts.
+- **Redaction**: Failure summaries are bounded and redact prompt, `Authorization`, `x-api-key`, downstream API key, ciphertext, and payload-shaped material. Cache keepalive rows surface the job type and hashed/idempotency summary, never the prompt snapshot or downstream auth headers.
 - **Resolution**: Once the underlying issue is resolved (for example, fixing invalid upstream credentials), operators can trigger the relevant watchdog or enqueue path to create new work with a new idempotency key.
 
 ## 8. Metrics List
@@ -145,13 +150,19 @@ The scheduler emits a comprehensive set of Prometheus metrics to monitor health 
 
 - `cclb_scheduler_jobs_total` (Counter): Tracks job lifecycle events.
   - Labels: `job_type`, `status` (started, done, retry, skip, panicked, duplicate_effect, noop)
-  - Cardinality: 12 job types * 7 statuses = 84
+  - Cardinality: bounded registered job types * 7 statuses; includes `adaptive:cache_keepalive`.
 - `cclb_scheduler_job_duration_seconds` (Histogram): Tracks job handler execution duration.
   - Labels: `job_type`
   - Cardinality: 12
 - `cclb_scheduler_failures_total` (Counter): Tracks terminal job failures.
   - Labels: `job_type`
-  - Cardinality: 12
+  - Cardinality: bounded registered job types; includes `adaptive:cache_keepalive`.
+
+Cache keepalive-specific operator notes:
+
+- `CacheKeepaliveJob` payloads are lightweight metadata only. Prompt snapshots are AEAD-encrypted in `cache_keepalive_sessions.encrypted_payload` with AAD bound to principal, session hash, upstream id, generation, and job type/version.
+- The first schedule uses the response-begin cache anchor (`message_start` for streaming, first upstream response event for non-stream, request dispatch time fallback), not response completion. Run time is `cache_anchor_at + ttl - lead`.
+- Cleanup may delete expired keepalive sessions, terminal keepalive Apalis rows, and old `Pending` keepalive Apalis rows. It must not delete `Queued` or `Running` rows; generation checks make those stale rows no-op when they eventually run.
 - `cclb_scheduler_init_failure` (Gauge): Tracks scheduler initialization failure state (0 or 1).
   - Cardinality: 1
 - `cclb_scheduler_lazy_refresh_timeout_total` (Counter): Tracks timed-out lazy OAuth refresh waits.

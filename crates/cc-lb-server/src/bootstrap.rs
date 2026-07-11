@@ -37,6 +37,7 @@ async fn seed_admin_if_absent(
         allowed_models: vec![],
         allowed_upstreams: vec![],
         default_limits: vec![],
+        cache_keepalive: None,
     };
 
     let now = unix_secs(clock.now());
@@ -205,6 +206,7 @@ async fn apply_principal(
         allowed_models: Vec::new(),
         allowed_upstreams: Vec::new(),
         default_limits: Vec::new(),
+        cache_keepalive: None,
     };
     principal_store
         .create(input, now)
@@ -651,6 +653,7 @@ plugins = ["missing-plugin"]
                 allowed_models: Vec::new(),
                 allowed_upstreams: Vec::new(),
                 default_limits: Vec::new(),
+                cache_keepalive: None,
             },
             1_800_000_000,
         )

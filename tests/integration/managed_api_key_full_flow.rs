@@ -699,6 +699,7 @@ async fn seed_runtime_state(
                     cap_micros: 1_000_000,
                 },
             ],
+            cache_keepalive: None,
         },
         now_secs(),
     )

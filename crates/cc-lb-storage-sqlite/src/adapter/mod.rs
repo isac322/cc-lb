@@ -1,6 +1,9 @@
 pub mod anthropic_compatibility_kv;
 pub mod api_keys;
 pub mod audit;
+pub mod cache_keepalive_sessions;
+#[cfg(test)]
+mod cache_keepalive_sessions_tests;
 pub mod config_store;
 pub mod killswitch;
 pub mod managed_keys;
