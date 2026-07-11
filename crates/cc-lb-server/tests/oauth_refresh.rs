@@ -187,6 +187,7 @@ impl Fixture {
                 allowed_models: Vec::new(),
                 allowed_upstreams: Vec::new(),
                 default_limits: Vec::new(),
+                cache_keepalive: None,
             },
             now_secs(self.clock.as_ref()),
         )
@@ -704,6 +705,7 @@ async fn enqueue_next_oauth_refresh(
             OAuthRefreshJob::new(upstream_id).idempotency_key(expires_at_unix_secs),
         ),
         run_at_unix_secs: Some(OAuthRefreshJob::run_at_for_expires_at(expires_at_unix_secs)),
+        max_attempts: None,
     };
     match backend.push_adaptive_task(task).await {
         Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),

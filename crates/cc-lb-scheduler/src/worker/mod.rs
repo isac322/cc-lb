@@ -28,6 +28,7 @@ pub use layers::{AdaptiveWorker, CronWorker, build_cron_worker};
 
 pub const ADAPTIVE_QUEUE: &str = "adaptive";
 pub const CRON_QUEUE: &str = "cron";
+pub const CACHE_KEEPALIVE_QUEUE: &str = "cache_keepalive";
 
 pub type AdaptiveDispatchFuture =
     Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>>;
@@ -149,6 +150,12 @@ impl SchedulerBackend {
                 cancel.clone(),
                 worker_instance_id.clone(),
             )),
+            tokio::spawn(run_cache_keepalive_consumer_loop(
+                backend.clone(),
+                ctx.clone(),
+                cancel.clone(),
+                worker_instance_id.clone(),
+            )),
             tokio::spawn(run_singleton_consumer_loop(
                 backend,
                 ctx,
@@ -257,6 +264,89 @@ async fn run_adaptive_consumer_loop(
                 ::metrics::counter!(
                     "cclb_scheduler_consumer_restarts_total",
                     "consumer" => "adaptive",
+                    "reason" => "exited_error",
+                )
+                .increment(1);
+            }
+        }
+        backoff = if elapsed >= CONSUMER_LONG_RUN_THRESHOLD {
+            CONSUMER_BACKOFF_INITIAL
+        } else {
+            (backoff * 2).min(CONSUMER_BACKOFF_CAP)
+        };
+        if !sleep_or_cancel(jitter(backoff, &*ctx.clock), &cancel).await {
+            return;
+        }
+    }
+}
+
+async fn run_cache_keepalive_consumer_loop(
+    backend: SchedulerBackend,
+    ctx: SchedulerCtx,
+    cancel: CancellationToken,
+    worker_instance_id: String,
+) {
+    let mut backoff = CONSUMER_BACKOFF_INITIAL;
+    loop {
+        if cancel.is_cancelled() {
+            return;
+        }
+        let worker_name = next_worker_name(CACHE_KEEPALIVE_QUEUE, &worker_instance_id);
+        let worker = match layers::build_backend_keepalive_worker_named(
+            &backend,
+            ctx.clone(),
+            worker_name.clone(),
+        ) {
+            Ok(worker) => worker,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    worker = %worker_name,
+                    "scheduler cache-keepalive worker build failed; supervising restart",
+                );
+                ::metrics::counter!(
+                    "cclb_scheduler_consumer_restarts_total",
+                    "consumer" => "cache_keepalive",
+                    "reason" => "build_failed",
+                )
+                .increment(1);
+                if !sleep_or_cancel(jitter(backoff, &*ctx.clock), &cancel).await {
+                    return;
+                }
+                backoff = (backoff * 2).min(CONSUMER_BACKOFF_CAP);
+                continue;
+            }
+        };
+        let started_at = Instant::now();
+        let result = worker.run_until_cancelled(cancel.clone()).await;
+        if cancel.is_cancelled() {
+            return;
+        }
+        let elapsed = started_at.elapsed();
+        match result {
+            Ok(()) => {
+                tracing::warn!(
+                    worker = %worker_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "scheduler cache-keepalive worker exited without cancel; supervising restart",
+                );
+                ::metrics::counter!(
+                    "cclb_scheduler_consumer_restarts_total",
+                    "consumer" => "cache_keepalive",
+                    "reason" => "exited_ok",
+                )
+                .increment(1);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    worker = %worker_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    error = %error,
+                    "scheduler cache-keepalive worker exited with error; supervising restart",
+                );
+                ::metrics::counter!(
+                    "cclb_scheduler_consumer_restarts_total",
+                    "consumer" => "cache_keepalive",
                     "reason" => "exited_error",
                 )
                 .increment(1);

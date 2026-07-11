@@ -1,3 +1,4 @@
+mod cache_keepalive;
 mod cron;
 mod http;
 mod oauth;
@@ -13,6 +14,7 @@ use std::sync::Arc;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_engine::DynamicViewHolder;
+use cc_lb_engine::cache_keepalive::KeepaliveDispatcher;
 use cc_lb_engine::clock::ClockHandle;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_scheduler::error::Result as SchedulerResult;
@@ -25,6 +27,7 @@ use cc_lb_storage_api::Storage;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::cache_keepalive_enqueuer::CacheKeepaliveTaskPusher;
 use crate::dynamic_view_builder::Stores;
 use crate::refresh::LazyRefresher;
 use crate::scheduler_dispatch::http::{JsonHttpClient, json_http_client};
@@ -33,6 +36,7 @@ use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
 pub(crate) struct SchedulerDispatchDeps {
     pub backend: SchedulerBackend,
+    pub cache_keepalive_pusher: Arc<dyn CacheKeepaliveTaskPusher>,
     pub config: Config,
     pub storage: Arc<dyn Storage>,
     pub stores: Arc<Stores>,
@@ -47,12 +51,14 @@ pub(crate) struct SchedulerDispatchDeps {
     pub replica_id: Option<Uuid>,
     pub price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
     pub dynamic_view: Arc<DynamicViewHolder>,
+    pub keepalive_dispatcher: Arc<dyn KeepaliveDispatcher>,
     pub clock: ClockHandle,
 }
 
 #[derive(Clone)]
 pub(super) struct SchedulerDispatch {
     pub(super) backend: SchedulerBackend,
+    pub(super) cache_keepalive_pusher: Arc<dyn CacheKeepaliveTaskPusher>,
     pub(super) config: Arc<Config>,
     pub(super) storage: Arc<dyn Storage>,
     pub(super) stores: Arc<Stores>,
@@ -68,6 +74,7 @@ pub(super) struct SchedulerDispatch {
     pub(super) price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
     pub(super) http: JsonHttpClient,
     pub(super) dynamic_view: Arc<DynamicViewHolder>,
+    pub(super) keepalive_dispatcher: Arc<dyn KeepaliveDispatcher>,
     pub(super) clock: ClockHandle,
 }
 
@@ -85,6 +92,7 @@ impl SchedulerDispatch {
     fn new(deps: SchedulerDispatchDeps) -> Self {
         Self {
             backend: deps.backend,
+            cache_keepalive_pusher: deps.cache_keepalive_pusher,
             config: Arc::new(deps.config),
             storage: deps.storage,
             stores: deps.stores,
@@ -100,6 +108,7 @@ impl SchedulerDispatch {
             price_catalog: deps.price_catalog,
             http: json_http_client(),
             dynamic_view: deps.dynamic_view,
+            keepalive_dispatcher: deps.keepalive_dispatcher,
             clock: deps.clock,
         }
     }
@@ -131,6 +140,23 @@ impl SchedulerDispatch {
                 );
                 metadata_outcome(MetadataRefreshJobHandler::new(runner).handle(job).await?)
             }
+            AdaptiveJob::CacheKeepalive(job) => self.dispatch_cache_keepalive(job).await,
         }
     }
 }
+
+pub(crate) fn cache_keepalive_payload_aad(
+    principal_id: &str,
+    session_key_hash: &str,
+    upstream_id: uuid::Uuid,
+    generation: u64,
+) -> Vec<u8> {
+    format!(
+        "cache_keepalive_snapshot:v1:{principal_id}:{session_key_hash}:{upstream_id}:{generation}"
+    )
+    .into_bytes()
+}
+
+#[cfg(test)]
+#[path = "scheduler_dispatch_tests.rs"]
+mod tests;

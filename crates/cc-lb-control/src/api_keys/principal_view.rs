@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use cc_lb_plugin_api::{FilterPlugin, ObservabilityHook, TerminalStrategy, UpstreamDialect};
 use cc_lb_storage_api::principal::Limit as DbLimit;
-use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
+use cc_lb_storage_api::{CacheKeepaliveConfig, PrincipalKind as DbPrincipalKind, PrincipalRecord};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use uuid::Uuid;
 
@@ -74,6 +74,7 @@ pub struct PrincipalSpecCached {
     default_router_pipeline: Arc<RouterPipelineCache>,
     observability_hooks: ObservabilityHooksCache,
     dialect: DialectCache,
+    cache_keepalive: Option<Arc<CacheKeepaliveConfig>>,
 }
 
 impl PrincipalView {
@@ -99,6 +100,7 @@ impl PrincipalView {
             created_at_unix_secs: 0,
             updated_at_unix_secs: 0,
             router_terminal_strategy: Default::default(),
+            cache_keepalive: None,
         };
         principal_chains.entry(principal_id.to_owned()).or_insert((
             None,
@@ -152,6 +154,11 @@ impl PrincipalView {
                     principal.router_terminal_strategy.clone(),
                 ));
 
+                let cache_keepalive = principal
+                    .cache_keepalive
+                    .clone()
+                    .filter(|cfg| cfg.enabled)
+                    .map(Arc::new);
                 let cached = PrincipalSpecCached {
                     id: principal_id.clone(),
                     principal_type: principal.kind.into(),
@@ -164,6 +171,7 @@ impl PrincipalView {
                     default_router_pipeline,
                     observability_hooks,
                     dialect,
+                    cache_keepalive,
                 };
 
                 (principal_id, cached)
@@ -278,6 +286,10 @@ impl PrincipalSpecCached {
             DialectCache::Explicit(cache) => &cache.dialect,
         }
     }
+
+    pub fn cache_keepalive(&self) -> Option<&Arc<CacheKeepaliveConfig>> {
+        self.cache_keepalive.as_ref()
+    }
 }
 
 impl From<DbPrincipalKind> for PrincipalType {
@@ -346,6 +358,7 @@ mod tests {
             )),
             observability_hooks: hooks,
             dialect: DialectCache::Inherit,
+            cache_keepalive: None,
         }
     }
 

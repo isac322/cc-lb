@@ -28,6 +28,7 @@ async fn credentials_list_filters_out_principals_without_credentials() {
             allowed_models: vec![],
             allowed_upstreams: vec![],
             default_limits: vec![],
+            cache_keepalive: None,
         },
         1_780_000_000,
     )

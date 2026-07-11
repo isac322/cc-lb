@@ -208,6 +208,7 @@ fn entity_idempotency_key(job: &AdaptiveJob, run_at_unix_secs: i64) -> Result<St
         AdaptiveJob::Warmup(job) => Ok(job.idempotency_key(job.cycle_key)),
         AdaptiveJob::OAuthRefresh(job) => Ok(job.idempotency_key(run_at_unix_secs)),
         AdaptiveJob::MetadataRefresh(job) => Ok(job.idempotency_key()),
+        AdaptiveJob::CacheKeepalive(job) => Ok(job.idempotency_key()),
     }
 }
 

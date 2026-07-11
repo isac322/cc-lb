@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::CacheKeepaliveConfig;
 use crate::StorageResult;
 pub use cc_lb_contract::{Limit, LimitKind};
 
@@ -13,7 +14,7 @@ pub enum PrincipalKind {
     Admin,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrincipalRecord {
     pub id: Uuid,
     pub name: String,
@@ -31,9 +32,11 @@ pub struct PrincipalRecord {
     pub updated_at_unix_secs: u64,
     #[serde(default)]
     pub router_terminal_strategy: cc_lb_plugin_api::TerminalStrategy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_keepalive: Option<CacheKeepaliveConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrincipalCreate {
     pub name: String,
     pub kind: PrincipalKind,
@@ -41,9 +44,11 @@ pub struct PrincipalCreate {
     #[serde(default)]
     pub allowed_upstreams: Vec<Uuid>,
     pub default_limits: Vec<Limit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_keepalive: Option<CacheKeepaliveConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PrincipalUpdate {
     pub name: Option<String>,
     pub allowed_models: Option<Vec<String>>,
@@ -51,6 +56,11 @@ pub struct PrincipalUpdate {
     pub default_limits: Option<Vec<Limit>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_terminal_strategy: Option<cc_lb_plugin_api::TerminalStrategy>,
+    /// When `Some`, replaces the principal's cache_keepalive config
+    /// (including `Some(None)` to clear it). When `None`, the existing
+    /// value is preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_keepalive: Option<Option<CacheKeepaliveConfig>>,
 }
 
 #[async_trait]

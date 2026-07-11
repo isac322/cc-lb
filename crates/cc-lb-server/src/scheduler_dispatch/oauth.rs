@@ -95,6 +95,7 @@ impl SchedulerDispatch {
             args: AdaptiveJob::OAuthRefresh(job),
             idempotency_key: Some(idempotency_key),
             run_at_unix_secs: Some(OAuthRefreshJob::run_at_for_expires_at(expires_at_unix_secs)),
+            max_attempts: None,
         };
         match self.backend.push_adaptive_task(task).await {
             Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),

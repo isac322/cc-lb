@@ -239,6 +239,7 @@ async fn seed_principal(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &st
             allowed_models: vec!["claude-3-*".to_owned()],
             allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
+            cache_keepalive: None,
         },
         1_800_000_000,
     )

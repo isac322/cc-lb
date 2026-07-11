@@ -71,6 +71,7 @@ pub async fn run_entity_watchdog(
             args: kind.job(*upstream_id, tick_unix_secs),
             idempotency_key: Some(kind.bootstrap_key(*upstream_id, tick_unix_secs)),
             run_at_unix_secs: Some(run_at_unix_secs),
+            max_attempts: None,
         };
         match backend.push_adaptive_task(task).await {
             Ok(()) => seeded += 1,

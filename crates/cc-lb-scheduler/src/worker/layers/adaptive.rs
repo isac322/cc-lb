@@ -17,7 +17,7 @@ use super::super::PostgresApalisStorage;
 #[cfg(feature = "sqlite")]
 use super::super::SqliteApalisStorage;
 use super::super::dispatch::{EntityHandlerFn, entity_job_handler};
-use super::super::{ADAPTIVE_QUEUE, SchedulerBackend, SchedulerCtx};
+use super::super::{ADAPTIVE_QUEUE, CACHE_KEEPALIVE_QUEUE, SchedulerBackend, SchedulerCtx};
 
 type AdaptiveWorkerFuture = Pin<Box<dyn Future<Output = Result<(), WorkerError>> + Send>>;
 
@@ -55,17 +55,59 @@ pub(in crate::worker) fn build_backend_adaptive_worker_named(
 ) -> Result<AdaptiveWorker, SchedulerError> {
     match backend {
         #[cfg(feature = "sqlite")]
-        SchedulerBackend::Sqlite(sqlite) => Ok(build_sqlite_worker(
-            sqlite.storage.clone(),
-            ctx,
-            worker_name,
-        )),
+        SchedulerBackend::Sqlite(sqlite) => {
+            let concurrency = ctx.config.entity_concurrency;
+            Ok(build_sqlite_worker(
+                sqlite.storage.clone(),
+                ctx,
+                worker_name,
+                concurrency,
+            ))
+        }
         #[cfg(feature = "postgres")]
-        SchedulerBackend::Postgres(postgres) => Ok(build_postgres_worker(
-            postgres.storage.clone(),
-            ctx,
-            worker_name,
-        )),
+        SchedulerBackend::Postgres(postgres) => {
+            let concurrency = ctx.config.entity_concurrency;
+            Ok(build_postgres_worker(
+                postgres.storage.clone(),
+                ctx,
+                worker_name,
+                concurrency,
+            ))
+        }
+    }
+}
+
+/// Builds a worker bound to the dedicated `cache_keepalive` queue so keepalive
+/// refreshes get an independent concurrency budget and cannot starve the
+/// entity-job pool. The queue is a `job_type` namespace on the shared table
+/// (no extra table/migration); only the storage handle differs from adaptive.
+pub(in crate::worker) fn build_backend_keepalive_worker_named(
+    backend: &SchedulerBackend,
+    ctx: SchedulerCtx,
+    worker_name: String,
+) -> Result<AdaptiveWorker, SchedulerError> {
+    match backend {
+        #[cfg(feature = "sqlite")]
+        SchedulerBackend::Sqlite(sqlite) => {
+            let concurrency = ctx.config.keepalive_concurrency;
+            let storage: SqliteApalisStorage =
+                apalis_sqlite::SqliteStorage::new_in_queue(&sqlite.pool, CACHE_KEEPALIVE_QUEUE);
+            Ok(build_sqlite_worker(storage, ctx, worker_name, concurrency))
+        }
+        #[cfg(feature = "postgres")]
+        SchedulerBackend::Postgres(postgres) => {
+            let concurrency = ctx.config.keepalive_concurrency;
+            let storage: PostgresApalisStorage = apalis_postgres::PostgresStorage::new_with_notify(
+                &postgres.pool,
+                &apalis_postgres::Config::new(CACHE_KEEPALIVE_QUEUE),
+            );
+            Ok(build_postgres_worker(
+                storage,
+                ctx,
+                worker_name,
+                concurrency,
+            ))
+        }
     }
 }
 
@@ -74,8 +116,8 @@ fn build_sqlite_worker(
     storage: SqliteApalisStorage,
     ctx: SchedulerCtx,
     worker_name: String,
+    concurrency: usize,
 ) -> AdaptiveWorker {
-    let concurrency = ctx.config.entity_concurrency;
     AdaptiveWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {
@@ -104,8 +146,8 @@ fn build_postgres_worker(
     storage: PostgresApalisStorage,
     ctx: SchedulerCtx,
     worker_name: String,
+    concurrency: usize,
 ) -> AdaptiveWorker {
-    let concurrency = ctx.config.entity_concurrency;
     AdaptiveWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {

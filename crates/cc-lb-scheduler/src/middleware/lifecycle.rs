@@ -56,6 +56,7 @@ impl SchedulerMetricPayload for AdaptiveJob {
             Self::Warmup(_) => "upstream_warmup",
             Self::OAuthRefresh(_) => "adaptive:oauth_refresh",
             Self::MetadataRefresh(_) => "adaptive:metadata_refresh",
+            Self::CacheKeepalive(_) => "adaptive:cache_keepalive",
         }
     }
 }

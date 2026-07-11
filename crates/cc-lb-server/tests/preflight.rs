@@ -240,6 +240,7 @@ async fn seed_principal(
             allowed_models,
             allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
+            cache_keepalive: None,
         },
         1_800_000_000,
     )

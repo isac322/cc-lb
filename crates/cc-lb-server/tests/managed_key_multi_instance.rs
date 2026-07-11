@@ -263,6 +263,7 @@ async fn seed_test_principal(storage: &dyn StorageTrait) -> TestResult<()> {
             allowed_models: vec!["*".to_owned()],
             allowed_upstreams: vec![],
             default_limits: vec![],
+            cache_keepalive: None,
         },
         now,
     )

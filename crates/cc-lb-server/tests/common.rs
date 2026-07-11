@@ -416,6 +416,7 @@ async fn seed_storage(
             allowed_models: Vec::new(),
             allowed_upstreams: Vec::new(),
             default_limits: principal_limits,
+            cache_keepalive: None,
         },
         1,
     )

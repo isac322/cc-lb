@@ -159,6 +159,7 @@ impl Fixture {
                 args: AdaptiveJob::Warmup(job),
                 idempotency_key: Some(key.clone()),
                 run_at_unix_secs: Some(SEVEN_DAY_RESET),
+                max_attempts: None,
             })
             .await?;
         sqlx::query(

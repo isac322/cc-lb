@@ -53,6 +53,7 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
             allowed_models: Vec::new(),
             allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
+            cache_keepalive: None,
         },
         1,
     )

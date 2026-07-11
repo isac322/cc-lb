@@ -8,6 +8,7 @@ use sqlx::PgPool;
 pub mod anthropic_compatibility_kv;
 pub mod api_keys;
 pub mod audit;
+pub mod cache_keepalive_sessions;
 pub mod config_store;
 pub mod managed_keys;
 pub mod meta;

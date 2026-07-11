@@ -217,6 +217,7 @@
         "idempotency": {
           "claim_ttl_secs": 60
         },
+        "keepalive_concurrency": 4,
         "pgbouncer_transaction_mode": false,
         "recurring_jobs": {
           "anthropic_compat_refresh": {
@@ -1032,6 +1033,12 @@
           "default": {
             "claim_ttl_secs": 60
           }
+        },
+        "keepalive_concurrency": {
+          "type": "integer",
+          "format": "uint",
+          "default": 4,
+          "minimum": 0
         },
         "pgbouncer_transaction_mode": {
           "type": "boolean",

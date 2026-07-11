@@ -18,6 +18,7 @@ const JOB_TYPES: &[&str] = &[
     "upstream_warmup",
     "adaptive:oauth_refresh",
     "adaptive:metadata_refresh",
+    "adaptive:cache_keepalive",
     "cron:usage_rollup",
     "cron:usage_prune",
     "cron:quota_gc",
@@ -47,7 +48,7 @@ pub fn describe_scheduler_metrics() {
         ::metrics::describe_counter!(
             JOBS_TOTAL,
             Unit::Count,
-            "Scheduler job lifecycle events by registered job type and status."
+            "Scheduler job lifecycle events by registered bounded job type and status."
         );
         ::metrics::describe_histogram!(
             JOB_DURATION_SECONDS,

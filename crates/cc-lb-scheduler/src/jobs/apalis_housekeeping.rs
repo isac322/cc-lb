@@ -17,6 +17,7 @@ use crate::{
 pub const APALIS_WORKER_RETENTION_SECS: u64 = 3_600;
 pub const APALIS_HOUSEKEEPING_RETRY_DELAY: Duration = Duration::from_secs(60);
 pub const APALIS_STALE_LOCK_THRESHOLD_SECS: u64 = 120;
+const CACHE_KEEPALIVE_IDEMPOTENCY_PREFIX: &str = "cache_keepalive:%";
 const SECONDS_PER_DAY: u64 = 86_400;
 const STALE_LOCK_LAST_RESULT: &str =
     "{\"Err\":\"Re-enqueued by cc-lb housekeeping: stale Running lock exceeded threshold.\"}";
@@ -62,6 +63,8 @@ pub struct ApalisHousekeepingJobStats {
     pub workers_removed: u64,
     pub jobs_removed: u64,
     pub stale_locks_reaped: u64,
+    pub cache_keepalive_sessions_removed: u64,
+    pub cache_keepalive_jobs_removed: u64,
     pub cutoff_unix_secs: u64,
 }
 
@@ -71,6 +74,8 @@ pub enum ApalisHousekeepingJobResult {
         workers_removed: u64,
         jobs_removed: u64,
         stale_locks_reaped: u64,
+        cache_keepalive_sessions_removed: u64,
+        cache_keepalive_jobs_removed: u64,
         cutoff_unix_secs: u64,
     },
     Retry {
@@ -127,6 +132,10 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
         .await?
         .rows_affected();
         let reaped = self.reap_stale_locks(now_unix_secs).await?;
+        let cache_keepalive_sessions_removed = self
+            .prune_cache_keepalive_sessions(now_unix_secs, worker_cutoff)
+            .await?;
+        let cache_keepalive_jobs_removed = self.prune_cache_keepalive_jobs(worker_cutoff).await?;
         log_reaped_rows(
             &reaped,
             self.config.stale_lock_threshold_secs,
@@ -137,8 +146,51 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
             workers_removed,
             jobs_removed,
             stale_locks_reaped,
+            cache_keepalive_sessions_removed,
+            cache_keepalive_jobs_removed,
             cutoff_unix_secs: job_cutoff,
         })
+    }
+
+    async fn prune_cache_keepalive_sessions(
+        &self,
+        now_unix_secs: u64,
+        stale_pending_cutoff: u64,
+    ) -> Result<u64> {
+        let result = sqlx::query(
+            "DELETE FROM cache_keepalive_sessions
+             WHERE expires_at < ?1
+                OR (status = 'active' AND enqueue_state = 'pending' AND updated_at < ?2)",
+        )
+        .bind(unix_i64(now_unix_secs, "now_unix_secs")?)
+        .bind(unix_i64(stale_pending_cutoff, "stale_pending_cutoff")?)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(result) => Ok(result.rows_affected()),
+            Err(error) if is_missing_cache_keepalive_table(&error) => Ok(0),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn prune_cache_keepalive_jobs(&self, cutoff_unix_secs: u64) -> Result<u64> {
+        let result = sqlx::query(
+            "DELETE FROM Jobs
+             WHERE job_type = 'adaptive'
+               AND idempotency_key LIKE ?1
+               AND (
+                   (status IN ('Done','Failed','Killed') AND COALESCE(done_at, run_at, 0) < ?2)
+                   OR (status = 'Pending' AND run_at < ?2)
+               )",
+        )
+        .bind(CACHE_KEEPALIVE_IDEMPOTENCY_PREFIX)
+        .bind(unix_i64(cutoff_unix_secs, "cache_keepalive_job_cutoff")?)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(result) => Ok(result.rows_affected()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn reap_stale_locks(&self, now_unix_secs: u64) -> Result<Vec<StaleLockRow>> {
@@ -225,6 +277,15 @@ impl ApalisHousekeepingJobHandler<Postgres> {
         .await?
         .rows_affected();
         let reaped = self.reap_stale_locks(now_unix_secs).await?;
+        let cache_keepalive_sessions_removed = self
+            .prune_cache_keepalive_sessions(
+                now_unix_secs,
+                now_unix_secs.saturating_sub(APALIS_WORKER_RETENTION_SECS),
+            )
+            .await?;
+        let cache_keepalive_jobs_removed = self
+            .prune_cache_keepalive_jobs(now_unix_secs.saturating_sub(APALIS_WORKER_RETENTION_SECS))
+            .await?;
         log_reaped_rows(
             &reaped,
             self.config.stale_lock_threshold_secs,
@@ -235,8 +296,52 @@ impl ApalisHousekeepingJobHandler<Postgres> {
             workers_removed,
             jobs_removed,
             stale_locks_reaped,
+            cache_keepalive_sessions_removed,
+            cache_keepalive_jobs_removed,
             cutoff_unix_secs: job_cutoff,
         })
+    }
+
+    async fn prune_cache_keepalive_sessions(
+        &self,
+        now_unix_secs: u64,
+        stale_pending_cutoff: u64,
+    ) -> Result<u64> {
+        let result = sqlx::query(
+            "DELETE FROM cache_keepalive_sessions
+             WHERE expires_at < $1
+                OR (status = 'active' AND enqueue_state = 'pending' AND updated_at < $2)",
+        )
+        .bind(unix_i64(now_unix_secs, "now_unix_secs")?)
+        .bind(unix_i64(stale_pending_cutoff, "stale_pending_cutoff")?)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(result) => Ok(result.rows_affected()),
+            Err(error) if is_missing_cache_keepalive_table(&error) => Ok(0),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn prune_cache_keepalive_jobs(&self, cutoff_unix_secs: u64) -> Result<u64> {
+        let cutoff = utc_timestamp(cutoff_unix_secs, "cache_keepalive_job_cutoff")?;
+        let result = sqlx::query(
+            "DELETE FROM apalis.jobs
+             WHERE job_type = 'adaptive'
+               AND idempotency_key LIKE $1
+               AND (
+                   (status IN ('Done','Failed','Killed') AND COALESCE(done_at, run_at) < $2)
+                   OR (status = 'Pending' AND run_at < $2)
+               )",
+        )
+        .bind(CACHE_KEEPALIVE_IDEMPOTENCY_PREFIX)
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(result) => Ok(result.rows_affected()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn reap_stale_locks(&self, now_unix_secs: u64) -> Result<Vec<StaleLockRow>> {
@@ -303,6 +408,8 @@ fn finish(result: Result<ApalisHousekeepingJobStats>) -> ApalisHousekeepingJobRe
             workers_removed: stats.workers_removed,
             jobs_removed: stats.jobs_removed,
             stale_locks_reaped: stats.stale_locks_reaped,
+            cache_keepalive_sessions_removed: stats.cache_keepalive_sessions_removed,
+            cache_keepalive_jobs_removed: stats.cache_keepalive_jobs_removed,
             cutoff_unix_secs: stats.cutoff_unix_secs,
         },
         Err(error) => ApalisHousekeepingJobResult::Retry {
@@ -346,6 +453,16 @@ fn log_reaped_rows(rows: &[StaleLockRow], threshold_secs: u64, now_unix_secs: u6
 
 fn unix_i64(value: u64, field: &str) -> Result<i64> {
     i64::try_from(value).map_err(|_| SchedulerError::Job(format!("{field} exceeds i64::MAX")))
+}
+
+fn is_missing_cache_keepalive_table(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(database) => database
+            .code()
+            .as_deref()
+            .is_some_and(|code| code == "42P01" || code == "1" || code == "101"),
+        _ => error.to_string().contains("cache_keepalive_sessions"),
+    }
 }
 
 #[cfg(feature = "postgres")]

@@ -13,14 +13,17 @@ mod sqlite {
 
     use super::{
         ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler,
-        ApalisHousekeepingJobResult, NOW_SECS, expected_job_ids, expected_result, jobs, workers,
+        ApalisHousekeepingJobResult, NOW_SECS, cache_keepalive_jobs, expected_job_ids,
+        expected_result, jobs, sessions, workers,
     };
 
     #[tokio::test]
     async fn prunes_old_workers_done_and_failed_jobs() -> Result<(), Box<dyn std::error::Error>> {
         let pool = SqlitePool::connect(":memory:").await?;
         SqliteStorage::setup(&pool).await?;
+        create_cache_keepalive_sessions_table(&pool).await?;
         seed_sqlite(&pool).await?;
+        seed_sqlite_cache_keepalive_cleanup(&pool).await?;
 
         let result =
             ApalisHousekeepingJobHandler::new(pool.clone(), ApalisHousekeepingConfig::new(1))
@@ -33,6 +36,10 @@ mod sqlite {
             vec!["worker-cutoff", "worker-live"]
         );
         assert_eq!(ids(&pool, "Jobs").await?, expected_job_ids());
+        assert_eq!(
+            session_hashes(&pool).await?,
+            vec!["live-enqueued", "live-pending"]
+        );
         Ok(())
     }
 
@@ -110,6 +117,52 @@ mod sqlite {
         Ok(())
     }
 
+    async fn create_cache_keepalive_sessions_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "CREATE TABLE cache_keepalive_sessions (
+                session_key_hash TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                enqueue_state TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn seed_sqlite_cache_keepalive_cleanup(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+        for (session_key_hash, status, enqueue_state, expires_at, updated_at) in sessions() {
+            sqlx::query(
+                "INSERT INTO cache_keepalive_sessions (session_key_hash, status, enqueue_state, expires_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .bind(session_key_hash)
+            .bind(status)
+            .bind(enqueue_state)
+            .bind(i64::try_from(expires_at).expect("test timestamp fits i64"))
+            .bind(i64::try_from(updated_at).expect("test timestamp fits i64"))
+            .execute(pool)
+            .await?;
+        }
+        for (id, status, run_at, done_at) in cache_keepalive_jobs() {
+            sqlx::query(
+                "INSERT INTO Jobs (job, id, job_type, status, run_at, done_at, idempotency_key)
+                 VALUES (?1, ?2, 'adaptive', ?3, ?4, ?5, ?6)",
+            )
+            .bind(Vec::<u8>::new())
+            .bind(id)
+            .bind(status)
+            .bind(i64::try_from(run_at).expect("test timestamp fits i64"))
+            .bind(done_at.map(|value| i64::try_from(value).expect("test timestamp fits i64")))
+            .bind(format!("cache_keepalive:{id}:1"))
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn seed_stale_lock_scenario(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         sqlx::query("INSERT INTO Workers (id, worker_type, storage_name, layers, last_seen, started_at) VALUES ('worker-live', 'cron', 'default', '', ?1, ?1)")
             .bind(i64::try_from(NOW_SECS).expect("test timestamp fits i64"))
@@ -137,6 +190,14 @@ mod sqlite {
             .fetch_all(pool)
             .await
     }
+
+    async fn session_hashes(pool: &SqlitePool) -> Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT session_key_hash FROM cache_keepalive_sessions ORDER BY session_key_hash",
+        )
+        .fetch_all(pool)
+        .await
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -153,7 +214,7 @@ mod postgres {
 
     use super::{
         ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler, NOW_SECS,
-        expected_job_ids, expected_result, jobs, workers,
+        cache_keepalive_jobs, expected_job_ids, expected_result, jobs, sessions, workers,
     };
 
     #[tokio::test]
@@ -197,7 +258,9 @@ mod postgres {
 
     async fn assert_postgres_housekeeping(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         PostgresStorage::setup(pool).await?;
+        create_cache_keepalive_sessions_table(pool).await?;
         seed_postgres(pool).await?;
+        seed_postgres_cache_keepalive_cleanup(pool).await?;
         let result =
             ApalisHousekeepingJobHandler::new(pool.clone(), ApalisHousekeepingConfig::new(1))
                 .handle(ApalisHousekeepingJob::default(), NOW_SECS)
@@ -208,6 +271,10 @@ mod postgres {
             vec!["worker-cutoff", "worker-live"]
         );
         assert_eq!(ids(pool, "apalis.jobs").await?, expected_job_ids());
+        assert_eq!(
+            session_hashes(pool).await?,
+            vec!["live-enqueued", "live-pending"]
+        );
         Ok(())
     }
 
@@ -232,10 +299,64 @@ mod postgres {
         Ok(())
     }
 
+    async fn create_cache_keepalive_sessions_table(pool: &PgPool) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "CREATE TABLE cache_keepalive_sessions (
+                session_key_hash TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                enqueue_state TEXT NOT NULL,
+                expires_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL
+            )",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn seed_postgres_cache_keepalive_cleanup(pool: &PgPool) -> Result<(), sqlx::Error> {
+        for (session_key_hash, status, enqueue_state, expires_at, updated_at) in sessions() {
+            sqlx::query(
+                "INSERT INTO cache_keepalive_sessions (session_key_hash, status, enqueue_state, expires_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(session_key_hash)
+            .bind(status)
+            .bind(enqueue_state)
+            .bind(i64::try_from(expires_at).expect("test timestamp fits i64"))
+            .bind(i64::try_from(updated_at).expect("test timestamp fits i64"))
+            .execute(pool)
+            .await?;
+        }
+        for (id, status, run_at, done_at) in cache_keepalive_jobs() {
+            sqlx::query(
+                "INSERT INTO apalis.jobs (job, id, job_type, status, run_at, done_at, idempotency_key)
+                 VALUES ($1, $2, 'adaptive', $3, $4, $5, $6)",
+            )
+            .bind(Vec::<u8>::new())
+            .bind(id)
+            .bind(status)
+            .bind(ts(run_at))
+            .bind(done_at.map(ts))
+            .bind(format!("cache_keepalive:{id}:1"))
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn ids(pool: &PgPool, table: &str) -> Result<Vec<String>, sqlx::Error> {
         sqlx::query_scalar::<_, String>(&format!("SELECT id FROM {table} ORDER BY id"))
             .fetch_all(pool)
             .await
+    }
+
+    async fn session_hashes(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT session_key_hash FROM cache_keepalive_sessions ORDER BY session_key_hash",
+        )
+        .fetch_all(pool)
+        .await
     }
 
     fn is_safe_database_url(url: &str) -> bool {
@@ -253,6 +374,8 @@ fn expected_result() -> ApalisHousekeepingJobResult {
         workers_removed: 1,
         jobs_removed: 2,
         stale_locks_reaped: 0,
+        cache_keepalive_sessions_removed: 3,
+        cache_keepalive_jobs_removed: 2,
         cutoff_unix_secs: NOW_SECS - DAY_SECS,
     }
 }
@@ -262,6 +385,8 @@ fn expected_job_ids() -> Vec<&'static str> {
         "active-pending",
         "active-queued",
         "active-running",
+        "keepalive-active-queued",
+        "keepalive-active-running",
         "recent-done",
     ]
 }
@@ -282,5 +407,64 @@ fn jobs() -> [(&'static str, &'static str, Option<u64>); 6] {
         ("old-done", "Done", Some(NOW_SECS - (2 * DAY_SECS))),
         ("old-failed", "Failed", Some(NOW_SECS - (2 * DAY_SECS))),
         ("recent-done", "Done", Some(NOW_SECS - 60)),
+    ]
+}
+
+fn sessions() -> [(&'static str, &'static str, &'static str, u64, u64); 5] {
+    [
+        (
+            "expired-terminal",
+            "terminal",
+            "enqueued",
+            NOW_SECS - 1,
+            NOW_SECS - 10,
+        ),
+        (
+            "expired-active",
+            "active",
+            "enqueued",
+            NOW_SECS - 1,
+            NOW_SECS - 10,
+        ),
+        (
+            "stale-pending",
+            "active",
+            "pending",
+            NOW_SECS + DAY_SECS,
+            NOW_SECS - 3_700,
+        ),
+        (
+            "live-pending",
+            "active",
+            "pending",
+            NOW_SECS + DAY_SECS,
+            NOW_SECS - 10,
+        ),
+        (
+            "live-enqueued",
+            "active",
+            "enqueued",
+            NOW_SECS + DAY_SECS,
+            NOW_SECS - 3_700,
+        ),
+    ]
+}
+
+fn cache_keepalive_jobs() -> [(&'static str, &'static str, u64, Option<u64>); 4] {
+    [
+        (
+            "keepalive-old-done",
+            "Done",
+            NOW_SECS - 3_700,
+            Some(NOW_SECS - 3_700),
+        ),
+        ("keepalive-stale-pending", "Pending", NOW_SECS - 3_700, None),
+        ("keepalive-active-queued", "Queued", NOW_SECS - 3_700, None),
+        (
+            "keepalive-active-running",
+            "Running",
+            NOW_SECS - 3_700,
+            None,
+        ),
     ]
 }
