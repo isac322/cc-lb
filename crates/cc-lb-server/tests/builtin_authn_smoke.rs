@@ -10,9 +10,9 @@ use cc_lb_engine::{
     ApiKeyAwareSignerFactory, Body, DispatchError, DynamicViewBuilder, DynamicViewHolder,
     Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
+use cc_lb_observability::ObservabilityHook;
 use cc_lb_plugin_api::{
-    ObservabilityHook, Principal, RouteDecision, RouteError, RouterPlugin, Upstream,
-    UpstreamCandidate,
+    Principal, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};

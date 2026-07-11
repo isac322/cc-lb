@@ -12,10 +12,10 @@ use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
 };
 use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
+use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
 use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, ObservabilityError, ObservabilityHook, ObserveEvent,
-    Principal, RouteDecision, RouteError, RouterPlugin, TerminalStrategy, Upstream,
-    UpstreamCandidate,
+    FilterError, FilterOutput, FilterPlugin, Principal, RouteDecision, RouteError, RouterPlugin,
+    TerminalStrategy, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};

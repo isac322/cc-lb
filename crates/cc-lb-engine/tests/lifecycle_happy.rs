@@ -17,7 +17,7 @@ async fn happy_sse_relays_incrementally_and_observes_chunks() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
     let test_bus = TestLifecycleBus::new().with_hook_adapter(vec![
-        hook.clone() as Arc<dyn cc_lb_plugin_api::ObservabilityHook>
+        hook.clone() as Arc<dyn cc_lb_observability::ObservabilityHook>
     ]);
     let lifecycle = lifecycle_with(
         TestAuthn::new(state.clone()),
@@ -55,14 +55,14 @@ async fn happy_sse_relays_incrementally_and_observes_chunks() {
             .lock()
             .expect("events lock")
             .iter()
-            .any(|event| matches!(event, cc_lb_plugin_api::ObserveEvent::Chunk { .. }))
+            .any(|event| matches!(event, cc_lb_observability::ObserveEvent::Chunk { .. }))
     );
     timeout(
         Duration::from_secs(1),
         hook.wait_for_event(|event| {
             matches!(
                 event,
-                cc_lb_plugin_api::ObserveEvent::RequestFinished {
+                cc_lb_observability::ObserveEvent::RequestFinished {
                     input_tokens: Some(7),
                     output_tokens: Some(42),
                     ..
@@ -79,7 +79,7 @@ async fn happy_non_streaming_observes_usage_tokens() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
     let test_bus = TestLifecycleBus::new().with_hook_adapter(vec![
-        hook.clone() as Arc<dyn cc_lb_plugin_api::ObservabilityHook>
+        hook.clone() as Arc<dyn cc_lb_observability::ObservabilityHook>
     ]);
     let lifecycle = lifecycle_with(
         TestAuthn::new(state.clone()),
@@ -112,7 +112,7 @@ async fn happy_non_streaming_observes_usage_tokens() {
         hook.wait_for_event(|event| {
             matches!(
                 event,
-                cc_lb_plugin_api::ObserveEvent::RequestFinished {
+                cc_lb_observability::ObserveEvent::RequestFinished {
                     input_tokens: Some(1),
                     output_tokens: Some(1),
                     ..

@@ -686,7 +686,7 @@ async fn build_principal_chains(
             registered_slot_keys.insert(slot_key.clone());
             match register_observe_slot(runtime, &slot_key, &manifest).await {
                 Ok(slot) => {
-                    let handle: Arc<dyn cc_lb_plugin_api::ObservabilityHook> = Arc::new(
+                    let handle: Arc<dyn cc_lb_observability::ObservabilityHook> = Arc::new(
                         WasmtimeObservabilityHookPlugin::new(slot, runtime.config_arc()),
                     );
                     hooks.push(handle);

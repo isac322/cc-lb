@@ -11,9 +11,9 @@ use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
 };
+use cc_lb_observability::ObservabilityHook;
 use cc_lb_plugin_api::{
-    ObservabilityHook, Principal, RouteDecision, RouteError, RouterPlugin, Upstream,
-    UpstreamCandidate,
+    Principal, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
 };
 use cc_lb_upstream::SignerFactory;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};

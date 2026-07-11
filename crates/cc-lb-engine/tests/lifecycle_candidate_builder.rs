@@ -12,10 +12,10 @@ use cc_lb_engine::{
     ApiKeyAwareSignerFactory, Body, DispatchError, DynamicView, DynamicViewBuilder,
     DynamicViewHolder, Lifecycle, LifecycleConfig, RequestKind, UpstreamDispatch, build_candidates,
 };
+use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
 use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, ObservabilityError, ObservabilityHook, ObserveEvent,
-    Principal, RouteDecision, RouteError, RouterPlugin, TerminalStrategy, Upstream,
-    UpstreamCandidate,
+    FilterError, FilterOutput, FilterPlugin, Principal, RouteDecision, RouteError, RouterPlugin,
+    TerminalStrategy, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};

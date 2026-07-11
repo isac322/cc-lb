@@ -1605,9 +1605,9 @@ mod tests {
     use cc_lb_control::{
         DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
     };
+    use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
     use cc_lb_plugin_api::{
-        ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RouteDecision, RouteError,
-        RouterPlugin, Upstream, UpstreamCandidate,
+        Principal, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
     };
     use cc_lb_storage_api::{BackendKind, MetaStore, UpstreamStore};
     use cc_lb_upstream::{

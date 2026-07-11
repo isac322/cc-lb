@@ -6,19 +6,20 @@
 mod cclb_metrics;
 mod engine_hook;
 mod hook;
+mod host;
 mod init;
 pub mod lifecycle_metrics;
 mod panic_hook;
 mod redaction;
 mod trace_layer;
 
-pub use cc_lb_plugin_api::{ObservabilityError, ObservabilityHook, ObserveEvent};
 pub use cclb_metrics::{prometheus14_metric_definitions, touch_prometheus14_metrics};
-pub use engine_hook::MetricsCrateHook;
+pub use engine_hook::{EngineMetricsHook, MetricsCrateHook, NoopMetricsHook};
 pub use hook::{
     BoundedChannelHook, DEFAULT_HOOK_CHANNEL_CAPACITY, dropped_events_total,
     increment_dropped_events_by,
 };
+pub use host::{ObservabilityError, ObservabilityHook, ObserveEvent};
 pub use init::{
     InitError, MetricDefinition, MetricKind, ObservabilityConfig, TracingGuard, init,
     metric_definitions, panic_total, register_metrics,

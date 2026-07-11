@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_contract::{EngineMetricsHook, NoopMetricsHook};
+use cc_lb_observability::{EngineMetricsHook, NoopMetricsHook};
 use cc_lb_storage_api::PrincipalLimitState;
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};

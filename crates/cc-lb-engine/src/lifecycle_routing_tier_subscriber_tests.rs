@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use cc_lb_contract::{
-    EventId, LifecycleEvent, NoopMetricsHook, PrincipalKindLite, RouteFailure, RouteInfo,
-    TerminationReason,
+    EventId, LifecycleEvent, PrincipalKindLite, RouteFailure, RouteInfo, TerminationReason,
 };
+use cc_lb_observability::NoopMetricsHook;
 use cc_lb_plugin_api::types::{StageDecision, WrhKeySource};
 use cc_lb_plugin_api::{RoutingTrace, SubscriptionPreferenceTrace, SubscriptionTier};
 use tokio::sync::mpsc;

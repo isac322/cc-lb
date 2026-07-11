@@ -1,11 +1,12 @@
 use std::time::Duration;
 
-use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent};
 use http::{Request, Response};
 use tower_http::trace::{
     DefaultMakeSpan, HttpMakeClassifier, OnBodyChunk, OnRequest, OnResponse, TraceLayer,
 };
 use tracing::Span;
+
+use crate::{ObservabilityHook, ObserveEvent};
 
 pub type ObservabilityTraceLayer<H> = TraceLayer<
     HttpMakeClassifier,
@@ -160,11 +161,11 @@ fn header_value<B>(request: &Request<B>, name: &'static str) -> Option<String> {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use cc_lb_plugin_api::{ObservabilityError, ObserveEvent};
     use http::StatusCode;
     use tower_http::trace::{OnBodyChunk as _, OnRequest as _, OnResponse as _};
 
     use super::*;
+    use crate::{ObservabilityError, ObserveEvent};
 
     #[derive(Clone, Default)]
     struct RecordingHook {

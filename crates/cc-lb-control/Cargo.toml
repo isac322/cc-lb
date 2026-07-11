@@ -16,6 +16,7 @@ cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-contract = { workspace = true }
 cc-lb-request-log.workspace = true
 cc-lb-domain.workspace = true
+cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-plugin-api = { workspace = true }
 cc-lb-routing.workspace = true
 cc-lb-upstream.workspace = true

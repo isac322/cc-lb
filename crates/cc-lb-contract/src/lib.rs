@@ -66,6 +66,9 @@ pub use cc_lb_request_log::{
     RequestEventPartial, RequestEventPhase, RequestEventUpdate, RequestEventUpstream,
 };
 
+#[doc(hidden)]
+pub use cc_lb_observability::{EngineMetricsHook, NoopMetricsHook};
+
 use cc_lb_domain::{InternalError, RoutingTrace, TtlClass};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -73,33 +76,6 @@ use uuid::Uuid;
 
 pub trait AuditSink: Send + Sync {
     fn sink_audit(&self, entry: AuditEntry);
-}
-
-pub trait EngineMetricsHook: Send + Sync {
-    fn record_cache_hit(&self, upstream: &str, model: &str);
-
-    fn record_cache_miss(&self, upstream: &str, model: &str);
-
-    fn record_cache_observation_dropped(&self, reason: &str);
-
-    fn record_dropped_events_by(&self, reason: &str, count: u64);
-
-    fn record_routing_tier_selection(&self, tier: &str, upstream: &str, principal_id: &str);
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NoopMetricsHook;
-
-impl EngineMetricsHook for NoopMetricsHook {
-    fn record_cache_hit(&self, _upstream: &str, _model: &str) {}
-
-    fn record_cache_miss(&self, _upstream: &str, _model: &str) {}
-
-    fn record_cache_observation_dropped(&self, _reason: &str) {}
-
-    fn record_dropped_events_by(&self, _reason: &str, _count: u64) {}
-
-    fn record_routing_tier_selection(&self, _tier: &str, _upstream: &str, _principal_id: &str) {}
 }
 
 #[doc(hidden)]

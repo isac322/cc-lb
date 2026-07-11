@@ -67,7 +67,7 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
         let state = TestState::default();
         let hook = Arc::new(RecordingHook::default());
         let test_bus = TestLifecycleBus::new().with_hook_adapter(vec![
-            hook.clone() as Arc<dyn cc_lb_plugin_api::ObservabilityHook>
+            hook.clone() as Arc<dyn cc_lb_observability::ObservabilityHook>
         ]);
         let filters: Vec<Arc<dyn FilterPlugin>> = vec![
             Arc::new(ErrorFilter {
@@ -108,7 +108,7 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
             hook.wait_for_event(|event| {
                 matches!(
                     event,
-                    cc_lb_plugin_api::ObserveEvent::Error { code, source, .. }
+                    cc_lb_observability::ObserveEvent::Error { code, source, .. }
                         if code == "router_filter_passthrough" && source == "router"
                 )
             }),

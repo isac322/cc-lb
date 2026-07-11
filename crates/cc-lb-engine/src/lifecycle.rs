@@ -15,7 +15,7 @@ use cc_lb_domain::{
     Principal, PrincipalKind, RoutingTrace, StageDecision, TerminalDecision, TerminalStrategy,
     TtlClass, Upstream, UpstreamCandidate, UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
-use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent};
+use cc_lb_observability::{ObservabilityHook, ObserveEvent};
 use cc_lb_quota::rate_limit_headers::parse_anthropic_rate_limit_headers;
 use cc_lb_request_log::{
     HeaderSnapshot, RequestCacheBreakpoint, RequestCacheBreakpointSource,

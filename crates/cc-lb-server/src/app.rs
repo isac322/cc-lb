@@ -728,7 +728,7 @@ async fn build_app_with_storage_inner(
 ) -> Result<App, BuildError> {
     let scheduler_lazy_handle = opened_scheduler.lazy_handle();
     let server_state = Arc::new(ServerStateHandle::new_starting());
-    let metrics_hook: Arc<dyn cc_lb_contract::EngineMetricsHook> =
+    let metrics_hook: Arc<dyn cc_lb_observability::EngineMetricsHook> =
         Arc::new(cc_lb_observability::MetricsCrateHook);
     let key_store = Arc::new(KeyStore::new(managed_store));
     let price_catalog = cc_lb_pricing::global_catalog().clone();

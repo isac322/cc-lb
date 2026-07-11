@@ -10,7 +10,7 @@ use std::time::{Duration, Instant as StdInstant};
 use axum::body::Body;
 use bytes::{Bytes, BytesMut};
 use cc_lb_contract::{EventId, LifecycleEvent, RequestEventBus};
-use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent};
+use cc_lb_observability::{ObservabilityHook, ObserveEvent};
 use cc_lb_upstream::UpstreamDialect;
 use eventsource_stream::{Event, EventStream, EventStreamError};
 use futures_core::Stream;
@@ -712,12 +712,11 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
     use cc_lb_plugin_api::types::{
         BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, TtlClass, WarmCacheEntry,
     };
-    use cc_lb_plugin_api::{
-        ObservabilityError, ObservabilityHook, ObserveEvent, Principal, Upstream,
-    };
+    use cc_lb_plugin_api::{Principal, Upstream};
     use cc_lb_storage_api::PromptCacheObservationRecord;
     use cc_lb_upstream::{
         DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,

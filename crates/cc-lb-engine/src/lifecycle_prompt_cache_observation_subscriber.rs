@@ -9,9 +9,8 @@
 use std::sync::Arc;
 
 use cc_lb_config::LifecyclePromptCacheObservationSubscriberConfig;
-use cc_lb_contract::{
-    EngineMetricsHook, LifecycleEvent, PromptCacheObservationKindWire, PromptCacheObservationWire,
-};
+use cc_lb_contract::{LifecycleEvent, PromptCacheObservationKindWire, PromptCacheObservationWire};
+use cc_lb_observability::EngineMetricsHook;
 use cc_lb_observability::cache_observation_dropped_reason;
 use cc_lb_storage_api::PromptCacheObservationRecord;
 use tokio::sync::{mpsc, oneshot};
@@ -212,8 +211,9 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use cc_lb_contract::{EngineMetricsHook, EventId, NoopMetricsHook};
+    use cc_lb_contract::EventId;
     use cc_lb_domain::{TtlClass, WarmCacheEntry};
+    use cc_lb_observability::{EngineMetricsHook, NoopMetricsHook};
 
     use super::*;
 

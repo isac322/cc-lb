@@ -17,19 +17,18 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-mod errors;
-mod traits;
 pub mod types;
 
-pub use errors::ObservabilityError;
-pub use traits::ObservabilityHook;
 pub use types::{
     CachePricingSummary, CandidateUrgency, CredentialStrategy, GLOBAL_PRINCIPAL, InternalError,
-    InternalErrorKind, InternalErrorStage, ObserveEvent, PluginManifest, PluginSlot, Principal,
-    PrincipalKind, PrincipalQuotas, RateLimitKind, RateLimitObservation, RoutingTrace, SlotKey,
+    InternalErrorKind, InternalErrorStage, PluginManifest, PluginSlot, Principal, PrincipalKind,
+    PrincipalQuotas, RateLimitKind, RateLimitObservation, RoutingTrace, SlotKey,
     SubscriptionPreferenceTrace, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
     SubscriptionTier, TerminalStrategy, Upstream, UpstreamCandidate, UpstreamKind, default_pure,
 };
+
+#[doc(hidden)]
+pub use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
 
 #[doc(hidden)]
 pub use cc_lb_routing::{

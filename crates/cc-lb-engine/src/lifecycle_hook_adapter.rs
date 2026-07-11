@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cc_lb_contract::{EventId, LifecycleEvent, UsageSnapshot};
-use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent, PrincipalKind};
+use cc_lb_domain::PrincipalKind;
+use cc_lb_observability::{ObservabilityHook, ObserveEvent};
 use cc_lb_storage_api::types::PrincipalKindLite;
 use http::StatusCode;
 use tokio::sync::{mpsc, oneshot};
@@ -274,7 +275,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 mod tests {
     use super::*;
     use cc_lb_contract::{StreamSuccess, TerminationReason, UsageSource};
-    use cc_lb_plugin_api::{ObservabilityError, ObserveEvent};
+    use cc_lb_observability::{ObservabilityError, ObserveEvent};
     use std::sync::Mutex as StdMutex;
 
     #[derive(Default)]

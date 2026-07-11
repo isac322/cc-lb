@@ -4,7 +4,8 @@ use arc_swap::ArcSwap;
 #[doc(hidden)]
 pub use cc_lb_domain::PlanInfo;
 use cc_lb_domain::RateLimitObservation;
-use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin};
+use cc_lb_observability::ObservabilityHook;
+use cc_lb_plugin_api::RouterPlugin;
 use cc_lb_storage_api::{UpstreamRateLimitObservationRecord, UpstreamRecord};
 use cc_lb_upstream::ApiKeyAwareSignerFactory;
 use parking_lot::RwLock;
@@ -329,9 +330,8 @@ impl DynamicViewBuilder {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use cc_lb_plugin_api::{
-        ObservabilityError, ObserveEvent, Principal, Upstream, UpstreamCandidate,
-    };
+    use cc_lb_observability::{ObservabilityError, ObserveEvent};
+    use cc_lb_plugin_api::{Principal, Upstream, UpstreamCandidate};
     use cc_lb_routing::{RouteDecision, RouteError, RoutingContext};
     use cc_lb_upstream::{
         RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,

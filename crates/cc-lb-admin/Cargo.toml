@@ -68,6 +68,7 @@ mime_guess = "2.0.5"
 nix = { version = "0.31.3", features = ["signal"] }
 
 [dev-dependencies]
+cc-lb-observability = { path = "../cc-lb-observability" }
 tower.workspace = true
 http-body-util.workspace = true
 wat = "1"

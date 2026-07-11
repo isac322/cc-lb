@@ -3,10 +3,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cc_lb_contract::{
-    AuthInfo, EngineMetricsHook, EventId, LifecycleEvent, ParseInfo, RequestEventBus, RouteInfo,
-    TerminationReason, UsageSnapshot,
+    AuthInfo, EventId, LifecycleEvent, ParseInfo, RequestEventBus, RouteInfo, TerminationReason,
+    UsageSnapshot,
 };
 use cc_lb_domain::{InternalError, RoutingTrace};
+use cc_lb_observability::EngineMetricsHook;
 use cc_lb_request_log::{
     CostBreakdown as LifecycleCostBreakdown, RequestCacheBreakpoint, RequestCacheState,
     RequestEventPartial, RequestEventUpdate, RequestEventUpstream,
@@ -1201,9 +1202,9 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use cc_lb_contract::{
-        AuthFailure, BusReceiver, EngineMetricsHook, NoopMetricsHook, ParseFailure, RouteInfo,
-        StreamError, StreamSuccess, UsageSource,
+        AuthFailure, BusReceiver, ParseFailure, RouteInfo, StreamError, StreamSuccess, UsageSource,
     };
+    use cc_lb_observability::{EngineMetricsHook, NoopMetricsHook};
     use cc_lb_plugin_api::types::{
         CandidateUrgency, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
         TerminalDecision, TerminalStrategy, WrhKeySource,

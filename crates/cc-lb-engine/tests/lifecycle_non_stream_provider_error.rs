@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_engine::event_bus::{BusReceiver, RequestEventBus, RequestEventUpdate};
-use cc_lb_plugin_api::ObserveEvent;
+use cc_lb_observability::ObserveEvent;
 use cc_lb_storage_api::types::RequestEvent;
 use cc_lb_storage_api::{BackendKind, MetaStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;

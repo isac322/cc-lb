@@ -8,7 +8,8 @@ use std::time::Duration;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_engine::{SseBatchConfig, SseRelay, StreamingUsage, strip_hop_by_hop};
-use cc_lb_plugin_api::{ObservabilityError, ObservabilityHook, ObserveEvent, Principal, Upstream};
+use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
+use cc_lb_plugin_api::{Principal, Upstream};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
 };

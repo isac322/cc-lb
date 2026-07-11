@@ -1,13 +1,11 @@
+use cc_lb_domain::{
+    CacheAffinityCandidate, CacheAffinityTrace, CandidateUrgency, InternalError, InternalErrorKind,
+    InternalErrorStage, RoutingTrace, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
+    TerminalDecision, TerminalStrategy, WrhKeySource,
+};
 use cc_lb_observability::{
     REDACTED, ROUTING_REASON_MAX_BYTES, ROUTING_TRACE_SIZE_CAP_BYTES, enforce_routing_trace_caps,
     redact_internal_errors, redact_routing_trace, truncate_reason,
-};
-use cc_lb_plugin_api::types::{
-    CacheAffinityCandidate, CacheAffinityTrace, CandidateUrgency, StageDecision,
-    SubscriptionPreferenceTrace, SubscriptionTier, TerminalDecision, WrhKeySource,
-};
-use cc_lb_plugin_api::{
-    InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace, TerminalStrategy,
 };
 use uuid::Uuid;
 

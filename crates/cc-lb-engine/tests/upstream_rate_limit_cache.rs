@@ -9,9 +9,9 @@ use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DynamicView, DynamicViewBuilder, RequestKind, UpstreamRateLimitCache,
     build_candidates,
 };
+use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
 use cc_lb_plugin_api::{
-    ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RateLimitKind, RouteDecision,
-    RouteError, RouterPlugin, Upstream, UpstreamCandidate,
+    Principal, RateLimitKind, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};

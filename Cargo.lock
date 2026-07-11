@@ -721,6 +721,7 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-engine",
  "cc-lb-oauth-protocol",
+ "cc-lb-observability",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "cc-lb-request-log",
@@ -813,6 +814,7 @@ name = "cc-lb-contract"
 version = "0.1.0"
 dependencies = [
  "cc-lb-domain",
+ "cc-lb-observability",
  "cc-lb-plugin-api",
  "cc-lb-request-log",
  "serde",
@@ -834,6 +836,7 @@ dependencies = [
  "cc-lb-config",
  "cc-lb-contract",
  "cc-lb-domain",
+ "cc-lb-observability",
  "cc-lb-plugin-api",
  "cc-lb-request-log",
  "cc-lb-routing",
@@ -978,9 +981,7 @@ name = "cc-lb-observability"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "cc-lb-contract",
  "cc-lb-domain",
- "cc-lb-plugin-api",
  "http",
  "insta",
  "metrics",
@@ -1027,12 +1028,12 @@ dependencies = [
  "async-trait",
  "bytes",
  "cc-lb-domain",
+ "cc-lb-observability",
  "cc-lb-routing",
  "cc-lb-upstream",
  "http",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "url",
  "uuid",
 ]
@@ -1099,6 +1100,7 @@ dependencies = [
  "bytes",
  "cc-lb-domain",
  "cc-lb-engine",
+ "cc-lb-observability",
  "cc-lb-plugin-api",
  "cc-lb-routing",
  "cc-lb-upstream",

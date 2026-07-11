@@ -7,10 +7,10 @@ use axum::{
 };
 use cc_lb_admin::AdminState;
 use cc_lb_contract::{
-    AuthInfo, LifecycleEvent, NoopMetricsHook, ParseInfo, RequestEventBus, RouteInfo,
-    TerminationReason,
+    AuthInfo, LifecycleEvent, ParseInfo, RequestEventBus, RouteInfo, TerminationReason,
 };
 use cc_lb_engine::{InMemoryBus, RequestEventAssemblerHandle, spawn_request_event_assembler};
+use cc_lb_observability::NoopMetricsHook;
 use cc_lb_storage_api::RequestEventStore;
 use cc_lb_storage_sqlite::SqliteStorage;
 use http_body_util::BodyExt;

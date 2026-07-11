@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::{EngineMetricsHook, EventId, LifecycleEvent};
+use cc_lb_contract::{EventId, LifecycleEvent};
 use cc_lb_domain::SubscriptionTier;
+use cc_lb_observability::EngineMetricsHook;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
