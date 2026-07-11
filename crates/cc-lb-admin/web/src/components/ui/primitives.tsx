@@ -3,7 +3,19 @@ import { Button as BaseButton } from '@base-ui/react/button';
 import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { Popover as BasePopover } from '@base-ui/react/popover';
 import { X } from 'lucide-react';
-import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from 'react';
+import {
+  type ButtonHTMLAttributes,
+  cloneElement,
+  type FocusEventHandler,
+  type HTMLAttributes,
+  isValidElement,
+  type MouseEventHandler,
+  type PointerEventHandler,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import { Area, AreaChart, ResponsiveContainer } from 'recharts';
 
 import { getWindowColor } from '../../lib/colors';
@@ -247,7 +259,10 @@ export function Modal({
   size = 'md',
 }: {
   open: boolean;
-  onOpenChange: (open: boolean) => void;
+  onOpenChange: (
+    open: boolean,
+    eventDetails: BaseDialog.Root.ChangeEventDetails,
+  ) => void;
   title: ReactNode;
   description?: ReactNode;
   children: ReactNode;
@@ -370,6 +385,13 @@ export function ConfirmDialog({
   );
 }
 
+type HintChildProps = {
+  onPointerEnter?: PointerEventHandler;
+  onPointerLeave?: PointerEventHandler;
+  onFocus?: FocusEventHandler;
+  onClick?: MouseEventHandler;
+};
+
 export function Hint({
   label,
   children,
@@ -379,15 +401,75 @@ export function Hint({
   children: ReactNode;
   side?: 'top' | 'right' | 'bottom' | 'left';
 }) {
-  return (
-    <BasePopover.Root>
-      <BasePopover.Trigger
-        delay={200}
-        onClick={(event) => event.stopPropagation()}
-        openOnHover
-        render={<span />}
+  const [engaged, setEngaged] = useState(false);
+  const [open, setOpen] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  if (!engaged) {
+    if (isValidElement<HintChildProps>(children)) {
+      const childElement = children;
+      return cloneElement(childElement, {
+        onPointerEnter: (e) => {
+          childElement.props.onPointerEnter?.(e);
+          timerRef.current = setTimeout(() => {
+            setEngaged(true);
+            setOpen(true);
+          }, 200);
+        },
+        onPointerLeave: (e) => {
+          childElement.props.onPointerLeave?.(e);
+          if (timerRef.current) clearTimeout(timerRef.current);
+        },
+        onFocus: (e) => {
+          childElement.props.onFocus?.(e);
+          setEngaged(true);
+          setOpen(true);
+        },
+        onClick: (e) => {
+          e.stopPropagation();
+          childElement.props.onClick?.(e);
+        },
+      });
+    }
+    return (
+      <span
+        onPointerEnter={() => {
+          timerRef.current = setTimeout(() => {
+            setEngaged(true);
+            setOpen(true);
+          }, 200);
+        }}
+        onPointerLeave={() => {
+          if (timerRef.current) clearTimeout(timerRef.current);
+        }}
+        onFocus={() => {
+          setEngaged(true);
+          setOpen(true);
+        }}
+        onClick={(e) => e.stopPropagation()}
       >
         {children}
+      </span>
+    );
+  }
+
+  return (
+    <BasePopover.Root open={open} onOpenChange={setOpen}>
+      <BasePopover.Trigger
+        delay={200}
+        onClick={(event: React.MouseEvent) => {
+          event.stopPropagation();
+        }}
+        openOnHover
+        render={isValidElement(children) ? children : <span />}
+      >
+        {!isValidElement(children) ? children : null}
       </BasePopover.Trigger>
       <BasePopover.Portal>
         <BasePopover.Positioner side={side} sideOffset={4}>
@@ -644,12 +726,14 @@ export function Field({
   label,
   hint,
   error,
+  errorId,
   children,
   required,
 }: {
   label: string;
   hint?: string;
   error?: string;
+  errorId?: string;
   children: ReactNode;
   required?: boolean;
 }) {
@@ -663,7 +747,11 @@ export function Field({
       {hint && !error ? (
         <span className="text-[11px] text-text-faint">{hint}</span>
       ) : null}
-      {error ? <span className="text-[11px] text-red-400">{error}</span> : null}
+      {error ? (
+        <span id={errorId} className="text-[11px] text-red-400">
+          {error}
+        </span>
+      ) : null}
     </label>
   );
 }

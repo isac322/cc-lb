@@ -1,18 +1,11 @@
-import { Select as BaseSelect } from '@base-ui/react/select';
 import { Toggle as BaseToggle } from '@base-ui/react/toggle';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
-import {
-  AlertTriangle,
-  Check,
-  ChevronDown,
-  Download,
-  RefreshCw,
-  X,
-  Zap,
-} from 'lucide-react';
-import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { AlertTriangle, Download, RefreshCw, X, Zap } from 'lucide-react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { z } from 'zod';
 import { LiveTailFailureBanner } from '../components/LiveTailFailureBanner';
+import { type FilterOption, LogSelect } from '../components/ui/LogSelect';
+import { LogsPagination } from '../components/ui/LogsPagination';
 import {
   Button,
   Card,
@@ -24,51 +17,163 @@ import {
 } from '../components/ui/primitives';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { SessionChip } from '../components/ui/SessionChip';
-import { eventTime } from '../lib/api';
+import {
+  type TimeRangeMode,
+  TimeRangeSelect,
+} from '../components/ui/TimeRangeSelect';
+import {
+  filterLiveEventsByUnixSeconds,
+  filterLogRowsByStatusClass,
+  LOG_STATUS_CLASSES,
+  mergeLogRows,
+} from '../lib/logRows';
+import {
+  clampLogsPage,
+  getLogsPageCount,
+  isLastLogsPage,
+  LOGS_PAGE_SIZE,
+  selectLogsPageRows,
+} from '../lib/logsPagination';
 import {
   usePrincipalNameMap,
   useRecentEventsInfinite,
   useUpstreamNameMap,
   useUpstreams,
 } from '../lib/queries';
-import type { RequestEventWithPhase } from '../lib/RequestEventTypes';
+import { MAX_FORMATTABLE_UNIX_SECONDS } from '../lib/timezone';
 import { useLiveEventStream } from '../lib/useLiveEventStream';
 
-const logsSearchSchema = z.object({
-  principal_id: z.string().optional(),
-  upstream: z.string().optional(),
-  session: z.string().optional(),
-  model: z.string().optional(),
-  status: z.string().optional(),
-  since: z.string().optional(),
-  until: z.string().optional(),
-});
+const unixSecondsSearchParam = z.preprocess((value) => {
+  if (value == null || value === '') return undefined;
+  const number = Number(value);
+  return Number.isSafeInteger(number) &&
+    number >= 0 &&
+    number <= MAX_FORMATTABLE_UNIX_SECONDS
+    ? number
+    : undefined;
+}, z.number().optional());
+
+export const logsSearchSchema = z
+  .object({
+    principal_id: z.string().optional(),
+    upstream: z.string().optional(),
+    session: z.string().optional(),
+    model: z.string().optional(),
+    status: z.enum(LOG_STATUS_CLASSES).optional(),
+    time_range: z.enum(['all', '1h', '6h', '24h', '7d', 'custom']).optional(),
+    since_unix_secs: unixSecondsSearchParam,
+    until_unix_secs: unixSecondsSearchParam,
+  })
+  .transform((filters) => {
+    if (
+      filters.time_range === 'custom' &&
+      filters.since_unix_secs != null &&
+      filters.until_unix_secs != null &&
+      filters.since_unix_secs > filters.until_unix_secs
+    ) {
+      return {
+        ...filters,
+        since_unix_secs: undefined,
+        until_unix_secs: undefined,
+      };
+    }
+    return filters;
+  });
 
 export const Route = createFileRoute('/logs')({
   validateSearch: logsSearchSchema,
   component: LogsPage,
 });
 
+export function buildHistoricalFilters(
+  filters: z.infer<typeof logsSearchSchema>,
+) {
+  const { time_range, since_unix_secs, until_unix_secs } = filters;
+  const base = buildLiveFilters(filters);
+
+  if (time_range === 'custom') {
+    if (since_unix_secs != null && until_unix_secs != null) {
+      base.since_unix_secs = since_unix_secs.toString();
+      base.until_unix_secs = until_unix_secs.toString();
+    }
+  } else if (time_range && time_range !== 'all') {
+    if (since_unix_secs != null) {
+      base.since_unix_secs = since_unix_secs.toString();
+    }
+  }
+
+  return base;
+}
+
+export function buildLiveFilters(filters: z.infer<typeof logsSearchSchema>) {
+  const base: Record<string, string> = {};
+  if (filters.principal_id) base.principal_id = filters.principal_id;
+  if (filters.upstream) base.upstream = filters.upstream;
+  if (filters.model) base.model = filters.model;
+  if (filters.status) base.status_class = filters.status;
+  return base;
+}
+
+export function getLogsRouteState({
+  sessionFilter,
+  hasNextPage,
+  userRequestedTailing,
+  time_range,
+  isLastClientPage,
+}: {
+  sessionFilter?: string;
+  hasNextPage: boolean;
+  userRequestedTailing: boolean;
+  time_range?: TimeRangeMode;
+  isLastClientPage: boolean;
+}) {
+  return {
+    showSentinel: !sessionFilter && hasNextPage && isLastClientPage,
+    effectiveTailing: userRequestedTailing && time_range !== 'custom',
+  };
+}
+
+const LOGS_TABLE_COLUMNS = { cost: true, tokens: true } as const;
+
 function LogsPage() {
   const filters = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const upstreams = useUpstreams();
-  // Session filter is applied client-side (the backend has no thread_id filter
-  // yet), so strip it before we key server queries or the live stream by it.
-  const { session: sessionFilter, ...serverFilters } = filters;
-  const recent = useRecentEventsInfinite(serverFilters);
+
+  const { session: sessionFilter, time_range } = filters;
+
+  const serverFilters = buildLiveFilters(filters);
+
+  const historicalFilters = buildHistoricalFilters(filters);
+
+  const recent = useRecentEventsInfinite(historicalFilters);
   const principalNameMap = usePrincipalNameMap();
   const upstreamNameMap = useUpstreamNameMap();
 
-  const [tailing, setTailing] = useState(true);
+  const [userRequestedTailing, setUserRequestedTailing] = useState(true);
+  const [page, setPage] = useState(0);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLTableRowElement>(null);
 
-  const live = useLiveEventStream(
-    tailing ? serverFilters : { __disabled: '1' },
-  );
-  const liveRows = Array.from(live.eventsMap.values()).map((v) => v.event);
-  const tailStatus = tailing
+  const effectiveTailing = userRequestedTailing && time_range !== 'custom';
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: route filter scalars intentionally reset pagination and table scroll without being read in the effect body.
+  useEffect(() => {
+    setPage(0);
+    if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
+  }, [
+    filters.principal_id,
+    filters.upstream,
+    filters.session,
+    filters.model,
+    filters.status,
+    filters.time_range,
+    filters.since_unix_secs,
+    filters.until_unix_secs,
+  ]);
+
+  const live = useLiveEventStream(serverFilters, { enabled: effectiveTailing });
+  const tailStatus = effectiveTailing
     ? live.permanentFailure
       ? 'failed'
       : live.status
@@ -96,54 +201,30 @@ function LogsPage() {
     failed: 'danger',
   }[tailStatus];
 
-  useEffect(() => {
-    const el = sentinelRef.current;
-    if (!el || !recent.hasNextPage || recent.isFetchingNextPage) return;
-    const obs = new IntersectionObserver(
-      (entries) =>
-        entries.forEach((e) => {
-          if (e.isIntersecting) recent.fetchNextPage();
-        }),
-      { root: scrollContainerRef.current, threshold: 0.1 },
-    );
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, [recent.hasNextPage, recent.isFetchingNextPage, recent.fetchNextPage]);
-
   // biome-ignore lint/correctness/useExhaustiveDependencies: live.eventsMap is a stable Map ref mutated in place by useLiveEventStream; live.version is bumped on every upsert so it is the real re-run trigger.
   const rows = useMemo(() => {
-    // While filters change, `recent.data` still holds the previous filter's
-    // pages (queryClient default `placeholderData: keepPreviousData`). Treat
-    // that as empty so we don't show the old filter's rows under the new
-    // filter's subtitle.
     const historical = recent.isPlaceholderData
       ? []
       : (recent.data?.pages.flatMap((p) => p.events) ?? []);
-    const seen = new Set<string>();
-    const out: RequestEventWithPhase[] = [];
-    for (const entry of live.eventsMap.values()) {
-      const ev = entry.event;
-      const key = ev.event_id ?? ev.request_id;
-      if (!seen.has(key)) {
-        seen.add(key);
-        if (entry.phase === 'final') {
-          out.push({ ...entry.event, _phase: 'final' });
-        } else {
-          out.push({ ...entry.event, _phase: 'partial' });
-        }
-      }
-    }
-    for (const ev of historical) {
-      const key = ev.event_id ?? ev.request_id;
-      if (!seen.has(key)) {
-        seen.add(key);
-        out.push({ ...ev, _phase: 'final' });
-      }
-    }
-    return out.sort(
-      (a, b) => (eventTime(b)?.getTime() ?? 0) - (eventTime(a)?.getTime() ?? 0),
-    );
-  }, [live.eventsMap, live.version, recent.data, recent.isPlaceholderData]);
+    const rangedLiveEvents = filterLiveEventsByUnixSeconds(live.eventsMap, {
+      since:
+        historicalFilters.since_unix_secs === undefined
+          ? undefined
+          : Number(historicalFilters.since_unix_secs),
+      until:
+        historicalFilters.until_unix_secs === undefined
+          ? undefined
+          : Number(historicalFilters.until_unix_secs),
+    });
+    return mergeLogRows(rangedLiveEvents, historical);
+  }, [
+    live.eventsMap,
+    live.version,
+    recent.data,
+    recent.isPlaceholderData,
+    historicalFilters.since_unix_secs,
+    historicalFilters.until_unix_secs,
+  ]);
 
   const sessionOptions = useMemo(() => {
     const seen = new Set<string>();
@@ -158,11 +239,54 @@ function LogsPage() {
     return out;
   }, [rows]);
 
-  const visibleRows = useMemo(
-    () =>
-      sessionFilter ? rows.filter((r) => r.thread_id === sessionFilter) : rows,
-    [rows, sessionFilter],
+  const visibleRows = useMemo(() => {
+    const statusRows = filterLogRowsByStatusClass(rows, filters.status);
+    return sessionFilter
+      ? statusRows.filter((row) => row.thread_id === sessionFilter)
+      : statusRows;
+  }, [rows, filters.status, sessionFilter]);
+  const deferredVisibleRows = useDeferredValue(visibleRows);
+
+  const pageCount = getLogsPageCount(deferredVisibleRows.length);
+  const clampedPage = clampLogsPage(page, pageCount);
+  const pageRows = useMemo(
+    () => selectLogsPageRows(deferredVisibleRows, clampedPage),
+    [deferredVisibleRows, clampedPage],
   );
+  const isLastClientPage = isLastLogsPage(clampedPage, pageCount);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: clampedPage changes intentionally trigger the imperative scroll reset.
+  useEffect(() => {
+    if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
+  }, [clampedPage]);
+
+  const { showSentinel } = getLogsRouteState({
+    sessionFilter,
+    hasNextPage: recent.hasNextPage,
+    userRequestedTailing,
+    time_range,
+    isLastClientPage,
+  });
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the deferred row count changes when the sentinel actually mounts; without it the observer can run once against a null ref and never attach.
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || !showSentinel || recent.isFetchingNextPage) return;
+    const obs = new IntersectionObserver(
+      (entries) =>
+        entries.forEach((e) => {
+          if (e.isIntersecting) recent.fetchNextPage();
+        }),
+      { root: scrollContainerRef.current, threshold: 0.1 },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [
+    showSentinel,
+    recent.isFetchingNextPage,
+    recent.fetchNextPage,
+    pageRows.length,
+  ]);
 
   const principalSelectOptions = useMemo<FilterOption[]>(
     () =>
@@ -202,9 +326,10 @@ function LogsPage() {
 
   const statusSelectOptions = useMemo<FilterOption[]>(
     () => [
-      { value: '200', label: <span className="font-mono">2xx</span> },
-      { value: '429', label: <span className="font-mono">429</span> },
-      { value: '500', label: <span className="font-mono">5xx</span> },
+      { value: '2xx', label: <span className="font-mono">2xx</span> },
+      { value: '3xx', label: <span className="font-mono">3xx</span> },
+      { value: '4xx', label: <span className="font-mono">4xx</span> },
+      { value: '5xx', label: <span className="font-mono">5xx</span> },
     ],
     [],
   );
@@ -251,9 +376,9 @@ function LogsPage() {
           <span className="flex items-center gap-2">
             <span>
               {visibleRows.length} requests —{' '}
-              {tailing ? 'live tailing' : 'paged'}
+              {effectiveTailing ? 'live tailing' : 'paged'}
             </span>
-            {tailing ? (
+            {effectiveTailing ? (
               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] uppercase tracking-wider border border-subtle rounded-sm">
                 {tailStatus === 'failed' ? (
                   <AlertTriangle className="w-3 h-3 text-[color:var(--color-danger)]" />
@@ -287,11 +412,17 @@ function LogsPage() {
             <BaseToggle
               aria-label="Live tail logs"
               className="inline-flex items-center justify-center rounded-sm font-medium transition-colors select-none disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 h-7 px-2.5 text-xs gap-1.5 bg-[color:var(--color-panel-strong)] border border-[color:var(--color-border)] text-[color:var(--color-text)] hover:bg-[color:var(--color-hover-bg)] data-[pressed]:bg-[color:var(--color-accent-dim)] data-[pressed]:text-[color:var(--color-accent)] data-[pressed]:border-[color:var(--color-accent)]"
-              onPressedChange={setTailing}
-              pressed={tailing}
+              onPressedChange={setUserRequestedTailing}
+              pressed={effectiveTailing}
+              disabled={time_range === 'custom'}
+              title={
+                time_range === 'custom'
+                  ? 'Live tail is disabled for custom time ranges'
+                  : undefined
+              }
             >
               <Zap className="w-3 h-3" />
-              {tailing ? 'Stop tail' : 'Live tail'}
+              {effectiveTailing ? 'Stop tail' : 'Live tail'}
             </BaseToggle>
             <Button
               size="sm"
@@ -336,7 +467,7 @@ function LogsPage() {
                 options={sessionSelectOptions}
                 onChange={(v) => setFilter('session', v)}
                 allLabel="All sessions"
-                widthClass="w-48"
+                widthClass="!w-64"
               />
             </Field>
             <Field label="Model">
@@ -356,33 +487,30 @@ function LogsPage() {
                 widthClass="w-32"
               />
             </Field>
-            <Field label="Since">
-              <input
-                type="datetime-local"
-                lang="en"
-                className={`${INPUT_CLASS} w-48`}
-                value={filters.since ?? ''}
-                onChange={(e) => setFilter('since', e.target.value)}
-              />
-            </Field>
-            <Field label="Until">
-              <input
-                type="datetime-local"
-                lang="en"
-                className={`${INPUT_CLASS} w-48`}
-                value={filters.until ?? ''}
-                onChange={(e) => setFilter('until', e.target.value)}
-              />
-            </Field>
+            <TimeRangeSelect
+              value={{
+                mode: filters.time_range ?? 'all',
+                since_unix_secs: filters.since_unix_secs,
+                until_unix_secs: filters.until_unix_secs,
+              }}
+              onChange={(val) => {
+                navigate({
+                  search: {
+                    ...filters,
+                    time_range: val.mode === 'all' ? undefined : val.mode,
+                    since_unix_secs: val.since_unix_secs,
+                    until_unix_secs: val.until_unix_secs,
+                  },
+                });
+              }}
+            />
             {filters.principal_id ||
             filters.upstream ||
             filters.session ||
             filters.model ||
             filters.status ||
-            filters.since ||
-            filters.until ? (
+            filters.time_range ? (
               <Button
-                size="sm"
                 iconLeft={<X className="w-3 h-3" />}
                 onClick={() => navigate({ search: {} })}
               >
@@ -396,110 +524,35 @@ function LogsPage() {
             className="flex-1 overflow-auto min-h-0"
           >
             <RequestEventsTable
-              events={visibleRows}
+              events={pageRows}
               principalNameMap={principalNameMap}
               upstreamNameMap={upstreamNameMap}
               loading={
                 (recent.isPending || recent.isPlaceholderData) &&
-                liveRows.length === 0
+                live.eventsMap.size === 0
               }
-              liveFlashIds={tailing ? recentLiveIds : undefined}
-              columns={{ cost: true, tokens: true }}
-              sentinelRef={sentinelRef}
+              liveFlashIds={effectiveTailing ? recentLiveIds : undefined}
+              columns={LOGS_TABLE_COLUMNS}
+              sentinelRef={showSentinel ? sentinelRef : undefined}
               loadingMore={recent.isFetchingNextPage}
-              hasMore={recent.hasNextPage}
+              hasMore={showSentinel}
               minWidthClass="min-w-[1080px]"
               emptyTitle="No requests"
               emptyDescription="Adjust filters or enable live tail."
             />
           </div>
+          {deferredVisibleRows.length > 0 && (
+            <LogsPagination
+              page={clampedPage}
+              pageCount={pageCount}
+              totalRows={deferredVisibleRows.length}
+              pageSize={LOGS_PAGE_SIZE}
+              onPrev={() => setPage((p) => Math.max(0, p - 1))}
+              onNext={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+            />
+          )}
         </Card>
       </Section>
     </FullPage>
-  );
-}
-
-type FilterOption = {
-  value: string;
-  label: ReactNode;
-  hint?: ReactNode;
-};
-
-const LOG_SELECT_ITEM_CLASS =
-  'flex items-center gap-2 px-2 py-1.5 text-xs rounded-sm cursor-pointer outline-none data-[highlighted]:bg-[color:var(--color-overlay-5)]';
-
-function LogSelect({
-  value,
-  options,
-  onChange,
-  allLabel,
-  widthClass,
-}: {
-  value: string;
-  options: FilterOption[];
-  onChange: (value: string) => void;
-  allLabel: string;
-  widthClass: string;
-}) {
-  return (
-    <BaseSelect.Root value={value} onValueChange={(v) => onChange(v ?? '')}>
-      <BaseSelect.Trigger
-        className={cx(
-          INPUT_CLASS,
-          widthClass,
-          'flex items-center justify-between gap-2 cursor-pointer',
-        )}
-      >
-        <BaseSelect.Value>
-          {(selected: unknown) => {
-            const key = typeof selected === 'string' ? selected : '';
-            if (!key)
-              return (
-                <span className="text-text-faint text-sm">{allLabel}</span>
-              );
-            const opt = options.find((o) => o.value === key);
-            return (
-              <span className="truncate text-sm">{opt?.label ?? key}</span>
-            );
-          }}
-        </BaseSelect.Value>
-        <BaseSelect.Icon className="shrink-0 text-text-faint">
-          <ChevronDown className="w-3.5 h-3.5" />
-        </BaseSelect.Icon>
-      </BaseSelect.Trigger>
-      <BaseSelect.Portal>
-        <BaseSelect.Positioner sideOffset={4} alignItemWithTrigger={false}>
-          <BaseSelect.Popup className="z-50 min-w-[220px] max-h-[320px] overflow-auto glass-strong rounded-sm border border-subtle p-1 shadow-2xl">
-            <BaseSelect.List>
-              <BaseSelect.Item value="" className={LOG_SELECT_ITEM_CLASS}>
-                <BaseSelect.ItemIndicator className="w-3.5 shrink-0 text-accent">
-                  <Check className="w-3 h-3" />
-                </BaseSelect.ItemIndicator>
-                <span className="text-text">{allLabel}</span>
-              </BaseSelect.Item>
-              {options.map((opt) => (
-                <BaseSelect.Item
-                  key={opt.value}
-                  value={opt.value}
-                  className={LOG_SELECT_ITEM_CLASS}
-                >
-                  <BaseSelect.ItemIndicator className="w-3.5 shrink-0 text-accent">
-                    <Check className="w-3 h-3" />
-                  </BaseSelect.ItemIndicator>
-                  <BaseSelect.ItemText className="flex-1 min-w-0">
-                    {opt.label}
-                  </BaseSelect.ItemText>
-                  {opt.hint && (
-                    <span className="text-[10px] text-text-faint shrink-0">
-                      {opt.hint}
-                    </span>
-                  )}
-                </BaseSelect.Item>
-              ))}
-            </BaseSelect.List>
-          </BaseSelect.Popup>
-        </BaseSelect.Positioner>
-      </BaseSelect.Portal>
-    </BaseSelect.Root>
   );
 }

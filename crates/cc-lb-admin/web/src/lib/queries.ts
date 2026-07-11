@@ -3,6 +3,7 @@
 // Source-of-truth: .omo/plans/cc-lb-dashboard-overhaul.md (API SURFACE section).
 
 import {
+  type InfiniteData,
   experimental_streamedQuery as streamedQuery,
   useInfiniteQuery,
   useMutation,
@@ -384,36 +385,77 @@ export function useRecentEvents(filters: Record<string, string | undefined>) {
     POLLING_INTERVALS.RECENT_EVENTS_MS,
   );
 }
+
+const RECENT_EVENTS_PAGE_SIZE = 200;
+const RECENT_EVENTS_LIMIT = 500;
+
+type RecentEventsPageParam =
+  | { readonly kind: 'initial'; readonly limit: number }
+  | {
+      readonly kind: 'cursor';
+      readonly limit: number;
+      readonly ts_ms: number;
+      readonly event_id: string;
+    };
+
+type RecentEventsQueryKey = readonly [
+  'events',
+  Record<string, string | undefined>,
+  'infinite',
+];
+
+const INITIAL_RECENT_EVENTS_PAGE: RecentEventsPageParam = {
+  kind: 'initial',
+  limit: RECENT_EVENTS_PAGE_SIZE,
+};
+
 export function useRecentEventsInfinite(
   filters: Record<string, string | undefined>,
 ) {
-  return useInfiniteQuery({
-    queryKey: [...qk.events(filters), 'infinite'],
-    initialPageParam: undefined as
-      | { ts_ms: number; event_id: string }
-      | undefined,
+  const queryKey: RecentEventsQueryKey = [...qk.events(filters), 'infinite'];
+  return useInfiniteQuery<
+    RecentEventsPayload,
+    Error,
+    InfiniteData<RecentEventsPayload, RecentEventsPageParam>,
+    RecentEventsQueryKey,
+    RecentEventsPageParam
+  >({
+    queryKey,
+    initialPageParam: INITIAL_RECENT_EVENTS_PAGE,
     queryFn: async ({ pageParam }) => {
       const params = new URLSearchParams();
       for (const [k, v] of Object.entries(filters)) if (v) params.set(k, v);
-      // TODO: Server-side needs matching change for until_ts_ms and until_event_id (Part 3)
-      if (pageParam != null) {
+      if (pageParam.kind === 'cursor') {
         params.set('until_ts_ms', String(pageParam.ts_ms));
         params.set('until_event_id', pageParam.event_id);
       }
-      params.set('limit', '200');
+      params.set('limit', String(pageParam.limit));
       return getJson<RecentEventsPayload>(
         `/admin/events/recent?${params.toString()}`,
       );
     },
-    getNextPageParam: (last) => {
+    getNextPageParam: (last, allPages) => {
+      const loadedEventCount = allPages.reduce(
+        (total, page) => total + page.events.length,
+        0,
+      );
+      if (loadedEventCount >= RECENT_EVENTS_LIMIT) return undefined;
       const evs = last.events;
-      if (!evs.length || evs.length < (last.limit ?? 200)) return undefined;
+      if (!evs.length || evs.length < last.limit) return undefined;
       const oldest = evs[evs.length - 1];
       const ts_ms =
         oldest.ts_ms ?? (oldest.ts != null ? oldest.ts * 1000 : null);
       const event_id = oldest.event_id ?? oldest.request_id;
       if (ts_ms != null && event_id != null) {
-        return { ts_ms, event_id };
+        return {
+          kind: 'cursor',
+          limit: Math.min(
+            RECENT_EVENTS_PAGE_SIZE,
+            RECENT_EVENTS_LIMIT - loadedEventCount,
+          ),
+          ts_ms,
+          event_id,
+        };
       }
       return undefined;
     },
