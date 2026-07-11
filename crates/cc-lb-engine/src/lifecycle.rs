@@ -230,34 +230,33 @@ fn build_cache_score(
                 .then_with(|| right.1.lookback_distance.cmp(&left.1.lookback_distance))
         });
 
+    if !valid_ttl_order(request_breakpoints) {
+        return None;
+    }
+
     let matched_prefix_tokens = longest_match
         .map(|(breakpoint, _, entry)| matched_read_tokens(breakpoint, entry))
         .unwrap_or(0);
-    let mut missing_breakpoints = request_breakpoints
-        .iter()
-        .filter(|breakpoint| breakpoint.prefix_token_count > matched_prefix_tokens)
-        .collect::<Vec<_>>();
-    missing_breakpoints.sort_unstable_by_key(|breakpoint| breakpoint.prefix_token_count);
+    let matched_index = longest_match.map(|(_, prefix, _)| prefix.content_block_index);
 
-    let mut predicted_cache_creation_tokens_5m = 0_u64;
-    let mut predicted_cache_creation_tokens_1h = 0_u64;
-    let mut previous_prefix_tokens = matched_prefix_tokens;
-    for breakpoint in missing_breakpoints {
-        let segment_tokens = breakpoint
+    let deepest_1h = deepest_breakpoint(request_breakpoints, TtlClass::Ephemeral1h, matched_index);
+    let deepest_5m = deepest_breakpoint(request_breakpoints, TtlClass::Ephemeral5m, matched_index);
+
+    let mut non_monotonic = false;
+    let predicted_cache_creation_tokens_1h = deepest_1h.map_or(0, |breakpoint| {
+        non_monotonic |= breakpoint.prefix_token_count < matched_prefix_tokens;
+        breakpoint
             .prefix_token_count
-            .saturating_sub(previous_prefix_tokens);
-        previous_prefix_tokens = breakpoint.prefix_token_count;
-        match breakpoint.requested_ttl {
-            TtlClass::Ephemeral5m => {
-                predicted_cache_creation_tokens_5m =
-                    predicted_cache_creation_tokens_5m.saturating_add(segment_tokens);
-            }
-            TtlClass::Ephemeral1h => {
-                predicted_cache_creation_tokens_1h =
-                    predicted_cache_creation_tokens_1h.saturating_add(segment_tokens);
-            }
-        }
-    }
+            .saturating_sub(matched_prefix_tokens)
+    });
+    let boundary = deepest_1h.map_or(matched_prefix_tokens, |breakpoint| {
+        breakpoint.prefix_token_count
+    });
+    let predicted_cache_creation_tokens_5m = deepest_5m.map_or(0, |breakpoint| {
+        non_monotonic |= breakpoint.prefix_token_count < boundary;
+        breakpoint.prefix_token_count.saturating_sub(boundary)
+    });
+    let ambiguity_reason = non_monotonic.then(|| "non_monotonic_token_estimate".to_owned());
 
     Some(CacheScore {
         predicted_cache_read_tokens: saturating_u64_to_u32(matched_prefix_tokens),
@@ -272,7 +271,7 @@ fn build_cache_score(
             .map(|(_, _, entry)| entry.expires_at_unix_secs),
         matched_breakpoint_index: longest_match.map(|(breakpoint, _, _)| breakpoint.block_index),
         confidence: if longest_match.is_some() { 1.0 } else { 0.0 },
-        ambiguity_reason: None,
+        ambiguity_reason,
         matched_v3_cache_key: longest_match.map(|(_, prefix, _)| prefix.prefix_hash.clone()),
         breakpoint_content_block_index: longest_match
             .map(|(breakpoint, _, _)| breakpoint.block_index),
@@ -291,6 +290,35 @@ fn matched_read_tokens(breakpoint: &CacheBreakpoint, entry: &WarmCacheEntry) -> 
     } else {
         breakpoint.prefix_token_count
     }
+}
+
+fn valid_ttl_order(breakpoints: &[CacheBreakpoint]) -> bool {
+    let deepest_1h = breakpoints
+        .iter()
+        .filter(|breakpoint| breakpoint.requested_ttl == TtlClass::Ephemeral1h)
+        .map(|breakpoint| breakpoint.block_index)
+        .max();
+    let shallowest_5m = breakpoints
+        .iter()
+        .filter(|breakpoint| breakpoint.requested_ttl == TtlClass::Ephemeral5m)
+        .map(|breakpoint| breakpoint.block_index)
+        .min();
+    match (deepest_1h, shallowest_5m) {
+        (Some(latest_1h), Some(earliest_5m)) => latest_1h < earliest_5m,
+        _ => true,
+    }
+}
+
+fn deepest_breakpoint(
+    breakpoints: &[CacheBreakpoint],
+    ttl: TtlClass,
+    covered_up_to: Option<u32>,
+) -> Option<&CacheBreakpoint> {
+    breakpoints
+        .iter()
+        .filter(|breakpoint| breakpoint.requested_ttl == ttl)
+        .filter(|breakpoint| covered_up_to.is_none_or(|index| breakpoint.block_index > index))
+        .max_by_key(|breakpoint| breakpoint.block_index)
 }
 
 fn eligible_ttls(requested: TtlClass) -> Vec<TtlClass> {
@@ -470,6 +498,112 @@ mod cache_score_tests {
     #[test]
     fn anthropic_family_cache_pricing_fallback_leaves_non_claude_unknown() {
         assert!(anthropic_family_cache_pricing_summary("gpt-5.5").is_none());
+    }
+
+    #[test]
+    fn fold_decreasing_tokens_picks_later_structural() {
+        let score = build_cache_score(
+            &[
+                breakpoint(0, 100, TtlClass::Ephemeral5m),
+                breakpoint(1, 90, TtlClass::Ephemeral5m),
+            ],
+            &[],
+        )
+        .expect("cache score for cacheable request");
+
+        assert_eq!(score.predicted_cache_read_tokens, 0);
+        assert_eq!(score.predicted_cache_creation_tokens_5m, 90);
+        assert_eq!(score.predicted_cache_creation_tokens_1h, 0);
+    }
+
+    #[test]
+    fn fold_all_5m() {
+        let score = build_cache_score(
+            &[
+                breakpoint(0, 100_000, TtlClass::Ephemeral5m),
+                breakpoint(1, 250_000, TtlClass::Ephemeral5m),
+                breakpoint(2, 500_000, TtlClass::Ephemeral5m),
+            ],
+            &[],
+        )
+        .expect("cache score for cacheable request");
+
+        assert_eq!(score.predicted_cache_creation_tokens_5m, 500_000);
+        assert_eq!(score.predicted_cache_creation_tokens_1h, 0);
+    }
+
+    #[test]
+    fn fold_all_1h() {
+        let score = build_cache_score(
+            &[
+                breakpoint(0, 100_000, TtlClass::Ephemeral1h),
+                breakpoint(1, 250_000, TtlClass::Ephemeral1h),
+                breakpoint(2, 500_000, TtlClass::Ephemeral1h),
+            ],
+            &[],
+        )
+        .expect("cache score for cacheable request");
+
+        assert_eq!(score.predicted_cache_creation_tokens_1h, 500_000);
+        assert_eq!(score.predicted_cache_creation_tokens_5m, 0);
+    }
+
+    #[test]
+    fn fold_1h_then_5m_index_split() {
+        let score = build_cache_score(
+            &[
+                breakpoint(0, 100_000, TtlClass::Ephemeral1h),
+                breakpoint(1, 300_000, TtlClass::Ephemeral5m),
+            ],
+            &[],
+        )
+        .expect("cache score for cacheable request");
+
+        assert_eq!(score.predicted_cache_creation_tokens_1h, 100_000);
+        assert_eq!(score.predicted_cache_creation_tokens_5m, 200_000);
+        assert_eq!(score.ambiguity_reason, None);
+    }
+
+    #[test]
+    fn fold_non_monotonic_1h_then_5m_saturates_and_flags() {
+        let score = build_cache_score(
+            &[
+                breakpoint(0, 100, TtlClass::Ephemeral1h),
+                breakpoint(1, 90, TtlClass::Ephemeral5m),
+            ],
+            &[],
+        )
+        .expect("cache score for cacheable request");
+
+        assert_eq!(score.predicted_cache_creation_tokens_1h, 100);
+        assert_eq!(score.predicted_cache_creation_tokens_5m, 0);
+        assert!(score.ambiguity_reason.is_some());
+    }
+
+    #[test]
+    fn fold_same_index_ttl_upgrade() {
+        let score = build_cache_score(
+            &[breakpoint(2, 200_000, TtlClass::Ephemeral1h)],
+            &[warm_entry("unrelated-5m", TtlClass::Ephemeral5m, 200_000)],
+        )
+        .expect("cache score for cacheable request");
+
+        assert_eq!(score.predicted_cache_read_tokens, 0);
+        assert_eq!(score.predicted_cache_creation_tokens_1h, 200_000);
+        assert_eq!(score.predicted_cache_creation_tokens_5m, 0);
+    }
+
+    #[test]
+    fn invalid_ttl_order_marks_ineligible() {
+        let score = build_cache_score(
+            &[
+                breakpoint(0, 100_000, TtlClass::Ephemeral5m),
+                breakpoint(1, 200_000, TtlClass::Ephemeral1h),
+            ],
+            &[],
+        );
+
+        assert!(score.is_none());
     }
 
     fn breakpoint(
@@ -4405,9 +4539,8 @@ mod tests {
         );
         let view = cache_score_view(upstream_id, Arc::new(cache));
         let breakpoints = vec![
-            cache_breakpoint(0, "short", 100, TtlClass::Ephemeral5m),
-            cache_breakpoint(1, "long", 250, TtlClass::Ephemeral1h),
-            cache_breakpoint(2, "cold", 300, TtlClass::Ephemeral5m),
+            cache_breakpoint(0, "long", 250, TtlClass::Ephemeral1h),
+            cache_breakpoint(1, "cold", 300, TtlClass::Ephemeral5m),
         ];
 
         let candidates = build_candidates(
@@ -4426,7 +4559,7 @@ mod tests {
         assert_eq!(score.predicted_cache_creation_tokens_1h, 0);
         assert_eq!(score.predicted_uncached_input_tokens, 0);
         assert_eq!(score.predicted_expires_at_unix_secs, Some(4_100_003_600));
-        assert_eq!(score.matched_breakpoint_index, Some(1));
+        assert_eq!(score.matched_breakpoint_index, Some(0));
         assert_eq!(score.confidence, 1.0);
         assert_eq!(score.ambiguity_reason, None);
     }
