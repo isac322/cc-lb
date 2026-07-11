@@ -76,7 +76,7 @@ use cc_lb_observability::{redact_internal_errors, truncate_reason};
 
 pub type Body = AxumBody;
 
-pub const HASH_SCHEMA_VERSION: u8 = 3;
+pub const HASH_SCHEMA_VERSION: u8 = 4;
 
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;

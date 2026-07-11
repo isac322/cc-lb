@@ -611,6 +611,50 @@ pub(crate) mod tests {
         assert_eq!(snapshot[0].prefix_hash, "active");
     }
 
+    #[tokio::test]
+    async fn hydrate_cold_starts_schema_v3_keeps_v4() {
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
+        let cache = PromptCacheObservationCache::new(clock, 30, 32);
+        let upstream_id = Uuid::new_v4();
+        let store = MockStore::new(vec![
+            storage_record(
+                upstream_id,
+                "current-v4",
+                StorageTtlClass::Ephemeral5m,
+                BASE_TS + 300,
+                BASE_TS - 10,
+                HASH_SCHEMA_VERSION,
+            ),
+            storage_record(
+                upstream_id,
+                "stale-v3",
+                StorageTtlClass::Ephemeral5m,
+                BASE_TS + 300,
+                BASE_TS - 20,
+                3,
+            ),
+        ]);
+
+        let loaded = cache
+            .hydrate_from_store(&store, &[upstream_id])
+            .await
+            .unwrap();
+
+        assert_eq!(HASH_SCHEMA_VERSION, 4, "ADR 0008 cutover pins schema v4");
+        assert_eq!(loaded, 1, "only the current-schema (v4) record hydrates");
+        let snapshot = cache.snapshot_for_upstream(
+            upstream_id,
+            MODEL,
+            &[
+                ("current-v4".to_owned(), TtlClass::Ephemeral5m),
+                ("stale-v3".to_owned(), TtlClass::Ephemeral5m),
+            ],
+            BASE_TS,
+        );
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].prefix_hash, "current-v4");
+    }
+
     #[test]
     fn refresh_debounce() {
         let clock = Arc::new(TestClock::new_at_secs(BASE_TS));

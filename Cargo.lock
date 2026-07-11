@@ -872,6 +872,7 @@ dependencies = [
  "axum",
  "base64",
  "bincode",
+ "blake3",
  "brotli",
  "bytes",
  "cc-lb-aead",

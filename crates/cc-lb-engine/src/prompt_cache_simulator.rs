@@ -1,5 +1,4 @@
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use crate::tokenizer::PrefixTokenizer;
 
@@ -10,10 +9,10 @@ pub struct PromptCacheSimulatorKey([u8; 32]);
 
 impl PromptCacheSimulatorKey {
     pub fn seed(canonical_model: &str) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(b"cc-lb-cache-v3:seed");
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"cc-lb-cache-v4:seed");
         hasher.update(canonical_model.as_bytes());
-        Self(hasher.finalize().into())
+        Self(*hasher.finalize().as_bytes())
     }
 
     pub fn to_hex(self) -> String {
@@ -83,11 +82,11 @@ impl PromptCachePrefixChain {
         let mut previous = seed;
         let mut keys = Vec::new();
         for digest in block_digests {
-            let mut hasher = Sha256::new();
-            hasher.update(b"cc-lb-cache-v3:prefix");
-            hasher.update(previous.0);
-            hasher.update(digest);
-            previous = PromptCacheSimulatorKey(hasher.finalize().into());
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"cc-lb-cache-v4:prefix");
+            hasher.update(&previous.0);
+            hasher.update(&digest);
+            previous = PromptCacheSimulatorKey(*hasher.finalize().as_bytes());
             keys.push(previous);
         }
         Self { keys }
@@ -293,10 +292,10 @@ fn block_digest(block: &V3PromptCacheBlock) -> [u8; 32] {
         "value": value,
     });
     let bytes = serde_json::to_vec(&hash_input).unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(b"cc-lb-cache-v3:block");
-    hasher.update(bytes);
-    hasher.finalize().into()
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"cc-lb-cache-v4:block");
+    hasher.update(&bytes);
+    *hasher.finalize().as_bytes()
 }
 
 fn prefix_token_counts(canonical_model: &str, blocks: &[V3PromptCacheBlock]) -> Vec<u64> {
