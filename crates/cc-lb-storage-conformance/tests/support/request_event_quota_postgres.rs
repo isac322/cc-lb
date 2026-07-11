@@ -42,17 +42,6 @@ macro_rules! define_request_event_quota_postgres_tests {
                         .await?;
                     assert_eq!(recent.len(), 1);
                     request_event_quota_support::assert_populated_event(&recent[0]);
-                    let cursor = storage.current_request_event_cursor().await?;
-                    let cursor_rows = storage
-                        .query_request_events_between_cursors(
-                            0,
-                            cursor,
-                            10,
-                            &cc_lb_storage_api::RequestEventStreamFilters::default(),
-                        )
-                        .await?;
-                    assert_eq!(cursor_rows.len(), 1);
-                    request_event_quota_support::assert_populated_event(&cursor_rows[0].1);
 
                     let row = sqlx::query_as::<_, PostgresQuotaRow>(POSTGRES_QUOTA_SELECT)
                         .bind(request_event_quota_support::SELECTED_EVENT_ID)
@@ -73,6 +62,46 @@ macro_rules! define_request_event_quota_postgres_tests {
                         )
                     );
 
+                    drop(storage);
+                    backend.teardown(fixture).await
+                },
+            );
+        }
+
+        #[test]
+        fn request_event_cursor_defers_committed_rows_behind_old_snapshot_postgres() {
+            run_postgres_scenario(
+                "request_event_cursor_defers_committed_rows_behind_old_snapshot",
+                |backend| async move {
+                    let fixture = backend.create_fixture().await?;
+                    let storage = backend.open(&fixture).await?;
+                    let event = request_event_quota_support::populated_event()?;
+
+                    // Given an older repeatable-read transaction has established its snapshot.
+                    let mut blocker = fixture.pool.begin().await?;
+                    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                        .execute(&mut *blocker)
+                        .await?;
+                    sqlx::query("SELECT pg_current_xact_id()")
+                        .execute(&mut *blocker)
+                        .await?;
+
+                    // When a newer request event is committed and its cursor is observed.
+                    storage.append_request_event(&event).await?;
+                    let cursor = storage.current_request_event_cursor().await?;
+                    let cursor_rows = storage
+                        .query_request_events_between_cursors(
+                            0,
+                            cursor,
+                            10,
+                            &cc_lb_storage_api::RequestEventStreamFilters::default(),
+                        )
+                        .await?;
+
+                    // Then cursor reads defer the row while the older snapshot is active.
+                    assert!(cursor_rows.is_empty());
+
+                    blocker.commit().await?;
                     drop(storage);
                     backend.teardown(fixture).await
                 },

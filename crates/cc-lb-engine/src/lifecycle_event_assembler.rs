@@ -332,17 +332,63 @@ impl Partial {
     }
 
     fn cost_options(&self) -> CostBreakdownOptions {
-        self.cost
-            .as_ref()
-            .map(|cost| CostBreakdownOptions {
+        if let Some(cost) = self.cost.as_ref() {
+            return CostBreakdownOptions {
                 total: cost.total_micros,
                 input: cost.input_micros,
                 output: cost.output_micros,
                 cache_creation_5m: cost.cache_creation_5m_micros,
                 cache_creation_1h: cost.cache_creation_1h_micros,
                 cache_read: cost.cache_read_micros,
-            })
-            .unwrap_or_default()
+            };
+        }
+        self.estimated_cost_options().unwrap_or_default()
+    }
+
+    // Display-only estimate for in-progress rows (authoritative `Priced` arrives
+    // at termination). Must never set `self.cost`: that feeds billing/limit
+    // reconciliation, which must stay driven solely by the real `Priced` event.
+    fn estimated_cost_options(&self) -> Option<CostBreakdownOptions> {
+        self.estimated_cost_options_with(|model, usage, upstream_kind| {
+            cc_lb_pricing::virtual_cost_micros_full(
+                model,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_creation_input_tokens_5m,
+                usage.cache_creation_input_tokens_1h,
+                usage.cache_read_input_tokens,
+                upstream_kind,
+            )
+            .into()
+        })
+    }
+
+    fn estimated_cost_options_with(
+        &self,
+        estimate: impl FnOnce(
+            &str,
+            &UsageSnapshot,
+            Option<cc_lb_pricing::UpstreamKind>,
+        ) -> cc_lb_contract::CostBreakdown,
+    ) -> Option<CostBreakdownOptions> {
+        if !self.usage_seen {
+            return None;
+        }
+        let model = self.model()?;
+        let upstream_kind = self
+            .route
+            .as_ref()
+            .and_then(|route| route.upstream_kind.as_deref())
+            .and_then(|label| match label {
+                "anthropic_key" => Some(cc_lb_pricing::UpstreamKind::AnthropicKey),
+                "anthropic_oauth" => Some(cc_lb_pricing::UpstreamKind::AnthropicOAuth),
+                _ => None,
+            });
+        Some(CostBreakdownOptions::from(estimate(
+            model,
+            &self.usage,
+            upstream_kind,
+        )))
     }
 
     fn usage_partial_due_at(&self, now: Instant) -> bool {
@@ -1272,6 +1318,49 @@ mod tests {
 
     include!("lifecycle_event_assembler_quota_support_test.rs");
     include!("lifecycle_event_assembler_quota_tests.rs");
+
+    #[test]
+    fn cost_options_estimates_from_usage_until_authoritative_price_arrives() {
+        let mut partial = Partial {
+            parse: Some(ParseInfo {
+                model: Some("claude-sonnet-4-5-20250929".to_owned()),
+                ..Default::default()
+            }),
+            usage: UsageSnapshot {
+                input_tokens: 1000,
+                output_tokens: 500,
+                ..Default::default()
+            },
+            usage_seen: false,
+            ..Default::default()
+        };
+        assert!(partial.estimated_cost_options().is_none());
+
+        partial.usage_seen = true;
+        let estimated = partial
+            .estimated_cost_options_with(|model, usage, upstream_kind| {
+                assert_eq!(model, "claude-sonnet-4-5-20250929");
+                assert_eq!(usage.input_tokens, 1000);
+                assert_eq!(usage.output_tokens, 500);
+                assert_eq!(upstream_kind, None);
+                CostBreakdown {
+                    total_micros: Some(31337),
+                    input_micros: Some(1000),
+                    output_micros: Some(30337),
+                    ..Default::default()
+                }
+            })
+            .expect("usage and model should produce an estimate");
+        assert_eq!(estimated.total, Some(31337));
+        assert_eq!(estimated.input, Some(1000));
+        assert_eq!(estimated.output, Some(30337));
+
+        partial.cost = Some(CostBreakdown {
+            total_micros: Some(4242),
+            ..Default::default()
+        });
+        assert_eq!(partial.cost_options().total, Some(4242));
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn success_terminated_persists_row() {
