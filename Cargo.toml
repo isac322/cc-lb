@@ -29,6 +29,7 @@ rust-version = "1.96.0"
 
 [workspace.dependencies]
 cc-lb-domain = { path = "crates/cc-lb-domain", version = "0.1.0" }
+cc-lb-lifecycle = { path = "crates/cc-lb-lifecycle", version = "0.1.0" }
 cc-lb-quota = { path = "crates/cc-lb-quota", version = "0.1.0" }
 cc-lb-request-log = { path = "crates/cc-lb-request-log", version = "0.1.0" }
 cc-lb-routing = { path = "crates/cc-lb-routing", version = "0.1.0" }

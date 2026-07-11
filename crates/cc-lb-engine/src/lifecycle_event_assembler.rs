@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cc_lb_contract::{
-    AuthInfo, EventId, LifecycleEvent, ParseInfo, RequestEventBus, RouteInfo, TerminationReason,
-    UsageSnapshot,
-};
+use cc_lb_contract::RequestEventBus;
 use cc_lb_domain::{InternalError, RoutingTrace};
+use cc_lb_lifecycle::{
+    AuthInfo, EventId, LifecycleEvent, ParseInfo, RouteInfo, TerminationReason, UsageSnapshot,
+};
 use cc_lb_observability::EngineMetricsHook;
 use cc_lb_request_log::{
     CostBreakdown as LifecycleCostBreakdown, RequestCacheBreakpoint, RequestCacheState,
@@ -842,7 +842,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         }
         LifecycleEvent::LimitDecision {
             decision:
-                cc_lb_contract::LimitDecisionKind::Reserved {
+                cc_lb_lifecycle::LimitDecisionKind::Reserved {
                     limit_reserve_ms, ..
                 },
             ..
@@ -1201,8 +1201,9 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use cc_lb_contract::{
-        AuthFailure, BusReceiver, ParseFailure, RouteInfo, StreamError, StreamSuccess, UsageSource,
+    use cc_lb_contract::BusReceiver;
+    use cc_lb_lifecycle::{
+        AuthFailure, ParseFailure, RouteInfo, StreamError, StreamSuccess, UsageSource,
     };
     use cc_lb_observability::{EngineMetricsHook, NoopMetricsHook};
     use cc_lb_plugin_api::types::{
@@ -1660,7 +1661,7 @@ mod tests {
             sse_event_count: 0,
             ..Default::default()
         };
-        let _ = cc_lb_contract::UsageSource::NonStreamBody;
+        let _ = cc_lb_lifecycle::UsageSource::NonStreamBody;
     }
 
     #[tokio::test(flavor = "current_thread")]

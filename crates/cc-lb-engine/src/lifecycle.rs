@@ -1218,19 +1218,19 @@ pub(crate) fn decode_prompt_cache_observations_pure(
 
 pub(crate) fn prompt_cache_observations_to_wire(
     observations: &[DecodedPromptCacheObservation],
-) -> Vec<cc_lb_contract::PromptCacheObservationWire> {
+) -> Vec<cc_lb_lifecycle::PromptCacheObservationWire> {
     observations
         .iter()
-        .map(|observation| cc_lb_contract::PromptCacheObservationWire {
+        .map(|observation| cc_lb_lifecycle::PromptCacheObservationWire {
             prefix_hash: observation.prefix_hash.clone(),
             ttl_class: observation.ttl_class,
             expires_at_unix_secs: observation.expires_at_unix_secs,
             kind: match observation.kind {
                 DecodedPromptCacheObservationKind::Hit => {
-                    cc_lb_contract::PromptCacheObservationKindWire::Hit
+                    cc_lb_lifecycle::PromptCacheObservationKindWire::Hit
                 }
                 DecodedPromptCacheObservationKind::Write => {
-                    cc_lb_contract::PromptCacheObservationKindWire::Write
+                    cc_lb_lifecycle::PromptCacheObservationKindWire::Write
                 }
             },
             prefix_content_block_index: observation.prefix_content_block_index,
@@ -1247,7 +1247,7 @@ fn emit_prompt_cache_observations_produced(
     dropped_aborted: u32,
 ) {
     observer.emit_lifecycle(
-        cc_lb_contract::LifecycleEvent::PromptCacheObservationsProduced {
+        cc_lb_lifecycle::LifecycleEvent::PromptCacheObservationsProduced {
             event_id: observer.event_id().to_owned(),
             upstream_id: context.upstream_id,
             canonical_model_id: context.canonical_model_id.clone(),
@@ -1353,9 +1353,9 @@ pub struct AuthLimitSubject {
 }
 
 struct LimitRejectionInfo {
-    subject: cc_lb_contract::LimitSubject,
-    request_summary: cc_lb_contract::LimitRequestSummary,
-    route_summary: cc_lb_contract::RouteSummary,
+    subject: cc_lb_lifecycle::LimitSubject,
+    request_summary: cc_lb_lifecycle::LimitRequestSummary,
+    route_summary: cc_lb_lifecycle::RouteSummary,
     limit_violation: Option<String>,
     reason_label: String,
 }
@@ -1781,9 +1781,9 @@ impl Lifecycle {
         if let Some(response) = body_too_large {
             if let Some(o) = observer.as_ref() {
                 let cap = body_cap_for_path(&self.config, &ctx.path);
-                o.emit_lifecycle(cc_lb_contract::LifecycleEvent::ParseCompleted {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                     event_id: o.event_id().to_owned(),
-                    result: Err(cc_lb_contract::ParseFailure::BodyTooLarge {
+                    result: Err(cc_lb_lifecycle::ParseFailure::BodyTooLarge {
                         limit_bytes: cap as u64,
                     }),
                 });
@@ -1794,9 +1794,9 @@ impl Lifecycle {
         }
         if ctx.path == "/v1/messages" && !ctx.body_bytes.is_empty() && !body_view.is_valid_json() {
             if let Some(o) = observer.as_ref() {
-                o.emit_lifecycle(cc_lb_contract::LifecycleEvent::ParseCompleted {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                     event_id: o.event_id().to_owned(),
-                    result: Err(cc_lb_contract::ParseFailure::InvalidJson),
+                    result: Err(cc_lb_lifecycle::ParseFailure::InvalidJson),
                 });
                 o.set_terminal(StatusCode::BAD_REQUEST, error_codes::INVALID_JSON);
                 o.finish();
@@ -1810,9 +1810,9 @@ impl Lifecycle {
         let mut cache_metadata =
             request_cache_metadata_from_value(&ctx.downstream_headers, body_view.value());
         if let Some(o) = observer.as_ref() {
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::ParseCompleted {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                 event_id: o.event_id().to_owned(),
-                result: Ok(cc_lb_contract::ParseInfo {
+                result: Ok(cc_lb_lifecycle::ParseInfo {
                     path: ctx.path.clone(),
                     method: ctx.method.to_string(),
                     model: body_view.model(),
@@ -1884,9 +1884,9 @@ impl Lifecycle {
                         ),
                     };
                     if let Some(o) = observer.as_ref() {
-                        o.emit_lifecycle(cc_lb_contract::LifecycleEvent::AuthCompleted {
+                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
                             event_id: o.event_id().to_owned(),
-                            result: Err(cc_lb_contract::AuthFailure::AuthenticationFailed {
+                            result: Err(cc_lb_lifecycle::AuthFailure::AuthenticationFailed {
                                 http_status: status.as_u16(),
                                 reason: Some(key_auth_failure_reason(&source).to_owned()),
                             }),
@@ -1901,9 +1901,9 @@ impl Lifecycle {
         let auth_ms = duration_to_ms(auth_start.elapsed());
         let principal_id = success.principal_id.clone();
         if let Some(o) = observer.as_ref() {
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::AuthCompleted {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
                 event_id: o.event_id().to_owned(),
-                result: Ok(cc_lb_contract::AuthInfo {
+                result: Ok(cc_lb_lifecycle::AuthInfo {
                     principal_id: principal_id.clone(),
                     key_id: Some(success.key_id.clone()),
                     principal_kind: Some(
@@ -1928,9 +1928,9 @@ impl Lifecycle {
                 "authenticated principal is unavailable",
             );
             if let Some(o) = observer.as_ref() {
-                o.emit_lifecycle(cc_lb_contract::LifecycleEvent::AuthCompleted {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
                     event_id: o.event_id().to_owned(),
-                    result: Err(cc_lb_contract::AuthFailure::PrincipalMissing {
+                    result: Err(cc_lb_lifecycle::AuthFailure::PrincipalMissing {
                         principal_id: principal_id.clone(),
                     }),
                 });
@@ -1967,9 +1967,9 @@ impl Lifecycle {
                 "router pipeline is unavailable for this request",
             );
             if let Some(o) = observer.as_ref() {
-                o.emit_lifecycle(cc_lb_contract::LifecycleEvent::RouteCompleted {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                     event_id: o.event_id().to_owned(),
-                    result: Err(cc_lb_contract::RouteFailure::RouterPipelineUnavailable),
+                    result: Err(cc_lb_lifecycle::RouteFailure::RouterPipelineUnavailable),
                     routing_trace: None,
                 });
                 o.set_terminal(
@@ -2054,9 +2054,9 @@ impl Lifecycle {
                 "no upstream route is configured for this request",
             );
             if let Some(o) = observer.as_ref() {
-                o.emit_lifecycle(cc_lb_contract::LifecycleEvent::RouteCompleted {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                     event_id: o.event_id().to_owned(),
-                    result: Err(cc_lb_contract::RouteFailure::RouteNotConfigured),
+                    result: Err(cc_lb_lifecycle::RouteFailure::RouteNotConfigured),
                     routing_trace: None,
                 });
                 o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::ROUTE_NOT_CONFIGURED);
@@ -2083,9 +2083,9 @@ impl Lifecycle {
                     "no upstream route is configured for this request",
                 );
                 if let Some(o) = observer.as_ref() {
-                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::RouteCompleted {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                         event_id: o.event_id().to_owned(),
-                        result: Err(cc_lb_contract::RouteFailure::RouteNotConfigured),
+                        result: Err(cc_lb_lifecycle::RouteFailure::RouteNotConfigured),
                         routing_trace: None,
                     });
                     o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::ROUTE_NOT_CONFIGURED);
@@ -2121,9 +2121,9 @@ impl Lifecycle {
             ctx.thread_id.as_deref(),
         );
         if let Some(o) = observer.as_ref() {
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::RouteCompleted {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                 event_id: o.event_id().to_owned(),
-                result: Ok(cc_lb_contract::RouteInfo {
+                result: Ok(cc_lb_lifecycle::RouteInfo {
                     upstream_id: resolved_upstream_id,
                     upstream_name: router_chosen_upstream_name.clone(),
                     model: body_view.model(),
@@ -2217,9 +2217,9 @@ impl Lifecycle {
                 let status = response.status();
                 if let Some(o) = observer.as_ref() {
                     let proxy_setup_ms = duration_to_ms(started.elapsed());
-                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::LimitDecision {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
                         event_id: o.event_id().to_owned(),
-                        decision: cc_lb_contract::LimitDecisionKind::Rejected {
+                        decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
                             reason: info.reason_label,
                             subject: Some(info.subject),
                             request_summary: Some(info.request_summary),
@@ -2237,7 +2237,7 @@ impl Lifecycle {
         let limit_reserve_ms = duration_to_ms(limit_reserve_start.elapsed());
         if let Some(o) = observer.as_ref() {
             let decision = if let Some(limit) = active_limit.as_ref() {
-                cc_lb_contract::LimitDecisionKind::Reserved {
+                cc_lb_lifecycle::LimitDecisionKind::Reserved {
                     reservation_id: limit
                         .reservation
                         .as_ref()
@@ -2247,13 +2247,13 @@ impl Lifecycle {
                     limit_reserve_ms: Some(limit_reserve_ms),
                 }
             } else {
-                cc_lb_contract::LimitDecisionKind::Reserved {
+                cc_lb_lifecycle::LimitDecisionKind::Reserved {
                     reservation_id: String::new(),
                     amount: 0,
                     limit_reserve_ms: Some(limit_reserve_ms),
                 }
             };
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::LimitDecision {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
                 event_id: o.event_id().to_owned(),
                 decision,
             });
@@ -2291,7 +2291,7 @@ impl Lifecycle {
         let mut keepalive_shaped_body = None;
         let mut keepalive_discard_shaped_body = None;
         if let Some(o) = observer.as_ref() {
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::UpstreamAttempt {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt {
                 event_id: o.event_id().to_owned(),
                 attempt_num: 1,
                 upstream_id: resolved_upstream_id,
@@ -2319,7 +2319,7 @@ impl Lifecycle {
             Ok(response) => {
                 let status = response.status();
                 if let Some(o) = observer.as_ref() {
-                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::UpstreamResponseStarted {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
                         event_id: o.event_id().to_owned(),
                         status: status.as_u16(),
                         headers: header_snapshot_from(response.headers()),
@@ -2355,7 +2355,7 @@ impl Lifecycle {
             if let RetryDecision::Refresh { new_signer } = signer.on_unauthorized(&err).await {
                 attempt_timings.reset_attempt_stages();
                 if let Some(o) = observer.as_ref() {
-                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::UpstreamAttempt {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt {
                         event_id: o.event_id().to_owned(),
                         attempt_num: 2,
                         upstream_id: resolved_upstream_id,
@@ -2383,7 +2383,7 @@ impl Lifecycle {
                     Ok(response) => {
                         if let Some(o) = observer.as_ref() {
                             o.emit_lifecycle(
-                                cc_lb_contract::LifecycleEvent::UpstreamResponseStarted {
+                                cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
                                     event_id: o.event_id().to_owned(),
                                     status: response.status().as_u16(),
                                     headers: header_snapshot_from(response.headers()),
@@ -2535,16 +2535,16 @@ impl Lifecycle {
                     &subject.principal_id,
                 );
                 let info = LimitRejectionInfo {
-                    subject: cc_lb_contract::LimitSubject {
+                    subject: cc_lb_lifecycle::LimitSubject {
                         principal_id: subject.principal_id.clone(),
                         key_id: subject.key_id.clone(),
                     },
-                    request_summary: cc_lb_contract::LimitRequestSummary {
+                    request_summary: cc_lb_lifecycle::LimitRequestSummary {
                         model: limit_request.model.clone(),
                         path: ctx.path.clone(),
                         method: ctx.method.as_str().to_owned(),
                     },
-                    route_summary: cc_lb_contract::RouteSummary {
+                    route_summary: cc_lb_lifecycle::RouteSummary {
                         upstream_name: audit_upstream_name(&route.upstream).to_owned(),
                     },
                     limit_violation,
@@ -2758,18 +2758,18 @@ impl Lifecycle {
         }
 
         if let Some(o) = observer.as_ref() {
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::UsageObserved {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                 event_id: o.event_id().to_owned(),
                 usage: to_usage_snapshot(&usage),
-                source: cc_lb_contract::UsageSource::NonStreamBody,
+                source: cc_lb_lifecycle::UsageSource::NonStreamBody,
             });
             let stream_result = if let Some(error) = buffered_transform_error.as_ref() {
-                Err(cc_lb_contract::StreamError {
+                Err(cc_lb_lifecycle::StreamError {
                     error_type: "response_transform_error".to_owned(),
                     error_message: error.to_string(),
                 })
             } else {
-                Ok(cc_lb_contract::StreamSuccess {
+                Ok(cc_lb_lifecycle::StreamSuccess {
                     usage: to_usage_snapshot(&usage),
                     sse_event_count: 0,
                     body_bytes: Some(downstream_body.len() as u64),
@@ -2778,7 +2778,7 @@ impl Lifecycle {
                     ..Default::default()
                 })
             };
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
                 event_id: o.event_id().to_owned(),
                 result: stream_result,
             });
@@ -2794,7 +2794,7 @@ impl Lifecycle {
                 if let Some(error) = canonical_upstream_error {
                     let (error_type, error_message) = error.into_parts();
                     o.emit_lifecycle(
-                        cc_lb_contract::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                        cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
                             event_id: o.event_id().to_owned(),
                             error_type,
                             error_message,
@@ -2840,9 +2840,9 @@ impl Lifecycle {
     ) {
         if let Some(o) = observer {
             o.set_internal_errors(internal_errors);
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::RouteCompleted {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                 event_id: o.event_id().to_owned(),
-                result: Err(cc_lb_contract::RouteFailure::RouteNoUpstreamAfterFilter),
+                result: Err(cc_lb_lifecycle::RouteFailure::RouteNoUpstreamAfterFilter),
                 routing_trace,
             });
             o.set_terminal(status, error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER);
@@ -3175,9 +3175,9 @@ impl Lifecycle {
                                     && let Some(err) =
                                         usage_parser::detect_mid_stream_error(&raw)
                                 {
-                                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
+                                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
                                         event_id: o.event_id().to_owned(),
-                                        result: Err(cc_lb_contract::StreamError {
+                                        result: Err(cc_lb_lifecycle::StreamError {
                                             error_type: err.error_type.clone().unwrap_or_default(),
                                             error_message: err.error_message.clone().unwrap_or_default(),
                                         }),
@@ -3262,16 +3262,16 @@ impl Lifecycle {
                                 }
                                 if let Some(o) = observer.as_ref() {
                                     if usage_update.message_start_usage {
-                                        o.emit_lifecycle(cc_lb_contract::LifecycleEvent::UsageObserved {
+                                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                             event_id: o.event_id().to_owned(),
                                             usage: to_usage_snapshot(&usage),
-                                            source: cc_lb_contract::UsageSource::MessageStart,
+                                            source: cc_lb_lifecycle::UsageSource::MessageStart,
                                         });
                                     } else if usage_update.message_stop {
-                                        o.emit_lifecycle(cc_lb_contract::LifecycleEvent::UsageObserved {
+                                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                             event_id: o.event_id().to_owned(),
                                             usage: to_usage_snapshot(&usage),
-                                            source: cc_lb_contract::UsageSource::MessageStop,
+                                            source: cc_lb_lifecycle::UsageSource::MessageStop,
                                         });
                                     }
                                     let force_publish = usage_update.message_start_usage
@@ -3287,10 +3287,10 @@ impl Lifecycle {
                                         || tokens_since_last >= 100;
                                     if force_publish || throttle_ok {
                                         if !usage_update.message_start_usage && !usage_update.message_stop {
-                                            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::UsageObserved {
+                                            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                                 event_id: o.event_id().to_owned(),
                                                 usage: to_usage_snapshot(&usage),
-                                                source: cc_lb_contract::UsageSource::MessageDelta,
+                                                source: cc_lb_lifecycle::UsageSource::MessageDelta,
                                             });
                                         }
                                         last_partial_at = Some(now);
@@ -3503,17 +3503,17 @@ impl Lifecycle {
                     record_thread_usage_from_response(&event_ctx, context, &usage, now_unix_secs);
                 }
                 if let Some(error) = stream_transform_error.as_ref() {
-                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
                         event_id: o.event_id().to_owned(),
-                        result: Err(cc_lb_contract::StreamError {
+                        result: Err(cc_lb_lifecycle::StreamError {
                             error_type: "response_transform_error".to_owned(),
                             error_message: error.to_string(),
                         }),
                     });
                 } else {
-                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
                         event_id: o.event_id().to_owned(),
-                        result: Ok(cc_lb_contract::StreamSuccess {
+                        result: Ok(cc_lb_lifecycle::StreamSuccess {
                             usage: to_usage_snapshot(&usage),
                             sse_event_count,
                             body_bytes: Some(total_bytes),
@@ -4773,8 +4773,8 @@ fn observe_many(hooks: &[Arc<dyn ObservabilityHook>], event: ObserveEvent) {
     }
 }
 
-fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_contract::UsageSnapshot {
-    cc_lb_contract::UsageSnapshot {
+fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
+    cc_lb_lifecycle::UsageSnapshot {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,
         cache_creation_input_tokens: u.cache_creation_input_tokens,

@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::{EventId, LifecycleEvent, RequestEventBus, UsageSnapshot};
+use cc_lb_contract::RequestEventBus;
+use cc_lb_lifecycle::{EventId, LifecycleEvent, UsageSnapshot};
 use cc_lb_request_log::RequestCacheState;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -208,7 +209,8 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 mod tests {
     use super::*;
     use crate::event_bus::InMemoryBus;
-    use cc_lb_contract::{LifecycleBusReceiver, ParseInfo, TerminationReason};
+    use cc_lb_contract::LifecycleBusReceiver;
+    use cc_lb_lifecycle::{ParseInfo, TerminationReason};
 
     fn eid(s: &str) -> EventId {
         s.to_owned()
@@ -245,7 +247,7 @@ mod tests {
                 cache_read_input_tokens: 100,
                 ..UsageSnapshot::default()
             },
-            source: cc_lb_contract::UsageSource::NonStreamBody,
+            source: cc_lb_lifecycle::UsageSource::NonStreamBody,
         })
         .await
         .unwrap();
@@ -290,7 +292,7 @@ mod tests {
                 cache_creation_input_tokens: 50,
                 ..UsageSnapshot::default()
             },
-            source: cc_lb_contract::UsageSource::NonStreamBody,
+            source: cc_lb_lifecycle::UsageSource::NonStreamBody,
         })
         .await
         .unwrap();

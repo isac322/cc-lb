@@ -10,6 +10,7 @@ publish = false
 arc-swap.workspace = true
 bytes.workspace = true
 cc-lb-contract = { workspace = true }
+cc-lb-lifecycle = { workspace = true }
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-domain.workspace = true
 cc-lb-request-log.workspace = true

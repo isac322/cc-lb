@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_contract::{EventId, LifecycleEvent, TerminationReason, UsageSnapshot};
+use cc_lb_lifecycle::{EventId, LifecycleEvent, TerminationReason, UsageSnapshot};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -251,7 +251,7 @@ fn handle_event(
 fn merge(partial: &mut Partial, event: LifecycleEvent) {
     match event {
         LifecycleEvent::LimitDecision {
-            decision: cc_lb_contract::LimitDecisionKind::Reserved { reservation_id, .. },
+            decision: cc_lb_lifecycle::LimitDecisionKind::Reserved { reservation_id, .. },
             ..
         } => {
             partial.reservation_id = Some(reservation_id);
@@ -361,7 +361,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 mod tests {
     use super::*;
     use crate::api_keys::concurrent_guard::KeyConcurrencyManager;
-    use cc_lb_contract::{LimitDecisionKind, UsageSource};
+    use cc_lb_lifecycle::{LimitDecisionKind, UsageSource};
 
     fn build_engine() -> Arc<LimitEngine> {
         LimitEngine::new(

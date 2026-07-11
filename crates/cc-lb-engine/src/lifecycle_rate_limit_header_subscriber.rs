@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use cc_lb_contract::{EventId, LifecycleEvent};
+use cc_lb_lifecycle::{EventId, LifecycleEvent};
 use cc_lb_request_log::HeaderSnapshot;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use parking_lot::RwLock;

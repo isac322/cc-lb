@@ -814,14 +814,13 @@ name = "cc-lb-contract"
 version = "0.1.0"
 dependencies = [
  "cc-lb-domain",
+ "cc-lb-lifecycle",
  "cc-lb-observability",
  "cc-lb-plugin-api",
  "cc-lb-request-log",
  "cc-lb-storage-api",
- "serde",
  "serde_json",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -837,6 +836,7 @@ dependencies = [
  "cc-lb-config",
  "cc-lb-contract",
  "cc-lb-domain",
+ "cc-lb-lifecycle",
  "cc-lb-observability",
  "cc-lb-plugin-api",
  "cc-lb-request-log",
@@ -906,6 +906,7 @@ dependencies = [
  "cc-lb-contract",
  "cc-lb-control",
  "cc-lb-domain",
+ "cc-lb-lifecycle",
  "cc-lb-observability",
  "cc-lb-plugin-api",
  "cc-lb-pricing",
@@ -954,6 +955,17 @@ dependencies = [
  "url",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "cc-lb-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-domain",
+ "cc-lb-request-log",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -1071,6 +1083,7 @@ dependencies = [
  "cc-lb-clock",
  "cc-lb-contract",
  "cc-lb-domain",
+ "cc-lb-lifecycle",
  "cc-lb-request-log",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",

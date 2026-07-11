@@ -8,11 +8,12 @@ publish = false
 
 [dependencies]
 cc-lb-domain.workspace = true
+cc-lb-lifecycle.workspace = true
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-request-log.workspace = true
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-plugin-api = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
-uuid = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+serde_json.workspace = true

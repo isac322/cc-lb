@@ -9,7 +9,8 @@ use std::time::{Duration, Instant as StdInstant};
 
 use axum::body::Body;
 use bytes::{Bytes, BytesMut};
-use cc_lb_contract::{EventId, LifecycleEvent, RequestEventBus};
+use cc_lb_contract::RequestEventBus;
+use cc_lb_lifecycle::{EventId, LifecycleEvent};
 use cc_lb_observability::{ObservabilityHook, ObserveEvent};
 use cc_lb_upstream::UpstreamDialect;
 use eventsource_stream::{Event, EventStream, EventStreamError};

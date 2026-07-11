@@ -33,6 +33,7 @@ bytes.workspace = true
 bincode.workspace = true
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-contract = { workspace = true }
+cc-lb-lifecycle = { workspace = true }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-observability = { path = "../cc-lb-observability" }

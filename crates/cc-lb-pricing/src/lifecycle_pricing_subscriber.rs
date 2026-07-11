@@ -15,7 +15,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::{EventId, LifecycleEvent, RequestEventBus};
+use cc_lb_contract::RequestEventBus;
+use cc_lb_lifecycle::{EventId, LifecycleEvent};
 use cc_lb_request_log::CostBreakdown;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -267,9 +268,9 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_contract::{
-        BusReceiver, LifecycleBusReceiver, ParseInfo, RouteInfo, StreamSuccess, TerminationReason,
-        UsageSnapshot, UsageSource,
+    use cc_lb_contract::{BusReceiver, LifecycleBusReceiver};
+    use cc_lb_lifecycle::{
+        ParseInfo, RouteInfo, StreamSuccess, TerminationReason, UsageSnapshot, UsageSource,
     };
     use cc_lb_request_log::RequestEventUpdate;
     use tokio::sync::broadcast;

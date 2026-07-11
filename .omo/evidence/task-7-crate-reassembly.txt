@@ -1,0 +1,34 @@
+Task: T7 Create cc-lb-lifecycle lifecycle vocabulary crate
+Commit target: refactor(lifecycle): extract LifecycleEvent vocabulary into cc-lb-lifecycle
+
+Re-grounding:
+- Read plan T7 block and current cc-lb-contract/src/lib.rs (819 lines).
+- Ran: rg -n 'enum LifecycleEvent|struct EventId|ParseInfo|PromptCacheObservationWire' crates/cc-lb-contract/src
+- Moved EventId, LifecycleEvent, PromptCacheObservationWire/Kind, all stage payloads, and lifecycle serde/label tests.
+- Retained RequestEventBus, BusReceiver, LifecycleBusReceiver, and DEFAULT_LIFECYCLE_BROADCAST_CAPACITY in cc-lb-contract.
+
+Red/green:
+- RED: CARGO_TARGET_DIR=target cargo test -p cc-lb-lifecycle exited 101 before vocabulary definitions (missing EventId and LifecycleEvent).
+- GREEN: cargo build -p cc-lb-lifecycle exited 0.
+- GREEN: cargo clippy -p cc-lb-lifecycle --all-targets -- -D warnings exited 0.
+- GREEN: cargo test -p cc-lb-lifecycle exited 0 twice (4 tests each run).
+
+Compatibility and dependency gates:
+- cargo fmt --all -- --check exited 0.
+- cargo build -p cc-lb-contract -p cc-lb-engine -p cc-lb-control -p cc-lb-observability -p cc-lb-pricing -p cc-lb-server exited 0.
+- cargo test -p cc-lb-storage-sqlite --test reassembly_serde_fixtures exited 0.
+- has_dep lifecycle domain: OK.
+- has_dep lifecycle request-log: OK.
+- no_dep lifecycle routing/quota/engine/control: OK.
+- no_dep request-log lifecycle: OK.
+- no_dep domain lifecycle: OK.
+- metadata: publish=[] (Cargo representation of publish=false); direct cc-lb deps exactly cc-lb-domain, cc-lb-request-log.
+- rg found no tokio, broadcast, or mpsc text in cc-lb-lifecycle.
+- contract retains bus wiring; moved vocabulary real-definition scan is empty; direct engine/control/pricing lifecycle consumers no longer use cc_lb_contract moved names.
+- cargo check --workspace --all-targets exited 0.
+
+LSP:
+- cc-lb-lifecycle/src and cc-lb-contract/src: zero diagnostics.
+- cc-lb-engine/src, cc-lb-control/src, cc-lb-pricing/src: daemon timed out once; targeted builds and workspace all-target check passed.
+
+Risk: contract's doc-hidden compatibility bridge is intentional until T11.

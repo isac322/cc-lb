@@ -1,0 +1,14 @@
+[package]
+name = "cc-lb-lifecycle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+cc-lb-domain.workspace = true
+cc-lb-request-log.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+uuid.workspace = true

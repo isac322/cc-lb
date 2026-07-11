@@ -10,7 +10,7 @@
 //! Signal, drain, await. Late lifecycle events after shutdown are lost;
 //! this is acceptable because the assembler already persisted the row.
 
-use cc_lb_contract::LifecycleEvent;
+use cc_lb_lifecycle::LifecycleEvent;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 

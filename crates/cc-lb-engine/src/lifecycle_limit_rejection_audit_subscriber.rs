@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use cc_lb_contract::{LifecycleEvent, LimitDecisionKind};
+use cc_lb_lifecycle::{LifecycleEvent, LimitDecisionKind};
 use http::StatusCode;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -106,12 +106,12 @@ fn handle_event(audit_sink: &AuditWriterSink, event: LifecycleEvent) {
         .increment(1);
     }
 
-    let request_summary = request_summary.unwrap_or(cc_lb_contract::LimitRequestSummary {
+    let request_summary = request_summary.unwrap_or(cc_lb_lifecycle::LimitRequestSummary {
         model: String::new(),
         path: String::new(),
         method: String::new(),
     });
-    let route_summary = route_summary.unwrap_or(cc_lb_contract::RouteSummary {
+    let route_summary = route_summary.unwrap_or(cc_lb_lifecycle::RouteSummary {
         upstream_name: String::new(),
     });
 
@@ -163,8 +163,8 @@ fn system_time_unix_secs(t: SystemTime) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_contract::{LimitRequestSummary, LimitSubject, RouteSummary};
     use cc_lb_control::audit_writer::spawn_audit_writer;
+    use cc_lb_lifecycle::{LimitRequestSummary, LimitSubject, RouteSummary};
     use cc_lb_storage_api::{
         AuditEntry as StoredAuditEntry, AuditStore, StorageError, StorageResult,
     };
