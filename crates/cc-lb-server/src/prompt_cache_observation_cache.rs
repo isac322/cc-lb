@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use cc_lb_engine::clock::{ClockHandle, unix_secs};
 use cc_lb_engine::lifecycle::{PromptCacheObservationCacheLike, PromptCacheThreadUsage};
@@ -11,6 +11,7 @@ pub const HASH_SCHEMA_VERSION: u8 = cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION
 
 const DEFAULT_REFRESH_DEBOUNCE_SECS: u64 = 60;
 const EXPIRY_SWEEP_INTERVAL_SECS: u64 = 60;
+const DEFAULT_MAX_ENTRIES_PER_UPSTREAM: usize = 50_000;
 const THREAD_USAGE_CAP_PER_UPSTREAM: usize = 2048;
 const THREAD_USAGE_TTL_SECS: u64 = 5 * 60;
 const CREATION_READ_EQUIVALENT_DIVISOR: u64 = 4;
@@ -36,6 +37,8 @@ pub struct PromptCacheObservationCache {
     thread_usage: RwLock<ThreadUsageByUpstream>,
     grace_margin_secs: u64,
     refresh_debounce_secs: u64,
+    max_entries_per_upstream: usize,
+    overloaded: RwLock<HashSet<Uuid>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -85,7 +88,15 @@ impl PromptCacheObservationCache {
             thread_usage: RwLock::new(HashMap::new()),
             grace_margin_secs,
             refresh_debounce_secs,
+            max_entries_per_upstream: DEFAULT_MAX_ENTRIES_PER_UPSTREAM,
+            overloaded: RwLock::new(HashSet::new()),
         }
+    }
+
+    #[must_use]
+    pub fn with_max_entries_per_upstream(mut self, max_entries_per_upstream: usize) -> Self {
+        self.max_entries_per_upstream = max_entries_per_upstream;
+        self
     }
 
     pub fn grace_margin_secs(&self) -> u64 {
@@ -93,13 +104,26 @@ impl PromptCacheObservationCache {
     }
 
     pub fn sweep_expired(&self, now_unix_secs: u64) -> usize {
-        let mut guard = self.entries.write();
         let mut removed = 0usize;
-        guard.retain(|_upstream_id, submap| {
-            let before = submap.len();
-            submap.retain(|_key, entry| entry.expires_at_unix_secs > now_unix_secs);
-            removed += before - submap.len();
-            !submap.is_empty()
+        let survivors: HashMap<Uuid, usize> = {
+            let mut guard = self.entries.write();
+            guard.retain(|_upstream_id, submap| {
+                let before = submap.len();
+                submap.retain(|_key, entry| entry.expires_at_unix_secs > now_unix_secs);
+                removed += before - submap.len();
+                !submap.is_empty()
+            });
+            guard
+                .iter()
+                .map(|(id, submap)| (*id, submap.len()))
+                .collect()
+        };
+        let exit_threshold = self.max_entries_per_upstream * 9 / 10;
+        let mut overloaded = self.overloaded.write();
+        overloaded.retain(|upstream_id| {
+            survivors
+                .get(upstream_id)
+                .is_some_and(|&live| live >= exit_threshold)
         });
         removed
     }
@@ -175,6 +199,17 @@ impl PromptCacheObservationCache {
         let mut guard = self.entries.write();
         let entries = guard.entry(upstream_id).or_default();
         let key = (canonical_model, prefix_hash, ttl_class);
+        if !entries.contains_key(&key) && entries.len() >= self.max_entries_per_upstream {
+            drop(guard);
+            if self.overloaded.write().insert(upstream_id) {
+                tracing::warn!(
+                    upstream_id = %upstream_id,
+                    ceiling = self.max_entries_per_upstream,
+                    "prompt-cache observation partition overloaded; rejecting new entries and routing cache-negative until it drains"
+                );
+            }
+            return;
+        }
         let last_persisted_at_unix_secs = entries
             .get(&key)
             .map_or(last_observed_at_unix_secs, |entry| {
@@ -248,6 +283,9 @@ impl PromptCacheObservationCache {
         eligible_ttls: &[TtlClass],
         now_unix_secs: u64,
     ) -> Option<WarmCacheEntry> {
+        if self.overloaded.read().contains(&upstream_id) {
+            return None;
+        }
         let guard = self.entries.read();
         let entries = guard.get(&upstream_id)?;
         let mut best: Option<WarmCacheEntry> = None;
@@ -581,6 +619,113 @@ pub(crate) mod tests {
             estimated_prefix_tokens: 0,
             token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
         });
+    }
+
+    #[test]
+    fn overloaded_partition_rejects_new_entries_and_serves_cache_negative() {
+        let cache = test_cache().with_max_entries_per_upstream(4);
+        let upstream = Uuid::new_v4();
+        let now = base_now();
+        for index in 0..4 {
+            upsert(
+                &cache,
+                upstream,
+                &format!("k{index}"),
+                TtlClass::Ephemeral5m,
+                now + 300,
+                now,
+            );
+        }
+        assert_eq!(cache.map_len(), 4);
+        upsert(
+            &cache,
+            upstream,
+            "overflow",
+            TtlClass::Ephemeral5m,
+            now + 300,
+            now,
+        );
+        assert_eq!(cache.map_len(), 4);
+        assert!(
+            cache
+                .lookup_warm_entry(
+                    upstream,
+                    MODEL,
+                    "k0",
+                    &[TtlClass::Ephemeral5m, TtlClass::Ephemeral1h],
+                    now,
+                )
+                .is_none()
+        );
+        assert!(
+            cache
+                .lookup_warm_entry(upstream, MODEL, "overflow", &[TtlClass::Ephemeral5m], now)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn overloaded_partition_recovers_below_ninety_percent_after_sweep() {
+        let cache = test_cache().with_max_entries_per_upstream(10);
+        let upstream = Uuid::new_v4();
+        let now = base_now();
+        for index in 0..3 {
+            upsert(
+                &cache,
+                upstream,
+                &format!("live{index}"),
+                TtlClass::Ephemeral5m,
+                now + 3600,
+                now,
+            );
+        }
+        for index in 0..7 {
+            upsert(
+                &cache,
+                upstream,
+                &format!("short{index}"),
+                TtlClass::Ephemeral5m,
+                now + 300,
+                now,
+            );
+        }
+        assert_eq!(cache.map_len(), 10);
+        upsert(
+            &cache,
+            upstream,
+            "overflow",
+            TtlClass::Ephemeral5m,
+            now + 3600,
+            now,
+        );
+        assert!(
+            cache
+                .lookup_warm_entry(upstream, MODEL, "live0", &[TtlClass::Ephemeral5m], now)
+                .is_none()
+        );
+        assert_eq!(cache.sweep_expired(now + 600), 7);
+        assert_eq!(cache.map_len(), 3);
+        assert_eq!(
+            cache
+                .lookup_warm_entry(
+                    upstream,
+                    MODEL,
+                    "live0",
+                    &[TtlClass::Ephemeral5m],
+                    now + 600
+                )
+                .map(|entry| entry.prefix_hash),
+            Some("live0".to_owned())
+        );
+        upsert(
+            &cache,
+            upstream,
+            "fresh",
+            TtlClass::Ephemeral5m,
+            now + 3600,
+            now + 600,
+        );
+        assert_eq!(cache.map_len(), 4);
     }
 
     #[test]

@@ -188,6 +188,7 @@
       "default": {
         "enabled": false,
         "grace_margin_secs": 30,
+        "max_live_entries_per_partition": 50000,
         "refresh_debounce_secs": 60
       }
     },
@@ -948,6 +949,12 @@
           "type": "integer",
           "format": "uint64",
           "default": 30,
+          "minimum": 0
+        },
+        "max_live_entries_per_partition": {
+          "type": "integer",
+          "format": "uint",
+          "default": 50000,
           "minimum": 0
         },
         "refresh_debounce_secs": {

@@ -703,6 +703,8 @@ pub struct PromptCacheShadowConfig {
     pub grace_margin_secs: u64,
     #[serde(default = "default_prompt_cache_shadow_refresh_debounce_secs")]
     pub refresh_debounce_secs: u64,
+    #[serde(default = "default_prompt_cache_shadow_max_live_entries_per_partition")]
+    pub max_live_entries_per_partition: usize,
 }
 
 impl Default for PromptCacheShadowConfig {
@@ -711,6 +713,7 @@ impl Default for PromptCacheShadowConfig {
             enabled: false,
             grace_margin_secs: 30,
             refresh_debounce_secs: 60,
+            max_live_entries_per_partition: 50_000,
         }
     }
 }
@@ -1459,6 +1462,10 @@ fn default_prompt_cache_shadow_grace_margin_secs() -> u64 {
 
 fn default_prompt_cache_shadow_refresh_debounce_secs() -> u64 {
     PromptCacheShadowConfig::default().refresh_debounce_secs
+}
+
+fn default_prompt_cache_shadow_max_live_entries_per_partition() -> usize {
+    PromptCacheShadowConfig::default().max_live_entries_per_partition
 }
 
 #[cfg(test)]
