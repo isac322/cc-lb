@@ -60,6 +60,41 @@ async fn route_quota_fields_follow_resolved_upstream() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn exact_fable_effective_weekly_pressure_survives_assembly() {
+    const FABLE: QuotaFields = QuotaFields {
+        urgency_5h: Some(0.405_465_108_108_164_4),
+        urgency_7d: Some(0.821_399_906_936_681_4),
+        urgency_combined: Some(0.823_368_670_558_544_7),
+        weight_factor: Some(1.823_368_670_558_544_7),
+        cache_multiplier: Some(1.0),
+        warning_multiplier: Some(1.0),
+        effective_weight: Some(1.823_368_670_558_544_7),
+        uniform_fallback: Some(false),
+    };
+    let upstream_id = Uuid::from_u128(5);
+    let mut trace = quota_trace(
+        vec![quota_candidate(upstream_id, FABLE)],
+        upstream_id,
+        upstream_id,
+    );
+    trace.stages[0]
+        .subscription_preference
+        .as_mut()
+        .expect("subscription preference trace")
+        .rendezvous_salt_version = Some("v11-fable".to_owned());
+    let mut route = route_info_from_trace(upstream_id, trace);
+    route.model = Some("claude-fable-5".to_owned());
+
+    let (partial, final_event, stored_event) = assemble_route("quota-fable", route).await;
+
+    assert_eq!(partial_quota_fields(&partial), FABLE);
+    assert_eq!(event_quota_fields(&final_event), FABLE);
+    assert_eq!(event_quota_fields(&stored_event), FABLE);
+    assert_eq!(final_event.model.as_deref(), Some("claude-fable-5"));
+    assert_eq!(stored_event.model.as_deref(), Some("claude-fable-5"));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn route_quota_fields_are_null_when_resolved_upstream_missing_from_trace() {
     let first_loser_id = Uuid::from_u128(1);
     let formula_winner_id = Uuid::from_u128(3);

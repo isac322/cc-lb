@@ -952,7 +952,8 @@ pub struct CandidateUrgency {
     /// Five-hour use-it-or-lose-it pressure for base-tier candidates.
     #[serde(default)]
     pub quota_urgency_5h: Option<f64>,
-    /// Seven-day use-it-or-lose-it pressure for base-tier candidates.
+    /// Shared seven-day pressure for normal v11 routing, or effective weekly
+    /// `(U_7d^6 + U_fable^6)^(1/6)` for exact Fable under v11-fable.
     #[serde(default)]
     pub quota_urgency_7d: Option<f64>,
     /// Combined use-it-or-lose-it pressure for base-tier candidates.

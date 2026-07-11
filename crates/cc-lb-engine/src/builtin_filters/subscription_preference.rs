@@ -7,8 +7,10 @@
 //!    overage bucket.
 //! 2. Within the winning tier, a Weighted Rendezvous Hash (WRH, Vilkonis) using
 //!    a tier-specific quota factor multiplied by cache and warning factors.
-//!    Base pressure is the weighted smoothmax of 5h and 7d use-it-or-lose-it
-//!    pressure. Overage urgency retains its fixed nominal 30-day denominator.
+//!    Base pressure is the weighted smoothmax of 5h and effective weekly
+//!    use-it-or-lose-it pressure. For exact Fable, effective weekly pressure is
+//!    the smoothmax of shared `7d` and `7d_fable`. Overage urgency retains its
+//!    fixed nominal 30-day denominator.
 //! 3. A deterministic tiebreak if two candidates produce numerically identical
 //!    WRH scores (rendezvous_hash DESC, upstream_id ASC).
 //!
@@ -59,6 +61,7 @@ pub(crate) const WINDOW_SEVEN_DAY: &str = "7d";
 pub(crate) const WINDOW_SEVEN_DAY_FABLE: &str = "7d_fable";
 pub(crate) const WINDOW_OVERAGE: &str = "overage";
 pub(crate) const WINDOW_UNIFIED: &str = "unified";
+pub(crate) const FABLE_MODEL: &str = "claude-fable-5";
 
 // -- Algorithm constants. ---------------------------------------------------
 
@@ -94,10 +97,14 @@ pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
 /// changes. Bumped in lockstep with `RENDEZVOUS_SALT` — a `debug_assert`
 /// in `tests::rendezvous_salt_embeds_version` guards the invariant.
 pub(crate) const SALT_VERSION: &str = "v11";
+pub(crate) const FABLE_SALT_VERSION: &str = "v11-fable";
 
 /// v11 salt for base and unknown-probe weighted-rendezvous selection. The
 /// overage tier deliberately retains its v10 salt so ADR 0008 does not move
 /// overage winners; traces still report the current v11 semantic era.
+///
+/// v11-fable (2026-07-11): exact `claude-fable-5` uses scoped weekly pressure,
+/// salt, and trace version without remapping non-Fable or overage traffic.
 ///
 /// v11 (2026-07-10): exposes use-it-or-lose-it base pressure components and the
 /// tier-specific quota factor in all-candidate traces.
@@ -152,6 +159,8 @@ pub(crate) const SALT_VERSION: &str = "v11";
 /// 2026-07-05 06:24 UTC scatter incident.
 const RENDEZVOUS_SALT: &str =
     "cc-lb:subscription-preference:v11:use-it-or-lose-it-quota-pressure:2026-07-10";
+const FABLE_RENDEZVOUS_SALT: &str =
+    "cc-lb:subscription-preference:v11-fable:use-it-or-lose-it-fable-quota-pressure:2026-07-11";
 const OVERAGE_RENDEZVOUS_SALT: &str =
     "cc-lb:subscription-preference:v10:symmetric-cache-value:2026-07-07";
 
@@ -205,7 +214,10 @@ impl FilterPlugin for SubscriptionPreferenceFilter {
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
-        let config = FilterConfig::default();
+        let mut config = FilterConfig::default();
+        if ctx.canonical_model_id == FABLE_MODEL {
+            config.rendezvous_hash_salt = FABLE_RENDEZVOUS_SALT;
+        }
         Ok(evaluate(ctx, candidates, &config))
     }
 
@@ -356,7 +368,14 @@ fn evaluate(
             candidates: all_assessments,
             wrh_key_source,
             previous_tier: None,
-            rendezvous_salt_version: Some(SALT_VERSION.to_owned()),
+            rendezvous_salt_version: Some(
+                if canonical_model == FABLE_MODEL {
+                    FABLE_SALT_VERSION
+                } else {
+                    SALT_VERSION
+                }
+                .to_owned(),
+            ),
             cache_cost_basis_version: Some(CACHE_COST_BASIS_VERSION.to_owned()),
             formula_winner_upstream_id: Some(formula_winner.candidate.upstream_id),
             kept_upstream_id: Some(kept_upstream_id),
@@ -398,7 +417,7 @@ fn evaluate(
 
 fn relevant_base_windows(canonical_model: &str) -> Vec<&'static str> {
     let mut windows = vec![WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY];
-    if canonical_model == "claude-fable-5" {
+    if canonical_model == FABLE_MODEL {
         windows.push(WINDOW_SEVEN_DAY_FABLE);
     }
     windows
@@ -532,9 +551,14 @@ fn assess_candidate<'a>(
     let mut hard_negative_count = 0u32;
     let mut five_hour_pressure = 0.0f64;
     let mut seven_day_pressure = 0.0f64;
+    let mut fable_weekly_pressure = 0.0f64;
     for &window in base_windows {
         let snapshot = find_snapshot(candidate, window);
-        let signal = classify_base_snapshot(snapshot, now_secs, config);
+        let signal = if window == WINDOW_SEVEN_DAY_FABLE {
+            classify_fable_base_snapshot(snapshot, now_secs, config)
+        } else {
+            classify_base_snapshot(snapshot, now_secs, config)
+        };
         match signal {
             BaseSignal::CurrentPositive => {
                 positive_count += 1;
@@ -544,6 +568,9 @@ fn assess_candidate<'a>(
                     }
                     WINDOW_SEVEN_DAY => {
                         seven_day_pressure = base_window_pressure(snapshot, now_secs);
+                    }
+                    WINDOW_SEVEN_DAY_FABLE => {
+                        fable_weekly_pressure = base_window_pressure(snapshot, now_secs);
                     }
                     _ => {}
                 }
@@ -558,6 +585,9 @@ fn assess_candidate<'a>(
                     WINDOW_SEVEN_DAY => {
                         seven_day_pressure = base_window_pressure(snapshot, now_secs);
                     }
+                    WINDOW_SEVEN_DAY_FABLE => {
+                        fable_weekly_pressure = base_window_pressure(snapshot, now_secs);
+                    }
                     _ => {}
                 }
             }
@@ -566,7 +596,8 @@ fn assess_candidate<'a>(
         }
     }
     let total = base_windows.len() as u32;
-    let base_urgency = weighted_smoothmax(five_hour_pressure, seven_day_pressure);
+    let effective_weekly_pressure = weekly_smoothmax(seven_day_pressure, fable_weekly_pressure);
+    let base_urgency = weighted_smoothmax(five_hour_pressure, effective_weekly_pressure);
 
     let overage = assess_overage(candidate, config);
     let base_proven_blocked = hard_negative_count > 0 || overage.base_exhausted_hint;
@@ -588,7 +619,7 @@ fn assess_candidate<'a>(
             (
                 Tier::KnownBase,
                 five_hour_pressure,
-                seven_day_pressure,
+                effective_weekly_pressure,
                 base_urgency,
                 0.0,
             )
@@ -596,7 +627,7 @@ fn assess_candidate<'a>(
             (
                 Tier::PartialBase,
                 five_hour_pressure,
-                seven_day_pressure,
+                effective_weekly_pressure,
                 base_urgency,
                 0.0,
             )
@@ -672,13 +703,18 @@ fn base_window_pressure_config(window: &str) -> Option<BaseWindowPressureConfig>
             gamma: FIVE_HOUR_GAMMA,
             target_floor: FIVE_HOUR_TARGET_FLOOR,
         }),
-        WINDOW_SEVEN_DAY => Some(BaseWindowPressureConfig {
+        WINDOW_SEVEN_DAY | WINDOW_SEVEN_DAY_FABLE => Some(BaseWindowPressureConfig {
             window_len_secs: SEVEN_DAY_WINDOW_LEN_SECS,
             gamma: SEVEN_DAY_GAMMA,
             target_floor: SEVEN_DAY_TARGET_FLOOR,
         }),
         _ => None,
     }
+}
+
+fn weekly_smoothmax(shared_weekly_pressure: f64, fable_weekly_pressure: f64) -> f64 {
+    (shared_weekly_pressure.powf(SMOOTHMAX_P) + fable_weekly_pressure.powf(SMOOTHMAX_P))
+        .powf(1.0 / SMOOTHMAX_P)
 }
 
 fn weighted_smoothmax(five_hour_pressure: f64, seven_day_pressure: f64) -> f64 {
@@ -750,6 +786,26 @@ fn classify_base_snapshot(
             }
         }
     }
+}
+
+fn classify_fable_base_snapshot(
+    snapshot: Option<&SubscriptionQuotaCandidateSnapshot>,
+    now_secs: u64,
+    config: &FilterConfig,
+) -> BaseSignal {
+    let Some(snapshot) = snapshot else {
+        return BaseSignal::Unknown;
+    };
+    if snapshot.state != SubscriptionQuotaDataState::Fresh {
+        return BaseSignal::Unknown;
+    }
+    if !matches!(snapshot.utilization, Some(value) if value.is_finite()) {
+        return BaseSignal::Unknown;
+    }
+    if !matches!(snapshot.resets_at_unix_secs, Some(value) if value > now_secs) {
+        return BaseSignal::Unknown;
+    }
+    classify_base_snapshot(Some(snapshot), now_secs, config)
 }
 
 fn utilization_signal(util: Option<f64>) -> BaseSignal {

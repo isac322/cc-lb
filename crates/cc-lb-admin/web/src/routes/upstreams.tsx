@@ -61,6 +61,7 @@ import { InlineNameEditor } from '../components/upstreams/InlineNameEditor';
 import { QuotaObservedAt } from '../components/upstreams/QuotaObservedAt';
 import {
   selectQuotaCardSnapshots,
+  selectSidebarQuotaWindows,
   selectVisibleGraphWindows,
 } from '../components/upstreams/quotaWindowVisibility';
 import { SettingsCard } from '../components/upstreams/SettingsCard';
@@ -184,6 +185,8 @@ function UpstreamsPage() {
     }
   }, [upstreams.isLoading, selected, visibleUpstreams, navigate]);
 
+  const listNowUnixSecs = Math.floor(Date.now() / 1000);
+
   return (
     <div className="h-[calc(100dvh-3rem)] min-h-0 flex w-full max-w-[120rem] mx-auto">
       {/* List pane */}
@@ -228,17 +231,10 @@ function UpstreamsPage() {
                   : runtimeStatus?.status === 'active'
                     ? 'ok'
                     : 'neutral';
-              const barWindows = ['5h', '7d'];
-              const overage = latest?.windows.find(
-                (w) => w.window === 'overage',
-              );
-              if (
-                overage &&
-                (overage.extra_usage_enabled ||
-                  overage.extra_usage_monthly_limit != null)
-              ) {
-                barWindows.push('overage');
-              }
+              const barWindows = selectSidebarQuotaWindows({
+                latestWindows: latest?.windows,
+                nowUnixSecs: listNowUnixSecs,
+              });
               return (
                 <button
                   key={u.id}
@@ -299,7 +295,11 @@ function UpstreamsPage() {
                             className="flex items-center gap-2 w-full text-[10px] font-mono"
                           >
                             <div className="w-8 shrink-0 text-text-faint truncate">
-                              {windowName === 'overage' ? 'Extra' : label}
+                              {windowName === 'overage'
+                                ? 'Extra'
+                                : windowName === '7d_fable'
+                                  ? 'Fable'
+                                  : label}
                             </div>
                             <BaseMeter.Root
                               value={
