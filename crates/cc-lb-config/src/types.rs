@@ -688,12 +688,14 @@ impl Default for SubscriptionQuotaConfig {
 /// pre-T22 behavior (no observation enqueue, no snapshot, no sweeper). When `enabled=true`,
 /// the full cache pipeline activates: observations from successful responses are decoded,
 /// upserted into the in-memory cache, and enqueued for persistent storage; `build_candidates`
-/// snapshots cache state per upstream to compute cache scores.
+/// reads cache state per `(upstream, canonical model)` partition to compute cache scores.
 ///
 /// Configuration keys and defaults:
 /// - `enabled` (default: false) - gate all observation flow and sweeper spawn
 /// - `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed
 /// - `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence
+/// - `max_live_entries_per_partition` (default: 50000) - cache-negative admission ceiling for one
+///   `(upstream, canonical model)` partition
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct PromptCacheShadowConfig {

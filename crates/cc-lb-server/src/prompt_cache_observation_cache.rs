@@ -13,7 +13,7 @@ pub const HASH_SCHEMA_VERSION: u8 = cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION
 
 const DEFAULT_REFRESH_DEBOUNCE_SECS: u64 = 60;
 const EXPIRY_SWEEP_INTERVAL_SECS: u64 = 60;
-const DEFAULT_MAX_ENTRIES_PER_UPSTREAM: usize = 50_000;
+const DEFAULT_MAX_ENTRIES_PER_PARTITION: usize = 50_000;
 const THREAD_USAGE_CAP_PER_UPSTREAM: usize = 2048;
 const THREAD_USAGE_TTL_SECS: u64 = 5 * 60;
 const CREATION_READ_EQUIVALENT_DIVISOR: u64 = 4;
@@ -32,7 +32,7 @@ pub struct PromptCacheObservationCache {
     thread_usage: RwLock<ThreadUsageByUpstream>,
     grace_margin_secs: u64,
     refresh_debounce_secs: u64,
-    max_entries_per_upstream: usize,
+    max_entries_per_partition: usize,
     overloaded: RwLock<HashSet<(Uuid, String /*canonical_model*/)>>,
 }
 
@@ -83,14 +83,14 @@ impl PromptCacheObservationCache {
             thread_usage: RwLock::new(HashMap::new()),
             grace_margin_secs,
             refresh_debounce_secs,
-            max_entries_per_upstream: DEFAULT_MAX_ENTRIES_PER_UPSTREAM,
+            max_entries_per_partition: DEFAULT_MAX_ENTRIES_PER_PARTITION,
             overloaded: RwLock::new(HashSet::new()),
         }
     }
 
     #[must_use]
-    pub fn with_max_entries_per_upstream(mut self, max_entries_per_upstream: usize) -> Self {
-        self.max_entries_per_upstream = max_entries_per_upstream;
+    pub fn with_max_entries_per_partition(mut self, max_entries_per_partition: usize) -> Self {
+        self.max_entries_per_partition = max_entries_per_partition;
         self
     }
 
@@ -113,7 +113,7 @@ impl PromptCacheObservationCache {
                 .map(|(key, submap)| (key.clone(), submap.len()))
                 .collect()
         };
-        let exit_threshold = self.max_entries_per_upstream * 9 / 10;
+        let exit_threshold = self.max_entries_per_partition * 9 / 10;
         let mut overloaded = self.overloaded.write();
         overloaded.retain(|key| {
             live_count
@@ -196,7 +196,7 @@ impl PromptCacheObservationCache {
             .entry((upstream_id, canonical_model.clone()))
             .or_default();
         let key = (prefix_hash, ttl_class);
-        if !partition.contains_key(&key) && partition.len() >= self.max_entries_per_upstream {
+        if !partition.contains_key(&key) && partition.len() >= self.max_entries_per_partition {
             drop(guard);
             if self
                 .overloaded
@@ -206,7 +206,7 @@ impl PromptCacheObservationCache {
                 tracing::warn!(
                     upstream_id = %upstream_id,
                     canonical_model,
-                    ceiling = self.max_entries_per_upstream,
+                    ceiling = self.max_entries_per_partition,
                     "prompt-cache observation partition overloaded; rejecting new entries and routing cache-negative until it drains"
                 );
             }
@@ -663,7 +663,7 @@ pub(crate) mod tests {
 
     #[test]
     fn overloaded_partition_rejects_new_entries_and_serves_cache_negative() {
-        let cache = test_cache().with_max_entries_per_upstream(4);
+        let cache = test_cache().with_max_entries_per_partition(4);
         let upstream = Uuid::new_v4();
         let now = base_now();
         for index in 0..4 {
@@ -708,7 +708,7 @@ pub(crate) mod tests {
     fn overload_isolated_per_model() {
         const SECOND_MODEL: &str = "claude-opus-4-1-20250805";
 
-        let cache = test_cache().with_max_entries_per_upstream(2);
+        let cache = test_cache().with_max_entries_per_partition(2);
         let upstream = Uuid::new_v4();
         let now = base_now();
         for prefix_hash in ["model-a-0", "model-a-1", "model-a-overflow"] {
@@ -763,7 +763,7 @@ pub(crate) mod tests {
 
     #[test]
     fn overloaded_partition_recovers_below_ninety_percent_after_sweep() {
-        let cache = test_cache().with_max_entries_per_upstream(10);
+        let cache = test_cache().with_max_entries_per_partition(10);
         let upstream = Uuid::new_v4();
         let now = base_now();
         for index in 0..3 {

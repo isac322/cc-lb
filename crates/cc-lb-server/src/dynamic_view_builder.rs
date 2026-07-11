@@ -311,7 +311,7 @@ pub(crate) fn new_prompt_cache_observation_cache(
             config.grace_margin_secs,
             config.refresh_debounce_secs,
         )
-        .with_max_entries_per_upstream(config.max_live_entries_per_partition),
+        .with_max_entries_per_partition(config.max_live_entries_per_partition),
     );
     cache.spawn_expiry_sweeper();
     cache
