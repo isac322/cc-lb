@@ -376,7 +376,12 @@ function RecentRequestsCard({ principal }: { principal: Principal }) {
     principal_id: principal.id,
     limit: '5',
   });
-  const events = recent.data?.events ?? [];
+  const events = useMemo(() => {
+    return (recent.data?.events ?? []).map((e) => ({
+      ...e,
+      _phase: 'final' as const,
+    }));
+  }, [recent.data]);
   return (
     <Card>
       <CardHeader

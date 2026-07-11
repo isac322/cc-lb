@@ -187,7 +187,7 @@ export function useLiveEventStream(
           const update: RequestEventUpdate = {
             phase: 'final',
             payload: {
-              event: ev as unknown as RequestEvent,
+              event: ev,
               cursor: res.next_cursor,
             },
           };

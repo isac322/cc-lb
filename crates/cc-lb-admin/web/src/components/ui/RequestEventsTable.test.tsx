@@ -1,13 +1,15 @@
-import { render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
-import {
-  RequestEventsTable,
-  type RequestEventWithPhase,
-  Sparkline,
-} from './RequestEventsTable';
+import { afterEach, describe, expect, it } from 'vitest';
+import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
+import { RequestEventsTable } from './RequestEventsTable';
+import { Sparkline } from './Sparkline';
 
 describe('RequestEventsTable', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   const principalNameMap = new Map<string, string>();
   const upstreamNameMap = new Map<string, string>();
 
@@ -16,19 +18,21 @@ describe('RequestEventsTable', () => {
       {
         event_id: 'evt_1',
         request_id: 'req_same',
-        ts: '2026-07-04T00:00:00Z',
+        ts: 1718553120,
         ts_ms: 1718553120000,
         status: 200,
+        duration_ms: 100,
         _phase: 'final',
-      } as unknown as RequestEventWithPhase,
+      } satisfies RequestEventWithPhase,
       {
         event_id: 'evt_2',
         request_id: 'req_same',
-        ts: '2026-07-04T00:00:01Z',
+        ts: 1718553121,
         ts_ms: 1718553121000,
         status: 500,
+        duration_ms: 150,
         _phase: 'final',
-      } as unknown as RequestEventWithPhase,
+      } satisfies RequestEventWithPhase,
     ];
 
     render(
@@ -49,12 +53,82 @@ describe('RequestEventsTable', () => {
     expect(screen.getByText('500')).toBeDefined();
   });
 
+  it('supports keyboard navigation and correctly identifies events with colliding request_id', async () => {
+    const user = userEvent.setup();
+    const events: RequestEventWithPhase[] = [
+      {
+        event_id: 'evt_1',
+        request_id: 'req_same',
+        ts: 1718553120,
+        ts_ms: 1718553120000,
+        status: 200,
+        duration_ms: 100,
+        _phase: 'final',
+      } satisfies RequestEventWithPhase,
+      {
+        event_id: 'evt_2',
+        request_id: 'req_same',
+        ts: 1718553121,
+        ts_ms: 1718553121000,
+        status: 500,
+        duration_ms: 150,
+        _phase: 'final',
+      } satisfies RequestEventWithPhase,
+    ];
+
+    render(
+      <RequestEventsTable
+        events={events}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+
+    const rows = screen.getAllByRole('row');
+    // rows[0] is header, rows[1] is evt_1, rows[2] is evt_2
+    const row1 = rows[1];
+    const row2 = rows[2];
+
+    expect(row1.getAttribute('tabIndex')).toBe('0');
+    expect(row2.getAttribute('tabIndex')).toBe('0');
+
+    // Initially neither is selected
+    expect(row1.getAttribute('aria-selected')).toBe('false');
+    expect(row2.getAttribute('aria-selected')).toBe('false');
+
+    row1.focus();
+    await user.keyboard('{Enter}');
+
+    expect(row1.getAttribute('aria-selected')).toBe('true');
+    expect(row2.getAttribute('aria-selected')).toBe('false');
+
+    const dialog1 = screen.getByRole('dialog');
+    expect(dialog1).toBeDefined();
+    expect(dialog1.textContent).toContain('200');
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    row2.focus();
+    await user.keyboard(' ');
+
+    expect(row1.getAttribute('aria-selected')).toBe('false');
+    expect(row2.getAttribute('aria-selected')).toBe('true');
+
+    const dialog2 = screen.getByRole('dialog');
+    expect(dialog2).toBeDefined();
+    expect(dialog2.textContent).toContain('500');
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
   it('handles JS int overflow gracefully', () => {
     const events: RequestEventWithPhase[] = [
       {
         event_id: 'evt_overflow',
         request_id: 'req_overflow',
-        ts: '2026-07-04T00:00:00Z',
+        ts: 1718553120,
         ts_ms: 1718553120000,
         status: 200,
         duration_ms: 2 ** 53,
@@ -62,7 +136,7 @@ describe('RequestEventsTable', () => {
         output_tokens: 2 ** 53,
         cost_usd_micros: 2 ** 53,
         _phase: 'final',
-      } as unknown as RequestEventWithPhase,
+      } satisfies RequestEventWithPhase,
     ];
 
     render(
@@ -91,9 +165,10 @@ describe('RequestEventsTable', () => {
         {
           event_id: 'evt_cost_1',
           request_id: 'req_cost_1',
-          ts: '2026-07-04T00:00:00Z',
+          ts: 1718553120,
           ts_ms: 1718553120000,
           status: 200,
+          duration_ms: 100,
           cost_input_micros: 1000,
           cost_output_micros: 2000,
           cost_cache_creation_5m_micros: 0,
@@ -101,7 +176,7 @@ describe('RequestEventsTable', () => {
           cost_cache_read_micros: 500,
           cost_usd_micros: 3500,
           _phase: 'final',
-        } as unknown as RequestEventWithPhase,
+        } satisfies RequestEventWithPhase,
       ];
 
       render(
@@ -159,9 +234,10 @@ describe('RequestEventsTable', () => {
         {
           event_id: 'evt_cost_partial',
           request_id: 'req_cost_partial',
-          ts: '2026-07-04T00:00:00Z',
+          ts: 1718553120,
           ts_ms: 1718553120000,
           status: 200,
+          duration_ms: 0,
           cost_input_micros: 0,
           cost_output_micros: 0,
           cost_cache_creation_5m_micros: 0,
@@ -169,7 +245,7 @@ describe('RequestEventsTable', () => {
           cost_cache_read_micros: 0,
           cost_usd_micros: 0,
           _phase: 'partial',
-        } as unknown as RequestEventWithPhase,
+        } satisfies RequestEventWithPhase,
       ];
 
       render(

@@ -58,6 +58,10 @@ pub struct RequestEventPartial {
     pub upstream_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Session identifier discovered during parsing. This non-terminal field is
+    /// broadcast only in memory and is never persisted as a partial snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
     /// HTTP status observed from upstream response headers, if received.
     /// Distinct from final client-visible `status` on [`RequestEvent`].
     #[serde(default, skip_serializing_if = "Option::is_none")]

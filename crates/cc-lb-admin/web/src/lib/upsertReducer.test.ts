@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { RequestEvent, RequestEventUpdate } from './api';
+import type { RequestEventUpdate } from './api';
 import { type LiveEventMap, upsertLiveEvent } from './upsertReducer';
 
 describe('upsertReducer', () => {
@@ -9,7 +9,7 @@ describe('upsertReducer', () => {
     const update: RequestEventUpdate = {
       phase: 'partial',
       payload: { event_id: 'evt-1', request_id: 'req-1', ts: 1, ts_ms: 1000 },
-    } as unknown as RequestEventUpdate;
+    } satisfies RequestEventUpdate;
 
     const changed = upsertLiveEvent(eventsMap, finalizedIds, update);
     expect(changed).toBe(false);
@@ -25,12 +25,13 @@ describe('upsertReducer', () => {
         event: {
           event_id: 'evt-2',
           request_id: 'req-2',
+          ts: 1,
           status: 200,
           duration_ms: 100,
         },
         cursor: 1,
       },
-    } as unknown as RequestEventUpdate;
+    } satisfies RequestEventUpdate;
 
     const changed = upsertLiveEvent(eventsMap, finalizedIds, update);
     expect(changed).toBe(true);
@@ -47,7 +48,7 @@ describe('upsertReducer', () => {
     const update: RequestEventUpdate = {
       phase: 'partial',
       payload: { event_id: 'evt-3', request_id: 'req-3', ts: 1, ts_ms: 1000 },
-    } as unknown as RequestEventUpdate;
+    } satisfies RequestEventUpdate;
 
     const changed = upsertLiveEvent(eventsMap, finalizedIds, update);
     expect(changed).toBe(true);
@@ -66,7 +67,7 @@ describe('upsertReducer', () => {
         request_id: 'req-4',
         ts: 1,
         ts_ms: 1000,
-      } as unknown as RequestEvent,
+      },
     });
     const finalizedIds = new Set<string>();
     const update: RequestEventUpdate = {
@@ -78,7 +79,7 @@ describe('upsertReducer', () => {
         ts_ms: 2000,
         input_tokens: 10,
       },
-    } as unknown as RequestEventUpdate;
+    } satisfies RequestEventUpdate;
 
     const changed = upsertLiveEvent(eventsMap, finalizedIds, update);
     expect(changed).toBe(true);

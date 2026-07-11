@@ -6,8 +6,8 @@ import {
   useMemo,
   useState,
 } from 'react';
-import type { RequestEvent } from '../../../lib/api';
 import { fmtMs, fmtN } from '../../../lib/format';
+import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { cx } from '../primitives';
 import { deriveSetupOverhead } from './computeStageGroups';
 
@@ -129,13 +129,13 @@ function stageShadeHsl(
   return `hsl(${hue}deg ${sat}% ${lightness}%)`;
 }
 
-export function buildStageDetails(e: RequestEvent): StageDetail[] {
+export function buildStageDetails(e: RequestEventWithPhase): StageDetail[] {
   const raw: Stage[] = [];
   const push = (
     key: string,
     label: string,
     group: StageGroup,
-    ms: number | undefined,
+    ms: number | null | undefined,
   ) => {
     if (ms && ms > 0) raw.push({ key, label, group, ms });
   };
@@ -164,23 +164,35 @@ export function buildStageDetails(e: RequestEvent): StageDetail[] {
     );
     if (uwait > 0) push('upstream_wait', 'Upstream wait', 'upstream', uwait);
   }
-  const isStream = (e.sse_event_count ?? 0) > 0 || e.stream_total_ms != null;
+  const isStream =
+    e._phase === 'final' &&
+    ((e.sse_event_count ?? 0) > 0 || e.stream_total_ms != null);
   if (isStream) {
-    push('stream_relay', 'Stream relay', 'body', e.stream_total_ms);
+    push(
+      'stream_relay',
+      'Stream relay',
+      'body',
+      e._phase === 'final' ? e.stream_total_ms : undefined,
+    );
   } else {
-    push('body_collect', 'Body collect', 'body', e.upstream_body_ms);
+    push(
+      'body_collect',
+      'Body collect',
+      'body',
+      e._phase === 'final' ? e.upstream_body_ms : undefined,
+    );
   }
   push(
     'observability_post',
     'Observability post',
     'internal_post',
-    e.observability_post_ms,
+    e._phase === 'final' ? e.observability_post_ms : undefined,
   );
   push(
     'limit_reconcile',
     'Limit reconcile',
     'internal_post',
-    e.limit_reconcile_ms,
+    e._phase === 'final' ? e.limit_reconcile_ms : undefined,
   );
 
   const perGroupCount = new Map<StageGroup, number>();
@@ -210,7 +222,7 @@ interface SseMarker {
   starred?: boolean;
 }
 
-export function buildSseMarkers(e: RequestEvent): SseMarker[] {
+export function buildSseMarkers(e: RequestEventWithPhase): SseMarker[] {
   const relayStart =
     (e.auth_ms ?? 0) +
     (e.route_ms ?? 0) +
@@ -230,38 +242,38 @@ export function buildSseMarkers(e: RequestEvent): SseMarker[] {
     {
       key: 'message_start',
       label: 'Message start',
-      ms: e.stream_message_start_ms,
+      ms: e._phase === 'final' ? e.stream_message_start_ms : undefined,
       color: 'text-cyan-300',
     },
     {
       key: 'content_block_start',
       label: 'Content block start',
-      ms: e.stream_content_block_start_ms,
+      ms: e._phase === 'final' ? e.stream_content_block_start_ms : undefined,
       color: 'text-sky-300',
     },
     {
       key: 'first_delta',
       label: 'First content delta (TTFT)',
-      ms: e.stream_first_content_delta_ms,
+      ms: e._phase === 'final' ? e.stream_first_content_delta_ms : undefined,
       color: 'text-amber-300',
       starred: true,
     },
     {
       key: 'last_delta',
       label: 'Last content delta',
-      ms: e.stream_last_content_delta_ms,
+      ms: e._phase === 'final' ? e.stream_last_content_delta_ms : undefined,
       color: 'text-emerald-300',
     },
     {
       key: 'message_stop',
       label: 'Message stop',
-      ms: e.stream_message_stop_ms,
+      ms: e._phase === 'final' ? e.stream_message_stop_ms : undefined,
       color: 'text-fuchsia-300',
     },
     {
       key: 'last_chunk',
       label: 'Last chunk',
-      ms: e.stream_last_chunk_ms,
+      ms: e._phase === 'final' ? e.stream_last_chunk_ms : undefined,
       color: 'text-slate-300',
     },
   ];
@@ -807,7 +819,7 @@ function SseLane({
   markers: SseMarker[];
   total: number;
   active: ActiveKeyApi;
-  event: RequestEvent;
+  event: RequestEventWithPhase;
 }) {
   const staggered = useMemo(
     () => computeMarkerTracks(markers, total, 6),
@@ -849,33 +861,33 @@ function SseLane({
   );
 }
 
-function StreamCounters({ event }: { event: RequestEvent }) {
+function StreamCounters({ event }: { event: RequestEventWithPhase }) {
   return (
     <div className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-text-muted">
       <CounterPill
         label="SSE"
-        value={event.sse_event_count}
+        value={event._phase === 'final' ? event.sse_event_count : undefined}
         description="Total parsed SSE frames — every `event:` line the proxy relayed (message_start, content_block_start, content_block_delta, ping, message_stop, etc. combined)."
       />
       <CounterPill
         label="deltas"
-        value={event.content_delta_count}
+        value={event._phase === 'final' ? event.content_delta_count : undefined}
         description="Number of `event: content_block_delta` frames — approximates the streamed token chunk count."
       />
       <CounterPill
         label="pings"
-        value={event.ping_count}
+        value={event._phase === 'final' ? event.ping_count : undefined}
         description="Number of `event: ping` keepalive frames Anthropic sent to keep the SSE connection alive during long turns."
       />
       <CounterPill
         label="chunks"
-        value={event.body_chunk_count}
+        value={event._phase === 'final' ? event.body_chunk_count : undefined}
         description="Count of raw HTTP body chunks relayed downstream. Non-stream: response body chunk count. Stream: low-level stream frame count from upstream."
       />
       <CounterPill
         label="avg gap"
         value={
-          event.inter_token_avg_ms != null
+          event._phase === 'final' && event.inter_token_avg_ms != null
             ? fmtMs(event.inter_token_avg_ms)
             : undefined
         }
@@ -1182,10 +1194,12 @@ export function LatencyTimeline({
   event,
   isPartial,
 }: {
-  event: RequestEvent;
+  event: RequestEventWithPhase;
   isPartial?: boolean;
 }) {
-  const total = isPartial ? event.elapsed_ms || 0 : event.duration_ms || 0;
+  const total = isPartial
+    ? event.elapsed_ms || 0
+    : (event._phase === 'final' ? event.duration_ms : 0) || 0;
   const stages = useMemo(() => buildStageDetails(event), [event]);
   const markers = useMemo(() => buildSseMarkers(event), [event]);
   const positioned = useMemo(() => {

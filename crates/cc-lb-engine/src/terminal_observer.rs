@@ -52,6 +52,7 @@ pub(crate) mod error_codes {
     pub(crate) const UPSTREAM_STREAM_ERROR: &str = "upstream_stream_error";
     pub(crate) const TOWER_TIMEOUT: &str = "tower_timeout";
     pub(crate) const TERMINAL_DROPPED: &str = "terminal_dropped";
+    pub(crate) const CLIENT_CLOSED_REQUEST: &str = "client_closed_request";
 }
 
 #[derive(Clone)]

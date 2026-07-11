@@ -5,6 +5,10 @@ pub enum FakeMode {
     Ok,
     Unauthorized,
     RateLimited,
+    /// A rate-limit error whose canonical message exceeds the proxy's 1024-byte
+    /// `upstream_error_message` cap, so request-log QA can exercise truncation
+    /// (storage/API) and long/multiline wrapping (admin-web drawer).
+    RateLimitedLong,
     ServerError,
     Timeout,
     Slow,
@@ -25,6 +29,7 @@ impl FakeMode {
         match value {
             "401" => Self::Unauthorized,
             "429" => Self::RateLimited,
+            "429-long" => Self::RateLimitedLong,
             "500" => Self::ServerError,
             "timeout" => Self::Timeout,
             "slow" => Self::Slow,

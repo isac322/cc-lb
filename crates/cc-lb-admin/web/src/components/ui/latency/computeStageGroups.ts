@@ -1,4 +1,4 @@
-import type { RequestEvent } from '../../../lib/api';
+import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 
 export interface StageGroups {
   internalPre: number;
@@ -13,7 +13,8 @@ export interface StageGroups {
 // `proxy_setup_ms` wraps handle-entry → attempt-entry and includes
 // auth + route + limit_reserve + ctx build. `setup_overhead` is the
 // residual inside that wrapper not attributed to a named sub-stage.
-export function deriveSetupOverhead(e: Partial<RequestEvent>): number {
+export function deriveSetupOverhead(e: RequestEventWithPhase): number {
+  if (e._phase === 'partial') return 0;
   if (e.proxy_setup_ms == null) return 0;
   return Math.max(
     0,
@@ -24,7 +25,18 @@ export function deriveSetupOverhead(e: Partial<RequestEvent>): number {
   );
 }
 
-export function computeStageGroups(e: Partial<RequestEvent>): StageGroups {
+export function computeStageGroups(e: RequestEventWithPhase): StageGroups {
+  if (e._phase === 'partial') {
+    return {
+      internalPre: 0,
+      setupOverhead: 0,
+      wait: 0,
+      upstream: 0,
+      body: 0,
+      internalPost: 0,
+      unaccounted: 0,
+    };
+  }
   const setupOverhead = deriveSetupOverhead(e);
   const internalPre =
     (e.auth_ms ?? 0) +

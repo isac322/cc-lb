@@ -1,10 +1,10 @@
 import { useMemo } from 'react';
-import type { RequestEvent } from '../../../lib/api';
 import { fmtN, formatCostMicros } from '../../../lib/format';
+import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { type ActiveSliceControl, PieChart, type PieSlice } from './PieChart';
 import { SLICE_COLORS } from './sliceColors';
 
-export function buildCostSlices(event: RequestEvent): PieSlice[] {
+export function buildCostSlices(event: RequestEventWithPhase): PieSlice[] {
   const rows: {
     key: string;
     label: string;
@@ -67,7 +67,7 @@ export function CostPie({
   event,
   control,
 }: {
-  event: RequestEvent;
+  event: RequestEventWithPhase;
   control?: ActiveSliceControl;
 }) {
   const slices = useMemo(() => buildCostSlices(event), [event]);
