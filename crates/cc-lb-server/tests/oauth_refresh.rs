@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -11,6 +11,7 @@ use cc_lb_config::{
     AnthropicOAuthConfig, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind,
 };
 use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_engine::{Clock, ClockHandle, DynamicViewHolder, Lifecycle, LifecycleConfig, TestClock};
 use cc_lb_oauth_protocol::{
     ExistingTokenParts, TokenEndpointResponse, parse_token_endpoint_response,
@@ -26,7 +27,9 @@ use cc_lb_scheduler::jobs::oauth_refresh::{
     OAuthRefreshJob, OAuthRefreshJobHandler, OAuthRefreshUpstreams, RefreshedOAuthTokens,
 };
 use cc_lb_scheduler::retry::JobOutcome;
-use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerCtx, SchedulerPushTask};
+use cc_lb_scheduler::worker::{
+    AdaptiveJob, SchedulerCtx, SchedulerPushTask, build_adaptive_worker,
+};
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
 use cc_lb_server::scheduler_factory::{SchedulerBackend, SqliteSchedulerBackend};
@@ -36,11 +39,12 @@ use cc_lb_signer_anthropic_oauth::{
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamRecord,
     UpstreamStore,
+    types::{KeyStatus, PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
-use fake_anthropic::{AppConfig, app as fake_anthropic_app};
+use fake_anthropic::{AppConfig, MessageScript, OAuthRefreshPause, app as fake_anthropic_app};
 use http::Request;
 use http::header::{AUTHORIZATION, LOCATION};
 use http_body_util::BodyExt;
@@ -49,10 +53,15 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
+
+#[path = "oauth_refresh/scheduler_restart.rs"]
+mod scheduler_restart;
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -63,20 +72,33 @@ struct Fixture {
     oauth_cfg: Arc<AnthropicOAuthConfig>,
     fake_base: String,
     scheduler_backend: SchedulerBackend,
-    scheduler_cancel: CancellationToken,
-    scheduler_task: JoinHandle<()>,
+    scheduler_worker: Option<(CancellationToken, JoinHandle<()>)>,
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        self.scheduler_cancel.cancel();
-        self.scheduler_task.abort();
+        if let Some((cancel, task)) = &self.scheduler_worker {
+            cancel.cancel();
+            task.abort();
+        }
     }
 }
 
 impl Fixture {
     async fn new() -> Self {
-        let fake_addr = spawn_fake_anthropic().await;
+        let mut fixture = Self::new_without_scheduler(AppConfig::default()).await;
+        fixture.scheduler_worker = Some(spawn_oauth_refresh_worker(
+            fixture.scheduler_backend.clone(),
+            fixture.storage.clone(),
+            fixture.aead.clone(),
+            fixture.oauth_cfg.clone(),
+            fixture.clock.clone(),
+        ));
+        fixture
+    }
+
+    async fn new_without_scheduler(fake_config: AppConfig) -> Self {
+        let fake_addr = spawn_fake_anthropic(fake_config).await;
         let dir = tempfile::tempdir().expect("tempdir");
         let database_url = format!("sqlite://{}", dir.path().join("oauth.sqlite").display());
         // Pin the test clock at real wall-clock "now" so the apalis scheduler's
@@ -114,13 +136,6 @@ impl Fixture {
             redirect_uri: Url::parse("http://localhost/callback").expect("redirect url"),
             scopes: vec!["messages".to_owned()],
         });
-        let (scheduler_cancel, scheduler_task) = spawn_oauth_refresh_worker(
-            scheduler_backend.clone(),
-            storage.clone(),
-            aead.clone(),
-            oauth_cfg.clone(),
-            clock.clone(),
-        );
         Self {
             _dir: dir,
             clock,
@@ -130,8 +145,7 @@ impl Fixture {
             oauth_cfg,
             fake_base,
             scheduler_backend,
-            scheduler_cancel,
-            scheduler_task,
+            scheduler_worker: None,
         }
     }
 
@@ -483,11 +497,11 @@ fn decode_chunked(mut bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     }
 }
 
-async fn spawn_fake_anthropic() -> SocketAddr {
+async fn spawn_fake_anthropic(config: AppConfig) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake");
     let addr = listener.local_addr().expect("fake addr");
     tokio::spawn(async move {
-        axum::serve(listener, fake_anthropic_app(AppConfig::default()))
+        axum::serve(listener, fake_anthropic_app(config))
             .await
             .expect("fake server")
     });
