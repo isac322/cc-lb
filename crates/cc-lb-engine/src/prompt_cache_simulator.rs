@@ -131,6 +131,12 @@ impl PromptCachePrefixChain {
 }
 
 pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3PromptCacheAnalysis {
+    if exceeds_explicit_breakpoint_cap(value) {
+        return V3PromptCacheAnalysis {
+            blocks: Vec::new(),
+            breakpoints: Vec::new(),
+        };
+    }
     let blocks = flatten_cacheable_blocks(value);
     let block_digests = blocks.iter().map(block_digest);
     let chain = PromptCachePrefixChain::from_block_digests(
@@ -181,6 +187,51 @@ pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3Prompt
         blocks,
         breakpoints,
     }
+}
+
+fn exceeds_explicit_breakpoint_cap(value: &Value) -> bool {
+    let mut count = 0;
+    if let Some(Value::Array(tools)) = value.get("tools") {
+        for tool in tools.iter().filter(|tool| tool.is_object()) {
+            if record_explicit_breakpoint(&mut count, tool) {
+                return true;
+            }
+        }
+    }
+    if let Some(Value::Array(system)) = value.get("system") {
+        for block in system
+            .iter()
+            .filter(|block| is_cacheable_content_block(block))
+        {
+            if record_explicit_breakpoint(&mut count, block) {
+                return true;
+            }
+        }
+    }
+    let Some(Value::Array(messages)) = value.get("messages") else {
+        return false;
+    };
+    for content in messages
+        .iter()
+        .filter_map(|message| message.get("content").and_then(Value::as_array))
+    {
+        for block in content
+            .iter()
+            .filter(|block| is_cacheable_content_block(block))
+        {
+            if record_explicit_breakpoint(&mut count, block) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn record_explicit_breakpoint(count: &mut usize, value: &Value) -> bool {
+    if value.get("cache_control").is_some() {
+        *count = count.saturating_add(1);
+    }
+    *count > MAX_EXPLICIT_BREAKPOINTS
 }
 
 fn flatten_cacheable_blocks(value: &Value) -> Vec<V3PromptCacheBlock> {
@@ -550,6 +601,7 @@ mod tests {
         reset_tokenizer_call_count();
         let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
 
+        assert!(analysis.blocks.is_empty());
         assert!(analysis.breakpoints.is_empty());
         assert_eq!(tokenizer_call_count(), 0);
     }

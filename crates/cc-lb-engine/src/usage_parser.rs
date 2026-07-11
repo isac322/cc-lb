@@ -195,13 +195,18 @@ pub(crate) fn accumulate_sse_usage(raw: &[u8], usage: &mut UsageCounts) -> SseUs
     update
 }
 
+#[cfg(test)]
 pub(crate) fn observe_non_stream_json_body(body: &[u8]) -> NonStreamObservation {
     let Ok(value) = sonic_rs::from_slice::<Value>(body) else {
         return NonStreamObservation::default();
     };
+    observe_non_stream_json_value(&value)
+}
+
+pub(crate) fn observe_non_stream_json_value(value: &Value) -> NonStreamObservation {
     NonStreamObservation {
-        usage: usage_from_value(&value),
-        canonical_error: canonical_upstream_error_from_value(&value),
+        usage: usage_from_value(value),
+        canonical_error: canonical_upstream_error_from_value(value),
     }
 }
 
@@ -585,6 +590,17 @@ mod tests {
         let error = observation.canonical_error.expect("canonical error");
         assert_eq!(error.error_type.0, "rate_limit_error");
         assert_eq!(error.error_message.0, "bounded");
+    }
+
+    #[test]
+    fn non_stream_value_observation_matches_body_observation() {
+        let body = br#"{"type":"error","error":{"type":"rate_limit_error","message":"bounded"},"usage":{"input_tokens":12,"output_tokens":3}}"#;
+        let value = sonic_rs::from_slice::<Value>(body).expect("valid response JSON");
+
+        assert_eq!(
+            observe_non_stream_json_value(&value),
+            observe_non_stream_json_body(body)
+        );
     }
 
     #[test]
