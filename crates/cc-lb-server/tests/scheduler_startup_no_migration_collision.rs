@@ -65,7 +65,7 @@ async fn sqlite_main_storage_and_apalis_setup_share_file_without_migration_colli
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
         )
         .bind(table_name)
-        .fetch_one(&sqlite_scheduler.pool)
+        .fetch_one(sqlite_scheduler.pool())
         .await
         .expect("apalis table existence query succeeds");
         assert_eq!(exists, 1, "missing apalis table {table_name}");

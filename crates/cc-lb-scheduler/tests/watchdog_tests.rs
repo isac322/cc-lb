@@ -6,9 +6,7 @@ use std::sync::Arc;
 use cc_lb_clock::SystemClock;
 use cc_lb_scheduler::jobs::watchdog::{WatchdogEntityKind, run_entity_watchdog};
 use cc_lb_scheduler::worker::AdaptiveJob;
-use cc_lb_scheduler::worker::{
-    ADAPTIVE_QUEUE, SchedulerBackend, SchedulerPushTask, SqliteSchedulerStorage,
-};
+use cc_lb_scheduler::worker::{SchedulerBackend, SchedulerPushTask, SqliteSchedulerBackend};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -170,15 +168,10 @@ impl Fixture {
             .await?;
         apalis_sqlite::SqliteStorage::setup(&pool).await?;
         cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
-        let storage = apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(
-            &pool,
-            &apalis_sqlite::Config::new(ADAPTIVE_QUEUE),
-        );
-        let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
-            pool: pool.clone(),
-            storage,
-            clock: Arc::new(SystemClock),
-        });
+        let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
+            pool.clone(),
+            Arc::new(SystemClock),
+        ));
         Ok(Self {
             _dir: dir,
             pool,

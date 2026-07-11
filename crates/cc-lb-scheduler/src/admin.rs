@@ -70,11 +70,11 @@ impl SchedulerAdminHandle {
         match &self.backend {
             #[cfg(feature = "sqlite")]
             SchedulerBackend::Sqlite(sqlite) => {
-                sqlite_next_run_for_upstream(&sqlite.pool, upstream_id, job_kind).await
+                sqlite_next_run_for_upstream(sqlite.pool(), upstream_id, job_kind).await
             }
             #[cfg(feature = "postgres")]
             SchedulerBackend::Postgres(postgres) => {
-                postgres_next_run_for_upstream(&postgres.pool, upstream_id, job_kind).await
+                postgres_next_run_for_upstream(postgres.pool(), upstream_id, job_kind).await
             }
         }
     }
@@ -116,11 +116,11 @@ impl SchedulerAdminHandle {
         match &self.backend {
             #[cfg(feature = "sqlite")]
             SchedulerBackend::Sqlite(sqlite) => {
-                sqlite_failures(&sqlite.pool, job_type_filter, limit, offset).await
+                sqlite_failures(sqlite.pool(), job_type_filter, limit, offset).await
             }
             #[cfg(feature = "postgres")]
             SchedulerBackend::Postgres(postgres) => {
-                postgres_failures(&postgres.pool, job_type_filter, limit, offset).await
+                postgres_failures(postgres.pool(), job_type_filter, limit, offset).await
             }
         }
     }
@@ -128,10 +128,10 @@ impl SchedulerAdminHandle {
     async fn recurring_runtime(&self) -> Result<BTreeMap<String, RecurringRuntime>> {
         match &self.backend {
             #[cfg(feature = "sqlite")]
-            SchedulerBackend::Sqlite(sqlite) => sqlite_recurring_runtime(&sqlite.pool).await,
+            SchedulerBackend::Sqlite(sqlite) => sqlite_recurring_runtime(sqlite.pool()).await,
             #[cfg(feature = "postgres")]
             SchedulerBackend::Postgres(postgres) => {
-                postgres_recurring_runtime(&postgres.pool).await
+                postgres_recurring_runtime(postgres.pool()).await
             }
         }
     }
@@ -139,9 +139,9 @@ impl SchedulerAdminHandle {
     fn pool_stats(&self) -> (u32, u32) {
         match &self.backend {
             #[cfg(feature = "sqlite")]
-            SchedulerBackend::Sqlite(sqlite) => pool_stats(&sqlite.pool),
+            SchedulerBackend::Sqlite(sqlite) => pool_stats(sqlite.pool()),
             #[cfg(feature = "postgres")]
-            SchedulerBackend::Postgres(postgres) => pool_stats(&postgres.pool),
+            SchedulerBackend::Postgres(postgres) => pool_stats(postgres.pool()),
         }
     }
 }

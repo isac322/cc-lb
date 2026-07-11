@@ -8,9 +8,7 @@ use cc_lb_clock::SystemClock;
 use cc_lb_config::{Config, RecurringJobConfig};
 use cc_lb_scheduler::migrations::apply_post_setup_migrations;
 use cc_lb_scheduler::retry::JobOutcome;
-use cc_lb_scheduler::worker::{
-    ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, SchedulerBackend, SchedulerCtx, SqliteSchedulerStorage,
-};
+use cc_lb_scheduler::worker::{CRON_QUEUE, SchedulerBackend, SchedulerCtx, SqliteSchedulerBackend};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
@@ -22,14 +20,10 @@ async fn sqlite_cron_producer_runs_after_partial_idempotency_index()
     let db = sqlite_test_db().await?;
     let pool = db.pool.clone();
     apply_post_setup_migrations(&pool).await?;
-    let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
-        pool: pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(
-            &pool,
-            ADAPTIVE_QUEUE,
-        ),
-        clock: Arc::new(SystemClock),
-    });
+    let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
+        pool.clone(),
+        Arc::new(SystemClock),
+    ));
     let cancel = CancellationToken::new();
     let handles = backend
         .spawn(

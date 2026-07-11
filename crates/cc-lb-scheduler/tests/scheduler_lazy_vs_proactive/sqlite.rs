@@ -9,7 +9,7 @@ use cc_lb_clock::SystemClock;
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_scheduler::middleware::TraceparentLayer;
 use cc_lb_scheduler::retry::RetryClass;
-use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, SchedulerBackend, SqliteSchedulerStorage};
+use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, SchedulerBackend, SqliteSchedulerBackend};
 use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -45,11 +45,10 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&scheduler_pool).await?;
 
     let config = sqlite_queue_config();
-    let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
-        pool: scheduler_pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::new_with_config(&scheduler_pool, &config),
-        clock: Arc::new(SystemClock),
-    });
+    let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
+        scheduler_pool.clone(),
+        Arc::new(SystemClock),
+    ));
     let aead = Arc::new(AeadService::from_master_key([38; 32]));
     let oauth_cfg = Arc::new(AnthropicOAuthConfig {
         client_id: "test-client".to_owned(),

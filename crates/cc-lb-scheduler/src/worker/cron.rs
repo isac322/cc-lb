@@ -17,9 +17,9 @@ use crate::jobs::watchdog::{OAuthRefreshWatchdogJob, WarmupWatchdogJob};
 const CRON_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 #[cfg(feature = "postgres")]
-use super::PostgresSchedulerStorage;
+use super::PostgresSchedulerBackend;
 #[cfg(feature = "sqlite")]
-use super::SqliteSchedulerStorage;
+use super::SqliteSchedulerBackend;
 use super::{CRON_QUEUE, CronJob, SchedulerBackend};
 
 type CronJobFactory = fn(u64) -> CronJob;
@@ -52,14 +52,14 @@ pub(super) fn spawn_cron_producer(
 
 #[cfg(feature = "sqlite")]
 async fn run_sqlite_cron_producer(
-    sqlite: SqliteSchedulerStorage,
+    sqlite: SqliteSchedulerBackend,
     config: Config,
     cancel: CancellationToken,
     clock: ClockHandle,
 ) {
     let mut handles = Vec::new();
     for spec in singleton_cron_specs(&config, clock.clone()) {
-        let pool = sqlite.pool.clone();
+        let pool = sqlite.pool().clone();
         let cancel = cancel.clone();
         let clock = clock.clone();
         handles.push(tokio::spawn(async move {
@@ -72,14 +72,14 @@ async fn run_sqlite_cron_producer(
 
 #[cfg(feature = "postgres")]
 async fn run_postgres_cron_producer(
-    postgres: PostgresSchedulerStorage,
+    postgres: PostgresSchedulerBackend,
     config: Config,
     cancel: CancellationToken,
     clock: ClockHandle,
 ) {
     let mut handles = Vec::new();
     for spec in singleton_cron_specs(&config, clock) {
-        let pool = postgres.pool.clone();
+        let pool = postgres.pool().clone();
         let cancel = cancel.clone();
         handles.push(tokio::spawn(async move {
             run_postgres_singleton_cron_loop(pool, spec, cancel).await;

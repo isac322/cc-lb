@@ -1043,14 +1043,10 @@ mod tests {
                 .await
                 .expect("scheduler storage initializes");
             let scheduler_backend =
-                SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerStorage {
-                    pool: scheduler_pool.clone(),
-                    storage: apalis_sqlite::SqliteStorage::new_in_queue(
-                        &scheduler_pool,
-                        cc_lb_scheduler::worker::ADAPTIVE_QUEUE,
-                    ),
-                    clock: Arc::new(cc_lb_engine::SystemClock),
-                });
+                SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerBackend::new(
+                    scheduler_pool,
+                    Arc::new(cc_lb_engine::SystemClock),
+                ));
             let stores = Arc::new(crate::dynamic_view_builder::Stores {
                 upstreams: storage.clone(),
                 principals: storage.clone(),

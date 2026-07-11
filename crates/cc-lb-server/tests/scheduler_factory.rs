@@ -30,18 +30,18 @@ async fn scheduler_factory_sqlite_happy_path_sets_up_tables_and_partial_index() 
     let table_count: i64 = scheduler_sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'Jobs'",
     )
-    .fetch_one(&sqlite.pool)
+    .fetch_one(sqlite.pool())
     .await
     .expect("Jobs table query succeeds");
     assert_eq!(table_count, 1);
     let index_sql: String = scheduler_sqlx::query_scalar(
         "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_jobs_idempotency_key'",
     )
-    .fetch_one(&sqlite.pool)
+    .fetch_one(sqlite.pool())
     .await
     .expect("partial index query succeeds");
     assert!(!index_sql.contains("WHERE"));
-    sqlite.pool.close().await;
+    sqlite.pool().close().await;
 }
 
 #[cfg(feature = "sqlite")]
@@ -111,15 +111,11 @@ async fn scheduler_factory_postgres_happy_path_sets_up_tables_and_index() {
     let SchedulerBackend::Postgres(postgres) = opened.backend else {
         panic!("expected postgres backend")
     };
-    let table_count: i64 = scheduler_sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'apalis' AND table_name = 'jobs'").fetch_one(&postgres.pool).await.expect("jobs table query succeeds");
+    let table_count: i64 = scheduler_sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'apalis' AND table_name = 'jobs'").fetch_one(postgres.pool()).await.expect("jobs table query succeeds");
     assert_eq!(table_count, 1);
-    let predicate: Option<String> = scheduler_sqlx::query_scalar("SELECT pg_get_expr(indexes.indpred, indexes.indrelid) FROM pg_index indexes JOIN pg_class classes ON classes.oid = indexes.indexrelid JOIN pg_namespace namespaces ON namespaces.oid = classes.relnamespace WHERE namespaces.nspname = 'apalis' AND classes.relname = 'idx_jobs_idempotency_key'").fetch_one(&postgres.pool).await.expect("idempotency index query succeeds");
+    let predicate: Option<String> = scheduler_sqlx::query_scalar("SELECT pg_get_expr(indexes.indpred, indexes.indrelid) FROM pg_index indexes JOIN pg_class classes ON classes.oid = indexes.indexrelid JOIN pg_namespace namespaces ON namespaces.oid = classes.relnamespace WHERE namespaces.nspname = 'apalis' AND classes.relname = 'idx_jobs_idempotency_key'").fetch_one(postgres.pool()).await.expect("idempotency index query succeeds");
     assert!(predicate.is_none());
-    postgres.pool.close().await;
-    drop(postgres.storage);
-    // Postgres 17+ WITH (FORCE) terminates any lingering apalis LISTEN/notify
-    // backends whose sessions outlive `pool.close().await`; without this the
-    // DROP races the notify worker and fails with 55006.
+    postgres.pool().close().await;
     let drop_database = format!(r#"DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)"#);
     scheduler_sqlx::query(&drop_database)
         .execute(&admin_pool)

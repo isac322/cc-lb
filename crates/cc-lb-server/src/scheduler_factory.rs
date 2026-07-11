@@ -6,10 +6,10 @@ use tokio_util::sync::CancellationToken;
 const SCHEDULER_SETUP_LOCK_KEY: i64 = 0x_CC1B_5CDE_0002_i64;
 
 #[cfg(feature = "postgres")]
-pub use cc_lb_scheduler::worker::PostgresSchedulerStorage;
+pub use cc_lb_scheduler::worker::PostgresSchedulerBackend;
 pub use cc_lb_scheduler::worker::SchedulerBackend;
 #[cfg(feature = "sqlite")]
-pub use cc_lb_scheduler::worker::SqliteSchedulerStorage;
+pub use cc_lb_scheduler::worker::SqliteSchedulerBackend;
 
 #[derive(Debug)]
 pub struct OpenedScheduler {
@@ -119,14 +119,8 @@ async fn open_sqlite(
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
         .await
         .map_err(migration_error)?;
-    let storage =
-        apalis_sqlite::SqliteStorage::new_in_queue(&pool, cc_lb_scheduler::worker::ADAPTIVE_QUEUE);
     Ok(OpenedScheduler {
-        backend: SchedulerBackend::Sqlite(SqliteSchedulerStorage {
-            pool,
-            storage,
-            clock,
-        }),
+        backend: SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(pool, clock)),
     })
 }
 
@@ -188,12 +182,8 @@ async fn open_postgres(
         .await
         .map_err(|error| connection_error_with_host(url, error))?;
     run_postgres_scheduler_setup(&connect_options, &pool).await?;
-    let storage = apalis_postgres::PostgresStorage::new_with_notify(
-        &pool,
-        &apalis_postgres::Config::new(cc_lb_scheduler::worker::ADAPTIVE_QUEUE),
-    );
     Ok(OpenedScheduler {
-        backend: SchedulerBackend::Postgres(PostgresSchedulerStorage { pool, storage }),
+        backend: SchedulerBackend::Postgres(PostgresSchedulerBackend::new(pool)),
     })
 }
 

@@ -67,7 +67,7 @@ impl SchedulerDispatch {
                     let config =
                         ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
                     apalis_housekeeping_outcome(
-                        ApalisHousekeepingJobHandler::new(sqlite.pool.clone(), config)
+                        ApalisHousekeepingJobHandler::new(sqlite.pool().clone(), config)
                             .handle(job, unix_secs(self.clock.now()))
                             .await,
                     )
@@ -77,7 +77,7 @@ impl SchedulerDispatch {
                     let config =
                         ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
                     apalis_housekeeping_outcome(
-                        ApalisHousekeepingJobHandler::new(postgres.pool.clone(), config)
+                        ApalisHousekeepingJobHandler::new(postgres.pool().clone(), config)
                             .handle(job, unix_secs(self.clock.now()))
                             .await,
                     )
@@ -249,7 +249,7 @@ impl SchedulerDispatch {
         match &self.backend {
             #[cfg(feature = "sqlite")]
             SchedulerBackend::Sqlite(sqlite) => {
-                OAuthUsagePollCursorsStore::new(sqlite.pool.clone())
+                OAuthUsagePollCursorsStore::new(sqlite.pool().clone())
                     .record_attempt(
                         update.upstream_id,
                         update.observed_at_unix_secs,
@@ -259,7 +259,7 @@ impl SchedulerDispatch {
             }
             #[cfg(feature = "postgres")]
             SchedulerBackend::Postgres(postgres) => {
-                OAuthUsagePollCursorsStore::new(postgres.pool.clone())
+                OAuthUsagePollCursorsStore::new(postgres.pool().clone())
                     .record_attempt(
                         update.upstream_id,
                         update.observed_at_unix_secs,
@@ -279,7 +279,7 @@ impl SchedulerDispatch {
             SchedulerBackend::Sqlite(sqlite) => {
                 handle_anthropic_compat_refresh_job_with_core_fetcher(
                     job,
-                    &AnthropicCompatEtagsStore::new(sqlite.pool.clone()),
+                    &AnthropicCompatEtagsStore::new(sqlite.pool().clone()),
                     self.storage.as_ref(),
                     &self.cancel,
                     &*self.clock,
@@ -290,7 +290,7 @@ impl SchedulerDispatch {
             SchedulerBackend::Postgres(postgres) => {
                 handle_anthropic_compat_refresh_job_with_core_fetcher(
                     job,
-                    &AnthropicCompatEtagsStore::new(postgres.pool.clone()),
+                    &AnthropicCompatEtagsStore::new(postgres.pool().clone()),
                     self.storage.as_ref(),
                     &self.cancel,
                     &*self.clock,
@@ -316,7 +316,7 @@ impl SchedulerDispatch {
             #[cfg(feature = "sqlite")]
             SchedulerBackend::Sqlite(sqlite) => price_catalog_outcome(
                 PriceCatalogRefreshJobHandler::new(
-                    PriceCatalogVersionsStore::new(sqlite.pool.clone()),
+                    PriceCatalogVersionsStore::new(sqlite.pool().clone()),
                     loader,
                 )
                 .handle(job, unix_secs(self.clock.now()))
@@ -325,7 +325,7 @@ impl SchedulerDispatch {
             #[cfg(feature = "postgres")]
             SchedulerBackend::Postgres(postgres) => price_catalog_outcome(
                 PriceCatalogRefreshJobHandler::new(
-                    PriceCatalogVersionsStore::new(postgres.pool.clone()),
+                    PriceCatalogVersionsStore::new(postgres.pool().clone()),
                     loader,
                 )
                 .handle(job, unix_secs(self.clock.now()))
