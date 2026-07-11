@@ -1,4 +1,4 @@
-mod admin_test_common;
+use crate::admin_test_common;
 
 use axum::http::StatusCode;
 use cc_lb_storage_api::{

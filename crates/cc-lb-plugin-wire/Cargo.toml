@@ -9,6 +9,11 @@ repository = "https://github.com/isac322/cc-lb"
 readme = "README.md"
 keywords = ["cc-lb", "plugin", "wasm", "wire", "rkyv"]
 categories = ["wasm", "api-bindings", "development-tools"]
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/all.rs"
 
 [lib]
 crate-type = ["rlib"]

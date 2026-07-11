@@ -1,6 +1,6 @@
 #![cfg(any())]
 
-mod healthcheck_common;
+use crate::healthcheck_common;
 
 use axum::{
     body::Body,

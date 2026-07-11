@@ -1,5 +1,3 @@
-mod common;
-
 use bytes::Bytes;
 use cc_lb_dialect_anthropic::AnthropicDirectDialect;
 use cc_lb_plugin_api::{Upstream, shape_request};
@@ -10,19 +8,19 @@ fn direct_shape_preserves_method_headers_and_body_bytes() {
     let body = Bytes::from_static(
         br#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hello"}]}"#,
     );
-    let ctx = common::request_context(
+    let ctx = crate::common::request_context(
         Method::POST,
         "/v1/messages",
         Some("stream=true&trace=abc"),
         body.clone(),
-        common::anthropic_headers(),
+        crate::common::anthropic_headers(),
     );
 
     let shaped = shape_request(
         &AnthropicDirectDialect::default(),
         &ctx,
         &Upstream::AnthropicDirect { base_url: None },
-        &common::principal(),
+        &crate::common::principal(),
     )
     .expect("direct shape should succeed");
 

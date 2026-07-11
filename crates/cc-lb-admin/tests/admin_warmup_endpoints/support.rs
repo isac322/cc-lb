@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 const TEST_TOKEN: &str = "test-token";
 const TEST_NOW_UNIX_SECS: u64 = 1_700_000_000;
-pub use crate::scheduler_support::NEXT_SCHEDULED_AT;
+pub use super::scheduler_support::NEXT_SCHEDULED_AT;
 pub const RECENT_7D_COUNTS: (u64, u64, u64, u64) = (6, 2, 3, 3);
 
 pub struct Fixture {
@@ -70,7 +70,7 @@ pub async fn new_fixture() -> Fixture {
     )
     .await;
     let scheduler =
-        crate::scheduler_support::scheduler_with_next_warmup(upstream.id, clock.clone()).await;
+        super::scheduler_support::scheduler_with_next_warmup(upstream.id, clock.clone()).await;
     Fixture {
         _dir: dir,
         app: router(test_state(storage, scheduler, clock)),

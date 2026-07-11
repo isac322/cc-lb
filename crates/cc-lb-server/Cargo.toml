@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 build = "build.rs"
+autotests = false
 
 [features]
 default = ["sqlite"]
@@ -38,6 +39,10 @@ postgres = [
 [[bin]]
 name = "cc-lb"
 path = "src/main.rs"
+
+[[test]]
+name = "integration"
+path = "tests/all.rs"
 
 [dependencies]
 anyhow.workspace = true

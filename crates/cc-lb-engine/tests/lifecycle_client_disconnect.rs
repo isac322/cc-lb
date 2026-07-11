@@ -1,5 +1,5 @@
 mod client_disconnect_support;
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::Duration;

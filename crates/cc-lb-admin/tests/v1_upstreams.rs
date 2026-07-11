@@ -1,6 +1,6 @@
 //! Upstream CRUD admin endpoint smoke tests (list, create, get, update, delete, enable/disable).
 
-mod admin_test_common;
+use crate::admin_test_common;
 
 use std::sync::Arc;
 use std::time::Duration;

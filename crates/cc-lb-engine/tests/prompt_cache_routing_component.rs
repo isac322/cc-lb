@@ -13,7 +13,7 @@ use http::{HeaderMap, Method};
 use url::Url;
 use uuid::Uuid;
 
-mod common;
+use crate::common;
 mod prompt_cache_routing_support;
 
 use common::{TestAuthn, TestRouter, TestState};

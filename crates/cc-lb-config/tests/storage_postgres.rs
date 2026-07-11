@@ -1,5 +1,3 @@
-mod common;
-
 use cc_lb_config::{Config, ConfigError, PostgresPoolConfig, StorageConfig, validate_postgres_url};
 
 #[test]
@@ -14,7 +12,7 @@ fn test_legacy_flat_storage_parses() {
 storage_path = "{}"
 oauth_aead_key_env = "MY_KEY"
 "#,
-            common::toml_path(&storage_path)
+            crate::common::toml_path(&storage_path)
         ),
     )
     .unwrap();

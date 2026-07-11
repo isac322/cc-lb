@@ -1040,6 +1040,10 @@ impl TerminationReason {
 }
 
 #[cfg(test)]
+#[path = "../tests/event_bus.rs"]
+mod event_bus_integration_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

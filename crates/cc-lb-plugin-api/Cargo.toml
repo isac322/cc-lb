@@ -7,6 +7,11 @@ license.workspace = true
 rust-version.workspace = true
 description = "cc-lb plugin API — public traits and types for built-in plugin authoring."
 repository = "https://github.com/isac322/cc-lb"
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/all.rs"
 
 [dependencies]
 async-trait.workspace = true

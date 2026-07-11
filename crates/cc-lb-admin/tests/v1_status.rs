@@ -1,4 +1,4 @@
-mod config_admin_common;
+use crate::config_admin_common;
 
 use std::collections::HashMap;
 use std::sync::Arc;

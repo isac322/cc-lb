@@ -13,7 +13,7 @@ use cc_lb_storage_api::{
 };
 use uuid::Uuid;
 
-use crate::fake::InitialTokens;
+use super::fake::InitialTokens;
 
 pub const LAZY_REQUEST_DELAY: Duration = Duration::from_millis(10);
 pub const LOSER_SETTLE_DELAY: Duration = Duration::from_millis(50);

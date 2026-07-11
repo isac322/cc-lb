@@ -1,5 +1,4 @@
 #![cfg(feature = "dto-roundtrip")]
-#![recursion_limit = "512"]
 
 use cc_lb_contract::{CostBreakdown, RequestCacheLookbackPrefix};
 use cc_lb_engine::event_bus::RequestEventUpdate;

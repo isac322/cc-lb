@@ -1,6 +1,6 @@
-mod admin_test_common;
+use crate::admin_test_common;
 
-mod config_admin_common;
+use crate::config_admin_common;
 
 use std::sync::Arc;
 

@@ -1,4 +1,4 @@
-use cc_lb_contract::{
+use crate::{
     BusReceiver, FinalRequestEventUpdate, LifecycleBusReceiver, RequestEvent, RequestEventPartial,
     RequestEventPhase, RequestEventUpdate,
 };

@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use cc_lb_signer_anthropic_oauth::{complete_pkce_flow, start_pkce_flow};
 use oauth2::{AuthUrl, ClientId, TokenUrl};
