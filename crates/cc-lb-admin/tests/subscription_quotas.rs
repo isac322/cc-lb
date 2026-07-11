@@ -62,6 +62,76 @@ async fn subscription_quota_series_defaults_missing_upstream_ids_to_all() {
 }
 
 #[tokio::test]
+async fn subscription_quota_series_defaults_exclude_stored_fable_window() {
+    // Given: only a Fable-scoped weekly checkpoint is stored.
+    let server = admin_test_common::spawn_admin_server().await;
+    let upstream_id = create_oauth_upstream(&server, "fable-series").await;
+    let mut fable = quota_observation(
+        upstream_id,
+        120,
+        30,
+        SubscriptionQuotaSource::Api,
+        0.28,
+        Some(SubscriptionQuotaStatus::Allowed),
+    );
+    fable.window = SubscriptionQuotaWindow::SevenDayFable;
+    server
+        .storage
+        .put_subscription_quota_checkpoint(&checkpoint_record(fable))
+        .await
+        .unwrap();
+
+    // When: series windows are omitted.
+    let (status, _, body) = server
+        .client
+        .get(&format!(
+            "/admin/v1/subscription-quotas/series?upstream_ids={upstream_id}&since_unix_secs=60&until_unix_secs=180&bucket_secs=60"
+        ))
+        .await;
+
+    // Then: the historical 5h/7d default excludes the Fable series.
+    assert_eq!(status, StatusCode::OK);
+    let series = body["series"].as_array().expect("series are returned");
+    assert!(series.is_empty());
+}
+
+#[tokio::test]
+async fn subscription_quota_series_explicit_fable_window_includes_stored_series() {
+    // Given: only a Fable-scoped weekly checkpoint is stored.
+    let server = admin_test_common::spawn_admin_server().await;
+    let upstream_id = create_oauth_upstream(&server, "explicit-fable-series").await;
+    let mut fable = quota_observation(
+        upstream_id,
+        120,
+        31,
+        SubscriptionQuotaSource::Api,
+        0.28,
+        Some(SubscriptionQuotaStatus::Allowed),
+    );
+    fable.window = SubscriptionQuotaWindow::SevenDayFable;
+    server
+        .storage
+        .put_subscription_quota_checkpoint(&checkpoint_record(fable))
+        .await
+        .unwrap();
+
+    // When: the Fable window is requested explicitly.
+    let (status, _, body) = server
+        .client
+        .get(&format!(
+            "/admin/v1/subscription-quotas/series?upstream_ids={upstream_id}&windows=7d_fable&since_unix_secs=60&until_unix_secs=180&bucket_secs=60"
+        ))
+        .await;
+
+    // Then: the stored Fable series is returned.
+    assert_eq!(status, StatusCode::OK);
+    let series = body["series"].as_array().expect("series are returned");
+    assert_eq!(series.len(), 1);
+    assert_eq!(series[0]["window"], "7d_fable");
+    assert_eq!(series[0]["buckets"][1]["utilization_last"], 0.28);
+}
+
+#[tokio::test]
 async fn subscription_quota_analysis_defaults_missing_upstream_ids_to_all() {
     let server = admin_test_common::spawn_admin_server().await;
 

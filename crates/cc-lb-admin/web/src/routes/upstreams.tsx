@@ -118,7 +118,7 @@ function UpstreamsPage() {
   // parent sidebar reads the 3 windows it needs, the detail reads the full 5.
   const quotaLatest = useSubscriptionQuotaLatest({
     upstreamIds,
-    windows: '5h,7d,overage,7d_sonnet,7d_opus',
+    windows: '5h,7d,overage,7d_sonnet,7d_opus,7d_fable',
     source: 'merged',
     refetchInterval: 5_000,
   });
@@ -435,8 +435,22 @@ function oauthBadge(entry: {
   return { tone: 'ok', label: 'Connected' };
 }
 
-const DETAIL_WINDOWS = ['5h', '7d', '7d_sonnet', '7d_opus', 'overage'];
-const SNAPSHOT_ORDER = ['5h', '7d', '7d_sonnet', '7d_opus', 'overage'];
+const DETAIL_WINDOWS = [
+  '5h',
+  '7d',
+  '7d_sonnet',
+  '7d_opus',
+  '7d_fable',
+  'overage',
+];
+const SNAPSHOT_ORDER = [
+  '5h',
+  '7d',
+  '7d_sonnet',
+  '7d_opus',
+  '7d_fable',
+  'overage',
+];
 
 function windowLabel(windowName: string): string {
   switch (windowName) {
@@ -444,6 +458,8 @@ function windowLabel(windowName: string): string {
       return '7d (Sonnet)';
     case '7d_opus':
       return '7d (Opus)';
+    case '7d_fable':
+      return '7d (Fable)';
     case 'overage':
       return 'Extra Usage';
     default:
@@ -645,7 +661,7 @@ function DetailView({
   );
   const quotaLatest = useSubscriptionQuotaLatest({
     upstreamIds: allUpstreamIds,
-    windows: '5h,7d,overage,7d_sonnet,7d_opus',
+    windows: '5h,7d,overage,7d_sonnet,7d_opus,7d_fable',
     source: 'merged',
     refetchInterval: 5_000,
   });
@@ -657,7 +673,7 @@ function DetailView({
   );
   const quotaSeries = useSubscriptionQuotaSeries({
     upstreamIds: upstream.id,
-    windows: '5h,7d,7d_sonnet,7d_opus,overage',
+    windows: '5h,7d,7d_sonnet,7d_opus,7d_fable,overage',
     source: 'merged',
     sinceUnixSecs,
     untilUnixSecs: nowUnixSecs,
@@ -665,7 +681,7 @@ function DetailView({
   });
   const quotaAnalysis = useSubscriptionQuotaAnalysis({
     upstreamIds: upstream.id,
-    windows: '5h,7d,7d_sonnet,7d_opus,overage',
+    windows: '5h,7d,7d_sonnet,7d_opus,7d_fable,overage',
     source: 'merged',
     sinceUnixSecs,
     untilUnixSecs: nowUnixSecs,
@@ -1089,7 +1105,6 @@ function DetailView({
                           dataKey="unix"
                           type="number"
                           domain={[sinceUnixSecs, nowUnixSecs]}
-                          allowDataOverflow
                           tick={{
                             fill: 'var(--color-text-faint)',
                             fontSize: 10,
@@ -1226,6 +1241,11 @@ function DetailView({
                             );
                             if (opus && opus.state !== 'missing')
                               windows.push('7d_opus');
+                            const fable = latest.windows.find(
+                              (w) => w.window === '7d_fable',
+                            );
+                            if (fable && fable.state !== 'missing')
+                              windows.push('7d_fable');
                             const overage = latest.windows.find(
                               (w) => w.window === 'overage',
                             );
@@ -1331,6 +1351,11 @@ function DetailView({
                           );
                           if (opus && opus.state !== 'missing')
                             windows.push('7d_opus');
+                          const fable = latest.windows.find(
+                            (w) => w.window === '7d_fable',
+                          );
+                          if (fable && fable.state !== 'missing')
+                            windows.push('7d_fable');
                           const overage = latest.windows.find(
                             (w) => w.window === 'overage',
                           );
@@ -1386,7 +1411,16 @@ function DetailView({
               return (
                 <div className="space-y-4">
                   <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
-                    {(['5h', '7d', '7d_sonnet', '7d_opus', 'overage'] as const)
+                    {(
+                      [
+                        '5h',
+                        '7d',
+                        '7d_sonnet',
+                        '7d_opus',
+                        '7d_fable',
+                        'overage',
+                      ] as const
+                    )
                       .map((windowName) =>
                         latest.windows.find(
                           (snap) => snap.window === windowName,

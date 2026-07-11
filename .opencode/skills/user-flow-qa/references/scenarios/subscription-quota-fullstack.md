@@ -44,8 +44,8 @@ Alternative (no full instance): mutate `$TDB` with §2 SQL, then run point-in-ti
 
 ```
 Ingestion (3 origins):
-  (a) periodic OAuth usage poller   -> source = "api"
-  (b) proxy response headers (live) -> source = "header"
+  (a) periodic OAuth usage poller   -> source = "api" (ingests active `limits[]` entries where `kind = "weekly_scoped"`, model display name is "Fable", and `is_active = true`; inactive or non-Fable scoped limits are ignored)
+  (b) proxy response headers (live) -> source = "header" (parses unified `7d_oi` headers)
   (c) admin POST /admin/v1/upstreams/{id}/warmup/fire-now -> real warmup, parses headers  (crates/cc-lb-admin/src/v1/upstreams.rs:101-103, 808-830)
         │  SubscriptionQuotaObservationRecord
         ▼
@@ -72,9 +72,9 @@ Write contract: `latest_v1` upserts on every accepted observation **only if** `e
 - Semantic fields (a change here ⇒ new checkpoint): `utilization, status, resets_at_unix_secs, surpassed_threshold, fallback_percentage, fallback_available, overage_in_use, overage_period_monthly_utilization, upgrade_paths, disabled_reason, extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits`.
 - Excluded/evidence fields (change here ⇒ NO new checkpoint, latest freshness only): `sample_id, changed_at/observed_at_unix_millis, ingested_at_unix_millis, representative_claim, sample_kind`.
 
-Schemas: `upstream_subscription_quota_latest_v1` PK `(upstream_id,window,source)`; `upstream_subscription_quota_checkpoints_v1` PK `(upstream_id,window,source,changed_at_unix_millis,sample_id)` + `semantic_fingerprint BLOB(32)`. Full column list: migrations `0019_subscription_quota_unified_signals.sql` (latest) and `0044_subscription_quota_checkpoints.sql` (checkpoints). `window ∈ (5h,7d,7d_sonnet,7d_opus,overage,unified)`, `source ∈ (header,api)`, `status ∈ (allowed,allowed_warning,rejected)`, `utilization ∈ [0,1]`.
+Schemas: `upstream_subscription_quota_latest_v1` PK `(upstream_id,window,source)`; `upstream_subscription_quota_checkpoints_v1` PK `(upstream_id,window,source,changed_at_unix_millis,sample_id)` + `semantic_fingerprint BLOB(32)`. Full column list: migrations `0019_subscription_quota_unified_signals.sql` (latest), `0044_subscription_quota_checkpoints.sql` (checkpoints), and SQLite 0051 / Postgres 0081 (Fable latest/checkpoint constraints). `window ∈ (5h,7d,7d_sonnet,7d_opus,7d_fable,overage,unified)`, `source ∈ (header,api)`, `status ∈ (allowed,allowed_warning,rejected)`, `utilization ∈ [0,1]`.
 
-**Template T (one observation)** — `UID`, `W=5h`, `S=api`, `T_MS`=observed millis, `RS`=resets secs, `U`=utilization, `FP`=unique 32-byte hex:
+**Template T (one observation)** — `UID`, `W=5h` (or `7d_fable`), `S=api`, `T_MS`=observed millis, `RS`=resets secs, `U`=utilization, `FP`=unique 32-byte hex:
 ```sql
 INSERT INTO upstream_subscription_quota_latest_v1
  (upstream_id,window,source,sample_kind,observed_at_unix_millis,sample_id,utilization,status,
@@ -131,6 +131,14 @@ Programmatic seed alt: `UpstreamSubscriptionQuotaStore::put_subscription_quota[_
 
 ### 3.4 Analysis/deficit values — given intervals, assert: `actual_account_burn` = median slope of valid utilization intervals; `proxy_projected_burn.effective_limit_tokens_estimate` = median(tokens/Δutilization); `eta_to_limit_secs` = (1−util)/slope; `deficit.shortfall_tokens` = projected_window − effective_limit; intervals never cross a reset (split_reset_cycles).
 
+### 3.5 Fable 5 model-scoped weekly quota (documented, not executed)
+- Seed a `7d_fable` checkpoint for an upstream (e.g., `bh322yoo-max` or `qa-oauth`) with utilization 0.28, status `allowed`, resets_at 1800000004.
+- Verify storage: `sqlite3 -readonly` query on `upstream_subscription_quota_checkpoints_v1` shows the row with window `7d_fable`.
+- Verify API: `GET /admin/v1/subscription-quotas/latest` returns `7d_fable` window with utilization 0.28, status `allowed`, resets_at 1800000004.
+- Verify series: `GET /admin/v1/subscription-quotas/series?windows=7d_fable` returns the series with the correct utilization.
+- Verify admin UI: detail page shows the "7d (Fable)" snapshot card with 28% utilization, pink color, and "live · API · Ns ago" observed-at.
+- Note: latest is cache-served and SQL mutation requires startup replay/writer path, reusing the document's existing caveat.
+
 ## 4. Part B — State-transition QA (~50%)
 
 Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoint) / UI. Wait the poll interval before asserting UI: latest ≈5s, series ≈30s, analysis ≈120s, aggregate/pool-history ≈30s.
@@ -145,13 +153,27 @@ Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoin
 - **T8 cleanup/backfill (M7)** — after `--drop-raw-observations`: live writer keeps persisting latest+checkpoints (raw insert skipped); Quota History still renders; re-run idempotent (marker fast-path). (Regression fixes: 9c0cbaa8 writer, e18fb76b chart clip.)
 - **T9 polling auto-refresh** — after ANY mutation, the DOM value changes on its own within the interval (no reload). Assert by snapshotting the same element before/after the wait.
 - **T10 routing reaction (M1→100% / M3 reset / M4 stale)** — an upstream at 100%/rejected or stale becomes ineligible/deprioritized for selection; after reset it becomes eligible again. Observe via proxy routing behavior or selected-upstream metrics/logs; config `subscription_quota_routing_max_staleness_secs`.
+- **T11 Fable 5 model-scoped weekly quota (documented, not executed)** —
+  - **INITIAL**: Upstream has `7d_fable` at 28% (utilization = 0.28, status = `allowed`, resets_at = 1800000004).
+  - **MUTATION**:
+    1. Drive utilization to 100% / rejected: Ingest an observation with utilization = 1.0, status = `rejected`, resets_at = 1800000004.
+    2. Drive reset: Ingest an observation with utilization = 0.0, status = `allowed`, resets_at = 1800000004 + 604800.
+  - **EXPECTED**:
+    - Storage: Checkpoints table gains new rows for 100% and reset.
+    - API: `/latest` and `/series` reflect the transitions.
+    - Admin UI: Snapshot card and Quota History chart update live.
+    - Routing: When `7d_fable` is at 100%/rejected, requests for model `claude-fable-5` are blocked/deprioritized on this upstream, while control requests for `claude-3-5-sonnet`, `claude-3-opus`, `claude-3-haiku`, or unknown models remain completely unaffected (they only look at `5h` and `7d` windows). After reset, `claude-fable-5` requests are allowed again.
 
 ## 5. Automated-test coverage map (leverage; focus manual QA on gaps)
-- Endpoint contracts + series windowing/anchor/no-zeroes: `crates/cc-lb-admin/tests/subscription_quotas.rs` (snapshot + some multi-observation transition).
-- Checkpoint dedup/fingerprint + range/anchor: `crates/cc-lb-storage-api/tests/subscription_quota_checkpoint.rs`, `crates/cc-lb-storage-conformance/tests/scenarios/upstream_subscription_quota_store.rs` (transition-heavy).
+- Endpoint contracts + series windowing/anchor/no-zeroes: `crates/cc-lb-admin/tests/subscription_quotas.rs` (snapshot + some multi-observation transition, including Fable tests).
+- Checkpoint dedup/fingerprint + range/anchor: `crates/cc-lb-storage-api/tests/subscription_quota_checkpoint.rs`, `crates/cc-lb-storage-conformance/tests/scenarios/upstream_subscription_quota_store.rs` (transition-heavy, including Fable storage conformance).
 - Cleanup/backfill idempotency + writer-continues-after-drop: `crates/cc-lb-server/tests/subscription_quota_checkpoint_{cleanup,backfill,writer}.rs`.
 - Storage roundtrips: `crates/cc-lb-storage-sqlite/tests/storage_roundtrips_sqlite.rs` (+ postgres).
 - Frontend chart transform + carry-forward/no-zeroes: `crates/cc-lb-admin/web/src/components/upstreams/buildQuotaChartData.test.ts`; card/legend: ApiUsageCard/QuotaObservedAt tests.
+- OAuth ingestion from active limits: `crates/cc-lb-server/src/scheduler_dispatch/usage/tests.rs`.
+- Unified header parsing: `crates/cc-lb-engine/src/rate_limit_headers.rs`.
+- Fable routing preference: `crates/cc-lb-engine/src/builtin_filters/subscription_preference/tests.rs`.
+- Proxy path E2E: `crates/cc-lb-server/tests/claude_fable_5_proxy_path.rs`.
 - **Gaps → manual only**: UI live auto-refresh (T9), UI status/color transitions (T3/T6), reset marker rendering (T4), routing reaction (T10). These MUST be executed by hand per §4.
 
 ## 6. Execution log / verdict
@@ -164,6 +186,8 @@ Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoin
 | **T4 window reset** | storage→API | **PASS** | /series `markers` gained `kind:"reset"` at mutation bucket; last bucket → 0.05 |
 | **T9 UI live auto-refresh** | UI | **VERIFIED** | detail page observed-at + Quota History chart updated live WITHOUT reload (driven by real writer path) |
 | T2,T3,T5,T6,T7,T8,T10 | storage/API/UI | documented, not executed | §4 specs; T10 routing flagged for hands-on |
+| §3.5 Fable point-in-time | storage/API/UI | documented, not executed | Fable 5 model-scoped weekly quota point-in-time case |
+| **T11 Fable transition** | storage/API/UI | documented, not executed | Fable 5 model-scoped weekly quota state-transition case |
 
-PASS = every executed case meets Expected. Part B (T1–T10) carries equal weight to Part A.
+PASS = every executed case meets Expected. Part B (T1–T11) carries equal weight to Part A.
 Representative subset (T1/T4/T9) executed & verified on 2026-07-09 against an isolated `.backup` copy of prod; prod left untouched.

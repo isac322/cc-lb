@@ -700,6 +700,7 @@ export type SubscriptionQuotaWindow =
   | '7d'
   | '7d_sonnet'
   | '7d_opus'
+  | '7d_fable'
   | 'overage'
   | 'unified';
 
@@ -708,6 +709,7 @@ export const WINDOW_LABELS: Record<SubscriptionQuotaWindow, string> = {
   '7d': '7d',
   '7d_sonnet': '7d (Sonnet)',
   '7d_opus': '7d (Opus)',
+  '7d_fable': '7d (Fable)',
   overage: 'Extra Usage',
   unified: 'Unified',
 };

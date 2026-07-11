@@ -362,6 +362,24 @@ mod cache_score_tests {
     }
 
     #[test]
+    fn anthropic_family_cache_pricing_fallback_covers_fable_5() {
+        let pricing = anthropic_family_cache_pricing_summary("claude-fable-5")
+            .expect("fable family fallback exists");
+
+        assert_eq!(pricing.status, "known");
+        assert_eq!(pricing.input_micros_per_million, Some(10_000_000));
+        assert_eq!(
+            pricing.cache_creation_5m_micros_per_million,
+            Some(12_500_000)
+        );
+        assert_eq!(
+            pricing.cache_creation_1h_micros_per_million,
+            Some(20_000_000)
+        );
+        assert_eq!(pricing.cache_read_micros_per_million, Some(1_000_000));
+    }
+
+    #[test]
     fn anthropic_family_cache_pricing_fallback_leaves_non_claude_unknown() {
         assert!(anthropic_family_cache_pricing_summary("gpt-5.5").is_none());
     }
@@ -458,7 +476,9 @@ fn anthropic_family_cache_pricing_summary(model: &str) -> Option<CachePricingSum
 }
 
 fn anthropic_family_input_micros_per_million(model: &str) -> Option<u64> {
-    if model.starts_with("claude-opus") {
+    if model.starts_with("claude-fable") {
+        Some(10_000_000)
+    } else if model.starts_with("claude-opus") {
         Some(15_000_000)
     } else if model.starts_with("claude-sonnet") {
         Some(3_000_000)

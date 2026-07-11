@@ -199,6 +199,8 @@ pub struct CcLbOAuthUsageResponse {
     #[serde(rename = "7d_opus", skip_serializing_if = "Option::is_none")]
     pub seven_day_opus: Option<CcLbOAuthWindowUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Vec<CcLbOAuthUsageLimit>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_usage: Option<CcLbOAuthExtraUsage>,
 }
 
@@ -213,6 +215,25 @@ pub struct CcLbOAuthExtraUsage {
     pub enabled: Option<bool>,
     pub monthly_limit: Option<f64>,
     pub used_credits: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CcLbOAuthUsageLimit {
+    pub kind: String,
+    pub percent: Option<f64>,
+    pub resets_at: u64,
+    pub scope: CcLbOAuthUsageLimitScope,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CcLbOAuthUsageLimitScope {
+    pub model: CcLbOAuthUsageLimitModel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CcLbOAuthUsageLimitModel {
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -634,6 +655,7 @@ pub async fn build_cc_lb_oauth_usage_response(
             SubscriptionQuotaWindow::SevenDay,
             SubscriptionQuotaWindow::SevenDaySonnet,
             SubscriptionQuotaWindow::SevenDayOpus,
+            SubscriptionQuotaWindow::SevenDayFable,
         ],
         SubscriptionQuotaSourceMerge::Merged,
         dynamic_view
@@ -1452,6 +1474,7 @@ fn oauth_usage_from_aggregate(aggregate: &AggregateResponse) -> CcLbOAuthUsageRe
         seven_day: None,
         seven_day_sonnet: None,
         seven_day_opus: None,
+        limits: None,
         extra_usage: None,
     };
     for window in &aggregate.windows {
@@ -1464,6 +1487,19 @@ fn oauth_usage_from_aggregate(aggregate: &AggregateResponse) -> CcLbOAuthUsageRe
             "7d" => response.seven_day = Some(usage),
             "7d_sonnet" => response.seven_day_sonnet = Some(usage),
             "7d_opus" => response.seven_day_opus = Some(usage),
+            "7d_fable" => {
+                response.limits = Some(vec![CcLbOAuthUsageLimit {
+                    kind: "weekly_scoped".to_owned(),
+                    percent: window.utilization_percent,
+                    resets_at: window.cc_window_reset_unix_secs,
+                    scope: CcLbOAuthUsageLimitScope {
+                        model: CcLbOAuthUsageLimitModel {
+                            display_name: "Fable".to_owned(),
+                        },
+                    },
+                    is_active: true,
+                }]);
+            }
             _ => {}
         }
     }
@@ -1569,7 +1605,8 @@ fn window_secs(window: SubscriptionQuotaWindow) -> Option<u64> {
         SubscriptionQuotaWindow::FiveHour => Some(5 * 3_600),
         SubscriptionQuotaWindow::SevenDay
         | SubscriptionQuotaWindow::SevenDaySonnet
-        | SubscriptionQuotaWindow::SevenDayOpus => Some(7 * 24 * 3_600),
+        | SubscriptionQuotaWindow::SevenDayOpus
+        | SubscriptionQuotaWindow::SevenDayFable => Some(7 * 24 * 3_600),
         SubscriptionQuotaWindow::Overage | SubscriptionQuotaWindow::Unified => None,
     }
 }
@@ -1836,7 +1873,8 @@ fn deficit_for_window(
         SubscriptionQuotaWindow::FiveHour => 5 * 3_600,
         SubscriptionQuotaWindow::SevenDay
         | SubscriptionQuotaWindow::SevenDaySonnet
-        | SubscriptionQuotaWindow::SevenDayOpus => 7 * 24 * 3_600,
+        | SubscriptionQuotaWindow::SevenDayOpus
+        | SubscriptionQuotaWindow::SevenDayFable => 7 * 24 * 3_600,
         SubscriptionQuotaWindow::Overage | SubscriptionQuotaWindow::Unified => return None,
     };
     let proxy_tokens_per_second = proxy_burn.proxy_tokens_per_second?;
@@ -2596,18 +2634,36 @@ mod tests {
                 aggregate_window("7d", 604_800, 40.0),
                 aggregate_window("7d_sonnet", 604_800, 30.0),
                 aggregate_window("7d_opus", 604_800, 10.0),
+                aggregate_window("7d_fable", 604_800, 28.0),
             ],
             caveats: vec!["admin only".to_owned()],
         };
 
-        let value = serde_json::to_value(oauth_usage_from_aggregate(&aggregate)).unwrap();
+        let mut response = oauth_usage_from_aggregate(&aggregate);
+        response.extra_usage = Some(CcLbOAuthExtraUsage {
+            enabled: Some(true),
+            monthly_limit: Some(500.0),
+            used_credits: Some(125.0),
+        });
+        let value = serde_json::to_value(response).unwrap();
 
         assert_eq!(value["5h"]["utilization"], 25.0);
         assert_eq!(value["5h"]["resets_at"], 1_800);
         assert_eq!(value["7d"]["utilization"], 40.0);
         assert_eq!(value["7d_sonnet"]["utilization"], 30.0);
         assert_eq!(value["7d_opus"]["utilization"], 10.0);
+        assert_eq!(value["extra_usage"]["enabled"], true);
+        assert_eq!(value["extra_usage"]["monthly_limit"], 500.0);
+        assert_eq!(value["extra_usage"]["used_credits"], 125.0);
+        let limits = value["limits"].as_array().expect("limits are returned");
+        assert_eq!(limits.len(), 1);
+        assert_eq!(limits[0]["kind"], "weekly_scoped");
+        assert_eq!(limits[0]["percent"], 28.0);
+        assert_eq!(limits[0]["resets_at"], 604_800);
+        assert_eq!(limits[0]["scope"]["model"]["display_name"], "Fable");
+        assert_eq!(limits[0]["is_active"], true);
         assert!(value.get("five_hour").is_none());
+        assert!(value.get("seven_day_fable").is_none());
         assert!(value.get("windows").is_none());
         assert!(value.get("caveats").is_none());
     }

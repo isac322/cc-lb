@@ -28,7 +28,7 @@ the axis back to the anchor, so every range (1h/6h/24h/7d) rendered the same spa
 - Direct API check (no browser) for a given upstream `<UID>`:
   ```
   curl -s -H "Authorization: Bearer $TOKEN" \
-    "http://127.0.0.1:52252/admin/v1/subscription-quotas/series?upstream_ids=<UID>&windows=5h,7d,7d_sonnet,7d_opus,overage&source=merged&since_unix_secs=<S>&until_unix_secs=<U>&bucket_secs=<B>"
+    "http://127.0.0.1:52252/admin/v1/subscription-quotas/series?upstream_ids=<UID>&windows=5h,7d,7d_sonnet,7d_opus,7d_fable,overage&source=merged&since_unix_secs=<S>&until_unix_secs=<U>&bucket_secs=<B>"
   ```
   Range→(offsetSecs, bucketSecs): 1h→(3600,60) 6h→(21600,60) 24h→(86400,300) 7d→(604800,1800).
 
@@ -70,17 +70,20 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
   - No x-axis label older than the selected range (pre-fix showed ~16 days e.g. `6/23…7/9`).
   - Line is continuous across the visible span (left-anchor value carried to left edge);
     no fabricated 0% leading segment.
+  - When Fable data exists, the pink `7d_fable` line is rendered on the chart, and the legend includes "7d (Fable)" with pink color.
 - Cross-check (API): the `series` payloads for 1h vs 6h may still be equal (backend returns
   anchor→until fill by design — see ADR 0007); the **frontend clip** is what must differ.
   So verdict is visual/x-domain, not payload bytes.
 
 ### TC-2 — Detail snapshot cards (per-window)
-- Surface: detail → grid of window cards (5h, 7d, 7d_sonnet, 7d_opus, overage).
+- Surface: detail → grid of window cards (5h, 7d, 7d_sonnet, 7d_opus, 7d_fable, overage).
 - Initial: OAuth upstream selected.
 - Steps: read each card.
 - Expected: each active window shows utilization %, a meter bar matching the %, source
   (Header/API/—), observed-at relative time, reset countdown or "not started", ETA/burn if
   present. `overage` card present only when overage billing enabled or monthly limit set.
+  `7d_fable` card is rendered conditionally only when Fable data exists (state is not missing).
+  When rendered, the `7d_fable` card displays "7d (Fable)" with pink color and correct utilization.
   Values agree with `/subscription-quotas/latest` for that upstream.
 
 ### TC-3 — Detail quota deficit + analysis caveats
@@ -105,7 +108,7 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
 
 ### TC-6 — Upstreams sidebar mini quota meters
 - Surface: upstreams list; OAuth rows.
-- Expected: mini meter bars for active windows (5h, 7d, +overage when enabled); state dot
+- Expected: mini meter bars for active windows (5h, 7d, 7d_fable [only when data exists], +overage when enabled); state dot
   green(fresh)/amber(stale) with hint (state/source/observed); % text; overage utilization
   computed from `extra_usage_used_credits / extra_usage_monthly_limit` when `utilization` null.
   Values agree with `latest`.
@@ -120,6 +123,22 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
 - Expected: renders relative observed time where snapshots appear; renders `—` when
   `observed_at_unix_millis` is null.
 
+### TC-9 — Fable 5 Quota Transition (Desktop & Mobile) (documented, not yet executed)
+- Surface: Upstream detail page → "Subscription Quota" section.
+- Initial: OAuth upstream selected, no Fable data exists yet.
+- Steps:
+  1. Open the upstream detail page on desktop (viewport 1280x800) and mobile (viewport 375x667).
+  2. Take a screenshot of the "Subscription Quota" section before any Fable data is seeded.
+  3. Seed/mutate a `7d_fable` checkpoint (e.g., 28% utilization).
+  4. Wait for the poll interval (or trigger a reload/restart if testing `/latest` cache-served behavior).
+  5. Observe the transition on both desktop and mobile viewports.
+- Expected:
+  - Before: The "7d (Fable)" card is completely hidden (conditional rendering when data is missing). The Quota History chart does not show the Fable line or legend item.
+  - After:
+    - On Desktop: The "7d (Fable)" card appears in the grid with 28% utilization, pink color, and correct observed-at text. The Quota History chart adds a pink line for `7d_fable` and a corresponding legend item.
+    - On Mobile: The layout adapts gracefully (cards stack or wrap without clipping or horizontal overflow). The mini meters in the sidebar (if visible) or the detail cards are fully readable.
+    - The transition occurs smoothly without layout shifts or broken elements.
+
 ## 3. Verdict table (fill on execution)
 
 | TC | Surface | Result | Evidence |
@@ -132,7 +151,20 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
 | 6  | Sidebar mini meters | **PASS** | /upstreams snapshot: per-window meters render (bh322yoo-max 5h 59% / 7d 72%, etc.) |
 | 7  | ApiUsageCard | N/A | non-OAuth surface, separate usage endpoint, code unchanged by fix |
 | 8  | QuotaObservedAt | **PASS** | relative observed-at "16초 전" rendered in TC-2 card; unit-tested |
+| 9  | Fable 5 Quota Transition | documented, not executed | TC-9 specs; Fable 5 model-scoped weekly quota transition case |
 
 PASS = every executed TC meets Expected; the fix's target (TC-1) is the gating case.
 
 Verdict: **PASS**. Fix isolated to the detail Quota History `<XAxis allowDataOverflow>`; gating TC-1 proven fixed in a real browser (agent-browser, live `:52252`, BuildID fb535fba), key quota surfaces regression-clean. Evidence PNGs in `/tmp/{post_*,ov_post_*}.png`.
+
+## 4. Automated-test coverage map
+
+- Endpoint contracts + series windowing/anchor/no-zeroes: `crates/cc-lb-admin/tests/subscription_quotas.rs` (snapshot + some multi-observation transition, including Fable tests).
+- Checkpoint dedup/fingerprint + range/anchor: `crates/cc-lb-storage-api/tests/subscription_quota_checkpoint.rs`, `crates/cc-lb-storage-conformance/tests/scenarios/upstream_subscription_quota_store.rs` (transition-heavy, including Fable storage conformance).
+- Cleanup/backfill idempotency + writer-continues-after-drop: `crates/cc-lb-server/tests/subscription_quota_checkpoint_{cleanup,backfill,writer}.rs`.
+- Storage roundtrips: `crates/cc-lb-storage-sqlite/tests/storage_roundtrips_sqlite.rs` (+ postgres).
+- Frontend chart transform + carry-forward/no-zeroes: `crates/cc-lb-admin/web/src/components/upstreams/buildQuotaChartData.test.ts`; card/legend: ApiUsageCard/QuotaObservedAt tests.
+- OAuth ingestion from active limits: `crates/cc-lb-server/src/scheduler_dispatch/usage/tests.rs`.
+- Unified header parsing: `crates/cc-lb-engine/src/rate_limit_headers.rs`.
+- Fable routing preference: `crates/cc-lb-engine/src/builtin_filters/subscription_preference/tests.rs`.
+- Proxy path E2E: `crates/cc-lb-server/tests/claude_fable_5_proxy_path.rs`.
