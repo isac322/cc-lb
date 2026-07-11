@@ -900,6 +900,7 @@ dependencies = [
  "cc-lb-observability",
  "cc-lb-plugin-api",
  "cc-lb-pricing",
+ "cc-lb-quota",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
  "cc-lb-upstream",
@@ -1095,6 +1096,17 @@ dependencies = [
  "http-body-util",
  "proptest",
  "tokio",
+]
+
+[[package]]
+name = "cc-lb-quota"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-domain",
+ "cc-lb-storage-api",
+ "http",
+ "serde",
+ "uuid",
 ]
 
 [[package]]

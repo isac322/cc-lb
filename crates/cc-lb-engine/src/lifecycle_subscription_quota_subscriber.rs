@@ -16,12 +16,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use cc_lb_contract::{EventId, HeaderSnapshot, LifecycleEvent};
+use cc_lb_quota::build_subscription_quota_samples;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::lifecycle::{SubscriptionQuotaCacheLike, build_subscription_quota_samples};
+use crate::lifecycle::SubscriptionQuotaCacheLike;
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 
 pub const DEFAULT_SUBSCRIPTION_QUOTA_MAP_CAP: usize = 4096;

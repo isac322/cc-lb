@@ -15,6 +15,7 @@ cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-control = { path = "../cc-lb-control" }
 cc-lb-domain.workspace = true
+cc-lb-quota.workspace = true
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 cc-lb-upstream.workspace = true
 globset.workspace = true

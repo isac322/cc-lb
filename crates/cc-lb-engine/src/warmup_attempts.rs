@@ -1,3 +1,4 @@
+use cc_lb_quota::rate_limit_headers::UnifiedQuotaObservation;
 use cc_lb_storage_api::upstream::UpstreamRecord;
 use cc_lb_storage_api::{
     Storage, SubscriptionQuotaWindow, WarmupAttemptOutcome, WarmupAttemptRecord,
@@ -30,7 +31,7 @@ pub struct WarmupAttemptExecution<'a> {
 pub enum WarmupAttemptExecutionResult<'a> {
     Response {
         status: StatusCode,
-        observations: &'a [crate::UnifiedQuotaObservation],
+        observations: &'a [UnifiedQuotaObservation],
         error_detail: Option<&'a str>,
     },
     TransientFailure {

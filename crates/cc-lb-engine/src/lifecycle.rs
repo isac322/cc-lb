@@ -18,8 +18,8 @@ use cc_lb_domain::{
 use cc_lb_plugin_api::{
     FilterError, FilterOutput, ObservabilityHook, ObserveEvent, RequestContext, RouterPlugin,
 };
+use cc_lb_quota::rate_limit_headers::parse_anthropic_rate_limit_headers;
 use cc_lb_storage_api::{
-    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
     UpstreamRateLimitObservationRecord, UpstreamRecord,
     types::{RequestCacheBreakpoint, RequestCacheBreakpointSource, StoredApiKeyRecord},
     upstream::UpstreamKind as StorageUpstreamKind,
@@ -56,9 +56,6 @@ use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::prompt_cache_simulator::{
     V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheBlockSource, analyze_v3_prompt_cache,
-};
-use crate::rate_limit_headers::{
-    parse_anthropic_rate_limit_headers, parse_anthropic_unified_headers,
 };
 use crate::request_timing::{
     REQUEST_STAGE_TIMINGS, RequestStageTimings, finalize_connection_reused_if_unset,
@@ -3576,38 +3573,7 @@ pub fn observe_rate_limits(
         .collect()
 }
 
-pub fn build_subscription_quota_samples(
-    headers: &HeaderMap,
-    upstream_id: Uuid,
-    observed_at_unix_millis: u64,
-) -> Vec<SubscriptionQuotaSample> {
-    parse_anthropic_unified_headers(headers)
-        .into_iter()
-        .map(|observation| SubscriptionQuotaSample {
-            upstream_id,
-            window: observation.window,
-            source: SubscriptionQuotaSource::Header,
-            sample_kind: SubscriptionQuotaSampleKind::Sample,
-            observed_at_unix_millis,
-            sample_id: Uuid::new_v4(),
-            utilization: observation.utilization,
-            status: observation.status,
-            resets_at_unix_secs: observation.resets_at_unix_secs,
-            surpassed_threshold: observation.surpassed_threshold,
-            representative_claim: observation.representative_claim,
-            fallback_percentage: observation.fallback_percentage,
-            fallback_available: observation.fallback_available,
-            overage_in_use: observation.overage_in_use,
-            overage_period_monthly_utilization: observation.overage_period_monthly_utilization,
-            upgrade_paths: observation.upgrade_paths,
-            disabled_reason: observation.disabled_reason,
-            extra_usage_enabled: None,
-            extra_usage_monthly_limit: None,
-            extra_usage_used_credits: None,
-            ingested_at_unix_millis: observed_at_unix_millis,
-        })
-        .collect()
-}
+pub use cc_lb_quota::build_subscription_quota_samples;
 
 struct FilterPipelineResult {
     candidates: Vec<UpstreamCandidate>,

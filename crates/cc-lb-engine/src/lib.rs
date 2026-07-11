@@ -68,11 +68,12 @@ pub mod metrics_labels;
 pub mod model_resolution;
 #[cfg(not(loom))]
 pub mod pg_notify_fanout;
-pub mod plan_capacity;
+#[doc(hidden)]
+pub use cc_lb_quota::plan_capacity;
 #[cfg(not(loom))]
 pub mod prompt_cache_simulator;
-#[allow(dead_code)]
-mod rate_limit_headers;
+#[doc(hidden)]
+pub use cc_lb_quota::rate_limit_headers;
 #[cfg(not(loom))]
 pub mod request_timing;
 #[cfg(not(loom))]
@@ -128,6 +129,12 @@ pub use cc_lb_control::{
 };
 #[cfg(not(loom))]
 pub use cc_lb_domain::ReplicaIdentity;
+pub use cc_lb_quota::rate_limit_headers::{
+    UnifiedQuotaObservation, clamp_utilization_fraction, parse_anthropic_unified_headers,
+    percent_to_utilization_fraction,
+};
+#[doc(hidden)]
+pub use cc_lb_quota::{build_subscription_quota_samples, unified_observation_to_sample};
 #[cfg(not(loom))]
 pub use cc_lb_upstream::ApiKeyAwareSignerFactory;
 #[cfg(not(loom))]
@@ -164,8 +171,7 @@ pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop}
 pub use lifecycle::{
     AuthLimitSubject, Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig,
     LimitCostEstimator, LimitSubjectProvider, ProxyError, RequestKind, UpstreamDispatch,
-    build_candidates, build_subscription_quota_samples, observe_rate_limits,
-    parse_request_cache_breakpoints,
+    build_candidates, observe_rate_limits, parse_request_cache_breakpoints,
 };
 pub use lifecycle_api_key_metrics_subscriber::{
     ApiKeyMetricsSubscriberHandle, spawn_lifecycle_api_key_metrics_subscriber,
@@ -218,10 +224,6 @@ pub use pg_notify_fanout::{
     DEFAULT_PG_NOTIFY_CHANNEL, PARTIAL_NOTIFY_MPSC_CAPACITY, PartialRetentionCache, PgListener,
     PgNotifier, PgNotifyFanout,
 };
-pub use rate_limit_headers::{
-    UnifiedQuotaObservation, clamp_utilization_fraction, parse_anthropic_unified_headers,
-    percent_to_utilization_fraction,
-};
 #[cfg(not(loom))]
 pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
 #[cfg(not(loom))]
@@ -239,7 +241,7 @@ pub use subscription_metadata_hook::{
 #[cfg(not(loom))]
 pub use subscription_quota_events::{
     SubscriptionQuotaEnqueueError, SubscriptionQuotaSink, SubscriptionQuotaWriterConfig,
-    start_subscription_quota_writer, unified_observation_to_sample,
+    start_subscription_quota_writer,
 };
 #[cfg(not(loom))]
 pub use terminal_observer::LifecycleContext;
