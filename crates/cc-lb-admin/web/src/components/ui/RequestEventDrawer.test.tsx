@@ -302,4 +302,58 @@ describe('RequestEventDrawer', () => {
     );
     expect(requestIdSpan.className).toContain('break-all');
   });
+
+  it('hides Tokens and Cost when the request used no tokens (zero, not just null)', () => {
+    const event = {
+      event_id: 'evt_no_tokens',
+      request_id: 'req_no_tokens',
+      ts: 1718553120,
+      ts_ms: 1718553120000,
+      status: 400,
+      duration_ms: 5,
+      error_code: 'upstream_4xx',
+      upstream_error_message: 'temperature: range: 0..1',
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+      _phase: 'final',
+    } satisfies RequestEventWithPhase;
+
+    render(
+      <RequestEventDrawer
+        event={event}
+        principalName={null}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.queryByRole('heading', { name: 'Tokens' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Cost' })).toBeNull();
+  });
+
+  it('shows Tokens and Cost when the request used tokens', () => {
+    const event = {
+      event_id: 'evt_tokens',
+      request_id: 'req_tokens',
+      ts: 1718553120,
+      ts_ms: 1718553120000,
+      status: 200,
+      duration_ms: 150,
+      input_tokens: 12,
+      output_tokens: 3,
+      _phase: 'final',
+    } satisfies RequestEventWithPhase;
+
+    render(
+      <RequestEventDrawer
+        event={event}
+        principalName={null}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole('heading', { name: 'Tokens' })).toBeDefined();
+    expect(screen.getByRole('heading', { name: 'Cost' })).toBeDefined();
+  });
 });
