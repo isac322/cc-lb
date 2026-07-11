@@ -2,7 +2,7 @@ import { Toggle as BaseToggle } from '@base-ui/react/toggle';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { AlertTriangle, Download, RefreshCw, X, Zap } from 'lucide-react';
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
-import { z } from 'zod';
+import * as z from 'zod';
 import { LiveTailFailureBanner } from '../components/LiveTailFailureBanner';
 import { type FilterOption, LogSelect } from '../components/ui/LogSelect';
 import { LogsPagination } from '../components/ui/LogsPagination';
