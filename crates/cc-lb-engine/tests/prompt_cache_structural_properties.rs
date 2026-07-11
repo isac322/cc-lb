@@ -6,6 +6,27 @@ use cc_lb_engine::prompt_cache_simulator::{V3PromptCacheBlockSource, analyze_v3_
 const CANONICAL_MODEL: &str = "claude-sonnet-4-5-20250929";
 
 #[test]
+fn v4_blake3_prefix_key_golden() {
+    let request = json!({
+        "model": CANONICAL_MODEL,
+        "system": [
+            {"type":"text","text":"stable system prefix"},
+            {"type":"text","text":"stable cache breakpoint","cache_control":{"type":"ephemeral","ttl":"1h"}}
+        ],
+        "messages": [{"role":"user","content":[{"type":"text","text":"tail"}]}]
+    });
+
+    let analysis = analyze_v3_prompt_cache(&request, canonical_model_id(CANONICAL_MODEL));
+    let breakpoint = analysis.breakpoints.first().expect("v4 breakpoint");
+
+    assert_eq!(breakpoint.block_index, 1);
+    assert_eq!(
+        breakpoint.prefix_key,
+        "2b2a6da458eca712951957290badc4e27115ba801f1115b7418af0214327aa26"
+    );
+}
+
+#[test]
 fn flatten_order_is_tools_then_system_then_messages() {
     let request = json!({
         "model": CANONICAL_MODEL,

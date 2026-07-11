@@ -4,6 +4,10 @@ use crate::tokenizer::PrefixTokenizer;
 
 pub const V3_TOKEN_ESTIMATE_SOURCE: &str = "local_tiktoken_v1";
 
+/// Anthropic's hard cap on explicit `cache_control` breakpoints; more is provider-invalid, so
+/// analysis is skipped (request forwarded as-is) before any per-breakpoint prefix tokenization.
+pub const MAX_EXPLICIT_BREAKPOINTS: usize = 4;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PromptCacheSimulatorKey([u8; 32]);
 
@@ -133,20 +137,31 @@ pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3Prompt
         PromptCacheSimulatorKey::seed(canonical_model),
         block_digests,
     );
-    let structural_breakpoints = blocks.iter().enumerate().filter_map(|(index, block)| {
-        block.explicit_ttl.as_ref()?;
-        let prefix_key = chain.prefix_key_hex(index)?;
-        Some(V3StructuralBreakpoint {
-            block_index: index as u64,
-            source: block.source,
-            path: block.path.clone(),
-            message_index: block.message_index,
-            ttl: block.explicit_ttl.clone(),
-            prefix_key,
-            lookback_prefixes: lookback_prefixes(&chain, index),
+    let structural_breakpoints = blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            block.explicit_ttl.as_ref()?;
+            let prefix_key = chain.prefix_key_hex(index)?;
+            Some(V3StructuralBreakpoint {
+                block_index: index as u64,
+                source: block.source,
+                path: block.path.clone(),
+                message_index: block.message_index,
+                ttl: block.explicit_ttl.clone(),
+                prefix_key,
+                lookback_prefixes: lookback_prefixes(&chain, index),
+            })
         })
-    });
+        .collect::<Vec<_>>();
+    if structural_breakpoints.len() > MAX_EXPLICIT_BREAKPOINTS {
+        return V3PromptCacheAnalysis {
+            blocks,
+            breakpoints: Vec::new(),
+        };
+    }
     let breakpoints = structural_breakpoints
+        .into_iter()
         .map(|breakpoint| V3PromptCacheBreakpoint {
             block_index: breakpoint.block_index,
             source: breakpoint.source,
@@ -521,7 +536,49 @@ mod tests {
     }
 
     #[test]
-    fn equal_bytes_128_blocks_does_not_scale() {
+    fn excessive_breakpoints_skip_analysis_without_tokenizing() {
+        let content = (0..5000)
+            .map(|index| {
+                json!({"type":"text","text":format!("block-{index}"),"cache_control":{"type":"ephemeral"}})
+            })
+            .collect::<Vec<_>>();
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role":"user","content": content}]
+        });
+
+        reset_tokenizer_call_count();
+        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+
+        assert!(analysis.breakpoints.is_empty());
+        assert_eq!(tokenizer_call_count(), 0);
+    }
+
+    #[test]
+    fn breakpoints_at_cap_are_analyzed() {
+        let content = (0..8)
+            .map(|index| {
+                if index < 4 {
+                    json!({"type":"text","text":format!("block-{index}"),"cache_control":{"type":"ephemeral"}})
+                } else {
+                    json!({"type":"text","text":format!("block-{index}")})
+                }
+            })
+            .collect::<Vec<_>>();
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role":"user","content": content}]
+        });
+
+        reset_tokenizer_call_count();
+        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+
+        assert_eq!(analysis.breakpoints.len(), 4);
+        assert_eq!(tokenizer_call_count(), 4);
+    }
+
+    #[test]
+    fn tokenizer_calls_are_bounded_across_block_counts() {
         let one_breakpoint = |block_count: usize| {
             let content = (0..block_count)
                 .map(|index| {
@@ -538,20 +595,14 @@ mod tests {
             })
         };
 
-        reset_tokenizer_call_count();
-        let _ =
-            analyze_v3_prompt_cache(&one_breakpoint(8), canonical_model_id("claude-sonnet-4-5"));
-        let calls_8 = tokenizer_call_count();
-
-        reset_tokenizer_call_count();
-        let _ = analyze_v3_prompt_cache(
-            &one_breakpoint(128),
-            canonical_model_id("claude-sonnet-4-5"),
-        );
-        let calls_128 = tokenizer_call_count();
-
-        assert_eq!(calls_8, 1);
-        assert_eq!(calls_128, 1);
+        for block_count in [1, 20, 128, 259] {
+            reset_tokenizer_call_count();
+            let _ = analyze_v3_prompt_cache(
+                &one_breakpoint(block_count),
+                canonical_model_id("claude-sonnet-4-5"),
+            );
+            assert_eq!(tokenizer_call_count(), 1, "block_count={block_count}");
+        }
     }
 
     #[test]

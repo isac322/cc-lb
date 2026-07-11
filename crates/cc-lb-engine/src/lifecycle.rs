@@ -261,10 +261,12 @@ fn build_cache_score(
         return None;
     }
 
-    let warm_entry_for = |prefix_hash: &str| {
+    let warm_entry_for = |breakpoint: &CacheBreakpoint, prefix_hash: &str| {
+        let eligible = eligible_ttls(breakpoint.requested_ttl);
         warm_entries
             .iter()
             .filter(|entry| entry.prefix_hash == prefix_hash)
+            .filter(|entry| eligible.contains(&entry.ttl_class))
             .max_by_key(|entry| entry.expires_at_unix_secs)
     };
     let longest_match = request_breakpoints
@@ -274,7 +276,8 @@ fn build_cache_score(
                 .lookback_prefixes
                 .iter()
                 .filter_map(move |prefix| {
-                    warm_entry_for(&prefix.prefix_hash).map(|entry| (breakpoint, prefix, entry))
+                    warm_entry_for(breakpoint, &prefix.prefix_hash)
+                        .map(|entry| (breakpoint, prefix, entry))
                 })
         })
         .max_by(|left, right| {
@@ -289,7 +292,7 @@ fn build_cache_score(
     }
 
     let matched_prefix_tokens = longest_match
-        .map(|(breakpoint, _, entry)| matched_read_tokens(breakpoint, entry))
+        .map(|(_, _, entry)| entry.estimated_prefix_tokens)
         .unwrap_or(0);
     let matched_index = longest_match.map(|(_, prefix, _)| prefix.content_block_index);
 
@@ -334,16 +337,6 @@ fn build_cache_score(
         token_estimate_source: longest_match
             .and_then(|(breakpoint, _, _)| breakpoint.token_estimate_source.clone()),
     })
-}
-
-fn matched_read_tokens(breakpoint: &CacheBreakpoint, entry: &WarmCacheEntry) -> u64 {
-    if entry.token_estimate_source == V3_TOKEN_ESTIMATE_SOURCE
-        && entry.hash_schema_version == HASH_SCHEMA_VERSION
-    {
-        entry.estimated_prefix_tokens
-    } else {
-        breakpoint.prefix_token_count
-    }
 }
 
 fn valid_ttl_order(breakpoints: &[CacheBreakpoint]) -> bool {
@@ -421,10 +414,7 @@ fn resolve_longest_warm_match(
 
 #[cfg(test)]
 mod cache_score_tests {
-    use super::{
-        HASH_SCHEMA_VERSION, V3_TOKEN_ESTIMATE_SOURCE, anthropic_family_cache_pricing_summary,
-        build_cache_score,
-    };
+    use super::{anthropic_family_cache_pricing_summary, build_cache_score};
     use cc_lb_plugin_api::types::{
         BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, TtlClass,
         WarmCacheEntry,
@@ -500,22 +490,6 @@ mod cache_score_tests {
         assert_eq!(score.predicted_cache_read_tokens, 100_000);
         assert_eq!(score.predicted_cache_creation_tokens_5m, 200_000);
         assert_eq!(score.matched_content_block_index, Some(0));
-    }
-
-    #[test]
-    fn build_cache_score_falls_back_to_breakpoint_count_on_incompatible_estimate_source() {
-        let mut entry = warm_entry("bp-1", TtlClass::Ephemeral5m, 999);
-        entry.token_estimate_source = "some_future_estimator".to_owned();
-        let score = build_cache_score(
-            &[
-                breakpoint(0, 100_000, TtlClass::Ephemeral1h),
-                breakpoint(1, 300_000, TtlClass::Ephemeral5m),
-            ],
-            std::slice::from_ref(&entry),
-        )
-        .expect("cache score for cacheable request");
-
-        assert_eq!(score.predicted_cache_read_tokens, 300_000);
     }
 
     #[test]
@@ -643,13 +617,28 @@ mod cache_score_tests {
     fn fold_same_index_ttl_upgrade() {
         let score = build_cache_score(
             &[breakpoint(2, 200_000, TtlClass::Ephemeral1h)],
-            &[warm_entry("unrelated-5m", TtlClass::Ephemeral5m, 200_000)],
+            &[warm_entry("bp-2", TtlClass::Ephemeral5m, 200_000)],
         )
         .expect("cache score for cacheable request");
 
         assert_eq!(score.predicted_cache_read_tokens, 0);
+        assert_eq!(score.matched_breakpoint_index, None);
         assert_eq!(score.predicted_cache_creation_tokens_1h, 200_000);
         assert_eq!(score.predicted_cache_creation_tokens_5m, 0);
+    }
+
+    #[test]
+    fn five_minute_request_matches_one_hour_entry_at_same_key() {
+        let score = build_cache_score(
+            &[breakpoint(2, 200_000, TtlClass::Ephemeral5m)],
+            &[warm_entry("bp-2", TtlClass::Ephemeral1h, 200_000)],
+        )
+        .expect("cache score for cacheable request");
+
+        assert_eq!(score.predicted_cache_read_tokens, 200_000);
+        assert_eq!(score.matched_breakpoint_index, Some(2));
+        assert_eq!(score.predicted_cache_creation_tokens_5m, 0);
+        assert_eq!(score.predicted_cache_creation_tokens_1h, 0);
     }
 
     #[test]
@@ -689,21 +678,17 @@ mod cache_score_tests {
         }
         let mut best: Option<(u32, u64)> = None;
         for breakpoint in breakpoints {
+            let eligible = super::eligible_ttls(breakpoint.requested_ttl);
             for prefix in &breakpoint.lookback_prefixes {
                 let Some(entry) = warm
                     .iter()
                     .filter(|entry| entry.prefix_hash == prefix.prefix_hash)
+                    .filter(|entry| eligible.contains(&entry.ttl_class))
                     .max_by_key(|entry| entry.expires_at_unix_secs)
                 else {
                     continue;
                 };
-                let tokens = if entry.token_estimate_source == V3_TOKEN_ESTIMATE_SOURCE
-                    && entry.hash_schema_version == HASH_SCHEMA_VERSION
-                {
-                    entry.estimated_prefix_tokens
-                } else {
-                    breakpoint.prefix_token_count
-                };
+                let tokens = entry.estimated_prefix_tokens;
                 if best.is_none_or(|(index, _)| prefix.content_block_index > index) {
                     best = Some((prefix.content_block_index, tokens));
                 }
