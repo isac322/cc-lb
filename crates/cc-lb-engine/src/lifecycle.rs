@@ -420,10 +420,15 @@ fn resolve_longest_warm_match(
 
 #[cfg(test)]
 mod cache_score_tests {
-    use super::{anthropic_family_cache_pricing_summary, build_cache_score};
-    use cc_lb_plugin_api::types::{
-        BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, TtlClass, WarmCacheEntry,
+    use super::{
+        HASH_SCHEMA_VERSION, V3_TOKEN_ESTIMATE_SOURCE, anthropic_family_cache_pricing_summary,
+        build_cache_score,
     };
+    use cc_lb_plugin_api::types::{
+        BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, TtlClass,
+        WarmCacheEntry,
+    };
+    use proptest::prelude::*;
 
     #[test]
     fn build_cache_score_counts_missing_breakpoints_as_incremental_segments_by_ttl() {
@@ -657,6 +662,154 @@ mod cache_score_tests {
         );
 
         assert!(score.is_none());
+    }
+
+    fn reference_cache_score(
+        breakpoints: &[CacheBreakpoint],
+        warm: &[WarmCacheEntry],
+    ) -> Option<(u64, u64, u64, Option<u32>)> {
+        if breakpoints.is_empty() {
+            return None;
+        }
+        let latest_1h = breakpoints
+            .iter()
+            .filter(|bp| bp.requested_ttl == TtlClass::Ephemeral1h)
+            .map(|bp| bp.block_index)
+            .max();
+        let earliest_5m = breakpoints
+            .iter()
+            .filter(|bp| bp.requested_ttl == TtlClass::Ephemeral5m)
+            .map(|bp| bp.block_index)
+            .min();
+        if let (Some(last_1h), Some(first_5m)) = (latest_1h, earliest_5m)
+            && last_1h >= first_5m
+        {
+            return None;
+        }
+        let mut best: Option<(u32, u64)> = None;
+        for breakpoint in breakpoints {
+            for prefix in &breakpoint.lookback_prefixes {
+                let Some(entry) = warm
+                    .iter()
+                    .filter(|entry| entry.prefix_hash == prefix.prefix_hash)
+                    .max_by_key(|entry| entry.expires_at_unix_secs)
+                else {
+                    continue;
+                };
+                let tokens = if entry.token_estimate_source == V3_TOKEN_ESTIMATE_SOURCE
+                    && entry.hash_schema_version == HASH_SCHEMA_VERSION
+                {
+                    entry.estimated_prefix_tokens
+                } else {
+                    breakpoint.prefix_token_count
+                };
+                if best.is_none_or(|(index, _)| prefix.content_block_index > index) {
+                    best = Some((prefix.content_block_index, tokens));
+                }
+            }
+        }
+        let matched_index = best.map(|(index, _)| index);
+        let matched_tokens = best.map_or(0, |(_, tokens)| tokens);
+        let deepest = |ttl: TtlClass| -> Option<u64> {
+            breakpoints
+                .iter()
+                .filter(|bp| bp.requested_ttl == ttl)
+                .filter(|bp| matched_index.is_none_or(|index| bp.block_index > index))
+                .max_by_key(|bp| bp.block_index)
+                .map(|bp| bp.prefix_token_count)
+        };
+        let deepest_1h = deepest(TtlClass::Ephemeral1h);
+        let deepest_5m = deepest(TtlClass::Ephemeral5m);
+        let creation_1h = deepest_1h.map_or(0, |tokens| tokens.saturating_sub(matched_tokens));
+        let boundary = deepest_1h.unwrap_or(matched_tokens);
+        let creation_5m = deepest_5m.map_or(0, |tokens| tokens.saturating_sub(boundary));
+        Some((matched_tokens, creation_5m, creation_1h, matched_index))
+    }
+
+    fn lookback_from(index: u32) -> Vec<CacheLookbackPrefix> {
+        let start = index.saturating_sub(2);
+        (start..=index)
+            .rev()
+            .map(|position| CacheLookbackPrefix {
+                prefix_hash: format!("h{position}"),
+                content_block_index: position,
+                lookback_distance: index - position,
+            })
+            .collect()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn build_cache_score_matches_reference_oracle(
+            tokens in proptest::collection::vec(0u64..=500_000, 1..=5),
+            ttl_1h in proptest::collection::vec(any::<bool>(), 5),
+            warm_flags in proptest::collection::vec(any::<bool>(), 5),
+        ) {
+            let count = tokens.len();
+            let breakpoints: Vec<CacheBreakpoint> = (0..count)
+                .map(|position| {
+                    let index = u32::try_from(position).expect("small index");
+                    CacheBreakpoint {
+                        block_index: index,
+                        source: CacheBreakpointSource::Message,
+                        path: format!("messages.{index}.content"),
+                        message_index: Some(index),
+                        prefix_hash: format!("h{index}"),
+                        prefix_token_count: tokens[position],
+                        requested_ttl: if ttl_1h[position] {
+                            TtlClass::Ephemeral1h
+                        } else {
+                            TtlClass::Ephemeral5m
+                        },
+                        origin: BreakpointOrigin::Explicit,
+                        lookback_prefixes: lookback_from(index),
+                        token_estimate_source: Some("test".to_owned()),
+                    }
+                })
+                .collect();
+            let warm: Vec<WarmCacheEntry> = (0..count)
+                .filter(|&position| warm_flags[position])
+                .map(|position| {
+                    let index = u32::try_from(position).expect("small index");
+                    WarmCacheEntry {
+                        prefix_hash: format!("h{index}"),
+                        expires_at_unix_secs: 1_700_000_300 + u64::from(index),
+                        ttl_class: TtlClass::Ephemeral5m,
+                        last_observed_at_unix_secs: 1_700_000_000,
+                        content_block_index: index,
+                        estimated_prefix_tokens: tokens[position],
+                        token_estimate_source: "local_tiktoken_v1".to_owned(),
+                        hash_schema_version: 4,
+                    }
+                })
+                .collect();
+
+            let got = build_cache_score(&breakpoints, &warm);
+            let want = reference_cache_score(&breakpoints, &warm);
+            match (got, want) {
+                (None, None) => {}
+                (Some(score), Some((read, creation_5m, creation_1h, matched_index))) => {
+                    prop_assert_eq!(u64::from(score.predicted_cache_read_tokens), read);
+                    prop_assert_eq!(
+                        u64::from(score.predicted_cache_creation_tokens_5m),
+                        creation_5m
+                    );
+                    prop_assert_eq!(
+                        u64::from(score.predicted_cache_creation_tokens_1h),
+                        creation_1h
+                    );
+                    prop_assert_eq!(score.matched_content_block_index, matched_index);
+                }
+                (got, want) => prop_assert!(
+                    false,
+                    "eligibility mismatch: got_some={} want_some={}",
+                    got.is_some(),
+                    want.is_some()
+                ),
+            }
+        }
     }
 
     fn breakpoint(

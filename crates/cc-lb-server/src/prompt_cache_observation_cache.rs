@@ -904,6 +904,40 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn deep_entry_survives_beyond_recency_without_warm_set_cap() {
+        let cache = test_cache();
+        let upstream = Uuid::new_v4();
+        let now = base_now();
+        upsert(
+            &cache,
+            upstream,
+            "deep",
+            TtlClass::Ephemeral5m,
+            now + 3600,
+            now,
+        );
+        for index in 0u64..200 {
+            upsert(
+                &cache,
+                upstream,
+                &format!("recent-{index}"),
+                TtlClass::Ephemeral5m,
+                now + 3600,
+                now + 1 + index,
+            );
+        }
+        let hit = cache.lookup_warm_entry(
+            upstream,
+            MODEL,
+            "deep",
+            &[TtlClass::Ephemeral5m, TtlClass::Ephemeral1h],
+            now + 10,
+        );
+        assert!(hit.is_some());
+        assert_eq!(cache.map_len(), 201);
+    }
+
+    #[test]
     fn expiry_eviction_shrinks_map() {
         let cache = test_cache();
         let upstream = Uuid::new_v4();
