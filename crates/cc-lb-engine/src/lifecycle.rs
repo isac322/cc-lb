@@ -1994,6 +1994,7 @@ impl Lifecycle {
         };
 
         let dispatch_started = Instant::now();
+        let dispatch_unix_secs = unix_now_ms(&*self.clock) / 1000;
         let proxy_setup_ms = duration_to_ms(dispatch_started.saturating_duration_since(started));
         let mut attempt_timings = AttemptTimings::default();
         let mut internal_errors = pipeline_result.internal_errors.clone();
@@ -2172,6 +2173,8 @@ impl Lifecycle {
                 prompt_cache_observation_context,
                 observer.clone(),
                 keepalive_completion,
+                dispatch_started,
+                dispatch_unix_secs,
             )
             .await;
         Ok(response)
@@ -2275,6 +2278,8 @@ impl Lifecycle {
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
         observer: Option<LifecycleContext>,
         keepalive_completion: Option<crate::cache_keepalive::LifecycleKeepaliveContext>,
+        dispatch_started: Instant,
+        dispatch_unix_secs: u64,
     ) -> Response<Body> {
         let mut active_limit = active_limit;
         if active_limit
@@ -2293,6 +2298,8 @@ impl Lifecycle {
                 prompt_cache_observation_context,
                 observer,
                 keepalive_completion,
+                dispatch_started,
+                dispatch_unix_secs,
             );
             self.attach_limit_headers(&mut response, None);
             return response;
@@ -2443,7 +2450,7 @@ impl Lifecycle {
             let decode = decode_prompt_cache_observations_pure(
                 context,
                 PromptCacheUsage::from(&usage),
-                now_unix_secs,
+                response_start_unix_secs(dispatch_unix_secs, dispatch_started, None),
             );
             emit_prompt_cache_observations_produced(o, context, &decode, 0);
         }
@@ -2752,6 +2759,8 @@ impl Lifecycle {
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
         observer: Option<LifecycleContext>,
         keepalive_completion: Option<crate::cache_keepalive::LifecycleKeepaliveContext>,
+        dispatch_started: Instant,
+        dispatch_unix_secs: u64,
     ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
@@ -2924,7 +2933,11 @@ impl Lifecycle {
                                         && let Some(context) =
                                             prompt_cache_observation_context.as_ref()
                                     {
-                                        let now_unix_secs = context.cache.clock_now_unix_secs();
+                                        let now_unix_secs = response_start_unix_secs(
+                                            dispatch_unix_secs,
+                                            dispatch_started,
+                                            message_start_at,
+                                        );
                                         prompt_cache_decode =
                                             decode_prompt_cache_observations_pure(
                                                 context,
@@ -4218,6 +4231,18 @@ fn unix_now_ms(clock: &dyn Clock) -> u64 {
     unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
 }
 
+fn response_start_unix_secs(
+    dispatch_unix_secs: u64,
+    dispatch_started: Instant,
+    response_start_at: Option<Instant>,
+) -> u64 {
+    match response_start_at {
+        Some(at) => dispatch_unix_secs
+            .saturating_add(at.saturating_duration_since(dispatch_started).as_secs()),
+        None => dispatch_unix_secs,
+    }
+}
+
 fn duration_to_ms(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
@@ -5250,6 +5275,38 @@ mod tests {
 
         assert_eq!(hits, vec!["b1"]);
         assert_eq!(writes, vec!["b2", "b3"]);
+    }
+
+    #[test]
+    fn expiry_anchored_at_start_not_completion() {
+        let dispatch_started = Instant::now();
+        let dispatch_unix_secs = 1_000_u64;
+        let message_start_at = dispatch_started + Duration::from_secs(2);
+        let anchor =
+            response_start_unix_secs(dispatch_unix_secs, dispatch_started, Some(message_start_at));
+        assert_eq!(anchor, 1_002);
+
+        let grace = 60;
+        let expires = prompt_cache_observation_expires_at(anchor, TtlClass::Ephemeral5m, grace);
+        assert_eq!(expires, 1_002 + 300 - 60);
+
+        let completion_unix = dispatch_unix_secs + 62;
+        let completion_expires =
+            prompt_cache_observation_expires_at(completion_unix, TtlClass::Ephemeral5m, grace);
+        assert!(
+            expires < completion_expires,
+            "start anchor must not extend expiry by the generation duration"
+        );
+    }
+
+    #[test]
+    fn sse_without_message_start_falls_back_to_dispatch() {
+        let dispatch_started = Instant::now();
+        let dispatch_unix_secs = 5_000_u64;
+        assert_eq!(
+            response_start_unix_secs(dispatch_unix_secs, dispatch_started, None),
+            dispatch_unix_secs
+        );
     }
 
     #[test]
