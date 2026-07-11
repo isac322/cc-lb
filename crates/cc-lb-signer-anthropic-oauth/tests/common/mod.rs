@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
 use cc_lb_clock::{Clock, ClockHandle, SystemClock, TestClock, unix_secs};
-use cc_lb_plugin_api::{Principal, PrincipalKind, RequestContext, Upstream};
+use cc_lb_plugin_api::{Principal, PrincipalKind, Upstream};
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSigner, AnthropicOAuthSignerHttpParams, OAuthHttpClient, OAuthHttpError,
     OAuthTokenRequest, OAuthTokenResponse,
@@ -227,17 +227,13 @@ pub fn now_epoch_secs(clock: &dyn Clock) -> u64 {
 }
 
 pub fn shaped_request() -> ShapedRequest {
-    let ctx = RequestContext {
+    let ctx = DialectShapeContext {
         request_id: "req-1".to_owned(),
-        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(b"{}"),
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: String::new(),
-        cache_pricing: cc_lb_domain::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "alice".to_owned(),
@@ -246,7 +242,7 @@ pub fn shaped_request() -> ShapedRequest {
     };
     shape_request(
         &DirectDialect,
-        &ctx.dialect_shape_context(),
+        &ctx,
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )

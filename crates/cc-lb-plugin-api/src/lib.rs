@@ -26,10 +26,9 @@ pub use traits::ObservabilityHook;
 pub use types::{
     CachePricingSummary, CandidateUrgency, CredentialStrategy, GLOBAL_PRINCIPAL, InternalError,
     InternalErrorKind, InternalErrorStage, ObserveEvent, PluginManifest, PluginSlot, Principal,
-    PrincipalKind, PrincipalQuotas, RateLimitKind, RateLimitObservation, RequestContext,
-    RoutingTrace, SlotKey, SubscriptionPreferenceTrace, SubscriptionQuotaCandidateSnapshot,
-    SubscriptionQuotaDataState, SubscriptionTier, TerminalStrategy, Upstream, UpstreamCandidate,
-    UpstreamKind, default_pure,
+    PrincipalKind, PrincipalQuotas, RateLimitKind, RateLimitObservation, RoutingTrace, SlotKey,
+    SubscriptionPreferenceTrace, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
+    SubscriptionTier, TerminalStrategy, Upstream, UpstreamCandidate, UpstreamKind, default_pure,
 };
 
 #[doc(hidden)]

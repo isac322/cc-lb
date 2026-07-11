@@ -17,8 +17,8 @@ use cc_lb_engine::{
     LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
-    ObservabilityError, ObservabilityHook, ObserveEvent, Principal, PrincipalKind, RequestContext,
-    Upstream, UpstreamCandidate,
+    ObservabilityError, ObservabilityHook, ObserveEvent, Principal, PrincipalKind, Upstream,
+    UpstreamCandidate,
 };
 use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
@@ -420,17 +420,13 @@ pub async fn settle() {
 
 pub async fn signed_request(base_url: &str) -> SignedRequest {
     let upstream = Upstream::AnthropicDirect { base_url: None };
-    let ctx = RequestContext {
+    let ctx = DialectShapeContext {
         request_id: "test-request".to_owned(),
-        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: String::new(),
-        cache_pricing: cc_lb_domain::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "principal-test".to_owned(),
@@ -441,7 +437,7 @@ pub async fn signed_request(base_url: &str) -> SignedRequest {
         &PassthroughDialect {
             base_url: Url::parse(base_url).expect("test URL parses"),
         },
-        &ctx.dialect_shape_context(),
+        &ctx,
         &upstream,
         &principal,
     )

@@ -3,14 +3,11 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use bytes::Bytes;
-use http::{HeaderMap, Method, StatusCode};
+use http::StatusCode;
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use uuid::Uuid;
-
-use cc_lb_upstream::DialectShapeContext;
 
 #[doc(hidden)]
 pub use cc_lb_domain::{
@@ -83,54 +80,6 @@ impl SlotKey {
     /// Build a proxy-wide global slot key.
     pub fn global(plugin: impl Into<String>) -> Self {
         Self::new(GLOBAL_PRINCIPAL, plugin)
-    }
-}
-
-/// Parsed downstream request data passed into plugins.
-#[derive(Clone, Debug)]
-pub struct RequestContext {
-    /// Stable request identifier used for logs, audit rows, and upstream traceability.
-    pub request_id: String,
-    /// Session / thread identifier that stays constant across multiple requests
-    /// belonging to the same conversation. Populated at request parse time
-    /// from `x-claude-code-session-id` and friends. `None` for stateless
-    /// requests that do not carry a session header.
-    ///
-    /// Filters that need cache-affinity (e.g. subscription routing) MUST
-    /// prefer this over `request_id` as their per-session hash input so that
-    /// all requests belonging to the same conversation land on the same
-    /// upstream and reuse the Anthropic prompt cache.
-    pub thread_id: Option<String>,
-    /// Downstream request headers after hop-by-hop stripping.
-    pub downstream_headers: HeaderMap,
-    /// Downstream HTTP method.
-    pub method: Method,
-    /// Downstream request path, such as `/v1/messages`.
-    pub path: String,
-    /// Raw downstream query string without the leading `?`.
-    pub query: Option<String>,
-    /// Buffered request body bytes, required by SigV4 and other signing schemes.
-    pub body_bytes: Bytes,
-    /// Cache breakpoints extracted from the request for prompt cache optimization.
-    pub cache_breakpoints: Vec<CacheBreakpoint>,
-    /// Canonical model identifier resolved from the request.
-    pub canonical_model_id: String,
-    /// Pricing summary for the canonical model, loaded by the host from the
-    /// in-memory price catalog before router plugins run.
-    pub cache_pricing: CachePricingSummary,
-}
-
-impl RequestContext {
-    #[doc(hidden)]
-    pub fn dialect_shape_context(&self) -> DialectShapeContext {
-        DialectShapeContext {
-            request_id: self.request_id.clone(),
-            downstream_headers: self.downstream_headers.clone(),
-            method: self.method.clone(),
-            path: self.path.clone(),
-            query: self.query.clone(),
-            body_bytes: self.body_bytes.clone(),
-        }
     }
 }
 
@@ -494,58 +443,6 @@ mod tests {
     }
 
     #[test]
-    fn request_context_cache_fields_roundtrip() {
-        let ctx_empty = RequestContext {
-            request_id: "req-1".to_owned(),
-            thread_id: None,
-            downstream_headers: HeaderMap::new(),
-            method: Method::POST,
-            path: "/v1/messages".to_owned(),
-            query: None,
-            body_bytes: Bytes::new(),
-            cache_breakpoints: Vec::new(),
-            canonical_model_id: String::new(),
-            cache_pricing: CachePricingSummary::default(),
-        };
-        assert_eq!(ctx_empty.cache_breakpoints.len(), 0);
-        assert_eq!(ctx_empty.canonical_model_id, "");
-
-        let breakpoint = CacheBreakpoint {
-            block_index: 1,
-            source: CacheBreakpointSource::Message,
-            path: "messages.0.content.0".to_owned(),
-            message_index: Some(0),
-            prefix_hash: "hash123".to_owned(),
-            prefix_token_count: 150,
-            requested_ttl: TtlClass::Ephemeral1h,
-            origin: BreakpointOrigin::Explicit,
-            lookback_prefixes: vec![CacheLookbackPrefix {
-                prefix_hash: "hash123".to_owned(),
-                content_block_index: 1,
-                lookback_distance: 0,
-            }],
-            token_estimate_source: Some("local_tiktoken_v1".to_owned()),
-        };
-        let ctx_populated = RequestContext {
-            request_id: "req-2".to_owned(),
-            thread_id: None,
-            downstream_headers: HeaderMap::new(),
-            method: Method::POST,
-            path: "/v1/messages".to_owned(),
-            query: Some("param=value".to_owned()),
-            body_bytes: Bytes::from_static(b"test"),
-            cache_breakpoints: vec![breakpoint],
-            canonical_model_id: "claude-sonnet-4-5-20250929".to_owned(),
-            cache_pricing: CachePricingSummary::default(),
-        };
-        assert_eq!(ctx_populated.cache_breakpoints.len(), 1);
-        assert_eq!(
-            ctx_populated.canonical_model_id,
-            "claude-sonnet-4-5-20250929"
-        );
-    }
-
-    #[test]
     fn upstream_candidate_deserialize_without_cache_score_field() {
         let json = r#"{
             "upstream_id": "00000000-0000-0000-0000-000000000001",
@@ -558,24 +455,6 @@ mod tests {
         let candidate: UpstreamCandidate = serde_json::from_str(json).unwrap();
         assert!(candidate.cache_score.is_none());
         assert_eq!(candidate.name, "legacy-upstream");
-    }
-
-    #[test]
-    fn request_context_cache_breakpoints_default_on_missing_fields() {
-        let ctx = RequestContext {
-            request_id: "test".to_owned(),
-            thread_id: None,
-            downstream_headers: HeaderMap::new(),
-            method: Method::GET,
-            path: "/test".to_owned(),
-            query: None,
-            body_bytes: Bytes::new(),
-            cache_breakpoints: Vec::new(),
-            canonical_model_id: String::new(),
-            cache_pricing: CachePricingSummary::default(),
-        };
-        assert!(ctx.cache_breakpoints.is_empty());
-        assert!(ctx.canonical_model_id.is_empty());
     }
 
     #[test]

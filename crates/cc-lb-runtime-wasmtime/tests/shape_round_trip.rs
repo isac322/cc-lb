@@ -20,11 +20,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use cc_lb_plugin_api::{
-    CachePricingSummary, Principal, PrincipalKind, RequestContext, SlotKey, Upstream,
-};
+use cc_lb_plugin_api::{Principal, PrincipalKind, SlotKey, Upstream};
 use cc_lb_runtime_wasmtime::{WasmtimeRuntime, WasmtimeUpstreamDialect};
-use cc_lb_upstream::shape_request;
+use cc_lb_upstream::{DialectShapeContext, shape_request};
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 
 fn wasm_path() -> PathBuf {
@@ -52,7 +50,7 @@ fn load_wasm_or_skip() -> Option<Vec<u8>> {
     }
 }
 
-fn fixture_request() -> RequestContext {
+fn fixture_request() -> DialectShapeContext {
     let mut headers = HeaderMap::new();
     headers.insert(
         http::header::CONTENT_TYPE,
@@ -66,17 +64,13 @@ fn fixture_request() -> RequestContext {
         http::header::AUTHORIZATION,
         HeaderValue::from_static("Bearer secret"),
     );
-    RequestContext {
+    DialectShapeContext {
         request_id: "req-shape".to_owned(),
-        thread_id: None,
         downstream_headers: headers,
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: Some("stream=true".to_owned()),
         body_bytes: Bytes::from_static(b"{\"prompt\":\"hi\"}"),
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: "claude-fixture".to_owned(),
-        cache_pricing: CachePricingSummary::default(),
     }
 }
 
@@ -111,13 +105,7 @@ fn shape_passthrough_echoes_request() {
     let principal = fixture_principal();
     let upstream = fixture_upstream();
 
-    let shaped = shape_request(
-        &dialect,
-        &ctx.dialect_shape_context(),
-        &upstream,
-        &principal,
-    )
-    .expect("shape OK");
+    let shaped = shape_request(&dialect, &ctx, &upstream, &principal).expect("shape OK");
 
     assert_eq!(
         shaped.url().as_str(),

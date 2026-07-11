@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
-use cc_lb_plugin_api::{Principal, PrincipalKind, RequestContext, Upstream};
+use cc_lb_plugin_api::{Principal, PrincipalKind, Upstream};
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 use cc_lb_storage_api::{
     AnthropicApiKeyCredential, ApiKeyStore, AuditEntry, AuditStore, BackendKind, ConfigDraftState,
@@ -70,17 +70,13 @@ async fn sign_loads_api_key_from_storage_key() {
         .await
         .expect("seed real key");
 
-    let ctx = RequestContext {
+    let ctx = DialectShapeContext {
         request_id: "req-internal-key-storage-test".to_owned(),
-        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(b"{}"),
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: String::new(),
-        cache_pricing: cc_lb_domain::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "alice".to_owned(),
@@ -89,7 +85,7 @@ async fn sign_loads_api_key_from_storage_key() {
     };
     let shaped = shape_request(
         &DirectDialect,
-        &ctx.dialect_shape_context(),
+        &ctx,
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )

@@ -4,7 +4,7 @@
 //! trait surface to the rkyv wire types in `cc_lb_plugin_wire`. One
 //! request flows through three transforms:
 //!
-//! 1. `(RequestContext, Principal, [UpstreamCandidate]) -> wire FilterRequest`
+//! 1. `(RoutingContext, Principal, [UpstreamCandidate]) -> wire FilterRequest`
 //! 2. `rkyv::to_bytes -> WasmtimeRuntime::call_filter -> Vec<u8>`
 //! 3. `Vec<u8> -> AlignedVec -> rkyv::access -> deserialize -> FilterOutput`
 //!
@@ -177,7 +177,7 @@ fn host_to_wire_request(
     // rkyv's `InlineAsBox` serialise the body / headers / strings
     // in-place without a `.to_vec()` on the up-to-100-MiB body.
     // Intermediate `Vec`s exist only for values we cannot borrow from
-    // the caller's `RequestContext` / `Principal` (Uuid-to-str, JSON
+    // the caller's `RoutingContext` / `Principal` (Uuid-to-str, JSON
     // claim encoding, header name/value pairing).
     let principal_kind_str = principal_kind_to_wire(principal);
     let claim_bufs: Vec<(&str, Vec<u8>)> = principal

@@ -3,7 +3,7 @@ use std::process::Command;
 use std::{env, fs};
 
 use bytes::Bytes;
-use cc_lb_plugin_api::{CachePricingSummary, Principal, PrincipalKind, RequestContext, Upstream};
+use cc_lb_plugin_api::{Principal, PrincipalKind, Upstream};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
     SignedRequest, Signer, SignerError, SigningCapability, UpstreamDialect, UpstreamError,
@@ -52,17 +52,13 @@ impl Signer for DummySigner {
 
 #[test]
 fn signer_seals_by_consuming_shaped_request() {
-    let ctx = RequestContext {
+    let ctx = DialectShapeContext {
         request_id: "req-1".to_owned(),
-        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(b"{}"),
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: String::new(),
-        cache_pricing: CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "alice".to_owned(),
@@ -71,7 +67,7 @@ fn signer_seals_by_consuming_shaped_request() {
     };
     let shaped = shape_request(
         &DummyDialect,
-        &ctx.dialect_shape_context(),
+        &ctx,
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )
@@ -83,7 +79,7 @@ fn signer_seals_by_consuming_shaped_request() {
 
     let shaped = shape_request(
         &DummyDialect,
-        &ctx.dialect_shape_context(),
+        &ctx,
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )
@@ -113,17 +109,13 @@ fn controlled_builder_cannot_be_fabricated_by_normal_callers() {
         }
     }
 
-    let ctx = RequestContext {
+    let ctx = DialectShapeContext {
         request_id: "req-2".to_owned(),
-        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::new(),
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: String::new(),
-        cache_pricing: CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "alice".to_owned(),
@@ -133,7 +125,7 @@ fn controlled_builder_cannot_be_fabricated_by_normal_callers() {
 
     let shaped = shape_request(
         &DirectDialect,
-        &ctx.dialect_shape_context(),
+        &ctx,
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )

@@ -17,7 +17,7 @@ use cc_lb_oauth_protocol::{
     ExistingTokenParts, TokenEndpointResponse, parse_token_endpoint_response,
     refresh_token_form_body, refreshed_token_parts,
 };
-use cc_lb_plugin_api::{RequestContext, Upstream};
+use cc_lb_plugin_api::Upstream;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
@@ -743,17 +743,13 @@ fn now_secs(clock: &dyn Clock) -> u64 {
 }
 
 fn shaped_request() -> ShapedRequest {
-    let ctx = RequestContext {
+    let ctx = DialectShapeContext {
         request_id: "req-1".to_owned(),
-        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(b"{}"),
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: String::new(),
-        cache_pricing: cc_lb_domain::CachePricingSummary::default(),
     };
     let principal = cc_lb_domain::Principal {
         id: "principal".to_owned(),
@@ -762,7 +758,7 @@ fn shaped_request() -> ShapedRequest {
     };
     shape_request(
         &DirectDialect,
-        &ctx.dialect_shape_context(),
+        &ctx,
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )

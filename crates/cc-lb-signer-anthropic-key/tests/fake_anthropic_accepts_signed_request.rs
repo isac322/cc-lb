@@ -1,6 +1,6 @@
 use axum::body::{Body, to_bytes};
 use bytes::Bytes;
-use cc_lb_plugin_api::{Principal, PrincipalKind, RequestContext, Upstream};
+use cc_lb_plugin_api::{Principal, PrincipalKind, Upstream};
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignerFactory,
@@ -32,17 +32,13 @@ impl UpstreamDialect for E2EDialect {
 
 #[tokio::test]
 async fn fake_anthropic_accepts_signed_request() {
-    let ctx = RequestContext {
+    let ctx = DialectShapeContext {
         request_id: "req-e2e".to_owned(),
-        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(b"{}"),
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: String::new(),
-        cache_pricing: cc_lb_domain::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "alice".to_owned(),
@@ -51,7 +47,7 @@ async fn fake_anthropic_accepts_signed_request() {
     };
     let shaped = shape_request(
         &E2EDialect,
-        &ctx.dialect_shape_context(),
+        &ctx,
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )

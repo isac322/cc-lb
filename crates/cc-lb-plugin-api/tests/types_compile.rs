@@ -1,10 +1,10 @@
 use std::time::Duration;
 
-use bytes::Bytes;
 use cc_lb_plugin_api::{
-    CachePricingSummary, CredentialStrategy, ObserveEvent, Principal, PrincipalKind,
-    PrincipalQuotas, RequestContext, Upstream,
+    CredentialStrategy, ObserveEvent, Principal, PrincipalKind, PrincipalQuotas, Upstream,
 };
+use cc_lb_routing::RoutingContext;
+use cc_lb_upstream::DialectShapeContext;
 use http::{HeaderMap, Method, StatusCode};
 
 #[test]
@@ -26,19 +26,28 @@ fn upstream_variants_and_principal_serde_compile() {
 #[test]
 fn remaining_public_types_compile() {
     let _strategy = CredentialStrategy::ApiKey;
-    let ctx = RequestContext {
+    let shape_context = DialectShapeContext {
+        request_id: "req-1".to_owned(),
+        downstream_headers: HeaderMap::new(),
+        method: Method::POST,
+        path: "/v1/messages".to_owned(),
+        query: None,
+        body_bytes: bytes::Bytes::from_static(b"{}"),
+    };
+    assert_eq!(shape_context.method, Method::POST);
+
+    let routing_context = RoutingContext {
         request_id: "req-1".to_owned(),
         thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: None,
-        body_bytes: Bytes::from_static(b"{}"),
-        cache_breakpoints: Vec::new(),
+        body_bytes: bytes::Bytes::from_static(b"{}"),
         canonical_model_id: String::new(),
-        cache_pricing: CachePricingSummary::default(),
+        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     };
-    assert_eq!(ctx.method, Method::POST);
+    assert_eq!(routing_context.method, Method::POST);
 
     let quotas = PrincipalQuotas {
         requests_per_window: 10,

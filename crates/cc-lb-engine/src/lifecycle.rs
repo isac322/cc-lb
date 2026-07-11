@@ -15,9 +15,9 @@ use cc_lb_domain::{
     Principal, PrincipalKind, RoutingTrace, StageDecision, TerminalDecision, TerminalStrategy,
     TtlClass, Upstream, UpstreamCandidate, UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
-use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent, RequestContext};
+use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent};
 use cc_lb_quota::rate_limit_headers::parse_anthropic_rate_limit_headers;
-use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RouterPlugin, RoutingContext};
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RouterPlugin};
 use cc_lb_storage_api::{
     UpstreamRateLimitObservationRecord, UpstreamRecord,
     types::{RequestCacheBreakpoint, RequestCacheBreakpointSource, StoredApiKeyRecord},
@@ -56,6 +56,7 @@ use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::prompt_cache_simulator::{
     V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheBlockSource, analyze_v3_prompt_cache,
 };
+use crate::request_context::RequestContext;
 use crate::request_timing::{
     REQUEST_STAGE_TIMINGS, RequestStageTimings, finalize_connection_reused_if_unset,
 };
@@ -1676,18 +1677,20 @@ impl Lifecycle {
             .request_id
             .clone()
             .unwrap_or_else(|| format!("preview-{}", Uuid::new_v4()));
-        let ctx = RequestContext {
-            request_id,
-            thread_id: cache_metadata.thread_id.clone(),
-            downstream_headers: input.headers,
-            method: http::Method::POST,
-            path: "/v1/messages".to_owned(),
-            query: None,
-            body_bytes: input.body_bytes,
-            cache_breakpoints,
-            canonical_model_id,
-            cache_pricing: cache_pricing_summary_for_model(&cache_metadata.canonical_model_id),
-        };
+        let ctx = RequestContext::builder()
+            .request_id(request_id)
+            .thread_id(cache_metadata.thread_id.clone())
+            .downstream_headers(input.headers)
+            .method(http::Method::POST)
+            .path("/v1/messages".to_owned())
+            .query(None)
+            .body_bytes(input.body_bytes)
+            .cache_breakpoints(cache_breakpoints)
+            .canonical_model_id(canonical_model_id)
+            .cache_pricing(cache_pricing_summary_for_model(
+                &cache_metadata.canonical_model_id,
+            ))
+            .build();
         let principal = Principal {
             id: input.principal_id,
             kind: PrincipalKind::ApiKey,
@@ -2901,21 +2904,22 @@ impl Lifecycle {
             .or_else(|| header_to_string(&parts.headers, "x-request-id"))
             .unwrap_or_else(next_request_id);
 
-        let ctx = RequestContext {
-            request_id,
-            thread_id: None,
-            downstream_headers: {
-                strip_hop_by_hop(&mut parts.headers);
-                parts.headers
-            },
-            method: parts.method,
-            path,
-            query: parts.uri.query().map(ToOwned::to_owned),
-            body_bytes: body,
-            cache_breakpoints: Vec::new(),
-            canonical_model_id: String::new(),
-            cache_pricing: CachePricingSummary::default(),
+        let downstream_headers = {
+            strip_hop_by_hop(&mut parts.headers);
+            parts.headers
         };
+        let ctx = RequestContext::builder()
+            .request_id(request_id)
+            .thread_id(None)
+            .downstream_headers(downstream_headers)
+            .method(parts.method)
+            .path(path)
+            .query(parts.uri.query().map(ToOwned::to_owned))
+            .body_bytes(body)
+            .cache_breakpoints(Vec::new())
+            .canonical_model_id(String::new())
+            .cache_pricing(CachePricingSummary::default())
+            .build();
         (ctx, body_too_large)
     }
 
@@ -3617,17 +3621,7 @@ fn execute_filter_pipeline(
     candidates: Vec<UpstreamCandidate>,
     observer: Option<&LifecycleContext>,
 ) -> FilterPipelineResult {
-    let routing_context = RoutingContext {
-        request_id: ctx.request_id.clone(),
-        thread_id: ctx.thread_id.clone(),
-        downstream_headers: ctx.downstream_headers.clone(),
-        method: ctx.method.clone(),
-        path: ctx.path.clone(),
-        query: ctx.query.clone(),
-        body_bytes: ctx.body_bytes.clone(),
-        canonical_model_id: ctx.canonical_model_id.clone(),
-        cache_pricing: ctx.cache_pricing.clone(),
-    };
+    let routing_context = ctx.routing_context();
     let mut current = candidates;
     let mut stages = Vec::with_capacity(filters.len());
     let mut internal_errors = Vec::new();
@@ -6294,7 +6288,7 @@ mod tests {
     impl RouterPlugin for TestRouter {
         fn route(
             &self,
-            _ctx: &RoutingContext,
+            _ctx: &cc_lb_routing::RoutingContext,
             _principal: &Principal,
             _candidates: &[UpstreamCandidate],
         ) -> Result<cc_lb_plugin_api::RouteDecision, cc_lb_plugin_api::RouteError> {

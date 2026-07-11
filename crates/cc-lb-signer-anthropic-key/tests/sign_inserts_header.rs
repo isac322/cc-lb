@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use cc_lb_plugin_api::{Principal, PrincipalKind, RequestContext, Upstream};
+use cc_lb_plugin_api::{Principal, PrincipalKind, Upstream};
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignerFactory,
@@ -34,17 +34,13 @@ impl UpstreamDialect for DirectDialect {
 
 #[tokio::test]
 async fn sign_inserts_header() {
-    let ctx = RequestContext {
+    let ctx = DialectShapeContext {
         request_id: "req-1".to_owned(),
-        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(b"{}"),
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: String::new(),
-        cache_pricing: cc_lb_domain::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "alice".to_owned(),
@@ -53,7 +49,7 @@ async fn sign_inserts_header() {
     };
     let shaped = shape_request(
         &DirectDialect,
-        &ctx.dialect_shape_context(),
+        &ctx,
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )

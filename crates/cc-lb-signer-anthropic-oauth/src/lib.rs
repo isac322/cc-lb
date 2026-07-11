@@ -975,7 +975,6 @@ mod tests {
     use bytes::Bytes;
     use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
     use cc_lb_clock::TestClock;
-    use cc_lb_plugin_api::RequestContext;
     use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
     use cc_lb_storage_api::{
         OAuthCredentialStore, StorageError, StorageResult, UpstreamCreate, UpstreamRecord,
@@ -1810,17 +1809,13 @@ mod tests {
     }
 
     fn shaped_request() -> ShapedRequest {
-        let ctx = RequestContext {
+        let ctx = DialectShapeContext {
             request_id: "req-1".to_owned(),
-            thread_id: None,
             downstream_headers: HeaderMap::new(),
             method: Method::POST,
             path: "/v1/messages".to_owned(),
             query: None,
             body_bytes: Bytes::from_static(b"{}"),
-            cache_breakpoints: Vec::new(),
-            canonical_model_id: String::new(),
-            cache_pricing: cc_lb_domain::CachePricingSummary::default(),
         };
         let principal = cc_lb_domain::Principal {
             id: "principal".to_owned(),
@@ -1829,7 +1824,7 @@ mod tests {
         };
         shape_request(
             &DirectDialect,
-            &ctx.dialect_shape_context(),
+            &ctx,
             &Upstream::AnthropicDirect { base_url: None },
             &principal,
         )
