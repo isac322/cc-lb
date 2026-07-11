@@ -7,8 +7,7 @@ use cc_lb_engine::api_keys::principal_view::{
     RouterPipelineCache,
 };
 use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, Principal, RequestContext, TerminalStrategy,
-    UpstreamCandidate,
+    FilterError, FilterOutput, FilterPlugin, Principal, TerminalStrategy, UpstreamCandidate,
 };
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use uuid::Uuid;
@@ -178,7 +177,7 @@ struct StubFilter {
 impl FilterPlugin for StubFilter {
     fn filter(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {

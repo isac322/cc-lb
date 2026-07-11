@@ -15,7 +15,7 @@ use cc_lb_domain::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, CacheAffinityCandidate,
     CacheAffinityTrace, Principal, UpstreamCandidate,
 };
-use cc_lb_plugin_api::{FilterError, FilterOutput, FilterPlugin, RequestContext};
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RoutingContext};
 use cc_lb_storage_api::PluginMetadata;
 use uuid::Uuid;
 
@@ -54,7 +54,7 @@ impl CacheAffinityFilter {
 impl FilterPlugin for CacheAffinityFilter {
     fn filter(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
@@ -247,8 +247,8 @@ mod tests {
             .expect("builtin filter cannot fail")
     }
 
-    fn ctx() -> RequestContext {
-        RequestContext {
+    fn ctx() -> RoutingContext {
+        RoutingContext {
             request_id: "req".to_owned(),
             thread_id: None,
             downstream_headers: http::HeaderMap::new(),
@@ -256,7 +256,6 @@ mod tests {
             path: "/v1/messages".to_owned(),
             query: None,
             body_bytes: Bytes::new(),
-            cache_breakpoints: Vec::new(),
             canonical_model_id: "claude".to_owned(),
             cache_pricing: cc_lb_domain::CachePricingSummary::default(),
         }

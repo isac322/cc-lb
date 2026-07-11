@@ -330,9 +330,9 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use cc_lb_plugin_api::{
-        ObservabilityError, ObserveEvent, Principal, RequestContext, RouteDecision, RouteError,
-        Upstream, UpstreamCandidate,
+        ObservabilityError, ObserveEvent, Principal, Upstream, UpstreamCandidate,
     };
+    use cc_lb_routing::{RouteDecision, RouteError, RoutingContext};
     use cc_lb_upstream::{
         RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
         SigningCapability, UpstreamError,
@@ -379,7 +379,7 @@ mod tests {
     impl RouterPlugin for TestRouter {
         fn route(
             &self,
-            _ctx: &RequestContext,
+            _ctx: &RoutingContext,
             _principal: &Principal,
             _candidates: &[UpstreamCandidate],
         ) -> Result<RouteDecision, RouteError> {

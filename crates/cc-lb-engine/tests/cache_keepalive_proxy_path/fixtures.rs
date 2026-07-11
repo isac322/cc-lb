@@ -5,7 +5,7 @@ use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_engine::{ApiKeyAwareSignerFactory, DispatchError, UpstreamDispatch};
 use cc_lb_plugin_api::{
-    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
+    Principal, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::principal::{Limit, PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord, UpstreamWarmupDialectPlugin};
@@ -97,7 +97,7 @@ pub(crate) struct FirstRouter;
 impl RouterPlugin for FirstRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

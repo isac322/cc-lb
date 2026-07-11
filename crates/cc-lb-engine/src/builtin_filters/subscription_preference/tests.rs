@@ -16,6 +16,7 @@
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{PrincipalKind, SubscriptionQuotaDataState};
+use cc_lb_routing::RoutingContext;
 use http::Method;
 use std::collections::HashMap;
 
@@ -2048,12 +2049,12 @@ fn wrh_distribution(
     counts
 }
 
-fn ctx(canonical_model: &str) -> RequestContext {
+fn ctx(canonical_model: &str) -> RoutingContext {
     ctx_with_request_id(canonical_model, "req")
 }
 
-fn ctx_with_request_id(canonical_model: &str, request_id: &str) -> RequestContext {
-    RequestContext {
+fn ctx_with_request_id(canonical_model: &str, request_id: &str) -> RoutingContext {
+    RoutingContext {
         request_id: request_id.to_owned(),
         thread_id: None,
         downstream_headers: http::HeaderMap::new(),
@@ -2061,14 +2062,13 @@ fn ctx_with_request_id(canonical_model: &str, request_id: &str) -> RequestContex
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::new(),
-        cache_breakpoints: Vec::new(),
         canonical_model_id: canonical_model.to_owned(),
         cache_pricing: test_cache_pricing(),
     }
 }
 
-fn ctx_with_thread_id(canonical_model: &str, request_id: &str, thread_id: &str) -> RequestContext {
-    RequestContext {
+fn ctx_with_thread_id(canonical_model: &str, request_id: &str, thread_id: &str) -> RoutingContext {
+    RoutingContext {
         request_id: request_id.to_owned(),
         thread_id: Some(thread_id.to_owned()),
         downstream_headers: http::HeaderMap::new(),
@@ -2076,14 +2076,13 @@ fn ctx_with_thread_id(canonical_model: &str, request_id: &str, thread_id: &str) 
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::new(),
-        cache_breakpoints: Vec::new(),
         canonical_model_id: canonical_model.to_owned(),
         cache_pricing: test_cache_pricing(),
     }
 }
 
-fn ctx_with_unknown_cache_pricing(canonical_model: &str, request_id: &str) -> RequestContext {
-    RequestContext {
+fn ctx_with_unknown_cache_pricing(canonical_model: &str, request_id: &str) -> RoutingContext {
+    RoutingContext {
         cache_pricing: cc_lb_domain::CachePricingSummary::default(),
         ..ctx_with_request_id(canonical_model, request_id)
     }

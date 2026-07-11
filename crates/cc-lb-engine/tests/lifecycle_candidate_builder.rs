@@ -14,7 +14,7 @@ use cc_lb_engine::{
 };
 use cc_lb_plugin_api::{
     FilterError, FilterOutput, FilterPlugin, ObservabilityError, ObservabilityHook, ObserveEvent,
-    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, TerminalStrategy, Upstream,
+    Principal, RouteDecision, RouteError, RouterPlugin, TerminalStrategy, Upstream,
     UpstreamCandidate,
 };
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
@@ -69,7 +69,7 @@ struct TestRouter;
 impl RouterPlugin for TestRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -346,7 +346,7 @@ struct KeepIdsFilter {
 impl FilterPlugin for KeepIdsFilter {
     fn filter(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
@@ -379,7 +379,7 @@ struct RecordingRouter {
 impl RouterPlugin for RecordingRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

@@ -10,8 +10,8 @@ use cc_lb_engine::api_keys::principal_view::{
 use cc_lb_engine::lifecycle::{PreviewRouteError, PreviewRouteInput};
 use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
 use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, Principal, RequestContext, RouteDecision, RouteError,
-    RouterPlugin, TerminalStrategy, UpstreamCandidate,
+    FilterError, FilterOutput, FilterPlugin, Principal, RouteDecision, RouteError, RouterPlugin,
+    TerminalStrategy, UpstreamCandidate,
 };
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use http::HeaderMap;
@@ -253,7 +253,7 @@ struct IndexKeepingFilter {
 impl FilterPlugin for IndexKeepingFilter {
     fn filter(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
@@ -296,7 +296,7 @@ struct NoopRouter;
 impl RouterPlugin for NoopRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

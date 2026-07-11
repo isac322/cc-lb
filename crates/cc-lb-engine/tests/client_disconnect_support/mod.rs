@@ -21,7 +21,7 @@ use cc_lb_engine::{
     DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
     UpstreamDispatch,
 };
-use cc_lb_plugin_api::{Principal, RequestContext, TerminalStrategy, Upstream};
+use cc_lb_plugin_api::{Principal, TerminalStrategy, Upstream};
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_upstream::{

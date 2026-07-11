@@ -11,8 +11,8 @@ use cc_lb_engine::{
     Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
-    ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    Upstream, UpstreamCandidate,
+    ObservabilityHook, Principal, RouteDecision, RouteError, RouterPlugin, Upstream,
+    UpstreamCandidate,
 };
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
@@ -101,7 +101,7 @@ struct RecordingFallbackRouter {
 impl RouterPlugin for RecordingFallbackRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

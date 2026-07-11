@@ -14,7 +14,7 @@ use cc_lb_engine::api_keys::principal_view::{
 use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
 use cc_lb_plugin_api::{
     FilterError, FilterOutput, FilterPlugin, ObservabilityError, ObservabilityHook, ObserveEvent,
-    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, TerminalStrategy, Upstream,
+    Principal, RouteDecision, RouteError, RouterPlugin, TerminalStrategy, Upstream,
     UpstreamCandidate,
 };
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
@@ -229,7 +229,7 @@ struct RecordingRouter {
 impl RouterPlugin for RecordingRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -269,7 +269,7 @@ struct RecordingFilter {
 impl FilterPlugin for RecordingFilter {
     fn filter(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {

@@ -10,8 +10,8 @@ use cc_lb_engine::api_keys::principal_view::{
 };
 use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
 use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, Principal, RequestContext, RouteDecision, RouteError,
-    RouterPlugin, TerminalStrategy, Upstream, UpstreamCandidate,
+    FilterError, FilterOutput, FilterPlugin, Principal, RouteDecision, RouteError, RouterPlugin,
+    TerminalStrategy, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
@@ -211,7 +211,7 @@ struct RecordingRouter {
 impl RouterPlugin for RecordingRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -239,7 +239,7 @@ struct KeepFilter {
 impl FilterPlugin for KeepFilter {
     fn filter(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {

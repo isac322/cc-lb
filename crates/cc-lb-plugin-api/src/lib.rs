@@ -21,15 +21,21 @@ mod errors;
 mod traits;
 pub mod types;
 
-pub use errors::{ObservabilityError, RouteError};
-pub use traits::{FilterError, FilterOutput, FilterPlugin, ObservabilityHook, RouterPlugin};
+pub use errors::ObservabilityError;
+pub use traits::ObservabilityHook;
 pub use types::{
     CachePricingSummary, CandidateUrgency, CredentialStrategy, GLOBAL_PRINCIPAL, InternalError,
-    InternalErrorKind, InternalErrorStage, ObserveEvent, PerCandidateReason, PluginManifest,
-    PluginSlot, Principal, PrincipalKind, PrincipalQuotas, RateLimitKind, RateLimitObservation,
-    RequestContext, RouteDecision, RoutingTrace, SlotKey, SubscriptionPreferenceTrace,
-    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, SubscriptionTier,
-    TerminalStrategy, Upstream, UpstreamCandidate, UpstreamKind, default_pure,
+    InternalErrorKind, InternalErrorStage, ObserveEvent, PluginManifest, PluginSlot, Principal,
+    PrincipalKind, PrincipalQuotas, RateLimitKind, RateLimitObservation, RequestContext,
+    RoutingTrace, SlotKey, SubscriptionPreferenceTrace, SubscriptionQuotaCandidateSnapshot,
+    SubscriptionQuotaDataState, SubscriptionTier, TerminalStrategy, Upstream, UpstreamCandidate,
+    UpstreamKind, default_pure,
+};
+
+#[doc(hidden)]
+pub use cc_lb_routing::{
+    FilterError, FilterOutput, FilterPlugin, PerCandidateReason, RouteDecision, RouteError,
+    RouterPlugin, RoutingContext,
 };
 
 #[doc(hidden)]

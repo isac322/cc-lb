@@ -1,8 +1,9 @@
 use cc_lb_plugin_api::types::{
     InternalError, InternalErrorKind, InternalErrorStage, MAX_ERROR_MESSAGE_LEN,
-    MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN, PassthroughCause, PerCandidateReason,
-    RoutingTrace, StageDecision, TerminalDecision, TerminalStrategy,
+    MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN, PassthroughCause, RoutingTrace, StageDecision,
+    TerminalDecision, TerminalStrategy,
 };
+use cc_lb_routing::PerCandidateReason;
 use uuid::Uuid;
 
 #[test]

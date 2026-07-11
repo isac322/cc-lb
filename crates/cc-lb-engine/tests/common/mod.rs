@@ -18,8 +18,9 @@ use cc_lb_engine::{
 };
 use cc_lb_plugin_api::{
     ObservabilityError, ObservabilityHook, ObserveEvent, Principal, PrincipalKind, RequestContext,
-    RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
+    Upstream, UpstreamCandidate,
 };
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
@@ -114,7 +115,7 @@ pub struct TestRouter {
 impl RouterPlugin for TestRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

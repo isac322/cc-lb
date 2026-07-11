@@ -16,9 +16,7 @@ use cc_lb_engine::{
     DnsResolverConfig, DynamicViewBuilder, DynamicViewHolder, InMemoryBus, Lifecycle,
     LifecycleConfig, RequestEventAssemblerHandle, UpstreamDispatch, spawn_request_event_assembler,
 };
-use cc_lb_plugin_api::{
-    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, UpstreamCandidate,
-};
+use cc_lb_plugin_api::{Principal, RouteDecision, RouteError, RouterPlugin, UpstreamCandidate};
 use cc_lb_storage_api::types::{KeyStatus, RequestEvent, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
@@ -307,7 +305,7 @@ struct SelectingRouter;
 impl RouterPlugin for SelectingRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

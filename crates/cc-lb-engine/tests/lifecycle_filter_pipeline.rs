@@ -10,8 +10,8 @@ use cc_lb_engine::api_keys::principal_view::{
 };
 use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
 use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, Principal, RequestContext, RouteDecision, RouteError,
-    RouterPlugin, TerminalStrategy, Upstream, UpstreamCandidate,
+    FilterError, FilterOutput, FilterPlugin, Principal, RouteDecision, RouteError, RouterPlugin,
+    TerminalStrategy, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use http::StatusCode;
@@ -250,7 +250,7 @@ struct RecordingTerminalRouter {
 impl RouterPlugin for RecordingTerminalRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -282,7 +282,7 @@ struct RecordingFilter {
 impl FilterPlugin for RecordingFilter {
     fn filter(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
@@ -319,7 +319,7 @@ struct ErrorFilter {
 impl FilterPlugin for ErrorFilter {
     fn filter(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {

@@ -2,9 +2,10 @@
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    CachePricingSummary, FilterError, FilterOutput, FilterPlugin, Principal, PrincipalKind,
-    RequestContext, TerminalStrategy, UpstreamCandidate, UpstreamKind,
+    CachePricingSummary, Principal, PrincipalKind, TerminalStrategy, UpstreamCandidate,
+    UpstreamKind,
 };
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RoutingContext};
 use http::Method;
 use uuid::Uuid;
 
@@ -140,7 +141,7 @@ struct AllowAllFilter;
 impl FilterPlugin for AllowAllFilter {
     fn filter(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
@@ -168,7 +169,7 @@ struct SelectiveFilter;
 impl FilterPlugin for SelectiveFilter {
     fn filter(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
@@ -200,7 +201,7 @@ struct ErrorProducingFilter;
 impl FilterPlugin for ErrorProducingFilter {
     fn filter(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
@@ -230,7 +231,7 @@ fn filter_plugin_object_safety() {
 #[test]
 fn allow_all_filter_execution() {
     let filter = AllowAllFilter;
-    let ctx = RequestContext {
+    let ctx = RoutingContext {
         request_id: "req-1".to_string(),
         thread_id: None,
         downstream_headers: http::HeaderMap::new(),
@@ -238,7 +239,6 @@ fn allow_all_filter_execution() {
         path: "/v1/messages".to_string(),
         query: None,
         body_bytes: Bytes::new(),
-        cache_breakpoints: Vec::new(),
         canonical_model_id: "claude-3-sonnet".to_string(),
         cache_pricing: CachePricingSummary::default(),
     };
@@ -291,7 +291,7 @@ fn allow_all_filter_execution() {
 #[test]
 fn selective_filter_execution() {
     let filter = SelectiveFilter;
-    let ctx = RequestContext {
+    let ctx = RoutingContext {
         request_id: "req-2".to_string(),
         thread_id: None,
         downstream_headers: http::HeaderMap::new(),
@@ -299,7 +299,6 @@ fn selective_filter_execution() {
         path: "/v1/messages".to_string(),
         query: None,
         body_bytes: Bytes::new(),
-        cache_breakpoints: Vec::new(),
         canonical_model_id: "claude-3-sonnet".to_string(),
         cache_pricing: CachePricingSummary::default(),
     };
@@ -351,7 +350,7 @@ fn selective_filter_execution() {
 #[test]
 fn error_filter_execution() {
     let filter = ErrorProducingFilter;
-    let ctx = RequestContext {
+    let ctx = RoutingContext {
         request_id: "req-3".to_string(),
         thread_id: None,
         downstream_headers: http::HeaderMap::new(),
@@ -359,7 +358,6 @@ fn error_filter_execution() {
         path: "/v1/messages".to_string(),
         query: None,
         body_bytes: Bytes::new(),
-        cache_breakpoints: Vec::new(),
         canonical_model_id: "claude-3-sonnet".to_string(),
         cache_pricing: CachePricingSummary::default(),
     };

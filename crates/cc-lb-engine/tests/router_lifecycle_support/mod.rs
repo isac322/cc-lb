@@ -10,8 +10,8 @@ use cc_lb_engine::{
     LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
-    ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    Upstream, UpstreamCandidate,
+    ObservabilityHook, Principal, RouteDecision, RouteError, RouterPlugin, Upstream,
+    UpstreamCandidate,
 };
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_upstream::{
@@ -110,7 +110,7 @@ pub struct SelectingRouter {
 impl RouterPlugin for SelectingRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -139,7 +139,7 @@ pub struct RejectingEmptyRouter {
 impl RouterPlugin for RejectingEmptyRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

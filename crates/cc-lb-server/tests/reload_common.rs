@@ -12,8 +12,8 @@ use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
 };
 use cc_lb_plugin_api::{
-    ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    Upstream, UpstreamCandidate,
+    ObservabilityHook, Principal, RouteDecision, RouteError, RouterPlugin, Upstream,
+    UpstreamCandidate,
 };
 use cc_lb_upstream::SignerFactory;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -122,7 +122,7 @@ struct NoopRouter;
 impl RouterPlugin for NoopRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

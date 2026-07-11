@@ -15,8 +15,8 @@ use cc_lb_control::{
     api_keys::limit_engine::LimitEngine, spawn_audit_writer,
 };
 use cc_lb_plugin_api::{
-    ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    Upstream, UpstreamCandidate,
+    ObservabilityHook, Principal, RouteDecision, RouteError, RouterPlugin, Upstream,
+    UpstreamCandidate,
 };
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -85,7 +85,7 @@ struct NoopRouter;
 impl RouterPlugin for NoopRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

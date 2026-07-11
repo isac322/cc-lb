@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext, RouteDecision,
-    RouteError, RouterPlugin, Upstream, UpstreamCandidate,
+    ObservabilityError, ObservabilityHook, ObserveEvent, Principal, Upstream, UpstreamCandidate,
 };
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ResponseTransformError, ResponseTransformHook,
     RetryDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError,
@@ -26,7 +26,7 @@ struct DummySseTransform;
 impl RouterPlugin for DummyRouter {
     fn route(
         &self,
-        _context: &RequestContext,
+        _context: &RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

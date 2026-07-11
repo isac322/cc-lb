@@ -6,7 +6,7 @@ use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_engine::{ApiKeyAwareSignerFactory, UpstreamDispatch};
 use cc_lb_plugin_api::{
-    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
+    Principal, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
 };
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
@@ -110,7 +110,7 @@ pub(super) struct NoRouteRouter;
 impl RouterPlugin for NoRouteRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

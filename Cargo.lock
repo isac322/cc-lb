@@ -723,6 +723,7 @@ dependencies = [
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
+ "cc-lb-routing",
  "cc-lb-runtime-wasmtime",
  "cc-lb-scheduler",
  "cc-lb-signer-anthropic-oauth",
@@ -832,6 +833,7 @@ dependencies = [
  "cc-lb-contract",
  "cc-lb-domain",
  "cc-lb-plugin-api",
+ "cc-lb-routing",
  "cc-lb-storage-api",
  "cc-lb-upstream",
  "chrono",
@@ -901,6 +903,7 @@ dependencies = [
  "cc-lb-plugin-api",
  "cc-lb-pricing",
  "cc-lb-quota",
+ "cc-lb-routing",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
  "cc-lb-upstream",
@@ -1020,6 +1023,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cc-lb-domain",
+ "cc-lb-routing",
  "cc-lb-upstream",
  "http",
  "serde",
@@ -1091,6 +1095,7 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-engine",
  "cc-lb-plugin-api",
+ "cc-lb-routing",
  "cc-lb-upstream",
  "http",
  "http-body-util",
@@ -1110,6 +1115,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-lb-routing"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-upstream",
+ "http",
+ "serde",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "cc-lb-runtime-wasmtime"
 version = "0.1.2"
 dependencies = [
@@ -1120,6 +1138,7 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
+ "cc-lb-routing",
  "cc-lb-upstream",
  "http",
  "metrics",
@@ -1217,6 +1236,7 @@ dependencies = [
  "cc-lb-observability",
  "cc-lb-plugin-api",
  "cc-lb-pricing",
+ "cc-lb-routing",
  "cc-lb-runtime-wasmtime",
  "cc-lb-scheduler",
  "cc-lb-signer-anthropic-key",

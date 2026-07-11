@@ -15,10 +15,9 @@ use cc_lb_domain::{
     Principal, PrincipalKind, RoutingTrace, StageDecision, TerminalDecision, TerminalStrategy,
     TtlClass, Upstream, UpstreamCandidate, UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
-use cc_lb_plugin_api::{
-    FilterError, FilterOutput, ObservabilityHook, ObserveEvent, RequestContext, RouterPlugin,
-};
+use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent, RequestContext};
 use cc_lb_quota::rate_limit_headers::parse_anthropic_rate_limit_headers;
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RouterPlugin, RoutingContext};
 use cc_lb_storage_api::{
     UpstreamRateLimitObservationRecord, UpstreamRecord,
     types::{RequestCacheBreakpoint, RequestCacheBreakpointSource, StoredApiKeyRecord},
@@ -3612,12 +3611,23 @@ pub(crate) fn resolved_candidate_urgency(
 }
 
 fn execute_filter_pipeline(
-    filters: &[Arc<dyn cc_lb_plugin_api::FilterPlugin>],
+    filters: &[Arc<dyn FilterPlugin>],
     ctx: &RequestContext,
     principal: &Principal,
     candidates: Vec<UpstreamCandidate>,
     observer: Option<&LifecycleContext>,
 ) -> FilterPipelineResult {
+    let routing_context = RoutingContext {
+        request_id: ctx.request_id.clone(),
+        thread_id: ctx.thread_id.clone(),
+        downstream_headers: ctx.downstream_headers.clone(),
+        method: ctx.method.clone(),
+        path: ctx.path.clone(),
+        query: ctx.query.clone(),
+        body_bytes: ctx.body_bytes.clone(),
+        canonical_model_id: ctx.canonical_model_id.clone(),
+        cache_pricing: ctx.cache_pricing.clone(),
+    };
     let mut current = candidates;
     let mut stages = Vec::with_capacity(filters.len());
     let mut internal_errors = Vec::new();
@@ -3625,7 +3635,7 @@ fn execute_filter_pipeline(
     for (stage_index, filter) in filters.iter().enumerate() {
         let stage_name = filter.plugin_name().to_owned();
         let stage_started = Instant::now();
-        match filter.filter(ctx, principal, &current) {
+        match filter.filter(&routing_context, principal, &current) {
             Ok(output) => {
                 let stage_elapsed = stage_started.elapsed();
                 let duration_ms = duration_to_ms(stage_elapsed);
@@ -6284,7 +6294,7 @@ mod tests {
     impl RouterPlugin for TestRouter {
         fn route(
             &self,
-            _ctx: &RequestContext,
+            _ctx: &RoutingContext,
             _principal: &Principal,
             _candidates: &[UpstreamCandidate],
         ) -> Result<cc_lb_plugin_api::RouteDecision, cc_lb_plugin_api::RouteError> {

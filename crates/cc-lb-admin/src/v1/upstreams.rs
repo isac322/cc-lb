@@ -1606,8 +1606,8 @@ mod tests {
         DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
     };
     use cc_lb_plugin_api::{
-        ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext,
-        RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
+        ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RouteDecision, RouteError,
+        RouterPlugin, Upstream, UpstreamCandidate,
     };
     use cc_lb_storage_api::{BackendKind, MetaStore, UpstreamStore};
     use cc_lb_upstream::{
@@ -1731,7 +1731,7 @@ mod tests {
     impl RouterPlugin for TestRouter {
         fn route(
             &self,
-            _ctx: &RequestContext,
+            _ctx: &cc_lb_routing::RoutingContext,
             _principal: &Principal,
             _candidates: &[UpstreamCandidate],
         ) -> Result<RouteDecision, RouteError> {

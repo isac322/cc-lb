@@ -10,8 +10,8 @@ use cc_lb_engine::{
     build_candidates,
 };
 use cc_lb_plugin_api::{
-    ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RateLimitKind, RequestContext,
-    RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
+    ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RateLimitKind, RouteDecision,
+    RouteError, RouterPlugin, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
@@ -260,7 +260,7 @@ struct TestRouter;
 impl RouterPlugin for TestRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

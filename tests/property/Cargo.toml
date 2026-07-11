@@ -13,6 +13,7 @@ axum.workspace = true
 bytes.workspace = true
 cc-lb-engine = { path = "../../crates/cc-lb-engine" }
 cc-lb-plugin-api = { path = "../../crates/cc-lb-plugin-api" }
+cc-lb-routing.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 proptest.workspace = true

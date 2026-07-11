@@ -15,8 +15,8 @@ use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
 };
 use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, Principal, RequestContext, RouteDecision, RouteError,
-    RouterPlugin, TerminalStrategy, Upstream, UpstreamCandidate,
+    FilterError, FilterOutput, FilterPlugin, Principal, RouteDecision, RouteError, RouterPlugin,
+    TerminalStrategy, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
@@ -315,7 +315,7 @@ struct NullRouter;
 impl RouterPlugin for NullRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -402,7 +402,7 @@ struct KeepFilter {
 impl FilterPlugin for KeepFilter {
     fn filter(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {

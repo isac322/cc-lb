@@ -7,8 +7,9 @@ use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferen
 use cc_lb_engine::{
     DynamicView, DynamicViewBuilder, RequestKind, build_candidates, parse_request_cache_breakpoints,
 };
+use cc_lb_plugin_api::UpstreamCandidate;
 use cc_lb_plugin_api::types::{TtlClass, WarmCacheEntry, WrhKeySource};
-use cc_lb_plugin_api::{FilterPlugin, RequestContext, UpstreamCandidate};
+use cc_lb_routing::{FilterPlugin, RoutingContext};
 use http::{HeaderMap, Method};
 use url::Url;
 use uuid::Uuid;
@@ -206,10 +207,10 @@ fn moved_cache_control_keeps_warm_upstream_routed_by_cache_hash() {
 
 fn ctx(
     body_bytes: Bytes,
-    cache_breakpoints: Vec<cc_lb_plugin_api::types::CacheBreakpoint>,
+    _cache_breakpoints: Vec<cc_lb_plugin_api::types::CacheBreakpoint>,
     thread_id: &str,
-) -> RequestContext {
-    RequestContext {
+) -> RoutingContext {
+    RoutingContext {
         request_id: "req-1".to_owned(),
         thread_id: Some(thread_id.to_owned()),
         downstream_headers: HeaderMap::new(),
@@ -217,7 +218,6 @@ fn ctx(
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes,
-        cache_breakpoints,
         canonical_model_id: TEST_MODEL.to_owned(),
         cache_pricing: test_cache_pricing(),
     }

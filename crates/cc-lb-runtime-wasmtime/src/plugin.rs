@@ -21,15 +21,14 @@
 
 use std::sync::Arc;
 
-use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, PerCandidateReason, Principal, PrincipalKind,
-    RequestContext, SlotKey, UpstreamCandidate,
-};
+use cc_lb_domain::{Principal, PrincipalKind, UpstreamCandidate};
+use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
 use cc_lb_plugin_wire::{
     ArchivedFilterResponse, CachePricingSummaryRef, ClaimRef, FilterRequestRef, HeaderRef,
     PrincipalRef, QueryRef, ShapeRequestRef, UpstreamCandidateRef, UpstreamRef,
 };
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, PerCandidateReason, RoutingContext};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ResponseTransformHook, ShapedRequest, ShapedRequestBuilder,
     SseEventTransformHook, UpstreamDialect,
@@ -50,7 +49,7 @@ use crate::response_transform::{WasmtimeResponseTransformHook, WasmtimeSseEventT
 /// each `DynamicView` keeps the adapter cells it was built with until
 /// it is itself replaced.
 pub struct WasmtimeFilterPlugin {
-    slot_key: SlotKey,
+    _slot_key: SlotKey,
     cell: Arc<PluginCell>,
     plugin_id: Uuid,
     plugin_name: String,
@@ -76,7 +75,7 @@ impl WasmtimeFilterPlugin {
             .get(HookKind::Filter.as_str())
             .and_then(|m| WireVersion::from_u8(m.wire_version));
         Self {
-            slot_key,
+            _slot_key: slot_key,
             cell,
             plugin_id,
             plugin_name: plugin_name.into(),
@@ -89,7 +88,7 @@ impl WasmtimeFilterPlugin {
 impl FilterPlugin for WasmtimeFilterPlugin {
     fn filter(
         &self,
-        ctx: &RequestContext,
+        ctx: &RoutingContext,
         principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
@@ -155,10 +154,6 @@ impl FilterPlugin for WasmtimeFilterPlugin {
     fn plugin_name(&self) -> &str {
         &self.plugin_name
     }
-
-    fn slot_key(&self) -> SlotKey {
-        self.slot_key.clone()
-    }
 }
 
 fn runtime_error_to_filter(err: WasmtimeRuntimeError) -> FilterError {
@@ -173,7 +168,7 @@ fn runtime_error_to_filter(err: WasmtimeRuntimeError) -> FilterError {
 }
 
 fn host_to_wire_request(
-    ctx: &RequestContext,
+    ctx: &RoutingContext,
     principal: &Principal,
     candidates: &[UpstreamCandidate],
     cookie_redaction: bool,
@@ -826,7 +821,7 @@ mod tests {
         }
     }
 
-    fn fixture_request() -> RequestContext {
+    fn fixture_request() -> RoutingContext {
         let mut headers = http::HeaderMap::new();
         headers.insert(
             http::header::CONTENT_TYPE,
@@ -836,7 +831,7 @@ mod tests {
             http::header::AUTHORIZATION,
             http::HeaderValue::from_static("Bearer secret"),
         );
-        RequestContext {
+        RoutingContext {
             request_id: "req-123".to_owned(),
             thread_id: None,
             downstream_headers: headers,
@@ -844,7 +839,6 @@ mod tests {
             path: "/v1/messages".to_owned(),
             query: None,
             body_bytes: bytes::Bytes::from_static(b"{\"msg\":\"hi\"}"),
-            cache_breakpoints: Vec::new(),
             canonical_model_id: "claude-fixture".to_owned(),
             cache_pricing: cc_lb_domain::CachePricingSummary::default(),
         }

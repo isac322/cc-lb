@@ -2,13 +2,14 @@ use bytes::Bytes;
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_plugin_api::types::{CachePricingSummary, CacheScore};
 use cc_lb_plugin_api::{
-    FilterPlugin, Principal, PrincipalKind, RequestContext, SubscriptionQuotaCandidateSnapshot,
-    SubscriptionQuotaDataState, SubscriptionTier, UpstreamCandidate, UpstreamKind,
+    Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
+    SubscriptionTier, UpstreamCandidate, UpstreamKind,
 };
 use cc_lb_pricing::{
     CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion, global_catalog,
     init_global_catalog,
 };
+use cc_lb_routing::{FilterPlugin, RoutingContext};
 use http::Method;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -571,8 +572,8 @@ fn clean_known_base(name: &str, id_seed: u8) -> UpstreamCandidate {
     )
 }
 
-fn ctx() -> RequestContext {
-    RequestContext {
+fn ctx() -> RoutingContext {
+    RoutingContext {
         request_id: "req-regression".to_owned(),
         thread_id: None,
         downstream_headers: http::HeaderMap::new(),
@@ -580,14 +581,13 @@ fn ctx() -> RequestContext {
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::new(),
-        cache_breakpoints: Vec::new(),
         canonical_model_id: MODEL_AGNOSTIC.to_owned(),
         cache_pricing: test_cache_pricing(),
     }
 }
 
-fn ctx_with_thread_id(request_id: &str, thread_id: &str) -> RequestContext {
-    RequestContext {
+fn ctx_with_thread_id(request_id: &str, thread_id: &str) -> RoutingContext {
+    RoutingContext {
         request_id: request_id.to_owned(),
         thread_id: Some(thread_id.to_owned()),
         downstream_headers: http::HeaderMap::new(),
@@ -595,7 +595,6 @@ fn ctx_with_thread_id(request_id: &str, thread_id: &str) -> RequestContext {
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::new(),
-        cache_breakpoints: Vec::new(),
         canonical_model_id: MODEL_AGNOSTIC.to_owned(),
         cache_pricing: test_cache_pricing(),
     }

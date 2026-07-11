@@ -5,9 +5,10 @@ use std::collections::BTreeSet;
 use bytes::Bytes;
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_plugin_api::{
-    FilterPlugin, Principal, PrincipalKind, RequestContext, SubscriptionQuotaCandidateSnapshot,
-    SubscriptionQuotaDataState, UpstreamCandidate, UpstreamKind,
+    Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
+    UpstreamCandidate, UpstreamKind,
 };
+use cc_lb_routing::{FilterPlugin, RoutingContext};
 use http::Method;
 use proptest::prelude::*;
 
@@ -357,8 +358,8 @@ fn winner_bytes(
     output.kept_upstream_ids[0].into_bytes()
 }
 
-fn make_context(request_id: &str, model: &str) -> RequestContext {
-    RequestContext {
+fn make_context(request_id: &str, model: &str) -> RoutingContext {
+    RoutingContext {
         request_id: request_id.to_owned(),
         thread_id: None,
         downstream_headers: http::HeaderMap::new(),
@@ -366,7 +367,6 @@ fn make_context(request_id: &str, model: &str) -> RequestContext {
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::new(),
-        cache_breakpoints: Vec::new(),
         canonical_model_id: model.to_owned(),
         cache_pricing: cc_lb_domain::CachePricingSummary::default(),
     }

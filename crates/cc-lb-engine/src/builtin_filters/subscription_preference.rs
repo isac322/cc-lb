@@ -41,7 +41,7 @@ use cc_lb_domain::{
     Principal, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, UpstreamCandidate,
     UpstreamKind, WrhKeySource,
 };
-use cc_lb_plugin_api::{FilterError, FilterOutput, FilterPlugin, RequestContext};
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RoutingContext};
 use std::cmp::Ordering;
 use uuid::Uuid;
 
@@ -201,7 +201,7 @@ impl SubscriptionPreferenceFilter {
 impl FilterPlugin for SubscriptionPreferenceFilter {
     fn filter(
         &self,
-        ctx: &RequestContext,
+        ctx: &RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
@@ -221,7 +221,7 @@ impl FilterPlugin for SubscriptionPreferenceFilter {
 // -- Evaluation entry point. ------------------------------------------------
 
 fn evaluate(
-    ctx: &RequestContext,
+    ctx: &RoutingContext,
     candidates: &[UpstreamCandidate],
     config: &FilterConfig,
 ) -> FilterOutput {

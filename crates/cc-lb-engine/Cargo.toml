@@ -17,6 +17,7 @@ cc-lb-control = { path = "../cc-lb-control" }
 cc-lb-domain.workspace = true
 cc-lb-quota.workspace = true
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+cc-lb-routing.workspace = true
 cc-lb-upstream.workspace = true
 globset.workspace = true
 serde = { workspace = true, features = ["derive"] }

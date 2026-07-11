@@ -27,9 +27,7 @@ use cc_lb_engine::{
     ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamRateLimitCache, UpstreamStatusEntry,
     UpstreamStatusSnapshot,
 };
-use cc_lb_plugin_api::{
-    FilterPlugin, PluginManifest, RequestContext, RouteDecision, RouteError, RouterPlugin,
-};
+use cc_lb_plugin_api::{FilterPlugin, PluginManifest, RouteDecision, RouteError, RouterPlugin};
 use cc_lb_runtime_wasmtime::{
     WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeRuntime, WasmtimeUpstreamDialect,
 };
@@ -1022,7 +1020,7 @@ struct FirstCandidateRouter;
 impl RouterPlugin for FirstCandidateRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

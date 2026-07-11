@@ -10,9 +10,7 @@ use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_engine::{SseBatchConfig, SseRelay};
-use cc_lb_plugin_api::{
-    ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext, Upstream,
-};
+use cc_lb_plugin_api::{ObservabilityError, ObservabilityHook, ObserveEvent, Principal, Upstream};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
 };

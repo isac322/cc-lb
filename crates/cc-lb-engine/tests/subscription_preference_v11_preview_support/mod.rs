@@ -12,9 +12,8 @@ use cc_lb_engine::{
     DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig, SubscriptionQuotaCacheLike,
 };
 use cc_lb_plugin_api::{
-    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy,
-    UpstreamCandidate,
+    Principal, RouteDecision, RouteError, RouterPlugin, SubscriptionQuotaCandidateSnapshot,
+    SubscriptionQuotaDataState, TerminalStrategy, UpstreamCandidate,
 };
 use cc_lb_storage_api::SubscriptionQuotaSample;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
@@ -201,7 +200,7 @@ struct NoopRouter;
 impl RouterPlugin for NoopRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
