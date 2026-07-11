@@ -6,7 +6,8 @@
 //! - B — Base-window classification state machine (fresh vs stale, disabled)
 //! - C — Reset semantics
 //! - D — Overage / extra_usage assessment
-//! - E — Model relevance (5h + 7d, excludes unstable model-specific windows)
+//! - E — Model relevance (5h + 7d, excludes unstable model-specific windows,
+//!   plus the Fable-scoped 7d_fable window only for claude-fable-5)
 //! - F — ADR 0008 pressure numerics and frozen v10 overage urgency
 //! - G — Capacity-ratio independence across pressure, weight, and distribution
 //! - H — WRH selection: uniform fallback, single candidate, determinism, spread
@@ -23,6 +24,10 @@ use super::*;
 const SONNET_MODEL: &str = "claude-sonnet-4-5-20250929";
 const OPUS_MODEL: &str = "claude-opus-4-8-20250514";
 const HAIKU_MODEL: &str = "claude-haiku-4-5-20251001";
+const FABLE_MODEL: &str = "claude-fable-5";
+const DATED_FABLE_LIKE_MODEL: &str = "claude-fable-5-20260701";
+const FUTURE_FABLE_LIKE_MODEL: &str = "claude-fable-6";
+const UNKNOWN_MODEL: &str = "claude-unknown-model";
 const MODEL_AGNOSTIC: &str = "claude-3-5-haiku-default";
 const WINDOW_SEVEN_DAY_SONNET: &str = "7d_sonnet";
 const WINDOW_SEVEN_DAY_OPUS: &str = "7d_opus";
@@ -423,6 +428,71 @@ fn always_ignores_7d_opus_window() {
             vec![alive.upstream_id],
             "model={model} must ignore 7d_opus"
         );
+    }
+}
+
+#[test]
+fn fable_request_blocks_oauth_with_exhausted_7d_fable_window() {
+    // Given: shared quota is healthy, but the Fable-scoped weekly quota is
+    // confirmed exhausted for an OAuth candidate with no usable overage.
+    let fable_exhausted = oauth_with(
+        "fable-exhausted",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY_FABLE)
+                .util(1.0)
+                .status("rejected")
+                .build(),
+        ],
+    );
+    let key = api_key("k", 2);
+
+    // When: the request targets a canonical Fable model.
+    let output = filter_for_model(&[fable_exhausted, key.clone()], FABLE_MODEL);
+
+    // Then: the exhausted OAuth candidate is blocked and the API key wins.
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
+    assert_eq!(output.reason, API_KEY_FALLBACK_REASON);
+}
+
+#[test]
+fn non_fable_requests_ignore_exhausted_7d_fable_window() {
+    for model in [
+        SONNET_MODEL,
+        OPUS_MODEL,
+        HAIKU_MODEL,
+        DATED_FABLE_LIKE_MODEL,
+        FUTURE_FABLE_LIKE_MODEL,
+        UNKNOWN_MODEL,
+    ] {
+        // Given: shared quota is healthy and only the Fable-scoped window is
+        // confirmed exhausted.
+        let oauth = oauth_with(
+            "shared-quota-healthy",
+            1,
+            vec![
+                fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+                fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+                fresh(WINDOW_SEVEN_DAY_FABLE)
+                    .util(1.0)
+                    .status("rejected")
+                    .build(),
+            ],
+        );
+        let key = api_key("k", 2);
+
+        // When: the request targets a non-Fable canonical model.
+        let output = filter_for_model(&[oauth.clone(), key], model);
+
+        // Then: 7d_fable is irrelevant and healthy shared quota keeps OAuth.
+        assert_eq!(
+            output.kept_upstream_ids,
+            vec![oauth.upstream_id],
+            "model={model} must ignore 7d_fable"
+        );
+        assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
     }
 }
 

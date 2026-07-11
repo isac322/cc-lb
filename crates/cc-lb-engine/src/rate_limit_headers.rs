@@ -356,6 +356,9 @@ fn parse_unified_header_name(name: &str) -> Option<(SubscriptionQuotaWindow, Uni
     {
         return Some((SubscriptionQuotaWindow::SevenDayOpus, field));
     }
+    if let Some(field) = suffix.strip_prefix("7d_oi-").and_then(parse_unified_field) {
+        return Some((SubscriptionQuotaWindow::SevenDayFable, field));
+    }
     if let Some(field) = suffix.strip_prefix("7d-").and_then(parse_unified_field) {
         return Some((SubscriptionQuotaWindow::SevenDay, field));
     }
@@ -397,8 +400,9 @@ fn subscription_quota_window_order(window: SubscriptionQuotaWindow) -> u8 {
         SubscriptionQuotaWindow::FiveHour => 1,
         SubscriptionQuotaWindow::SevenDaySonnet => 2,
         SubscriptionQuotaWindow::SevenDayOpus => 3,
-        SubscriptionQuotaWindow::SevenDay => 4,
-        SubscriptionQuotaWindow::Overage => 5,
+        SubscriptionQuotaWindow::SevenDayFable => 4,
+        SubscriptionQuotaWindow::SevenDay => 5,
+        SubscriptionQuotaWindow::Overage => 6,
     }
 }
 
@@ -722,6 +726,36 @@ mod tests {
         assert_eq!(
             observations[0].status,
             Some(SubscriptionQuotaStatus::AllowedWarning)
+        );
+    }
+
+    #[test]
+    fn unified_seven_day_fable_oi_prefix_does_not_collide_with_generic_seven_day() {
+        let observations = parse_anthropic_unified_headers(&headers(&[
+            ("anthropic-ratelimit-unified-7d_oi-utilization", "0.28"),
+            ("anthropic-ratelimit-unified-7d_oi-reset", "1800000004"),
+            (
+                "anthropic-ratelimit-unified-7d_oi-status",
+                "allowed_warning",
+            ),
+            ("anthropic-ratelimit-unified-7d-status", "rejected"),
+        ]));
+
+        assert_eq!(observations.len(), 2);
+        assert_eq!(
+            observations[0].window,
+            SubscriptionQuotaWindow::SevenDayFable
+        );
+        assert_eq!(observations[0].utilization, Some(0.28));
+        assert_eq!(observations[0].resets_at_unix_secs, Some(1_800_000_004));
+        assert_eq!(
+            observations[0].status,
+            Some(SubscriptionQuotaStatus::AllowedWarning)
+        );
+        assert_eq!(observations[1].window, SubscriptionQuotaWindow::SevenDay);
+        assert_eq!(
+            observations[1].status,
+            Some(SubscriptionQuotaStatus::Rejected)
         );
     }
 

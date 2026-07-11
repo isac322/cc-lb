@@ -2155,6 +2155,13 @@ fn claude_default_snapshot(clock: &dyn cc_lb_engine::Clock) -> cc_lb_pricing::Ca
     let raw: &[(&str, u64, u64, u64, u64)] = &[
         // model name, input, output, cache_creation_5m, cache_read
         (
+            "claude-fable-5",
+            10_000_000,
+            50_000_000,
+            12_500_000,
+            1_000_000,
+        ),
+        (
             "claude-opus-4-5",
             15_000_000,
             75_000_000,
@@ -2766,6 +2773,43 @@ mod tests {
 
         assert!(matches!(catalog.status(), cc_lb_pricing::CatalogStatus::Ok));
         assert!(catalog.lookup("claude-opus-4-5", None).is_some());
+    }
+
+    #[test]
+    fn default_fallback_contains_fable_5_pricing() {
+        let catalog = cc_lb_pricing::PriceCatalog::new_empty();
+        let clock = cc_lb_engine::SystemClock;
+
+        install_default_fallback_if_uninitialized(&catalog, &clock);
+
+        let pricing = catalog
+            .lookup("claude-fable-5", None)
+            .expect("fable fallback pricing exists");
+        assert_eq!(pricing.input_per_million_usd.as_micros_usd(), 10_000_000);
+        assert_eq!(pricing.output_per_million_usd.as_micros_usd(), 50_000_000);
+        let snapshot = catalog.current();
+        assert_eq!(
+            snapshot
+                .cache_creation_per_million_usd
+                .get("claude-fable-5")
+                .map(|price| price.as_micros_usd()),
+            Some(12_500_000)
+        );
+        assert_eq!(
+            snapshot
+                .cache_read_per_million_usd
+                .get("claude-fable-5")
+                .map(|price| price.as_micros_usd()),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            snapshot
+                .models
+                .keys()
+                .filter(|model| model.starts_with("claude-fable"))
+                .count(),
+            1
+        );
     }
 
     #[test]
