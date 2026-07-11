@@ -14,7 +14,7 @@ use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, BackendKind, BackfillApplyOutcome, CompatibilityKvRecord,
     MetaStore, MetadataTierMappingOverrideRecord, OrganizationMetadataRecord,
     OrganizationMetadataStore, PlanTierRatioRecord, PlanTierStore, PluginChainEntry,
-    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlot,
+    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlotKind,
     PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
     PromptCacheObservationStore, StorageResult, SubscriptionQuotaCheckpointRange,
     SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
@@ -817,7 +817,7 @@ impl PluginRegistryStore for EmptyPluginRegistryStore {
     async fn update_supported_slots(
         &self,
         _id: Uuid,
-        _supported_slots: Vec<PluginSlot>,
+        _supported_slots: Vec<PluginSlotKind>,
     ) -> StorageResult<()> {
         Ok(())
     }
@@ -840,7 +840,7 @@ impl PluginRegistryStore for EmptyPluginRegistryStore {
     async fn list_chain_for_principal(
         &self,
         _principal_id: Uuid,
-        _slot: PluginSlot,
+        _slot: PluginSlotKind,
     ) -> StorageResult<Vec<PluginChainEntry>> {
         Ok(Vec::new())
     }
@@ -855,7 +855,7 @@ impl PluginRegistryStore for EmptyPluginRegistryStore {
     async fn reorder_chain(
         &self,
         _principal_id: Uuid,
-        _slot: PluginSlot,
+        _slot: PluginSlotKind,
         _new_orders: Vec<(Uuid, i64, u64)>,
     ) -> StorageResult<Vec<PluginChainEntry>> {
         unimplemented!()
@@ -870,7 +870,7 @@ impl PluginRegistryStore for EmptyPluginRegistryStore {
     async fn rebalance_chain(
         &self,
         _principal_id: Uuid,
-        _slot: PluginSlot,
+        _slot: PluginSlotKind,
     ) -> StorageResult<Vec<PluginChainEntry>> {
         unimplemented!()
     }

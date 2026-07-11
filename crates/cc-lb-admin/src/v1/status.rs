@@ -7,7 +7,7 @@ use cc_lb_domain::ReplicaIdentity;
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    PluginChainEntry, PluginRegistryStore, PluginSlot, PrincipalKind, PrincipalRecord,
+    PluginChainEntry, PluginRegistryStore, PluginSlotKind, PrincipalKind, PrincipalRecord,
     PrincipalStore, Storage, StorageError, UpstreamRecord, UpstreamStore, WasmRegistryEntry,
 };
 use serde::Serialize;
@@ -293,13 +293,13 @@ async fn plugin_chain_summary(
     let mut summary = PluginChainSummary::default();
     for principal in principals {
         let router = storage
-            .list_chain_for_principal(principal.id, PluginSlot::Router)
+            .list_chain_for_principal(principal.id, PluginSlotKind::Router)
             .await?;
         let hooks = storage
-            .list_chain_for_principal(principal.id, PluginSlot::ObservabilityHook)
+            .list_chain_for_principal(principal.id, PluginSlotKind::ObservabilityHook)
             .await?;
         let shape = storage
-            .list_chain_for_principal(principal.id, PluginSlot::Shape)
+            .list_chain_for_principal(principal.id, PluginSlotKind::Shape)
             .await?;
         let count = router.len() + hooks.len() + shape.len();
         if count > 0 {
@@ -318,13 +318,13 @@ async fn export_chains(
     let mut chains = BTreeMap::new();
     for principal in principals {
         let router = storage
-            .list_chain_for_principal(principal.id, PluginSlot::Router)
+            .list_chain_for_principal(principal.id, PluginSlotKind::Router)
             .await?;
         let observability_hook = storage
-            .list_chain_for_principal(principal.id, PluginSlot::ObservabilityHook)
+            .list_chain_for_principal(principal.id, PluginSlotKind::ObservabilityHook)
             .await?;
         let shape = storage
-            .list_chain_for_principal(principal.id, PluginSlot::Shape)
+            .list_chain_for_principal(principal.id, PluginSlotKind::Shape)
             .await?;
         if router.is_empty() && observability_hook.is_empty() && shape.is_empty() {
             continue;

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
-    AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalStore,
+    AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalStore,
     StorageError, WasmBlob, WasmRegistryEntryInput, default_wire_version,
     principal::{
         Limit, LimitKind, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalUpdate,
@@ -548,9 +548,9 @@ where
     S: PluginRegistryStore,
 {
     for (slot, order) in [
-        (PluginSlot::Router, 100),
-        (PluginSlot::ObservabilityHook, 200),
-        (PluginSlot::Shape, 300),
+        (PluginSlotKind::Router, 100),
+        (PluginSlotKind::ObservabilityHook, 200),
+        (PluginSlotKind::Shape, 300),
     ] {
         storage
             .insert_chain_entry(PluginChainEntryInput {
@@ -585,9 +585,9 @@ where
     S: PluginRegistryStore,
 {
     for slot in [
-        PluginSlot::Router,
-        PluginSlot::ObservabilityHook,
-        PluginSlot::Shape,
+        PluginSlotKind::Router,
+        PluginSlotKind::ObservabilityHook,
+        PluginSlotKind::Shape,
     ] {
         ensure!(
             storage

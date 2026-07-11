@@ -14,6 +14,7 @@ bytes.workspace = true
 cc-lb-domain.workspace = true
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-routing.workspace = true
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-upstream.workspace = true
 http.workspace = true
 serde = { workspace = true, features = ["derive"] }

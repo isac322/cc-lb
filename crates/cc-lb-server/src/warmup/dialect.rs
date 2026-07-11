@@ -9,7 +9,7 @@ use cc_lb_runtime_wasmtime::{WasmtimeRuntime, WasmtimeRuntimeError, WasmtimeUpst
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh, LazyRefreshHandle,
 };
-use cc_lb_storage_api::{PluginSlot, StorageError, UpstreamRecord, WasmRegistryEntry};
+use cc_lb_storage_api::{PluginSlotKind, StorageError, UpstreamRecord, WasmRegistryEntry};
 use cc_lb_upstream::{
     DialectShapeContext, SignerFactory, UpstreamDialect, shape_request, sign_request,
 };
@@ -51,7 +51,7 @@ pub enum WarmupDispatchError {
     RegistryUnsupportedSlot {
         wasm_registry_id: Uuid,
         plugin_name: String,
-        slot: PluginSlot,
+        slot: PluginSlotKind,
     },
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
@@ -97,7 +97,7 @@ pub async fn dispatch_warmup_with_dialect(
         .ok_or(WarmupDispatchError::RegistryNotFound(
             plugin_ref.wasm_registry_id,
         ))?;
-    let slot = PluginSlot::Shape;
+    let slot = PluginSlotKind::Shape;
     if registry_entry_unsupported_slot(&registry_entry, slot) {
         return Err(WarmupDispatchError::RegistryUnsupportedSlot {
             wasm_registry_id: registry_entry.id,
@@ -200,7 +200,10 @@ pub async fn dispatch_warmup_with_dialect(
     })
 }
 
-fn registry_entry_unsupported_slot(registry_entry: &WasmRegistryEntry, slot: PluginSlot) -> bool {
+fn registry_entry_unsupported_slot(
+    registry_entry: &WasmRegistryEntry,
+    slot: PluginSlotKind,
+) -> bool {
     !registry_entry.is_builtin
         && !registry_entry.supported_slots.is_empty()
         && !registry_entry.supported_slots.contains(&slot)

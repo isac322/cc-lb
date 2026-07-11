@@ -35,10 +35,11 @@ use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, AuditStore, MetadataTierMappingOverrideRecord,
     OrganizationMetadataStore, PlanTierRatioRecord, PlanTierStore, PluginChainEntry,
-    PluginRegistryStore, PluginSlot, PrincipalRecord, PrincipalStore, PromptCacheObservationStore,
-    RateLimitKind, StorageError, StorageResult, TierResolutionSource, UpstreamPlanTierRecord,
-    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
-    UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
+    PluginRegistryStore, PluginSlotKind, PrincipalRecord, PrincipalStore,
+    PromptCacheObservationStore, RateLimitKind, StorageError, StorageResult, TierResolutionSource,
+    UpstreamPlanTierRecord, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
+    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataStore,
+    UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
 };
 use cc_lb_upstream::{Signer, SignerError, SignerFactory};
 use parking_lot::RwLock;
@@ -249,7 +250,7 @@ pub async fn build_dynamic_view(
     // no longer referenced by the freshly-built view. Must run AFTER
     // build_principal_chains succeeds so we don't tear down slots the
     // still-active view is dispatching against; already-cloned
-    // `Arc<PluginSlot>` handles keep the evicted cells alive for the
+    // `Arc<PluginSlotKind>` handles keep the evicted cells alive for the
     // duration of any in-flight call (see `WasmtimeRuntime::evict_slot`
     // docs).
     let evicted = runtime.retain_slots(&registered_slot_keys);
@@ -591,7 +592,10 @@ async fn list_principals(stores: &Stores) -> StorageResult<Vec<PrincipalRecord>>
     Ok(all)
 }
 
-fn registry_entry_unsupported_slot(registry_entry: &WasmRegistryEntry, slot: PluginSlot) -> bool {
+fn registry_entry_unsupported_slot(
+    registry_entry: &WasmRegistryEntry,
+    slot: PluginSlotKind,
+) -> bool {
     !registry_entry.is_builtin
         && !registry_entry.supported_slots.is_empty()
         && !registry_entry.supported_slots.contains(&slot)
@@ -615,11 +619,11 @@ async fn build_principal_chains(
         .map(|principal| principal.id)
         .collect::<Vec<_>>();
     let slots = [
-        PluginSlot::Router,
-        PluginSlot::ObservabilityHook,
-        PluginSlot::Shape,
+        PluginSlotKind::Router,
+        PluginSlotKind::ObservabilityHook,
+        PluginSlotKind::Shape,
     ];
-    let mut chain_entries: HashMap<(Uuid, PluginSlot), Vec<PluginChainEntry>> = stores
+    let mut chain_entries: HashMap<(Uuid, PluginSlotKind), Vec<PluginChainEntry>> = stores
         .plugin_registry
         .list_chains_for_principals(&principal_ids, &slots)
         .await?
@@ -635,13 +639,14 @@ async fn build_principal_chains(
     let mut registered_slot_keys: HashSet<cc_lb_plugin_api::SlotKey> = HashSet::new();
     for principal in principals {
         let router_entries =
-            take_chain_entries(&mut chain_entries, principal.id, PluginSlot::Router);
+            take_chain_entries(&mut chain_entries, principal.id, PluginSlotKind::Router);
         let hook_entries = take_chain_entries(
             &mut chain_entries,
             principal.id,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::ObservabilityHook,
         );
-        let shape_entries = take_chain_entries(&mut chain_entries, principal.id, PluginSlot::Shape);
+        let shape_entries =
+            take_chain_entries(&mut chain_entries, principal.id, PluginSlotKind::Shape);
 
         let router = build_router_pipeline(
             stores,
@@ -659,14 +664,14 @@ async fn build_principal_chains(
             let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
             })?;
-            if registry_entry_unsupported_slot(registry_entry, PluginSlot::ObservabilityHook) {
+            if registry_entry_unsupported_slot(registry_entry, PluginSlotKind::ObservabilityHook) {
                 tracing::warn!(
                     target: "cc_lb_server::drift",
                     principal = %principal.name,
                     plugin = registry_entry.name.as_str(),
                     chain_entry_id = %entry.id,
                     wasm_registry_id = %registry_entry.id,
-                    requested_slot = PluginSlot::ObservabilityHook.as_str(),
+                    requested_slot = PluginSlotKind::ObservabilityHook.as_str(),
                     supported_slots = ?registry_entry.supported_slots,
                     "skipping observability_hook chain entry: registry entry does not support requested slot",
                 );
@@ -712,14 +717,14 @@ async fn build_principal_chains(
             let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
             })?;
-            if registry_entry_unsupported_slot(registry_entry, PluginSlot::Shape) {
+            if registry_entry_unsupported_slot(registry_entry, PluginSlotKind::Shape) {
                 tracing::warn!(
                     target: "cc_lb_server::drift",
                     principal = %principal.name,
                     plugin = registry_entry.name.as_str(),
                     chain_entry_id = %entry.id,
                     wasm_registry_id = %registry_entry.id,
-                    requested_slot = PluginSlot::Shape.as_str(),
+                    requested_slot = PluginSlotKind::Shape.as_str(),
                     supported_slots = ?registry_entry.supported_slots,
                     "skipping shape chain entry: registry entry does not support requested slot",
                 );
@@ -766,9 +771,9 @@ async fn build_principal_chains(
 }
 
 fn take_chain_entries(
-    entries: &mut HashMap<(Uuid, PluginSlot), Vec<PluginChainEntry>>,
+    entries: &mut HashMap<(Uuid, PluginSlotKind), Vec<PluginChainEntry>>,
     principal_id: Uuid,
-    slot: PluginSlot,
+    slot: PluginSlotKind,
 ) -> Vec<PluginChainEntry> {
     let mut chain = entries.remove(&(principal_id, slot)).unwrap_or_default();
     chain.sort_by_key(|entry| (entry.order, entry.id));

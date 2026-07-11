@@ -1,12 +1,11 @@
 #![cfg(feature = "dto-roundtrip")]
 #![recursion_limit = "512"]
 
-use cc_lb_engine::event_bus::RequestEventUpdate;
-use cc_lb_plugin_api::{
-    InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace,
-    types::{StageDecision, TerminalDecision, TerminalStrategy},
+use cc_lb_domain::{
+    InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace, StageDecision,
+    TerminalDecision, TerminalStrategy,
 };
-use cc_lb_request_log::{CostBreakdown, RequestCacheLookbackPrefix};
+use cc_lb_request_log::{CostBreakdown, RequestCacheLookbackPrefix, RequestEventUpdate};
 use cc_lb_storage_api::principal::{Limit, LimitKind};
 use cc_lb_storage_api::types::UpstreamKind;
 use cc_lb_storage_api::types::{Limit as TypesLimit, LimitKind as TypesLimitKind};

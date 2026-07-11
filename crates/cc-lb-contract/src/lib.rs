@@ -69,87 +69,19 @@ pub use cc_lb_request_log::{
 #[doc(hidden)]
 pub use cc_lb_observability::{EngineMetricsHook, NoopMetricsHook};
 
+#[doc(hidden)]
+pub use cc_lb_storage_api::{AuditEntry, AuditSink, KeyStatus, Limit, LimitKind};
+
 use cc_lb_domain::{InternalError, RoutingTrace, TtlClass};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
-
-pub trait AuditSink: Send + Sync {
-    fn sink_audit(&self, entry: AuditEntry);
-}
 
 #[doc(hidden)]
 pub use cc_lb_domain::{ANTHROPIC_IDENTITY_HEADERS, PrincipalKindLite, ReplicaIdentity};
 
 pub trait ReplicaIdentityProvider: Send + Sync {
     fn replica_identity(&self) -> Option<ReplicaIdentity>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct AuditEntry {
-    pub ts: u64,
-    pub request_id: String,
-    pub principal_id: String,
-    pub route: String,
-    pub upstream: String,
-    pub model: Option<String>,
-    pub status: u16,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_tokens: Option<u64>,
-    pub duration_ms: u64,
-    pub agent_label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost_usd_micros: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit_violation: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub admin_action: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actor: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload: Option<JsonValue>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum LimitKind {
-    #[default]
-    Requests,
-    InputTokens,
-    OutputTokens,
-    TotalTokens,
-    CostUsd,
-    Concurrent,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct Limit {
-    pub kind: LimitKind,
-    pub window_secs: u64,
-    pub cap_micros: i64,
-}
-
-impl Limit {
-    pub fn is_subset_of(&self, parent: &Limit) -> bool {
-        self.kind == parent.kind
-            && self.window_secs == parent.window_secs
-            && self.cap_micros <= parent.cap_micros
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum KeyStatus {
-    #[default]
-    Active,
-    Disabled,
-    Revoked,
 }
 
 /// Application-generated unique identifier for a single request lifecycle.

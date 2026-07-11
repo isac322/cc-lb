@@ -7,7 +7,7 @@ use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_engine::DynamicViewHolder;
 use cc_lb_engine::clock::ClockHandle;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
-use cc_lb_storage_api::{PluginSlot, StorageResult};
+use cc_lb_storage_api::{PluginSlotKind, StorageResult};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -185,11 +185,11 @@ pub(crate) async fn collect_revision_hash(stores: &Stores) -> StorageResult<u64>
         }
         offset += page.len();
         for principal in page {
-            chains.extend(chain_revisions(stores, principal.id, PluginSlot::Router).await?);
+            chains.extend(chain_revisions(stores, principal.id, PluginSlotKind::Router).await?);
             chains.extend(
-                chain_revisions(stores, principal.id, PluginSlot::ObservabilityHook).await?,
+                chain_revisions(stores, principal.id, PluginSlotKind::ObservabilityHook).await?,
             );
-            chains.extend(chain_revisions(stores, principal.id, PluginSlot::Shape).await?);
+            chains.extend(chain_revisions(stores, principal.id, PluginSlotKind::Shape).await?);
             principals.push((principal.id, principal.revision));
         }
     }
@@ -205,7 +205,7 @@ pub(crate) async fn collect_revision_hash(stores: &Stores) -> StorageResult<u64>
 async fn chain_revisions(
     stores: &Stores,
     principal_id: Uuid,
-    slot: PluginSlot,
+    slot: PluginSlotKind,
 ) -> StorageResult<Vec<(Uuid, u64)>> {
     let entries = stores
         .plugin_registry

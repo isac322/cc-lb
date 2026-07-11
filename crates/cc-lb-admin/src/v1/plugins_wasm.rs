@@ -15,7 +15,7 @@ use cc_lb_control::{AuditEntry, AuditPayload};
 use cc_lb_plugin_wire::schema::HookKind;
 use cc_lb_runtime_wasmtime::{ModuleInspection, WasmtimeRuntime, WasmtimeRuntimeError};
 use cc_lb_storage_api::{
-    MAX_WASM_BLOB_BYTES, PluginSlot, StorageError, WasmBlob, WasmRegistryEntryInput,
+    MAX_WASM_BLOB_BYTES, PluginSlotKind, StorageError, WasmBlob, WasmRegistryEntryInput,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -436,11 +436,11 @@ fn validate_wasm_bytes(bytes: &[u8]) -> Result<(), Response> {
 }
 
 #[allow(clippy::result_large_err)]
-fn parse_slot_kind(value: &str) -> Result<(HookKind, PluginSlot), Response> {
+fn parse_slot_kind(value: &str) -> Result<(HookKind, PluginSlotKind), Response> {
     match value {
-        "filter" => Ok((HookKind::Filter, PluginSlot::Router)),
-        "shape" => Ok((HookKind::Shape, PluginSlot::Shape)),
-        "observe" => Ok((HookKind::Observe, PluginSlot::ObservabilityHook)),
+        "filter" => Ok((HookKind::Filter, PluginSlotKind::Router)),
+        "shape" => Ok((HookKind::Shape, PluginSlotKind::Shape)),
+        "observe" => Ok((HookKind::Observe, PluginSlotKind::ObservabilityHook)),
         other => Err(json_error(
             StatusCode::BAD_REQUEST,
             "invalid_slot_kind",
@@ -484,18 +484,18 @@ async fn inspect_with_wasmtime(
     })
 }
 
-fn supported_slots_from_inspection(inspection: &ModuleInspection) -> Vec<PluginSlot> {
+fn supported_slots_from_inspection(inspection: &ModuleInspection) -> Vec<PluginSlotKind> {
     let mut slots = BTreeSet::new();
     for hook in inspection.hook_versions.keys() {
         match hook {
             HookKind::Filter => {
-                slots.insert(PluginSlot::Router);
+                slots.insert(PluginSlotKind::Router);
             }
             HookKind::Shape | HookKind::TransformResponse | HookKind::TransformSseEvent => {
-                slots.insert(PluginSlot::Shape);
+                slots.insert(PluginSlotKind::Shape);
             }
             HookKind::Observe => {
-                slots.insert(PluginSlot::ObservabilityHook);
+                slots.insert(PluginSlotKind::ObservabilityHook);
             }
         }
     }

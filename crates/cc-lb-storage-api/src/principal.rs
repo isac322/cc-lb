@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::CacheKeepaliveConfig;
 use crate::StorageResult;
-pub use cc_lb_contract::{Limit, LimitKind};
+pub use crate::limits::{Limit, LimitKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

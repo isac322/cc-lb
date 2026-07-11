@@ -361,8 +361,8 @@ impl SubscriptionQuotaSampleControl for NoopSubscriptionQuotaCache {
     }
 }
 
-impl cc_lb_contract::AuditSink for AuditWriterSink {
-    fn sink_audit(&self, entry: cc_lb_contract::AuditEntry) {
+impl cc_lb_storage_api::AuditSink for AuditWriterSink {
+    fn sink_audit(&self, entry: cc_lb_storage_api::AuditEntry) {
         let _ = self.try_enqueue(entry);
     }
 }

@@ -15,10 +15,8 @@ blake3 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 cc-lb-aead = { version = "0.1.0", path = "../cc-lb-aead" }
-cc-lb-contract = { workspace = true }
 cc-lb-request-log.workspace = true
 cc-lb-domain.workspace = true
-cc-lb-plugin-api = { workspace = true }
 cc-lb-plugin-wire = { workspace = true, features = ["std"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

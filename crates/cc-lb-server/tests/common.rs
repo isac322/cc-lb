@@ -9,7 +9,7 @@ use std::thread::JoinHandle as ThreadJoinHandle;
 
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore,
-    PluginSlot, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore,
+    PluginSlotKind, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore,
     principal::Limit,
     types::{PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
 };
@@ -495,7 +495,7 @@ async fn seed_storage(
             storage.as_ref(),
             PluginChainEntryInput {
                 principal_id: principal.id,
-                slot: PluginSlot::Router,
+                slot: PluginSlotKind::Router,
                 order: 1_000,
                 wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID,
                 config: serde_json::json!({}),

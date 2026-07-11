@@ -5,8 +5,9 @@ use cc_lb_domain::{
     InternalErrorStage, RoutingTrace, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
     TerminalDecision, TerminalStrategy, WrhKeySource,
 };
-use cc_lb_plugin_api::PluginSlot;
-use cc_lb_storage_api::{BackendKind, KeyStatus, MetaStore, RequestEvent, RequestEventStore};
+use cc_lb_storage_api::{
+    BackendKind, KeyStatus, MetaStore, PluginSlotKind, RequestEvent, RequestEventStore,
+};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -83,7 +84,7 @@ async fn golden_serde_bytes_match_current_types_and_storage_path() {
 
     let plugin_slot_bytes = fs::read(Path::new(FIXTURE_ROOT).join("plugin_slots.json"))
         .expect("read plugin slot fixture");
-    let plugin_slots: Vec<PluginSlot> =
+    let plugin_slots: Vec<PluginSlotKind> =
         serde_json::from_slice(&plugin_slot_bytes).expect("deserialize plugin slot fixture");
     assert_eq!(plugin_slots.len(), 3);
     assert_eq!(
@@ -92,9 +93,9 @@ async fn golden_serde_bytes_match_current_types_and_storage_path() {
     );
     for slot in plugin_slots {
         match slot {
-            PluginSlot::Router => assert_eq!(slot.as_str(), "router"),
-            PluginSlot::ObservabilityHook => assert_eq!(slot.as_str(), "observability_hook"),
-            PluginSlot::Shape => assert_eq!(slot.as_str(), "shape"),
+            PluginSlotKind::Router => assert_eq!(slot.as_str(), "router"),
+            PluginSlotKind::ObservabilityHook => assert_eq!(slot.as_str(), "observability_hook"),
+            PluginSlotKind::Shape => assert_eq!(slot.as_str(), "shape"),
         }
     }
 
@@ -184,9 +185,9 @@ async fn generate_fixtures(output_dir: &Path) {
     fs::write(
         output_dir.join("plugin_slots.json"),
         serde_json::to_vec(&[
-            PluginSlot::Router,
-            PluginSlot::ObservabilityHook,
-            PluginSlot::Shape,
+            PluginSlotKind::Router,
+            PluginSlotKind::ObservabilityHook,
+            PluginSlotKind::Shape,
         ])
         .expect("serialize plugin slot fixture"),
     )

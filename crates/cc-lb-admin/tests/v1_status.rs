@@ -12,7 +12,7 @@ use cc_lb_domain::ReplicaIdentity;
 use cc_lb_engine::{Lifecycle, LifecycleConfig};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate,
+    MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalCreate,
     PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntryInput,
 };
 use config_admin_common::{app, authed_json, temp_storage, test_state};
@@ -145,7 +145,7 @@ async fn export_round_trips_through_stable_key_ordering() {
     storage
         .insert_chain_entry(PluginChainEntryInput {
             principal_id,
-            slot: PluginSlot::Router,
+            slot: PluginSlotKind::Router,
             order: 1000,
             wasm_registry_id: registry.id,
             config: json!({ "zeta": 1, "alpha": { "zeta": true, "alpha": false } }),
