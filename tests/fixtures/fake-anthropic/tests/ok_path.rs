@@ -66,7 +66,13 @@ async fn non_streaming_and_aux_endpoints_return_anthropic_like_shapes() {
     assert_eq!(count["input_tokens"], 100);
 
     let models = json_request(app.clone(), "GET", "/v1/models", "").await;
-    assert!(models["data"].as_array().expect("models array").len() >= 3);
+    assert!(
+        models["data"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .any(|model| model["id"] == "claude-fable-5")
+    );
 
     let model = json_request(app.clone(), "GET", "/v1/models/claude-test", "").await;
     assert_eq!(model["id"], "claude-test");

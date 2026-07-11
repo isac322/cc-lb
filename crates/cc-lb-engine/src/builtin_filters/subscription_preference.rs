@@ -22,11 +22,12 @@
 //!
 //! ## Windows
 //!
-//! Base: `5h` and `7d`. Model-specific `7d_sonnet` and `7d_opus` labels are
-//! deliberately ignored because they are not stable enough to drive routing.
-//! `unified` is not itself an exhaustion window; its top-level flags
-//! (`overage_in_use`, `fallback_available`, `extra_usage_*`) enrich the
-//! overage assessment.
+//! Base: shared `5h` and `7d` windows for every model, plus `7d_fable` only for
+//! the canonical model ID `claude-fable-5`. Older model-specific
+//! `7d_sonnet` and `7d_opus` labels remain deliberately ignored because they
+//! are not stable enough to drive routing. `unified` is not itself an
+//! exhaustion window; its top-level flags (`overage_in_use`,
+//! `fallback_available`, `extra_usage_*`) enrich the overage assessment.
 //!
 //! ## Reset semantics
 //!
@@ -55,6 +56,7 @@ pub(crate) const NO_SUBSCRIPTION_REASON: &str = "keep:no_subscription_candidates
 
 pub(crate) const WINDOW_FIVE_HOUR: &str = "5h";
 pub(crate) const WINDOW_SEVEN_DAY: &str = "7d";
+pub(crate) const WINDOW_SEVEN_DAY_FABLE: &str = "7d_fable";
 pub(crate) const WINDOW_OVERAGE: &str = "overage";
 pub(crate) const WINDOW_UNIFIED: &str = "unified";
 
@@ -394,8 +396,12 @@ fn evaluate(
     }
 }
 
-fn relevant_base_windows(_canonical_model: &str) -> Vec<&'static str> {
-    vec![WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY]
+fn relevant_base_windows(canonical_model: &str) -> Vec<&'static str> {
+    let mut windows = vec![WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY];
+    if canonical_model == "claude-fable-5" {
+        windows.push(WINDOW_SEVEN_DAY_FABLE);
+    }
+    windows
 }
 
 fn routing_key_for_bucket<'a>(

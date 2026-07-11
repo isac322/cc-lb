@@ -527,11 +527,12 @@ async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
         json!({
             "type": "list",
             "data": [
+                model_json("claude-fable-5"),
                 model_json("claude-3-5-sonnet-20241022"),
                 model_json("claude-3-5-haiku-20241022"),
                 model_json("claude-3-opus-20240229")
             ],
-            "first_id": "claude-3-5-sonnet-20241022",
+            "first_id": "claude-fable-5",
             "last_id": "claude-3-opus-20240229",
             "has_more": false
         }),

@@ -18,6 +18,8 @@
 /// ```
 pub fn canonical_model_id(requested: &str) -> &str {
     match requested {
+        "claude-fable-5" => "claude-fable-5",
+
         // Sonnet aliases
         "claude-sonnet-4-5" => "claude-sonnet-4-5-20250929",
 
@@ -55,6 +57,7 @@ fn is_dated_model(model: &str) -> bool {
 /// # Cache Threshold Reference
 ///
 /// Based on Anthropic docs (retrieved 2026-06-07):
+/// - **512 tokens**: Claude Fable 5
 /// - **4,096 tokens**: Claude Opus 4.7, 4.6, 4.5; Claude Mythos Preview; Claude Haiku 4.5
 /// - **1,024 tokens**: Claude Opus 4.8; Claude Sonnet 4.6, 4.5
 /// - **2,048 tokens**: Claude Haiku 3.5 (retired; not included)
@@ -69,6 +72,8 @@ fn is_dated_model(model: &str) -> bool {
 /// ```
 pub fn cache_threshold_tokens(canonical: &str) -> usize {
     match canonical {
+        "claude-fable-5" => 512,
+
         // Sonnet 4.5 / 4.6 family: 1024
         "claude-sonnet-4-5-20250929" => 1024,
         "claude-sonnet-4-5" => 1024,
@@ -155,6 +160,16 @@ mod tests {
             canonical_model_id("claude-haiku-4-5"),
             "claude-haiku-4-5-20251001"
         );
+    }
+
+    #[test]
+    fn fable5_is_a_dateless_canonical_model() {
+        assert_eq!(canonical_model_id("claude-fable-5"), "claude-fable-5");
+    }
+
+    #[test]
+    fn threshold_fable5_is_512() {
+        assert_eq!(cache_threshold_tokens("claude-fable-5"), 512);
     }
 
     #[test]

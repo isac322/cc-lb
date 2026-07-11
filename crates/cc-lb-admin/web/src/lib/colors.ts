@@ -18,6 +18,7 @@ export const WINDOW_GRADIENT_IDS = {
   '7d': 'quota-grad-7d',
   '7d_sonnet': 'quota-grad-sonnet',
   '7d_opus': 'quota-grad-opus',
+  '7d_fable': 'quota-grad-fable',
   overage: 'quota-grad-overage',
   unified: 'quota-grad-unified',
 } as const;
@@ -27,6 +28,7 @@ export const WINDOW_DURATION_SECS: Record<string, number> = {
   '7d': 604800,
   '7d_sonnet': 604800,
   '7d_opus': 604800,
+  '7d_fable': 604800,
 };
 
 export const WINDOW_COLORS: Record<string, { stroke: string; fill: string }> = {
@@ -34,6 +36,7 @@ export const WINDOW_COLORS: Record<string, { stroke: string; fill: string }> = {
   '7d': { stroke: '#8b5cf6', fill: '#8b5cf6' }, // violet
   '7d_sonnet': { stroke: '#14b8a6', fill: '#14b8a6' }, // teal
   '7d_opus': { stroke: '#f59e0b', fill: '#f59e0b' }, // amber
+  '7d_fable': { stroke: '#ec4899', fill: '#ec4899' }, // pink
   overage: { stroke: '#f97316', fill: '#f97316' }, // orange
   unified: { stroke: '#64748b', fill: '#64748b' }, // slate
 };

@@ -15,6 +15,7 @@ struct UsageBody {
     seven_day: Option<UsageWindow>,
     seven_day_sonnet: Option<UsageWindow>,
     seven_day_opus: Option<UsageWindow>,
+    limits: Option<Vec<UsageLimit>>,
     extra_usage: Option<ExtraUsage>,
 }
 
@@ -22,6 +23,25 @@ struct UsageBody {
 struct UsageWindow {
     utilization: Option<f64>,
     resets_at: Option<ResetsAt>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageLimit {
+    kind: String,
+    percent: Option<f64>,
+    resets_at: Option<ResetsAt>,
+    scope: Option<UsageLimitScope>,
+    is_active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageLimitScope {
+    model: Option<UsageLimitModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageLimitModel {
+    display_name: Option<String>,
 }
 
 // Anthropic's /api/oauth/usage emits `resets_at` as a Unix-seconds number or an RFC3339 string; accept both.
@@ -101,6 +121,27 @@ fn records_from_usage(
         usage.seven_day_opus,
         observed_at_unix_millis,
     );
+    if let Some(limit) = usage.limits.into_iter().flatten().find(|limit| {
+        limit.is_active == Some(true)
+            && limit.kind == "weekly_scoped"
+            && limit
+                .scope
+                .as_ref()
+                .and_then(|scope| scope.model.as_ref())
+                .and_then(|model| model.display_name.as_deref())
+                == Some("Fable")
+    }) {
+        push_window(
+            &mut records,
+            upstream_id,
+            SubscriptionQuotaWindow::SevenDayFable,
+            Some(UsageWindow {
+                utilization: limit.percent,
+                resets_at: limit.resets_at,
+            }),
+            observed_at_unix_millis,
+        );
+    }
     if let Some(extra_usage) = usage.extra_usage {
         let utilization = match (extra_usage.used_credits, extra_usage.monthly_limit) {
             (Some(used), Some(limit)) if limit > 0.0 => Some((used / limit).clamp(0.0, 1.0)),

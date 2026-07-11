@@ -68,3 +68,34 @@ fn extra_usage_is_enabled_field_is_parsed() {
     assert_eq!(overage.extra_usage_monthly_limit, Some(30000.0));
     assert_eq!(overage.extra_usage_used_credits, Some(15000.0));
 }
+
+#[test]
+fn active_weekly_scoped_fable_limit_emits_normalized_window() {
+    let records = parse(
+        r#"{"limits":[{"kind":"weekly_scoped","percent":28,"resets_at":"2026-07-14T00:00:00Z","scope":{"model":{"display_name":"Fable","id":null},"surface":null},"is_active":true}]}"#,
+    );
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].window, SubscriptionQuotaWindow::SevenDayFable);
+    assert_eq!(records[0].utilization, Some(0.28));
+    assert_eq!(records[0].resets_at_unix_secs, Some(1_783_987_200));
+}
+
+#[test]
+fn active_fable_limit_percent_is_clamped_after_normalization() {
+    let records = parse(
+        r#"{"limits":[{"kind":"weekly_scoped","percent":128,"resets_at":1800000000,"scope":{"model":{"display_name":"Fable"}},"is_active":true}]}"#,
+    );
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].utilization, Some(1.0));
+}
+
+#[test]
+fn inactive_and_unrelated_scoped_limits_are_ignored() {
+    let records = parse(
+        r#"{"limits":[{"kind":"weekly_scoped","percent":28,"resets_at":1800000000,"scope":{"model":{"display_name":"Fable"}},"is_active":false},{"kind":"monthly_scoped","percent":28,"resets_at":1800000000,"scope":{"model":{"display_name":"Fable"}},"is_active":true},{"kind":"weekly_scoped","percent":28,"resets_at":1800000000,"scope":{"model":{"display_name":"Sonnet"}},"is_active":true},{"kind":"weekly_scoped","percent":28,"resets_at":1800000000,"scope":{"model":{"display_name":"Fable"}}}]}"#,
+    );
+
+    assert!(records.is_empty());
+}

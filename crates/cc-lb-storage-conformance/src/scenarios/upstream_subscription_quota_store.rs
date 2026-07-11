@@ -628,12 +628,58 @@ where
     B: ConformanceBackend,
     B::Storage: UpstreamSubscriptionQuotaStore,
 {
+    sample_writer_persists_seven_day_fable_window(Arc::clone(&backend)).await?;
     checkpoint_history_suppresses_duplicate_semantic_state(Arc::clone(&backend)).await?;
     checkpoint_history_returns_left_anchor_and_in_range_rows(Arc::clone(&backend)).await?;
     checkpoint_history_keeps_sources_separate(Arc::clone(&backend)).await?;
     checkpoint_history_orders_same_millis_ties_deterministically(backend).await?;
     Ok(())
 }
+
+scenario!(
+    sample_writer_persists_seven_day_fable_window,
+    |storage| async move {
+        let upstream = upstream_id(29);
+        let mut sample = observation(upstream, 100, 1, SubscriptionQuotaSource::Header, 0.4);
+        sample.window = SubscriptionQuotaWindow::SevenDayFable;
+        let checkpoint = checkpoint(&sample);
+
+        storage.record_subscription_quota_sample(&sample).await?;
+
+        let latest_samples = storage
+            .list_latest_subscription_quota_for_upstreams(&[upstream])
+            .await?;
+        ensure!(
+            latest_samples == [sample],
+            "latest sample should return the persisted Fable record"
+        );
+
+        let latest_checkpoints = storage
+            .list_latest_subscription_quota_checkpoints_for_upstreams(&[upstream])
+            .await?;
+        ensure!(
+            latest_checkpoints == [checkpoint.clone()],
+            "latest checkpoint should return the persisted Fable record"
+        );
+
+        let ranges = storage
+            .list_subscription_quota_checkpoint_ranges(SubscriptionQuotaCheckpointRangeQuery {
+                upstream_ids: vec![upstream],
+                windows: vec![SubscriptionQuotaWindow::SevenDayFable],
+                sources: vec![SubscriptionQuotaSource::Header],
+                since_unix_millis: 0,
+                until_unix_millis: 200,
+            })
+            .await?;
+        ensure!(ranges.len() == 1, "expected one Fable checkpoint range");
+        ensure!(
+            ranges[0].window == SubscriptionQuotaWindow::SevenDayFable
+                && ranges[0].checkpoints == [checkpoint],
+            "Fable checkpoint range should preserve its window and payload"
+        );
+        Ok(())
+    }
+);
 
 scenario!(
     checkpoint_history_suppresses_duplicate_semantic_state,

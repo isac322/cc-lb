@@ -18,6 +18,8 @@ pub enum SubscriptionQuotaWindow {
     SevenDaySonnet,
     #[serde(rename = "7d_opus")]
     SevenDayOpus,
+    #[serde(rename = "7d_fable")]
+    SevenDayFable,
     #[serde(rename = "overage")]
     Overage,
     #[serde(rename = "unified")]
@@ -29,6 +31,7 @@ impl SubscriptionQuotaWindow {
         match self {
             Self::FiveHour => "5h",
             Self::SevenDay => "7d",
+            Self::SevenDayFable => "7d_fable",
             Self::SevenDaySonnet => "7d_sonnet",
             Self::SevenDayOpus => "7d_opus",
             Self::Overage => "overage",
@@ -41,6 +44,7 @@ impl SubscriptionQuotaWindow {
         Some(match value {
             "5h" => Self::FiveHour,
             "7d" => Self::SevenDay,
+            "7d_fable" => Self::SevenDayFable,
             "7d_sonnet" => Self::SevenDaySonnet,
             "7d_opus" => Self::SevenDayOpus,
             "overage" => Self::Overage,
@@ -57,6 +61,7 @@ impl SubscriptionQuotaWindow {
             Self::SevenDayOpus => 4,
             Self::Overage => 5,
             Self::Unified => 6,
+            Self::SevenDayFable => 7,
         }
     }
 
@@ -68,6 +73,7 @@ impl SubscriptionQuotaWindow {
             4 => Self::SevenDayOpus,
             5 => Self::Overage,
             6 => Self::Unified,
+            7 => Self::SevenDayFable,
             _ => return None,
         })
     }
@@ -78,9 +84,52 @@ impl SubscriptionQuotaWindow {
             Self::SevenDay,
             Self::SevenDaySonnet,
             Self::SevenDayOpus,
+            Self::SevenDayFable,
             Self::Overage,
             Self::Unified,
         ]
+    }
+}
+
+#[cfg(test)]
+mod subscription_quota_window_tests {
+    use super::SubscriptionQuotaWindow;
+
+    #[test]
+    fn seven_day_fable_round_trips_stable_vocabulary() {
+        let window = SubscriptionQuotaWindow::SevenDayFable;
+
+        assert_eq!(window.as_str(), "7d_fable");
+        assert_eq!(SubscriptionQuotaWindow::from_str("7d_fable"), Some(window));
+        assert_eq!(window.code(), 7);
+        assert_eq!(SubscriptionQuotaWindow::from_code(7), Some(window));
+        assert_eq!(
+            serde_json::to_string(&window).expect("Fable window serializes"),
+            "\"7d_fable\""
+        );
+        assert_eq!(
+            serde_json::from_str::<SubscriptionQuotaWindow>("\"7d_fable\"")
+                .expect("Fable window deserializes"),
+            window
+        );
+        assert!(SubscriptionQuotaWindow::all().contains(&window));
+    }
+
+    #[test]
+    fn existing_window_codes_remain_stable() {
+        let stable_codes = [
+            (SubscriptionQuotaWindow::FiveHour, 1),
+            (SubscriptionQuotaWindow::SevenDay, 2),
+            (SubscriptionQuotaWindow::SevenDaySonnet, 3),
+            (SubscriptionQuotaWindow::SevenDayOpus, 4),
+            (SubscriptionQuotaWindow::Overage, 5),
+            (SubscriptionQuotaWindow::Unified, 6),
+        ];
+
+        for (window, code) in stable_codes {
+            assert_eq!(window.code(), code);
+            assert_eq!(SubscriptionQuotaWindow::from_code(code), Some(window));
+        }
     }
 }
 
