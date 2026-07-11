@@ -92,10 +92,55 @@ fn active_fable_limit_percent_is_clamped_after_normalization() {
 }
 
 #[test]
-fn inactive_and_unrelated_scoped_limits_are_ignored() {
+fn inactive_weekly_scoped_fable_limit_is_still_recorded() {
     let records = parse(
-        r#"{"limits":[{"kind":"weekly_scoped","percent":28,"resets_at":1800000000,"scope":{"model":{"display_name":"Fable"}},"is_active":false},{"kind":"monthly_scoped","percent":28,"resets_at":1800000000,"scope":{"model":{"display_name":"Fable"}},"is_active":true},{"kind":"weekly_scoped","percent":28,"resets_at":1800000000,"scope":{"model":{"display_name":"Sonnet"}},"is_active":true},{"kind":"weekly_scoped","percent":28,"resets_at":1800000000,"scope":{"model":{"display_name":"Fable"}}}]}"#,
+        r#"{"limits":[{"kind":"weekly_scoped","percent":16,"resets_at":"2026-07-15T15:00:00Z","scope":{"model":{"display_name":"Fable","id":null},"surface":null},"is_active":false}]}"#,
+    );
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].window, SubscriptionQuotaWindow::SevenDayFable);
+    assert_eq!(records[0].utilization, Some(0.16));
+}
+
+#[test]
+fn weekly_scoped_fable_limit_without_is_active_is_recorded() {
+    let records = parse(
+        r#"{"limits":[{"kind":"weekly_scoped","percent":14,"resets_at":1800000000,"scope":{"model":{"display_name":"Fable"}}}]}"#,
+    );
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].window, SubscriptionQuotaWindow::SevenDayFable);
+    assert_eq!(records[0].utilization, Some(0.14));
+}
+
+#[test]
+fn non_weekly_or_non_fable_scoped_limits_are_ignored() {
+    let records = parse(
+        r#"{"limits":[{"kind":"monthly_scoped","percent":28,"resets_at":1800000000,"scope":{"model":{"display_name":"Fable"}},"is_active":true},{"kind":"weekly_scoped","percent":28,"resets_at":1800000000,"scope":{"model":{"display_name":"Sonnet"}},"is_active":true}]}"#,
     );
 
     assert!(records.is_empty());
+}
+
+#[test]
+fn realistic_body_records_inactive_fable_beside_top_level_windows() {
+    let body = r#"{"five_hour":{"utilization":11.0,"resets_at":"2026-07-11T15:20:00Z"},"seven_day":{"utilization":55.0,"resets_at":"2026-07-15T15:00:00Z"},"seven_day_sonnet":null,"seven_day_opus":null,"limits":[{"kind":"session","group":"session","percent":11,"scope":null,"is_active":false},{"kind":"weekly_all","group":"weekly","percent":55,"scope":null,"is_active":true},{"kind":"weekly_scoped","group":"weekly","percent":16,"resets_at":"2026-07-15T15:00:00Z","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null},"is_active":false}]}"#;
+    let records = parse(body);
+    let fable = records
+        .iter()
+        .find(|r| r.window == SubscriptionQuotaWindow::SevenDayFable)
+        .expect("fable window recorded from inactive weekly_scoped entry");
+    assert_eq!(fable.utilization, Some(0.16));
+    assert!(
+        records
+            .iter()
+            .any(|r| r.window == SubscriptionQuotaWindow::FiveHour),
+        "top-level five_hour still recorded"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|r| r.window == SubscriptionQuotaWindow::SevenDay),
+        "top-level seven_day still recorded"
+    );
 }
