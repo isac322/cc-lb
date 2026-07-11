@@ -31,7 +31,6 @@ struct UsageLimit {
     percent: Option<f64>,
     resets_at: Option<ResetsAt>,
     scope: Option<UsageLimitScope>,
-    is_active: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,9 +120,12 @@ fn records_from_usage(
         usage.seven_day_opus,
         observed_at_unix_millis,
     );
+    // Anthropic marks a per-model weekly meter (e.g. Fable) `is_active=false` unless that
+    // model is the single currently-binding limit, which for a per-model meter is almost
+    // never the case. The entry still carries real utilization, so record it regardless of
+    // `is_active`; filtering on it drops live Fable usage entirely.
     if let Some(limit) = usage.limits.into_iter().flatten().find(|limit| {
-        limit.is_active == Some(true)
-            && limit.kind == "weekly_scoped"
+        limit.kind == "weekly_scoped"
             && limit
                 .scope
                 .as_ref()
