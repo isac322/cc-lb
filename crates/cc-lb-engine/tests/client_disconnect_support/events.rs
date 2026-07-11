@@ -1,9 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_contract::{
-    LifecycleBusReceiver, LifecycleEvent, RequestEventBus, RequestEventUpdate, TerminationReason,
-};
+use cc_lb_contract::{LifecycleBusReceiver, LifecycleEvent, RequestEventBus, TerminationReason};
+use cc_lb_request_log::RequestEventUpdate;
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_sqlite::SqliteStorage;
 use tokio::sync::broadcast;

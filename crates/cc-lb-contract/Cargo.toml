@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 cc-lb-domain.workspace = true
+cc-lb-request-log.workspace = true
 cc-lb-plugin-api = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

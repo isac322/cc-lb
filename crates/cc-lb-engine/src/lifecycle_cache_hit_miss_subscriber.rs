@@ -237,9 +237,10 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 mod tests {
     use super::*;
     use cc_lb_contract::{
-        EngineMetricsHook, NoopMetricsHook, ParseInfo, RequestCacheBreakpoint,
-        RequestCacheBreakpointSource, RouteInfo, TerminationReason, UsageSnapshot, UsageSource,
+        EngineMetricsHook, NoopMetricsHook, ParseInfo, RouteInfo, TerminationReason, UsageSnapshot,
+        UsageSource,
     };
+    use cc_lb_request_log::{RequestCacheBreakpoint, RequestCacheBreakpointSource};
     use uuid::Uuid;
 
     fn eid(s: &str) -> EventId {

@@ -15,7 +15,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::{CostBreakdown, EventId, LifecycleEvent, RequestEventBus};
+use cc_lb_contract::{EventId, LifecycleEvent, RequestEventBus};
+use cc_lb_request_log::CostBreakdown;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -225,7 +226,7 @@ fn pricing_upstream_kind_from_label(label: &str) -> Option<crate::UpstreamKind> 
 
 fn event_cost_breakdown_from_pricing(
     breakdown: crate::ComputedCostBreakdown,
-) -> cc_lb_contract::CostBreakdown {
+) -> cc_lb_request_log::CostBreakdown {
     breakdown.into()
 }
 
@@ -267,9 +268,10 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 mod tests {
     use super::*;
     use cc_lb_contract::{
-        BusReceiver, LifecycleBusReceiver, ParseInfo, RequestEventUpdate, RouteInfo, StreamSuccess,
-        TerminationReason, UsageSnapshot, UsageSource,
+        BusReceiver, LifecycleBusReceiver, ParseInfo, RouteInfo, StreamSuccess, TerminationReason,
+        UsageSnapshot, UsageSource,
     };
+    use cc_lb_request_log::RequestEventUpdate;
     use tokio::sync::broadcast;
     use uuid::Uuid;
 

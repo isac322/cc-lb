@@ -19,10 +19,10 @@ use std::sync::{Arc, Mutex};
 use cc_lb_contract::LifecycleEvent;
 pub use cc_lb_contract::{
     BusReceiver, DEFAULT_LIFECYCLE_BROADCAST_CAPACITY, LifecycleBusReceiver, RequestEventBus,
-    RequestEventPhase, RequestEventUpdate,
 };
 #[cfg(test)]
-use cc_lb_contract::{RequestEvent, RequestEventPartial};
+use cc_lb_request_log::{RequestEvent, RequestEventPartial};
+pub use cc_lb_request_log::{RequestEventPhase, RequestEventUpdate};
 use tokio::sync::{broadcast, mpsc};
 
 /// Default capacity for the broadcast channel powering admin SSE subscribers.

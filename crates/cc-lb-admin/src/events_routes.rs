@@ -11,9 +11,10 @@ use axum::{
     },
     routing::get,
 };
-use cc_lb_contract::{BusReceiver, RequestEventPartial, RequestEventUpdate};
+use cc_lb_contract::BusReceiver;
 use cc_lb_control::record_dashboard_sse_lagged;
 use cc_lb_engine::ResetReason;
+use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
 use cc_lb_storage_api::RequestEvent;
 use serde_json::json;
 use tokio::{sync::broadcast::error::RecvError, time::Duration};

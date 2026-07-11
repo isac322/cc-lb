@@ -3,11 +3,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cc_lb_contract::{
-    AuthInfo, CostBreakdown as LifecycleCostBreakdown, EngineMetricsHook, EventId, LifecycleEvent,
-    ParseInfo, RequestCacheBreakpoint, RequestCacheState, RequestEventBus, RequestEventPartial,
-    RequestEventUpdate, RequestEventUpstream, RouteInfo, TerminationReason, UsageSnapshot,
+    AuthInfo, EngineMetricsHook, EventId, LifecycleEvent, ParseInfo, RequestEventBus, RouteInfo,
+    TerminationReason, UsageSnapshot,
 };
 use cc_lb_domain::{InternalError, RoutingTrace};
+use cc_lb_request_log::{
+    CostBreakdown as LifecycleCostBreakdown, RequestCacheBreakpoint, RequestCacheState,
+    RequestEventPartial, RequestEventUpdate, RequestEventUpstream,
+};
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -369,7 +372,7 @@ impl Partial {
             &str,
             &UsageSnapshot,
             Option<cc_lb_pricing::UpstreamKind>,
-        ) -> cc_lb_contract::CostBreakdown,
+        ) -> LifecycleCostBreakdown,
     ) -> Option<CostBreakdownOptions> {
         if !self.usage_seen {
             return None;
@@ -433,8 +436,8 @@ fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
     }
 }
 
-impl From<cc_lb_contract::CostBreakdown> for CostBreakdownOptions {
-    fn from(cost: cc_lb_contract::CostBreakdown) -> Self {
+impl From<LifecycleCostBreakdown> for CostBreakdownOptions {
+    fn from(cost: LifecycleCostBreakdown) -> Self {
         Self {
             total: cost.total_micros,
             input: cost.input_micros,
@@ -1198,13 +1201,14 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use cc_lb_contract::{
-        AuthFailure, BusReceiver, CostBreakdown, EngineMetricsHook, HeaderSnapshot,
-        NoopMetricsHook, ParseFailure, RouteInfo, StreamError, StreamSuccess, UsageSource,
+        AuthFailure, BusReceiver, EngineMetricsHook, NoopMetricsHook, ParseFailure, RouteInfo,
+        StreamError, StreamSuccess, UsageSource,
     };
     use cc_lb_plugin_api::types::{
         CandidateUrgency, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
         TerminalDecision, TerminalStrategy, WrhKeySource,
     };
+    use cc_lb_request_log::{CostBreakdown, HeaderSnapshot};
     use cc_lb_storage_api::{RequestEvent, StorageResult};
     use metrics::{Counter, CounterFn, Key, KeyName, Metadata, Recorder, SharedString, Unit};
     use proptest::prelude::*;

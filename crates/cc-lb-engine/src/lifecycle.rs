@@ -17,10 +17,13 @@ use cc_lb_domain::{
 };
 use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent};
 use cc_lb_quota::rate_limit_headers::parse_anthropic_rate_limit_headers;
+use cc_lb_request_log::{
+    HeaderSnapshot, RequestCacheBreakpoint, RequestCacheBreakpointSource,
+    RequestCacheLookbackPrefix,
+};
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RouterPlugin};
 use cc_lb_storage_api::{
-    UpstreamRateLimitObservationRecord, UpstreamRecord,
-    types::{RequestCacheBreakpoint, RequestCacheBreakpointSource, StoredApiKeyRecord},
+    UpstreamRateLimitObservationRecord, UpstreamRecord, types::StoredApiKeyRecord,
     upstream::UpstreamKind as StorageUpstreamKind,
 };
 use cc_lb_upstream::{
@@ -3977,7 +3980,7 @@ fn header_to_string(headers: &HeaderMap, name: &str) -> Option<String> {
 /// with `anthropic-ratelimit-` OR exactly matches one of the identity slots
 /// (`ANTHROPIC_IDENTITY_HEADERS`). Downstream subscribers reconstruct a
 /// `HeaderMap` and parse into typed rate-limit/subscription-quota records.
-fn header_snapshot_from(headers: &HeaderMap) -> cc_lb_contract::HeaderSnapshot {
+fn header_snapshot_from(headers: &HeaderMap) -> HeaderSnapshot {
     let mut anthropic_headers: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     for (name, value) in headers.iter() {
@@ -3989,7 +3992,7 @@ fn header_snapshot_from(headers: &HeaderMap) -> cc_lb_contract::HeaderSnapshot {
             anthropic_headers.insert(name_lc.to_owned(), val.to_owned());
         }
     }
-    cc_lb_contract::HeaderSnapshot {
+    HeaderSnapshot {
         content_type: header_to_string(headers, "content-type"),
         content_encoding: header_to_string(headers, "content-encoding"),
         request_id: header_to_string(headers, "x-request-id")
@@ -4251,7 +4254,7 @@ fn request_cache_metadata_from_value(
             lookback_prefixes: breakpoint
                 .lookback_prefixes
                 .iter()
-                .map(|prefix| cc_lb_contract::RequestCacheLookbackPrefix {
+                .map(|prefix| RequestCacheLookbackPrefix {
                     prefix_hash: prefix.prefix_key.clone(),
                     content_block_index: prefix.content_block_index,
                     lookback_distance: prefix.lookback_distance,

@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::{EventId, LifecycleEvent, RequestCacheState, RequestEventBus, UsageSnapshot};
+use cc_lb_contract::{EventId, LifecycleEvent, RequestEventBus, UsageSnapshot};
+use cc_lb_request_log::RequestCacheState;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 

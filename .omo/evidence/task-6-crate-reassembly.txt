@@ -1,0 +1,80 @@
+T6 crate reassembly evidence
+============================
+
+Scope
+-----
+Created unpublished `cc-lb-request-log` as the stable persisted request-log
+read-model. Its only cc-lb dependency is `cc-lb-domain`; its external
+dependencies are `serde`, `serde_json`, and `uuid`. It has no Tokio dependency
+and defines no `Persisted*` mirror type.
+
+Moved owned items
+-----------------
+* `RequestEvent`, with `routing_trace: Option<cc_lb_domain::RoutingTrace>` and
+  `internal_errors: Vec<cc_lb_domain::InternalError>` directly.
+* `RequestEventPartial`, `RequestEventUpdate`, `FinalRequestEventUpdate`, and
+  `RequestEventPhase`.
+* `RequestEventUpstream`, `RequestCacheState`, `RequestCacheBreakpoint`,
+  `RequestCacheLookbackPrefix`, and `RequestCacheBreakpointSource`.
+* `HeaderSnapshot` and `CostBreakdown`.
+
+Ownership and bridges
+---------------------
+`cc-lb-contract` retains Tokio transport only: `RequestEventBus`,
+`BusReceiver`, `LifecycleBusReceiver`, and
+`DEFAULT_LIFECYCLE_BROADCAST_CAPACITY`. It has a narrow `#[doc(hidden)]`
+re-export bridge for every T6-owned DTO. `event_bus.rs` imports the update
+payload directly from request-log, so no DTO definition remains in contract.
+
+Direct engine, pricing, control, admin, and server consumers now import moved
+DTOs from `cc_lb_request_log`. `cc-lb-storage-api` deliberately retains its
+existing re-export through the contract bridge until its T9 ownership move; the
+SQLite T0 fixture therefore exercises `storage-api -> contract bridge ->
+request-log` exactly as required.
+
+RED-first and serde artifact
+----------------------------
+The focused request-log fixture test was created before the DTO definition.
+`cargo test -p cc-lb-request-log --test reassembly_serde_fixtures` first exited
+101 with E0432 (`cc_lb_request_log::RequestEvent` missing). After the move, the
+test deserializes `tests/fixtures/reassembly/request_event.json`, asserts its
+populated domain `routing_trace` and one internal error, and compares
+`serde_json::to_string(&event)` byte-for-byte with the fixture. It passed in
+both required deterministic runs.
+
+Verification
+------------
+All commands exited 0:
+* `cargo fmt --all -- --check`
+* `cargo build -p cc-lb-request-log`
+* `cargo clippy -p cc-lb-request-log --all-targets -- -D warnings`
+* `cargo test -p cc-lb-request-log` twice
+* `cargo test -p cc-lb-storage-sqlite --test reassembly_serde_fixtures`
+* `cargo build -p cc-lb-contract -p cc-lb-storage-api -p cc-lb-storage-sqlite -p cc-lb-storage-postgres -p cc-lb-engine -p cc-lb-control -p cc-lb-server`
+* `cargo check --workspace --all-targets`
+* `no_dep request-log routing`, `no_dep request-log engine`,
+  `no_dep request-log lifecycle`, `no_dep request-log storage-api`, and
+  `has_dep request-log domain`
+* `cargo metadata --format-version 1 --no-deps`: `publish: []` (Cargo's
+  metadata representation of `publish = false`); direct dependencies are
+  `cc-lb-domain`, `serde`, `serde_json`, and `uuid`.
+* empty scans for `PersistedRoutingTrace|PersistedInternalError|Persisted` and
+  `tokio` under `crates/cc-lb-request-log`.
+
+LSP and review
+--------------
+LSP diagnostics were clean for request-log and contract. The daemon timed out
+twice for engine, pricing, admin, control, and server, so the required
+successful targeted builds and workspace `--all-targets` check provide compiler
+coverage for those re-points. All new request-log Rust files are below 250 pure
+LOC under the repository's measurement. Modules own cache values, header/cost
+values, persisted event schema, and live update DTOs separately. No unsafe,
+production unwrap/expect, untyped boundary, new enum wildcard, or logging was
+introduced.
+
+Cleanup and risks
+-----------------
+No process, credential, network resource, migration, or temporary database was
+created. The only intentional compatibility surface is the doc-hidden contract
+bridge, scheduled for removal with the remaining contract decomposition in T11;
+storage-api's bridge-based re-export is scheduled for its T9 ownership move.

@@ -317,9 +317,8 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_contract::{
-        AuthInfo, CostBreakdown, ParseInfo, TerminationReason, UsageSnapshot, UsageSource,
-    };
+    use cc_lb_contract::{AuthInfo, ParseInfo, TerminationReason, UsageSnapshot, UsageSource};
+    use cc_lb_request_log::CostBreakdown;
 
     fn eid(s: &str) -> EventId {
         s.to_owned()

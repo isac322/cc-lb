@@ -4,8 +4,9 @@ use std::error::Error;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use cc_lb_contract::{BusReceiver, RequestEventBus, RequestEventPartial, RequestEventUpdate};
+use cc_lb_contract::{BusReceiver, RequestEventBus};
 use cc_lb_engine::{DEFAULT_PG_NOTIFY_CHANNEL, InMemoryBus, PgListener};
+use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use secrecy::SecretString;
 use sqlx::PgPool;

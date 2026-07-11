@@ -723,6 +723,7 @@ dependencies = [
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
+ "cc-lb-request-log",
  "cc-lb-routing",
  "cc-lb-runtime-wasmtime",
  "cc-lb-scheduler",
@@ -813,6 +814,7 @@ version = "0.1.0"
 dependencies = [
  "cc-lb-domain",
  "cc-lb-plugin-api",
+ "cc-lb-request-log",
  "serde",
  "serde_json",
  "tokio",
@@ -833,6 +835,7 @@ dependencies = [
  "cc-lb-contract",
  "cc-lb-domain",
  "cc-lb-plugin-api",
+ "cc-lb-request-log",
  "cc-lb-routing",
  "cc-lb-storage-api",
  "cc-lb-upstream",
@@ -903,6 +906,7 @@ dependencies = [
  "cc-lb-plugin-api",
  "cc-lb-pricing",
  "cc-lb-quota",
+ "cc-lb-request-log",
  "cc-lb-routing",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
@@ -1064,6 +1068,7 @@ dependencies = [
  "cc-lb-clock",
  "cc-lb-contract",
  "cc-lb-domain",
+ "cc-lb-request-log",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
  "futures-lite",
@@ -1111,6 +1116,16 @@ dependencies = [
  "cc-lb-storage-api",
  "http",
  "serde",
+ "uuid",
+]
+
+[[package]]
+name = "cc-lb-request-log"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-domain",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 
@@ -1236,6 +1251,7 @@ dependencies = [
  "cc-lb-observability",
  "cc-lb-plugin-api",
  "cc-lb-pricing",
+ "cc-lb-request-log",
  "cc-lb-routing",
  "cc-lb-runtime-wasmtime",
  "cc-lb-scheduler",
@@ -1358,6 +1374,7 @@ dependencies = [
  "cc-lb-engine",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
+ "cc-lb-request-log",
  "cc-lb-storage-sqlite",
  "chrono",
  "serde",
