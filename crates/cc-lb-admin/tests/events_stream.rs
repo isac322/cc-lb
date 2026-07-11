@@ -8,7 +8,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use cc_lb_config::Config;
-use cc_lb_contract::RequestEventBus;
+use cc_lb_control::RequestEventBus;
 use cc_lb_engine::InMemoryBus;
 use cc_lb_request_log::RequestEventUpdate;
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};

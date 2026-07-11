@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::RequestEventBus;
+use cc_lb_control::RequestEventBus;
 use cc_lb_lifecycle::{EventId, LifecycleEvent, UsageSnapshot};
 use cc_lb_request_log::RequestCacheState;
 use tokio::sync::{mpsc, oneshot};
@@ -209,7 +209,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 mod tests {
     use super::*;
     use crate::event_bus::InMemoryBus;
-    use cc_lb_contract::LifecycleBusReceiver;
+    use cc_lb_control::LifecycleBusReceiver;
     use cc_lb_lifecycle::{ParseInfo, TerminationReason};
 
     fn eid(s: &str) -> EventId {

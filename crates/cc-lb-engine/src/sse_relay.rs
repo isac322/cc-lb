@@ -9,7 +9,7 @@ use std::time::{Duration, Instant as StdInstant};
 
 use axum::body::Body;
 use bytes::{Bytes, BytesMut};
-use cc_lb_contract::RequestEventBus;
+use cc_lb_control::RequestEventBus;
 use cc_lb_lifecycle::{EventId, LifecycleEvent};
 use cc_lb_observability::{ObservabilityHook, ObserveEvent};
 use cc_lb_upstream::UpstreamDialect;
@@ -730,7 +730,7 @@ mod tests {
         PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
         PromptCacheObservationInput, PromptCacheObservationSinkLike,
     };
-    use cc_lb_contract::LifecycleBusReceiver;
+    use cc_lb_control::LifecycleBusReceiver;
 
     use super::*;
 

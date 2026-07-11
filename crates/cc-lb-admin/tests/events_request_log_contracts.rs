@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use cc_lb_config::Config;
-use cc_lb_contract::RequestEventBus;
+use cc_lb_control::RequestEventBus;
 use cc_lb_storage_api::RequestEventStore;
 use config_admin_common::{app, authed_json, temp_storage, test_state};
 use events_request_log_contracts_support::{

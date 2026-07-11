@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use cc_lb_contract::{BusReceiver, RequestEventBus};
+use cc_lb_control::{BusReceiver, RequestEventBus};
 use cc_lb_engine::InMemoryBus;
 use cc_lb_lifecycle::{
     EventId, LifecycleEvent, ParseInfo, RouteInfo, StreamSuccess, TerminationReason, UsageSnapshot,

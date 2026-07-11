@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use cc_lb_admin::internal_partials::{InternalPartialsState, router as internal_partials_router};
-use cc_lb_contract::{BusReceiver, RequestEventBus};
+use cc_lb_control::{BusReceiver, RequestEventBus};
 use cc_lb_engine::{
     ClockHandle, InMemoryBus, PartialRetentionCache, PgListener, PgNotifier, SystemClock,
 };

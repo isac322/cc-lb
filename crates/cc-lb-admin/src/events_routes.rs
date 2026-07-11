@@ -11,7 +11,7 @@ use axum::{
     },
     routing::get,
 };
-use cc_lb_contract::BusReceiver;
+use cc_lb_control::BusReceiver;
 use cc_lb_control::record_dashboard_sse_lagged;
 use cc_lb_engine::ResetReason;
 use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};

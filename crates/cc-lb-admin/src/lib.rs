@@ -28,7 +28,7 @@ use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use serde::Serialize;
 
 use cc_lb_clock::ClockHandle;
-use cc_lb_contract::RequestEventBus;
+use cc_lb_control::RequestEventBus;
 use cc_lb_control::{
     AuditWriterSink, DynamicView, DynamicViewHolder, MetadataHookHandle,
     api_keys::{key_store::KeyStore, limit_engine::LimitEngine},

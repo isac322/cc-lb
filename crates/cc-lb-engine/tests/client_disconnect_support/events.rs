@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_contract::{LifecycleBusReceiver, RequestEventBus};
+use cc_lb_control::{LifecycleBusReceiver, RequestEventBus};
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_request_log::RequestEventUpdate;
 use cc_lb_storage_api::{BackendKind, MetaStore};

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::RequestEventBus;
+use cc_lb_control::RequestEventBus;
 use cc_lb_lifecycle::{EventId, LifecycleEvent};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;

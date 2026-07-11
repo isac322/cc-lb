@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cc_lb_contract::RequestEventBus;
+use cc_lb_control::RequestEventBus;
 use cc_lb_domain::{InternalError, RoutingTrace};
 use cc_lb_lifecycle::{
     AuthInfo, EventId, LifecycleEvent, ParseInfo, RouteInfo, TerminationReason, UsageSnapshot,
@@ -1201,7 +1201,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use cc_lb_contract::BusReceiver;
+    use cc_lb_control::BusReceiver;
     use cc_lb_lifecycle::{
         AuthFailure, ParseFailure, RouteInfo, StreamError, StreamSuccess, UsageSource,
     };
@@ -1667,7 +1667,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn finalized_row_write_republishes_to_bus_for_admin_sse() {
         use crate::event_bus::InMemoryBus;
-        use cc_lb_contract::BusReceiver;
+        use cc_lb_control::BusReceiver;
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
         let bus = Arc::new(InMemoryBus::new());
@@ -1726,7 +1726,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn request_started_then_route_publishes_ordered_enrichment_baseline() {
         use crate::event_bus::InMemoryBus;
-        use cc_lb_contract::BusReceiver;
+        use cc_lb_control::BusReceiver;
 
         // Given an assembler with an in-memory subscriber.
         let (tx, rx) = mpsc::channel(4);
@@ -1814,7 +1814,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn full_lifecycle_publishes_throttled_partials_and_one_final() {
         use crate::event_bus::InMemoryBus;
-        use cc_lb_contract::BusReceiver;
+        use cc_lb_control::BusReceiver;
 
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
@@ -2036,7 +2036,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn parse_and_auth_failures_emit_no_enrichment_partials_and_finalize_once() {
         use crate::event_bus::InMemoryBus;
-        use cc_lb_contract::BusReceiver;
+        use cc_lb_control::BusReceiver;
 
         // Given an assembler subscribed before a request begins.
         let (tx, rx) = mpsc::channel(8);

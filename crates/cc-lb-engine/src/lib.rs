@@ -34,7 +34,6 @@ mod error_format;
 mod error_normalizer;
 #[cfg(not(loom))]
 pub mod event_bus {
-    pub use cc_lb_contract::event_bus::{BusReceiver, LifecycleBusReceiver, RequestEventBus};
     pub use cc_lb_control::event_bus::*;
     pub use cc_lb_request_log::{RequestEventPhase, RequestEventUpdate};
 }

@@ -1,4 +1,4 @@
-use cc_lb_contract::RequestEventBus;
+use cc_lb_control::RequestEventBus;
 use cc_lb_engine::PgNotifyFanout;
 use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
 

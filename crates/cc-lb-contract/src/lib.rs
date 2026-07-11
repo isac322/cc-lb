@@ -1,14 +1,14 @@
 //! Contract types and traits shared by cc-lb runtime layers.
 //!
-//! This crate retains the Tokio lifecycle transport boundary while lifecycle
-//! vocabulary resides in `cc-lb-lifecycle`.
+//! This crate retains bridge exports while lifecycle vocabulary resides in
+//! `cc-lb-lifecycle` and Tokio lifecycle transport resides in `cc-lb-control`.
 
 #![deny(missing_debug_implementations)]
 
-pub mod event_bus;
-
-pub use event_bus::{
-    BusReceiver, DEFAULT_LIFECYCLE_BROADCAST_CAPACITY, LifecycleBusReceiver, RequestEventBus,
+#[doc(hidden)]
+pub use cc_lb_control::{
+    BusReceiver, DEFAULT_LIFECYCLE_BROADCAST_CAPACITY, LifecycleBusReceiver,
+    ReplicaIdentityProvider, RequestEventBus,
 };
 
 #[doc(hidden)]
@@ -34,7 +34,3 @@ pub use cc_lb_storage_api::{AuditEntry, AuditSink, KeyStatus, Limit, LimitKind};
 
 #[doc(hidden)]
 pub use cc_lb_domain::{ANTHROPIC_IDENTITY_HEADERS, PrincipalKindLite, ReplicaIdentity};
-
-pub trait ReplicaIdentityProvider: Send + Sync {
-    fn replica_identity(&self) -> Option<ReplicaIdentity>;
-}

@@ -813,6 +813,7 @@ dependencies = [
 name = "cc-lb-contract"
 version = "0.1.0"
 dependencies = [
+ "cc-lb-control",
  "cc-lb-domain",
  "cc-lb-lifecycle",
  "cc-lb-observability",
@@ -834,7 +835,6 @@ dependencies = [
  "bytes",
  "cc-lb-clock",
  "cc-lb-config",
- "cc-lb-contract",
  "cc-lb-domain",
  "cc-lb-lifecycle",
  "cc-lb-observability",
@@ -903,7 +903,6 @@ dependencies = [
  "cc-lb-aead",
  "cc-lb-clock",
  "cc-lb-config",
- "cc-lb-contract",
  "cc-lb-control",
  "cc-lb-domain",
  "cc-lb-lifecycle",
@@ -1081,7 +1080,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "cc-lb-clock",
- "cc-lb-contract",
+ "cc-lb-control",
  "cc-lb-domain",
  "cc-lb-lifecycle",
  "cc-lb-request-log",
@@ -1259,7 +1258,6 @@ dependencies = [
  "cc-lb-admin",
  "cc-lb-aead",
  "cc-lb-config",
- "cc-lb-contract",
  "cc-lb-control",
  "cc-lb-dialect-anthropic",
  "cc-lb-domain",

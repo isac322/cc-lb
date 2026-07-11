@@ -16,14 +16,48 @@
 
 use std::sync::{Arc, Mutex};
 
-pub use cc_lb_contract::{
-    BusReceiver, DEFAULT_LIFECYCLE_BROADCAST_CAPACITY, LifecycleBusReceiver, RequestEventBus,
-};
 use cc_lb_lifecycle::LifecycleEvent;
 #[cfg(test)]
 use cc_lb_request_log::{RequestEvent, RequestEventPartial};
 pub use cc_lb_request_log::{RequestEventPhase, RequestEventUpdate};
 use tokio::sync::{broadcast, mpsc};
+
+/// Default capacity for the lifecycle-event broadcast channel.
+///
+/// The lifecycle stream fires up to ~10 events per request, so this absorbs
+/// bursts of ~200 in-flight requests before slow ephemeral consumers observe
+/// `Lagged(n)`.
+pub const DEFAULT_LIFECYCLE_BROADCAST_CAPACITY: usize = 2048;
+
+/// Receiver side of [`RequestEventBus::subscribe`] for ephemeral consumers.
+#[derive(Debug)]
+pub enum BusReceiver {
+    InMemory(broadcast::Receiver<RequestEventUpdate>),
+    Remote(mpsc::Receiver<RequestEventUpdate>),
+}
+
+/// Receiver side of [`RequestEventBus::subscribe_lifecycle`].
+///
+/// `None` is returned by trait implementations that do not publish lifecycle
+/// events, such as test doubles that only exercise the `RequestEvent` path.
+#[derive(Debug)]
+pub enum LifecycleBusReceiver {
+    None,
+    InMemory(broadcast::Receiver<LifecycleEvent>),
+}
+
+/// Transport-agnostic event sink used by lifecycle producers and admin SSE consumers.
+pub trait RequestEventBus: Send + Sync + 'static {
+    /// Publish an event update. Synchronous and non-blocking.
+    fn publish(&self, update: RequestEventUpdate);
+
+    /// Subscribe an ephemeral consumer. Slow consumers may observe `Lagged(n)`.
+    fn subscribe(&self) -> BusReceiver;
+
+    fn publish_lifecycle(&self, event: LifecycleEvent);
+
+    fn subscribe_lifecycle(&self) -> LifecycleBusReceiver;
+}
 
 /// Default capacity for the broadcast channel powering admin SSE subscribers.
 pub const DEFAULT_BROADCAST_CAPACITY: usize = 4096;

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use cc_lb_contract::RequestEventBus;
+use cc_lb_control::RequestEventBus;
 use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_engine::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::instrumented_connector::InstrumentedHttpsConnector;

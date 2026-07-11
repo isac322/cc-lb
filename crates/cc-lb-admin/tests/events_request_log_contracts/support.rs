@@ -6,9 +6,8 @@ use axum::{
     http::{Request, StatusCode},
 };
 use cc_lb_admin::AdminState;
-use cc_lb_contract::{
-    AuthInfo, LifecycleEvent, ParseInfo, RequestEventBus, RouteInfo, TerminationReason,
-};
+use cc_lb_contract::{AuthInfo, LifecycleEvent, ParseInfo, RouteInfo, TerminationReason};
+use cc_lb_control::RequestEventBus;
 use cc_lb_engine::{InMemoryBus, RequestEventAssemblerHandle, spawn_request_event_assembler};
 use cc_lb_observability::NoopMetricsHook;
 use cc_lb_storage_api::RequestEventStore;

@@ -68,7 +68,7 @@ use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{LifecycleContext, error_codes};
 use crate::usage_decoder::{UsageDecoder, decode_full_body};
 use crate::usage_parser::{self, UsageCounts, accumulate_sse_usage, sse_event_name};
-use cc_lb_contract::{ReplicaIdentity, RequestEventBus};
+use cc_lb_control::RequestEventBus;
 use cc_lb_control::dynamic_view::{
     DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
 };
@@ -77,6 +77,7 @@ pub use cc_lb_control::{
     PromptCacheObservationInput, PromptCacheObservationSinkLike, PromptCacheThreadUsage,
     SubscriptionQuotaCacheLike,
 };
+use cc_lb_domain::ReplicaIdentity;
 use cc_lb_observability::{redact_internal_errors, truncate_reason};
 
 pub type Body = AxumBody;

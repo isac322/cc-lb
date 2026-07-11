@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use cc_lb_contract::RequestEventBus;
+use cc_lb_control::RequestEventBus;
 use cc_lb_domain::InternalError;
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_storage_api::types::PrincipalKindLite;
@@ -267,7 +267,7 @@ mod tests {
     use crate::event_bus::InMemoryBus;
 
     fn subscribe(bus: &Arc<InMemoryBus>) -> tokio::sync::broadcast::Receiver<LifecycleEvent> {
-        use cc_lb_contract::LifecycleBusReceiver;
+        use cc_lb_control::LifecycleBusReceiver;
         let LifecycleBusReceiver::InMemory(rx) = bus.subscribe_lifecycle() else {
             panic!("expected InMemory lifecycle receiver");
         };
