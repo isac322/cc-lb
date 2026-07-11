@@ -5099,6 +5099,160 @@ mod tests {
     }
 
     #[test]
+    fn refresh_non_breakpoint_nk_hit_on_read() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000230").unwrap();
+        let now = 1_800_000_000;
+        let cache =
+            Arc::new(RecordingPromptCacheObservationCache::new(Vec::new()).with_clock_now(now));
+        let context = PromptCacheObservationContext {
+            upstream_id,
+            canonical_model_id: TEST_MODEL.to_owned(),
+            cache_breakpoints: vec![cache_breakpoint(2, "owner", 5_000, TtlClass::Ephemeral5m)],
+            selected_match: Some(SelectedCacheMatch {
+                prefix_hash: "nk".to_owned(),
+                matched_breakpoint_block_index: 2,
+                content_block_index: 0,
+                ttl_class: TtlClass::Ephemeral5m,
+                estimated_prefix_tokens: 2_000,
+                token_estimate_source: Some("local_tiktoken_v1".to_owned()),
+            }),
+            cache: cache.clone(),
+        };
+
+        let decoded = decode_prompt_cache_observations_pure(
+            &context,
+            PromptCacheUsage {
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 2_000,
+            },
+            now,
+        );
+
+        assert_eq!(decoded.observations.len(), 1);
+        let hit = &decoded.observations[0];
+        assert_eq!(hit.kind, DecodedPromptCacheObservationKind::Hit);
+        assert_eq!(
+            hit.prefix_hash, "nk",
+            "refresh must target the matched N-k prefix, not the owning breakpoint"
+        );
+        assert_eq!(hit.prefix_content_block_index, 0);
+        assert_eq!(hit.estimated_prefix_tokens, 2_000);
+    }
+
+    #[test]
+    fn read_zero_predicted_records_drift_no_refresh() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000231").unwrap();
+        let now = 1_800_000_000;
+        let cache =
+            Arc::new(RecordingPromptCacheObservationCache::new(Vec::new()).with_clock_now(now));
+        let context = PromptCacheObservationContext {
+            upstream_id,
+            canonical_model_id: TEST_MODEL.to_owned(),
+            cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
+            selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral5m, 2_400)),
+            cache: cache.clone(),
+        };
+
+        let decoded = decode_prompt_cache_observations_pure(
+            &context,
+            PromptCacheUsage {
+                cache_creation_input_tokens: 2_400,
+                cache_read_input_tokens: 0,
+            },
+            now,
+        );
+
+        assert!(
+            decoded
+                .observations
+                .iter()
+                .all(|obs| obs.kind != DecodedPromptCacheObservationKind::Hit),
+            "cache_read==0 must not refresh the predicted match as a Hit"
+        );
+        assert!(cache.upserts().is_empty());
+    }
+
+    #[test]
+    fn read_positive_no_predict_records_unknown() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000232").unwrap();
+        let now = 1_800_000_000;
+        let cache =
+            Arc::new(RecordingPromptCacheObservationCache::new(Vec::new()).with_clock_now(now));
+        let context = PromptCacheObservationContext {
+            upstream_id,
+            canonical_model_id: TEST_MODEL.to_owned(),
+            cache_breakpoints: vec![cache_breakpoint(
+                0,
+                "unknown-key",
+                2_400,
+                TtlClass::Ephemeral5m,
+            )],
+            selected_match: None,
+            cache: cache.clone(),
+        };
+
+        let decoded = decode_prompt_cache_observations_pure(
+            &context,
+            PromptCacheUsage {
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 2_400,
+            },
+            now,
+        );
+
+        assert!(
+            decoded.observations.is_empty(),
+            "a provider read with no predicted match must not fabricate a Hit key"
+        );
+        assert!(cache.upserts().is_empty());
+    }
+
+    #[test]
+    fn creation_persists_only_fold_marked_breakpoints() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000233").unwrap();
+        let now = 1_800_000_000;
+        let cache =
+            Arc::new(RecordingPromptCacheObservationCache::new(Vec::new()).with_clock_now(now));
+        let context = PromptCacheObservationContext {
+            upstream_id,
+            canonical_model_id: TEST_MODEL.to_owned(),
+            cache_breakpoints: vec![
+                cache_breakpoint(0, "b0", 2_400, TtlClass::Ephemeral5m),
+                cache_breakpoint(1, "b1", 2_500, TtlClass::Ephemeral5m),
+                cache_breakpoint(2, "b2", 2_600, TtlClass::Ephemeral5m),
+                cache_breakpoint(3, "b3", 2_700, TtlClass::Ephemeral5m),
+            ],
+            selected_match: Some(selected_match_hit("b1", 1, TtlClass::Ephemeral5m, 2_500)),
+            cache: cache.clone(),
+        };
+
+        let decoded = decode_prompt_cache_observations_pure(
+            &context,
+            PromptCacheUsage {
+                cache_creation_input_tokens: 3_000,
+                cache_read_input_tokens: 2_500,
+            },
+            now,
+        );
+
+        let hits = decoded
+            .observations
+            .iter()
+            .filter(|obs| obs.kind == DecodedPromptCacheObservationKind::Hit)
+            .map(|obs| obs.prefix_hash.as_str())
+            .collect::<Vec<_>>();
+        let writes = decoded
+            .observations
+            .iter()
+            .filter(|obs| obs.kind == DecodedPromptCacheObservationKind::Write)
+            .map(|obs| obs.prefix_hash.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(hits, vec!["b1"]);
+        assert_eq!(writes, vec!["b2", "b3"]);
+    }
+
+    #[test]
     fn build_subscription_quota_samples_from_headers() {
         let upstream_id = Uuid::new_v4();
         let mut headers = HeaderMap::new();
