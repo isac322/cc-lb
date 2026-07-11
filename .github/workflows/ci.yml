@@ -40,6 +40,8 @@ jobs:
       - run: cargo fmt --check
       - name: Audit-redaction lint
         run: bash scripts/lint-audit-redaction.sh
+      - name: Integration-test target count lint
+        run: bash scripts/lint-integration-test-target-count.sh
 
   clippy:
     runs-on: oracle4-cc-lb
@@ -145,7 +147,7 @@ jobs:
         run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
       # Registry-only: target/ must not be shared across branches. The
       # Swatinem cache key hashes Cargo.lock/Cargo.toml but not the test
-      # file set, so a branch can otherwise leak its per-test binaries into
+      # file set, so a branch can otherwise leak its integration-test binaries into
       # target/llvm-cov-target/debug/deps/ and cargo invokes them on restore
       # against a source tree that never contained those files.
       - uses: ./.github/actions/setup-rust-cache

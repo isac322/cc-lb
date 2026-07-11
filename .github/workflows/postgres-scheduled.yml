@@ -45,11 +45,9 @@ jobs:
           rust-cache-key: postgres-storage-stress
 
       - name: Run Postgres storage stress tests
-        run: |
-          cargo test -p cc-lb-storage-postgres --features postgres \
-            --test crash_recovery \
-            --test multi_instance_quota \
-            -- --test-threads=1
+        run: >-
+          cargo test -p cc-lb-storage-postgres --features postgres
+          --test integration -- --test-threads=1
 
       - name: Show sccache stats
         if: always()
@@ -107,7 +105,7 @@ jobs:
           DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
 
       - name: Run cc-lb-server DB unreachable chaos test (ignored)
-        run: cargo test -p cc-lb-server --features postgres --test db_unreachable_503 -- --ignored
+        run: cargo test -p cc-lb-server --features postgres --test integration db_unreachable_503:: -- --ignored
         continue-on-error: true
 
       # Fallback in case the ARC pod has not yet picked up the cc-lb-actions-runner

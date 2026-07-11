@@ -12,10 +12,10 @@ Environment variables:
 Run individual tests with:
 
 ```bash
-cargo test --features chaos -p cc-lb-server --test latency_injection
-cargo test --features chaos -p cc-lb-server --test drop_pct_50
-cargo test --features chaos -p cc-lb-server --test truncate_mid_stream
-cargo test --features chaos -p cc-lb-server --test rst_after_bytes
+cargo test --features chaos -p cc-lb-server --test integration latency_injection::
+cargo test --features chaos -p cc-lb-server --test integration drop_pct_50::
+cargo test --features chaos -p cc-lb-server --test integration truncate_mid_stream::
+cargo test --features chaos -p cc-lb-server --test integration rst_after_bytes::
 ```
 
 The default feature set does not compile or install `ChaosLayer`.
