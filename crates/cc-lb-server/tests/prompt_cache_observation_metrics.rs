@@ -5,11 +5,11 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
+use cc_lb_domain::TtlClass;
 use cc_lb_observability::cache_observation_store_kind;
 use cc_lb_server::prompt_cache_observation_sink::{EnqueueError, PromptCacheObservationSink};
 use cc_lb_storage_api::{
     PromptCacheObservationRecord, PromptCacheObservationStore, StorageError, StorageResult,
-    TtlClass,
 };
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tokio::runtime::Builder;

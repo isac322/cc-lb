@@ -3,10 +3,11 @@ use std::process::Command;
 use std::{env, fs};
 
 use bytes::Bytes;
-use cc_lb_plugin_api::{
-    CachePricingSummary, DialectError, Principal, PrincipalKind, RequestContext, ShapedRequest,
-    ShapedRequestBuilder, SignedRequest, Signer, SignerError, SigningCapability, Upstream,
-    UpstreamDialect, shape_request, sign_request,
+use cc_lb_plugin_api::{CachePricingSummary, Principal, PrincipalKind, RequestContext, Upstream};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
+    SignedRequest, Signer, SignerError, SigningCapability, UpstreamDialect, UpstreamError,
+    shape_request, sign_request,
 };
 use http::{HeaderMap, Method};
 
@@ -16,7 +17,7 @@ struct DummySigner;
 impl UpstreamDialect for DummyDialect {
     fn shape(
         &self,
-        _ctx: &RequestContext,
+        _context: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
@@ -44,11 +45,8 @@ impl Signer for DummySigner {
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
-    async fn on_unauthorized(
-        &self,
-        _err: &cc_lb_plugin_api::UpstreamError,
-    ) -> cc_lb_plugin_api::RetryDecision {
-        cc_lb_plugin_api::RetryDecision::Fail
+    async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+        RetryDecision::Fail
     }
 }
 
@@ -73,7 +71,7 @@ fn signer_seals_by_consuming_shaped_request() {
     };
     let shaped = shape_request(
         &DummyDialect,
-        &ctx,
+        &ctx.dialect_shape_context(),
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )
@@ -85,7 +83,7 @@ fn signer_seals_by_consuming_shaped_request() {
 
     let shaped = shape_request(
         &DummyDialect,
-        &ctx,
+        &ctx.dialect_shape_context(),
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )
@@ -101,7 +99,7 @@ fn controlled_builder_cannot_be_fabricated_by_normal_callers() {
     impl UpstreamDialect for DirectDialect {
         fn shape(
             &self,
-            _ctx: &RequestContext,
+            _context: &DialectShapeContext,
             _upstream: &Upstream,
             _principal: &Principal,
             builder: &mut ShapedRequestBuilder,
@@ -135,7 +133,7 @@ fn controlled_builder_cannot_be_fabricated_by_normal_callers() {
 
     let shaped = shape_request(
         &DirectDialect,
-        &ctx,
+        &ctx.dialect_shape_context(),
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )
@@ -168,15 +166,15 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-cc-lb-plugin-api = {{ path = "{}" }}
+	cc-lb-upstream = {{ path = "{}" }}
 "#,
-            manifest_dir.display()
+            manifest_dir.join("../cc-lb-upstream").display()
         ),
     )
     .unwrap();
     fs::write(
         src_dir.join("main.rs"),
-        r#"use cc_lb_plugin_api::{ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability};
+        r#"use cc_lb_upstream::{ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability};
 
 fn main() {
     let _ = ShapedRequest {

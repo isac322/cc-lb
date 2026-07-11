@@ -28,8 +28,7 @@ use cc_lb_engine::{
     UpstreamStatusSnapshot,
 };
 use cc_lb_plugin_api::{
-    FilterPlugin, PluginManifest, RequestContext, RouteDecision, RouteError, RouterPlugin, Signer,
-    SignerError, SignerFactory,
+    FilterPlugin, PluginManifest, RequestContext, RouteDecision, RouteError, RouterPlugin,
 };
 use cc_lb_runtime_wasmtime::{
     WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeRuntime, WasmtimeUpstreamDialect,
@@ -43,6 +42,7 @@ use cc_lb_storage_api::{
     UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
     UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
 };
+use cc_lb_upstream::{Signer, SignerError, SignerFactory};
 use parking_lot::RwLock;
 use thiserror::Error;
 use url::Url;
@@ -741,7 +741,7 @@ async fn build_principal_chains(
                 registered_slot_keys.insert(slot_key.clone());
                 match register_shape_slot(runtime, &slot_key, &manifest).await {
                     Ok(slot) => {
-                        let handle: Arc<dyn cc_lb_plugin_api::UpstreamDialect> = Arc::new(
+                        let handle: Arc<dyn cc_lb_upstream::UpstreamDialect> = Arc::new(
                             WasmtimeUpstreamDialect::new(slot.clone(), runtime.config_arc()),
                         );
                         DialectCache::Explicit(ShapePluginCache { dialect: handle })
@@ -1189,14 +1189,11 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
 mod tests {
     use std::collections::BTreeSet;
 
-    use cc_lb_domain::TtlClass as PluginTtlClass;
+    use cc_lb_domain::{TtlClass as PluginTtlClass, TtlClass as StorageTtlClass};
     use cc_lb_engine::clock::{Clock, TestClock};
     use cc_lb_engine::lifecycle::PromptCacheObservationCacheLike;
     use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
-    use cc_lb_storage_api::{
-        BackendKind, MetaStore, PromptCacheObservationRecord, TtlClass as StorageTtlClass,
-        UpstreamCreate,
-    };
+    use cc_lb_storage_api::{BackendKind, MetaStore, PromptCacheObservationRecord, UpstreamCreate};
     use cc_lb_storage_sqlite::SqliteStorage as Storage;
 
     use super::*;

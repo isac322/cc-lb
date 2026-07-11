@@ -1606,11 +1606,14 @@ mod tests {
         DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
     };
     use cc_lb_plugin_api::{
-        ApiKeyAwareSignerFactory, ObservabilityError, ObservabilityHook, ObserveEvent, Principal,
-        RequestContext, RouteDecision, RouteError, RouterPlugin, ShapedRequest, SignedRequest,
-        Signer, SignerError, SignerFactory, SigningCapability, Upstream, UpstreamCandidate,
+        ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext,
+        RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
     };
     use cc_lb_storage_api::{BackendKind, MetaStore, UpstreamStore};
+    use cc_lb_upstream::{
+        ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
+        SignerFactory, SigningCapability, UpstreamError,
+    };
     use http_body_util::BodyExt;
     use tokio::net::TcpListener;
     use tower::ServiceExt;
@@ -1718,11 +1721,8 @@ mod tests {
             Ok(SignedRequest::from_shaped(shaped, capability))
         }
 
-        async fn on_unauthorized(
-            &self,
-            _err: &cc_lb_plugin_api::UpstreamError,
-        ) -> cc_lb_plugin_api::RetryDecision {
-            cc_lb_plugin_api::RetryDecision::Fail
+        async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+            RetryDecision::Fail
         }
     }
 

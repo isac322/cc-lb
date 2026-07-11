@@ -42,6 +42,7 @@ use cc_lb_storage_api::{
     BackendKind, ManagedKeyStore, MetaStore, PluginBlobRepo, RuntimeChangeNotifier, Storage,
     UpstreamRecord,
 };
+use cc_lb_upstream::SignedRequest;
 use http_body_util::BodyExt;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::rt::TokioExecutor;
@@ -2708,7 +2709,7 @@ fn dispatcher(
 ) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistry>) {
     let bulkhead_config = BulkheadRuntimeConfig::from(config.bulkhead.clone());
     let breaker_config = BreakerRuntimeConfig::from(config.circuit_breaker.clone());
-    let upstream_name = Arc::new(|request: &cc_lb_plugin_api::SignedRequest| {
+    let upstream_name = Arc::new(|request: &SignedRequest| {
         request
             .url()
             .host_str()

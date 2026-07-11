@@ -21,9 +21,10 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    CachePricingSummary, Principal, PrincipalKind, RequestContext, SlotKey, Upstream, shape_request,
+    CachePricingSummary, Principal, PrincipalKind, RequestContext, SlotKey, Upstream,
 };
 use cc_lb_runtime_wasmtime::{WasmtimeRuntime, WasmtimeUpstreamDialect};
+use cc_lb_upstream::shape_request;
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 
 fn wasm_path() -> PathBuf {
@@ -110,7 +111,13 @@ fn shape_passthrough_echoes_request() {
     let principal = fixture_principal();
     let upstream = fixture_upstream();
 
-    let shaped = shape_request(&dialect, &ctx, &upstream, &principal).expect("shape OK");
+    let shaped = shape_request(
+        &dialect,
+        &ctx.dialect_shape_context(),
+        &upstream,
+        &principal,
+    )
+    .expect("shape OK");
 
     assert_eq!(
         shaped.url().as_str(),

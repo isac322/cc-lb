@@ -11,12 +11,15 @@ use cc_lb_engine::{
 };
 use cc_lb_plugin_api::{
     ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RateLimitKind, RequestContext,
-    RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest, SignedRequest, Signer,
-    SignerError, SignerFactory, SigningCapability, Upstream, UpstreamCandidate, UpstreamError,
+    RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{RateLimitKind as StoredRateLimitKind, UpstreamRateLimitObservationRecord};
+use cc_lb_upstream::{
+    RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+    SigningCapability, UpstreamError,
+};
 use http::header::HeaderName;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use parking_lot::RwLock;

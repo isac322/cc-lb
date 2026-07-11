@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use cc_lb_plugin_api::SignedRequest;
+use cc_lb_upstream::SignedRequest;
 use dashmap::DashMap;
 use http::{HeaderMap, Request, Response};
 use http_body_util::Full;
@@ -402,10 +402,11 @@ mod tests {
 
     use async_trait::async_trait;
     use bytes::Bytes;
-    use cc_lb_plugin_api::{
-        DialectError, Principal, PrincipalKind, RequestContext, RetryDecision, ShapedRequest,
-        ShapedRequestBuilder, SignedRequest, Signer, SignerError, SigningCapability, Upstream,
-        UpstreamDialect, shape_request, sign_request,
+    use cc_lb_domain::{Principal, PrincipalKind, Upstream};
+    use cc_lb_upstream::{
+        DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
+        SignedRequest, Signer, SignerError, SigningCapability, UpstreamDialect, UpstreamError,
+        shape_request, sign_request,
     };
     use http::{HeaderMap, Method, Response};
     use url::Url;
@@ -498,24 +499,20 @@ mod tests {
 
     async fn signed_request() -> SignedRequest {
         let upstream = Upstream::AnthropicDirect { base_url: None };
-        let ctx = RequestContext {
+        let context = DialectShapeContext {
             request_id: "test-request".to_owned(),
-            thread_id: None,
             downstream_headers: HeaderMap::new(),
             method: Method::POST,
             path: "/v1/messages".to_owned(),
             query: None,
             body_bytes: Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
-            cache_breakpoints: Vec::new(),
-            canonical_model_id: String::new(),
-            cache_pricing: cc_lb_domain::CachePricingSummary::default(),
         };
         let principal = Principal {
             id: "principal-test".to_owned(),
             kind: PrincipalKind::ApiKey,
             claims: serde_json::Map::new(),
         };
-        let shaped = shape_request(&PassthroughDialect, &ctx, &upstream, &principal)
+        let shaped = shape_request(&PassthroughDialect, &context, &upstream, &principal)
             .expect("test request shapes");
 
         sign_request(&NoopSigner, shaped)
@@ -528,19 +525,19 @@ mod tests {
     impl UpstreamDialect for PassthroughDialect {
         fn shape(
             &self,
-            ctx: &RequestContext,
+            context: &DialectShapeContext,
             _upstream: &Upstream,
             _principal: &Principal,
             builder: &mut ShapedRequestBuilder,
         ) -> Result<ShapedRequest, DialectError> {
             let mut url = Url::parse("http://upstream.local/").expect("test URL parses");
-            url.set_path(ctx.path.trim_start_matches('/'));
-            url.set_query(ctx.query.as_deref());
+            url.set_path(context.path.trim_start_matches('/'));
+            url.set_query(context.query.as_deref());
             Ok(builder.shaped_request(
                 url,
-                ctx.method.clone(),
-                ctx.downstream_headers.clone(),
-                ctx.body_bytes.clone(),
+                context.method.clone(),
+                context.downstream_headers.clone(),
+                context.body_bytes.clone(),
             ))
         }
     }
@@ -557,7 +554,7 @@ mod tests {
             Ok(SignedRequest::from_shaped(shaped, capability))
         }
 
-        async fn on_unauthorized(&self, _err: &cc_lb_plugin_api::UpstreamError) -> RetryDecision {
+        async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
             RetryDecision::Fail
         }
     }

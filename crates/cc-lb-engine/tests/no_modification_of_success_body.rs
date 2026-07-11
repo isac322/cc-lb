@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_engine::{DispatchError, ErrorNormalizer, LifecycleConfig, UpstreamDispatch};
-use cc_lb_plugin_api::SignedRequest;
+use cc_lb_upstream::SignedRequest;
 use http::{Response, StatusCode};
 use http_body_util::BodyExt;
 use url::Url;

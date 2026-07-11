@@ -3,12 +3,15 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext,
-    ResponseTransformError, ResponseTransformHook, RetryDecision, RouteDecision, RouteError,
-    RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError,
+    ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext, RouteDecision,
+    RouteError, RouterPlugin, Upstream, UpstreamCandidate,
+};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ResponseTransformError, ResponseTransformHook,
+    RetryDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError,
     SignerFactory, SigningCapability, SseEventTransformHook, TransformResponseRequest,
-    TransformResponseResult, TransformSseEventRequest, TransformSseEventResult, Upstream,
-    UpstreamCandidate, UpstreamDialect,
+    TransformResponseResult, TransformSseEventRequest, TransformSseEventResult, UpstreamDialect,
+    UpstreamError,
 };
 use http::{HeaderMap, Method};
 
@@ -23,7 +26,7 @@ struct DummySseTransform;
 impl RouterPlugin for DummyRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _context: &RequestContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -38,7 +41,7 @@ impl RouterPlugin for DummyRouter {
 impl UpstreamDialect for DummyDialect {
     fn shape(
         &self,
-        _ctx: &RequestContext,
+        _context: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
@@ -62,7 +65,7 @@ impl Signer for DummySigner {
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
-    async fn on_unauthorized(&self, _err: &cc_lb_plugin_api::UpstreamError) -> RetryDecision {
+    async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
         RetryDecision::Fail
     }
 }

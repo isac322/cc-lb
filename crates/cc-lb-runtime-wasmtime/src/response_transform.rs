@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
-use cc_lb_plugin_api::{
-    Principal, PrincipalKind, ResponseTransformError, ResponseTransformHook, SseEventTransformHook,
-    TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
-    TransformSseEventResult, Upstream,
-};
+use cc_lb_plugin_api::{Principal, PrincipalKind, Upstream};
 use cc_lb_plugin_wire::metadata::HookMode;
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
 use cc_lb_plugin_wire::{
     ArchivedTransformResponseResult, ArchivedTransformSseEventResult, ClaimRef, HeaderRef,
     PrincipalRef, QueryRef, SseEvent, SseEventRef, TransformResponseRequestRef,
     TransformSseEventRequestRef, UpstreamRef,
+};
+use cc_lb_upstream::{
+    ResponseTransformError, ResponseTransformHook, SseEventTransformHook, TransformResponseRequest,
+    TransformResponseResult, TransformSseEventRequest, TransformSseEventResult,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
@@ -342,8 +342,8 @@ fn status_code_from_u16(status: u16) -> Result<http::StatusCode, ResponseTransfo
     })
 }
 
-fn sse_event_from_wire(event: SseEvent) -> cc_lb_plugin_api::SseEvent {
-    cc_lb_plugin_api::SseEvent {
+fn sse_event_from_wire(event: SseEvent) -> cc_lb_upstream::SseEvent {
+    cc_lb_upstream::SseEvent {
         event: event.event.into_string(),
         data: bytes::Bytes::from(event.data.into_vec()),
     }

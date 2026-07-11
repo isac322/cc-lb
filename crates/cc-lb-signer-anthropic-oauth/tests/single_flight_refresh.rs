@@ -3,7 +3,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_plugin_api::{RetryDecision, Signer};
+use cc_lb_upstream::{RetryDecision, Signer};
 use tokio::sync::Barrier;
 
 #[tokio::test]

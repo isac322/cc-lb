@@ -13,8 +13,9 @@ use cc_lb_engine::{
 };
 use cc_lb_plugin_api::{
     ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    SignerFactory, Upstream, UpstreamCandidate,
+    Upstream, UpstreamCandidate,
 };
+use cc_lb_upstream::SignerFactory;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -109,8 +110,8 @@ impl SignerFactory for NoopSignerFactory {
     async fn build(
         &self,
         _upstream: &Upstream,
-    ) -> Result<Arc<dyn cc_lb_plugin_api::Signer>, cc_lb_plugin_api::SignerError> {
-        Err(cc_lb_plugin_api::SignerError::MissingCredentials {
+    ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
+        Err(cc_lb_upstream::SignerError::MissingCredentials {
             reason: "noop test signer factory".to_owned(),
         })
     }

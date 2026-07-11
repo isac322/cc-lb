@@ -1,9 +1,10 @@
 use bytes::Bytes;
-use cc_lb_plugin_api::{
-    Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder, SignerFactory,
-    Upstream, UpstreamDialect, sign_request,
-};
+use cc_lb_plugin_api::{Principal, PrincipalKind, RequestContext, Upstream};
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignerFactory,
+    UpstreamDialect, shape_request, sign_request,
+};
 use http::{HeaderMap, Method};
 
 struct BodyDialect;
@@ -11,11 +12,11 @@ struct BodyDialect;
 impl UpstreamDialect for BodyDialect {
     fn shape(
         &self,
-        _ctx: &RequestContext,
+        _context: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
+    ) -> Result<ShapedRequest, DialectError> {
         Ok(builder.shaped_request(
             "https://api.anthropic.com/v1/messages"
                 .parse()
@@ -46,9 +47,9 @@ async fn sign_does_not_modify_body() {
         kind: PrincipalKind::ApiKey,
         claims: serde_json::Map::new(),
     };
-    let shaped = cc_lb_plugin_api::shape_request(
+    let shaped = shape_request(
         &BodyDialect,
-        &ctx,
+        &ctx.dialect_shape_context(),
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )

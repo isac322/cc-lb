@@ -17,6 +17,7 @@ cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-domain.workspace = true
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
+cc-lb-upstream.workspace = true
 http.workspace = true
 secrecy.workspace = true
 serde_json.workspace = true

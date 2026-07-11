@@ -213,7 +213,7 @@ mod tests {
     use std::sync::Mutex;
 
     use cc_lb_contract::{EngineMetricsHook, EventId, NoopMetricsHook};
-    use cc_lb_domain::WarmCacheEntry;
+    use cc_lb_domain::{TtlClass, WarmCacheEntry};
 
     use super::*;
 

@@ -23,12 +23,16 @@ use std::sync::Arc;
 
 use cc_lb_plugin_api::{
     FilterError, FilterOutput, FilterPlugin, PerCandidateReason, Principal, PrincipalKind,
-    RequestContext, ResponseTransformHook, SlotKey, SseEventTransformHook, UpstreamCandidate,
+    RequestContext, SlotKey, UpstreamCandidate,
 };
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
 use cc_lb_plugin_wire::{
     ArchivedFilterResponse, CachePricingSummaryRef, ClaimRef, FilterRequestRef, HeaderRef,
     PrincipalRef, QueryRef, ShapeRequestRef, UpstreamCandidateRef, UpstreamRef,
+};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ResponseTransformHook, ShapedRequest, ShapedRequestBuilder,
+    SseEventTransformHook, UpstreamDialect,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
@@ -455,28 +459,28 @@ impl WasmtimeUpstreamDialect {
     }
 }
 
-impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
+impl UpstreamDialect for WasmtimeUpstreamDialect {
     fn shape(
         &self,
-        ctx: &RequestContext,
+        context: &DialectShapeContext,
         upstream: &cc_lb_domain::Upstream,
         principal: &Principal,
-        builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
-    ) -> Result<cc_lb_plugin_api::ShapedRequest, cc_lb_plugin_api::DialectError> {
+        builder: &mut ShapedRequestBuilder,
+    ) -> Result<ShapedRequest, DialectError> {
         let in_bytes = host_to_wire_shape_request(
-            ctx,
+            context,
             upstream,
             principal,
             self.runtime_config.cookie_redaction,
         )
-        .map_err(|e| cc_lb_plugin_api::DialectError::UnsupportedRequest {
+        .map_err(|e| DialectError::UnsupportedRequest {
             reason: format!("rkyv encode ShapeRequest: {e}"),
         })?;
 
         let out_bytes = match self.wire_version {
             Some(WireVersion::V1) => crate::cache::call_shape_hook(&self.cell, in_bytes.as_slice()),
             None => {
-                return Err(cc_lb_plugin_api::DialectError::UnsupportedRequest {
+                return Err(DialectError::UnsupportedRequest {
                     reason: "plugin metadata missing shape hook".to_owned(),
                 });
             }
@@ -484,7 +488,7 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
         .map_err(runtime_error_to_dialect)?;
         let out_bound = self.runtime_config.wire_bounds.output_body_bytes;
         if out_bytes.len() as u64 > out_bound {
-            return Err(cc_lb_plugin_api::DialectError::UnsupportedRequest {
+            return Err(DialectError::UnsupportedRequest {
                 reason: format!(
                     "shape output {} bytes exceeds wire_bounds.output_body_bytes ({})",
                     out_bytes.len(),
@@ -499,7 +503,7 @@ impl cc_lb_plugin_api::UpstreamDialect for WasmtimeUpstreamDialect {
         let archived = rkyv::access::<cc_lb_plugin_wire::ArchivedShapeResponse, RkyvError>(
             &aligned,
         )
-        .map_err(|e| cc_lb_plugin_api::DialectError::UnsupportedRequest {
+        .map_err(|e| DialectError::UnsupportedRequest {
             reason: format!("rkyv access ShapeResponse: {e}"),
         })?;
 
@@ -535,21 +539,19 @@ fn host_upstream_to_wire(upstream: &cc_lb_domain::Upstream) -> cc_lb_plugin_wire
     }
 }
 
-fn runtime_error_to_dialect(err: WasmtimeRuntimeError) -> cc_lb_plugin_api::DialectError {
+fn runtime_error_to_dialect(err: WasmtimeRuntimeError) -> DialectError {
     match err {
-        WasmtimeRuntimeError::GuestTrap { phase, source } => {
-            cc_lb_plugin_api::DialectError::UnsupportedRequest {
-                reason: format!("{phase}: {source}"),
-            }
-        }
-        other => cc_lb_plugin_api::DialectError::UnsupportedRequest {
+        WasmtimeRuntimeError::GuestTrap { phase, source } => DialectError::UnsupportedRequest {
+            reason: format!("{phase}: {source}"),
+        },
+        other => DialectError::UnsupportedRequest {
             reason: other.to_string(),
         },
     }
 }
 
 fn host_to_wire_shape_request(
-    ctx: &RequestContext,
+    context: &DialectShapeContext,
     upstream: &cc_lb_domain::Upstream,
     principal: &Principal,
     cookie_redaction: bool,
@@ -571,7 +573,7 @@ fn host_to_wire_shape_request(
             value: v.as_slice(),
         })
         .collect();
-    let header_refs: Vec<HeaderRef<'_>> = ctx
+    let header_refs: Vec<HeaderRef<'_>> = context
         .downstream_headers
         .iter()
         .filter(|(name, _)| !is_stripped_downstream_header(name.as_str(), cookie_redaction))
@@ -588,14 +590,14 @@ fn host_to_wire_shape_request(
     let upstream_ref = UpstreamRef::AnthropicDirect {
         base_url: base_url_str.as_deref().map(|s| QueryRef { value: s }),
     };
-    let query_ref = ctx.query.as_deref().map(|s| QueryRef { value: s });
+    let query_ref = context.query.as_deref().map(|s| QueryRef { value: s });
     let request = ShapeRequestRef {
-        request_id: ctx.request_id.as_str(),
-        method: ctx.method.as_str(),
-        path: ctx.path.as_str(),
+        request_id: context.request_id.as_str(),
+        method: context.method.as_str(),
+        path: context.path.as_str(),
         query: query_ref,
         headers: &header_refs,
-        body: ctx.body_bytes.as_ref(),
+        body: context.body_bytes.as_ref(),
         principal: PrincipalRef {
             id: principal.id.as_str(),
             kind: principal_kind_str,
@@ -618,16 +620,16 @@ fn upstream_base_url(upstream: &cc_lb_domain::Upstream) -> Option<url::Url> {
 }
 
 fn wire_to_host_shaped_request(
-    builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
+    builder: &mut ShapedRequestBuilder,
     archived: &cc_lb_plugin_wire::ArchivedShapeResponse,
     upstream: &cc_lb_domain::Upstream,
     origin_policy: crate::policy::ShapeOriginPolicy,
     wire_bounds: &crate::policy::PluginWireBounds,
-) -> Result<cc_lb_plugin_api::ShapedRequest, cc_lb_plugin_api::DialectError> {
+) -> Result<ShapedRequest, DialectError> {
     // Enforce max_headers before parsing: a plugin returning
     // 100k headers should not force the host to parse them all.
     if archived.headers.len() as u32 > wire_bounds.max_headers {
-        return Err(cc_lb_plugin_api::DialectError::UnsupportedRequest {
+        return Err(DialectError::UnsupportedRequest {
             reason: format!(
                 "shape plugin returned {} headers, exceeds wire_bounds.max_headers ({})",
                 archived.headers.len(),
@@ -651,7 +653,7 @@ fn wire_to_host_shaped_request(
         let expected_origin = expected.origin();
         let actual_origin = url.origin();
         if expected_origin != actual_origin {
-            return Err(cc_lb_plugin_api::DialectError::UnsupportedRequest {
+            return Err(DialectError::UnsupportedRequest {
                 reason: format!(
                     "shape plugin returned URL origin `{}` but selected upstream requires `{}`",
                     actual_origin.ascii_serialization(),
@@ -663,7 +665,7 @@ fn wire_to_host_shaped_request(
 
     let method_str: &str = &archived.method;
     let method = http::Method::from_bytes(method_str.as_bytes()).map_err(|e| {
-        cc_lb_plugin_api::DialectError::UnsupportedRequest {
+        DialectError::UnsupportedRequest {
             reason: format!("plugin returned invalid method `{method_str}`: {e}"),
         }
     })?;
@@ -677,7 +679,7 @@ fn wire_to_host_shaped_request(
             continue;
         }
         if h_value.len() as u32 > wire_bounds.max_header_value_bytes {
-            return Err(cc_lb_plugin_api::DialectError::UnsupportedRequest {
+            return Err(DialectError::UnsupportedRequest {
                 reason: format!(
                     "shape plugin header `{h_name}` value {} bytes exceeds wire_bounds.max_header_value_bytes ({})",
                     h_value.len(),
@@ -686,12 +688,12 @@ fn wire_to_host_shaped_request(
             });
         }
         let name = http::HeaderName::from_bytes(h_name.as_bytes()).map_err(|e| {
-            cc_lb_plugin_api::DialectError::UnsupportedRequest {
+            DialectError::UnsupportedRequest {
                 reason: format!("plugin returned invalid header name `{h_name}`: {e}"),
             }
         })?;
         let value = http::HeaderValue::from_bytes(h_value).map_err(|e| {
-            cc_lb_plugin_api::DialectError::UnsupportedRequest {
+            DialectError::UnsupportedRequest {
                 reason: format!("plugin returned invalid header value for `{h_name}`: {e}"),
             }
         })?;

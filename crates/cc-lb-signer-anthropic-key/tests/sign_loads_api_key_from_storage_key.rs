@@ -4,16 +4,17 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
-use cc_lb_plugin_api::{
-    Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder, SignerFactory,
-    Upstream, UpstreamDialect, shape_request, sign_request,
-};
+use cc_lb_plugin_api::{Principal, PrincipalKind, RequestContext, Upstream};
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 use cc_lb_storage_api::{
     AnthropicApiKeyCredential, ApiKeyStore, AuditEntry, AuditStore, BackendKind, ConfigDraftState,
     ConfigStore, HistoryEntry, HistorySummary, MetaStore, OAuthCredentialStore, RequestEvent,
     RequestEventStore, StorageError, StorageResult, UsageRollup, UsageRollupResolution,
     UsageRollupRun, UsageRollupStore,
+};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignerFactory,
+    UpstreamDialect, shape_request, sign_request,
 };
 use http::header::{AUTHORIZATION, USER_AGENT};
 use http::{HeaderMap, HeaderValue, Method};
@@ -29,11 +30,11 @@ struct DirectDialect;
 impl UpstreamDialect for DirectDialect {
     fn shape(
         &self,
-        _ctx: &RequestContext,
+        _context: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
+    ) -> Result<ShapedRequest, DialectError> {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static("test-agent"));
         headers.insert(
@@ -88,7 +89,7 @@ async fn sign_loads_api_key_from_storage_key() {
     };
     let shaped = shape_request(
         &DirectDialect,
-        &ctx,
+        &ctx.dialect_shape_context(),
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )

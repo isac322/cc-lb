@@ -6,11 +6,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
 use cc_lb_domain::{CredentialStrategy, Upstream};
-use cc_lb_plugin_api::{
+use cc_lb_storage_api::{AnthropicApiKeyCredential, OAuthCredentialStore};
+use cc_lb_upstream::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
     SigningCapability, UpstreamError,
 };
-use cc_lb_storage_api::{AnthropicApiKeyCredential, OAuthCredentialStore};
 use http::header::{AUTHORIZATION, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 

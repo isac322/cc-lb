@@ -728,6 +728,7 @@ dependencies = [
  "cc-lb-signer-anthropic-oauth",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
+ "cc-lb-upstream",
  "chrono",
  "fake-anthropic",
  "hex",
@@ -832,6 +833,7 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-plugin-api",
  "cc-lb-storage-api",
+ "cc-lb-upstream",
  "chrono",
  "dashmap",
  "globset",
@@ -861,7 +863,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "cc-lb-domain",
- "cc-lb-plugin-api",
+ "cc-lb-upstream",
  "http",
  "url",
 ]
@@ -900,6 +902,7 @@ dependencies = [
  "cc-lb-pricing",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
+ "cc-lb-upstream",
  "chrono",
  "dashmap",
  "eventsource-stream",
@@ -1016,6 +1019,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cc-lb-domain",
+ "cc-lb-upstream",
  "http",
  "serde",
  "serde_json",
@@ -1086,6 +1090,7 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-engine",
  "cc-lb-plugin-api",
+ "cc-lb-upstream",
  "http",
  "http-body-util",
  "proptest",
@@ -1103,6 +1108,7 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
+ "cc-lb-upstream",
  "http",
  "metrics",
  "metrics-exporter-prometheus",
@@ -1206,6 +1212,7 @@ dependencies = [
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
+ "cc-lb-upstream",
  "chrono",
  "clap",
  "fake-anthropic",
@@ -1263,6 +1270,7 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-plugin-api",
  "cc-lb-storage-api",
+ "cc-lb-upstream",
  "fake-anthropic",
  "http",
  "http-body-util",
@@ -1284,6 +1292,7 @@ dependencies = [
  "cc-lb-oauth-protocol",
  "cc-lb-plugin-api",
  "cc-lb-storage-api",
+ "cc-lb-upstream",
  "chrono",
  "dashmap",
  "http",
@@ -1422,6 +1431,18 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "url",
+]
+
+[[package]]
+name = "cc-lb-upstream"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "cc-lb-domain",
+ "http",
+ "thiserror 2.0.18",
  "url",
 ]
 

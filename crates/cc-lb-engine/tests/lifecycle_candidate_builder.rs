@@ -13,14 +13,17 @@ use cc_lb_engine::{
     DynamicViewHolder, Lifecycle, LifecycleConfig, RequestKind, UpstreamDispatch, build_candidates,
 };
 use cc_lb_plugin_api::{
-    DialectError, FilterError, FilterOutput, FilterPlugin, ObservabilityError, ObservabilityHook,
-    ObserveEvent, Principal, RequestContext, RetryDecision, RouteDecision, RouteError,
-    RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError,
-    SignerFactory, SigningCapability, TerminalStrategy, Upstream, UpstreamCandidate,
-    UpstreamDialect, UpstreamError,
+    FilterError, FilterOutput, FilterPlugin, ObservabilityError, ObservabilityHook, ObserveEvent,
+    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, TerminalStrategy, Upstream,
+    UpstreamCandidate,
 };
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
+    SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, UpstreamDialect,
+    UpstreamError,
+};
 use http::{Request, Response, StatusCode};
 use url::Url;
 use uuid::Uuid;
@@ -400,7 +403,7 @@ struct PassthroughDialect;
 impl UpstreamDialect for PassthroughDialect {
     fn shape(
         &self,
-        ctx: &RequestContext,
+        ctx: &DialectShapeContext,
         upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,

@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use cc_lb_domain::TtlClass;
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PromptCacheObservationRecord, PromptCacheObservationStore, TtlClass,
+    BackendKind, MetaStore, PromptCacheObservationRecord, PromptCacheObservationStore,
 };
 use uuid::Uuid;
 

@@ -129,7 +129,7 @@ pub use cc_lb_control::{
 #[cfg(not(loom))]
 pub use cc_lb_domain::ReplicaIdentity;
 #[cfg(not(loom))]
-pub use cc_lb_plugin_api::ApiKeyAwareSignerFactory;
+pub use cc_lb_upstream::ApiKeyAwareSignerFactory;
 #[cfg(not(loom))]
 pub use circuit_breaker::{
     BreakerError, BreakerRegistry, BreakerRuntimeConfig, BreakerState, CircuitBreaker,

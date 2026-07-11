@@ -575,11 +575,11 @@ fn ttl_matches_request(request_ttl: TtlClass, entry_ttl: TtlClass) -> bool {
 #[cfg(test)]
 pub(crate) mod tests {
     use async_trait::async_trait;
+    use cc_lb_domain::TtlClass as StorageTtlClass;
     use cc_lb_engine::clock::{Clock, ClockHandle, TestClock};
     use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
     use cc_lb_storage_api::{
         PromptCacheObservationRecord, PromptCacheObservationStore, StorageResult,
-        TtlClass as StorageTtlClass,
     };
     use std::sync::{Arc, Mutex};
 

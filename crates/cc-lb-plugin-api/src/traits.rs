@@ -1,19 +1,11 @@
 //! Object-safe plugin traits for each proxy lifecycle boundary.
 
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::errors::{
-    DialectError, ObservabilityError, ResponseTransformError, RouteError, SignerError,
-    UpstreamError,
-};
+use crate::errors::{ObservabilityError, RouteError};
 use crate::types::{
-    CacheAffinityTrace, ObserveEvent, PerCandidateReason, Principal, RequestContext, RetryDecision,
-    RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, SlotKey,
-    SubscriptionPreferenceTrace, TransformResponseRequest, TransformResponseResult,
-    TransformSseEventRequest, TransformSseEventResult, Upstream, UpstreamCandidate,
+    CacheAffinityTrace, ObserveEvent, PerCandidateReason, Principal, RequestContext, RouteDecision,
+    SlotKey, SubscriptionPreferenceTrace, UpstreamCandidate,
 };
 
 /// Filter plugin output containing upstream selection results and per-candidate reasons.
@@ -115,79 +107,8 @@ pub trait RouterPlugin: Send + Sync {
     ) -> Result<RouteDecision, RouteError>;
 }
 
-/// Upstream dialect boundary for request shaping and error normalization.
-pub trait UpstreamDialect: Send + Sync {
-    /// Shapes a downstream Anthropic-compatible request for the selected upstream.
-    fn shape(
-        &self,
-        ctx: &RequestContext,
-        upstream: &Upstream,
-        principal: &Principal,
-        builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, DialectError>;
-
-    /// Buffered response transform hook carried by this dialect, if any.
-    fn response_transform_hook(&self) -> Option<&dyn ResponseTransformHook> {
-        None
-    }
-
-    /// Per-event SSE response transform hook carried by this dialect, if any.
-    fn sse_event_transform_hook(&self) -> Option<&dyn SseEventTransformHook> {
-        None
-    }
-}
-
-/// Signer boundary for applying credentials to shaped requests.
-#[async_trait]
-pub trait Signer: Send + Sync {
-    /// Consumes a shaped request and returns a sealed signed request.
-    async fn sign(
-        &self,
-        shaped: ShapedRequest,
-        capability: &mut SigningCapability,
-    ) -> Result<SignedRequest, SignerError>;
-
-    /// Handles an unauthorized upstream response, optionally refreshing credentials.
-    async fn on_unauthorized(&self, err: &UpstreamError) -> RetryDecision;
-}
-
-/// Factory that builds upstream-specific signers.
-#[async_trait]
-pub trait SignerFactory: Send + Sync {
-    /// Builds a signer for the selected upstream.
-    async fn build(&self, upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError>;
-}
-
-/// Factory extension that binds signer construction to the router-selected upstream.
-pub trait ApiKeyAwareSignerFactory: Send + Sync {
-    /// Returns a signer factory using the downstream API key and router-selected upstream name.
-    fn with_router_choice(
-        &self,
-        api_key: String,
-        router_chosen_upstream_name: String,
-    ) -> Arc<dyn SignerFactory>;
-}
-
 /// Non-blocking observability hook boundary.
 pub trait ObservabilityHook: Send + Sync {
     /// Observes a lifecycle event.
     fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError>;
-}
-
-/// Buffered response transform boundary.
-pub trait ResponseTransformHook: Send + Sync {
-    /// Transforms one buffered upstream response.
-    fn transform_response(
-        &self,
-        request: TransformResponseRequest,
-    ) -> Result<TransformResponseResult, ResponseTransformError>;
-}
-
-/// SSE event response transform boundary.
-pub trait SseEventTransformHook: Send + Sync {
-    /// Transforms one complete parsed SSE event.
-    fn transform_sse_event(
-        &self,
-        request: TransformSseEventRequest,
-    ) -> Result<TransformSseEventResult, ResponseTransformError>;
 }

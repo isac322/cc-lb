@@ -11,8 +11,10 @@ use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_engine::{SseBatchConfig, SseRelay};
 use cc_lb_plugin_api::{
-    DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext,
-    ShapedRequest, ShapedRequestBuilder, Upstream, UpstreamDialect,
+    ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext, Upstream,
+};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
 };
 use http::Response;
 use http_body_util::BodyExt;
@@ -48,7 +50,7 @@ pub struct TestDialect;
 impl UpstreamDialect for TestDialect {
     fn shape(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
         _builder: &mut ShapedRequestBuilder,

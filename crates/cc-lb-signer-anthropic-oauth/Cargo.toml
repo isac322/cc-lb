@@ -19,6 +19,7 @@ cc-lb-domain.workspace = true
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
+cc-lb-upstream.workspace = true
 dashmap.workspace = true
 http.workspace = true
 http-body-util.workspace = true

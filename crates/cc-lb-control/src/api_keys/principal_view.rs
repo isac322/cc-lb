@@ -2,9 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use cc_lb_domain::TerminalStrategy;
-use cc_lb_plugin_api::{FilterPlugin, ObservabilityHook, UpstreamDialect};
+use cc_lb_plugin_api::{FilterPlugin, ObservabilityHook};
 use cc_lb_storage_api::principal::Limit as DbLimit;
 use cc_lb_storage_api::{CacheKeepaliveConfig, PrincipalKind as DbPrincipalKind, PrincipalRecord};
+use cc_lb_upstream::UpstreamDialect;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use uuid::Uuid;
 

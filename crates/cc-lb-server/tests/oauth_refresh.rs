@@ -17,9 +17,7 @@ use cc_lb_oauth_protocol::{
     ExistingTokenParts, TokenEndpointResponse, parse_token_endpoint_response,
     refresh_token_form_body, refreshed_token_parts,
 };
-use cc_lb_plugin_api::{
-    RequestContext, ShapedRequest, Upstream, UpstreamDialect, shape_request, sign_request,
-};
+use cc_lb_plugin_api::{RequestContext, Upstream};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
@@ -40,6 +38,10 @@ use cc_lb_storage_api::{
     BackendKind, MetaStore, PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamRecord,
     UpstreamStore,
     types::{KeyStatus, PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
+};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
+    shape_request, sign_request,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -236,7 +238,7 @@ async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
         fixture.clock.clone(),
     );
     let factory = AnthropicOAuthSignerFactoryWithLazyRefresh::new(base, lazy, upstream_id);
-    let signer = cc_lb_plugin_api::SignerFactory::build(
+    let signer = cc_lb_upstream::SignerFactory::build(
         &factory,
         &Upstream::AnthropicDirect { base_url: None },
     )
@@ -760,7 +762,7 @@ fn shaped_request() -> ShapedRequest {
     };
     shape_request(
         &DirectDialect,
-        &ctx,
+        &ctx.dialect_shape_context(),
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )
@@ -785,11 +787,11 @@ struct DirectDialect;
 impl UpstreamDialect for DirectDialect {
     fn shape(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &cc_lb_domain::Principal,
-        builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
+        builder: &mut ShapedRequestBuilder,
+    ) -> Result<ShapedRequest, DialectError> {
         Ok(builder.shaped_request(
             Url::parse("https://api.anthropic.com/v1/messages").expect("url"),
             Method::POST,

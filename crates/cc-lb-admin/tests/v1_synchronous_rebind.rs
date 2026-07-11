@@ -13,11 +13,11 @@ use cc_lb_control::{
     ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
 use cc_lb_plugin_api::{
-    ApiKeyAwareSignerFactory, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    SignerFactory, Upstream, UpstreamCandidate,
+    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
+use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
@@ -101,8 +101,8 @@ impl SignerFactory for NoopSignerFactory {
     async fn build(
         &self,
         _upstream: &Upstream,
-    ) -> Result<Arc<dyn cc_lb_plugin_api::Signer>, cc_lb_plugin_api::SignerError> {
-        Err(cc_lb_plugin_api::SignerError::MissingCredentials {
+    ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
+        Err(cc_lb_upstream::SignerError::MissingCredentials {
             reason: "noop test signer factory".to_owned(),
         })
     }

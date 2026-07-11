@@ -21,25 +21,15 @@ mod errors;
 mod traits;
 pub mod types;
 
-pub use errors::{
-    DialectError, ObservabilityError, ResponseTransformError, RouteError, SignerError,
-    UpstreamError,
-};
-pub use traits::{
-    ApiKeyAwareSignerFactory, FilterError, FilterOutput, FilterPlugin, ObservabilityHook,
-    ResponseTransformHook, RouterPlugin, Signer, SignerFactory, SseEventTransformHook,
-    UpstreamDialect,
-};
+pub use errors::{ObservabilityError, RouteError};
+pub use traits::{FilterError, FilterOutput, FilterPlugin, ObservabilityHook, RouterPlugin};
 pub use types::{
     CachePricingSummary, CandidateUrgency, CredentialStrategy, GLOBAL_PRINCIPAL, InternalError,
     InternalErrorKind, InternalErrorStage, ObserveEvent, PerCandidateReason, PluginManifest,
     PluginSlot, Principal, PrincipalKind, PrincipalQuotas, RateLimitKind, RateLimitObservation,
-    RequestContext, RetryDecision, RouteDecision, RoutingTrace, ShapedRequest,
-    ShapedRequestBuilder, SignedRequest, SigningCapability, SlotKey, SseEvent,
-    SubscriptionPreferenceTrace, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
-    SubscriptionTier, TerminalStrategy, TransformResponseRequest, TransformResponseResult,
-    TransformSseEventRequest, TransformSseEventResult, Upstream, UpstreamCandidate, UpstreamKind,
-    default_pure, shape_request, sign_request,
+    RequestContext, RouteDecision, RoutingTrace, SlotKey, SubscriptionPreferenceTrace,
+    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, SubscriptionTier,
+    TerminalStrategy, Upstream, UpstreamCandidate, UpstreamKind, default_pure,
 };
 
 #[doc(hidden)]
@@ -48,7 +38,11 @@ pub use cc_lb_domain::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_NAME,
 };
 
-mod private {
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(crate) struct Seal;
-}
+#[doc(hidden)]
+pub use cc_lb_upstream::{
+    ApiKeyAwareSignerFactory, DialectError, DialectShapeContext, ResponseTransformError,
+    ResponseTransformHook, RetryDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest,
+    Signer, SignerError, SignerFactory, SigningCapability, SseEvent, SseEventTransformHook,
+    TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
+    TransformSseEventResult, UpstreamDialect, UpstreamError, shape_request, sign_request,
+};

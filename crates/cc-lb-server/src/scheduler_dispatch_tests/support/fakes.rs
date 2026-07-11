@@ -6,12 +6,14 @@ use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_engine::{ApiKeyAwareSignerFactory, UpstreamDispatch};
 use cc_lb_plugin_api::{
-    Principal, RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin,
-    ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
-    UpstreamCandidate,
+    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
 };
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
+use cc_lb_upstream::{
+    RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+    SigningCapability, UpstreamError,
+};
 use serde_json::{Value, json};
 
 use crate::cache_keepalive_enqueuer::CacheKeepaliveTaskPusher;
@@ -138,7 +140,7 @@ impl Signer for RecordingSigner {
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
-    async fn on_unauthorized(&self, _err: &cc_lb_plugin_api::UpstreamError) -> RetryDecision {
+    async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
         RetryDecision::Fail
     }
 }

@@ -17,3 +17,6 @@ http.workspace = true
 http-body-util.workspace = true
 proptest.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+
+[dev-dependencies]
+cc-lb-upstream.workspace = true

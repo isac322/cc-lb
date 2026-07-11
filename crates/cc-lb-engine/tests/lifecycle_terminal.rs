@@ -15,16 +15,18 @@ use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
 };
 use cc_lb_plugin_api::{
-    DialectError, FilterError, FilterOutput, FilterPlugin, Principal, RequestContext,
-    RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest, ShapedRequestBuilder,
-    SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, TerminalStrategy,
-    Upstream, UpstreamCandidate, UpstreamDialect,
+    FilterError, FilterOutput, FilterPlugin, Principal, RequestContext, RouteDecision, RouteError,
+    RouterPlugin, TerminalStrategy, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
+    SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, UpstreamDialect,
+};
 use http::StatusCode;
 use url::Url;
 use uuid::Uuid;
@@ -330,7 +332,7 @@ struct NullDialect;
 impl UpstreamDialect for NullDialect {
     fn shape(
         &self,
-        ctx: &RequestContext,
+        ctx: &DialectShapeContext,
         upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
@@ -387,7 +389,7 @@ impl Signer for RecordingSigner {
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
-    async fn on_unauthorized(&self, _err: &cc_lb_plugin_api::UpstreamError) -> RetryDecision {
+    async fn on_unauthorized(&self, _err: &cc_lb_upstream::UpstreamError) -> RetryDecision {
         RetryDecision::Fail
     }
 }

@@ -27,7 +27,6 @@ use cc_lb_engine::{
     Body, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
     UpstreamDispatch,
 };
-use cc_lb_plugin_api::SignedRequest;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::SubscriptionQuotaCache;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
@@ -37,6 +36,7 @@ use cc_lb_storage_api::{
     UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
 };
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
+use cc_lb_upstream::SignedRequest;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use url::Url;

@@ -16,6 +16,7 @@ cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-contract = { workspace = true }
 cc-lb-domain.workspace = true
 cc-lb-plugin-api = { workspace = true }
+cc-lb-upstream.workspace = true
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 chrono.workspace = true
 dashmap.workspace = true

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cc_lb_engine::{Body, Bulkhead, BulkheadRuntimeConfig, DispatchError, UpstreamDispatch};
-use cc_lb_plugin_api::SignedRequest;
+use cc_lb_upstream::SignedRequest;
 use http::Response;
 use tokio::sync::Notify;
 

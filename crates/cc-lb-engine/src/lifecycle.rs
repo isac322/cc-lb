@@ -16,10 +16,7 @@ use cc_lb_domain::{
     TtlClass, Upstream, UpstreamCandidate, UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
 use cc_lb_plugin_api::{
-    ApiKeyAwareSignerFactory, FilterError, FilterOutput, ObservabilityHook, ObserveEvent,
-    RequestContext, ResponseTransformError, RetryDecision, RouterPlugin, ShapedRequest,
-    ShapedRequestBuilder, SignedRequest, TransformResponseRequest, UpstreamDialect, UpstreamError,
-    shape_request, sign_request,
+    FilterError, FilterOutput, ObservabilityHook, ObserveEvent, RequestContext, RouterPlugin,
 };
 use cc_lb_storage_api::{
     SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
@@ -27,6 +24,13 @@ use cc_lb_storage_api::{
     types::{RequestCacheBreakpoint, RequestCacheBreakpointSource, StoredApiKeyRecord},
     upstream::UpstreamKind as StorageUpstreamKind,
 };
+use cc_lb_upstream::{
+    ApiKeyAwareSignerFactory, DialectError, DialectShapeContext, ResponseTransformError,
+    RetryDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer,
+    TransformResponseRequest, UpstreamDialect, UpstreamError, shape_request, sign_request,
+};
+#[cfg(test)]
+use cc_lb_upstream::{SignerError, SignerFactory};
 use http::header::{CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -2927,7 +2931,7 @@ impl Lifecycle {
         principal: &Principal,
         route: &cc_lb_plugin_api::RouteDecision,
         raw_passthrough_base_url: Option<&Url>,
-        signer: Arc<dyn cc_lb_plugin_api::Signer>,
+        signer: Arc<dyn Signer>,
         observer: Option<&LifecycleContext>,
         timings: &mut AttemptTimings,
         internal_errors: &mut Vec<InternalError>,
@@ -2935,9 +2939,10 @@ impl Lifecycle {
     ) -> Result<Response<Body>, Box<Response<Body>>> {
         let shape_start = Instant::now();
         *shaped_body_out = None;
+        let shape_context = ctx.dialect_shape_context();
         let (shaped, capture_shaped_body) = match shape_request(
             route.dialect.as_ref(),
-            ctx,
+            &shape_context,
             &route.upstream,
             principal,
         ) {
@@ -3937,9 +3942,10 @@ fn raw_passthrough_request(
     let upstream = Upstream::AnthropicDirect {
         base_url: Some(base_url.clone()),
     };
+    let shape_context = ctx.dialect_shape_context();
     shape_request(
         &RawPassthroughDialect { base_url },
-        ctx,
+        &shape_context,
         &upstream,
         principal,
     )
@@ -3960,19 +3966,19 @@ struct RawPassthroughDialect {
 impl UpstreamDialect for RawPassthroughDialect {
     fn shape(
         &self,
-        ctx: &RequestContext,
+        context: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
+    ) -> Result<ShapedRequest, DialectError> {
         let mut url = self.base_url.clone();
-        url.set_path(ctx.path.trim_start_matches('/'));
-        url.set_query(ctx.query.as_deref());
+        url.set_path(context.path.trim_start_matches('/'));
+        url.set_query(context.query.as_deref());
         Ok(builder.shaped_request(
             url,
-            ctx.method.clone(),
-            ctx.downstream_headers.clone(),
-            ctx.body_bytes.clone(),
+            context.method.clone(),
+            context.downstream_headers.clone(),
+            context.body_bytes.clone(),
         ))
     }
 }
@@ -6278,17 +6284,14 @@ mod tests {
             &self,
             _api_key: String,
             _router_chosen_upstream_name: String,
-        ) -> Arc<dyn cc_lb_plugin_api::SignerFactory> {
+        ) -> Arc<dyn SignerFactory> {
             Arc::new(Self)
         }
     }
 
     #[async_trait]
-    impl cc_lb_plugin_api::SignerFactory for TestSignerFactory {
-        async fn build(
-            &self,
-            _upstream: &Upstream,
-        ) -> Result<Arc<dyn cc_lb_plugin_api::Signer>, cc_lb_plugin_api::SignerError> {
+    impl SignerFactory for TestSignerFactory {
+        async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
             Ok(Arc::new(TestSigner))
         }
     }
@@ -6296,12 +6299,12 @@ mod tests {
     struct TestSigner;
 
     #[async_trait]
-    impl cc_lb_plugin_api::Signer for TestSigner {
+    impl Signer for TestSigner {
         async fn sign(
             &self,
-            shaped: cc_lb_plugin_api::ShapedRequest,
-            capability: &mut cc_lb_plugin_api::SigningCapability,
-        ) -> Result<SignedRequest, cc_lb_plugin_api::SignerError> {
+            shaped: ShapedRequest,
+            capability: &mut cc_lb_upstream::SigningCapability,
+        ) -> Result<SignedRequest, SignerError> {
             Ok(SignedRequest::from_shaped(shaped, capability))
         }
 

@@ -9,10 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
 use cc_lb_clock::{Clock, ClockHandle, SystemClock, TestClock, unix_secs};
-use cc_lb_plugin_api::{
-    Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder, Upstream,
-    UpstreamDialect, shape_request,
-};
+use cc_lb_plugin_api::{Principal, PrincipalKind, RequestContext, Upstream};
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSigner, AnthropicOAuthSignerHttpParams, OAuthHttpClient, OAuthHttpError,
     OAuthTokenRequest, OAuthTokenResponse,
@@ -22,6 +19,10 @@ use cc_lb_storage_api::{
     HistorySummary, MetaStore, OAuthCredentialStore, OAuthCredentials, RequestEvent,
     RequestEventStore, StorageError, StorageResult, UsageRollup, UsageRollupResolution,
     UsageRollupRun, UsageRollupStore,
+};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
+    UpstreamError, shape_request,
 };
 use http::header::USER_AGENT;
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
@@ -245,7 +246,7 @@ pub fn shaped_request() -> ShapedRequest {
     };
     shape_request(
         &DirectDialect,
-        &ctx,
+        &ctx.dialect_shape_context(),
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )
@@ -257,11 +258,11 @@ struct DirectDialect;
 impl UpstreamDialect for DirectDialect {
     fn shape(
         &self,
-        _ctx: &RequestContext,
+        _context: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
+    ) -> Result<ShapedRequest, DialectError> {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static("test-agent"));
         Ok(builder.shaped_request(
@@ -273,8 +274,8 @@ impl UpstreamDialect for DirectDialect {
     }
 }
 
-pub fn unauthorized_error() -> cc_lb_plugin_api::UpstreamError {
-    cc_lb_plugin_api::UpstreamError::Unauthorized {
+pub fn unauthorized_error() -> UpstreamError {
+    UpstreamError::Unauthorized {
         status: StatusCode::UNAUTHORIZED,
         body: None,
     }

@@ -1,5 +1,6 @@
-use cc_lb_plugin_api::{CredentialStrategy, SignerError, SignerFactory, Upstream};
+use cc_lb_plugin_api::{CredentialStrategy, Upstream};
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
+use cc_lb_upstream::{SignerError, SignerFactory};
 
 #[tokio::test]
 async fn factory_wrong_strategy_returns_error() {

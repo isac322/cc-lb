@@ -17,12 +17,15 @@ use cc_lb_engine::{
     LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
-    DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
-    RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest,
-    ShapedRequestBuilder, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability,
-    Upstream, UpstreamCandidate, UpstreamDialect, sign_request,
+    ObservabilityError, ObservabilityHook, ObserveEvent, Principal, PrincipalKind, RequestContext,
+    RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
+    SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, UpstreamDialect,
+    UpstreamError, shape_request, sign_request,
+};
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::BodyExt;
@@ -132,20 +135,20 @@ pub struct PassthroughDialect {
 impl UpstreamDialect for PassthroughDialect {
     fn shape(
         &self,
-        ctx: &RequestContext,
+        context: &DialectShapeContext,
         upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError> {
         let _ = upstream;
         let mut url = self.base_url.clone();
-        url.set_path(ctx.path.trim_start_matches('/'));
-        url.set_query(ctx.query.as_deref());
+        url.set_path(context.path.trim_start_matches('/'));
+        url.set_query(context.query.as_deref());
         Ok(builder.shaped_request(
             url,
-            ctx.method.clone(),
-            ctx.downstream_headers.clone(),
-            ctx.body_bytes.clone(),
+            context.method.clone(),
+            context.downstream_headers.clone(),
+            context.body_bytes.clone(),
         ))
     }
 }
@@ -187,7 +190,7 @@ impl Signer for TestSigner {
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
-    async fn on_unauthorized(&self, _err: &cc_lb_plugin_api::UpstreamError) -> RetryDecision {
+    async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
         if !self.refresh_allowed {
             return RetryDecision::Fail;
         }
@@ -433,11 +436,11 @@ pub async fn signed_request(base_url: &str) -> SignedRequest {
         kind: PrincipalKind::ApiKey,
         claims: serde_json::Map::new(),
     };
-    let shaped = cc_lb_plugin_api::shape_request(
+    let shaped = shape_request(
         &PassthroughDialect {
             base_url: Url::parse(base_url).expect("test URL parses"),
         },
-        &ctx,
+        &ctx.dialect_shape_context(),
         &upstream,
         &principal,
     )
@@ -459,7 +462,7 @@ impl Signer for NoopSigner {
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
-    async fn on_unauthorized(&self, _err: &cc_lb_plugin_api::UpstreamError) -> RetryDecision {
+    async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
         RetryDecision::Fail
     }
 }

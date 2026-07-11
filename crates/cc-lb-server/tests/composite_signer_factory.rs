@@ -4,16 +4,17 @@ use axum::body::Bytes;
 use axum::http::{HeaderMap, Method};
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_plugin_api::{
-    Principal, PrincipalKind, RequestContext, ShapedRequest, SignerError, SignerFactory, Upstream,
-    UpstreamDialect, shape_request, sign_request,
-};
+use cc_lb_plugin_api::{Principal, PrincipalKind, RequestContext, Upstream};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{BackendKind, MetaStore, UpstreamCreate, UpstreamStore};
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignerError,
+    SignerFactory, UpstreamDialect, shape_request, sign_request,
+};
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tokio::net::TcpListener;
@@ -392,7 +393,7 @@ fn shaped_request() -> ShapedRequest {
     };
     shape_request(
         &DirectDialect,
-        &ctx,
+        &ctx.dialect_shape_context(),
         &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )
@@ -404,11 +405,11 @@ struct DirectDialect;
 impl UpstreamDialect for DirectDialect {
     fn shape(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
-        builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
+        builder: &mut ShapedRequestBuilder,
+    ) -> Result<ShapedRequest, DialectError> {
         Ok(builder.shaped_request(
             Url::parse("https://api.anthropic.com/v1/messages").expect("url"),
             Method::POST,

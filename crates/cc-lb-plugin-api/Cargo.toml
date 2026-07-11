@@ -12,6 +12,7 @@ repository = "https://github.com/isac322/cc-lb"
 async-trait.workspace = true
 bytes.workspace = true
 cc-lb-domain.workspace = true
+cc-lb-upstream.workspace = true
 http.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

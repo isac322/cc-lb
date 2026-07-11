@@ -1,6 +1,6 @@
 mod common;
 
-use cc_lb_plugin_api::{RetryDecision, Signer};
+use cc_lb_upstream::{RetryDecision, Signer};
 
 #[tokio::test]
 async fn refresh_failure_returns_fail() {

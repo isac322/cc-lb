@@ -12,12 +12,12 @@ use async_trait::async_trait;
 use cc_lb_aead::{AeadService, OAuthTokenBundle};
 use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_domain::Upstream;
-use cc_lb_plugin_api::{
-    ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
-    SignerFactory, SigningCapability, UpstreamError,
-};
 use cc_lb_storage_api::{
     OAuthCredentialStore, OAuthCredentials, StorageError, UpstreamRecord, UpstreamStore,
+};
+use cc_lb_upstream::{
+    ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
+    SignerFactory, SigningCapability, UpstreamError,
 };
 use dashmap::DashMap;
 use http::HeaderMap;
@@ -975,13 +975,15 @@ mod tests {
     use bytes::Bytes;
     use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
     use cc_lb_clock::TestClock;
-    use cc_lb_plugin_api::{
-        RequestContext, Upstream, UpstreamDialect, shape_request, sign_request,
-    };
+    use cc_lb_plugin_api::RequestContext;
     use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
     use cc_lb_storage_api::{
         OAuthCredentialStore, StorageError, StorageResult, UpstreamCreate, UpstreamRecord,
         UpstreamRecordId, UpstreamStore, UpstreamUpdate, validate_identifier,
+    };
+    use cc_lb_upstream::{
+        DialectError, DialectShapeContext, ShapedRequestBuilder, UpstreamDialect, shape_request,
+        sign_request,
     };
     use http::header::{AUTHORIZATION, USER_AGENT};
     use http::{HeaderMap, HeaderValue, Method, StatusCode};
@@ -1827,7 +1829,7 @@ mod tests {
         };
         shape_request(
             &DirectDialect,
-            &ctx,
+            &ctx.dialect_shape_context(),
             &Upstream::AnthropicDirect { base_url: None },
             &principal,
         )
@@ -1839,11 +1841,11 @@ mod tests {
     impl UpstreamDialect for DirectDialect {
         fn shape(
             &self,
-            _ctx: &RequestContext,
+            _context: &DialectShapeContext,
             _upstream: &Upstream,
             _principal: &cc_lb_domain::Principal,
-            builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
-        ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
+            builder: &mut ShapedRequestBuilder,
+        ) -> Result<ShapedRequest, DialectError> {
             let mut headers = HeaderMap::new();
             headers.insert(USER_AGENT, HeaderValue::from_static("test-agent"));
             Ok(builder.shaped_request(

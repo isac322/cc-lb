@@ -4,12 +4,13 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_control::dynamic_view::DynamicViewHolder;
-use cc_lb_plugin_api::{
-    CachePricingSummary, DialectError, Principal, PrincipalKind, RequestContext, ShapedRequest,
-    ShapedRequestBuilder, SignedRequest, Upstream, UpstreamDialect, shape_request, sign_request,
-};
+use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignedRequest,
+    UpstreamDialect, shape_request, sign_request,
+};
 use http::header::AUTHORIZATION;
 use http::{HeaderMap, StatusCode};
 use http_body_util::BodyExt;
@@ -171,24 +172,20 @@ fn shaped_request_from_snapshot(
     let dialect = SnapshotDialect {
         url: target_url.clone(),
     };
-    let ctx = RequestContext {
+    let context = DialectShapeContext {
         request_id: format!("cache-keepalive-{}", snapshot.upstream_id),
-        thread_id: None,
         downstream_headers: snapshot.headers.clone(),
         method: snapshot.method.clone(),
         path: target_url.path().to_owned(),
         query: target_url.query().map(ToOwned::to_owned),
         body_bytes: body,
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: String::new(),
-        cache_pricing: CachePricingSummary::default(),
     };
     let principal = Principal {
         id: snapshot.upstream_id.to_string(),
         kind: PrincipalKind::ApiKey,
         claims: serde_json::Map::new(),
     };
-    shape_request(&dialect, &ctx, upstream, &principal).map_err(|source| source.to_string())
+    shape_request(&dialect, &context, upstream, &principal).map_err(|source| source.to_string())
 }
 
 struct SnapshotDialect {
@@ -198,16 +195,16 @@ struct SnapshotDialect {
 impl UpstreamDialect for SnapshotDialect {
     fn shape(
         &self,
-        ctx: &RequestContext,
+        context: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError> {
         Ok(builder.shaped_request(
             self.url.clone(),
-            ctx.method.clone(),
-            ctx.downstream_headers.clone(),
-            ctx.body_bytes.clone(),
+            context.method.clone(),
+            context.downstream_headers.clone(),
+            context.body_bytes.clone(),
         ))
     }
 }

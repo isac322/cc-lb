@@ -8,9 +8,9 @@ use std::time::Duration;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_engine::{SseBatchConfig, SseRelay, StreamingUsage, strip_hop_by_hop};
-use cc_lb_plugin_api::{
-    DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext,
-    ShapedRequest, ShapedRequestBuilder, Upstream, UpstreamDialect,
+use cc_lb_plugin_api::{ObservabilityError, ObservabilityHook, ObserveEvent, Principal, Upstream};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
 };
 use http::header::CONNECTION;
 use http::{HeaderMap, HeaderName, HeaderValue};
@@ -319,7 +319,7 @@ struct NoopDialect;
 impl UpstreamDialect for NoopDialect {
     fn shape(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
         _builder: &mut ShapedRequestBuilder,

@@ -4,8 +4,9 @@ use arc_swap::ArcSwap;
 #[doc(hidden)]
 pub use cc_lb_domain::PlanInfo;
 use cc_lb_domain::RateLimitObservation;
-use cc_lb_plugin_api::{ApiKeyAwareSignerFactory, ObservabilityHook, RouterPlugin};
+use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin};
 use cc_lb_storage_api::{UpstreamRateLimitObservationRecord, UpstreamRecord};
+use cc_lb_upstream::ApiKeyAwareSignerFactory;
 use parking_lot::RwLock;
 use uuid::Uuid;
 
@@ -330,8 +331,11 @@ mod tests {
     use async_trait::async_trait;
     use cc_lb_plugin_api::{
         ObservabilityError, ObserveEvent, Principal, RequestContext, RouteDecision, RouteError,
-        SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
-        UpstreamCandidate, UpstreamError,
+        Upstream, UpstreamCandidate,
+    };
+    use cc_lb_upstream::{
+        RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+        SigningCapability, UpstreamError,
     };
 
     struct TestSignerFactory;
@@ -359,14 +363,14 @@ mod tests {
     impl Signer for TestSigner {
         async fn sign(
             &self,
-            shaped: cc_lb_plugin_api::ShapedRequest,
+            shaped: ShapedRequest,
             capability: &mut SigningCapability,
         ) -> Result<SignedRequest, SignerError> {
             Ok(SignedRequest::from_shaped(shaped, capability))
         }
 
-        async fn on_unauthorized(&self, _err: &UpstreamError) -> cc_lb_plugin_api::RetryDecision {
-            cc_lb_plugin_api::RetryDecision::Fail
+        async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+            RetryDecision::Fail
         }
     }
 

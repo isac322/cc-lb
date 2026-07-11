@@ -387,7 +387,7 @@ where
 {
     async fn dispatch(
         &self,
-        request: cc_lb_plugin_api::SignedRequest,
+        request: cc_lb_upstream::SignedRequest,
     ) -> Result<Response<Body>, DispatchError> {
         let (url, method, headers, body) = request.into_parts();
         let uri =
