@@ -10,6 +10,7 @@ use uuid::Uuid;
 pub const HASH_SCHEMA_VERSION: u8 = cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
 
 const DEFAULT_REFRESH_DEBOUNCE_SECS: u64 = 60;
+const EXPIRY_SWEEP_INTERVAL_SECS: u64 = 60;
 const THREAD_USAGE_CAP_PER_UPSTREAM: usize = 2048;
 const THREAD_USAGE_TTL_SECS: u64 = 5 * 60;
 const CREATION_READ_EQUIVALENT_DIVISOR: u64 = 4;
@@ -31,7 +32,6 @@ pub struct PromptCacheObservationCache {
             >,
         >,
     >,
-    #[allow(dead_code)]
     clock: ClockHandle,
     thread_usage: RwLock<ThreadUsageByUpstream>,
     grace_margin_secs: u64,
@@ -90,6 +90,43 @@ impl PromptCacheObservationCache {
 
     pub fn grace_margin_secs(&self) -> u64 {
         self.grace_margin_secs
+    }
+
+    pub fn sweep_expired(&self, now_unix_secs: u64) -> usize {
+        let mut guard = self.entries.write();
+        let mut removed = 0usize;
+        guard.retain(|_upstream_id, submap| {
+            let before = submap.len();
+            submap.retain(|_key, entry| entry.expires_at_unix_secs > now_unix_secs);
+            removed += before - submap.len();
+            !submap.is_empty()
+        });
+        removed
+    }
+
+    pub fn spawn_expiry_sweeper(self: &std::sync::Arc<Self>) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let weak = std::sync::Arc::downgrade(self);
+        handle.spawn(async move {
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(EXPIRY_SWEEP_INTERVAL_SECS));
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let Some(cache) = weak.upgrade() else {
+                    break;
+                };
+                let now = unix_secs(cache.clock.now());
+                cache.sweep_expired(now);
+            }
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn map_len(&self) -> usize {
+        self.entries.read().values().map(HashMap::len).sum()
     }
 
     pub async fn hydrate_from_store(
@@ -719,6 +756,73 @@ pub(crate) mod tests {
         );
         assert!(hit.is_some());
         assert!(map_entries_inspected_count() <= 2);
+    }
+
+    #[test]
+    fn expiry_eviction_shrinks_map() {
+        let cache = test_cache();
+        let upstream = Uuid::new_v4();
+        let now = base_now();
+        upsert(
+            &cache,
+            upstream,
+            "live-a",
+            TtlClass::Ephemeral5m,
+            now + 900,
+            now,
+        );
+        upsert(
+            &cache,
+            upstream,
+            "live-b",
+            TtlClass::Ephemeral1h,
+            now + 900,
+            now,
+        );
+        upsert(
+            &cache,
+            upstream,
+            "expired-a",
+            TtlClass::Ephemeral5m,
+            now + 300,
+            now,
+        );
+        upsert(
+            &cache,
+            upstream,
+            "expired-b",
+            TtlClass::Ephemeral1h,
+            now + 300,
+            now,
+        );
+        assert_eq!(cache.map_len(), 4);
+
+        let removed = cache.sweep_expired(now + 600);
+        assert_eq!(removed, 2);
+        assert_eq!(cache.map_len(), 2);
+
+        assert!(
+            cache
+                .lookup_warm_entry(
+                    upstream,
+                    MODEL,
+                    "expired-a",
+                    &[TtlClass::Ephemeral5m, TtlClass::Ephemeral1h],
+                    now + 600,
+                )
+                .is_none()
+        );
+        assert!(
+            cache
+                .lookup_warm_entry(
+                    upstream,
+                    MODEL,
+                    "live-a",
+                    &[TtlClass::Ephemeral5m, TtlClass::Ephemeral1h],
+                    now + 600,
+                )
+                .is_some()
+        );
     }
 
     #[derive(Clone, Default)]

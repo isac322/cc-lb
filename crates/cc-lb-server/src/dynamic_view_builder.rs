@@ -305,11 +305,13 @@ pub(crate) fn new_prompt_cache_observation_cache(
     config: &PromptCacheShadowConfig,
     clock: cc_lb_engine::ClockHandle,
 ) -> Arc<PromptCacheObservationCache> {
-    Arc::new(PromptCacheObservationCache::new_with_debounce(
+    let cache = Arc::new(PromptCacheObservationCache::new_with_debounce(
         clock,
         config.grace_margin_secs,
         config.refresh_debounce_secs,
-    ))
+    ));
+    cache.spawn_expiry_sweeper();
+    cache
 }
 
 fn group_rate_limit_observations(
