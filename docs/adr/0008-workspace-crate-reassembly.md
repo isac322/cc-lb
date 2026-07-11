@@ -39,7 +39,7 @@ Contract's remaining members are redistributed to their real owners: metrics hoo
 
 ### 2. Routing-trace lives in the stable leaf, so **no mirror machinery exists**
 
-The routing-trace tree is entirely pure value types (verified: `RoutingTrace` at `crates/cc-lb-plugin-api/src/types.rs:1198` holds only `stages` + `terminal_decision`; `UpstreamCandidate` at :407 aggregates only pure values). Placing the whole tree in `cc-lb-domain` lets the persisted `RequestEvent` embed `domain::RoutingTrace` and `Vec<InternalError>` **directly**. There are **no** `PersistedRoutingTrace`/`PersistedInternalError` mirror types and **no** rich→mirror converter. The published-semver churn (Context §2) is already solved by deleting the *published* `cc-lb-plugin-api`; the residual cost is that a trace-field addition recompiles domain's stable consumers — build coupling, not a semver break.
+The routing-trace tree is entirely pure value types (verified: `RoutingTrace` at `crates/cc-lb-plugin-api/src/types.rs:1239` holds only `stages` + `terminal_decision`; `UpstreamCandidate` at :413 aggregates only pure values). Placing the whole tree in `cc-lb-domain` lets the persisted `RequestEvent` embed `domain::RoutingTrace` and `Vec<InternalError>` **directly**. There are **no** `PersistedRoutingTrace`/`PersistedInternalError` mirror types and **no** rich→mirror converter. The published-semver churn (Context §2) is already solved by deleting the *published* `cc-lb-plugin-api`; the residual cost is that a trace-field addition recompiles domain's stable consumers — build coupling, not a semver break.
 
 ### 3. Publication stays exactly five crates
 
@@ -47,7 +47,7 @@ Keep `cc-lb-plugin-wire`, `cc-lb-pdk-wasmtime-macros`, `cc-lb-pdk-wasmtime`, `cc
 
 ### 4. Split the three overloaded concepts
 
-- **`RequestContext`** monolith (47 struct-literal sites on origin/master) → capability-specific views: proxy-only `RoutingContext` (routing) and a minimal `DialectShapeContext` (upstream) carrying only the fields `UpstreamDialect::shape` reads, so upstream never depends on routing.
+- **`RequestContext`** monolith (dozens of struct-literal construction sites; the exact set is enumerated at implementation) → capability-specific views: proxy-only `RoutingContext` (routing) and a minimal `DialectShapeContext` (upstream) carrying only the fields `UpstreamDialect::shape` reads, so upstream never depends on routing.
 - **Slot types** (never merged): `SlotKey` → `cc-lb-runtime-wasmtime::RuntimeSlotKey` (and the unused `FilterPlugin::slot_key` is removed); serialized enum `PluginSlot` → `cc-lb-storage-api::plugin_registry::PluginSlotKind` (serde strings byte-preserved); runtime struct `PluginSlot` → `LoadedPluginSlot`.
 
 ### 5. Decompose `cc-lb-engine` only enough to unhook admin & scheduler
@@ -103,6 +103,17 @@ The implementation plan encodes machine-checkable gates:
 - **Publish legality:** `cargo package` for all five published crates; deleted packages asserted absent via `cargo metadata` node-absence.
 - **Byte-compat:** origin/master golden fixtures for `request_events_v1` and `PluginSlotKind`/`KeyStatus` serde strings; a normalized proxy-parity harness diffs the semantic subset across three scenarios (happy `POST /v1/messages`, 401 retry/refresh, filter/limit).
 - **No behavior change:** `git diff` gate over migrations, `cc-lb-plugin-wire`, and the PDK crates.
+
+## Post-rebase validation (origin/master `0d75efc0`, 2026-07-10)
+
+This decision was re-validated after rebasing from base `cdf77383` onto `0d75efc0` (8 intervening commits: durable prompt-cache keep-alive, use-it-or-lose-it quota urgency, Fable 5 model, admin live-logs overhaul, scheduler Apalis worker fix). **The decision is unaffected:**
+
+- The workspace **crate set is unchanged** (no manifest added, removed, or renamed).
+- `cc-lb-plugin-api`/`cc-lb-contract` gained only **additive fields** on already-classified types (`quota_urgency_*`, `thread_id`, prompt-cache-breakpoint fields) — no new type or trait needs a home, so the Symbol→home partition stands.
+- The largest addition, the **`cache_keepalive` subsystem**, lands entirely in existing homes: `cc-lb-engine/src/cache_keepalive/**` + `downstream_stream_drop_guard.rs` are engine execution logic (consumed cross-crate only by `cc-lb-server`, a downward edge); the persisted session record + port already live in `cc-lb-storage-api`; the new `cc-lb-scheduler` keep-alive job depends on `cc-lb-storage-api`, not `cc-lb-engine`.
+- **admin's and scheduler's `cc-lb-engine` touch-points are unchanged** (the `feat(admin)` live-logs work is mostly `admin/web` TypeScript), so the admin/scheduler decoupling (§5) is intact.
+
+No topology, dependency-direction, publish, or acceptance-gate change follows from the rebase.
 
 ## Status & follow-up
 
