@@ -17,7 +17,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use tokio::time::{self, Instant};
 
-use cc_lb_storage_api::{PriceCatalogCache, PriceCatalogSnapshotRecord};
+use cc_lb_storage_api::{PriceCatalogCache, PriceCatalogSnapshotFetch};
 
 use crate::{CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion};
 
@@ -158,7 +158,7 @@ impl LiteLlmLoader {
         let snapshot = parse_litellm_json(&bytes, &*self.clock)?;
         Ok(FetchedCatalog {
             fetched_at_ms: snapshot.fetched_at_ms,
-            fingerprint: catalog_fingerprint(&bytes),
+            fingerprint: snapshot.payload_hash,
             bytes,
         })
     }
@@ -195,8 +195,15 @@ impl LiteLlmLoader {
     }
 
     pub async fn install_latest_local(&self) -> Result<bool, LoaderError> {
-        let storage_error = match get_storage_snapshot(self.storage.clone()).await {
-            Ok(Some(snapshot)) => {
+        let current = self.catalog.current();
+        let fetched = self
+            .storage
+            .get_price_snapshot_if_changed(&current.payload_hash)
+            .await
+            .map_err(|error| LoaderError::Storage(error.to_string()))?;
+
+        match fetched {
+            PriceCatalogSnapshotFetch::Changed(snapshot) => {
                 return install_cached_bytes(
                     &self.catalog,
                     snapshot.json_bytes,
@@ -204,18 +211,15 @@ impl LiteLlmLoader {
                     &*self.clock,
                 );
             }
-            Ok(None) => None,
-            Err(error) => Some(error),
-        };
+            PriceCatalogSnapshotFetch::Unchanged(_) => return Ok(false),
+            PriceCatalogSnapshotFetch::Missing => {}
+        }
 
         if let Some(bytes) = read_disk_cache(self.cache_path.clone()).await? {
             return install_cached_bytes(&self.catalog, bytes, None, &*self.clock);
         }
 
-        match storage_error {
-            Some(error) => Err(error),
-            None => Ok(false),
-        }
+        Ok(false)
     }
 
     fn record_success(&self) {
@@ -307,6 +311,7 @@ fn parse_litellm_json(bytes: &[u8], clock: &dyn Clock) -> Result<CatalogSnapshot
     }
 
     Ok(CatalogSnapshot {
+        payload_hash: catalog_fingerprint(bytes),
         fetched_at_ms: now_ms(clock),
         models,
         raw_json: bytes.to_vec(),
@@ -353,15 +358,6 @@ async fn put_storage_snapshot(
 ) -> Result<(), LoaderError> {
     storage
         .put_price_snapshot(&bytes, fetched_at_ms)
-        .await
-        .map_err(|error| LoaderError::Storage(error.to_string()))
-}
-
-async fn get_storage_snapshot(
-    storage: Arc<dyn PriceCatalogCache>,
-) -> Result<Option<PriceCatalogSnapshotRecord>, LoaderError> {
-    storage
-        .get_price_snapshot()
         .await
         .map_err(|error| LoaderError::Storage(error.to_string()))
 }

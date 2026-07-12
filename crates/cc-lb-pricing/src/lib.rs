@@ -135,6 +135,7 @@ pub enum CatalogStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CatalogSnapshot {
+    pub payload_hash: String,
     pub fetched_at_ms: u64,
     pub models: HashMap<String, Pricing>,
     pub raw_json: Vec<u8>,
@@ -146,6 +147,7 @@ pub struct CatalogSnapshot {
 impl CatalogSnapshot {
     pub fn empty_cost_disabled() -> Self {
         Self {
+            payload_hash: String::new(),
             fetched_at_ms: 0,
             models: HashMap::new(),
             raw_json: Vec::new(),
@@ -399,6 +401,7 @@ mod tests {
         models.insert(model.to_owned(), pricing);
 
         CatalogSnapshot {
+            payload_hash: String::new(),
             fetched_at_ms: 1,
             models,
             raw_json: b"{}".to_vec(),
