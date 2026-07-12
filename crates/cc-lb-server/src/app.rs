@@ -2275,6 +2275,7 @@ fn claude_default_snapshot(clock: &dyn cc_lb_engine::Clock) -> cc_lb_pricing::Ca
     }
 
     CatalogSnapshot {
+        payload_hash: String::new(),
         fetched_at_ms: cc_lb_engine::clock::unix_millis(clock.now())
             .try_into()
             .unwrap_or(u64::MAX),
@@ -3059,6 +3060,7 @@ mod tests {
             },
         );
         catalog.install_snapshot(cc_lb_pricing::CatalogSnapshot {
+            payload_hash: String::new(),
             fetched_at_ms: 0,
             models,
             raw_json: Vec::new(),
