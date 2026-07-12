@@ -20,7 +20,6 @@ import {
   AreaChart,
   CartesianGrid,
   Label,
-  Legend,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -605,6 +604,7 @@ function DetailView({
   }>({});
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [range, setRange] = useState<'1h' | '6h' | '24h' | '7d'>('7d');
+  const [isolatedWindow, setIsolatedWindow] = useState<string | null>(null);
   const [showMoreMeta, setShowMoreMeta] = useState(false);
 
   // Stable across re-renders so quotaSeries/quotaAnalysis queryKeys do not
@@ -711,6 +711,20 @@ function DetailView({
       }),
     [selectedLatest, quotaSeries.data, sinceUnixSecs],
   );
+
+  const effectiveIsolatedWindow =
+    isolatedWindow && visibleGraphWindows.includes(isolatedWindow)
+      ? isolatedWindow
+      : null;
+
+  const xDomain = useMemo<[number, number]>(() => {
+    const rows = chartData.rows;
+    const first = rows[0]?.unix;
+    const last = rows[rows.length - 1]?.unix;
+    if (first == null || last == null) return [sinceUnixSecs, nowUnixSecs];
+    if (first === last) return [first - 1, last + 1];
+    return [first, last];
+  }, [chartData.rows, sinceUnixSecs, nowUnixSecs]);
 
   const recent = useRecentEvents({
     upstream_id: upstream.id,
@@ -1071,8 +1085,8 @@ function DetailView({
                   </BaseToggleGroup>
                 }
               />
-              <CardBody className="p-3 pt-1">
-                <div className="w-full h-[240px]" style={{ minWidth: 0 }}>
+              <CardBody className="p-4 pt-2">
+                <div className="w-full h-[300px]" style={{ minWidth: 0 }}>
                   {quotaSeries.isPending || quotaSeries.isPlaceholderData ? (
                     <div className="h-full flex items-center justify-center text-text-faint text-sm">
                       Loading…
@@ -1080,10 +1094,10 @@ function DetailView({
                   ) : !chartData.rows.length || !visibleGraphWindows.length ? (
                     <EmptyState title="No data in range" />
                   ) : (
-                    <ResponsiveContainer width="100%" height={240}>
+                    <ResponsiveContainer width="100%" height={300}>
                       <AreaChart
                         data={chartData.rows}
-                        margin={{ top: 28, right: 24, bottom: 4, left: 0 }}
+                        margin={{ top: 20, right: 8, bottom: 0, left: 0 }}
                       >
                         <defs>
                           {DETAIL_WINDOWS.map((windowName) => {
@@ -1115,7 +1129,7 @@ function DetailView({
                         <XAxis
                           dataKey="unix"
                           type="number"
-                          domain={[sinceUnixSecs, nowUnixSecs]}
+                          domain={xDomain}
                           tick={{
                             fill: 'var(--color-text-faint)',
                             fontSize: 10,
@@ -1237,37 +1251,6 @@ function DetailView({
                             );
                           }}
                         />
-                        <Legend
-                          wrapperStyle={{
-                            fontSize: 11,
-                            fontFamily: 'Geist Mono',
-                            color: 'var(--color-text-muted)',
-                          }}
-                          content={() => {
-                            if (!visibleGraphWindows.length) return null;
-                            return (
-                              <div className="flex flex-wrap items-center justify-center gap-4 mt-2">
-                                {visibleGraphWindows.map((windowName) => (
-                                  <div
-                                    key={windowName}
-                                    className="flex items-center gap-1.5"
-                                  >
-                                    <div
-                                      className="w-3 h-0.5"
-                                      style={{
-                                        backgroundColor:
-                                          getWindowColor(windowName).stroke,
-                                      }}
-                                    />
-                                    <span className="text-[11px] text-text-muted font-mono">
-                                      {windowLabel(windowName)}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                            );
-                          }}
-                        />
                         {(() => {
                           const visible = 2 * (nowUnixSecs - sinceUnixSecs);
                           const markers: ChartMarker[] = [];
@@ -1305,7 +1288,9 @@ function DetailView({
                               marker.ts < sinceUnixSecs ||
                               marker.ts >
                                 nowUnixSecs + (nowUnixSecs - sinceUnixSecs) ||
-                              !visibleGraphWindows.includes(marker.window)
+                              !visibleGraphWindows.includes(marker.window) ||
+                              (effectiveIsolatedWindow !== null &&
+                                effectiveIsolatedWindow !== marker.window)
                             )
                               return null;
                             const color = getWindowColor(marker.window);
@@ -1344,12 +1329,52 @@ function DetailView({
                             fillOpacity={1}
                             isAnimationActive={false}
                             connectNulls={false}
+                            hide={
+                              effectiveIsolatedWindow !== null &&
+                              effectiveIsolatedWindow !== windowName
+                            }
                           />
                         ))}
                       </AreaChart>
                     </ResponsiveContainer>
                   )}
                 </div>
+                {!(quotaSeries.isPending || quotaSeries.isPlaceholderData) &&
+                chartData.rows.length > 0 &&
+                visibleGraphWindows.length > 0 ? (
+                  <div className="mt-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
+                    {visibleGraphWindows.map((windowName) => {
+                      const dimmed =
+                        effectiveIsolatedWindow !== null &&
+                        effectiveIsolatedWindow !== windowName;
+                      return (
+                        <button
+                          key={windowName}
+                          type="button"
+                          onClick={() =>
+                            setIsolatedWindow((prev) =>
+                              prev === windowName ? null : windowName,
+                            )
+                          }
+                          aria-pressed={effectiveIsolatedWindow === windowName}
+                          className="flex cursor-pointer items-center gap-1.5 border-0 bg-transparent p-0 transition-opacity hover:opacity-100"
+                          style={{ opacity: dimmed ? 0.35 : 1 }}
+                        >
+                          <div
+                            className="w-3 h-0.5"
+                            style={{
+                              backgroundColor:
+                                getWindowColor(windowName).stroke,
+                            }}
+                          />
+                          <span className="text-[11px] text-text-muted font-mono">
+                            {windowLabel(windowName)}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
               </CardBody>
             </Card>
 
