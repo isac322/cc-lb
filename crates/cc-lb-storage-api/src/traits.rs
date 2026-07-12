@@ -297,9 +297,21 @@ pub trait MetaStore: Send + Sync {
 pub trait PriceCatalogCache: Send + Sync {
     async fn put_price_snapshot(&self, json_bytes: &[u8], fetched_at_ms: u64) -> StorageResult<()>;
 
-    async fn get_price_snapshot(
+    async fn get_price_snapshot_if_changed(
         &self,
-    ) -> StorageResult<Option<crate::types::PriceCatalogSnapshotRecord>>;
+        current_hash: &str,
+    ) -> StorageResult<PriceCatalogSnapshotFetch>;
+
+    async fn get_price_snapshot(&self) -> StorageResult<Option<PriceCatalogSnapshotRecord>> {
+        match self.get_price_snapshot_if_changed("").await? {
+            PriceCatalogSnapshotFetch::Missing => Ok(None),
+            PriceCatalogSnapshotFetch::Changed(record) => Ok(Some(record)),
+            PriceCatalogSnapshotFetch::Unchanged(_) => Err(StorageError::Corrupted {
+                message: "price catalog returned unchanged for an empty compatibility hash"
+                    .to_owned(),
+            }),
+        }
+    }
 }
 
 #[async_trait]
