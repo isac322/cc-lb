@@ -7,7 +7,7 @@ name: release-plz
 # Flow:
 #   1. `preflight` job re-runs the publish-check gate (cargo semver-checks
 #      on every publish=true crate that has a crates.io baseline, plus a
-#      `cargo publish --dry-run` on the foundation crate cc-lb-plugin-api).
+#      `cargo publish --dry-run` on the foundation crate cc-lb-plugin-wire).
 #      This is defense-in-depth against the class of failure where a PR
 #      slips through with a public API break that has no matching version
 #      bump — path deps hide the mismatch until `cargo publish --verify`
@@ -16,8 +16,8 @@ name: release-plz
 #      cannot happen.
 #   2. `release` job runs after preflight succeeds. It detects new versions
 #      in Cargo.toml, creates git tags + GitHub releases, and publishes the
-#      crates managed in release-plz.toml (currently 6: cc-lb-plugin-api,
-#      cc-lb-plugin-wire, cc-lb-pdk-wasmtime, cc-lb-pdk-wasmtime-macros,
+#      crates managed in release-plz.toml (currently 5: cc-lb-plugin-wire,
+#      cc-lb-pdk-wasmtime, cc-lb-pdk-wasmtime-macros,
 #      cc-lb-plugin-conformance, cc-lb-runtime-wasmtime) to crates.io via
 #      trusted publishing (OIDC). Host / storage / internal crates carry
 #      `publish = false` and are skipped.
@@ -65,12 +65,11 @@ jobs:
       - name: cargo semver-checks (published baselines)
         run: |
           set -euo pipefail
-          cargo semver-checks --package cc-lb-plugin-api
           cargo semver-checks --package cc-lb-plugin-wire
           cargo semver-checks --package cc-lb-plugin-conformance
 
-      - name: cargo publish --dry-run cc-lb-plugin-api
-        run: cargo publish --dry-run -p cc-lb-plugin-api
+      - name: cargo publish --dry-run cc-lb-plugin-wire
+        run: cargo publish --dry-run -p cc-lb-plugin-wire
 
   release:
     name: release-plz release
