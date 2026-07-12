@@ -215,7 +215,7 @@ async fn upload_wasm_inner(
         _ => declared_slots,
     };
     let admin_id = admin_id_from_headers(headers);
-    let uploaded_at_unix_secs = cc_lb_engine::clock::unix_secs(state.clock.now());
+    let uploaded_at_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
     let blob = WasmBlob {
         sha256,
         size_bytes: bytes.len() as u64,
@@ -603,7 +603,7 @@ fn enqueue_upload_audit(
         original_filename: original_filename.to_owned(),
     };
     let mut entry: AuditEntry = payload.into();
-    entry.ts = cc_lb_engine::clock::unix_secs(state.clock.now());
+    entry.ts = cc_lb_clock::unix_secs(state.clock.now());
     entry.request_id = format!("admin-plugin-registry-upload-{sha256}-{}", entry.ts);
     entry.principal_id = "admin".to_owned();
     entry.route = "/admin/v1/plugins/wasm".to_owned();
@@ -616,7 +616,7 @@ fn enqueue_upload_attempt_audit(state: &AdminState, status: u16) {
     let Some(audit_sink) = &state.audit_sink else {
         return;
     };
-    let ts = cc_lb_engine::clock::unix_secs(state.clock.now());
+    let ts = cc_lb_clock::unix_secs(state.clock.now());
     let _ = audit_sink.try_enqueue(AuditEntry {
         ts,
         request_id: format!("admin-plugin-registry-upload-attempt-{ts}"),

@@ -100,7 +100,6 @@ pub mod usage_decoder;
 #[cfg(not(loom))]
 mod usage_parser;
 #[cfg(not(loom))]
-pub mod usage_pruner;
 #[cfg(not(loom))]
 pub mod warmup_attempts;
 #[cfg(not(loom))]
@@ -230,7 +229,7 @@ pub use sse_relay::{
     PromptCacheObservationEventEmitter, RelayError, SseBatchConfig, SseRelay, StreamingUsage,
 };
 #[cfg(not(loom))]
-pub use storage_tail_poller::{StorageTailPoller, StorageTailUpdate};
+pub use storage_tail_poller::StorageTailPoller;
 #[cfg(not(loom))]
 pub use subscription_metadata_hook::{
     MetadataHookEnqueueError, MetadataHookHandle, MetadataHookRequest, MetadataRefreshEnqueue,

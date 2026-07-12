@@ -16,6 +16,7 @@ pub mod traits;
 
 pub use audit_payload::AuditPayload;
 pub use audit_writer::{AuditDropped, AuditEntry, AuditWriterSink, spawn_audit_writer};
+pub use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 pub use dynamic_view::{
     ApplyStatus, DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamRateLimitCache,
     UpstreamStatusEntry, UpstreamStatusSnapshot,

@@ -32,13 +32,12 @@ cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-control = { path = "../cc-lb-control" }
 cc-lb-domain.workspace = true
 cc-lb-lifecycle.workspace = true
+cc-lb-quota.workspace = true
 cc-lb-request-log.workspace = true
-cc-lb-engine = { path = "../cc-lb-engine" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-scheduler = { path = "../cc-lb-scheduler", default-features = false }
 cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
-cc-lb-routing.workspace = true
 cc-lb-upstream.workspace = true
 cc-lb-runtime-wasmtime = { workspace = true }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }

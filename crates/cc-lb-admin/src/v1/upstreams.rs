@@ -19,10 +19,7 @@ use cc_lb_control::anthropic_compat::{
 };
 use cc_lb_control::anthropic_metadata::make_metadata_http_client;
 use cc_lb_control::{AuditEntry, AuditPayload, run_metadata_refresh};
-use cc_lb_engine::warmup_attempts::{
-    WarmupAttemptExecution, WarmupAttemptExecutionResult, execute_warmup_attempt,
-};
-use cc_lb_engine::{
+use cc_lb_quota::{
     UnifiedQuotaObservation, build_subscription_quota_samples, parse_anthropic_unified_headers,
 };
 use cc_lb_scheduler::error::SchedulerError;
@@ -47,6 +44,7 @@ use url::Url;
 use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
+use crate::ports::{WarmupAttemptInput, WarmupAttemptResult};
 use crate::{AdminState, WarmupDialectDispatchErrorKind};
 
 const DEFAULT_LIMIT: usize = 100;
@@ -68,7 +66,7 @@ async fn write_warmup_status_after_success(
     clock: &dyn Clock,
 ) {
     let status = UpstreamStatusUpdate {
-        last_warmup_at_unix_secs: Some(Some(cc_lb_engine::clock::unix_secs(clock.now()))),
+        last_warmup_at_unix_secs: Some(Some(cc_lb_clock::unix_secs(clock.now()))),
         ..UpstreamStatusUpdate::default()
     };
     if let Err(error) = UpstreamStore::set_status(storage, upstream_id, status).await {
@@ -209,6 +207,7 @@ enum UpstreamError {
     RefreshUnavailable,
     RefreshFailed { detail: String },
     MetadataRefreshTimeout,
+    WarmupUnavailable,
     Internal { detail: String },
     Storage(StorageError),
 }
@@ -269,6 +268,11 @@ impl IntoResponse for UpstreamError {
             Self::MetadataRefreshTimeout => (
                 StatusCode::GATEWAY_TIMEOUT,
                 Json(json!({ "error": "metadata_refresh_timeout" })),
+            )
+                .into_response(),
+            Self::WarmupUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "warmup_unavailable" })),
             )
                 .into_response(),
             Self::Internal { detail } => (
@@ -473,13 +477,14 @@ async fn fire_now_upstream_warmup(
     let now_unix_secs = unix_now_secs_i64(&*state.clock)?;
     if !upstream.warmup_enabled {
         let _ = record_fire_now_skip(
+            &state,
             storage.as_ref(),
             &upstream,
             now_unix_secs,
             WarmupSkipReason::UpstreamDisabled,
             None,
         )
-        .await;
+        .await?;
         return Ok((
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "warmup_disabled" })),
@@ -488,6 +493,7 @@ async fn fire_now_upstream_warmup(
     }
     if upstream.oauth_credentials.is_none() {
         let outcome = record_fire_now_failure(
+            &state,
             storage.as_ref(),
             &upstream,
             now_unix_secs,
@@ -498,7 +504,7 @@ async fn fire_now_upstream_warmup(
             None,
             None,
         )
-        .await;
+        .await?;
         return Ok(fire_now_not_fired_response(
             StatusCode::BAD_REQUEST,
             outcome,
@@ -520,6 +526,7 @@ async fn fire_now_upstream_warmup(
     {
         tracing::warn!(target: "warmup", upstream_id = %upstream_id, holder = %holder, action = "cycle_abandoned", reason = "dialect_plugin_failed");
         let outcome = record_fire_now_failure(
+            &state,
             storage.as_ref(),
             &upstream,
             now_unix_secs,
@@ -530,7 +537,7 @@ async fn fire_now_upstream_warmup(
             Some(StatusCode::BAD_GATEWAY),
             Some("warmup dialect dispatcher unavailable"),
         )
-        .await;
+        .await?;
         return Ok(fire_now_not_fired_response(
             StatusCode::BAD_GATEWAY,
             outcome,
@@ -585,7 +592,8 @@ async fn fire_now_upstream_warmup(
         let bundle = match decrypt_oauth_bundle(&state, &upstream) {
             Ok(bundle) => bundle,
             Err(error) => {
-                record_fire_now_failure(
+                let _ = record_fire_now_failure(
+                    &state,
                     storage.as_ref(),
                     &upstream,
                     now_unix_secs,
@@ -604,7 +612,8 @@ async fn fire_now_upstream_warmup(
             match fresh_enough_access_token(&state, storage.clone(), &upstream, bundle).await {
                 Ok(access_token) => access_token,
                 Err(error) => {
-                    record_fire_now_failure(
+                    let _ = record_fire_now_failure(
+                        &state,
                         storage.as_ref(),
                         &upstream,
                         now_unix_secs,
@@ -622,7 +631,8 @@ async fn fire_now_upstream_warmup(
         let base_url = match upstream_base_url(&upstream) {
             Ok(base_url) => base_url,
             Err(error) => {
-                record_fire_now_failure(
+                let _ = record_fire_now_failure(
+                    &state,
                     storage.as_ref(),
                     &upstream,
                     now_unix_secs,
@@ -653,20 +663,23 @@ async fn fire_now_upstream_warmup(
             },
         }
     };
-    let record = execute_warmup_attempt(WarmupAttemptExecution {
-        storage: storage.as_ref(),
-        upstream: &upstream,
-        scheduled_for_unix_secs: now_unix_secs,
-        trigger: WarmupAttemptTrigger::Manual,
-        replica_id: None,
-        lease_holder: Some(holder.as_str()),
-        expected_cycle_key: Some(candidate_cycle_key),
-        attempted_at_unix_secs: now_unix_secs,
-        completed_at_unix_secs: Some(unix_now_secs_i64(&*state.clock)?),
-        dispatch_kind: fire_now_attempt_dispatch_kind(&dispatch_attempt),
-        result: execution_result_from_fire_now_attempt(&dispatch_attempt),
-    })
-    .await;
+    let record = record_warmup_attempt(
+        &state,
+        WarmupAttemptInput {
+            storage: storage.as_ref(),
+            upstream: &upstream,
+            scheduled_for_unix_secs: now_unix_secs,
+            trigger: WarmupAttemptTrigger::Manual,
+            replica_id: None,
+            lease_holder: Some(holder.as_str()),
+            expected_cycle_key: Some(candidate_cycle_key),
+            attempted_at_unix_secs: now_unix_secs,
+            completed_at_unix_secs: Some(unix_now_secs_i64(&*state.clock)?),
+            dispatch_kind: fire_now_attempt_dispatch_kind(&dispatch_attempt),
+            result: execution_result_from_fire_now_attempt(&dispatch_attempt),
+        },
+    )
+    .await?;
     if let FireNowDispatchAttempt::Response { headers, .. } = &dispatch_attempt {
         record_fire_now_subscription_quota_observations(
             &state,
@@ -815,11 +828,15 @@ async fn record_fire_now_subscription_quota_observations(
         return Ok(());
     }
     let observed_at_unix_millis = unix_now_millis(&*state.clock)?;
-    if let Some(lifecycle) = &state.lifecycle {
+    if let Some(quota_ingestion) = state
+        .lifecycle
+        .as_ref()
+        .and_then(|ports| ports.subscription_quota_ingestion.as_deref())
+    {
         let observed_at = UNIX_EPOCH
             .checked_add(Duration::from_millis(observed_at_unix_millis))
             .ok_or_else(|| invalid_warmup_state("warmup observed timestamp overflow"))?;
-        lifecycle.ingest_subscription_quota_headers(headers, upstream_id, observed_at);
+        quota_ingestion.ingest_subscription_quota_headers(headers, upstream_id, observed_at);
         return Ok(());
     }
     let records = build_subscription_quota_samples(headers, upstream_id, observed_at_unix_millis);
@@ -866,13 +883,13 @@ fn fire_now_response_attempt(
 
 fn execution_result_from_fire_now_attempt(
     attempt: &FireNowDispatchAttempt,
-) -> WarmupAttemptExecutionResult<'_> {
+) -> WarmupAttemptResult<'_> {
     match attempt {
         FireNowDispatchAttempt::Response {
             status,
             observations,
             ..
-        } => WarmupAttemptExecutionResult::Response {
+        } => WarmupAttemptResult::Response {
             status: *status,
             observations,
             error_detail: None,
@@ -882,7 +899,7 @@ fn execution_result_from_fire_now_attempt(
             status,
             error_detail,
             ..
-        } => WarmupAttemptExecutionResult::TransientFailure {
+        } => WarmupAttemptResult::TransientFailure {
             reason: *reason,
             http_status: Some(*status),
             error_detail: Some(error_detail.as_str()),
@@ -892,7 +909,7 @@ fn execution_result_from_fire_now_attempt(
             status,
             error_detail,
             ..
-        } => WarmupAttemptExecutionResult::PermanentFailure {
+        } => WarmupAttemptResult::PermanentFailure {
             reason: *reason,
             http_status: Some(*status),
             error_detail: Some(error_detail.as_str()),
@@ -917,35 +934,40 @@ fn fire_now_attempt_dispatch_kind(attempt: &FireNowDispatchAttempt) -> WarmupDis
 }
 
 async fn record_fire_now_skip(
+    state: &AdminState,
     storage: &dyn Storage,
     upstream: &UpstreamRecord,
     now_unix_secs: i64,
     reason: WarmupSkipReason,
     error_detail: Option<&str>,
-) -> WarmupAttemptOutcome {
-    execute_warmup_attempt(WarmupAttemptExecution {
-        storage,
-        upstream,
-        scheduled_for_unix_secs: now_unix_secs,
-        trigger: WarmupAttemptTrigger::Manual,
-        replica_id: None,
-        lease_holder: None,
-        expected_cycle_key: None,
-        attempted_at_unix_secs: now_unix_secs,
-        completed_at_unix_secs: Some(now_unix_secs),
-        dispatch_kind: WarmupDispatchKind::NotDispatched,
-        result: WarmupAttemptExecutionResult::Skipped {
-            reason,
-            cycle_key: None,
-            error_detail,
+) -> Result<WarmupAttemptOutcome, UpstreamError> {
+    record_warmup_attempt(
+        state,
+        WarmupAttemptInput {
+            storage,
+            upstream,
+            scheduled_for_unix_secs: now_unix_secs,
+            trigger: WarmupAttemptTrigger::Manual,
+            replica_id: None,
+            lease_holder: None,
+            expected_cycle_key: None,
+            attempted_at_unix_secs: now_unix_secs,
+            completed_at_unix_secs: Some(now_unix_secs),
+            dispatch_kind: WarmupDispatchKind::NotDispatched,
+            result: WarmupAttemptResult::Skipped {
+                reason,
+                cycle_key: None,
+                error_detail,
+            },
         },
-    })
+    )
     .await
-    .outcome
+    .map(|record| record.outcome)
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn record_fire_now_failure(
+    state: &AdminState,
     storage: &dyn Storage,
     upstream: &UpstreamRecord,
     now_unix_secs: i64,
@@ -955,26 +977,41 @@ async fn record_fire_now_failure(
     dispatch_kind: WarmupDispatchKind,
     status: Option<StatusCode>,
     error_detail: Option<&str>,
-) -> WarmupAttemptOutcome {
-    execute_warmup_attempt(WarmupAttemptExecution {
-        storage,
-        upstream,
-        scheduled_for_unix_secs: now_unix_secs,
-        trigger: WarmupAttemptTrigger::Manual,
-        replica_id: None,
-        lease_holder: holder,
-        expected_cycle_key: Some(candidate_cycle_key),
-        attempted_at_unix_secs: now_unix_secs,
-        completed_at_unix_secs: Some(now_unix_secs),
-        dispatch_kind,
-        result: WarmupAttemptExecutionResult::PermanentFailure {
-            reason,
-            http_status: status,
-            error_detail,
+) -> Result<WarmupAttemptOutcome, UpstreamError> {
+    record_warmup_attempt(
+        state,
+        WarmupAttemptInput {
+            storage,
+            upstream,
+            scheduled_for_unix_secs: now_unix_secs,
+            trigger: WarmupAttemptTrigger::Manual,
+            replica_id: None,
+            lease_holder: holder,
+            expected_cycle_key: Some(candidate_cycle_key),
+            attempted_at_unix_secs: now_unix_secs,
+            completed_at_unix_secs: Some(now_unix_secs),
+            dispatch_kind,
+            result: WarmupAttemptResult::PermanentFailure {
+                reason,
+                http_status: status,
+                error_detail,
+            },
         },
-    })
+    )
     .await
-    .outcome
+    .map(|record| record.outcome)
+}
+
+async fn record_warmup_attempt(
+    state: &AdminState,
+    input: WarmupAttemptInput<'_>,
+) -> Result<crate::ports::WarmupAttemptOutcomeSnapshot, UpstreamError> {
+    let warmup_port = state
+        .lifecycle
+        .as_ref()
+        .and_then(|ports| ports.warmup.as_deref())
+        .ok_or(UpstreamError::WarmupUnavailable)?;
+    Ok(warmup_port.record_attempt(input).await)
 }
 
 fn upstream_base_url(upstream: &UpstreamRecord) -> Result<Url, UpstreamError> {
@@ -1081,7 +1118,7 @@ async fn seed_warmup_if_toggled(
     let Some(scheduler) = state.scheduler.as_ref() else {
         return Ok(());
     };
-    let seed_secs = cc_lb_engine::clock::unix_secs(state.clock.now());
+    let seed_secs = cc_lb_clock::unix_secs(state.clock.now());
     match scheduler
         .push_adaptive_task(warmup_bootstrap_task(after.id, seed_secs))
         .await
@@ -1307,7 +1344,7 @@ async fn fresh_enough_access_token(
     upstream: &UpstreamRecord,
     bundle: OAuthTokenBundle,
 ) -> Result<String, UpstreamError> {
-    let now = cc_lb_engine::clock::unix_secs(state.clock.now());
+    let now = cc_lb_clock::unix_secs(state.clock.now());
     if bundle.expires_at_unix_secs > now.saturating_add(METADATA_REFRESH_LOOKAHEAD_SECS) {
         return Ok(bundle.access_token);
     }
@@ -1565,7 +1602,7 @@ fn enqueue_upstream_audit(state: &AdminState, upstream: &UpstreamRecord, payload
     let Some(audit_sink) = &state.audit_sink else {
         return;
     };
-    let ts = cc_lb_engine::clock::unix_secs(state.clock.now());
+    let ts = cc_lb_clock::unix_secs(state.clock.now());
     let action = payload.to_string();
     let mut entry: AuditEntry = payload.into();
     entry.ts = ts;
@@ -1581,12 +1618,12 @@ fn enqueue_upstream_audit(state: &AdminState, upstream: &UpstreamRecord, payload
 }
 
 fn unix_now_secs_i64(clock: &dyn Clock) -> Result<i64, UpstreamError> {
-    i64::try_from(cc_lb_engine::clock::unix_secs(clock.now()))
+    i64::try_from(cc_lb_clock::unix_secs(clock.now()))
         .map_err(|_| invalid_warmup_state("current timestamp overflow"))
 }
 
 fn unix_now_millis(clock: &dyn Clock) -> Result<u64, UpstreamError> {
-    cc_lb_engine::clock::unix_secs(clock.now())
+    cc_lb_clock::unix_secs(clock.now())
         .checked_mul(1_000)
         .ok_or_else(|| invalid_warmup_state("current timestamp millis overflow"))
 }
@@ -1603,11 +1640,11 @@ mod tests {
     use cc_lb_control::api_keys::limit_engine::LimitEngine;
     use cc_lb_control::api_keys::principal_view::PrincipalView;
     use cc_lb_control::{
-        DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
+        DynamicView, DynamicViewBuilder, DynamicViewHolder, RouteDecision, RouteError,
+        RouterPlugin, RoutingContext, UpstreamStatusSnapshot,
     };
     use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
     use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
-    use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
     use cc_lb_storage_api::{BackendKind, MetaStore, UpstreamStore};
     use cc_lb_upstream::{
         ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
@@ -1730,7 +1767,7 @@ mod tests {
     impl RouterPlugin for TestRouter {
         fn route(
             &self,
-            _ctx: &cc_lb_routing::RoutingContext,
+            _ctx: &RoutingContext,
             _principal: &Principal,
             _candidates: &[UpstreamCandidate],
         ) -> Result<RouteDecision, RouteError> {
@@ -1745,6 +1782,87 @@ mod tests {
     impl ObservabilityHook for TestHook {
         fn observe(&self, _event: ObserveEvent) -> Result<(), ObservabilityError> {
             Ok(())
+        }
+    }
+
+    struct TestWarmupPort;
+
+    #[async_trait]
+    impl crate::ports::WarmupPort for TestWarmupPort {
+        async fn record_attempt(
+            &self,
+            input: crate::ports::WarmupAttemptInput<'_>,
+        ) -> crate::ports::WarmupAttemptOutcomeSnapshot {
+            let (outcome, cycle_key, error_detail) = match input.result {
+                crate::ports::WarmupAttemptResult::Response {
+                    status,
+                    error_detail,
+                    ..
+                } if status.is_success() => (
+                    WarmupAttemptOutcome::Success(
+                        cc_lb_storage_api::WarmupSuccessReason::CycleAdvanced,
+                    ),
+                    input.expected_cycle_key,
+                    error_detail.map(str::to_owned),
+                ),
+                crate::ports::WarmupAttemptResult::Response {
+                    status,
+                    error_detail,
+                    ..
+                } if status == StatusCode::UNAUTHORIZED => (
+                    WarmupAttemptOutcome::PermanentFailure(
+                        WarmupPermanentFailureReason::AuthFailed,
+                    ),
+                    input.expected_cycle_key,
+                    error_detail.map(str::to_owned),
+                ),
+                crate::ports::WarmupAttemptResult::Response { error_detail, .. } => (
+                    WarmupAttemptOutcome::TransientFailure(
+                        WarmupTransientFailureReason::Upstream5xx,
+                    ),
+                    input.expected_cycle_key,
+                    error_detail.map(str::to_owned),
+                ),
+                crate::ports::WarmupAttemptResult::TransientFailure {
+                    reason,
+                    error_detail,
+                    ..
+                } => (
+                    WarmupAttemptOutcome::TransientFailure(reason),
+                    input.expected_cycle_key,
+                    error_detail.map(str::to_owned),
+                ),
+                crate::ports::WarmupAttemptResult::PermanentFailure {
+                    reason,
+                    error_detail,
+                    ..
+                } => (
+                    WarmupAttemptOutcome::PermanentFailure(reason),
+                    input.expected_cycle_key,
+                    error_detail.map(str::to_owned),
+                ),
+                crate::ports::WarmupAttemptResult::Skipped {
+                    reason,
+                    cycle_key,
+                    error_detail,
+                } => (
+                    WarmupAttemptOutcome::Skipped(reason),
+                    cycle_key,
+                    error_detail.map(str::to_owned),
+                ),
+                crate::ports::WarmupAttemptResult::PreflightActiveWindow { cycle_key } => (
+                    WarmupAttemptOutcome::Success(
+                        cc_lb_storage_api::WarmupSuccessReason::WindowAlreadyActive,
+                    ),
+                    Some(cycle_key),
+                    None,
+                ),
+            };
+            crate::ports::WarmupAttemptOutcomeSnapshot {
+                outcome,
+                cycle_key,
+                error_detail,
+            }
         }
     }
 
@@ -1854,7 +1972,10 @@ mod tests {
                 Arc::new(KeyConcurrencyManager::new()),
                 Arc::new(cc_lb_clock::SystemClock),
             ),
-            lifecycle: None,
+            lifecycle: Some(crate::AdminPorts {
+                warmup: Some(Arc::new(TestWarmupPort)),
+                ..crate::AdminPorts::default()
+            }),
             subscription_metadata_hook: None,
             lazy_refresher: None,
             runtime: None,

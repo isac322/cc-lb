@@ -12,7 +12,7 @@ use axum::{
 use cc_lb_clock::Clock;
 use cc_lb_control::DynamicViewHolder;
 use cc_lb_domain::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
-use cc_lb_engine::plan_capacity::{PRO_CAPACITY_RATIO, plan_capacity_ratio};
+use cc_lb_quota::plan_capacity::{PRO_CAPACITY_RATIO, plan_capacity_ratio};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaHistoryStore,
     PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord, Storage, StorageError,
@@ -2435,7 +2435,7 @@ fn internal_error(error: &str) -> Response {
 }
 
 fn now_unix_millis(clock: &dyn Clock) -> u64 {
-    cc_lb_engine::clock::unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
+    cc_lb_clock::unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]

@@ -1102,7 +1102,7 @@ fn emit_audit(state: &AdminState, payload: AuditPayload) {
         return;
     };
     let action = payload.to_string();
-    let ts = cc_lb_engine::clock::unix_secs(state.clock.now());
+    let ts = cc_lb_clock::unix_secs(state.clock.now());
     let mut entry: AuditEntry = payload.into();
     entry.ts = ts;
     entry.request_id = format!("admin-v1-plugin-{ts}");

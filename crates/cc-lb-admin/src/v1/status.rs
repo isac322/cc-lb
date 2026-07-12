@@ -144,7 +144,7 @@ pub(crate) async fn status(State(state): State<AdminState>) -> axum::response::R
 }
 
 async fn export(State(state): State<AdminState>) -> axum::response::Response {
-    match build_export(&state, cc_lb_engine::clock::unix_secs(state.clock.now())).await {
+    match build_export(&state, cc_lb_clock::unix_secs(state.clock.now())).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => status_error_response(error),
     }
@@ -177,7 +177,7 @@ async fn build_status(state: &AdminState) -> Result<StatusResponse, StatusError>
     let replica_identity = state
         .lifecycle
         .as_ref()
-        .and_then(|lifecycle| lifecycle.replica_identity());
+        .and_then(|ports| ports.replica_identity.clone());
 
     Ok(StatusResponse {
         version: env!("CARGO_PKG_VERSION"),

@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_storage_api::Storage;
+use cc_lb_clock::{Clock, ClockHandle, unix_millis};
 
-use crate::clock::{Clock, ClockHandle, unix_millis};
+use crate::Storage;
 
 const DAY_MS: u64 = 86_400_000;
 const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
@@ -57,7 +57,6 @@ impl UsagePruner {
         let retention_ms = self.retention_days.saturating_mul(DAY_MS);
         let cutoff_ms = now_ms.saturating_sub(retention_ms);
         let cutoff_secs = cutoff_ms / 1_000;
-
         let request_events_removed = self
             .prune_request_events(cutoff_ms.saturating_mul(KEY_SEQUENCE_SCALE))
             .await;
@@ -87,13 +86,10 @@ impl UsagePruner {
                     break;
                 }
             };
-
             if removed == 0 {
                 break;
             }
-            // TODO(T26): cclb_usage_pruned_rows_total{table="request_events"} counter increment
             total_removed += removed;
-
             if removed < PRUNE_BATCH_SIZE as u64 {
                 break;
             }
@@ -116,13 +112,10 @@ impl UsagePruner {
                     break;
                 }
             };
-
             if removed == 0 {
                 break;
             }
-            // TODO(T26): cclb_usage_pruned_rows_total{table="audit_log"} counter increment
             total_removed += removed;
-
             if removed < PRUNE_BATCH_SIZE as u64 {
                 break;
             }

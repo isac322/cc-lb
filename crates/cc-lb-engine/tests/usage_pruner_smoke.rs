@@ -1,7 +1,7 @@
-use cc_lb_engine::usage_pruner::{PruneResult, UsagePruner};
 use cc_lb_engine::{Clock, ClockHandle, TestClock, unix_millis, unix_secs};
 use cc_lb_storage_api::{
     AuditEntry, AuditStore, BackendKind, MetaStore, RequestEvent, RequestEventStore,
+    usage_pruner::{PruneResult, UsagePruner},
 };
 use cc_lb_storage_sqlite::SqliteStorage;
 use std::sync::Arc;

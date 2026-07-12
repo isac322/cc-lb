@@ -25,6 +25,7 @@ pub mod upstream_rate_limit;
 pub mod upstream_subscription_metadata;
 pub mod upstream_subscription_quota;
 pub mod upstream_subscription_quota_checkpoint;
+pub mod usage_pruner;
 pub mod validation;
 pub mod warmup_attempts;
 

@@ -11,7 +11,7 @@ use cc_lb_storage_api::RequestEventStore;
 use config_admin_common::{app, authed_json, temp_storage, test_state};
 use events_request_log_contracts_support::{
     BROAD_REQUEST_ID, CANCELED_REQUEST_ID, DROPPED_REQUEST_ID, EVENT_ID, MODEL,
-    STRUCTURED_REQUEST_ID, THREAD_ID, UPSTREAM_ID, UPSTREAM_NAME, assembler, publish_enriched,
+    STRUCTURED_REQUEST_ID, THREAD_ID, UPSTREAM_ID, UPSTREAM_NAME, event_bus, publish_enriched,
     publish_recent_contracts, read_message_updates_through_final_window, stream_response,
     wait_for_initial_cursor,
 };
@@ -19,15 +19,14 @@ use events_request_log_contracts_support::{
 #[tokio::test]
 async fn events_stream_orders_parse_auth_route_enrichment_before_one_final() {
     let (_dir, storage) = temp_storage().await;
-    let (bus, assembler) = assembler(Arc::clone(&storage));
+    let bus = event_bus();
     let mut state = test_state(Config::default(), Some(Arc::clone(&storage)));
     state.event_bus = Some(Arc::clone(&bus) as Arc<dyn RequestEventBus>);
     let response = stream_response(state).await;
     let mut body = response.into_body();
     wait_for_initial_cursor(&mut body).await;
 
-    publish_enriched(&bus);
-    assembler.shutdown().await;
+    publish_enriched(&bus, storage.as_ref()).await;
     let updates = read_message_updates_through_final_window(&mut body).await;
 
     assert_eq!(
@@ -84,9 +83,7 @@ async fn events_stream_orders_parse_auth_route_enrichment_before_one_final() {
 #[tokio::test]
 async fn events_recent_returns_structured_429_and_distinct_499_without_control_fabrication() {
     let (_dir, storage) = temp_storage().await;
-    let (bus, assembler) = assembler(Arc::clone(&storage));
-    publish_recent_contracts(&bus);
-    assembler.shutdown().await;
+    publish_recent_contracts(storage.as_ref()).await;
     let state = test_state(Config::default(), Some(Arc::clone(&storage)));
 
     let (status, _, four_xx, _) = authed_json(

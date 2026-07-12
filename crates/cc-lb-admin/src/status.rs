@@ -2,8 +2,7 @@ use std::collections::BTreeMap;
 
 use axum::{Json, extract::State};
 use cc_lb_config::Config;
-use cc_lb_engine::{BreakerRegistry, BulkheadRegistry, DrainController};
-use cc_lb_storage_api::{RequestEventUpstream, Storage, StorageError};
+use cc_lb_storage_api::RequestEventUpstream;
 use serde::Serialize;
 
 use crate::{AdminState, LastReloadStatus};
@@ -83,26 +82,6 @@ pub async fn handler(State(state): State<AdminState>) -> Json<PluginsStatusRespo
     ))
 }
 
-#[derive(Debug)]
-pub enum StatusBuildError {
-    UnknownUpstream,
-    Storage(StorageError),
-    Crypto,
-    Json,
-}
-
-pub async fn build_upstream_health(
-    _storage: &dyn Storage,
-    _config: &Config,
-    _breaker_registry: Option<&BreakerRegistry>,
-    _bulkhead_registry: Option<&BulkheadRegistry>,
-    _drain_controller: Option<&DrainController>,
-    _upstream_name: &str,
-    _now_unix_secs: u64,
-) -> Result<UpstreamHealthResponse, StatusBuildError> {
-    Err(StatusBuildError::UnknownUpstream)
-}
-
 pub fn build_status_response(
     _config: &Config,
     last_reload_status: Option<LastReloadStatus>,
@@ -111,22 +90,5 @@ pub fn build_status_response(
         plugins: Vec::new(),
         principals: BTreeMap::new(),
         last_reload_status,
-    }
-}
-
-impl StatusBuildError {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::UnknownUpstream => "unknown_upstream",
-            Self::Storage(_) => "storage_error",
-            Self::Crypto => "crypto_error",
-            Self::Json => "json_error",
-        }
-    }
-}
-
-impl From<StorageError> for StatusBuildError {
-    fn from(error: StorageError) -> Self {
-        Self::Storage(error)
     }
 }

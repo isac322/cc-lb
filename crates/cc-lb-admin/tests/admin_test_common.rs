@@ -11,12 +11,11 @@ use cc_lb_control::api_keys::{
     concurrent_guard::KeyConcurrencyManager, principal_view::PrincipalView,
 };
 use cc_lb_control::{
-    DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
-    api_keys::limit_engine::LimitEngine, spawn_audit_writer,
+    DynamicViewBuilder, DynamicViewHolder, RouteDecision, RouteError, RouterPlugin, RoutingContext,
+    UpstreamStatusSnapshot, api_keys::limit_engine::LimitEngine, spawn_audit_writer,
 };
 use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_observability::ObservabilityHook;
-use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
@@ -84,7 +83,7 @@ struct NoopRouter;
 impl RouterPlugin for NoopRouter {
     fn route(
         &self,
-        _ctx: &cc_lb_routing::RoutingContext,
+        _ctx: &RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

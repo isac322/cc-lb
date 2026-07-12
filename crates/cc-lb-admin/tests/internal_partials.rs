@@ -1,14 +1,16 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use cc_lb_admin::internal_partials::{InternalPartialsState, router};
-use cc_lb_engine::PartialRetentionCache;
+use cc_lb_admin::ports::{RetainedPartialPort, RetainedPartialSnapshot};
 use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 #[tokio::test]
 async fn internal_partial_fetch_returns_payload_when_token_valid() {
-    let cache = PartialRetentionCache::new(std::time::Duration::from_secs(300), 10);
     let update = RequestEventUpdate::Partial(RequestEventPartial {
         event_id: "event-present".to_owned(),
         request_id: "req-present".to_owned(),
@@ -17,13 +19,13 @@ async fn internal_partial_fetch_returns_payload_when_token_valid() {
         last_update_ms: 1_700_000_000_000,
         ..RequestEventPartial::default()
     });
-    cache.insert(
-        "event-present".to_owned(),
+    let retention = TestRetainedPartials::with_payload(
+        "event-present",
         serde_json::to_vec(&update).expect("update serializes"),
     );
 
     let response = router(InternalPartialsState {
-        retention: cache,
+        retention: Arc::new(retention),
         cluster_token: "cluster-token".to_owned(),
     })
     .oneshot(request("event-present", Some("cluster-token")))
@@ -44,7 +46,7 @@ async fn internal_partial_fetch_returns_payload_when_token_valid() {
 #[tokio::test]
 async fn internal_partial_fetch_rejects_missing_or_wrong_token() {
     let app = router(InternalPartialsState {
-        retention: PartialRetentionCache::new(std::time::Duration::from_secs(300), 10),
+        retention: Arc::new(TestRetainedPartials::default()),
         cluster_token: "cluster-token".to_owned(),
     });
 
@@ -65,7 +67,7 @@ async fn internal_partial_fetch_rejects_missing_or_wrong_token() {
 #[tokio::test]
 async fn internal_partial_fetch_returns_not_found_when_event_absent() {
     let response = router(InternalPartialsState {
-        retention: PartialRetentionCache::new(std::time::Duration::from_secs(300), 10),
+        retention: Arc::new(TestRetainedPartials::default()),
         cluster_token: "cluster-token".to_owned(),
     })
     .oneshot(request("missing-event", Some("cluster-token")))
@@ -83,4 +85,26 @@ fn request(event_id: &str, token: Option<&str>) -> Request<Body> {
         builder = builder.header("X-Cluster-Token", token);
     }
     builder.body(Body::empty()).expect("request builds")
+}
+
+#[derive(Default)]
+struct TestRetainedPartials {
+    payloads: HashMap<String, Vec<u8>>,
+}
+
+impl TestRetainedPartials {
+    fn with_payload(event_id: &str, payload: Vec<u8>) -> Self {
+        Self {
+            payloads: HashMap::from([(event_id.to_owned(), payload)]),
+        }
+    }
+}
+
+impl RetainedPartialPort for TestRetainedPartials {
+    fn retained_partial(&self, event_id: &str) -> Option<RetainedPartialSnapshot> {
+        self.payloads
+            .get(event_id)
+            .cloned()
+            .map(|payload| RetainedPartialSnapshot { payload })
+    }
 }

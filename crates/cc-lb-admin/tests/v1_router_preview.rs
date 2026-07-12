@@ -4,11 +4,36 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use cc_lb_admin::{AdminState, router};
+use cc_lb_admin::ports::{
+    RoutePreviewError, RoutePreviewInput, RoutePreviewOutcome, RoutePreviewPort, RoutePreviewWinner,
+};
+use cc_lb_admin::{AdminPorts, AdminState, router};
 use cc_lb_config::Config;
+use cc_lb_domain::RoutingTrace;
 use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
+use uuid::Uuid;
+
+struct PreviewPort;
+
+impl RoutePreviewPort for PreviewPort {
+    fn preview_route(
+        &self,
+        _input: RoutePreviewInput,
+    ) -> Result<RoutePreviewOutcome, RoutePreviewError> {
+        Ok(RoutePreviewOutcome {
+            trace: RoutingTrace {
+                stages: Vec::new(),
+                terminal_decision: None,
+            },
+            winner: Some(RoutePreviewWinner {
+                upstream_id: Uuid::from_u128(7),
+                name: "preview-upstream".to_owned(),
+            }),
+        })
+    }
+}
 
 fn test_state() -> AdminState {
     let config = Config::default();
@@ -69,6 +94,41 @@ async fn send_preview_request(
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     };
     (status, value)
+}
+
+#[tokio::test]
+async fn route_preview_returns_admin_port_projection() {
+    let mut state = test_state();
+    state.lifecycle = Some(AdminPorts {
+        route_preview: Some(Arc::new(PreviewPort)),
+        ..AdminPorts::default()
+    });
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/v1/router/preview")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"principal_id":"preview-principal"}"#))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body collects")
+        .to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("response is json");
+
+    assert_eq!(body["trace"]["stages"], serde_json::json!([]));
+    assert_eq!(
+        body["winner"]["upstream_id"],
+        Uuid::from_u128(7).to_string()
+    );
+    assert_eq!(body["winner"]["name"], "preview-upstream");
 }
 
 #[tokio::test]

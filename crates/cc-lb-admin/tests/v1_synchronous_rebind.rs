@@ -10,10 +10,10 @@ use cc_lb_admin::{AdminState, CurrentConfig, DynamicViewRebinder, router};
 use cc_lb_config::Config;
 use cc_lb_control::api_keys::principal_view::PrincipalView;
 use cc_lb_control::{
-    ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamStatusEntry, UpstreamStatusSnapshot,
+    ApplyStatus, DynamicView, DynamicViewBuilder, RouteDecision, RouteError, RouterPlugin,
+    RoutingContext, UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
 use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
-use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
@@ -112,7 +112,7 @@ struct NoopRouter;
 impl RouterPlugin for NoopRouter {
     fn route(
         &self,
-        _ctx: &cc_lb_routing::RoutingContext,
+        _ctx: &RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
