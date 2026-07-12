@@ -4,10 +4,12 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     StorageError, StorageResult, SubscriptionQuotaBucket, SubscriptionQuotaCheckpointRange,
     SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaLatestRecord, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
-    SubscriptionQuotaSemanticFingerprint, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
+    SubscriptionQuotaLatestRecord, SubscriptionQuotaProviderLot, SubscriptionQuotaProviderLotQuery,
+    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSemanticFingerprint,
+    SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery, SubscriptionQuotaSlimCheckpoint,
     SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
-    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
+    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
+    UpstreamSubscriptionQuotaStore,
 };
 use sqlx::{AssertSqlSafe, Row, sqlite::SqliteRow};
 use uuid::Uuid;
@@ -94,6 +96,40 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
         query: SubscriptionQuotaCheckpointRangeQuery,
     ) -> StorageResult<Vec<SubscriptionQuotaCheckpointRange>> {
         list_checkpoint_ranges_for_query(self, &query).await
+    }
+}
+
+#[async_trait]
+impl UpstreamSubscriptionQuotaAggregateStore for SqliteStorage {
+    async fn list_subscription_quota_slim_checkpoints(
+        &self,
+        query: SubscriptionQuotaCheckpointRangeQuery,
+    ) -> StorageResult<Vec<SubscriptionQuotaSlimCheckpoint>> {
+        list_slim_checkpoints_for_query(self, &query).await
+    }
+
+    async fn list_subscription_quota_provider_lots(
+        &self,
+        query: SubscriptionQuotaProviderLotQuery,
+    ) -> StorageResult<Vec<SubscriptionQuotaProviderLot>> {
+        let sources = query
+            .sources
+            .iter()
+            .copied()
+            .filter(|source| source_matches_merge(*source, query.source_merge))
+            .collect::<Vec<_>>();
+        let checkpoints = list_slim_checkpoints_for_query(
+            self,
+            &SubscriptionQuotaCheckpointRangeQuery {
+                upstream_ids: query.upstream_ids.clone(),
+                windows: query.windows.clone(),
+                sources,
+                since_unix_millis: query.since_unix_millis,
+                until_unix_millis: query.until_unix_millis,
+            },
+        )
+        .await?;
+        Ok(provider_lots_from_slim_checkpoints(checkpoints, &query))
     }
 }
 
@@ -260,6 +296,69 @@ async fn list_checkpoint_ranges_for_query(
             .push(checkpoint);
     }
     Ok(ranges.into_values().collect())
+}
+
+async fn list_slim_checkpoints_for_query(
+    storage: &SqliteStorage,
+    query: &SubscriptionQuotaCheckpointRangeQuery,
+) -> StorageResult<Vec<SubscriptionQuotaSlimCheckpoint>> {
+    if query.upstream_ids.is_empty() || query.windows.is_empty() || query.sources.is_empty() {
+        return Ok(Vec::new());
+    }
+    let windows = query.windows.iter().copied().collect::<BTreeSet<_>>();
+    let sources = query.sources.iter().copied().collect::<BTreeSet<_>>();
+    let upstream_placeholders = placeholders(query.upstream_ids.len());
+    let window_placeholders = placeholders(windows.len());
+    let source_placeholders = placeholders(sources.len());
+    let projection = "checkpoint.upstream_id, checkpoint.window, checkpoint.source, \
+                      checkpoint.changed_at_unix_millis, checkpoint.sample_id, \
+                      checkpoint.utilization, checkpoint.status, checkpoint.resets_at_unix_secs";
+    let sql = format!(
+        "SELECT {projection} FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
+         WHERE checkpoint.upstream_id IN ({upstream_placeholders}) \
+         AND checkpoint.window IN ({window_placeholders}) \
+         AND checkpoint.source IN ({source_placeholders}) \
+         AND checkpoint.changed_at_unix_millis < ? \
+         AND NOT EXISTS ( \
+             SELECT 1 FROM upstream_subscription_quota_checkpoints_v1 newer \
+             WHERE newer.upstream_id = checkpoint.upstream_id \
+             AND newer.window = checkpoint.window \
+             AND newer.source = checkpoint.source \
+             AND newer.changed_at_unix_millis < ? \
+             AND (newer.changed_at_unix_millis > checkpoint.changed_at_unix_millis \
+                  OR (newer.changed_at_unix_millis = checkpoint.changed_at_unix_millis \
+                      AND newer.sample_id > checkpoint.sample_id)) \
+         ) \
+         UNION ALL \
+         SELECT {projection} FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
+         WHERE checkpoint.upstream_id IN ({upstream_placeholders}) \
+         AND checkpoint.window IN ({window_placeholders}) \
+         AND checkpoint.source IN ({source_placeholders}) \
+         AND checkpoint.changed_at_unix_millis >= ? \
+         AND checkpoint.changed_at_unix_millis <= ? \
+         ORDER BY upstream_id ASC, window ASC, source ASC, \
+                  changed_at_unix_millis ASC, sample_id ASC"
+    );
+    let since = u64_to_i64(
+        query.since_unix_millis,
+        "subscription quota checkpoint since_unix_millis",
+    )?;
+    let until = u64_to_i64(
+        query.until_unix_millis,
+        "subscription quota checkpoint until_unix_millis",
+    )?;
+    let mut q = sqlx::query(AssertSqlSafe(sql));
+    q = bind_checkpoint_filters(q, query, &windows, &sources)
+        .bind(since)
+        .bind(since);
+    q = bind_checkpoint_filters(q, query, &windows, &sources)
+        .bind(since)
+        .bind(until);
+
+    let mut tx = storage.pool().begin().await.map_err(map_sqlx_error)?;
+    let rows = q.fetch_all(&mut *tx).await.map_err(map_sqlx_error)?;
+    tx.commit().await.map_err(map_sqlx_error)?;
+    rows.into_iter().map(row_to_slim_checkpoint).collect()
 }
 
 async fn list_checkpoint_anchors(
@@ -594,6 +693,40 @@ pub(super) fn row_to_checkpoint_record(
     })
 }
 
+fn row_to_slim_checkpoint(row: SqliteRow) -> StorageResult<SubscriptionQuotaSlimCheckpoint> {
+    let upstream_id = row
+        .try_get::<String, _>("upstream_id")
+        .map_err(map_sqlx_error)?;
+    let sample_id = row
+        .try_get::<String, _>("sample_id")
+        .map_err(map_sqlx_error)?;
+    let status = row
+        .try_get::<Option<String>, _>("status")
+        .map_err(map_sqlx_error)?
+        .as_deref()
+        .map(parse_status)
+        .transpose()?;
+
+    Ok(SubscriptionQuotaSlimCheckpoint {
+        upstream_id: parse_uuid(&upstream_id, "subscription quota checkpoint upstream_id")?,
+        window: parse_window(&row.try_get::<String, _>("window").map_err(map_sqlx_error)?)?,
+        source: parse_source(&row.try_get::<String, _>("source").map_err(map_sqlx_error)?)?,
+        changed_at_unix_millis: i64_to_u64(
+            row.try_get("changed_at_unix_millis")
+                .map_err(map_sqlx_error)?,
+            "subscription quota checkpoint changed_at_unix_millis",
+        )?,
+        sample_id: parse_uuid(&sample_id, "subscription quota checkpoint sample_id")?,
+        utilization: row.try_get("utilization").map_err(map_sqlx_error)?,
+        status,
+        resets_at_unix_secs: row
+            .try_get::<Option<i64>, _>("resets_at_unix_secs")
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, "subscription quota resets_at_unix_secs"))
+            .transpose()?,
+    })
+}
+
 fn fingerprint_from_vec(bytes: Vec<u8>) -> StorageResult<SubscriptionQuotaSemanticFingerprint> {
     let len = bytes.len();
     let array = <[u8; 32]>::try_from(bytes).map_err(|_| StorageError::Corrupted {
@@ -705,6 +838,207 @@ fn stream_from_range(range: SubscriptionQuotaCheckpointRange) -> CheckpointStrea
         checkpoints,
         index: 0,
         current: None,
+    }
+}
+
+const PROVIDER_LOT_BUCKET_SECS: u64 = 60;
+const PROVIDER_LOT_RESET_DROP_THRESHOLD: f64 = 0.5;
+
+struct SlimCheckpointStream {
+    checkpoints: Vec<SubscriptionQuotaSlimCheckpoint>,
+    next_index: usize,
+    current_index: Option<usize>,
+}
+
+impl SlimCheckpointStream {
+    fn advance_to_bucket(&mut self, bucket_start: u64) {
+        while self.next_index < self.checkpoints.len()
+            && bucket_start_unix_secs(
+                self.checkpoints[self.next_index].changed_at_unix_millis,
+                PROVIDER_LOT_BUCKET_SECS,
+            ) == bucket_start
+        {
+            self.current_index = Some(self.next_index);
+            self.next_index += 1;
+        }
+    }
+
+    fn current(&self) -> Option<&SubscriptionQuotaSlimCheckpoint> {
+        self.current_index.map(|index| &self.checkpoints[index])
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProviderLotObservation {
+    bucket_start_unix_secs: u64,
+    observed_at_unix_millis: u64,
+    utilization: f64,
+    resets_at_unix_secs: Option<u64>,
+}
+
+struct ProviderLotCycle {
+    first_observed_at_unix_millis: u64,
+    last: ProviderLotObservation,
+}
+
+fn provider_lots_from_slim_checkpoints(
+    checkpoints: Vec<SubscriptionQuotaSlimCheckpoint>,
+    query: &SubscriptionQuotaProviderLotQuery,
+) -> Vec<SubscriptionQuotaProviderLot> {
+    let mut groups = BTreeMap::<
+        (Uuid, SubscriptionQuotaWindow),
+        BTreeMap<SubscriptionQuotaSource, Vec<SubscriptionQuotaSlimCheckpoint>>,
+    >::new();
+    for checkpoint in checkpoints {
+        groups
+            .entry((checkpoint.upstream_id, checkpoint.window))
+            .or_default()
+            .entry(checkpoint.source)
+            .or_default()
+            .push(checkpoint);
+    }
+
+    let mut lots = Vec::new();
+    for ((upstream_id, window), source_checkpoints) in groups {
+        let Some(window_secs) = provider_lot_window_secs(window) else {
+            continue;
+        };
+        let mut streams = source_checkpoints
+            .into_values()
+            .map(|checkpoints| SlimCheckpointStream {
+                checkpoints,
+                next_index: 0,
+                current_index: None,
+            })
+            .collect::<Vec<_>>();
+        let Some(mut bucket_start) = streams
+            .iter()
+            .filter_map(|stream| stream.checkpoints.first())
+            .map(|checkpoint| {
+                bucket_start_unix_secs(checkpoint.changed_at_unix_millis, PROVIDER_LOT_BUCKET_SECS)
+            })
+            .min()
+        else {
+            continue;
+        };
+        let end_bucket = bucket_start_unix_secs(query.until_unix_millis, PROVIDER_LOT_BUCKET_SECS);
+        let mut cycle: Option<ProviderLotCycle> = None;
+        let mut previous: Option<ProviderLotObservation> = None;
+        while bucket_start <= end_bucket {
+            for stream in &mut streams {
+                stream.advance_to_bucket(bucket_start);
+            }
+            let latest = streams
+                .iter()
+                .filter_map(SlimCheckpointStream::current)
+                .max_by(|left, right| {
+                    (
+                        left.changed_at_unix_millis,
+                        left.source.as_str(),
+                        left.sample_id,
+                    )
+                        .cmp(&(
+                            right.changed_at_unix_millis,
+                            right.source.as_str(),
+                            right.sample_id,
+                        ))
+                });
+            if let Some(checkpoint) = latest
+                && let Some(utilization) = checkpoint.utilization
+            {
+                let observation = ProviderLotObservation {
+                    bucket_start_unix_secs: bucket_start,
+                    observed_at_unix_millis: checkpoint.changed_at_unix_millis,
+                    utilization,
+                    resets_at_unix_secs: checkpoint.resets_at_unix_secs,
+                };
+                if previous
+                    .is_some_and(|previous| provider_lot_starts_new_cycle(previous, observation))
+                    && let Some(completed) = cycle.take()
+                {
+                    lots.push(provider_lot_from_cycle(
+                        upstream_id,
+                        window,
+                        query.source_merge,
+                        window_secs,
+                        completed,
+                        previous.map_or(bucket_start, |value| value.bucket_start_unix_secs),
+                    ));
+                }
+                match &mut cycle {
+                    Some(cycle) => cycle.last = observation,
+                    None => {
+                        cycle = Some(ProviderLotCycle {
+                            first_observed_at_unix_millis: observation.observed_at_unix_millis,
+                            last: observation,
+                        });
+                    }
+                }
+                previous = Some(observation);
+            }
+            let Some(next_bucket) = bucket_start.checked_add(PROVIDER_LOT_BUCKET_SECS) else {
+                break;
+            };
+            bucket_start = next_bucket;
+        }
+        if let Some(completed) = cycle {
+            lots.push(provider_lot_from_cycle(
+                upstream_id,
+                window,
+                query.source_merge,
+                window_secs,
+                completed,
+                query.evaluation_unix_secs,
+            ));
+        }
+    }
+    lots
+}
+
+fn provider_lot_starts_new_cycle(
+    previous: ProviderLotObservation,
+    current: ProviderLotObservation,
+) -> bool {
+    let reset_changed = match (previous.resets_at_unix_secs, current.resets_at_unix_secs) {
+        (Some(left), Some(right)) => left.abs_diff(right) > PROVIDER_LOT_BUCKET_SECS,
+        (Some(_), None) | (None, Some(_)) => true,
+        (None, None) => false,
+    };
+    reset_changed || previous.utilization - current.utilization >= PROVIDER_LOT_RESET_DROP_THRESHOLD
+}
+
+fn provider_lot_from_cycle(
+    upstream_id: Uuid,
+    window: SubscriptionQuotaWindow,
+    source: SubscriptionQuotaSourceMerge,
+    window_secs: u64,
+    cycle: ProviderLotCycle,
+    evaluation_unix_secs: u64,
+) -> SubscriptionQuotaProviderLot {
+    SubscriptionQuotaProviderLot {
+        upstream_id,
+        window,
+        source,
+        provider_start_unix_secs: cycle
+            .last
+            .resets_at_unix_secs
+            .map(|reset| reset.saturating_sub(window_secs))
+            .or(Some(cycle.first_observed_at_unix_millis / 1_000)),
+        provider_reset_unix_secs: cycle.last.resets_at_unix_secs,
+        observed_at_unix_millis: cycle.last.observed_at_unix_millis,
+        evaluation_unix_secs,
+        utilization: cycle.last.utilization,
+    }
+}
+
+const fn provider_lot_window_secs(window: SubscriptionQuotaWindow) -> Option<u64> {
+    match window {
+        SubscriptionQuotaWindow::FiveHour => Some(5 * 3_600),
+        SubscriptionQuotaWindow::SevenDay
+        | SubscriptionQuotaWindow::SevenDaySonnet
+        | SubscriptionQuotaWindow::SevenDayOpus
+        | SubscriptionQuotaWindow::SevenDayFable => Some(7 * 24 * 3_600),
+        SubscriptionQuotaWindow::Overage | SubscriptionQuotaWindow::Unified => None,
     }
 }
 
@@ -858,12 +1192,19 @@ fn filtered_sources(query: &SubscriptionQuotaSeriesQuery) -> Vec<SubscriptionQuo
         .sources
         .iter()
         .copied()
-        .filter(|source| match query.source_merge {
-            SubscriptionQuotaSourceMerge::Merged => true,
-            SubscriptionQuotaSourceMerge::Header => *source == SubscriptionQuotaSource::Header,
-            SubscriptionQuotaSourceMerge::Api => *source == SubscriptionQuotaSource::Api,
-        })
+        .filter(|source| source_matches_merge(*source, query.source_merge))
         .collect()
+}
+
+fn source_matches_merge(
+    source: SubscriptionQuotaSource,
+    source_merge: SubscriptionQuotaSourceMerge,
+) -> bool {
+    match source_merge {
+        SubscriptionQuotaSourceMerge::Merged => true,
+        SubscriptionQuotaSourceMerge::Header => source == SubscriptionQuotaSource::Header,
+        SubscriptionQuotaSourceMerge::Api => source == SubscriptionQuotaSource::Api,
+    }
 }
 
 fn parse_window(value: &str) -> StorageResult<SubscriptionQuotaWindow> {
