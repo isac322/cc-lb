@@ -1,0 +1,70 @@
+# Prunes the garage sccache bucket to emulate sccache's local LRU + size cap.
+# S3 has no last-ACCESS time, so we approximate LRU with last-MODIFIED (write time):
+# when the bucket exceeds THRESHOLD, delete oldest-by-mtime objects until under TARGET.
+# For a compiler cache this tracks staleness well (old entries = old commits, no longer hit).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sccache-prune
+  namespace: arc-systems
+spec:
+  schedule: "0 */6 * * *"        # every 6h (no-op / cheap when under threshold)
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 900
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: prune
+              image: python:3.12-slim
+              env:
+                - name: SCCACHE_ENDPOINT
+                  value: http://garage.arc-systems.svc.cluster.local:3900
+                - name: SCCACHE_BUCKET
+                  value: sccache
+                - name: PRUNE_THRESHOLD_GIB
+                  value: "40"     # start pruning above this
+                - name: PRUNE_TARGET_GIB
+                  value: "30"     # prune down to this
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom: {secretKeyRef: {name: sccache-s3-creds, key: AWS_ACCESS_KEY_ID}}
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom: {secretKeyRef: {name: sccache-s3-creds, key: AWS_SECRET_ACCESS_KEY}}
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -e
+                  pip install --quiet --disable-pip-version-check --root-user-action=ignore boto3
+                  python3 - <<'PY'
+                  import boto3, os
+                  GIB = 1 << 30
+                  thr = int(os.environ["PRUNE_THRESHOLD_GIB"]) * GIB
+                  tgt = int(os.environ["PRUNE_TARGET_GIB"]) * GIB
+                  bkt = os.environ["SCCACHE_BUCKET"]
+                  s3 = boto3.client("s3", endpoint_url=os.environ["SCCACHE_ENDPOINT"],
+                                    region_name="garage")
+                  objs = []
+                  for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bkt):
+                      for o in page.get("Contents", []):
+                          objs.append((o["LastModified"], o["Size"], o["Key"]))
+                  total = sum(s for _, s, _ in objs)
+                  print(f"bucket={total/GIB:.2f} GiB, objects={len(objs)}, threshold={thr//GIB}G target={tgt//GIB}G")
+                  if total <= thr:
+                      print("under threshold - no prune"); raise SystemExit(0)
+                  objs.sort(key=lambda x: x[0])   # oldest last-modified first
+                  batch, freed, n = [], 0, 0
+                  for _, sz, key in objs:
+                      if total - freed <= tgt:
+                          break
+                      batch.append({"Key": key}); freed += sz; n += 1
+                      if len(batch) == 1000:
+                          s3.delete_objects(Bucket=bkt, Delete={"Objects": batch}); batch = []
+                  if batch:
+                      s3.delete_objects(Bucket=bkt, Delete={"Objects": batch})
+                  print(f"pruned {n} objects, freed {freed/GIB:.2f} GiB, now ~{(total-freed)/GIB:.2f} GiB")
+                  PY
