@@ -44,14 +44,14 @@ opentelemetry_sdk = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-sqlx = { version = "0.8.6", default-features = false, features = ["chrono", "json", "runtime-tokio", "tls-rustls-ring", "uuid"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["chrono", "json", "runtime-tokio", "tls-rustls-ring", "uuid"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tokio-util = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
-ulid = "1"
+ulid = "2"
 uuid = { workspace = true }
 
 [[test]]
@@ -71,7 +71,7 @@ cc-lb-server = { path = "../cc-lb-server", default-features = false }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
-cron = "0.16"
+cron = "0.17"
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
 http.workspace = true
 metrics-exporter-prometheus.workspace = true
