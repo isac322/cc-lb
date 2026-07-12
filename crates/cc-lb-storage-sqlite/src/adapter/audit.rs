@@ -10,54 +10,19 @@ const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
 #[async_trait]
 impl AuditStore for SqliteStorage {
     async fn append_audit(&self, entry: &AuditEntry) -> StorageResult<()> {
-        let payload = entry
-            .payload
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-
-        sqlx::query(
-            "INSERT INTO audit_log_v1 \
-             (ts, request_id, principal_id, route, upstream, model, status, input_tokens, \
-              output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, \
-              limit_violation, admin_action, actor, kind, payload) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(u64_to_i64(entry.ts, "audit ts")?)
-        .bind(&entry.request_id)
-        .bind(&entry.principal_id)
-        .bind(&entry.route)
-        .bind(&entry.upstream)
-        .bind(entry.model.as_deref())
-        .bind(i64::from(entry.status))
-        .bind(option_u64_to_i64(entry.input_tokens, "audit input_tokens")?)
-        .bind(option_u64_to_i64(
-            entry.output_tokens,
-            "audit output_tokens",
-        )?)
-        .bind(u64_to_i64(entry.duration_ms, "audit duration_ms")?)
-        .bind(entry.agent_label.as_deref())
-        .bind(entry.api_key_id.as_deref())
-        .bind(option_u64_to_i64(
-            entry.cost_usd_micros,
-            "audit cost_usd_micros",
-        )?)
-        .bind(entry.limit_violation.as_deref())
-        .bind(entry.admin_action.as_deref())
-        .bind(entry.actor.as_deref())
-        .bind(entry.kind.as_deref())
-        .bind(payload.as_deref())
-        .execute(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-
-        Ok(())
+        insert_audit_entry(self.pool(), entry).await
     }
 
     async fn append_audit_entries(&self, entries: &[AuditEntry]) -> StorageResult<()> {
-        for entry in entries {
-            self.append_audit(entry).await?;
+        if entries.is_empty() {
+            return Ok(());
         }
+
+        let mut tx = self.begin_immediate().await?;
+        for entry in entries {
+            insert_audit_entry(&mut *tx, entry).await?;
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())
     }
 
@@ -132,6 +97,48 @@ impl AuditStore for SqliteStorage {
 
         Ok(result.rows_affected())
     }
+}
+
+async fn insert_audit_entry<'e, E>(executor: E, entry: &AuditEntry) -> StorageResult<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let payload = entry
+        .payload
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+
+    sqlx::query(
+        "INSERT INTO audit_log_v1 \
+         (ts, request_id, principal_id, route, upstream, model, status, input_tokens, \
+          output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, \
+          limit_violation, admin_action, actor, kind, payload) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(u64_to_i64(entry.ts, "audit ts")?)
+    .bind(&entry.request_id)
+    .bind(&entry.principal_id)
+    .bind(&entry.route)
+    .bind(&entry.upstream)
+    .bind(entry.model.as_deref())
+    .bind(i64::from(entry.status))
+    .bind(option_u64_to_i64(entry.input_tokens, "audit input_tokens")?)
+    .bind(option_u64_to_i64(entry.output_tokens, "audit output_tokens")?)
+    .bind(u64_to_i64(entry.duration_ms, "audit duration_ms")?)
+    .bind(entry.agent_label.as_deref())
+    .bind(entry.api_key_id.as_deref())
+    .bind(option_u64_to_i64(entry.cost_usd_micros, "audit cost_usd_micros")?)
+    .bind(entry.limit_violation.as_deref())
+    .bind(entry.admin_action.as_deref())
+    .bind(entry.actor.as_deref())
+    .bind(entry.kind.as_deref())
+    .bind(payload.as_deref())
+    .execute(executor)
+    .await
+    .map_err(map_sqlx_error)?;
+
+    Ok(())
 }
 
 fn row_to_audit_entry(row: SqliteRow) -> StorageResult<AuditEntry> {
