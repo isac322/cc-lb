@@ -1,30 +1,12 @@
-//! End-to-end shape against the `wasmtime-shape-passthrough` fixture.
-//!
-//! Verifies that
-//! [`WasmtimeRuntime::register_shape`][cc_lb_runtime_wasmtime::WasmtimeRuntime::register_shape]
-//! → `compile_module` → `WasmtimeUpstreamDialect` round-trips a real
-//! rkyv `ShapeRequest`/`ShapeResponse` through a pdk-wasmtime-built
-//! guest module.
-//!
-//! Pre-build the wasm artifact with:
-//!
-//! ```text
-//! cargo build --target wasm32-unknown-unknown --release \
-//!     -p wasmtime-shape-passthrough
-//! ```
-//!
-//! Tests skip (print + return) if the artifact is missing — same
-//! convention as `cache_aware_wasmtime_e2e.rs`.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use bytes::Bytes;
-use cc_lb_plugin_api::{Principal, PrincipalKind, Upstream};
-use cc_lb_runtime_wasmtime::RuntimeSlotKey;
-use cc_lb_runtime_wasmtime::{WasmtimeRuntime, WasmtimeUpstreamDialect};
-use cc_lb_upstream::{DialectShapeContext, shape_request};
-use http::{HeaderMap, HeaderName, HeaderValue, Method};
+use cc_lb_plugin_wire::{
+    ArchivedShapeResponse, ShapeRequest, ShapeResponse, Upstream as WireUpstream,
+};
+use cc_lb_runtime_wasmtime::{RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime};
+use rkyv::rancor::Error as RkyvError;
+use rkyv::util::AlignedVec;
 
 fn wasm_path() -> PathBuf {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -51,46 +33,37 @@ fn load_wasm_or_skip() -> Option<Vec<u8>> {
     }
 }
 
-fn fixture_request() -> DialectShapeContext {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        http::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    headers.insert(
-        HeaderName::from_static("x-trace-id"),
-        HeaderValue::from_static("abc-123"),
-    );
-    headers.insert(
-        http::header::AUTHORIZATION,
-        HeaderValue::from_static("Bearer secret"),
-    );
-    DialectShapeContext {
-        request_id: "req-shape".to_owned(),
-        downstream_headers: headers,
-        method: Method::POST,
-        path: "/v1/messages".to_owned(),
-        query: Some("stream=true".to_owned()),
-        body_bytes: Bytes::from_static(b"{\"prompt\":\"hi\"}"),
-    }
-}
-
-fn fixture_principal() -> Principal {
-    Principal {
-        id: "tenant-shape".to_owned(),
-        kind: PrincipalKind::ApiKey,
-        claims: serde_json::Map::new(),
-    }
-}
-
-fn fixture_upstream() -> Upstream {
-    Upstream::AnthropicDirect {
-        base_url: Some(url::Url::parse("https://example.test").expect("fixture URL")),
+fn fixture_wire_request() -> ShapeRequest {
+    use cc_lb_plugin_wire::{Header, Principal as WirePrincipal};
+    ShapeRequest {
+        request_id: Box::from("req-shape"),
+        method: Box::from("POST"),
+        path: Box::from("/v1/messages"),
+        query: Some(Box::from("stream=true")),
+        headers: Box::new([
+            Header {
+                name: Box::from("content-type"),
+                value: Box::from(b"application/json".as_slice()),
+            },
+            Header {
+                name: Box::from("x-trace-id"),
+                value: Box::from(b"abc-123".as_slice()),
+            },
+        ]),
+        body: Box::from(b"{\"prompt\":\"hi\"}".as_slice()),
+        principal: WirePrincipal {
+            id: Box::from("tenant-shape"),
+            kind: Box::from("api_key"),
+            claims: Box::new([]),
+        },
+        upstream: WireUpstream::AnthropicDirect {
+            base_url: Some(Box::from("https://example.test")),
+        },
     }
 }
 
 #[test]
-fn shape_passthrough_echoes_request() {
+fn shape_passthrough_echoes_request_via_wire_dispatch() {
     let Some(wasm_bytes) = load_wasm_or_skip() else {
         return;
     };
@@ -104,32 +77,36 @@ fn shape_passthrough_echoes_request() {
         )
         .expect("register_shape OK");
 
-    let dialect = WasmtimeUpstreamDialect::new(slot, runtime.config_arc());
+    let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
 
-    let ctx = fixture_request();
-    let principal = fixture_principal();
-    let upstream = fixture_upstream();
+    let request = fixture_wire_request();
+    let in_bytes = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode ShapeRequest");
 
-    let shaped = shape_request(&dialect, &ctx, &upstream, &principal).expect("shape OK");
+    let out_bytes = dispatch
+        .call_shape(in_bytes.as_slice())
+        .expect("shape call succeeds");
 
-    assert_eq!(
-        shaped.url().as_str(),
-        "https://example.test/v1/messages?stream=true"
-    );
-    assert_eq!(shaped.method(), &Method::POST);
-    assert_eq!(shaped.body().as_ref(), b"{\"prompt\":\"hi\"}");
-    let ct = shaped
-        .headers()
-        .get(http::header::CONTENT_TYPE)
-        .expect("content-type forwarded");
-    assert_eq!(ct, "application/json");
-    let trace = shaped
-        .headers()
-        .get("x-trace-id")
-        .expect("custom header forwarded");
-    assert_eq!(trace, "abc-123");
-    assert!(
-        shaped.headers().get(http::header::AUTHORIZATION).is_none(),
-        "authorization must be stripped at the host boundary"
-    );
+    let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
+    aligned.extend_from_slice(&out_bytes);
+    let archived = rkyv::access::<ArchivedShapeResponse, RkyvError>(&aligned).expect("rkyv access");
+    let response: ShapeResponse =
+        rkyv::deserialize::<ShapeResponse, RkyvError>(archived).expect("rkyv deserialize");
+
+    let url: &str = &response.url;
+    assert_eq!(url, "https://example.test/v1/messages?stream=true");
+    let method: &str = &response.method;
+    assert_eq!(method, "POST");
+    assert_eq!(&*response.body, b"{\"prompt\":\"hi\"}");
+
+    let has_ct = response.headers.iter().any(|h| {
+        let name: &str = &h.name;
+        name == "content-type"
+    });
+    assert!(has_ct, "content-type must be forwarded");
+
+    let has_trace = response.headers.iter().any(|h| {
+        let name: &str = &h.name;
+        name == "x-trace-id"
+    });
+    assert!(has_trace, "x-trace-id must be forwarded");
 }

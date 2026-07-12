@@ -28,8 +28,10 @@ use cc_lb_engine::{
     UpstreamStatusSnapshot,
 };
 use cc_lb_plugin_api::{FilterPlugin, PluginManifest, RouteDecision, RouteError, RouterPlugin};
-use cc_lb_runtime_wasmtime::{
-    WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeRuntime, WasmtimeUpstreamDialect,
+use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntime};
+
+use crate::wasm_host::{
+    WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeUpstreamDialect,
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
@@ -702,9 +704,12 @@ async fn build_principal_chains(
             registered_slot_keys.insert(slot_key.clone());
             match register_observe_slot(runtime, &slot_key, &manifest).await {
                 Ok(slot) => {
-                    let handle: Arc<dyn cc_lb_observability::ObservabilityHook> = Arc::new(
-                        WasmtimeObservabilityHookPlugin::new(slot, runtime.config_arc()),
-                    );
+                    let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
+                        slot,
+                        runtime.config_arc(),
+                    ));
+                    let handle: Arc<dyn cc_lb_observability::ObservabilityHook> =
+                        Arc::new(WasmtimeObservabilityHookPlugin::new(dispatch));
                     hooks.push(handle);
                 }
                 Err(error) => {
@@ -757,9 +762,12 @@ async fn build_principal_chains(
                 registered_slot_keys.insert(slot_key.clone());
                 match register_shape_slot(runtime, &slot_key, &manifest).await {
                     Ok(slot) => {
-                        let handle: Arc<dyn cc_lb_upstream::UpstreamDialect> = Arc::new(
-                            WasmtimeUpstreamDialect::new(slot.clone(), runtime.config_arc()),
-                        );
+                        let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
+                            slot,
+                            runtime.config_arc(),
+                        ));
+                        let handle: Arc<dyn cc_lb_upstream::UpstreamDialect> =
+                            Arc::new(WasmtimeUpstreamDialect::new(dispatch));
                         DialectCache::Explicit(ShapePluginCache { dialect: handle })
                     }
                     Err(error) => {
@@ -924,12 +932,14 @@ async fn build_router_pipeline(
         registered_slot_keys.insert(slot_key.clone());
         match register_filter_slot(runtime, &slot_key, &manifest).await {
             Ok(slot) => {
-                let handle: Arc<dyn FilterPlugin> = Arc::new(WasmtimeFilterPlugin::new(
+                let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
                     slot,
-                    slot_key,
+                    runtime.config_arc(),
+                ));
+                let handle: Arc<dyn FilterPlugin> = Arc::new(WasmtimeFilterPlugin::new(
+                    dispatch,
                     entry.id,
                     manifest.name.clone(),
-                    runtime.config_arc(),
                 ));
                 filters.push(handle);
             }

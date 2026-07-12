@@ -6,8 +6,10 @@ use cc_lb_aead::AeadService;
 use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_plugin_api::PluginManifest;
 use cc_lb_runtime_wasmtime::{
-    RuntimeSlotKey, WasmtimeRuntime, WasmtimeRuntimeError, WasmtimeUpstreamDialect,
+    RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime, WasmtimeRuntimeError,
 };
+
+use crate::wasm_host::WasmtimeUpstreamDialect;
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh, LazyRefreshHandle,
 };
@@ -130,10 +132,11 @@ pub async fn dispatch_warmup_with_dialect(
         manifest.name.clone(),
         &wasm_bytes,
     )?;
-    let dialect: Arc<dyn UpstreamDialect> = Arc::new(WasmtimeUpstreamDialect::new(
+    let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
         slot,
         params.runtime.config_arc(),
     ));
+    let dialect: Arc<dyn UpstreamDialect> = Arc::new(WasmtimeUpstreamDialect::new(dispatch));
 
     let body_json = json!({
         "model": WARMUP_MODEL,

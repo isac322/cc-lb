@@ -37,6 +37,7 @@ pub mod tls;
 pub mod validate;
 pub mod version;
 pub mod warmup;
+pub mod wasm_host;
 
 pub use app::{App, BuildError, build_app, build_app_with_path, run_serve};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]

@@ -17,13 +17,12 @@ mod error;
 mod inspect;
 mod metrics;
 mod module;
-mod plugin;
 pub mod policy;
 mod probe;
-mod response_transform;
 mod slot;
 #[cfg(test)]
 mod tests;
+mod wire_dispatch;
 
 pub use cache::{DEFAULT_ALIGN, call_filter_hook, call_observe_hook, call_shape_hook};
 pub use cc_lb_plugin_wire::schema::HookKind;
@@ -33,8 +32,8 @@ pub use engine::{HostState, HotEngineAllocationStrategy, HotEngineConfig, build_
 pub use error::WasmtimeRuntimeError;
 pub use inspect::{ModuleInspection, inspect_wasm};
 pub use module::{admit_wasm, compile_module};
-pub use plugin::{WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeUpstreamDialect};
 pub use slot::RuntimeSlotKey;
+pub use wire_dispatch::WasmPluginWireDispatch;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

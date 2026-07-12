@@ -1,28 +1,9 @@
-//! End-to-end observe hook against the `wasmtime-observe-noop`
-//! fixture.
-//!
-//! Verifies that
-//! [`WasmtimeRuntime::register_observe`][cc_lb_runtime_wasmtime::WasmtimeRuntime::register_observe]
-//! → `compile_module` → `WasmtimeObservabilityHookPlugin` accepts a
-//! stream of `ObserveEvent`s and returns `Ok(())` for each — covering
-//! the best-effort + bounded retention contract the dispatch helper
-//! enforces (output buffer skip when guest returns `(0, 0)`).
-//!
-//! Pre-build the wasm artifact with:
-//!
-//! ```text
-//! cargo build --target wasm32-unknown-unknown --release \
-//!     -p wasmtime-observe-noop
-//! ```
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cc_lb_domain::{PrincipalKind, Upstream};
-use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent};
-use cc_lb_runtime_wasmtime::RuntimeSlotKey;
-use cc_lb_runtime_wasmtime::{WasmtimeObservabilityHookPlugin, WasmtimeRuntime};
-use http::StatusCode;
+use cc_lb_plugin_wire::ObserveEvent as WireObserveEvent;
+use cc_lb_runtime_wasmtime::{RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime};
+use rkyv::rancor::Error as RkyvError;
 
 fn wasm_path() -> PathBuf {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -49,7 +30,7 @@ fn load_wasm_or_skip() -> Option<Vec<u8>> {
     }
 }
 
-fn setup() -> Option<WasmtimeObservabilityHookPlugin> {
+fn setup() -> Option<WasmPluginWireDispatch> {
     let wasm_bytes = load_wasm_or_skip()?;
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let slot = runtime
@@ -59,61 +40,67 @@ fn setup() -> Option<WasmtimeObservabilityHookPlugin> {
             &wasm_bytes,
         )
         .expect("register_observe OK");
-    Some(WasmtimeObservabilityHookPlugin::new(
+    Some(WasmPluginWireDispatch::from_slot(
         slot,
         runtime.config_arc(),
     ))
 }
 
+fn encode_event(event: WireObserveEvent) -> Vec<u8> {
+    rkyv::to_bytes::<RkyvError>(&event)
+        .expect("rkyv encode ObserveEvent")
+        .to_vec()
+}
+
 #[test]
 fn observe_accepts_single_event_best_effort() {
-    let Some(hook) = setup() else { return };
+    let Some(dispatch) = setup() else { return };
 
-    hook.observe(ObserveEvent::RequestStarted {
-        request_id: "req-1".to_owned(),
-        downstream_user_agent: Some("anthropic-cli/0.1".to_owned()),
-    })
-    .expect("first observe OK");
+    dispatch
+        .call_observe(&encode_event(WireObserveEvent::RequestStarted {
+            request_id: Box::from("req-1"),
+            downstream_user_agent: Some(Box::from("anthropic-cli/0.1")),
+        }))
+        .expect("first observe OK");
 
-    hook.observe(ObserveEvent::AuthnComplete {
-        principal_id: "tenant-A".to_owned(),
-        kind: PrincipalKind::ApiKey,
-    })
-    .expect("authn observe OK");
+    dispatch
+        .call_observe(&encode_event(WireObserveEvent::AuthnComplete {
+            principal_id: Box::from("tenant-A"),
+            principal_kind: Box::from("api_key"),
+        }))
+        .expect("authn observe OK");
 
-    hook.observe(ObserveEvent::RequestFinished {
-        status: StatusCode::OK,
-        input_tokens: Some(120),
-        output_tokens: Some(42),
-        cache_creation_input_tokens: Some(0),
-        cache_read_input_tokens: Some(100),
-        duration_ms: 350,
-    })
-    .expect("finished observe OK");
+    dispatch
+        .call_observe(&encode_event(WireObserveEvent::RequestFinished {
+            status: 200,
+            input_tokens: Some(120),
+            output_tokens: Some(42),
+            cache_creation_input_tokens: Some(0),
+            cache_read_input_tokens: Some(100),
+            duration_ms: 350,
+        }))
+        .expect("finished observe OK");
 }
 
 #[test]
 fn observe_drains_bounded_burst_without_error() {
-    // Hammer the hook with a contiguous stream to exercise the
-    // per-call fresh-Store instantiation `call_observe_hook` runs
-    // under. If a per-call Store leaked memory or trapped mid-burst,
-    // the next iteration would surface as ObservabilityError::Dropped
-    // on this test thread.
-    let Some(hook) = setup() else { return };
+    let Some(dispatch) = setup() else { return };
 
-    let upstream = Upstream::AnthropicDirect { base_url: None };
+    let upstream_wire = cc_lb_plugin_wire::Upstream::AnthropicDirect { base_url: None };
     for batch in 0..256u64 {
-        hook.observe(ObserveEvent::Chunk {
-            batch_index: batch,
-            event_count: batch as usize % 7,
-            total_bytes: (batch as usize) * 64,
-        })
-        .expect("chunk observe OK");
+        dispatch
+            .call_observe(&encode_event(WireObserveEvent::Chunk {
+                batch_index: batch,
+                event_count: batch % 7,
+                total_bytes: batch * 64,
+            }))
+            .expect("chunk observe OK");
         if batch % 32 == 0 {
-            hook.observe(ObserveEvent::UpstreamChosen {
-                upstream: upstream.clone(),
-            })
-            .expect("upstream observe OK");
+            dispatch
+                .call_observe(&encode_event(WireObserveEvent::UpstreamChosen {
+                    upstream: upstream_wire.clone(),
+                }))
+                .expect("upstream observe OK");
         }
     }
 }

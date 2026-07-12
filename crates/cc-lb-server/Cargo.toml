@@ -61,6 +61,7 @@ cc-lb-dialect-anthropic = { path = "../cc-lb-dialect-anthropic" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+cc-lb-plugin-wire = { workspace = true, features = ["std"] }
 cc-lb-routing.workspace = true
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-runtime-wasmtime = { workspace = true }
@@ -85,6 +86,7 @@ oauth2.workspace = true
 parking_lot = "0.12"
 nix = { version = "0.31.3", features = ["resource"] }
 rand = { version = "0.10", features = ["std", "std_rng"] }
+rkyv = { workspace = true, features = ["std", "bytecheck"] }
 reqwest.workspace = true
 rustls = { workspace = true, default-features = false, features = ["std", "ring", "tls12"] }
 rustls-pemfile = "2"

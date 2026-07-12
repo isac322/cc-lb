@@ -1,7 +1,13 @@
 //! Runtime-owned identity keys for loaded plugin slots.
 
-use cc_lb_domain::GLOBAL_PRINCIPAL;
 use serde::{Deserialize, Serialize};
+
+/// Sentinel principal id used for proxy-wide global plugin slots.
+///
+/// Kept as a runtime-local copy that must stay byte-identical to
+/// `cc_lb_domain::GLOBAL_PRINCIPAL`, so this published crate does not take a
+/// normal dependency on the unpublished `cc-lb-domain` crate.
+pub const GLOBAL_PRINCIPAL: &str = "__global__";
 
 /// Composite key identifying a loaded plugin slot per principal × plugin name.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
