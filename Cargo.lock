@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-plugin-conformance"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "blake3",
  "cc-lb-plugin-api",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-plugin-wire"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "blake3",
  "rkyv",
@@ -1073,7 +1073,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-runtime-wasmtime"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "arc-swap",
