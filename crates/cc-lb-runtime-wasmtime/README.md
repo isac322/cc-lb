@@ -2,9 +2,10 @@
 
 Wasmtime-based plugin runtime for [cc-lb](https://github.com/isac322/cc-lb).
 
-Host-side crate that admits and dispatches wasm plugins built against
-[`cc-lb-plugin-wire`](https://crates.io/crates/cc-lb-plugin-wire) via the
-[`cc-lb-pdk-wasmtime`](https://crates.io/crates/cc-lb-pdk-wasmtime) macro suite.
+Wire-only Wasmtime runtime that admits and dispatches wasm plugin bytes using
+[`cc-lb-plugin-wire`](https://crates.io/crates/cc-lb-plugin-wire). Among plugin
+crates, it depends only on the wire contract; guest plugins use
+[`cc-lb-pdk-wasmtime`](https://crates.io/crates/cc-lb-pdk-wasmtime).
 
 ## Contents
 
@@ -12,13 +13,14 @@ Host-side crate that admits and dispatches wasm plugins built against
   metadata + fingerprint check) followed by canonical sample payload probe per
   declared hook.
 - `inspect_wasm(kind, wasm_bytes)` — structural-only load-time verification.
-- `WasmtimeFilterPlugin` / `WasmtimeUpstreamDialect` / `WasmtimeObservabilityHookPlugin`
-  — per-hook runtime adapters implementing the trait boundaries in
-  [`cc-lb-plugin-api`](https://crates.io/crates/cc-lb-plugin-api).
+- Wire-level dispatch primitives consumed by host adapters. The
+  `WasmtimeFilterPlugin`, `WasmtimeUpstreamDialect`, and
+  `WasmtimeObservabilityHookPlugin` adapters live in
+  `cc-lb-server/src/wasm_host/`.
 
 Plugin authors should not depend on this crate directly. It is exposed for the
 [`cc-lb-plugin-conformance`](https://crates.io/crates/cc-lb-plugin-conformance)
-harness and for hosts embedding the cc-lb plugin runtime out-of-tree.
+harness and for hosts embedding wire-level cc-lb plugin dispatch out-of-tree.
 
 ## License
 

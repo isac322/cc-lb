@@ -1,0 +1,26 @@
+T18 — Correct crate inventory and published-count drift
+
+Documentation files changed:
+- README.md
+- plugins/README.md
+- crates/cc-lb-runtime-wasmtime/README.md
+- crates/cc-lb-plugin-wire/README.md
+- docs/rfc/0001-plugin-runtime-vnext.md
+- docs/rfc/0002-event-driven-lifecycle.md
+- docs/rfc/0003-cache-weighted-subscription-preference.md
+
+Acceptance stale-reference grep (docs/adr excluded):
+$ rg -n 'cc-lb-plugin-api|cc_lb_plugin_api|cc-lb-contract|cc_lb_contract' README.md plugins/README.md docs/rfc/ $(git ls-files 'crates/**/README.md')
+0 matches
+
+Published-count drift grep:
+$ rg -n '6 published|5 vs 6' README.md plugins/README.md $(git ls-files 'crates/**/README.md')
+0 matches
+
+Verified current documentation states exactly 5 published crates, the six unpublished domain crates, the wire-only runtime boundary, and the moved host adapters in cc-lb-server/src/wasm_host/.
+docs/adr was not edited.
+
+Verification:
+- cargo fmt --all -- --check: exit 0
+- cargo check --workspace --all-targets: exit 0
+- Markdown LSP error diagnostics for every changed documentation file: 0 errors
