@@ -109,22 +109,35 @@ impl PromptCacheObservationStore for PostgresStorage {
         let cutoff = u64_to_i64(ts_unix_secs, "prompt cache purge cutoff unix secs")?;
         let mut total_removed = 0u64;
         for _ in 0..PURGE_MAX_BATCHES {
-            let removed = sqlx::query(
-                "DELETE FROM prompt_cache_observations \
-                 WHERE expires_at < $1 \
-                   AND ctid IN ( \
-                       SELECT ctid FROM prompt_cache_observations \
-                       WHERE expires_at < $1 LIMIT $2 \
-                   )",
+            // Break on how many expired rows were found, not how many were
+            // removed. A concurrent upsert can bump expires_at on a selected
+            // ctid so the outer predicate skips it; keying the break on the
+            // removed count could stop while other expired rows still remain.
+            let row = sqlx::query(
+                "WITH candidates AS MATERIALIZED ( \
+                     SELECT ctid FROM prompt_cache_observations \
+                     WHERE expires_at < $1 LIMIT $2 \
+                 ), deleted AS ( \
+                     DELETE FROM prompt_cache_observations \
+                     WHERE ctid IN (SELECT ctid FROM candidates) AND expires_at < $1 \
+                     RETURNING 1 \
+                 ) \
+                 SELECT \
+                     (SELECT count(*) FROM candidates) AS candidate_count, \
+                     (SELECT count(*) FROM deleted) AS deleted_count",
             )
             .bind(cutoff)
             .bind(PURGE_BATCH_SIZE)
-            .execute(&self.pool)
+            .fetch_one(&self.pool)
             .await
-            .map_err(map_sqlx_error)?
-            .rows_affected();
-            total_removed = total_removed.saturating_add(removed);
-            if removed < PURGE_BATCH_SIZE as u64 {
+            .map_err(map_sqlx_error)?;
+            let candidate_count: i64 = row.try_get("candidate_count").map_err(map_sqlx_error)?;
+            let deleted_count: i64 = row.try_get("deleted_count").map_err(map_sqlx_error)?;
+            total_removed = total_removed.saturating_add(i64_to_u64(
+                deleted_count,
+                "prompt cache purge deleted count",
+            )?);
+            if candidate_count < PURGE_BATCH_SIZE {
                 break;
             }
         }
