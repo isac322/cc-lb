@@ -717,14 +717,15 @@ function DetailView({
       ? isolatedWindow
       : null;
 
-  const xDomain = useMemo<[number, number]>(() => {
-    const rows = chartData.rows;
-    const first = rows[0]?.unix;
-    const last = rows[rows.length - 1]?.unix;
-    if (first == null || last == null) return [sinceUnixSecs, nowUnixSecs];
-    if (first === last) return [first - 1, last + 1];
-    return [first, last];
-  }, [chartData.rows, sinceUnixSecs, nowUnixSecs]);
+  const chartRows = useMemo(
+    () => chartData.rows.filter((row) => row.unix >= sinceUnixSecs),
+    [chartData.rows, sinceUnixSecs],
+  );
+
+  const xDomain = useMemo<[number, number]>(
+    () => [sinceUnixSecs, nowUnixSecs],
+    [sinceUnixSecs, nowUnixSecs],
+  );
 
   const recent = useRecentEvents({
     upstream_id: upstream.id,
@@ -1091,12 +1092,12 @@ function DetailView({
                     <div className="h-full flex items-center justify-center text-text-faint text-sm">
                       Loading…
                     </div>
-                  ) : !chartData.rows.length || !visibleGraphWindows.length ? (
+                  ) : !chartRows.length || !visibleGraphWindows.length ? (
                     <EmptyState title="No data in range" />
                   ) : (
                     <ResponsiveContainer width="100%" height={300}>
                       <AreaChart
-                        data={chartData.rows}
+                        data={chartRows}
                         margin={{ top: 20, right: 8, bottom: 0, left: 0 }}
                       >
                         <defs>
