@@ -98,21 +98,24 @@ if [ "${SKIP_SPA}" = "1" ]; then export CC_LB_ADMIN_SKIP_SPA=1; fi
 # set; otherwise compile uncached. SCCACHE_IGNORE_SERVER_IO_ERROR keeps a cache
 # outage non-fatal; SCCACHE_IDLE_TIMEOUT=0 keeps the server alive through the LTO
 # link so its --show-stats survives.
+# Read + export the creds with the shell -x trace OFF so it never prints them.
+set +x
 AWS_ACCESS_KEY_ID="$(cat /run/secrets/AWS_ACCESS_KEY_ID 2>/dev/null || true)"
 AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/AWS_SECRET_ACCESS_KEY 2>/dev/null || true)"
 if [ -n "${AWS_ACCESS_KEY_ID}" ] && [ -n "${AWS_SECRET_ACCESS_KEY}" ] && [ -n "${SCCACHE_BUCKET}" ]; then
   export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
   export SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION SCCACHE_S3_USE_SSL
   export RUSTC_WRAPPER=sccache SCCACHE_IGNORE_SERVER_IO_ERROR=1 SCCACHE_IDLE_TIMEOUT=0 CARGO_INCREMENTAL=0
+  set -x
   echo "sccache: S3 backend enabled (bucket=${SCCACHE_BUCKET})"
 else
+  set -x
   echo "sccache: disabled (no creds/bucket) - compiling uncached"
 fi
 xx-cargo build --release --locked \
   -p cc-lb-server \
   --no-default-features --features "${FEATURES}" \
   --target-dir /src/target
-if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats; fi
 triple="$(xx-cargo --print-target-triple)"
 install -Dm0755 "/src/target/${triple}/release/cc-lb" /out/cc-lb
 xx-verify --static /out/cc-lb
@@ -120,6 +123,13 @@ xx-verify --static /out/cc-lb
 install -d /out/etc
 echo 'nonroot:x:65532:65532:nonroot:/home/nonroot:/sbin/nologin' > /out/etc/passwd
 echo 'nonroot:x:65532:' > /out/etc/group
+# Stop the sccache server LAST: SCCACHE_IDLE_TIMEOUT=0 makes it linger and keep
+# the BuildKit RUN open, and a cold-cache S3 flush can block, so bound both with
+# timeout (the binary is already extracted above, so a slow flush can't lose it).
+if [ -n "${RUSTC_WRAPPER:-}" ]; then
+  timeout 60 sccache --show-stats || true
+  timeout 180 sccache --stop-server || true
+fi
 EOF
 
 # ---- Final: scratch (opt-in via `--target runtime-scratch`; smallest image) ----
