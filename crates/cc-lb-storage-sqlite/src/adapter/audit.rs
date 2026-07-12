@@ -124,11 +124,17 @@ where
     .bind(entry.model.as_deref())
     .bind(i64::from(entry.status))
     .bind(option_u64_to_i64(entry.input_tokens, "audit input_tokens")?)
-    .bind(option_u64_to_i64(entry.output_tokens, "audit output_tokens")?)
+    .bind(option_u64_to_i64(
+        entry.output_tokens,
+        "audit output_tokens",
+    )?)
     .bind(u64_to_i64(entry.duration_ms, "audit duration_ms")?)
     .bind(entry.agent_label.as_deref())
     .bind(entry.api_key_id.as_deref())
-    .bind(option_u64_to_i64(entry.cost_usd_micros, "audit cost_usd_micros")?)
+    .bind(option_u64_to_i64(
+        entry.cost_usd_micros,
+        "audit cost_usd_micros",
+    )?)
     .bind(entry.limit_violation.as_deref())
     .bind(entry.admin_action.as_deref())
     .bind(entry.actor.as_deref())
