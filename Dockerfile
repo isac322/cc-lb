@@ -34,8 +34,9 @@ SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 #            .cargo/config.toml rust-lld, which is expected and correct).
 # git:       cc-lb-server/build.rs reads `git rev-parse` (falls back gracefully).
 # libstdc++/libgcc: Bun's runtime dependencies on Alpine.
+# sccache: Rust compiler cache; uses the S3/garage backend when creds are passed.
 # hadolint ignore=DL3018
-RUN apk add --no-cache clang lld git libstdc++ libgcc
+RUN apk add --no-cache clang lld git libstdc++ libgcc sccache
 
 # xx scripts (xx-cargo, xx-apk, xx-verify, ...).
 COPY --from=xx / /
@@ -63,6 +64,15 @@ ARG SOURCE_DATE_EPOCH=""
 ARG FEATURES="sqlite,postgres"
 # Set to 1 to skip building the dashboard SPA (ships a placeholder page).
 ARG SKIP_SPA="0"
+# sccache S3 backend (optional, fail-open). When the AWS_ACCESS_KEY_ID /
+# AWS_SECRET_ACCESS_KEY secrets are mounted and SCCACHE_BUCKET is set, the Rust
+# compile is cached to the S3/garage bucket; otherwise it compiles uncached. On
+# the self-hosted runner these come from the in-cluster sccache-s3-creds secret
+# already present in the runner env (no GitHub Actions secret needed).
+ARG SCCACHE_BUCKET=""
+ARG SCCACHE_ENDPOINT=""
+ARG SCCACHE_REGION=""
+ARG SCCACHE_S3_USE_SSL=""
 
 WORKDIR /src
 COPY . .
@@ -74,7 +84,9 @@ COPY . .
 # that build script on a warm rebuild -> missing web/dist -> fail.
 RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
-    --mount=type=cache,id=bun-${BUILDPLATFORM},sharing=locked,target=/root/.bun/install/cache <<'EOF'
+    --mount=type=cache,id=bun-${BUILDPLATFORM},sharing=locked,target=/root/.bun/install/cache \
+    --mount=type=secret,id=AWS_ACCESS_KEY_ID,required=false \
+    --mount=type=secret,id=AWS_SECRET_ACCESS_KEY,required=false <<'EOF'
 # An empty SOURCE_DATE_EPOCH makes ring's cc/clang C build abort; drop it unless
 # a real value was passed.
 if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then unset SOURCE_DATE_EPOCH; fi
@@ -82,10 +94,25 @@ if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then unset SOURCE_DATE_EPOCH; fi
 export CC_LB_SKIP_WASM_FIXTURE_BUILD=1
 export GIT_SHA="${GIT_SHA}"
 if [ "${SKIP_SPA}" = "1" ]; then export CC_LB_ADMIN_SKIP_SPA=1; fi
+# Enable sccache (S3/garage backend) only when creds are mounted and a bucket is
+# set; otherwise compile uncached. SCCACHE_IGNORE_SERVER_IO_ERROR keeps a cache
+# outage non-fatal; SCCACHE_IDLE_TIMEOUT=0 keeps the server alive through the LTO
+# link so its --show-stats survives.
+AWS_ACCESS_KEY_ID="$(cat /run/secrets/AWS_ACCESS_KEY_ID 2>/dev/null || true)"
+AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/AWS_SECRET_ACCESS_KEY 2>/dev/null || true)"
+if [ -n "${AWS_ACCESS_KEY_ID}" ] && [ -n "${AWS_SECRET_ACCESS_KEY}" ] && [ -n "${SCCACHE_BUCKET}" ]; then
+  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+  export SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION SCCACHE_S3_USE_SSL
+  export RUSTC_WRAPPER=sccache SCCACHE_IGNORE_SERVER_IO_ERROR=1 SCCACHE_IDLE_TIMEOUT=0 CARGO_INCREMENTAL=0
+  echo "sccache: S3 backend enabled (bucket=${SCCACHE_BUCKET})"
+else
+  echo "sccache: disabled (no creds/bucket) - compiling uncached"
+fi
 xx-cargo build --release --locked \
   -p cc-lb-server \
   --no-default-features --features "${FEATURES}" \
   --target-dir /src/target
+if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats; fi
 triple="$(xx-cargo --print-target-triple)"
 install -Dm0755 "/src/target/${triple}/release/cc-lb" /out/cc-lb
 xx-verify --static /out/cc-lb
