@@ -136,6 +136,16 @@ pub trait UsageRollupStore: Send + Sync {
 }
 
 #[async_trait]
+pub trait UsageTokenIntervalStore: Send + Sync {
+    /// Sums all token columns for each interval. Both boundaries are inclusive:
+    /// `bucket_start >= start_unix_secs AND bucket_start <= end_unix_secs`.
+    async fn sum_usage_tokens_for_intervals(
+        &self,
+        intervals: &[UsageTokenInterval],
+    ) -> StorageResult<Vec<UsageTokenIntervalSum>>;
+}
+
+#[async_trait]
 pub trait OAuthCredentialStore: Send + Sync {
     async fn put_oauth_ciphertext(
         &self,

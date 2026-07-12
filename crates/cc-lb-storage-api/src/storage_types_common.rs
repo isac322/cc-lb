@@ -217,6 +217,20 @@ pub struct UsageRollup {
     pub virtual_cost_micros: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageTokenInterval {
+    pub interval_id: u64,
+    pub upstream_id: Uuid,
+    pub start_unix_secs: u64,
+    pub end_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageTokenIntervalSum {
+    pub interval_id: u64,
+    pub tokens: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageRollupRun {
     pub processed_events: u64,

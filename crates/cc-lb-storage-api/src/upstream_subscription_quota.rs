@@ -328,6 +328,94 @@ pub struct SubscriptionQuotaSeries {
     pub buckets: Vec<SubscriptionQuotaBucket>,
 }
 
+/// Allocation-light checkpoint row used to build quota series and aggregates.
+///
+/// Backends return rows ordered by `(upstream_id, window, source,
+/// changed_at_unix_millis, sample_id)`. For each physical quota key, the
+/// projection includes the last row before the query start when one exists,
+/// followed by rows inside the query's inclusive time range.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubscriptionQuotaSlimCheckpoint {
+    pub upstream_id: Uuid,
+    pub window: SubscriptionQuotaWindow,
+    pub source: SubscriptionQuotaSource,
+    pub changed_at_unix_millis: u64,
+    pub sample_id: Uuid,
+    pub utilization: Option<f64>,
+    pub status: Option<SubscriptionQuotaStatus>,
+    pub resets_at_unix_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubscriptionQuotaProviderLotQuery {
+    pub upstream_ids: Vec<Uuid>,
+    pub windows: Vec<SubscriptionQuotaWindow>,
+    pub sources: Vec<SubscriptionQuotaSource>,
+    pub since_unix_millis: u64,
+    pub until_unix_millis: u64,
+    pub source_merge: SubscriptionQuotaSourceMerge,
+    pub evaluation_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubscriptionQuotaProviderLot {
+    pub upstream_id: Uuid,
+    pub window: SubscriptionQuotaWindow,
+    pub source: SubscriptionQuotaSourceMerge,
+    pub provider_start_unix_secs: Option<u64>,
+    pub provider_reset_unix_secs: Option<u64>,
+    pub observed_at_unix_millis: u64,
+    pub evaluation_unix_secs: u64,
+    pub utilization: f64,
+}
+
+#[cfg(test)]
+mod slim_projection_tests {
+    use std::collections::BTreeSet;
+
+    use serde_json::Value;
+
+    use super::{
+        SubscriptionQuotaSlimCheckpoint, SubscriptionQuotaSource, SubscriptionQuotaStatus,
+        SubscriptionQuotaWindow,
+    };
+
+    #[test]
+    fn slim_projection_field_set() {
+        let projection = SubscriptionQuotaSlimCheckpoint {
+            upstream_id: uuid::Uuid::nil(),
+            window: SubscriptionQuotaWindow::FiveHour,
+            source: SubscriptionQuotaSource::Header,
+            changed_at_unix_millis: 1,
+            sample_id: uuid::Uuid::nil(),
+            utilization: Some(0.5),
+            status: Some(SubscriptionQuotaStatus::Allowed),
+            resets_at_unix_secs: Some(2),
+        };
+
+        let Value::Object(fields) =
+            serde_json::to_value(projection).expect("slim projection serializes")
+        else {
+            panic!("slim projection must serialize as an object");
+        };
+        let actual = fields.keys().map(String::as_str).collect::<BTreeSet<_>>();
+        let expected = [
+            "upstream_id",
+            "window",
+            "source",
+            "changed_at_unix_millis",
+            "sample_id",
+            "utilization",
+            "status",
+            "resets_at_unix_secs",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+        assert_eq!(actual, expected);
+    }
+}
+
 #[async_trait]
 pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
     /// Atomically upserts the latest sidecar row and inserts change-only
@@ -394,4 +482,19 @@ pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
         &self,
         query: SubscriptionQuotaCheckpointRangeQuery,
     ) -> StorageResult<Vec<SubscriptionQuotaCheckpointRange>>;
+}
+
+#[async_trait]
+pub trait UpstreamSubscriptionQuotaAggregateStore: Send + Sync {
+    /// Returns slim checkpoint rows in stable key/time/sample order, including
+    /// the same per-key left anchor and inclusive range as checkpoint ranges.
+    async fn list_subscription_quota_slim_checkpoints(
+        &self,
+        query: SubscriptionQuotaCheckpointRangeQuery,
+    ) -> StorageResult<Vec<SubscriptionQuotaSlimCheckpoint>>;
+
+    async fn list_subscription_quota_provider_lots(
+        &self,
+        query: SubscriptionQuotaProviderLotQuery,
+    ) -> StorageResult<Vec<SubscriptionQuotaProviderLot>>;
 }
