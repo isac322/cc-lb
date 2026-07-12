@@ -10,6 +10,10 @@ use crate::{
     error_map::map_sqlx_error,
 };
 
+/// Bounds how many rows one purge DELETE removes so a large expired backlog cannot
+/// hold a long row-lock / WAL burst that stalls request-path writers.
+const PURGE_BATCH_SIZE: i64 = 1_000;
+
 #[async_trait]
 impl PromptCacheObservationStore for PostgresStorage {
     async fn upsert_observation(&self, record: &PromptCacheObservationRecord) -> StorageResult<()> {
@@ -99,15 +103,29 @@ impl PromptCacheObservationStore for PostgresStorage {
     }
 
     async fn purge_expired_before(&self, ts_unix_secs: u64) -> StorageResult<u64> {
-        let result = sqlx::query("DELETE FROM prompt_cache_observations WHERE expires_at < $1")
-            .bind(u64_to_i64(
-                ts_unix_secs,
-                "prompt cache purge cutoff unix secs",
-            )?)
+        let cutoff = u64_to_i64(ts_unix_secs, "prompt cache purge cutoff unix secs")?;
+        let mut total_removed = 0u64;
+        loop {
+            let removed = sqlx::query(
+                "DELETE FROM prompt_cache_observations \
+                 WHERE expires_at < $1 \
+                   AND ctid IN ( \
+                       SELECT ctid FROM prompt_cache_observations \
+                       WHERE expires_at < $1 LIMIT $2 \
+                   )",
+            )
+            .bind(cutoff)
+            .bind(PURGE_BATCH_SIZE)
             .execute(&self.pool)
             .await
-            .map_err(map_sqlx_error)?;
-        Ok(result.rows_affected())
+            .map_err(map_sqlx_error)?
+            .rows_affected();
+            total_removed = total_removed.saturating_add(removed);
+            if removed < PURGE_BATCH_SIZE as u64 {
+                break;
+            }
+        }
+        Ok(total_removed)
     }
 
     async fn count(&self) -> StorageResult<u64> {
