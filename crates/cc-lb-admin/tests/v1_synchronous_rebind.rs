@@ -12,9 +12,8 @@ use cc_lb_control::api_keys::principal_view::PrincipalView;
 use cc_lb_control::{
     ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
-use cc_lb_plugin_api::{
-    Principal, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
-};
+use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};

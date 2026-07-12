@@ -4,7 +4,7 @@ use axum::body::Bytes;
 use axum::http::{HeaderMap, Method};
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_plugin_api::{Principal, PrincipalKind, Upstream};
+use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;

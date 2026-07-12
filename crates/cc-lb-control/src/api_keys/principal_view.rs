@@ -311,8 +311,8 @@ fn is_glob_pattern(model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cc_lb_domain::{Principal, UpstreamCandidate};
     use cc_lb_observability::{ObservabilityError, ObserveEvent};
-    use cc_lb_plugin_api::{Principal, UpstreamCandidate};
     use cc_lb_routing::{FilterError, FilterOutput, RoutingContext};
 
     struct StubFilter(&'static str);

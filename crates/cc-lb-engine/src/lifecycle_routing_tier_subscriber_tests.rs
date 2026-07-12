@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use cc_lb_domain::PrincipalKindLite;
+use cc_lb_domain::{
+    PrincipalKindLite, RoutingTrace, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
+    WrhKeySource,
+};
 use cc_lb_lifecycle::{EventId, LifecycleEvent, RouteFailure, RouteInfo, TerminationReason};
 use cc_lb_observability::NoopMetricsHook;
-use cc_lb_plugin_api::types::{StageDecision, WrhKeySource};
-use cc_lb_plugin_api::{RoutingTrace, SubscriptionPreferenceTrace, SubscriptionTier};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 

@@ -27,7 +27,7 @@ use cc_lb_engine::{
     ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamRateLimitCache, UpstreamStatusEntry,
     UpstreamStatusSnapshot,
 };
-use cc_lb_plugin_api::{FilterPlugin, PluginManifest, RouteDecision, RouteError, RouterPlugin};
+use cc_lb_routing::{FilterPlugin, RouteDecision, RouteError, RouterPlugin};
 use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntime};
 
 use crate::wasm_host::{
@@ -51,6 +51,7 @@ use uuid::Uuid;
 
 use cc_lb_engine::PromptCacheObservationSinkLike;
 
+use crate::PluginManifest;
 use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
 use crate::reconcile::collect_revision_hash;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;

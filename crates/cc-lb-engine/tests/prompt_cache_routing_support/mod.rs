@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
+use cc_lb_domain::{
+    CacheScore, Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot,
+    SubscriptionQuotaDataState, TtlClass, WarmCacheEntry,
+};
 use cc_lb_engine::{
     PromptCacheObservationCacheLike, PromptCacheObservationInput, SubscriptionQuotaCacheLike,
-};
-use cc_lb_plugin_api::types::{CacheScore, TtlClass, WarmCacheEntry};
-use cc_lb_plugin_api::{
-    Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
 };
 use cc_lb_storage_api::SubscriptionQuotaSample;
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};

@@ -7,14 +7,13 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use cc_lb_config::Config;
+use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
 };
 use cc_lb_observability::ObservabilityHook;
-use cc_lb_plugin_api::{
-    Principal, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
-};
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_upstream::SignerFactory;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tracing_subscriber::fmt::MakeWriter;

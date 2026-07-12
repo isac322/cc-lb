@@ -4,7 +4,6 @@ use std::sync::Arc;
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
 use cc_lb_domain::{Principal, PrincipalKind, Upstream};
-use cc_lb_plugin_api::PluginManifest;
 use cc_lb_runtime_wasmtime::{
     RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime, WasmtimeRuntimeError,
 };
@@ -23,6 +22,7 @@ use serde_json::json;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::PluginManifest;
 use crate::dynamic_view_builder::{Stores, materialize_wasm};
 use crate::refresh::LazyRefresher;
 use crate::warmup::request::{WARMUP_MAX_TOKENS, WARMUP_MODEL, WarmupHttpClient};

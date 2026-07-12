@@ -15,7 +15,7 @@
 //! - J — Live-snapshot regression (four-upstream production fixture)
 
 use bytes::Bytes;
-use cc_lb_plugin_api::{PrincipalKind, SubscriptionQuotaDataState};
+use cc_lb_domain::{PrincipalKind, SubscriptionQuotaDataState};
 use cc_lb_routing::RoutingContext;
 use http::Method;
 use std::collections::HashMap;

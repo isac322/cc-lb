@@ -5,14 +5,13 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle,
     LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_observability::ObservabilityHook;
-use cc_lb_plugin_api::{
-    Principal, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
-};
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,

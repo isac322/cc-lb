@@ -60,7 +60,6 @@ cc-lb-engine = { path = "../cc-lb-engine" }
 cc-lb-dialect-anthropic = { path = "../cc-lb-dialect-anthropic" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
-cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 cc-lb-plugin-wire = { workspace = true, features = ["std"] }
 cc-lb-routing.workspace = true
 cc-lb-pricing = { path = "../cc-lb-pricing" }

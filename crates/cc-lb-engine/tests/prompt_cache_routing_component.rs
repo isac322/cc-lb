@@ -2,13 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use cc_lb_domain::{TtlClass, UpstreamCandidate, WarmCacheEntry, WrhKeySource};
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_engine::{
     DynamicView, DynamicViewBuilder, RequestKind, build_candidates, parse_request_cache_breakpoints,
 };
-use cc_lb_plugin_api::UpstreamCandidate;
-use cc_lb_plugin_api::types::{TtlClass, WarmCacheEntry, WrhKeySource};
 use cc_lb_routing::{FilterPlugin, RoutingContext};
 use http::{HeaderMap, Method};
 use url::Url;
@@ -207,7 +206,7 @@ fn moved_cache_control_keeps_warm_upstream_routed_by_cache_hash() {
 
 fn ctx(
     body_bytes: Bytes,
-    _cache_breakpoints: Vec<cc_lb_plugin_api::types::CacheBreakpoint>,
+    _cache_breakpoints: Vec<cc_lb_domain::CacheBreakpoint>,
     thread_id: &str,
 ) -> RoutingContext {
     RoutingContext {

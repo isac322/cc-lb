@@ -3,10 +3,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_engine::{ApiKeyAwareSignerFactory, DispatchError, UpstreamDispatch};
-use cc_lb_plugin_api::{
-    Principal, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
-};
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::principal::{Limit, PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};

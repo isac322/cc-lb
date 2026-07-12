@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
+use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::{
@@ -11,9 +12,7 @@ use cc_lb_engine::{
     Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_observability::ObservabilityHook;
-use cc_lb_plugin_api::{
-    Principal, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
-};
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_upstream::{

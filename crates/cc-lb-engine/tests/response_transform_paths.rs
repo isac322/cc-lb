@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_domain::{Principal, PrincipalKind, TerminalStrategy, Upstream};
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
     RouterPipelineCache, ShapePluginCache,
@@ -16,7 +17,6 @@ use cc_lb_engine::{
     UpstreamDispatch,
 };
 use cc_lb_observability::ObserveEvent;
-use cc_lb_plugin_api::{Principal, PrincipalKind, TerminalStrategy, Upstream};
 use cc_lb_storage_api::principal::PrincipalRecord;
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};

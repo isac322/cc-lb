@@ -4,14 +4,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
 };
 use cc_lb_engine::lifecycle::{PreviewRouteError, PreviewRouteInput};
 use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
-use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, Principal, RouteDecision, RouteError, RouterPlugin,
-    TerminalStrategy, UpstreamCandidate,
+use cc_lb_routing::{
+    FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
 };
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use http::HeaderMap;

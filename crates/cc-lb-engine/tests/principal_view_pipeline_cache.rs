@@ -2,13 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
     RouterPipelineCache,
 };
-use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, Principal, TerminalStrategy, UpstreamCandidate,
-};
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use uuid::Uuid;
 

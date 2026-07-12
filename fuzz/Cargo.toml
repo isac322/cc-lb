@@ -12,7 +12,8 @@ cc-lb-domain = { path = "../crates/cc-lb-domain" }
 axum = "0.8"
 bytes = "1"
 cc-lb-engine = { path = "../crates/cc-lb-engine" }
-cc-lb-plugin-api = { path = "../crates/cc-lb-plugin-api" }
+cc-lb-observability = { path = "../crates/cc-lb-observability" }
+cc-lb-upstream = { path = "../crates/cc-lb-upstream" }
 http = "1"
 http-body-util = "0.1"
 libfuzzer-sys = "0.4"

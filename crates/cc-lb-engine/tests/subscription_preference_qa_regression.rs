@@ -1,13 +1,10 @@
 use bytes::Bytes;
+use cc_lb_domain::{
+    CachePricingSummary, CacheScore, CandidateUrgency, Principal, PrincipalKind,
+    SubscriptionPreferenceTrace, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
+    SubscriptionTier, UpstreamCandidate, UpstreamKind, WrhKeySource,
+};
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_plugin_api::types::{
-    CachePricingSummary, CacheScore, CandidateUrgency, SubscriptionPreferenceTrace,
-    SubscriptionTier, WrhKeySource,
-};
-use cc_lb_plugin_api::{
-    Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
-    UpstreamCandidate, UpstreamKind,
-};
 use cc_lb_routing::{FilterPlugin, RoutingContext};
 use http::{HeaderMap, Method};
 use uuid::Uuid;

@@ -37,7 +37,6 @@ cc-lb-engine = { path = "../cc-lb-engine" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-scheduler = { path = "../cc-lb-scheduler", default-features = false }
-cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
 cc-lb-routing.workspace = true
 cc-lb-upstream.workspace = true

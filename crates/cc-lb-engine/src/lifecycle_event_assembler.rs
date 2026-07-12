@@ -1202,14 +1202,14 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use cc_lb_control::BusReceiver;
+    use cc_lb_domain::{
+        CandidateUrgency, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
+        TerminalDecision, TerminalStrategy, WrhKeySource,
+    };
     use cc_lb_lifecycle::{
         AuthFailure, ParseFailure, RouteInfo, StreamError, StreamSuccess, UsageSource,
     };
     use cc_lb_observability::{EngineMetricsHook, NoopMetricsHook};
-    use cc_lb_plugin_api::types::{
-        CandidateUrgency, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
-        TerminalDecision, TerminalStrategy, WrhKeySource,
-    };
     use cc_lb_request_log::{CostBreakdown, HeaderSnapshot};
     use cc_lb_storage_api::{RequestEvent, StorageResult};
     use metrics::{Counter, CounterFn, Key, KeyName, Metadata, Recorder, SharedString, Unit};

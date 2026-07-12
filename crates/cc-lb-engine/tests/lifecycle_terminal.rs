@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
 use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_engine::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::api_keys::principal_view::{
@@ -14,9 +15,8 @@ use cc_lb_engine::api_keys::principal_view::{
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
 };
-use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, Principal, RouteDecision, RouteError, RouterPlugin,
-    TerminalStrategy, Upstream, UpstreamCandidate,
+use cc_lb_routing::{
+    FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
 };
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};

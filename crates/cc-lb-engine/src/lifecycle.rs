@@ -21,7 +21,7 @@ use cc_lb_request_log::{
     HeaderSnapshot, RequestCacheBreakpoint, RequestCacheBreakpointSource,
     RequestCacheLookbackPrefix,
 };
-use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RouterPlugin};
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RouteDecision, RouterPlugin};
 use cc_lb_storage_api::{
     UpstreamRateLimitObservationRecord, UpstreamRecord, types::StoredApiKeyRecord,
     upstream::UpstreamKind as StorageUpstreamKind,
@@ -478,7 +478,7 @@ fn eligible_ttls_for_entry(requested: TtlClass, entry: TtlClass) -> bool {
 #[cfg(test)]
 mod cache_score_tests {
     use super::{anthropic_family_cache_pricing_summary, build_cache_score};
-    use cc_lb_plugin_api::types::{
+    use cc_lb_domain::{
         BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, TtlClass,
         WarmCacheEntry,
     };
@@ -531,12 +531,12 @@ mod cache_score_tests {
             requested_ttl: TtlClass::Ephemeral5m,
             origin: BreakpointOrigin::Explicit,
             lookback_prefixes: vec![
-                cc_lb_plugin_api::types::CacheLookbackPrefix {
+                cc_lb_domain::CacheLookbackPrefix {
                     prefix_hash: "bp-2".to_owned(),
                     content_block_index: 2,
                     lookback_distance: 0,
                 },
-                cc_lb_plugin_api::types::CacheLookbackPrefix {
+                cc_lb_domain::CacheLookbackPrefix {
                     prefix_hash: "warm-0".to_owned(),
                     content_block_index: 0,
                     lookback_distance: 2,
@@ -945,7 +945,7 @@ mod cache_score_tests {
             prefix_token_count,
             requested_ttl,
             origin: BreakpointOrigin::Explicit,
-            lookback_prefixes: vec![cc_lb_plugin_api::types::CacheLookbackPrefix {
+            lookback_prefixes: vec![cc_lb_domain::CacheLookbackPrefix {
                 prefix_hash: format!("bp-{block_index}"),
                 content_block_index: block_index,
                 lookback_distance: 0,
@@ -2096,7 +2096,7 @@ impl Lifecycle {
             }
         };
         let dialect = cached.resolved_dialect(&route_dialect).clone();
-        let route = cc_lb_plugin_api::RouteDecision {
+        let route = RouteDecision {
             upstream_id: Some(resolved_upstream_id),
             upstream: route_upstream,
             dialect,
@@ -2477,7 +2477,7 @@ impl Lifecycle {
         view: &PrincipalView,
         ctx: &RequestContext,
         principal: &Principal,
-        route: &cc_lb_plugin_api::RouteDecision,
+        route: &RouteDecision,
         authn_success: &AuthnSuccess,
         body_view: &RequestBodyView,
     ) -> Result<Option<ActiveLimit>, LimitRejectionErr> {
@@ -2933,7 +2933,7 @@ impl Lifecycle {
         dispatcher: &dyn UpstreamDispatch,
         ctx: &RequestContext,
         principal: &Principal,
-        route: &cc_lb_plugin_api::RouteDecision,
+        route: &RouteDecision,
         raw_passthrough_base_url: Option<&Url>,
         signer: Arc<dyn Signer>,
         observer: Option<&LifecycleContext>,
@@ -3734,7 +3734,7 @@ struct ValidatedOutput {
     kept_upstream_ids: Vec<Uuid>,
     reason: String,
     subscription_preference: Option<cc_lb_domain::SubscriptionPreferenceTrace>,
-    cache_affinity: Option<cc_lb_plugin_api::types::CacheAffinityTrace>,
+    cache_affinity: Option<cc_lb_domain::CacheAffinityTrace>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -4829,6 +4829,7 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+    use cc_lb_routing::RouteError;
     use cc_lb_storage_api::{
         SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaStatus,
         SubscriptionQuotaWindow,
@@ -6295,7 +6296,7 @@ mod tests {
             _ctx: &cc_lb_routing::RoutingContext,
             _principal: &Principal,
             _candidates: &[UpstreamCandidate],
-        ) -> Result<cc_lb_plugin_api::RouteDecision, cc_lb_plugin_api::RouteError> {
+        ) -> Result<RouteDecision, RouteError> {
             panic!("cache score tests do not route")
         }
     }

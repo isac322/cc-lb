@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_domain::{Principal, UpstreamCandidate};
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
 };
 use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
-use cc_lb_plugin_api::{Principal, UpstreamCandidate};
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, PerCandidateReason, RoutingContext};
 use cc_lb_upstream::SignedRequest;
 use http::{Method, Response, StatusCode};
@@ -59,7 +59,7 @@ fn lifecycle(state: ParityState) -> Lifecycle {
     });
     let pipeline = Arc::new(RouterPipelineCache {
         user_filters: vec![filter],
-        terminal: cc_lb_plugin_api::TerminalStrategy::FirstPick,
+        terminal: cc_lb_domain::TerminalStrategy::FirstPick,
         instantiation_error: None,
     });
     let mut chains = HashMap::new();

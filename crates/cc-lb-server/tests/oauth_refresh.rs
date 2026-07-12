@@ -10,6 +10,7 @@ use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::{
     AnthropicOAuthConfig, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind,
 };
+use cc_lb_domain::Upstream;
 use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_engine::{Clock, ClockHandle, DynamicViewHolder, Lifecycle, LifecycleConfig, TestClock};
@@ -17,7 +18,6 @@ use cc_lb_oauth_protocol::{
     ExistingTokenParts, TokenEndpointResponse, parse_token_endpoint_response,
     refresh_token_form_body, refreshed_token_parts,
 };
-use cc_lb_plugin_api::Upstream;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;

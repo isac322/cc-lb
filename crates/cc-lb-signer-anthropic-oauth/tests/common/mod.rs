@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
 use cc_lb_clock::{Clock, ClockHandle, SystemClock, TestClock, unix_secs};
-use cc_lb_plugin_api::{Principal, PrincipalKind, Upstream};
+use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSigner, AnthropicOAuthSignerHttpParams, OAuthHttpClient, OAuthHttpError,
     OAuthTokenRequest, OAuthTokenResponse,

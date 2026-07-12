@@ -16,10 +16,9 @@ use cc_lb_control::api_keys::{
     principal_view::PrincipalView,
 };
 use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot};
+use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_observability::ObservabilityHook;
-use cc_lb_plugin_api::{
-    Principal, RouteDecision, RouteError, RouterPlugin, Upstream, UpstreamCandidate,
-};
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};

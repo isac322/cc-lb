@@ -1,10 +1,9 @@
 use bytes::Bytes;
-use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_plugin_api::types::{CachePricingSummary, CacheScore};
-use cc_lb_plugin_api::{
-    Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
-    SubscriptionTier, UpstreamCandidate, UpstreamKind,
+use cc_lb_domain::{
+    CachePricingSummary, CacheScore, Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot,
+    SubscriptionQuotaDataState, SubscriptionTier, UpstreamCandidate, UpstreamKind,
 };
+use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_pricing::{
     CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion, global_catalog,
     init_global_catalog,
@@ -359,7 +358,7 @@ fn same_thread_recomputes_without_successor_convergence() {
     );
 }
 
-fn filter(candidates: &[UpstreamCandidate]) -> cc_lb_plugin_api::FilterOutput {
+fn filter(candidates: &[UpstreamCandidate]) -> cc_lb_routing::FilterOutput {
     SubscriptionPreferenceFilter::new()
         .filter(&ctx(), &principal(), candidates)
         .expect("builtin filter cannot fail")

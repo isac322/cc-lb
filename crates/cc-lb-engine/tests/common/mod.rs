@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
+use cc_lb_domain::{Principal, PrincipalKind, Upstream, UpstreamCandidate};
 use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::{
@@ -17,7 +18,6 @@ use cc_lb_engine::{
     LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
-use cc_lb_plugin_api::{Principal, PrincipalKind, Upstream, UpstreamCandidate};
 use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_upstream::{

@@ -713,11 +713,11 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
-    use cc_lb_plugin_api::types::{
-        BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, TtlClass, WarmCacheEntry,
+    use cc_lb_domain::{
+        BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, Principal, TtlClass, Upstream,
+        WarmCacheEntry,
     };
-    use cc_lb_plugin_api::{Principal, Upstream};
+    use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
     use cc_lb_storage_api::PromptCacheObservationRecord;
     use cc_lb_upstream::{
         DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
@@ -894,7 +894,7 @@ mod tests {
             prefix_token_count,
             requested_ttl,
             origin: BreakpointOrigin::Explicit,
-            lookback_prefixes: vec![cc_lb_plugin_api::types::CacheLookbackPrefix {
+            lookback_prefixes: vec![cc_lb_domain::CacheLookbackPrefix {
                 prefix_hash: prefix_hash.to_owned(),
                 content_block_index: index,
                 lookback_distance: 0,

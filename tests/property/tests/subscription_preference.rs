@@ -3,11 +3,11 @@
 use std::collections::BTreeSet;
 
 use bytes::Bytes;
-use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_plugin_api::{
+use cc_lb_domain::{
     Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
     UpstreamCandidate, UpstreamKind,
 };
+use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_routing::{FilterPlugin, RoutingContext};
 use http::Method;
 use proptest::prelude::*;

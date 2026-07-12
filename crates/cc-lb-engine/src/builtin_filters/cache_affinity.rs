@@ -125,8 +125,7 @@ fn predicted_read_tokens(candidate: &UpstreamCandidate) -> u32 {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use cc_lb_domain::CacheScore;
-    use cc_lb_plugin_api::{PrincipalKind, UpstreamKind};
+    use cc_lb_domain::{CacheScore, PrincipalKind, UpstreamKind};
     use http::Method;
 
     use super::*;

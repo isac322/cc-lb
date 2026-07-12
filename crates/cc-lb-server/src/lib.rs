@@ -19,6 +19,7 @@ pub mod drain;
 pub mod dynamic_view_builder;
 pub(crate) mod local_storage_path;
 pub mod notify_listener;
+mod plugin_manifest;
 pub mod preflight;
 pub mod prompt_cache_observation_cache;
 pub mod prompt_cache_observation_sink;
@@ -40,6 +41,7 @@ pub mod warmup;
 pub mod wasm_host;
 
 pub use app::{App, BuildError, build_app, build_app_with_path, run_serve};
+pub(crate) use plugin_manifest::PluginManifest;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use scheduler_factory::{
     OpenedScheduler, SchedulerBackend, SchedulerFactoryError, open_scheduler_storage,

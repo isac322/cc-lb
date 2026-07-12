@@ -722,7 +722,6 @@ dependencies = [
  "cc-lb-lifecycle",
  "cc-lb-oauth-protocol",
  "cc-lb-observability",
- "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "cc-lb-request-log",
  "cc-lb-routing",
@@ -823,7 +822,6 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-lifecycle",
  "cc-lb-observability",
- "cc-lb-plugin-api",
  "cc-lb-request-log",
  "cc-lb-routing",
  "cc-lb-storage-api",
@@ -892,7 +890,6 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-lifecycle",
  "cc-lb-observability",
- "cc-lb-plugin-api",
  "cc-lb-pricing",
  "cc-lb-quota",
  "cc-lb-request-log",
@@ -1019,24 +1016,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cc-lb-plugin-api"
-version = "0.13.0"
-dependencies = [
- "async-trait",
- "bytes",
- "cc-lb-domain",
- "cc-lb-observability",
- "cc-lb-routing",
- "cc-lb-storage-api",
- "cc-lb-upstream",
- "http",
- "serde",
- "serde_json",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "cc-lb-plugin-conformance"
 version = "0.2.2"
 dependencies = [
@@ -1099,7 +1078,6 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-engine",
  "cc-lb-observability",
- "cc-lb-plugin-api",
  "cc-lb-routing",
  "cc-lb-upstream",
  "http",
@@ -1245,7 +1223,6 @@ dependencies = [
  "cc-lb-engine",
  "cc-lb-oauth-protocol",
  "cc-lb-observability",
- "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "cc-lb-pricing",
  "cc-lb-request-log",
@@ -1314,7 +1291,6 @@ dependencies = [
  "bytes",
  "cc-lb-aead",
  "cc-lb-domain",
- "cc-lb-plugin-api",
  "cc-lb-storage-api",
  "cc-lb-upstream",
  "fake-anthropic",
@@ -1336,7 +1312,6 @@ dependencies = [
  "cc-lb-clock",
  "cc-lb-domain",
  "cc-lb-oauth-protocol",
- "cc-lb-plugin-api",
  "cc-lb-storage-api",
  "cc-lb-upstream",
  "chrono",

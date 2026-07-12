@@ -1,6 +1,6 @@
 use axum::body::{Body, to_bytes};
 use bytes::Bytes;
-use cc_lb_plugin_api::{Principal, PrincipalKind, Upstream};
+use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignerFactory,

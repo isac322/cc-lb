@@ -421,7 +421,7 @@ pub enum TransformSseEventResult {
 }
 
 /// Lifecycle event delivered to the observe hook. rkyv mirror of
-/// `cc_lb_plugin_api::ObserveEvent`.
+/// `cc_lb_observability::ObserveEvent`.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub enum ObserveEvent {

@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_domain::{Principal, Upstream};
 use cc_lb_engine::{SseBatchConfig, SseRelay};
 use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
-use cc_lb_plugin_api::{Principal, Upstream};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
 };
