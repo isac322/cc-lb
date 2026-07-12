@@ -20,7 +20,7 @@
 //! a warning. Multiple stacked encodings (`content-encoding: gzip, br`) are
 //! also unsupported because no real upstream sends them.
 
-use std::io::Write;
+use std::io::{self, Write};
 
 use http::HeaderMap;
 use http::header::CONTENT_ENCODING;
@@ -30,18 +30,18 @@ use http::header::CONTENT_ENCODING;
 /// One instance per upstream response. Fed compressed chunks; emits plaintext
 /// bytes that the SSE parser / JSON parser consume. The owned downstream body
 /// is forwarded independently and never goes through this decoder.
-pub enum UsageDecoder {
+pub(crate) enum UsageDecoder {
     /// `content-encoding` absent or `identity` — passthrough.
     Identity,
-    Gzip(flate2::write::GzDecoder<Vec<u8>>),
+    Gzip(flate2::write::GzDecoder<BudgetedOutput>),
     /// `content-encoding: deflate` — RFC asks for zlib-wrapped DEFLATE; we
     /// honour that. Servers that send raw DEFLATE under this name are out of
     /// spec and not handled.
-    Deflate(flate2::write::ZlibDecoder<Vec<u8>>),
-    Brotli(Box<brotli::DecompressorWriter<Vec<u8>>>),
+    Deflate(flate2::write::ZlibDecoder<BudgetedOutput>),
+    Brotli(Box<brotli::DecompressorWriter<BudgetedOutput>>),
     /// Boxed because [`zstd::stream::write::Decoder`] has a non-trivial size
     /// and the rest of the enum is small.
-    Zstd(Box<zstd::stream::write::Decoder<'static, Vec<u8>>>),
+    Zstd(Box<zstd::stream::write::Decoder<'static, BudgetedOutput>>),
     /// Encoding name was unrecognised, multi-encoded, or initialising the
     /// decoder failed. Caller should skip usage extraction.
     Unsupported(String),
@@ -55,7 +55,7 @@ impl UsageDecoder {
     ///
     /// Returns [`UsageDecoder::Unsupported`] (rather than `Err`) for unknown or
     /// multi-stacked encodings so the caller has a single uniform path.
-    pub fn from_headers(headers: &HeaderMap) -> Self {
+    pub fn from_headers(headers: &HeaderMap, output_budget_bytes: usize) -> Self {
         let Some(value) = headers.get(CONTENT_ENCODING) else {
             return Self::Identity;
         };
@@ -72,13 +72,22 @@ impl UsageDecoder {
         let normalized = trimmed.to_ascii_lowercase();
         match normalized.as_str() {
             "" | "identity" => Self::Identity,
-            "gzip" | "x-gzip" => Self::Gzip(flate2::write::GzDecoder::new(Vec::new())),
-            "deflate" => Self::Deflate(flate2::write::ZlibDecoder::new(Vec::new())),
-            "br" => Self::Brotli(Box::new(brotli::DecompressorWriter::new(Vec::new(), 4096))),
-            "zstd" => match zstd::stream::write::Decoder::new(Vec::new()) {
-                Ok(decoder) => Self::Zstd(Box::new(decoder)),
-                Err(_) => Self::Unsupported(normalized),
-            },
+            "gzip" | "x-gzip" => Self::Gzip(flate2::write::GzDecoder::new(BudgetedOutput::new(
+                output_budget_bytes,
+            ))),
+            "deflate" => Self::Deflate(flate2::write::ZlibDecoder::new(BudgetedOutput::new(
+                output_budget_bytes,
+            ))),
+            "br" => Self::Brotli(Box::new(brotli::DecompressorWriter::new(
+                BudgetedOutput::new(output_budget_bytes),
+                4096,
+            ))),
+            "zstd" => {
+                match zstd::stream::write::Decoder::new(BudgetedOutput::new(output_budget_bytes)) {
+                    Ok(decoder) => Self::Zstd(Box::new(decoder)),
+                    Err(_) => Self::Unsupported(normalized),
+                }
+            }
             _ => Self::Unsupported(normalized),
         }
     }
@@ -131,8 +140,8 @@ impl UsageDecoder {
     pub fn finish(self) -> std::io::Result<Vec<u8>> {
         match self {
             Self::Identity | Self::Unsupported(_) | Self::Poisoned => Ok(Vec::new()),
-            Self::Gzip(inner) => inner.finish(),
-            Self::Deflate(inner) => inner.finish(),
+            Self::Gzip(inner) => inner.finish().map(BudgetedOutput::into_bytes),
+            Self::Deflate(inner) => inner.finish().map(BudgetedOutput::into_bytes),
             Self::Brotli(inner) => {
                 let mut buf = (*inner).into_inner().map_err(|_| {
                     std::io::Error::new(
@@ -140,11 +149,11 @@ impl UsageDecoder {
                         "brotli decoder failed to finalise",
                     )
                 })?;
-                Ok(std::mem::take(&mut buf))
+                Ok(buf.take_bytes())
             }
             Self::Zstd(inner) => {
                 let mut writer = inner.into_inner();
-                Ok(std::mem::take(&mut writer))
+                Ok(writer.take_bytes())
             }
         }
     }
@@ -155,11 +164,60 @@ impl UsageDecoder {
 fn write_and_drain<W, F>(writer: &mut W, input: &[u8], mut extract: F) -> std::io::Result<Vec<u8>>
 where
     W: Write,
-    F: FnMut(&mut W) -> &mut Vec<u8>,
+    F: FnMut(&mut W) -> &mut BudgetedOutput,
 {
     writer.write_all(input)?;
     writer.flush()?;
-    Ok(std::mem::take(extract(writer)))
+    Ok(extract(writer).take_bytes())
+}
+
+pub(crate) struct BudgetedOutput {
+    bytes: Vec<u8>,
+    written_bytes: usize,
+    budget_bytes: usize,
+}
+
+impl BudgetedOutput {
+    const fn new(budget_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            written_bytes: 0,
+            budget_bytes,
+        }
+    }
+
+    fn take_bytes(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.bytes)
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Write for BudgetedOutput {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let Some(next_written_bytes) = self.written_bytes.checked_add(buf.len()) else {
+            return Err(decompression_output_budget_error(self.budget_bytes));
+        };
+        if next_written_bytes > self.budget_bytes {
+            return Err(decompression_output_budget_error(self.budget_bytes));
+        }
+        self.bytes.extend_from_slice(buf);
+        self.written_bytes = next_written_bytes;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn decompression_output_budget_error(budget_bytes: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::OutOfMemory,
+        format!("decompression output exceeds {budget_bytes}-byte budget"),
+    )
 }
 
 /// Decode a full body in one shot for the non-streaming JSON response path.
@@ -170,8 +228,9 @@ where
 pub fn decode_full_body<'a>(
     headers: &HeaderMap,
     body: &'a [u8],
+    output_budget_bytes: usize,
 ) -> std::io::Result<Option<std::borrow::Cow<'a, [u8]>>> {
-    let mut decoder = UsageDecoder::from_headers(headers);
+    let mut decoder = UsageDecoder::from_headers(headers, output_budget_bytes);
     if !decoder.is_active() {
         return Ok(None);
     }
@@ -189,6 +248,8 @@ mod tests {
     use super::*;
     use http::HeaderValue;
 
+    const TEST_OUTPUT_BUDGET_BYTES: usize = 1024 * 1024;
+
     fn headers_with(encoding: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
         h.insert(CONTENT_ENCODING, HeaderValue::from_str(encoding).unwrap());
@@ -199,7 +260,7 @@ mod tests {
     fn identity_when_header_absent() {
         let h = HeaderMap::new();
         assert!(matches!(
-            UsageDecoder::from_headers(&h),
+            UsageDecoder::from_headers(&h, TEST_OUTPUT_BUDGET_BYTES),
             UsageDecoder::Identity
         ));
     }
@@ -208,7 +269,7 @@ mod tests {
     fn identity_when_header_identity() {
         let h = headers_with("identity");
         assert!(matches!(
-            UsageDecoder::from_headers(&h),
+            UsageDecoder::from_headers(&h, TEST_OUTPUT_BUDGET_BYTES),
             UsageDecoder::Identity
         ));
     }
@@ -217,7 +278,7 @@ mod tests {
     fn x_gzip_aliases_gzip() {
         let h = headers_with("x-gzip");
         assert!(matches!(
-            UsageDecoder::from_headers(&h),
+            UsageDecoder::from_headers(&h, TEST_OUTPUT_BUDGET_BYTES),
             UsageDecoder::Gzip(_)
         ));
     }
@@ -225,7 +286,7 @@ mod tests {
     #[test]
     fn multi_encoding_marked_unsupported() {
         let h = headers_with("gzip, br");
-        let d = UsageDecoder::from_headers(&h);
+        let d = UsageDecoder::from_headers(&h, TEST_OUTPUT_BUDGET_BYTES);
         assert!(!d.is_active());
         assert_eq!(d.unsupported_encoding(), Some("gzip, br"));
     }
@@ -233,7 +294,7 @@ mod tests {
     #[test]
     fn unknown_encoding_marked_unsupported() {
         let h = headers_with("snappy");
-        assert!(!UsageDecoder::from_headers(&h).is_active());
+        assert!(!UsageDecoder::from_headers(&h, TEST_OUTPUT_BUDGET_BYTES).is_active());
     }
 
     #[test]
@@ -244,7 +305,7 @@ mod tests {
         let compressed = encoder.finish().unwrap();
 
         let h = headers_with("gzip");
-        let mut decoder = UsageDecoder::from_headers(&h);
+        let mut decoder = UsageDecoder::from_headers(&h, TEST_OUTPUT_BUDGET_BYTES);
         let mut decoded = Vec::new();
         // chunk in tiny slices to exercise the streaming path
         for window in compressed.chunks(3) {
@@ -263,7 +324,7 @@ mod tests {
         let compressed = encoder.finish().unwrap();
 
         let h = headers_with("deflate");
-        let mut decoder = UsageDecoder::from_headers(&h);
+        let mut decoder = UsageDecoder::from_headers(&h, TEST_OUTPUT_BUDGET_BYTES);
         let mut decoded = decoder.push(&compressed).unwrap();
         decoded.extend(decoder.finish().unwrap());
         assert_eq!(decoded, plaintext);
@@ -277,7 +338,7 @@ mod tests {
         let compressed = encoder.into_inner();
 
         let h = headers_with("br");
-        let mut decoder = UsageDecoder::from_headers(&h);
+        let mut decoder = UsageDecoder::from_headers(&h, TEST_OUTPUT_BUDGET_BYTES);
         let mut decoded = decoder.push(&compressed).unwrap();
         decoded.extend(decoder.finish().unwrap());
         assert_eq!(decoded, plaintext);
@@ -289,7 +350,7 @@ mod tests {
         let compressed = zstd::encode_all(&plaintext[..], 3).unwrap();
 
         let h = headers_with("zstd");
-        let mut decoder = UsageDecoder::from_headers(&h);
+        let mut decoder = UsageDecoder::from_headers(&h, TEST_OUTPUT_BUDGET_BYTES);
         let mut decoded = decoder.push(&compressed).unwrap();
         decoded.extend(decoder.finish().unwrap());
         assert_eq!(decoded, plaintext);
@@ -299,7 +360,7 @@ mod tests {
     fn decode_full_body_identity_borrows() {
         let h = HeaderMap::new();
         let body = b"plain";
-        let decoded = decode_full_body(&h, body).unwrap().unwrap();
+        let decoded = decode_full_body(&h, body, body.len()).unwrap().unwrap();
         assert!(matches!(decoded, std::borrow::Cow::Borrowed(_)));
         assert_eq!(&*decoded, body);
     }
@@ -312,21 +373,37 @@ mod tests {
         let compressed = encoder.finish().unwrap();
 
         let h = headers_with("gzip");
-        let decoded = decode_full_body(&h, &compressed).unwrap().unwrap();
+        let decoded = decode_full_body(&h, &compressed, plaintext.len())
+            .unwrap()
+            .unwrap();
         assert_eq!(&*decoded, plaintext);
+    }
+
+    #[test]
+    fn decode_full_body_rejects_output_beyond_budget() {
+        let plaintext = vec![b'x'; 4096];
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&plaintext).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let h = headers_with("gzip");
+
+        let error = decode_full_body(&h, &compressed, plaintext.len() - 1)
+            .expect_err("decompression beyond the output budget must fail");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::OutOfMemory);
     }
 
     #[test]
     fn decode_full_body_unsupported_returns_none() {
         let h = headers_with("snappy");
         let body = b"\x00\x01\x02";
-        assert!(decode_full_body(&h, body).unwrap().is_none());
+        assert!(decode_full_body(&h, body, body.len()).unwrap().is_none());
     }
 
     #[test]
     fn push_after_poison_returns_empty() {
         let h = headers_with("gzip");
-        let mut decoder = UsageDecoder::from_headers(&h);
+        let mut decoder = UsageDecoder::from_headers(&h, TEST_OUTPUT_BUDGET_BYTES);
         // garbage that gzip cannot parse
         let _ = decoder.push(&[0xffu8; 16]);
         // force-poison for the assertion below; the implementation may or may
