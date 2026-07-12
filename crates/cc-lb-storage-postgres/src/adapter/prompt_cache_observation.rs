@@ -13,6 +13,9 @@ use crate::{
 /// Bounds how many rows one purge DELETE removes so a large expired backlog cannot
 /// hold a long row-lock / WAL burst that stalls request-path writers.
 const PURGE_BATCH_SIZE: i64 = 1_000;
+// Bound work per call so a continuous influx of already-expired rows cannot pin
+// the purge in an unbounded loop; the scheduler re-runs the job to finish later.
+const PURGE_MAX_BATCHES: usize = 1_024;
 
 #[async_trait]
 impl PromptCacheObservationStore for PostgresStorage {
@@ -105,7 +108,7 @@ impl PromptCacheObservationStore for PostgresStorage {
     async fn purge_expired_before(&self, ts_unix_secs: u64) -> StorageResult<u64> {
         let cutoff = u64_to_i64(ts_unix_secs, "prompt cache purge cutoff unix secs")?;
         let mut total_removed = 0u64;
-        loop {
+        for _ in 0..PURGE_MAX_BATCHES {
             let removed = sqlx::query(
                 "DELETE FROM prompt_cache_observations \
                  WHERE expires_at < $1 \
