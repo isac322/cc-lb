@@ -402,7 +402,9 @@ describe('RequestEventDrawer', () => {
         />,
       );
 
-      expect(screen.queryByText(/low ·|medium ·|high ·|xhigh ·|max ·/)).toBeNull();
+      expect(
+        screen.queryByText(/low ·|medium ·|high ·|xhigh ·|max ·/),
+      ).toBeNull();
     });
 
     it('renders fast badge when service_tier is priority', () => {

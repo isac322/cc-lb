@@ -6,8 +6,8 @@ import {
   type RequestOutcome,
   statusTone,
 } from '../../lib/format';
-import { budgetToTier, serviceTierToFast } from '../../lib/reasoningTier';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
+import { budgetToTier, serviceTierToFast } from '../../lib/reasoningTier';
 import { useCopyButton } from '../../lib/useCopyButton';
 import { Badge, cx, Hint } from './primitives';
 import { RelativeTime } from './RelativeTime';
@@ -172,15 +172,20 @@ export function RequestEventIdentity({
               </span>
               {budgetToTier(event.thinking_budget_tokens) !== 'none' && (
                 <Badge tone="mono" className="shrink-0">
-                  {budgetToTier(event.thinking_budget_tokens)} · {event.thinking_budget_tokens}
+                  {budgetToTier(event.thinking_budget_tokens)} ·{' '}
+                  {event.thinking_budget_tokens}
                 </Badge>
               )}
               {event.service_tier != null && (
                 <Badge
-                  tone={serviceTierToFast(event.service_tier) ? 'ok' : 'neutral'}
+                  tone={
+                    serviceTierToFast(event.service_tier) ? 'ok' : 'neutral'
+                  }
                   className="shrink-0"
                 >
-                  {serviceTierToFast(event.service_tier) ? 'fast' : event.service_tier}
+                  {serviceTierToFast(event.service_tier)
+                    ? 'fast'
+                    : event.service_tier}
                 </Badge>
               )}
             </span>

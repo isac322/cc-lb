@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { budgetToTier, serviceTierToFast, REASONING_TIER_THRESHOLDS } from './reasoningTier';
+import {
+  budgetToTier,
+  REASONING_TIER_THRESHOLDS,
+  serviceTierToFast,
+} from './reasoningTier';
 
 describe('budgetToTier', () => {
   it('returns none for null', () => {
