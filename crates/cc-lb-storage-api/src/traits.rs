@@ -5,10 +5,13 @@ use crate::{
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
     cache_keepalive_sessions::CacheKeepaliveSessionStore,
     organization_metadata::OrganizationMetadataStore,
-    prompt_cache_observation::PromptCacheObservationStore, types::*,
+    prompt_cache_observation::PromptCacheObservationStore,
+    types::*,
     upstream_rate_limit::UpstreamRateLimitStateStore,
     upstream_subscription_metadata::UpstreamSubscriptionMetadataStore,
-    upstream_subscription_quota::UpstreamSubscriptionQuotaStore,
+    upstream_subscription_quota::{
+        UpstreamSubscriptionQuotaAggregateStore, UpstreamSubscriptionQuotaStore,
+    },
     warmup_attempts::UpstreamWarmupAttemptStore,
 };
 
@@ -325,6 +328,7 @@ pub trait Storage:
     + RequestEventStore
     + UpstreamRateLimitStateStore
     + UpstreamSubscriptionQuotaStore
+    + UpstreamSubscriptionQuotaAggregateStore
     + UpstreamSubscriptionMetadataStore
     + UpstreamWarmupAttemptStore
     + PromptCacheObservationStore
@@ -332,6 +336,7 @@ pub trait Storage:
     + AnthropicCompatibilityKvStore
     + CacheKeepaliveSessionStore
     + UsageRollupStore
+    + UsageTokenIntervalStore
     + OAuthCredentialStore
     + ApiKeyStore
     + PriceCatalogCache
@@ -355,6 +360,7 @@ impl<T> Storage for T where
         + RequestEventStore
         + UpstreamRateLimitStateStore
         + UpstreamSubscriptionQuotaStore
+        + UpstreamSubscriptionQuotaAggregateStore
         + UpstreamSubscriptionMetadataStore
         + UpstreamWarmupAttemptStore
         + PromptCacheObservationStore
@@ -362,6 +368,7 @@ impl<T> Storage for T where
         + AnthropicCompatibilityKvStore
         + CacheKeepaliveSessionStore
         + UsageRollupStore
+        + UsageTokenIntervalStore
         + OAuthCredentialStore
         + ApiKeyStore
         + PriceCatalogCache
