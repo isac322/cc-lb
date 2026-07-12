@@ -78,6 +78,7 @@ fn connection_drop_mid_commit() {
                 let storage = fixture.storage.clone();
                 let pool = fixture.pool.clone();
 
+                fixture.wait_for_events_eligible().await?;
                 let handle = tokio::spawn(async move { storage.rollup_usage_once().await });
                 let pid = fixture.wait_for_checkpoint_backend(&app_name).await?;
                 let terminated = sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
@@ -208,6 +209,33 @@ impl CrashFixture {
         }
 
         Err(format!("timed out waiting for active checkpoint query for {app_name}").into())
+    }
+
+    // The rollup only consumes events whose tx_id has fallen below the snapshot
+    // xmin horizon, and a concurrent transaction elsewhere in the cluster can
+    // hold that horizon back. Wait until every seeded event is eligible so the
+    // rollup deterministically reaches its checkpoint write instead of
+    // committing an empty no-op (which would starve the crash injection below).
+    async fn wait_for_events_eligible(&self) -> Result<(), Box<dyn std::error::Error>> {
+        for _ in 0..600 {
+            let eligible = sqlx::query_scalar::<_, bool>(
+                "SELECT NOT EXISTS (                      SELECT 1 FROM request_events_v1                      WHERE COALESCE(tx_id, '0'::xid8) >= pg_snapshot_xmin(pg_current_snapshot())                  )",
+            )
+            .fetch_one(&self.pool)
+            .await?;
+
+            if eligible {
+                return Ok(());
+            }
+
+            time::sleep(Duration::from_millis(25)).await;
+        }
+
+        Err(format!(
+            "timed out waiting for seeded events to fall below the snapshot xmin horizon for {}",
+            self.app_name
+        )
+        .into())
     }
 
     async fn drop_schema(&self) -> Result<(), Box<dyn std::error::Error>> {

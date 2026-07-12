@@ -8,6 +8,13 @@ use uuid::Uuid;
 
 use crate::{SqliteStorage, map_sqlx_error};
 
+/// Bounds how many rows one purge DELETE removes so a large expired backlog cannot
+/// hold the single SQLite write lock long enough to stall request-path writers.
+const PURGE_BATCH_SIZE: i64 = 1_000;
+// Bound work per call so a continuous influx of already-expired rows cannot pin
+// the purge in an unbounded loop; the scheduler re-runs the job to finish later.
+const PURGE_MAX_BATCHES: usize = 1_024;
+
 #[async_trait]
 impl PromptCacheObservationStore for SqliteStorage {
     async fn upsert_observation(&self, record: &PromptCacheObservationRecord) -> StorageResult<()> {
@@ -104,15 +111,30 @@ impl PromptCacheObservationStore for SqliteStorage {
     }
 
     async fn purge_expired_before(&self, ts_unix_secs: u64) -> StorageResult<u64> {
-        let result = sqlx::query("DELETE FROM prompt_cache_observations WHERE expires_at < ?")
-            .bind(u64_to_i64(
-                ts_unix_secs,
-                "prompt cache purge cutoff unix secs",
-            )?)
+        let cutoff = u64_to_i64(ts_unix_secs, "prompt cache purge cutoff unix secs")?;
+        let mut total_removed = 0u64;
+        for _ in 0..PURGE_MAX_BATCHES {
+            let removed = sqlx::query(
+                "DELETE FROM prompt_cache_observations \
+                 WHERE expires_at < ? \
+                   AND rowid IN ( \
+                       SELECT rowid FROM prompt_cache_observations \
+                       WHERE expires_at < ? LIMIT ? \
+                   )",
+            )
+            .bind(cutoff)
+            .bind(cutoff)
+            .bind(PURGE_BATCH_SIZE)
             .execute(self.pool())
             .await
-            .map_err(map_sqlx_error)?;
-        Ok(result.rows_affected())
+            .map_err(map_sqlx_error)?
+            .rows_affected();
+            total_removed = total_removed.saturating_add(removed);
+            if removed < PURGE_BATCH_SIZE as u64 {
+                break;
+            }
+        }
+        Ok(total_removed)
     }
 
     async fn count(&self) -> StorageResult<u64> {
