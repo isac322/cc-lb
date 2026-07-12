@@ -1019,7 +1019,6 @@ name = "cc-lb-plugin-conformance"
 version = "0.2.2"
 dependencies = [
  "blake3",
- "cc-lb-domain",
  "cc-lb-plugin-wire",
  "cc-lb-runtime-wasmtime",
  "rkyv",
@@ -1396,7 +1395,6 @@ dependencies = [
  "cc-lb-clock",
  "cc-lb-domain",
  "cc-lb-plugin-wire",
- "cc-lb-pricing",
  "cc-lb-storage-api",
  "cc-lb-storage-conformance",
  "chrono",
@@ -1419,7 +1417,6 @@ dependencies = [
  "async-trait",
  "cc-lb-aead",
  "cc-lb-clock",
- "cc-lb-config",
  "cc-lb-domain",
  "cc-lb-plugin-wire",
  "cc-lb-storage-api",
