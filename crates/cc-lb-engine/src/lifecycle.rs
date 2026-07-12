@@ -1864,6 +1864,7 @@ impl Lifecycle {
                     stream: body_view.stream(),
                     body_bytes: ctx.body_bytes.len() as u64,
                     cache_control_block_count: cache_metadata.cache_control_block_count,
+                    thinking_budget_tokens: cache_metadata.thinking_budget_tokens,
                     cache_breakpoints: cache_metadata.cache_breakpoints.clone(),
                     cache_prefix_hash: cache_metadata.cache_prefix_hash.clone(),
                     matched_v3_cache_key: cache_metadata.cache_prefix_hash.clone(),
@@ -4233,6 +4234,7 @@ pub(crate) struct RequestCacheMetadata {
     message_index: Option<u64>,
     message_count: Option<u64>,
     cache_control_block_count: Option<u64>,
+    thinking_budget_tokens: Option<u64>,
     cache_control_message_indices: Vec<u64>,
     pub(crate) cache_breakpoints: Vec<RequestCacheBreakpoint>,
     pub(crate) cache_prefix_hash: Option<String>,
@@ -4376,6 +4378,12 @@ fn request_cache_metadata_from_value(
     cache_control_message_indices.dedup();
 
     let cache_control_block_count = cache_breakpoints.len() as u64;
+    let thinking_budget_tokens = value
+        .get("thinking")
+        .filter(|t| t.get("type").and_then(Value::as_str) == Some("enabled"))
+        .and_then(|t| t.get("budget_tokens"))
+        .and_then(Value::as_u64)
+        .filter(|v| *v <= 9_007_199_254_740_991);
     let cache_prefix_hash = cache_breakpoints
         .last()
         .map(|breakpoint| breakpoint.prefix_hash.clone());
@@ -4387,6 +4395,7 @@ fn request_cache_metadata_from_value(
         message_index,
         message_count,
         cache_control_block_count: Some(cache_control_block_count),
+        thinking_budget_tokens,
         cache_control_message_indices,
         cache_breakpoints,
         cache_prefix_hash,
@@ -5855,6 +5864,74 @@ mod tests {
         assert_eq!(hash.len(), 64);
         assert_eq!(hash, metadata.cache_breakpoints[2].prefix_hash);
         assert!(!hash.contains("secret"));
+    }
+
+    #[test]
+    fn request_cache_metadata_preserves_enabled_thinking_budgets_across_badge_boundaries() {
+        // Given
+        let headers = HeaderMap::new();
+        let budgets = [
+            1_024, 4_000, 4_001, 12_000, 12_001, 24_000, 24_001, 32_000, 32_001,
+        ];
+
+        for budget in budgets {
+            let body = Bytes::from(format!(
+                r#"{{"thinking":{{"type":"enabled","budget_tokens":{budget}}}}}"#
+            ));
+
+            // When
+            let metadata = request_cache_metadata(&headers, &body);
+
+            // Then
+            assert_eq!(
+                metadata.thinking_budget_tokens,
+                Some(budget),
+                "enabled budget must remain value-preserving for {budget}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_cache_metadata_rejects_inapplicable_or_unsafe_thinking_budgets() {
+        // Given
+        let headers = HeaderMap::new();
+        let cases = [
+            (
+                "disabled",
+                r#"{"thinking":{"type":"disabled","budget_tokens":5000}}"#,
+            ),
+            ("adaptive", r#"{"thinking":{"type":"adaptive"}}"#),
+            (
+                "enabled without budget",
+                r#"{"thinking":{"type":"enabled"}}"#,
+            ),
+            ("missing thinking", r#"{}"#),
+            (
+                "string budget",
+                r#"{"thinking":{"type":"enabled","budget_tokens":"1024"}}"#,
+            ),
+            ("null thinking", r#"{"thinking":null}"#),
+            (
+                "one over safe integer maximum",
+                r#"{"thinking":{"type":"enabled","budget_tokens":9007199254740992}}"#,
+            ),
+            (
+                "u64 maximum",
+                r#"{"thinking":{"type":"enabled","budget_tokens":18446744073709551615}}"#,
+            ),
+        ];
+
+        for (case, fixture) in cases {
+            // When
+            let metadata =
+                request_cache_metadata(&headers, &Bytes::copy_from_slice(fixture.as_bytes()));
+
+            // Then
+            assert_eq!(
+                metadata.thinking_budget_tokens, None,
+                "{case} must not produce a thinking budget"
+            );
+        }
     }
 
     #[test]
