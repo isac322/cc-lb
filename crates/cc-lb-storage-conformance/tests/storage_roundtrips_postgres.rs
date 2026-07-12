@@ -7,7 +7,11 @@ mod request_event_quota_postgres;
 
 request_event_quota_postgres::define_request_event_quota_postgres_tests!();
 
-use std::{future::Future, str::FromStr, sync::Arc};
+use std::{
+    future::Future,
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use cc_lb_engine::{ClockHandle, SystemClock, TestClock};
@@ -41,6 +45,8 @@ struct PostgresFixture {
     schema: String,
     pool: PgPool,
 }
+
+static PRICE_CATALOG_SCENARIO_LOCK: Mutex<()> = Mutex::new(());
 
 #[async_trait]
 impl ConformanceBackend for PostgresConformanceBackend {
@@ -107,6 +113,25 @@ impl ConformanceBackend for PostgresConformanceBackend {
 
     fn kind(&self) -> BackendKind {
         BackendKind::Postgres
+    }
+}
+
+#[async_trait]
+impl price_catalog::PriceCatalogCorruptionBackend for PostgresConformanceBackend {
+    async fn corrupt_latest_price_catalog_hash(
+        &self,
+        fixture: &Self::Fixture,
+    ) -> anyhow::Result<()> {
+        let result = sqlx::query(
+            "UPDATE price_catalog_snapshots_v1 SET payload_hash = $1 \
+             WHERE id = (SELECT id FROM price_catalog_snapshots_v1 \
+             ORDER BY fetched_at_ms DESC, id DESC LIMIT 1)",
+        )
+        .bind("corrupted-payload-hash")
+        .execute(&fixture.pool)
+        .await?;
+        anyhow::ensure!(result.rows_affected() == 1, "expected one corrupted row");
+        Ok(())
     }
 }
 
@@ -383,7 +408,7 @@ prompt_cache_observation_postgres_test!(
 
 #[test]
 fn price_catalog_roundtrip_smoke_postgres() {
-    run_postgres_scenario(
+    run_postgres_price_scenario(
         "price_catalog_roundtrip_smoke",
         price_catalog::roundtrip_smoke,
     );
@@ -391,10 +416,29 @@ fn price_catalog_roundtrip_smoke_postgres() {
 
 #[test]
 fn price_catalog_put_same_payload_twice_updates_fetched_at_postgres() {
-    run_postgres_scenario(
+    run_postgres_price_scenario(
         "price_catalog_put_same_payload_twice_updates_fetched_at",
         price_catalog::put_same_payload_twice_updates_fetched_at,
     );
+}
+
+#[test]
+fn price_catalog_corrupted_payload_hash_is_rejected_postgres() {
+    run_postgres_price_scenario(
+        "price_catalog_corrupted_payload_hash_is_rejected",
+        price_catalog::corrupted_payload_hash_is_rejected,
+    );
+}
+
+fn run_postgres_price_scenario<F, Fut>(name: &str, scenario: F)
+where
+    F: FnOnce(Arc<PostgresConformanceBackend>) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    let _guard = PRICE_CATALOG_SCENARIO_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    run_postgres_scenario(name, scenario);
 }
 
 fn run_postgres_scenario<F, Fut>(name: &str, scenario: F)

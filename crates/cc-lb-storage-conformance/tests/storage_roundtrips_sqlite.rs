@@ -63,6 +63,27 @@ impl ConformanceBackend for SqliteConformanceBackend {
     }
 }
 
+#[async_trait]
+impl price_catalog::PriceCatalogCorruptionBackend for SqliteConformanceBackend {
+    async fn corrupt_latest_price_catalog_hash(
+        &self,
+        fixture: &Self::Fixture,
+    ) -> anyhow::Result<()> {
+        let pool = sqlx::SqlitePool::connect(&fixture.database_url).await?;
+        let result = sqlx::query(
+            "UPDATE price_catalog_snapshots_v1 SET payload_hash = ? \
+             WHERE id = (SELECT id FROM price_catalog_snapshots_v1 \
+             ORDER BY fetched_at_ms DESC, id DESC LIMIT 1)",
+        )
+        .bind("corrupted-payload-hash")
+        .execute(&pool)
+        .await?;
+        pool.close().await;
+        anyhow::ensure!(result.rows_affected() == 1, "expected one corrupted row");
+        Ok(())
+    }
+}
+
 #[test]
 fn storage_roundtrips_sqlite() {
     run_sqlite_scenario("storage_roundtrips", storage_roundtrips::run_all);
@@ -412,6 +433,14 @@ fn price_catalog_put_same_payload_twice_updates_fetched_at_sqlite() {
     run_sqlite_scenario(
         "price_catalog_put_same_payload_twice_updates_fetched_at",
         price_catalog::put_same_payload_twice_updates_fetched_at,
+    );
+}
+
+#[test]
+fn price_catalog_corrupted_payload_hash_is_rejected_sqlite() {
+    run_sqlite_scenario(
+        "price_catalog_corrupted_payload_hash_is_rejected",
+        price_catalog::corrupted_payload_hash_is_rejected,
     );
 }
 
