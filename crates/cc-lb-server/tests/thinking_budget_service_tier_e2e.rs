@@ -46,14 +46,9 @@ async fn thinking_enabled_and_priority_tier_are_persisted_after_proxy_request() 
     });
 
     // When
-    let response = common::http_post(
-        server.proxy_addr,
-        "/v1/messages",
-        &request.to_string(),
-        &[],
-    )
-    .await
-    .expect("send thinking request through cc-lb proxy");
+    let response = common::http_post(server.proxy_addr, "/v1/messages", &request.to_string(), &[])
+        .await
+        .expect("send thinking request through cc-lb proxy");
 
     // Then
     assert_eq!(response.status, 200);
@@ -85,14 +80,9 @@ async fn absent_thinking_and_standard_tier_are_persisted_after_proxy_request() {
     });
 
     // When
-    let response = common::http_post(
-        server.proxy_addr,
-        "/v1/messages",
-        &request.to_string(),
-        &[],
-    )
-    .await
-    .expect("send standard request through cc-lb proxy");
+    let response = common::http_post(server.proxy_addr, "/v1/messages", &request.to_string(), &[])
+        .await
+        .expect("send standard request through cc-lb proxy");
 
     // Then
     assert_eq!(response.status, 200);
