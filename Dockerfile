@@ -95,17 +95,6 @@ echo 'nonroot:x:65532:65532:nonroot:/home/nonroot:/sbin/nologin' > /out/etc/pass
 echo 'nonroot:x:65532:' > /out/etc/group
 EOF
 
-# ---- Runtime base: distroless config shared by the final images ----
-# Ships /etc/passwd, a nonroot user (65532), /tmp, and CA certs — a safe,
-# debuggable base while staying ~2 MB over the static binary. Digest-pinned for
-# reproducible builds (:nonroot is a rolling tag); bump it alongside the other
-# base images (freshen-deps).
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240 AS runtime-base
-USER 65532:65532
-EXPOSE 8080 9090 9091
-ENTRYPOINT ["/usr/local/bin/cc-lb"]
-CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
-
 # ---- Final: scratch (opt-in via `--target runtime-scratch`; smallest image) ----
 FROM scratch AS runtime-scratch
 COPY --link --from=builder /out/etc/passwd /etc/passwd
@@ -117,5 +106,13 @@ ENTRYPOINT ["/usr/local/bin/cc-lb"]
 CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
 
 # ---- Final: distroless static (DEFAULT target) ----
-FROM runtime-base AS distroless
+# Ships /etc/passwd, a nonroot user (65532), /tmp, and CA certs — a safe,
+# debuggable base ~2 MB over the static binary. Digest-pinned for reproducible
+# builds (:nonroot is a rolling tag); bump alongside the other base images
+# (freshen-deps).
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240 AS distroless
 COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
+USER 65532:65532
+EXPOSE 8080 9090 9091
+ENTRYPOINT ["/usr/local/bin/cc-lb"]
+CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
