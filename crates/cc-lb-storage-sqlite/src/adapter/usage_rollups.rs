@@ -163,17 +163,7 @@ impl UsageRollupStore for SqliteStorage {
     }
 
     async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
-        let value = sqlx::query_scalar::<_, i64>(
-            "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = ?",
-        )
-        .bind(CHECKPOINT_ID)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-
-        value
-            .map(|value| i64_to_u64(value, "usage rollup checkpoint"))
-            .transpose()
+        read_checkpoint(self.pool()).await
     }
 
     async fn advance_rollup_checkpoint_and_persist(
@@ -185,27 +175,23 @@ impl UsageRollupStore for SqliteStorage {
 }
 
 async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<UsageRollupRun> {
-    let mut tx = storage
-        .pool()
-        .begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(map_sqlx_error)?;
-
-    let previous_checkpoint = usage_rollup_checkpoint_in_tx(&mut tx).await?.unwrap_or(0);
+    // Phase A: read the checkpoint, the next batch of (append-only, immutable)
+    // request events, and the upstream identities WITHOUT holding the write
+    // lock. Each run processes a fixed id range (previous_checkpoint, max_id],
+    // so aggregation needs no write lock; only the additive upserts in Phase B
+    // do. This keeps the write lock off the JSON-parse/aggregate hot path.
+    let pool = storage.pool();
+    let previous_checkpoint = read_checkpoint(pool).await?.unwrap_or(0);
     let rows = sqlx::query(
         "SELECT id, payload, upstream_id FROM request_events_v1 WHERE id > ? ORDER BY id ASC LIMIT ?",
     )
-    .bind(u64_to_i64(
-        previous_checkpoint,
-        "usage rollup checkpoint",
-    )?)
+    .bind(u64_to_i64(previous_checkpoint, "usage rollup checkpoint")?)
     .bind(ROLLUP_BATCH_LIMIT)
-    .fetch_all(&mut *tx)
+    .fetch_all(pool)
     .await
     .map_err(map_sqlx_error)?;
 
     if rows.is_empty() {
-        tx.commit().await.map_err(map_sqlx_error)?;
         return Ok(UsageRollupRun {
             processed_events: 0,
             updated_rollups: 0,
@@ -213,7 +199,7 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
         });
     }
 
-    let upstreams = load_upstream_identities(&mut tx).await?;
+    let upstreams = load_upstream_identities(pool).await?;
     let mut max_id = previous_checkpoint;
     let mut deltas: BTreeMap<RollupKey, RollupDelta> = BTreeMap::new();
     for row in &rows {
@@ -248,6 +234,21 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
     let updated_rollups = u64::try_from(deltas.len()).map_err(|_| StorageError::Fatal {
         message: "usage rollup aggregate count cannot be represented as u64".to_owned(),
     })?;
+
+    // Phase B: short write transaction. Re-read the checkpoint under the write
+    // lock; if it advanced since Phase A a concurrent run already processed this
+    // id range, so bail instead of double-counting these additive deltas. This
+    // CAS is the single-flight guard that the previous whole-run write lock used
+    // to provide implicitly.
+    let mut tx = storage.begin_immediate().await?;
+    let current_checkpoint = read_checkpoint(&mut *tx).await?.unwrap_or(0);
+    if current_checkpoint != previous_checkpoint {
+        return Ok(UsageRollupRun {
+            processed_events: 0,
+            updated_rollups: 0,
+            checkpoint: Some(current_checkpoint),
+        });
+    }
 
     for (key, delta) in deltas {
         sqlx::query(
@@ -361,13 +362,14 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
     })
 }
 
-async fn usage_rollup_checkpoint_in_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-) -> StorageResult<Option<u64>> {
+async fn read_checkpoint<'e, E>(executor: E) -> StorageResult<Option<u64>>
+where
+    E: sqlx::Executor<'e, Database = Sqlite>,
+{
     let value =
         sqlx::query_scalar::<_, i64>("SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = ?")
             .bind(CHECKPOINT_ID)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(executor)
             .await
             .map_err(map_sqlx_error)?;
 
@@ -394,11 +396,14 @@ async fn persist_checkpoint_in_tx(
     Ok(())
 }
 
-async fn load_upstream_identities(
-    tx: &mut Transaction<'_, Sqlite>,
-) -> StorageResult<HashMap<String, UpstreamIdentity>> {
+async fn load_upstream_identities<'e, E>(
+    executor: E,
+) -> StorageResult<HashMap<String, UpstreamIdentity>>
+where
+    E: sqlx::Executor<'e, Database = Sqlite>,
+{
     let rows = sqlx::query("SELECT id, name FROM upstream_spec_v1 WHERE deleted_at IS NULL")
-        .fetch_all(&mut **tx)
+        .fetch_all(executor)
         .await
         .map_err(map_sqlx_error)?;
     let mut upstreams = HashMap::new();
