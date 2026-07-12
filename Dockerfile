@@ -116,6 +116,18 @@ xx-cargo build --release --locked \
   -p cc-lb-server \
   --no-default-features --features "${FEATURES}" \
   --target-dir /src/target
+# Tear sccache down BEFORE any further xx-cargo/rustc call. With RUSTC_WRAPPER
+# still set, the next call (target-triple detection) routes through the sccache
+# server while it is flushing its cold-cache S3 upload backlog, which hangs the
+# build for hours. Bound the flush + force-kill the lingering server so it can't
+# stall the RUN, then run the remaining steps uncached (the compile's cache
+# stores already happened during the build above).
+if [ -n "${RUSTC_WRAPPER:-}" ]; then
+  timeout 60 sccache --show-stats || true
+  timeout 60 sccache --stop-server || true
+  pkill -9 sccache 2>/dev/null || true
+  unset RUSTC_WRAPPER
+fi
 triple="$(xx-cargo --print-target-triple)"
 install -Dm0755 "/src/target/${triple}/release/cc-lb" /out/cc-lb
 xx-verify --static /out/cc-lb
@@ -123,13 +135,6 @@ xx-verify --static /out/cc-lb
 install -d /out/etc
 echo 'nonroot:x:65532:65532:nonroot:/home/nonroot:/sbin/nologin' > /out/etc/passwd
 echo 'nonroot:x:65532:' > /out/etc/group
-# Stop the sccache server LAST: SCCACHE_IDLE_TIMEOUT=0 makes it linger and keep
-# the BuildKit RUN open, and a cold-cache S3 flush can block, so bound both with
-# timeout (the binary is already extracted above, so a slow flush can't lose it).
-if [ -n "${RUSTC_WRAPPER:-}" ]; then
-  timeout 60 sccache --show-stats || true
-  timeout 180 sccache --stop-server || true
-fi
 EOF
 
 # ---- Final: scratch (opt-in via `--target runtime-scratch`; smallest image) ----
