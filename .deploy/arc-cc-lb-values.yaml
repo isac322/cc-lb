@@ -19,7 +19,7 @@ template:
           - name: dind-externals
             mountPath: /home/runner/tmpDir
       - name: toolcache-perms
-        image: busybox:1.36
+        image: busybox:1.38
         command: ["sh", "-c", "mkdir -p /opt/hostedtoolcache /opt/rustup && chown 1001:1001 /opt/hostedtoolcache /opt/rustup"]
         securityContext:
           runAsUser: 0

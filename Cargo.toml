@@ -25,7 +25,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.96.0"
+rust-version = "1.97.0"
 
 [workspace.dependencies]
 cc-lb-domain = { path = "crates/cc-lb-domain", version = "0.1.0" }
@@ -51,7 +51,7 @@ wasmtime  = "46"
 rkyv      = { version = "0.8", default-features = false }
 bytecheck = { version = "0.8", default-features = false }
 blake3    = { version = "1", default-features = false }
-wasmparser = "0.252"
+wasmparser = "0.253"
 
 anyhow = "1"
 arc-swap = "1"
