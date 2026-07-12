@@ -20,13 +20,12 @@ template:
             mountPath: /home/runner/tmpDir
       - name: toolcache-perms
         image: busybox:1.36
-        command: ["sh", "-c", "mkdir -p /opt/hostedtoolcache /opt/rustup /opt/sccache && chown 1001:1001 /opt/hostedtoolcache /opt/rustup /opt/sccache"]
+        command: ["sh", "-c", "mkdir -p /opt/hostedtoolcache /opt/rustup && chown 1001:1001 /opt/hostedtoolcache /opt/rustup"]
         securityContext:
           runAsUser: 0
         volumeMounts:
           - {name: tool-cache, mountPath: /opt/hostedtoolcache}
           - {name: rustup-home, mountPath: /opt/rustup}
-          - {name: sccache-cache, mountPath: /opt/sccache}
     containers:
       - name: runner
         image: ghcr.io/isac322/cc-lb-actions-runner:2.334.0-cclb-1
@@ -48,16 +47,25 @@ template:
             value: "120"
           - name: CUSTOM_ACTIONS_RESULTS_URL
             value: http://gha-cache-server.arc-systems.svc.cluster.local:3000/
-          # Shared sccache compiler cache via node hostPath (single node): every
-          # job's sccache server reads/writes one content-addressed store, so
-          # parallel jobs share compilations (~98% cross-job hits, 0 errors -
-          # verified under concurrent multi-server access) at a few GB instead of
-          # per-job target tarballs. SCCACHE_BASEDIRS (set by setup-rust-cache)
-          # normalises per-job workspace paths so artifacts hit across jobs.
-          - name: SCCACHE_DIR
-            value: /opt/sccache
-          - name: SCCACHE_CACHE_SIZE
-            value: "20G"
+          # Shared sccache compiler cache backed by garage (S3) so it can be shared
+          # across MULTIPLE nodes (a node hostPath cache is single-node only). Every
+          # runner's sccache server reads/writes one garage bucket. SCCACHE_BASEDIRS
+          # (set by setup-rust-cache) normalises per-job workspace paths so artifacts
+          # hit across jobs. Creds come from the sccache-s3-creds secret.
+          - name: SCCACHE_BUCKET
+            value: sccache
+          - name: SCCACHE_ENDPOINT
+            value: http://garage.arc-systems.svc.cluster.local:3900
+          - name: SCCACHE_S3_USE_SSL
+            value: "off"
+          - name: SCCACHE_REGION
+            value: garage
+          - name: AWS_ACCESS_KEY_ID
+            valueFrom:
+              secretKeyRef: {name: sccache-s3-creds, key: AWS_ACCESS_KEY_ID}
+          - name: AWS_SECRET_ACCESS_KEY
+            valueFrom:
+              secretKeyRef: {name: sccache-s3-creds, key: AWS_SECRET_ACCESS_KEY}
           # --- target 축소 (무위험 디스크 이득: incremental 캐시 제거 + 디버그 심볼 축소) ---
           - name: CARGO_INCREMENTAL
             value: "0"
@@ -68,7 +76,6 @@ template:
         volumeMounts:
           - {name: tool-cache, mountPath: /opt/hostedtoolcache}
           - {name: rustup-home, mountPath: /opt/rustup}
-          - {name: sccache-cache, mountPath: /opt/sccache}
           - {name: work, mountPath: /home/runner/_work}
           - {name: dind-sock, mountPath: /var/run}
       - name: dind
@@ -103,7 +110,5 @@ template:
         hostPath: {path: /opt/actions-tool-cache, type: DirectoryOrCreate}
       - name: rustup-home
         hostPath: {path: /opt/actions-rustup, type: DirectoryOrCreate}
-      - name: sccache-cache
-        hostPath: {path: /opt/actions-sccache, type: DirectoryOrCreate}
       - name: registry-proxy-ca
         configMap: {name: registry-proxy-ca}

@@ -27,10 +27,10 @@ runs:
       uses: mozilla-actions/sccache-action@v0.0.10
       continue-on-error: true
 
-    # No actions/cache round-trip: sccache stores into a node-shared hostPath
-    # (SCCACHE_DIR=/opt/sccache, set on the runner) so every job on the node
-    # shares one content-addressed compiler cache. SCCACHE_DIR / SCCACHE_CACHE_SIZE
-    # come from the runner env (.deploy/arc-cc-lb-values.yaml).
+    # No actions/cache round-trip: sccache stores into a shared garage (S3) bucket
+    # (SCCACHE_BUCKET/ENDPOINT + AWS creds set on the runner) so every runner —
+    # across nodes — shares one content-addressed compiler cache. The backend
+    # config comes from the runner env (.deploy/arc-cc-lb-values.yaml).
     - name: Export Rust compiler cache env
       if: steps.sccache-setup.outcome == 'success'
       shell: bash
