@@ -9,6 +9,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use cc_lb_admin::internal_partials::{InternalPartialsState, router as internal_partials_router};
+use cc_lb_admin::ports::{RetainedPartialPort, RetainedPartialSnapshot};
 use cc_lb_control::{BusReceiver, RequestEventBus};
 use cc_lb_engine::{
     ClockHandle, InMemoryBus, PartialRetentionCache, PgListener, PgNotifier, SystemClock,
@@ -33,6 +34,24 @@ static POSTGRES_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 static METRICS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+
+struct TestRetainedPartialPort {
+    cache: PartialRetentionCache,
+}
+
+impl TestRetainedPartialPort {
+    const fn new(cache: PartialRetentionCache) -> Self {
+        Self { cache }
+    }
+}
+
+impl RetainedPartialPort for TestRetainedPartialPort {
+    fn retained_partial(&self, event_id: &str) -> Option<RetainedPartialSnapshot> {
+        self.cache
+            .get(event_id)
+            .map(|payload| RetainedPartialSnapshot { payload })
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn truncated_partial_http_fallback_reaches_consumer_bus() -> TestResult<()> {
@@ -77,7 +96,7 @@ async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let producer_url = format!("http://{}", listener.local_addr()?);
     let app = internal_partials_router(InternalPartialsState {
-        retention: retention.clone(),
+        retention: Arc::new(TestRetainedPartialPort::new(retention.clone())),
         cluster_token: producer_token.to_owned(),
     });
     let (http_shutdown_tx, http_shutdown_rx) = oneshot::channel();
