@@ -22,10 +22,12 @@ use std::collections::HashMap;
 
 use super::*;
 
+mod fable_pressure;
+mod fable_salt;
+
 const SONNET_MODEL: &str = "claude-sonnet-4-5-20250929";
 const OPUS_MODEL: &str = "claude-opus-4-8-20250514";
 const HAIKU_MODEL: &str = "claude-haiku-4-5-20251001";
-const FABLE_MODEL: &str = "claude-fable-5";
 const DATED_FABLE_LIKE_MODEL: &str = "claude-fable-5-20260701";
 const FUTURE_FABLE_LIKE_MODEL: &str = "claude-fable-6";
 const UNKNOWN_MODEL: &str = "claude-unknown-model";
@@ -445,6 +447,7 @@ fn fable_request_blocks_oauth_with_exhausted_7d_fable_window() {
             fresh(WINDOW_SEVEN_DAY_FABLE)
                 .util(1.0)
                 .status("rejected")
+                .reset_at(T0_SECS + 302_400)
                 .build(),
         ],
     );

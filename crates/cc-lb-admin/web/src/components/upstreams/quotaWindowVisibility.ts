@@ -126,3 +126,37 @@ export function selectQuotaCardSnapshots({
   }
   return result;
 }
+
+/**
+ * Windows the sidebar mini meters should render. `5h` and `7d` are always shown.
+ * `7d_fable` is shown if it exists, is not missing, and was observed within the last week.
+ * Overage keeps its existing enabled/limit gate.
+ */
+export function selectSidebarQuotaWindows({
+  latestWindows,
+  nowUnixSecs,
+}: QuotaCardSnapshotsInput): string[] {
+  const result: string[] = ['5h', '7d'];
+  if (!latestWindows) return result;
+
+  const byWindow = new Map<string, QuotaSnapshot>(
+    latestWindows.map((snap) => [snap.window, snap]),
+  );
+  const staleCutoffUnixSecs = nowUnixSecs - MODEL_WINDOW_MAX_AGE_SECS;
+
+  const fableSnap = byWindow.get('7d_fable');
+  if (
+    fableSnap &&
+    fableSnap.state !== 'missing' &&
+    isObservedAtOrAfter(fableSnap.observed_at_unix_millis, staleCutoffUnixSecs)
+  ) {
+    result.push('7d_fable');
+  }
+
+  const overageSnap = byWindow.get('overage');
+  if (overageSnap && isOverageActive(overageSnap)) {
+    result.push('overage');
+  }
+
+  return result;
+}

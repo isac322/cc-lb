@@ -83,11 +83,10 @@ async fn canonical_non_stream_429_records_structured_error_and_preserves_client_
 }
 
 #[tokio::test]
-async fn noncanonical_non_stream_429_keeps_only_broad_error_classification()
+async fn noncanonical_non_stream_429_captures_raw_body_as_error_message()
 -> Result<(), Box<dyn std::error::Error>> {
     // Given
-    let controls = [
-        Bytes::new(),
+    let raw_bodies = [
         Bytes::from_static(b"not-json"),
         Bytes::from_static(
             br#"{"type":"message","error":{"type":"rate_limit_error","message":"no"}}"#,
@@ -97,14 +96,55 @@ async fn noncanonical_non_stream_429_keeps_only_broad_error_classification()
     ];
 
     // When / Then
-    for upstream_body in controls {
+    for upstream_body in raw_bodies {
         let observed = observe_non_stream_429(upstream_body.clone()).await?;
         assert_eq!(observed.status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(observed.body, upstream_body);
         assert_eq!(observed.event.error_code.as_deref(), Some("upstream_4xx"));
         assert_eq!(observed.event.upstream_error_type, None);
-        assert_eq!(observed.event.upstream_error_message, None);
+        assert_eq!(
+            observed.event.upstream_error_message.as_deref(),
+            Some(std::str::from_utf8(&upstream_body).expect("test bodies are utf8")),
+        );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn empty_non_stream_429_records_no_error_body() -> Result<(), Box<dyn std::error::Error>> {
+    // Given / When
+    let observed = observe_non_stream_429(Bytes::new()).await?;
+
+    // Then
+    assert_eq!(observed.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(observed.event.error_code.as_deref(), Some("upstream_4xx"));
+    assert_eq!(observed.event.upstream_error_type, None);
+    assert_eq!(observed.event.upstream_error_message, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn oversized_non_stream_429_truncates_captured_error_body()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let upstream_body = Bytes::from(vec![b'x'; 10 * 1024]);
+
+    // When
+    let observed = observe_non_stream_429(upstream_body.clone()).await?;
+
+    // Then
+    assert_eq!(observed.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(observed.body, upstream_body);
+    let message = observed
+        .event
+        .upstream_error_message
+        .expect("raw error body captured");
+    assert!(message.len() <= 8 * 1024, "message stays within cap");
+    assert!(
+        message.ends_with("...[truncated]"),
+        "oversized body is marked truncated"
+    );
+    assert_eq!(observed.event.upstream_error_type, None);
     Ok(())
 }
 
@@ -161,6 +201,28 @@ async fn canonical_non_stream_429_exposes_only_broad_error_to_observe_plugin()
     Ok(())
 }
 
+#[tokio::test]
+async fn noncanonical_stream_429_captures_raw_body_as_error_message()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let upstream_body =
+        Bytes::from_static(br#"{"type":"error","error":{"message":"missing type"}}"#);
+
+    // When
+    let observed = observe_429(true, upstream_body.clone()).await?;
+
+    // Then
+    assert_eq!(observed.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(observed.body, upstream_body);
+    assert_eq!(observed.event.error_code.as_deref(), Some("upstream_4xx"));
+    assert_eq!(observed.event.upstream_error_type, None);
+    assert_eq!(
+        observed.event.upstream_error_message.as_deref(),
+        Some(std::str::from_utf8(&upstream_body).expect("test body is utf8")),
+    );
+    Ok(())
+}
+
 struct ObservedErrorResponse {
     status: StatusCode,
     body: Bytes,
@@ -169,6 +231,13 @@ struct ObservedErrorResponse {
 }
 
 async fn observe_non_stream_429(
+    upstream_body: Bytes,
+) -> Result<ObservedErrorResponse, Box<dyn std::error::Error>> {
+    observe_429(false, upstream_body).await
+}
+
+async fn observe_429(
+    client_stream: bool,
     upstream_body: Bytes,
 ) -> Result<ObservedErrorResponse, Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
@@ -196,11 +265,12 @@ async fn observe_non_stream_429(
         hook.clone(),
     )
     .with_event_bus(test_bus.bus_arc());
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
-        .await?;
+    let request_body = if client_stream {
+        Bytes::from_static(br#"{"model":"claude-test","messages":[],"stream":true}"#)
+    } else {
+        Bytes::from_static(br#"{"model":"claude-test","messages":[],"stream":false}"#)
+    };
+    let response = lifecycle.handle(messages_request(request_body)).await?;
     let (status, _headers, body) = collect_body(response).await;
     let event = timeout(Duration::from_secs(1), async {
         loop {

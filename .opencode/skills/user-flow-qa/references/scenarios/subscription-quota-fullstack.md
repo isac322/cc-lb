@@ -44,7 +44,7 @@ Alternative (no full instance): mutate `$TDB` with §2 SQL, then run point-in-ti
 
 ```
 Ingestion (3 origins):
-  (a) periodic OAuth usage poller   -> source = "api" (ingests active `limits[]` entries where `kind = "weekly_scoped"`, model display name is "Fable", and `is_active = true`; inactive or non-Fable scoped limits are ignored)
+  (a) periodic OAuth usage poller   -> source = "api" (PR #394 ingests `limits[]` entries where `kind = "weekly_scoped"` and model display name is "Fable" regardless of `is_active`; `is_active` only identifies the currently binding limit and is not an ingestion gate)
   (b) proxy response headers (live) -> source = "header" (parses unified `7d_oi` headers)
   (c) admin POST /admin/v1/upstreams/{id}/warmup/fire-now -> real warmup, parses headers  (crates/cc-lb-admin/src/v1/upstreams.rs:101-103, 808-830)
         │  SubscriptionQuotaObservationRecord
@@ -161,8 +161,10 @@ Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoin
   - **EXPECTED**:
     - Storage: Checkpoints table gains new rows for 100% and reset.
     - API: `/latest` and `/series` reflect the transitions.
-    - Admin UI: Snapshot card and Quota History chart update live.
-    - Routing: When `7d_fable` is at 100%/rejected, requests for model `claude-fable-5` are blocked/deprioritized on this upstream, while control requests for `claude-3-5-sonnet`, `claude-3-opus`, `claude-3-haiku`, or unknown models remain completely unaffected (they only look at `5h` and `7d` windows). After reset, `claude-fable-5` requests are allowed again.
+    - Admin UI: Snapshot card, Quota History chart, and sidebar `Fable` meter update live from 28% to exhausted and then reset.
+    - Routing pressure: For exact `claude-fable-5`, trace `quota_urgency_7d` is effective weekly pressure `(U_7d^6 + U_fable^6)^(1/6)`, and `quota_urgency_combined` is `(U_5h^6 + U_weekly^6)^(1/6)`. Before exhaustion, increasing scoped use-it-or-lose-it pressure changes effective weight and selection share; missing/stale/malformed/elapsed scoped data contributes zero but leaves completeness partial.
+    - Routing eligibility: When `7d_fable` is at 100%/rejected, requests for model `claude-fable-5` are blocked/deprioritized on this upstream, while control requests for `claude-3-5-sonnet`, `claude-3-opus`, `claude-3-haiku`, dated/future Fable-like IDs, or unknown models remain completely unaffected (they only look at `5h` and `7d` windows). After reset, `claude-fable-5` requests are allowed again.
+    - Routing trace/profile: Exact Fable reports `rendezvous_salt_version = "v11-fable"`; controls remain `v11`. Overage fallback for every model remains on the v10 selection salt.
 
 ## 5. Automated-test coverage map (leverage; focus manual QA on gaps)
 - Endpoint contracts + series windowing/anchor/no-zeroes: `crates/cc-lb-admin/tests/subscription_quotas.rs` (snapshot + some multi-observation transition, including Fable tests).
@@ -170,7 +172,7 @@ Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoin
 - Cleanup/backfill idempotency + writer-continues-after-drop: `crates/cc-lb-server/tests/subscription_quota_checkpoint_{cleanup,backfill,writer}.rs`.
 - Storage roundtrips: `crates/cc-lb-storage-sqlite/tests/storage_roundtrips_sqlite.rs` (+ postgres).
 - Frontend chart transform + carry-forward/no-zeroes: `crates/cc-lb-admin/web/src/components/upstreams/buildQuotaChartData.test.ts`; card/legend: ApiUsageCard/QuotaObservedAt tests.
-- OAuth ingestion from active limits: `crates/cc-lb-server/src/scheduler_dispatch/usage/tests.rs`.
+- OAuth ingestion and PR #394 `is_active` semantics: `crates/cc-lb-server/src/scheduler_dispatch/usage/tests.rs` (`is_active` marks the binding limit; weekly-scoped Fable observations are ingested regardless).
 - Unified header parsing: `crates/cc-lb-engine/src/rate_limit_headers.rs`.
 - Fable routing preference: `crates/cc-lb-engine/src/builtin_filters/subscription_preference/tests.rs`.
 - Proxy path E2E: `crates/cc-lb-server/tests/claude_fable_5_proxy_path.rs`.

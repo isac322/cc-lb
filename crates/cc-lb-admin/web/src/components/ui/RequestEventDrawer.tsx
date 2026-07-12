@@ -69,11 +69,10 @@ function RequestDetail({
   const usageControl = useActiveSlice();
 
   const hasAnyToken =
-    event.input_tokens != null ||
-    event.output_tokens != null ||
-    event.cache_creation_input_tokens != null ||
-    event.cache_read_input_tokens != null ||
-    event.body_bytes != null;
+    (event.input_tokens ?? 0) > 0 ||
+    (event.output_tokens ?? 0) > 0 ||
+    (event.cache_creation_input_tokens ?? 0) > 0 ||
+    (event.cache_read_input_tokens ?? 0) > 0;
 
   const principalLabel = principalName ?? event.principal_id ?? DASH;
   const isPartial = event._phase === 'partial';
@@ -141,16 +140,16 @@ function RequestDetail({
           </DetailSection>
         ) : null}
 
-        <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-3 min-w-0">
-          {hasAnyToken ? (
+        {hasAnyToken ? (
+          <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-3 min-w-0">
             <DetailSection title="Tokens">
               <TokenPie event={event} control={usageControl} />
             </DetailSection>
-          ) : null}
-          <DetailSection title={isPartial ? 'Estimated Cost' : 'Cost'}>
-            <CostPie event={event} control={usageControl} />
-          </DetailSection>
-        </div>
+            <DetailSection title={isPartial ? 'Estimated Cost' : 'Cost'}>
+              <CostPie event={event} control={usageControl} />
+            </DetailSection>
+          </div>
+        ) : null}
 
         {event._phase === 'final' && event.body_bytes != null ? (
           <KvRow

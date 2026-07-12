@@ -27,7 +27,7 @@ Recent local SQLite inspection of the user-service database confirmed that provi
 
 ## Decision
 
-Replace the base-window quota pressure for stable base windows `5h` and `7d` with:
+Replace the base-window quota pressure for stable base windows `5h` and `7d`, and the exact `claude-fable-5` model's `7d_fable` window, with:
 
 ```text
 remaining_ratio_w = 1 - clamp(utilization_w, 0, 1)
@@ -49,9 +49,23 @@ smoothmax_p   = 6.0
 w7            = 1.0
 ```
 
-`floor` is a near-reset cap on the denominator. It is not a warning threshold and not an early-start threshold. `gamma_7d = 1.3` makes weekly pressure rise earlier and smoother than the linear 5h target. A missing, stale, missing-utilization, missing-reset, or already-elapsed base window contributes `0` to the base pressure vector.
+`7d_fable` uses the same length, gamma, and floor as shared `7d`. `floor` is a near-reset cap on the denominator. It is not a warning threshold and not an early-start threshold. `gamma_7d = 1.3` makes weekly pressure rise earlier and smoother than the linear 5h target. A missing, stale, missing-utilization, missing-reset, or already-elapsed base window contributes `0` to the base pressure vector. For exact Fable, such a scoped observation remains `Unknown` for tier completeness, so missing data produces `PartialBase` rather than being treated as known-neutral.
 
-Combine the two base-window pressures with weighted smoothmax:
+For exact canonical `claude-fable-5`, first combine shared and scoped weekly pressure symmetrically, then combine 5h and effective weekly pressure:
+
+```text
+U_weekly = (U_7d^p + U_fable^p)^(1/p)
+quota_pressure = (U_5h^p + (w7 * U_weekly)^p)^(1/p)
+```
+
+With `p = 6` and `w7 = 1`:
+
+```text
+U_weekly = (U_7d^6 + U_fable^6)^(1/6)
+quota_pressure = (U_5h^6 + U_weekly^6)^(1/6)
+```
+
+All other models retain the existing two-window weighted smoothmax because `7d_fable` is not relevant to them:
 
 ```text
 quota_pressure = (U_5h^p + (w7 * U_7d)^p)^(1/p)
@@ -104,7 +118,7 @@ Keep existing eligibility and safety behavior:
 - Tier order remains `KnownBase > PartialBase > Overage > UnknownProbe`.
 - Cache multiplier and cache-affinity key selection remain unchanged.
 
-Bump the subscription-preference salt and trace version from v10 to v11 so historical traces with old `quota_urgency` semantics are distinguishable from new traces.
+The existing non-Fable subscription-preference salt and trace version remain byte-identical `v11`. Exact canonical `claude-fable-5` uses a scoped salt containing the exact token `v11-fable` and reports `v11-fable` in `rendezvous_salt_version` for base, partial, and unknown-probe selection. Overage selection retains the frozen v10 salt for every model, including Fable.
 
 ## Trace and storage decision
 
@@ -128,7 +142,7 @@ Keep the existing `urgency` field as the effective WRH weight and keep the exist
 
 Field semantics are tier- and era-specific:
 
-- For every v11 `KnownBase` or `PartialBase` candidate, `quota_urgency_5h`, `quota_urgency_7d`, and `quota_urgency_combined` are `Some(value)`. Missing, stale, malformed, or elapsed windows use `Some(0.0)`, not `None`.
+- For every v11 or v11-fable `KnownBase` or `PartialBase` candidate, `quota_urgency_5h`, `quota_urgency_7d`, and `quota_urgency_combined` are `Some(value)`. For v11-fable, `quota_urgency_7d` is effective weekly pressure, not raw shared-7d pressure. Missing, stale, malformed, or elapsed windows contribute zero; an unusable scoped Fable observation also remains unknown for tier completeness.
 - For v11 `Overage` and `UnknownProbe` candidates, those three base-pressure fields are `None`. `quota_urgency` retains the existing raw overage urgency for `Overage` and is `0.0` for `UnknownProbe`.
 - `quota_weight_factor` contains the tier-specific factor actually multiplied into WRH: `1 + combined` or `1.0` for base tiers, existing raw overage urgency or `1.0` for `Overage`, and `1.0` for `UnknownProbe`.
 - `quota_uniform_fallback` reports whether that candidate's selected tier bucket used its uniform quota fallback.
@@ -166,7 +180,7 @@ Add SQLite migration `0048_request_events_quota_urgency.sql` with nullable `REAL
 
 ### Negative
 
-- Routing distribution changes immediately on deployment because the formula and salt change.
+- Exact Fable routing distribution changes immediately on deployment because its formula and scoped salt change; non-Fable distribution does not move.
 - `quota_urgency` historical rows are not directly comparable across v10 and v11 without checking `rendezvous_salt_version`.
 - The formula is more complex than old burn pressure; tests must carry golden numeric examples for reviewability.
 - `1 + pressure` means quota pressure is a bias on top of a neutral baseline, not an absolute gate. This is intentional, but operators must read `quota_urgency_combined` rather than `effective_weight` to understand raw quota pressure.
@@ -194,21 +208,25 @@ Add SQLite migration `0048_request_events_quota_urgency.sql` with nullable `REAL
 Implementation must include local regression tests for:
 
 - Exact formula values for representative 5h and 7d scenarios.
+- Exact Fable weekly and final pressure values, including smoothmax being greater than max but less than raw sum and degeneration to shared 7d when scoped pressure is zero.
 - `gamma_7d = 1.3` producing earlier/smoother weekly pressure than gamma 1.
 - Near-reset floor cap: denominator never falls below `0.01`.
 - Missing/stale/elapsed base windows contributing zero pressure.
+- Missing/stale/malformed/elapsed Fable observations contributing zero while preserving `PartialBase` completeness semantics.
 - Capacity ratio changes not changing base quota pressure.
 - Cache multiplier outputs unchanged for fixed cache inputs.
 - Cache-hot on-pace candidates keeping finite effective weight through `1 + pressure`.
 - All-on-pace buckets using uniform quota factor `1.0` while still applying warning multiplier.
 - Warning-positive candidates retaining `WARNING_MULTIPLIER = 0.20` in mixed and uniform fallback cases.
+- Two otherwise-equal Fable candidates receiving different pressure, effective weights, and routing distribution from scoped weekly pressure.
 - All-candidate payload trace carrying U5/U7/combined/factor fields.
 - Historical v10 payload JSON deserializing with the documented compatibility defaults.
 - Winner and losing candidates carrying distinct per-candidate trace values.
 - Overage-tier scoring remaining identical to v10, including non-uniform urgency differentiation and uniform fallback.
 - Chosen-upstream request-event columns round-tripping through SQLite and Postgres adapters.
 - Direct SQL assertions proving all eight dedicated columns are written independently of payload JSON, remain `NULL` for a trace/upstream mismatch, and stay `NULL` for pre-migration/historical rows.
-- v11 salt/version appearing in trace and guard tests.
+- Exact Fable `v11-fable` salt/version and non-Fable fixed v11 winner/hash/trace invariance.
+- Overage selection retaining the v10 salt for Fable and non-Fable models.
 
 ## Future work
 

@@ -89,6 +89,50 @@ const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
 const DEFAULT_MAX_INPUT_ESTIMATE: i64 = 4000;
 
+/// Cap on the retained non-200 upstream error body: an admin-visible diagnostic
+/// that can echo request text, so the byte cap bounds the blast radius.
+const REQUEST_LOG_UPSTREAM_ERROR_BODY_MAX_BYTES: usize = 8 * 1024;
+const REQUEST_LOG_UPSTREAM_ERROR_BODY_TRUNCATION_MARKER: &str = "\n...[truncated]";
+
+fn append_bounded_upstream_error_body(buf: &mut Vec<u8>, chunk: &[u8], truncated: &mut bool) {
+    if *truncated || chunk.is_empty() {
+        return;
+    }
+    let remaining = REQUEST_LOG_UPSTREAM_ERROR_BODY_MAX_BYTES.saturating_sub(buf.len());
+    if chunk.len() <= remaining {
+        buf.extend_from_slice(chunk);
+    } else {
+        buf.extend_from_slice(&chunk[..remaining]);
+        *truncated = true;
+    }
+}
+
+/// Render bounded upstream error bytes as a lossy UTF-8 string, appending a
+/// truncation marker when the body was capped. The result never exceeds the byte
+/// cap and always ends on a UTF-8 char boundary.
+fn bounded_lossy_upstream_error_body(bytes: &[u8], truncated: bool) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let marker = REQUEST_LOG_UPSTREAM_ERROR_BODY_TRUNCATION_MARKER;
+    let needs_marker = truncated || text.len() > REQUEST_LOG_UPSTREAM_ERROR_BODY_MAX_BYTES;
+    let max_text_len = if needs_marker {
+        REQUEST_LOG_UPSTREAM_ERROR_BODY_MAX_BYTES.saturating_sub(marker.len())
+    } else {
+        REQUEST_LOG_UPSTREAM_ERROR_BODY_MAX_BYTES
+    };
+
+    let mut end = text.len().min(max_text_len);
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    let mut out = String::with_capacity(end + usize::from(needs_marker) * marker.len());
+    out.push_str(&text[..end]);
+    if needs_marker {
+        out.push_str(marker);
+    }
+    out
+}
+
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2675,6 +2719,16 @@ impl Lifecycle {
         } else {
             None
         };
+        let raw_upstream_error_message = if (status.is_client_error() || status.is_server_error())
+            && canonical_upstream_error.is_none()
+        {
+            semantic_body
+                .as_ref()
+                .filter(|body| !body.is_empty())
+                .map(|body| bounded_lossy_upstream_error_body(body, false))
+        } else {
+            None
+        };
         let mut downstream_body = body;
         let mut buffered_transform_error: Option<ResponseTransformError> = None;
         if let (Some(hook), Some(semantic_body)) = (
@@ -2798,6 +2852,14 @@ impl Lifecycle {
                         cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
                             event_id: o.event_id().to_owned(),
                             error_type,
+                            error_message,
+                        },
+                    );
+                } else if let Some(error_message) = raw_upstream_error_message {
+                    o.emit_lifecycle(
+                        cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                            event_id: o.event_id().to_owned(),
+                            error_type: String::new(),
                             error_message,
                         },
                     );
@@ -3093,6 +3155,8 @@ impl Lifecycle {
         } else {
             DownstreamStreamDropGuard::armed(observer.clone())
         };
+        let upstream_error_status = status.is_client_error() || status.is_server_error();
+        let parse_sse_events = !upstream_error_status || is_sse_response(&parts.headers);
         let stream = async_stream::stream! {
             let mut downstream_drop_guard = downstream_drop_guard;
             let mut usage_decoder = usage_decoder;
@@ -3119,6 +3183,9 @@ impl Lifecycle {
             let mut stream_transform_error: Option<ResponseTransformError> = None;
             let mut last_partial_at: Option<Instant> = None;
             let mut last_partial_output_tokens: u64 = 0;
+            let mut upstream_error_body: Vec<u8> = Vec::new();
+            let mut upstream_error_body_truncated = false;
+            let mut upstream_error_body_decode_failed = false;
             while let Some(frame) = body.frame().await {
                 match frame {
                     Ok(frame) => {
@@ -3131,13 +3198,25 @@ impl Lifecycle {
                             last_chunk_at = Some(now);
                             total_bytes = total_bytes.saturating_add(data.len() as u64);
                             match usage_decoder.push(&data) {
-                                Ok(plaintext) => buffer.extend_from_slice(&plaintext),
+                                Ok(plaintext) => {
+                                    if upstream_error_status {
+                                        append_bounded_upstream_error_body(
+                                            &mut upstream_error_body,
+                                            &plaintext,
+                                            &mut upstream_error_body_truncated,
+                                        );
+                                    }
+                                    if parse_sse_events {
+                                        buffer.extend_from_slice(&plaintext);
+                                    }
+                                }
                                 Err(error) => {
                                     tracing::warn!(
                                         request_id = %event_ctx.request_id,
                                         %error,
                                         "skipping streaming usage extraction: chunk decode failed"
                                     );
+                                        upstream_error_body_decode_failed = true;
                                         if sse_transform_active {
                                             if transformed_output_started {
                                             let transform_error = ResponseTransformError::Runtime {
@@ -3406,24 +3485,34 @@ impl Lifecycle {
             downstream_drop_guard.disarm();
             match usage_decoder.finish() {
                 Ok(tail) if !tail.is_empty() => {
-                    buffer.extend_from_slice(&tail);
-                    while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
-                        let raw = buffer.drain(..end).collect::<Vec<u8>>();
-                        let _ = accumulate_sse_usage(&raw, &mut usage);
-                        keepalive_response.observe(sse_event_name(&raw), &raw);
-                        if let Some(o) = observer.as_ref()
-                            && usage_parser::detect_mid_stream_error(&raw).is_some()
-                        {
-                            o.set_terminal(
-                                StatusCode::OK,
-                                error_codes::UPSTREAM_STREAM_ERROR,
-                            );
+                    if upstream_error_status {
+                        append_bounded_upstream_error_body(
+                            &mut upstream_error_body,
+                            &tail,
+                            &mut upstream_error_body_truncated,
+                        );
+                    }
+                    if parse_sse_events {
+                        buffer.extend_from_slice(&tail);
+                        while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
+                            let raw = buffer.drain(..end).collect::<Vec<u8>>();
+                            let _ = accumulate_sse_usage(&raw, &mut usage);
+                            keepalive_response.observe(sse_event_name(&raw), &raw);
+                            if let Some(o) = observer.as_ref()
+                                && usage_parser::detect_mid_stream_error(&raw).is_some()
+                            {
+                                o.set_terminal(
+                                    StatusCode::OK,
+                                    error_codes::UPSTREAM_STREAM_ERROR,
+                                );
+                            }
+                            sse_event_count = sse_event_count.saturating_add(1);
                         }
-                        sse_event_count = sse_event_count.saturating_add(1);
                     }
                 }
                 Ok(_) => {}
                 Err(error) => {
+                    upstream_error_body_decode_failed = true;
                     tracing::warn!(
                         request_id = %event_ctx.request_id,
                         %error,
@@ -3541,6 +3630,21 @@ impl Lifecycle {
                     elapsed_ms(first_chunk_at),
                 );
                 o.set_internal_errors(event_ctx.internal_errors.clone());
+                if upstream_error_status
+                    && !upstream_error_body_decode_failed
+                    && !upstream_error_body.is_empty()
+                {
+                    o.emit_lifecycle(
+                        cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                            event_id: o.event_id().to_owned(),
+                            error_type: String::new(),
+                            error_message: bounded_lossy_upstream_error_body(
+                                &upstream_error_body,
+                                upstream_error_body_truncated,
+                            ),
+                        },
+                    );
+                }
                 if stream_transform_error.is_some() {
                     o.set_terminal(StatusCode::OK, error_codes::UPSTREAM_STREAM_ERROR);
                 } else if !status.is_client_error() && !status.is_server_error() {

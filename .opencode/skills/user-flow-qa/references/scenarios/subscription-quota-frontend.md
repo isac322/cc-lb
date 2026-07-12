@@ -118,10 +118,10 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
 
 ### TC-6 — Upstreams sidebar mini quota meters
 - Surface: upstreams list; OAuth rows.
-- Expected: mini meter bars for active windows (5h, 7d, 7d_fable [only when data exists], +overage when enabled); state dot
+- Expected: mini meter bars for active windows (5h, 7d, 7d_fable [only when data exists and observed within the last week], +overage when enabled); state dot
   green(fresh)/amber(stale) with hint (state/source/observed); % text; overage utilization
   computed from `extra_usage_used_credits / extra_usage_monthly_limit` when `utilization` null.
-  Values agree with `latest`.
+  Values agree with `latest`. The `7d_fable` label must be exactly `Fable` (not `7d (Fable)`) to fit the 32px cell.
 
 ### TC-7 — ApiUsageCard (non-OAuth upstream)
 - Surface: detail of a `anthropic_api_key` upstream → "API Usage".
@@ -133,21 +133,23 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
 - Expected: renders relative observed time where snapshots appear; renders `—` when
   `observed_at_unix_millis` is null.
 
-### TC-9 — Fable 5 Quota Transition (Desktop & Mobile) (documented, not yet executed)
-- Surface: Upstream detail page → "Subscription Quota" section.
+### TC-9 — Fable 5 Quota Transition (Desktop & Mobile) (automated Playwright route-mocked transition executed; isolated real-backend/manual mutation not executed)
+- Surface: Upstream detail page → "Subscription Quota" section, and Upstreams sidebar.
 - Initial: OAuth upstream selected, no Fable data exists yet.
 - Steps:
   1. Open the upstream detail page on desktop (viewport 1280x800) and mobile (viewport 375x667).
-  2. Take a screenshot of the "Subscription Quota" section before any Fable data is seeded.
+  2. Take a screenshot of the "Subscription Quota" section and the sidebar before any Fable data is seeded.
   3. Seed/mutate a `7d_fable` checkpoint (e.g., 28% utilization).
   4. Wait for the poll interval (or trigger a reload/restart if testing `/latest` cache-served behavior).
   5. Observe the transition on both desktop and mobile viewports.
+  6. Push the `7d_fable` observation to > 1 week old, wait for poll, and observe the transition.
 - Expected:
-  - Before: The "7d (Fable)" card is completely hidden (conditional rendering when data is missing). The Quota History chart does not show the Fable line or legend item.
-  - After:
-    - On Desktop: The "7d (Fable)" card appears in the grid with 28% utilization, pink color, and correct observed-at text. The Quota History chart adds a pink line for `7d_fable` and a corresponding legend item.
+  - Before: The "7d (Fable)" card is completely hidden (conditional rendering when data is missing). The Quota History chart does not show the Fable line or legend item. The sidebar does not show the Fable mini meter.
+  - After seeding:
+    - On Desktop: The "7d (Fable)" card appears in the grid with 28% utilization, pink color, and correct observed-at text. The Quota History chart adds a pink line for `7d_fable` and a corresponding legend item. The sidebar adds a `Fable` mini meter.
     - On Mobile: The layout adapts gracefully (cards stack or wrap without clipping or horizontal overflow). The mini meters in the sidebar (if visible) or the detail cards are fully readable.
     - The transition occurs smoothly without layout shifts or broken elements.
+  - After aging > 1 week: The "7d (Fable)" card disappears. The sidebar `Fable` mini meter disappears. `5h` and `7d` remain visible.
 
 ### TC-10 — Range-scoped stale window visibility (Desktop & Mobile) (documented, not yet executed)
 - Surface: Upstream detail page → "Subscription Quota" → "Quota History" chart + snapshot card grid.
@@ -176,7 +178,7 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
 | 6  | Sidebar mini meters | **PASS** | /upstreams snapshot: per-window meters render (bh322yoo-max 5h 59% / 7d 72%, etc.) |
 | 7  | ApiUsageCard | N/A | non-OAuth surface, separate usage endpoint, code unchanged by fix |
 | 8  | QuotaObservedAt | **PASS** | relative observed-at "16초 전" rendered in TC-2 card; unit-tested |
-| 9  | Fable 5 Quota Transition | documented, not executed | TC-9 specs; Fable 5 model-scoped weekly quota transition case |
+| 9  | Fable 5 Quota Transition | **PASS** (automated Playwright route-mocked transition executed; isolated real-backend/manual mutation not executed) | TC-9 specs; Fable 5 model-scoped weekly quota transition case. Fresh responsive visual captures cover 1280/768/375. |
 | 10 | Range-scoped stale window visibility | documented, not executed | TC-10 specs; stale/out-of-range windows hidden from chart + model cards expire after 7d while 5h/7d always show |
 
 PASS = every executed TC meets Expected; the fix's target (TC-1) is the gating case.
