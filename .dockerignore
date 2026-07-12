@@ -36,11 +36,7 @@
 #    present. Its own `node_modules` / build output are (re)generated in-image.
 !crates/cc-lb-admin/web/**
 
-# 7) The shared compile script the `compiled` stage runs (also used by the
-#    docker-build CI `docker run`).
-!scripts/build-cc-lb.sh
-
-# 8) Re-exclude heavy or generated trees that the broad negations above would
+# 7) Re-exclude heavy or generated trees that the broad negations above would
 #    otherwise pull back in. `.dockerignore` does NOT consult `.gitignore`, so a
 #    local `target/` or `node_modules/` on disk must be excluded explicitly, and
 #    these rules come last so they win.
