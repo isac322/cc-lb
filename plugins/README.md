@@ -6,7 +6,7 @@ For the full plugin author reference (PDK macros, the seven wire functions, iden
 
 ## Directory layout
 
-Plugins are grouped by category. Each plugin is its own crate excluded from the workspace's default build; it targets `wasm32-unknown-unknown` or `wasm32-wasip1`.
+Plugins are grouped by category. Each plugin is its own workspace crate, targets `wasm32-unknown-unknown` or `wasm32-wasip1`, and depends on `cc-lb-pdk-wasmtime` for its guest runtime API.
 
 ```
 plugins/

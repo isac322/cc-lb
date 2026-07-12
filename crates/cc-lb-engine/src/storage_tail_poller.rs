@@ -2,17 +2,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cc_lb_request_log::StorageTailUpdate;
 use cc_lb_storage_api::{RequestEvent, RequestEventStore, RequestEventStreamFilters};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 
 const STORAGE_TAIL_PAGE_LIMIT: usize = 500;
-
-#[derive(Debug, Clone)]
-pub struct StorageTailUpdate {
-    pub cursor: u64,
-    pub event: RequestEvent,
-}
 
 pub struct StorageTailPoller<S: RequestEventStore + ?Sized> {
     storage: Arc<S>,

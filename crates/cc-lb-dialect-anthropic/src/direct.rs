@@ -1,6 +1,6 @@
-use cc_lb_plugin_api::{
-    DialectError, Principal, RequestContext, ShapedRequest, ShapedRequestBuilder, Upstream,
-    UpstreamDialect,
+use cc_lb_domain::{Principal, Upstream};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
 };
 use url::Url;
 
@@ -21,7 +21,7 @@ impl AnthropicDirectDialect {
 impl UpstreamDialect for AnthropicDirectDialect {
     fn shape(
         &self,
-        ctx: &RequestContext,
+        context: &DialectShapeContext,
         upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
@@ -35,12 +35,12 @@ impl UpstreamDialect for AnthropicDirectDialect {
             None => Url::parse(ANTHROPIC_API_BASE_URL)
                 .map_err(|source| DialectError::InvalidUrl { source })?,
         };
-        let url = compose_url(&base_url, &ctx.path, ctx.query.as_deref());
+        let url = compose_url(&base_url, &context.path, context.query.as_deref());
         Ok(builder.shaped_request(
             url,
-            ctx.method.clone(),
-            ctx.downstream_headers.clone(),
-            ctx.body_bytes.clone(),
+            context.method.clone(),
+            context.downstream_headers.clone(),
+            context.body_bytes.clone(),
         ))
     }
 }

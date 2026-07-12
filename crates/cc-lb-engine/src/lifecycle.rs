@@ -9,24 +9,30 @@ use async_trait::async_trait;
 use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_config::PromptCacheShadowConfig;
-use cc_lb_plugin_api::types::{
+use cc_lb_domain::{
     BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix,
-    CachePricingSummary, CacheScore, StageDecision, TerminalDecision, TtlClass, WarmCacheEntry,
+    CachePricingSummary, CacheScore, InternalError, InternalErrorKind, InternalErrorStage,
+    Principal, PrincipalKind, RoutingTrace, StageDecision, TerminalDecision, TerminalStrategy,
+    TtlClass, Upstream, UpstreamCandidate, UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
-use cc_lb_plugin_api::{
-    ApiKeyAwareSignerFactory, FilterError, FilterOutput, InternalError, InternalErrorKind,
-    InternalErrorStage, ObservabilityHook, ObserveEvent, Principal, PrincipalKind, RequestContext,
-    ResponseTransformError, RetryDecision, RouterPlugin, RoutingTrace, ShapedRequest,
-    ShapedRequestBuilder, SignedRequest, TerminalStrategy, TransformResponseRequest, Upstream,
-    UpstreamCandidate, UpstreamDialect, UpstreamError, UpstreamKind as CandidateUpstreamKind,
-    shape_request, sign_request,
+use cc_lb_observability::{ObservabilityHook, ObserveEvent};
+use cc_lb_quota::rate_limit_headers::parse_anthropic_rate_limit_headers;
+use cc_lb_request_log::{
+    HeaderSnapshot, RequestCacheBreakpoint, RequestCacheBreakpointSource,
+    RequestCacheLookbackPrefix,
 };
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RouteDecision, RouterPlugin};
 use cc_lb_storage_api::{
-    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
-    UpstreamRateLimitObservationRecord, UpstreamRecord,
-    types::{RequestCacheBreakpoint, RequestCacheBreakpointSource, StoredApiKeyRecord},
+    UpstreamRateLimitObservationRecord, UpstreamRecord, types::StoredApiKeyRecord,
     upstream::UpstreamKind as StorageUpstreamKind,
 };
+use cc_lb_upstream::{
+    ApiKeyAwareSignerFactory, DialectError, DialectShapeContext, ResponseTransformError,
+    RetryDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer,
+    TransformResponseRequest, UpstreamDialect, UpstreamError, shape_request, sign_request,
+};
+#[cfg(test)]
+use cc_lb_upstream::{SignerError, SignerFactory};
 use http::header::{CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -53,9 +59,7 @@ use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::prompt_cache_simulator::{
     V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheBlockSource, analyze_v3_prompt_cache,
 };
-use crate::rate_limit_headers::{
-    parse_anthropic_rate_limit_headers, parse_anthropic_unified_headers,
-};
+use crate::request_context::RequestContext;
 use crate::request_timing::{
     REQUEST_STAGE_TIMINGS, RequestStageTimings, finalize_connection_reused_if_unset,
 };
@@ -64,7 +68,7 @@ use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{LifecycleContext, error_codes};
 use crate::usage_decoder::{UsageDecoder, decode_full_body};
 use crate::usage_parser::{self, UsageCounts, accumulate_sse_usage, sse_event_name};
-use cc_lb_contract::{ReplicaIdentity, RequestEventBus};
+use cc_lb_control::RequestEventBus;
 use cc_lb_control::dynamic_view::{
     DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
 };
@@ -73,6 +77,7 @@ pub use cc_lb_control::{
     PromptCacheObservationInput, PromptCacheObservationSinkLike, PromptCacheThreadUsage,
     SubscriptionQuotaCacheLike,
 };
+use cc_lb_domain::ReplicaIdentity;
 use cc_lb_observability::{redact_internal_errors, truncate_reason};
 
 pub type Body = AxumBody;
@@ -517,7 +522,7 @@ fn eligible_ttls_for_entry(requested: TtlClass, entry: TtlClass) -> bool {
 #[cfg(test)]
 mod cache_score_tests {
     use super::{anthropic_family_cache_pricing_summary, build_cache_score};
-    use cc_lb_plugin_api::types::{
+    use cc_lb_domain::{
         BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, TtlClass,
         WarmCacheEntry,
     };
@@ -570,12 +575,12 @@ mod cache_score_tests {
             requested_ttl: TtlClass::Ephemeral5m,
             origin: BreakpointOrigin::Explicit,
             lookback_prefixes: vec![
-                cc_lb_plugin_api::types::CacheLookbackPrefix {
+                cc_lb_domain::CacheLookbackPrefix {
                     prefix_hash: "bp-2".to_owned(),
                     content_block_index: 2,
                     lookback_distance: 0,
                 },
-                cc_lb_plugin_api::types::CacheLookbackPrefix {
+                cc_lb_domain::CacheLookbackPrefix {
                     prefix_hash: "warm-0".to_owned(),
                     content_block_index: 0,
                     lookback_distance: 2,
@@ -984,7 +989,7 @@ mod cache_score_tests {
             prefix_token_count,
             requested_ttl,
             origin: BreakpointOrigin::Explicit,
-            lookback_prefixes: vec![cc_lb_plugin_api::types::CacheLookbackPrefix {
+            lookback_prefixes: vec![cc_lb_domain::CacheLookbackPrefix {
                 prefix_hash: format!("bp-{block_index}"),
                 content_block_index: block_index,
                 lookback_distance: 0,
@@ -1258,19 +1263,19 @@ pub(crate) fn decode_prompt_cache_observations_pure(
 
 pub(crate) fn prompt_cache_observations_to_wire(
     observations: &[DecodedPromptCacheObservation],
-) -> Vec<cc_lb_contract::PromptCacheObservationWire> {
+) -> Vec<cc_lb_lifecycle::PromptCacheObservationWire> {
     observations
         .iter()
-        .map(|observation| cc_lb_contract::PromptCacheObservationWire {
+        .map(|observation| cc_lb_lifecycle::PromptCacheObservationWire {
             prefix_hash: observation.prefix_hash.clone(),
             ttl_class: observation.ttl_class,
             expires_at_unix_secs: observation.expires_at_unix_secs,
             kind: match observation.kind {
                 DecodedPromptCacheObservationKind::Hit => {
-                    cc_lb_contract::PromptCacheObservationKindWire::Hit
+                    cc_lb_lifecycle::PromptCacheObservationKindWire::Hit
                 }
                 DecodedPromptCacheObservationKind::Write => {
-                    cc_lb_contract::PromptCacheObservationKindWire::Write
+                    cc_lb_lifecycle::PromptCacheObservationKindWire::Write
                 }
             },
             prefix_content_block_index: observation.prefix_content_block_index,
@@ -1287,7 +1292,7 @@ fn emit_prompt_cache_observations_produced(
     dropped_aborted: u32,
 ) {
     observer.emit_lifecycle(
-        cc_lb_contract::LifecycleEvent::PromptCacheObservationsProduced {
+        cc_lb_lifecycle::LifecycleEvent::PromptCacheObservationsProduced {
             event_id: observer.event_id().to_owned(),
             upstream_id: context.upstream_id,
             canonical_model_id: context.canonical_model_id.clone(),
@@ -1393,9 +1398,9 @@ pub struct AuthLimitSubject {
 }
 
 struct LimitRejectionInfo {
-    subject: cc_lb_contract::LimitSubject,
-    request_summary: cc_lb_contract::LimitRequestSummary,
-    route_summary: cc_lb_contract::RouteSummary,
+    subject: cc_lb_lifecycle::LimitSubject,
+    request_summary: cc_lb_lifecycle::LimitRequestSummary,
+    route_summary: cc_lb_lifecycle::RouteSummary,
     limit_violation: Option<String>,
     reason_label: String,
 }
@@ -1720,18 +1725,20 @@ impl Lifecycle {
             .request_id
             .clone()
             .unwrap_or_else(|| format!("preview-{}", Uuid::new_v4()));
-        let ctx = RequestContext {
-            request_id,
-            thread_id: cache_metadata.thread_id.clone(),
-            downstream_headers: input.headers,
-            method: http::Method::POST,
-            path: "/v1/messages".to_owned(),
-            query: None,
-            body_bytes: input.body_bytes,
-            cache_breakpoints,
-            canonical_model_id,
-            cache_pricing: cache_pricing_summary_for_model(&cache_metadata.canonical_model_id),
-        };
+        let ctx = RequestContext::builder()
+            .request_id(request_id)
+            .thread_id(cache_metadata.thread_id.clone())
+            .downstream_headers(input.headers)
+            .method(http::Method::POST)
+            .path("/v1/messages".to_owned())
+            .query(None)
+            .body_bytes(input.body_bytes)
+            .cache_breakpoints(cache_breakpoints)
+            .canonical_model_id(canonical_model_id)
+            .cache_pricing(cache_pricing_summary_for_model(
+                &cache_metadata.canonical_model_id,
+            ))
+            .build();
         let principal = Principal {
             id: input.principal_id,
             kind: PrincipalKind::ApiKey,
@@ -1819,9 +1826,9 @@ impl Lifecycle {
         if let Some(response) = body_too_large {
             if let Some(o) = observer.as_ref() {
                 let cap = body_cap_for_path(&self.config, &ctx.path);
-                o.emit_lifecycle(cc_lb_contract::LifecycleEvent::ParseCompleted {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                     event_id: o.event_id().to_owned(),
-                    result: Err(cc_lb_contract::ParseFailure::BodyTooLarge {
+                    result: Err(cc_lb_lifecycle::ParseFailure::BodyTooLarge {
                         limit_bytes: cap as u64,
                     }),
                 });
@@ -1832,9 +1839,9 @@ impl Lifecycle {
         }
         if ctx.path == "/v1/messages" && !ctx.body_bytes.is_empty() && !body_view.is_valid_json() {
             if let Some(o) = observer.as_ref() {
-                o.emit_lifecycle(cc_lb_contract::LifecycleEvent::ParseCompleted {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                     event_id: o.event_id().to_owned(),
-                    result: Err(cc_lb_contract::ParseFailure::InvalidJson),
+                    result: Err(cc_lb_lifecycle::ParseFailure::InvalidJson),
                 });
                 o.set_terminal(StatusCode::BAD_REQUEST, error_codes::INVALID_JSON);
                 o.finish();
@@ -1848,9 +1855,9 @@ impl Lifecycle {
         let mut cache_metadata =
             request_cache_metadata_from_value(&ctx.downstream_headers, body_view.value());
         if let Some(o) = observer.as_ref() {
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::ParseCompleted {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                 event_id: o.event_id().to_owned(),
-                result: Ok(cc_lb_contract::ParseInfo {
+                result: Ok(cc_lb_lifecycle::ParseInfo {
                     path: ctx.path.clone(),
                     method: ctx.method.to_string(),
                     model: body_view.model(),
@@ -1922,9 +1929,9 @@ impl Lifecycle {
                         ),
                     };
                     if let Some(o) = observer.as_ref() {
-                        o.emit_lifecycle(cc_lb_contract::LifecycleEvent::AuthCompleted {
+                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
                             event_id: o.event_id().to_owned(),
-                            result: Err(cc_lb_contract::AuthFailure::AuthenticationFailed {
+                            result: Err(cc_lb_lifecycle::AuthFailure::AuthenticationFailed {
                                 http_status: status.as_u16(),
                                 reason: Some(key_auth_failure_reason(&source).to_owned()),
                             }),
@@ -1939,9 +1946,9 @@ impl Lifecycle {
         let auth_ms = duration_to_ms(auth_start.elapsed());
         let principal_id = success.principal_id.clone();
         if let Some(o) = observer.as_ref() {
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::AuthCompleted {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
                 event_id: o.event_id().to_owned(),
-                result: Ok(cc_lb_contract::AuthInfo {
+                result: Ok(cc_lb_lifecycle::AuthInfo {
                     principal_id: principal_id.clone(),
                     key_id: Some(success.key_id.clone()),
                     principal_kind: Some(
@@ -1966,9 +1973,9 @@ impl Lifecycle {
                 "authenticated principal is unavailable",
             );
             if let Some(o) = observer.as_ref() {
-                o.emit_lifecycle(cc_lb_contract::LifecycleEvent::AuthCompleted {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
                     event_id: o.event_id().to_owned(),
-                    result: Err(cc_lb_contract::AuthFailure::PrincipalMissing {
+                    result: Err(cc_lb_lifecycle::AuthFailure::PrincipalMissing {
                         principal_id: principal_id.clone(),
                     }),
                 });
@@ -2005,9 +2012,9 @@ impl Lifecycle {
                 "router pipeline is unavailable for this request",
             );
             if let Some(o) = observer.as_ref() {
-                o.emit_lifecycle(cc_lb_contract::LifecycleEvent::RouteCompleted {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                     event_id: o.event_id().to_owned(),
-                    result: Err(cc_lb_contract::RouteFailure::RouterPipelineUnavailable),
+                    result: Err(cc_lb_lifecycle::RouteFailure::RouterPipelineUnavailable),
                     routing_trace: None,
                 });
                 o.set_terminal(
@@ -2092,9 +2099,9 @@ impl Lifecycle {
                 "no upstream route is configured for this request",
             );
             if let Some(o) = observer.as_ref() {
-                o.emit_lifecycle(cc_lb_contract::LifecycleEvent::RouteCompleted {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                     event_id: o.event_id().to_owned(),
-                    result: Err(cc_lb_contract::RouteFailure::RouteNotConfigured),
+                    result: Err(cc_lb_lifecycle::RouteFailure::RouteNotConfigured),
                     routing_trace: None,
                 });
                 o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::ROUTE_NOT_CONFIGURED);
@@ -2121,9 +2128,9 @@ impl Lifecycle {
                     "no upstream route is configured for this request",
                 );
                 if let Some(o) = observer.as_ref() {
-                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::RouteCompleted {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                         event_id: o.event_id().to_owned(),
-                        result: Err(cc_lb_contract::RouteFailure::RouteNotConfigured),
+                        result: Err(cc_lb_lifecycle::RouteFailure::RouteNotConfigured),
                         routing_trace: None,
                     });
                     o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::ROUTE_NOT_CONFIGURED);
@@ -2133,7 +2140,7 @@ impl Lifecycle {
             }
         };
         let dialect = cached.resolved_dialect(&route_dialect).clone();
-        let route = cc_lb_plugin_api::RouteDecision {
+        let route = RouteDecision {
             upstream_id: Some(resolved_upstream_id),
             upstream: route_upstream,
             dialect,
@@ -2159,9 +2166,9 @@ impl Lifecycle {
             ctx.thread_id.as_deref(),
         );
         if let Some(o) = observer.as_ref() {
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::RouteCompleted {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                 event_id: o.event_id().to_owned(),
-                result: Ok(cc_lb_contract::RouteInfo {
+                result: Ok(cc_lb_lifecycle::RouteInfo {
                     upstream_id: resolved_upstream_id,
                     upstream_name: router_chosen_upstream_name.clone(),
                     model: body_view.model(),
@@ -2217,8 +2224,8 @@ impl Lifecycle {
                     quota_uniform_fallback: selected_quota_candidate
                         .map(|candidate| candidate.quota_uniform_fallback),
                     wrh_key_source: subscription_trace.map(|trace| match trace.wrh_key_source {
-                        cc_lb_plugin_api::types::WrhKeySource::CacheHash => "cache_hash".to_owned(),
-                        cc_lb_plugin_api::types::WrhKeySource::RequestId => "request_id".to_owned(),
+                        cc_lb_domain::WrhKeySource::CacheHash => "cache_hash".to_owned(),
+                        cc_lb_domain::WrhKeySource::RequestId => "request_id".to_owned(),
                     }),
                     lineage_would_have_predicted_read_tokens: subscription_trace
                         .and_then(|trace| trace.lineage_would_have_predicted_read_tokens)
@@ -2255,9 +2262,9 @@ impl Lifecycle {
                 let status = response.status();
                 if let Some(o) = observer.as_ref() {
                     let proxy_setup_ms = duration_to_ms(started.elapsed());
-                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::LimitDecision {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
                         event_id: o.event_id().to_owned(),
-                        decision: cc_lb_contract::LimitDecisionKind::Rejected {
+                        decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
                             reason: info.reason_label,
                             subject: Some(info.subject),
                             request_summary: Some(info.request_summary),
@@ -2275,7 +2282,7 @@ impl Lifecycle {
         let limit_reserve_ms = duration_to_ms(limit_reserve_start.elapsed());
         if let Some(o) = observer.as_ref() {
             let decision = if let Some(limit) = active_limit.as_ref() {
-                cc_lb_contract::LimitDecisionKind::Reserved {
+                cc_lb_lifecycle::LimitDecisionKind::Reserved {
                     reservation_id: limit
                         .reservation
                         .as_ref()
@@ -2285,13 +2292,13 @@ impl Lifecycle {
                     limit_reserve_ms: Some(limit_reserve_ms),
                 }
             } else {
-                cc_lb_contract::LimitDecisionKind::Reserved {
+                cc_lb_lifecycle::LimitDecisionKind::Reserved {
                     reservation_id: String::new(),
                     amount: 0,
                     limit_reserve_ms: Some(limit_reserve_ms),
                 }
             };
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::LimitDecision {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
                 event_id: o.event_id().to_owned(),
                 decision,
             });
@@ -2329,7 +2336,7 @@ impl Lifecycle {
         let mut keepalive_shaped_body = None;
         let mut keepalive_discard_shaped_body = None;
         if let Some(o) = observer.as_ref() {
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::UpstreamAttempt {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt {
                 event_id: o.event_id().to_owned(),
                 attempt_num: 1,
                 upstream_id: resolved_upstream_id,
@@ -2357,7 +2364,7 @@ impl Lifecycle {
             Ok(response) => {
                 let status = response.status();
                 if let Some(o) = observer.as_ref() {
-                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::UpstreamResponseStarted {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
                         event_id: o.event_id().to_owned(),
                         status: status.as_u16(),
                         headers: header_snapshot_from(response.headers()),
@@ -2393,7 +2400,7 @@ impl Lifecycle {
             if let RetryDecision::Refresh { new_signer } = signer.on_unauthorized(&err).await {
                 attempt_timings.reset_attempt_stages();
                 if let Some(o) = observer.as_ref() {
-                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::UpstreamAttempt {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt {
                         event_id: o.event_id().to_owned(),
                         attempt_num: 2,
                         upstream_id: resolved_upstream_id,
@@ -2421,7 +2428,7 @@ impl Lifecycle {
                     Ok(response) => {
                         if let Some(o) = observer.as_ref() {
                             o.emit_lifecycle(
-                                cc_lb_contract::LifecycleEvent::UpstreamResponseStarted {
+                                cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
                                     event_id: o.event_id().to_owned(),
                                     status: response.status().as_u16(),
                                     headers: header_snapshot_from(response.headers()),
@@ -2514,7 +2521,7 @@ impl Lifecycle {
         view: &PrincipalView,
         ctx: &RequestContext,
         principal: &Principal,
-        route: &cc_lb_plugin_api::RouteDecision,
+        route: &RouteDecision,
         authn_success: &AuthnSuccess,
         body_view: &RequestBodyView,
     ) -> Result<Option<ActiveLimit>, LimitRejectionErr> {
@@ -2573,16 +2580,16 @@ impl Lifecycle {
                     &subject.principal_id,
                 );
                 let info = LimitRejectionInfo {
-                    subject: cc_lb_contract::LimitSubject {
+                    subject: cc_lb_lifecycle::LimitSubject {
                         principal_id: subject.principal_id.clone(),
                         key_id: subject.key_id.clone(),
                     },
-                    request_summary: cc_lb_contract::LimitRequestSummary {
+                    request_summary: cc_lb_lifecycle::LimitRequestSummary {
                         model: limit_request.model.clone(),
                         path: ctx.path.clone(),
                         method: ctx.method.as_str().to_owned(),
                     },
-                    route_summary: cc_lb_contract::RouteSummary {
+                    route_summary: cc_lb_lifecycle::RouteSummary {
                         upstream_name: audit_upstream_name(&route.upstream).to_owned(),
                     },
                     limit_violation,
@@ -2806,18 +2813,18 @@ impl Lifecycle {
         }
 
         if let Some(o) = observer.as_ref() {
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::UsageObserved {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                 event_id: o.event_id().to_owned(),
                 usage: to_usage_snapshot(&usage),
-                source: cc_lb_contract::UsageSource::NonStreamBody,
+                source: cc_lb_lifecycle::UsageSource::NonStreamBody,
             });
             let stream_result = if let Some(error) = buffered_transform_error.as_ref() {
-                Err(cc_lb_contract::StreamError {
+                Err(cc_lb_lifecycle::StreamError {
                     error_type: "response_transform_error".to_owned(),
                     error_message: error.to_string(),
                 })
             } else {
-                Ok(cc_lb_contract::StreamSuccess {
+                Ok(cc_lb_lifecycle::StreamSuccess {
                     usage: to_usage_snapshot(&usage),
                     sse_event_count: 0,
                     body_bytes: Some(downstream_body.len() as u64),
@@ -2826,7 +2833,7 @@ impl Lifecycle {
                     ..Default::default()
                 })
             };
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
                 event_id: o.event_id().to_owned(),
                 result: stream_result,
             });
@@ -2842,7 +2849,7 @@ impl Lifecycle {
                 if let Some(error) = canonical_upstream_error {
                     let (error_type, error_message) = error.into_parts();
                     o.emit_lifecycle(
-                        cc_lb_contract::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                        cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
                             event_id: o.event_id().to_owned(),
                             error_type,
                             error_message,
@@ -2850,7 +2857,7 @@ impl Lifecycle {
                     );
                 } else if let Some(error_message) = raw_upstream_error_message {
                     o.emit_lifecycle(
-                        cc_lb_contract::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                        cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
                             event_id: o.event_id().to_owned(),
                             error_type: String::new(),
                             error_message,
@@ -2896,9 +2903,9 @@ impl Lifecycle {
     ) {
         if let Some(o) = observer {
             o.set_internal_errors(internal_errors);
-            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::RouteCompleted {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                 event_id: o.event_id().to_owned(),
-                result: Err(cc_lb_contract::RouteFailure::RouteNoUpstreamAfterFilter),
+                result: Err(cc_lb_lifecycle::RouteFailure::RouteNoUpstreamAfterFilter),
                 routing_trace,
             });
             o.set_terminal(status, error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER);
@@ -2963,21 +2970,22 @@ impl Lifecycle {
             .or_else(|| header_to_string(&parts.headers, "x-request-id"))
             .unwrap_or_else(next_request_id);
 
-        let ctx = RequestContext {
-            request_id,
-            thread_id: None,
-            downstream_headers: {
-                strip_hop_by_hop(&mut parts.headers);
-                parts.headers
-            },
-            method: parts.method,
-            path,
-            query: parts.uri.query().map(ToOwned::to_owned),
-            body_bytes: body,
-            cache_breakpoints: Vec::new(),
-            canonical_model_id: String::new(),
-            cache_pricing: CachePricingSummary::default(),
+        let downstream_headers = {
+            strip_hop_by_hop(&mut parts.headers);
+            parts.headers
         };
+        let ctx = RequestContext::builder()
+            .request_id(request_id)
+            .thread_id(None)
+            .downstream_headers(downstream_headers)
+            .method(parts.method)
+            .path(path)
+            .query(parts.uri.query().map(ToOwned::to_owned))
+            .body_bytes(body)
+            .cache_breakpoints(Vec::new())
+            .canonical_model_id(String::new())
+            .cache_pricing(CachePricingSummary::default())
+            .build();
         (ctx, body_too_large)
     }
 
@@ -2987,9 +2995,9 @@ impl Lifecycle {
         dispatcher: &dyn UpstreamDispatch,
         ctx: &RequestContext,
         principal: &Principal,
-        route: &cc_lb_plugin_api::RouteDecision,
+        route: &RouteDecision,
         raw_passthrough_base_url: Option<&Url>,
-        signer: Arc<dyn cc_lb_plugin_api::Signer>,
+        signer: Arc<dyn Signer>,
         observer: Option<&LifecycleContext>,
         timings: &mut AttemptTimings,
         internal_errors: &mut Vec<InternalError>,
@@ -2997,9 +3005,10 @@ impl Lifecycle {
     ) -> Result<Response<Body>, Box<Response<Body>>> {
         let shape_start = Instant::now();
         *shaped_body_out = None;
+        let shape_context = ctx.dialect_shape_context();
         let (shaped, capture_shaped_body) = match shape_request(
             route.dialect.as_ref(),
-            ctx,
+            &shape_context,
             &route.upstream,
             principal,
         ) {
@@ -3246,9 +3255,9 @@ impl Lifecycle {
                                     && let Some(err) =
                                         usage_parser::detect_mid_stream_error(&raw)
                                 {
-                                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
+                                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
                                         event_id: o.event_id().to_owned(),
-                                        result: Err(cc_lb_contract::StreamError {
+                                        result: Err(cc_lb_lifecycle::StreamError {
                                             error_type: err.error_type.clone().unwrap_or_default(),
                                             error_message: err.error_message.clone().unwrap_or_default(),
                                         }),
@@ -3333,16 +3342,16 @@ impl Lifecycle {
                                 }
                                 if let Some(o) = observer.as_ref() {
                                     if usage_update.message_start_usage {
-                                        o.emit_lifecycle(cc_lb_contract::LifecycleEvent::UsageObserved {
+                                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                             event_id: o.event_id().to_owned(),
                                             usage: to_usage_snapshot(&usage),
-                                            source: cc_lb_contract::UsageSource::MessageStart,
+                                            source: cc_lb_lifecycle::UsageSource::MessageStart,
                                         });
                                     } else if usage_update.message_stop {
-                                        o.emit_lifecycle(cc_lb_contract::LifecycleEvent::UsageObserved {
+                                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                             event_id: o.event_id().to_owned(),
                                             usage: to_usage_snapshot(&usage),
-                                            source: cc_lb_contract::UsageSource::MessageStop,
+                                            source: cc_lb_lifecycle::UsageSource::MessageStop,
                                         });
                                     }
                                     let force_publish = usage_update.message_start_usage
@@ -3358,10 +3367,10 @@ impl Lifecycle {
                                         || tokens_since_last >= 100;
                                     if force_publish || throttle_ok {
                                         if !usage_update.message_start_usage && !usage_update.message_stop {
-                                            o.emit_lifecycle(cc_lb_contract::LifecycleEvent::UsageObserved {
+                                            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                                 event_id: o.event_id().to_owned(),
                                                 usage: to_usage_snapshot(&usage),
-                                                source: cc_lb_contract::UsageSource::MessageDelta,
+                                                source: cc_lb_lifecycle::UsageSource::MessageDelta,
                                             });
                                         }
                                         last_partial_at = Some(now);
@@ -3584,17 +3593,17 @@ impl Lifecycle {
                     record_thread_usage_from_response(&event_ctx, context, &usage, now_unix_secs);
                 }
                 if let Some(error) = stream_transform_error.as_ref() {
-                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
                         event_id: o.event_id().to_owned(),
-                        result: Err(cc_lb_contract::StreamError {
+                        result: Err(cc_lb_lifecycle::StreamError {
                             error_type: "response_transform_error".to_owned(),
                             error_message: error.to_string(),
                         }),
                     });
                 } else {
-                    o.emit_lifecycle(cc_lb_contract::LifecycleEvent::StreamCompleted {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
                         event_id: o.event_id().to_owned(),
-                        result: Ok(cc_lb_contract::StreamSuccess {
+                        result: Ok(cc_lb_lifecycle::StreamSuccess {
                             usage: to_usage_snapshot(&usage),
                             sse_event_count,
                             body_bytes: Some(total_bytes),
@@ -3626,7 +3635,7 @@ impl Lifecycle {
                     && !upstream_error_body.is_empty()
                 {
                     o.emit_lifecycle(
-                        cc_lb_contract::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                        cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
                             event_id: o.event_id().to_owned(),
                             error_type: String::new(),
                             error_message: bounded_lossy_upstream_error_body(
@@ -3675,38 +3684,7 @@ pub fn observe_rate_limits(
         .collect()
 }
 
-pub fn build_subscription_quota_samples(
-    headers: &HeaderMap,
-    upstream_id: Uuid,
-    observed_at_unix_millis: u64,
-) -> Vec<SubscriptionQuotaSample> {
-    parse_anthropic_unified_headers(headers)
-        .into_iter()
-        .map(|observation| SubscriptionQuotaSample {
-            upstream_id,
-            window: observation.window,
-            source: SubscriptionQuotaSource::Header,
-            sample_kind: SubscriptionQuotaSampleKind::Sample,
-            observed_at_unix_millis,
-            sample_id: Uuid::new_v4(),
-            utilization: observation.utilization,
-            status: observation.status,
-            resets_at_unix_secs: observation.resets_at_unix_secs,
-            surpassed_threshold: observation.surpassed_threshold,
-            representative_claim: observation.representative_claim,
-            fallback_percentage: observation.fallback_percentage,
-            fallback_available: observation.fallback_available,
-            overage_in_use: observation.overage_in_use,
-            overage_period_monthly_utilization: observation.overage_period_monthly_utilization,
-            upgrade_paths: observation.upgrade_paths,
-            disabled_reason: observation.disabled_reason,
-            extra_usage_enabled: None,
-            extra_usage_monthly_limit: None,
-            extra_usage_used_credits: None,
-            ingested_at_unix_millis: observed_at_unix_millis,
-        })
-        .collect()
-}
+pub use cc_lb_quota::build_subscription_quota_samples;
 
 struct FilterPipelineResult {
     candidates: Vec<UpstreamCandidate>,
@@ -3725,7 +3703,7 @@ impl FilterPipelineResult {
 
 fn subscription_preference_trace(
     routing_trace: &RoutingTrace,
-) -> Option<&cc_lb_plugin_api::SubscriptionPreferenceTrace> {
+) -> Option<&cc_lb_domain::SubscriptionPreferenceTrace> {
     routing_trace
         .stages
         .iter()
@@ -3735,7 +3713,7 @@ fn subscription_preference_trace(
 pub(crate) fn resolved_candidate_urgency(
     routing_trace: &RoutingTrace,
     resolved_upstream_id: Uuid,
-) -> Option<&cc_lb_plugin_api::types::CandidateUrgency> {
+) -> Option<&cc_lb_domain::CandidateUrgency> {
     subscription_preference_trace(routing_trace).and_then(|trace| {
         trace
             .candidates
@@ -3745,12 +3723,13 @@ pub(crate) fn resolved_candidate_urgency(
 }
 
 fn execute_filter_pipeline(
-    filters: &[Arc<dyn cc_lb_plugin_api::FilterPlugin>],
+    filters: &[Arc<dyn FilterPlugin>],
     ctx: &RequestContext,
     principal: &Principal,
     candidates: Vec<UpstreamCandidate>,
     observer: Option<&LifecycleContext>,
 ) -> FilterPipelineResult {
+    let routing_context = ctx.routing_context();
     let mut current = candidates;
     let mut stages = Vec::with_capacity(filters.len());
     let mut internal_errors = Vec::new();
@@ -3758,7 +3737,7 @@ fn execute_filter_pipeline(
     for (stage_index, filter) in filters.iter().enumerate() {
         let stage_name = filter.plugin_name().to_owned();
         let stage_started = Instant::now();
-        match filter.filter(ctx, principal, &current) {
+        match filter.filter(&routing_context, principal, &current) {
             Ok(output) => {
                 let stage_elapsed = stage_started.elapsed();
                 let duration_ms = duration_to_ms(stage_elapsed);
@@ -3858,8 +3837,8 @@ fn execute_filter_pipeline(
 struct ValidatedOutput {
     kept_upstream_ids: Vec<Uuid>,
     reason: String,
-    subscription_preference: Option<cc_lb_plugin_api::SubscriptionPreferenceTrace>,
-    cache_affinity: Option<cc_lb_plugin_api::types::CacheAffinityTrace>,
+    subscription_preference: Option<cc_lb_domain::SubscriptionPreferenceTrace>,
+    cache_affinity: Option<cc_lb_domain::CacheAffinityTrace>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -4041,9 +4020,10 @@ fn raw_passthrough_request(
     let upstream = Upstream::AnthropicDirect {
         base_url: Some(base_url.clone()),
     };
+    let shape_context = ctx.dialect_shape_context();
     shape_request(
         &RawPassthroughDialect { base_url },
-        ctx,
+        &shape_context,
         &upstream,
         principal,
     )
@@ -4064,19 +4044,19 @@ struct RawPassthroughDialect {
 impl UpstreamDialect for RawPassthroughDialect {
     fn shape(
         &self,
-        ctx: &RequestContext,
+        context: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
+    ) -> Result<ShapedRequest, DialectError> {
         let mut url = self.base_url.clone();
-        url.set_path(ctx.path.trim_start_matches('/'));
-        url.set_query(ctx.query.as_deref());
+        url.set_path(context.path.trim_start_matches('/'));
+        url.set_query(context.query.as_deref());
         Ok(builder.shaped_request(
             url,
-            ctx.method.clone(),
-            ctx.downstream_headers.clone(),
-            ctx.body_bytes.clone(),
+            context.method.clone(),
+            context.downstream_headers.clone(),
+            context.body_bytes.clone(),
         ))
     }
 }
@@ -4105,19 +4085,19 @@ fn header_to_string(headers: &HeaderMap, name: &str) -> Option<String> {
 /// with `anthropic-ratelimit-` OR exactly matches one of the identity slots
 /// (`ANTHROPIC_IDENTITY_HEADERS`). Downstream subscribers reconstruct a
 /// `HeaderMap` and parse into typed rate-limit/subscription-quota records.
-fn header_snapshot_from(headers: &HeaderMap) -> cc_lb_contract::HeaderSnapshot {
+fn header_snapshot_from(headers: &HeaderMap) -> HeaderSnapshot {
     let mut anthropic_headers: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     for (name, value) in headers.iter() {
         let name_lc = name.as_str();
         let Ok(val) = value.to_str() else { continue };
         if name_lc.starts_with("anthropic-ratelimit-")
-            || cc_lb_contract::ANTHROPIC_IDENTITY_HEADERS.contains(&name_lc)
+            || cc_lb_domain::ANTHROPIC_IDENTITY_HEADERS.contains(&name_lc)
         {
             anthropic_headers.insert(name_lc.to_owned(), val.to_owned());
         }
     }
-    cc_lb_contract::HeaderSnapshot {
+    HeaderSnapshot {
         content_type: header_to_string(headers, "content-type"),
         content_encoding: header_to_string(headers, "content-encoding"),
         request_id: header_to_string(headers, "x-request-id")
@@ -4379,7 +4359,7 @@ fn request_cache_metadata_from_value(
             lookback_prefixes: breakpoint
                 .lookback_prefixes
                 .iter()
-                .map(|prefix| cc_lb_contract::RequestCacheLookbackPrefix {
+                .map(|prefix| RequestCacheLookbackPrefix {
                     prefix_hash: prefix.prefix_key.clone(),
                     content_block_index: prefix.content_block_index,
                     lookback_distance: prefix.lookback_distance,
@@ -4898,8 +4878,8 @@ fn observe_many(hooks: &[Arc<dyn ObservabilityHook>], event: ObserveEvent) {
     }
 }
 
-fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_contract::UsageSnapshot {
-    cc_lb_contract::UsageSnapshot {
+fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
+    cc_lb_lifecycle::UsageSnapshot {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,
         cache_creation_input_tokens: u.cache_creation_input_tokens,
@@ -4953,6 +4933,7 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+    use cc_lb_routing::RouteError;
     use cc_lb_storage_api::{
         SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaStatus,
         SubscriptionQuotaWindow,
@@ -6382,17 +6363,14 @@ mod tests {
             &self,
             _api_key: String,
             _router_chosen_upstream_name: String,
-        ) -> Arc<dyn cc_lb_plugin_api::SignerFactory> {
+        ) -> Arc<dyn SignerFactory> {
             Arc::new(Self)
         }
     }
 
     #[async_trait]
-    impl cc_lb_plugin_api::SignerFactory for TestSignerFactory {
-        async fn build(
-            &self,
-            _upstream: &Upstream,
-        ) -> Result<Arc<dyn cc_lb_plugin_api::Signer>, cc_lb_plugin_api::SignerError> {
+    impl SignerFactory for TestSignerFactory {
+        async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
             Ok(Arc::new(TestSigner))
         }
     }
@@ -6400,12 +6378,12 @@ mod tests {
     struct TestSigner;
 
     #[async_trait]
-    impl cc_lb_plugin_api::Signer for TestSigner {
+    impl Signer for TestSigner {
         async fn sign(
             &self,
-            shaped: cc_lb_plugin_api::ShapedRequest,
-            capability: &mut cc_lb_plugin_api::SigningCapability,
-        ) -> Result<SignedRequest, cc_lb_plugin_api::SignerError> {
+            shaped: ShapedRequest,
+            capability: &mut cc_lb_upstream::SigningCapability,
+        ) -> Result<SignedRequest, SignerError> {
             Ok(SignedRequest::from_shaped(shaped, capability))
         }
 
@@ -6419,10 +6397,10 @@ mod tests {
     impl RouterPlugin for TestRouter {
         fn route(
             &self,
-            _ctx: &RequestContext,
+            _ctx: &cc_lb_routing::RoutingContext,
             _principal: &Principal,
             _candidates: &[UpstreamCandidate],
-        ) -> Result<cc_lb_plugin_api::RouteDecision, cc_lb_plugin_api::RouteError> {
+        ) -> Result<RouteDecision, RouteError> {
             panic!("cache score tests do not route")
         }
     }

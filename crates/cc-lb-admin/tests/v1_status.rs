@@ -1,22 +1,20 @@
 mod config_admin_common;
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use axum::http::StatusCode;
+use cc_lb_admin::AdminPorts;
 use cc_lb_aead::EncryptedOAuthTokens;
-use cc_lb_config::{Config, DownstreamAuthMode};
-use cc_lb_contract::ReplicaIdentity;
-use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_config::Config;
 use cc_lb_control::{ApplyStatus, DynamicViewBuilder, UpstreamStatusEntry, UpstreamStatusSnapshot};
-use cc_lb_engine::{Lifecycle, LifecycleConfig};
+use cc_lb_domain::ReplicaIdentity;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate,
+    MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalCreate,
     PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntryInput,
 };
 use config_admin_common::{app, authed_json, temp_storage, test_state};
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -24,22 +22,10 @@ async fn status_reflects_in_memory_dynamic_view_generation_and_replica_id() {
     let (_dir, storage) = temp_storage().await;
     let mut state = test_state(Config::default(), Some(storage.clone()));
     let replica = ReplicaIdentity { id: Uuid::new_v4() };
-    let lifecycle = Lifecycle::new_with_dynamic_view(
-        Arc::new(BuiltinAuthn::new(
-            DownstreamAuthMode::ApiKey,
-            None,
-            state.key_store.clone(),
-            Arc::new(cc_lb_clock::SystemClock),
-        )),
-        state.dynamic_view.clone(),
-        cc_lb_engine::make_default_dispatcher(50),
-        LifecycleConfig {
-            replica_identity: Some(replica.clone()),
-            ..LifecycleConfig::default()
-        },
-        Arc::new(cc_lb_clock::SystemClock),
-    );
-    state.lifecycle = Some(Arc::new(lifecycle));
+    state.lifecycle = Some(AdminPorts {
+        replica_identity: Some(replica.clone()),
+        ..AdminPorts::default()
+    });
     bump_dynamic_generation(&state, UpstreamStatusSnapshot::default());
 
     let (status, _, body, _) = authed_json(app(state), "GET", "/admin/v1/status", None).await;
@@ -145,7 +131,7 @@ async fn export_round_trips_through_stable_key_ordering() {
     storage
         .insert_chain_entry(PluginChainEntryInput {
             principal_id,
-            slot: PluginSlot::Router,
+            slot: PluginSlotKind::Router,
             order: 1000,
             wasm_registry_id: registry.id,
             config: json!({ "zeta": 1, "alpha": { "zeta": true, "alpha": false } }),

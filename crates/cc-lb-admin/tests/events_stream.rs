@@ -8,8 +8,8 @@ use axum::{
     http::{Request, StatusCode},
 };
 use cc_lb_config::Config;
-use cc_lb_contract::{RequestEventBus, RequestEventUpdate};
-use cc_lb_engine::InMemoryBus;
+use cc_lb_control::{InMemoryBus, RequestEventBus};
+use cc_lb_request_log::RequestEventUpdate;
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use config_admin_common::{TOKEN, app, authed_bytes, temp_storage, test_state};
 use http_body_util::BodyExt;

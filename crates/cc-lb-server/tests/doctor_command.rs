@@ -3,7 +3,7 @@ use std::process::{Command, Output};
 
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PluginChainEntry, PluginChainEntryInput, PluginRegistryStore,
-    PluginSlot, WasmBlob, WasmRegistryEntry, WasmRegistryEntryInput,
+    PluginSlotKind, WasmBlob, WasmRegistryEntry, WasmRegistryEntryInput,
     principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind, PrincipalStore},
 };
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -59,7 +59,7 @@ async fn list_abandoned_chain_entries_omits_healthy_chain_entries() -> anyhow::R
         &storage,
         "doctor-healthy-plugin",
         [12; 32],
-        vec![PluginSlot::Router],
+        vec![PluginSlotKind::Router],
     )
     .await?;
     insert_router_chain(&storage, principal_id, registry_entry.id, 500).await?;
@@ -119,7 +119,7 @@ async fn upload_plugin(
     storage: &SqliteStorage,
     name: &str,
     sha256: [u8; 32],
-    supported_slots: Vec<PluginSlot>,
+    supported_slots: Vec<PluginSlotKind>,
 ) -> anyhow::Result<WasmRegistryEntry> {
     let bytes = format!("{name}-bytes").into_bytes();
     let (entry, existed) = storage
@@ -157,7 +157,7 @@ async fn insert_router_chain(
     let entry = storage
         .insert_chain_entry(PluginChainEntryInput {
             principal_id,
-            slot: PluginSlot::Router,
+            slot: PluginSlotKind::Router,
             order,
             wasm_registry_id,
             config: json!({}),

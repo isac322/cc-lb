@@ -1,6 +1,6 @@
 mod common;
 
-use cc_lb_plugin_api::sign_request;
+use cc_lb_upstream::sign_request;
 
 #[tokio::test]
 async fn proactive_refreshes_before_signing() {

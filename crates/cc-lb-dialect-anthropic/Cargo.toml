@@ -7,7 +7,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+cc-lb-domain.workspace = true
+cc-lb-upstream.workspace = true
 bytes.workspace = true
-cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 http.workspace = true
 url.workspace = true

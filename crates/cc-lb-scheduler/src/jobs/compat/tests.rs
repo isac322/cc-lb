@@ -1,4 +1,4 @@
-use cc_lb_engine::anthropic_compat::CLAUDE_CODE_STABLE_VERSION_KEY;
+use cc_lb_control::anthropic_compat::CLAUDE_CODE_STABLE_VERSION_KEY;
 
 use crate::state_stores::AnthropicCompatEtagsStore;
 

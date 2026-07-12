@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use cc_lb_contract::RequestEventBus;
+use cc_lb_control::RequestEventBus;
+use cc_lb_domain::{Principal, UpstreamCandidate};
 use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_engine::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::instrumented_connector::InstrumentedHttpsConnector;
@@ -16,9 +17,8 @@ use cc_lb_engine::{
     DnsResolverConfig, DynamicViewBuilder, DynamicViewHolder, InMemoryBus, Lifecycle,
     LifecycleConfig, RequestEventAssemblerHandle, UpstreamDispatch, spawn_request_event_assembler,
 };
-use cc_lb_plugin_api::{
-    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, UpstreamCandidate,
-};
+use cc_lb_observability::NoopMetricsHook;
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::types::{KeyStatus, RequestEvent, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
@@ -178,7 +178,7 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
         assembler_rx,
         Arc::clone(&storage) as Arc<dyn StorageTrait>,
         Some(Arc::clone(&bus) as Arc<dyn RequestEventBus>),
-        Arc::new(cc_lb_contract::NoopMetricsHook),
+        Arc::new(NoopMetricsHook),
     );
     let limit_engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
@@ -307,7 +307,7 @@ struct SelectingRouter;
 impl RouterPlugin for SelectingRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -387,7 +387,7 @@ where
 {
     async fn dispatch(
         &self,
-        request: cc_lb_plugin_api::SignedRequest,
+        request: cc_lb_upstream::SignedRequest,
     ) -> Result<Response<Body>, DispatchError> {
         let (url, method, headers, body) = request.into_parts();
         let uri =

@@ -4,14 +4,15 @@ use ::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_engine::{ApiKeyAwareSignerFactory, UpstreamDispatch};
-use cc_lb_plugin_api::{
-    Principal, RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin,
-    ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
-    UpstreamCandidate,
-};
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
+use cc_lb_upstream::{
+    RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+    SigningCapability, UpstreamError,
+};
 use serde_json::{Value, json};
 
 use crate::cache_keepalive_enqueuer::CacheKeepaliveTaskPusher;
@@ -108,7 +109,7 @@ pub(super) struct NoRouteRouter;
 impl RouterPlugin for NoRouteRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -138,7 +139,7 @@ impl Signer for RecordingSigner {
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
-    async fn on_unauthorized(&self, _err: &cc_lb_plugin_api::UpstreamError) -> RetryDecision {
+    async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
         RetryDecision::Fail
     }
 }

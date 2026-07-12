@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
+use cc_lb_domain::{
+    CacheScore, Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot,
+    SubscriptionQuotaDataState, TtlClass, WarmCacheEntry,
+};
 use cc_lb_engine::{
     PromptCacheObservationCacheLike, PromptCacheObservationInput, SubscriptionQuotaCacheLike,
-};
-use cc_lb_plugin_api::types::{CacheScore, TtlClass, WarmCacheEntry};
-use cc_lb_plugin_api::{
-    Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
 };
 use cc_lb_storage_api::SubscriptionQuotaSample;
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
@@ -36,8 +36,8 @@ pub fn known_base_quota_snapshots(util: f64) -> Vec<SubscriptionQuotaCandidateSn
     ]
 }
 
-pub fn test_cache_pricing() -> cc_lb_plugin_api::CachePricingSummary {
-    cc_lb_plugin_api::CachePricingSummary {
+pub fn test_cache_pricing() -> cc_lb_domain::CachePricingSummary {
+    cc_lb_domain::CachePricingSummary {
         status: "known".to_owned(),
         input_micros_per_million: Some(5_000_000),
         cache_creation_5m_micros_per_million: Some(6_250_000),

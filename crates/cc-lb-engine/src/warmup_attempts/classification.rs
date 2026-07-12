@@ -1,3 +1,4 @@
+use cc_lb_quota::rate_limit_headers::UnifiedQuotaObservation;
 use cc_lb_storage_api::{
     SubscriptionQuotaStatus, SubscriptionQuotaWindow, WarmupAttemptOutcome,
     WarmupPermanentFailureReason, WarmupSkipReason, WarmupSuccessReason,
@@ -88,7 +89,7 @@ pub(super) fn attempt_fields(execution: &WarmupAttemptExecution<'_>) -> AttemptF
 
 fn response_attempt_fields(
     status: StatusCode,
-    observations: &[crate::UnifiedQuotaObservation],
+    observations: &[UnifiedQuotaObservation],
     expected_cycle_key: Option<i64>,
     scheduled_for_unix_secs: i64,
     error_detail: Option<&str>,
@@ -138,7 +139,7 @@ fn response_attempt_fields(
 
 fn classify_response(
     status: StatusCode,
-    observations: &[crate::UnifiedQuotaObservation],
+    observations: &[UnifiedQuotaObservation],
     candidate_cycle_key: i64,
 ) -> ResponseClassification {
     if status.is_success() {
@@ -184,11 +185,11 @@ fn classify_response(
     }
 }
 
-fn five_hour_cycle_key(observations: &[crate::UnifiedQuotaObservation]) -> Option<i64> {
+fn five_hour_cycle_key(observations: &[UnifiedQuotaObservation]) -> Option<i64> {
     cycle_key_for_window(observations, SubscriptionQuotaWindow::FiveHour)
 }
 
-fn seven_day_exhausted_cycle_key(observations: &[crate::UnifiedQuotaObservation]) -> Option<i64> {
+fn seven_day_exhausted_cycle_key(observations: &[UnifiedQuotaObservation]) -> Option<i64> {
     const SEVEN_DAY_WINDOWS: [SubscriptionQuotaWindow; 3] = [
         SubscriptionQuotaWindow::SevenDay,
         SubscriptionQuotaWindow::SevenDaySonnet,
@@ -201,7 +202,7 @@ fn seven_day_exhausted_cycle_key(observations: &[crate::UnifiedQuotaObservation]
 }
 
 fn exhausted_cycle_key_for_window(
-    observations: &[crate::UnifiedQuotaObservation],
+    observations: &[UnifiedQuotaObservation],
     window: SubscriptionQuotaWindow,
 ) -> Option<i64> {
     observations
@@ -213,7 +214,7 @@ fn exhausted_cycle_key_for_window(
         .and_then(|resets_at| i64::try_from(resets_at).ok())
 }
 
-fn quota_observation_is_exhausted(observation: &crate::UnifiedQuotaObservation) -> bool {
+fn quota_observation_is_exhausted(observation: &UnifiedQuotaObservation) -> bool {
     observation.status == Some(SubscriptionQuotaStatus::Rejected)
         || observation
             .utilization
@@ -221,7 +222,7 @@ fn quota_observation_is_exhausted(observation: &crate::UnifiedQuotaObservation) 
 }
 
 fn cycle_key_for_window(
-    observations: &[crate::UnifiedQuotaObservation],
+    observations: &[UnifiedQuotaObservation],
     window: SubscriptionQuotaWindow,
 ) -> Option<i64> {
     observations

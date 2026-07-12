@@ -73,7 +73,7 @@ impl ComputedCostBreakdown {
     }
 }
 
-impl From<ComputedCostBreakdown> for cc_lb_contract::CostBreakdown {
+impl From<ComputedCostBreakdown> for cc_lb_request_log::CostBreakdown {
     fn from(breakdown: ComputedCostBreakdown) -> Self {
         match breakdown.pricing_status {
             PricingStatus::Known => Self {

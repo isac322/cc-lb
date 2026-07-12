@@ -3,12 +3,12 @@ name: publish-check
 # PR-stage validation for the crates.io-published plugin ecosystem.
 #
 # The bug this workflow guards against: an editor removes a public trait
-# method (or otherwise makes a breaking API change) in cc-lb-plugin-api
+# method (or otherwise makes a breaking API change) in cc-lb-plugin-wire
 # but forgets to bump the crate version. Workspace-local `cargo check`
 # still passes because path deps resolve to the fresh source, so nothing
-# downstream complains. release-plz then publishes cc-lb-plugin-api at
+# downstream complains. release-plz then publishes cc-lb-plugin-wire at
 # the same version (skipped — already on crates.io) and tries to publish
-# the runtime crate, whose tarball verify pulls cc-lb-plugin-api back
+# the runtime crate, whose tarball verify pulls cc-lb-plugin-wire back
 # from crates.io using the workspace semver constraint. The old crates.io
 # trait definition mismatches the new local impl and the publish job
 # aborts mid-release. See PR #287 → release-plz run 28669111764 for the
@@ -23,12 +23,12 @@ name: publish-check
 #    primary defense: it catches breakage at the SOURCE (the crate whose
 #    API changed) instead of waiting for downstream verify to fail.
 #
-# 2. cargo publish --dry-run on cc-lb-plugin-api. Foundation crate with
+# 2. cargo publish --dry-run on cc-lb-plugin-wire. Foundation crate with
 #    no in-workspace unpublished deps, so packaging is self-contained
 #    and catches manifest regressions (missing description/license/
 #    repository, excluded source files, broken workspace inheritance).
 #
-# Downstream publish=true crates (cc-lb-plugin-wire, cc-lb-pdk-wasmtime,
+# Downstream publish=true crates (cc-lb-pdk-wasmtime,
 # cc-lb-pdk-wasmtime-macros, cc-lb-plugin-conformance, cc-lb-runtime-wasmtime)
 # intentionally skip --dry-run: their workspace deps are typically not yet
 # published to crates.io at PR-review time, so --dry-run would flake on
@@ -39,7 +39,6 @@ name: publish-check
 on:
   pull_request:
     paths:
-      - 'crates/cc-lb-plugin-api/**'
       - 'crates/cc-lb-plugin-wire/**'
       - 'crates/cc-lb-pdk-wasmtime/**'
       - 'crates/cc-lb-pdk-wasmtime-macros/**'
@@ -66,7 +65,6 @@ jobs:
       fail-fast: false
       matrix:
         crate:
-          - cc-lb-plugin-api
           - cc-lb-plugin-wire
           - cc-lb-plugin-conformance
     env:
@@ -90,7 +88,7 @@ jobs:
         run: cargo semver-checks --package ${{ matrix.crate }}
 
   dry-run:
-    name: dry-run cc-lb-plugin-api
+    name: dry-run cc-lb-plugin-wire
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
@@ -98,4 +96,4 @@ jobs:
       - uses: ./.github/actions/setup-rust-cache
 
       - name: cargo publish --dry-run
-        run: cargo publish --dry-run -p cc-lb-plugin-api
+        run: cargo publish --dry-run -p cc-lb-plugin-wire

@@ -4,9 +4,10 @@ use bytes::Bytes;
 use http::header::{CONTENT_ENCODING, CONTENT_LENGTH};
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 
-use cc_lb_plugin_api::{
-    Principal, ResponseTransformError, SseEvent, SseEventTransformHook, TransformResponseResult,
-    TransformSseEventRequest, TransformSseEventResult, Upstream, UpstreamDialect,
+use cc_lb_domain::{Principal, Upstream};
+use cc_lb_upstream::{
+    ResponseTransformError, SseEvent, SseEventTransformHook, TransformResponseResult,
+    TransformSseEventRequest, TransformSseEventResult, UpstreamDialect,
 };
 
 use crate::hop_by_hop::strip_hop_by_hop;

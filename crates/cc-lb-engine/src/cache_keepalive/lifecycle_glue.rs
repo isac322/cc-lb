@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_control::dynamic_view::DynamicViewHolder;
-use cc_lb_plugin_api::Principal;
+use cc_lb_domain::Principal;
 use http::HeaderMap;
 use serde_json::Value;
 use sha2::{Digest, Sha256};

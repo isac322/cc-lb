@@ -15,13 +15,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use cc_lb_contract::{EventId, HeaderSnapshot, LifecycleEvent};
+use cc_lb_lifecycle::{EventId, LifecycleEvent};
+use cc_lb_quota::build_subscription_quota_samples;
+use cc_lb_request_log::HeaderSnapshot;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::lifecycle::{SubscriptionQuotaCacheLike, build_subscription_quota_samples};
+use crate::lifecycle::SubscriptionQuotaCacheLike;
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 
 pub const DEFAULT_SUBSCRIPTION_QUOTA_MAP_CAP: usize = 4096;
@@ -151,7 +153,7 @@ fn handle_event(
             }
             let Some(partial) = partials.get(&event_id) else {
                 metrics::counter!(
-                    "cc_lb_contract_subscription_quota_events_total",
+                    "cc_lb_lifecycle_subscription_quota_events_total",
                     "outcome" => "response_without_attempt"
                 )
                 .increment(1);
@@ -159,7 +161,7 @@ fn handle_event(
             };
             let Some(upstream_id) = partial.upstream_id else {
                 metrics::counter!(
-                    "cc_lb_contract_subscription_quota_events_total",
+                    "cc_lb_lifecycle_subscription_quota_events_total",
                     "outcome" => "response_without_upstream_id"
                 )
                 .increment(1);
@@ -190,7 +192,7 @@ fn apply_observations(
         build_subscription_quota_samples(&header_map, upstream_id, observed_at_unix_millis);
     if records.is_empty() {
         metrics::counter!(
-            "cc_lb_contract_subscription_quota_events_total",
+            "cc_lb_lifecycle_subscription_quota_events_total",
             "outcome" => "no_headers"
         )
         .increment(1);
@@ -207,7 +209,7 @@ fn apply_observations(
     }
 
     metrics::counter!(
-        "cc_lb_contract_subscription_quota_events_total",
+        "cc_lb_lifecycle_subscription_quota_events_total",
         "outcome" => "observed"
     )
     .increment(1);
@@ -245,7 +247,7 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
         metrics::counter!(
-            "cc_lb_contract_subscription_quota_events_total",
+            "cc_lb_lifecycle_subscription_quota_events_total",
             "outcome" => "orphan_ttl_evicted"
         )
         .increment(removed as u64);
@@ -262,7 +264,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     };
     partials.remove(&oldest_key);
     metrics::counter!(
-        "cc_lb_contract_subscription_quota_events_total",
+        "cc_lb_lifecycle_subscription_quota_events_total",
         "outcome" => "cap_evicted"
     )
     .increment(1);
@@ -271,7 +273,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_plugin_api::SubscriptionQuotaCandidateSnapshot;
+    use cc_lb_domain::SubscriptionQuotaCandidateSnapshot;
     use cc_lb_storage_api::{
         SubscriptionQuotaSample, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
     };

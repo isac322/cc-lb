@@ -11,15 +11,14 @@ use cc_lb_control::api_keys::{
     concurrent_guard::KeyConcurrencyManager, principal_view::PrincipalView,
 };
 use cc_lb_control::{
-    DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
-    api_keys::limit_engine::LimitEngine, spawn_audit_writer,
+    DynamicViewBuilder, DynamicViewHolder, RouteDecision, RouteError, RouterPlugin, RoutingContext,
+    UpstreamStatusSnapshot, api_keys::limit_engine::LimitEngine, spawn_audit_writer,
 };
-use cc_lb_plugin_api::{
-    ApiKeyAwareSignerFactory, ObservabilityHook, Principal, RequestContext, RouteDecision,
-    RouteError, RouterPlugin, SignerFactory, Upstream, UpstreamCandidate,
-};
+use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
+use cc_lb_observability::ObservabilityHook;
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -72,8 +71,8 @@ impl SignerFactory for NoopSignerFactory {
     async fn build(
         &self,
         _upstream: &Upstream,
-    ) -> Result<Arc<dyn cc_lb_plugin_api::Signer>, cc_lb_plugin_api::SignerError> {
-        Err(cc_lb_plugin_api::SignerError::MissingCredentials {
+    ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
+        Err(cc_lb_upstream::SignerError::MissingCredentials {
             reason: "noop test signer factory".to_owned(),
         })
     }
@@ -84,7 +83,7 @@ struct NoopRouter;
 impl RouterPlugin for NoopRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

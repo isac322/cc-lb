@@ -2,7 +2,8 @@ mod common;
 
 use bytes::Bytes;
 use cc_lb_dialect_anthropic::AnthropicDirectDialect;
-use cc_lb_plugin_api::{Upstream, shape_request};
+use cc_lb_domain::Upstream;
+use cc_lb_upstream::shape_request;
 use http::Method;
 
 #[test]

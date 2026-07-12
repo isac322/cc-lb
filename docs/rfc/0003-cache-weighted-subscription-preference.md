@@ -170,7 +170,7 @@ Direct replacement, no runtime flag. The salt bump prevents any hidden dependenc
   - Retained as an opt-in filter for custom chains; `metadata()` docstring notes v7 recommends removing it.
 - `crates/cc-lb-server/src/dynamic_view_builder.rs`
   - No source edit. Line 683 already dispatches by ID; `cache_affinity` is dropped only when the per-principal `router_chain` row omits it. Deploy-time operator action documented in the plan.
-- `crates/cc-lb-plugin-api/src/types.rs`
+- `crates/cc-lb-domain/src/routing/subscription.rs`
   - Extend `CandidateUrgency` with the five new fields (all `#[serde(default)]`, `#[serde(skip_serializing_if = "…is_default")]` where sensible so v6 rows round-trip unchanged).
   - Do NOT touch `SubscriptionPreferenceTrace`, `StageDecision`, or `FilterOutput` top-level shapes.
 - `crates/cc-lb-engine/src/builtin_filters/subscription_preference/tests.rs`

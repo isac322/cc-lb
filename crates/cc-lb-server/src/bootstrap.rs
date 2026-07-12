@@ -3,7 +3,9 @@ use std::path::Path;
 
 use cc_lb_config::Config;
 use cc_lb_engine::clock::{Clock, unix_secs};
-use cc_lb_storage_api::plugin_registry::{PluginChainEntryInput, PluginSlot, WasmRegistryEntry};
+use cc_lb_storage_api::plugin_registry::{
+    PluginChainEntryInput, PluginSlotKind, WasmRegistryEntry,
+};
 use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind};
 use cc_lb_storage_api::sparse_order;
 use cc_lb_storage_api::upstream::UpstreamCreate;
@@ -345,7 +347,10 @@ async fn resolve_wasm_registry_entry(
     }
 }
 
-fn registry_entry_unsupported_slot(registry_entry: &WasmRegistryEntry, slot: PluginSlot) -> bool {
+fn registry_entry_unsupported_slot(
+    registry_entry: &WasmRegistryEntry,
+    slot: PluginSlotKind,
+) -> bool {
     !registry_entry.is_builtin
         && !registry_entry.supported_slots.is_empty()
         && !registry_entry.supported_slots.contains(&slot)
@@ -426,11 +431,11 @@ fn parse_principal_kind(kind: Option<&str>) -> PrincipalKind {
     }
 }
 
-fn parse_plugin_slot(slot: &str) -> Option<PluginSlot> {
+fn parse_plugin_slot(slot: &str) -> Option<PluginSlotKind> {
     match slot {
-        "Router" | "router" => Some(PluginSlot::Router),
-        "ObservabilityHook" | "observability_hook" => Some(PluginSlot::ObservabilityHook),
-        "Shape" | "shape" => Some(PluginSlot::Shape),
+        "Router" | "router" => Some(PluginSlotKind::Router),
+        "ObservabilityHook" | "observability_hook" => Some(PluginSlotKind::ObservabilityHook),
+        "Shape" | "shape" => Some(PluginSlotKind::Shape),
         _ => None,
     }
 }
@@ -552,7 +557,7 @@ plugins = ["audit"]
             .unwrap()
             .unwrap();
         let entries = storage
-            .list_chain_for_principal(principal.id, PluginSlot::Router)
+            .list_chain_for_principal(principal.id, PluginSlotKind::Router)
             .await
             .unwrap();
         assert_eq!(entries.len(), 1);
@@ -579,7 +584,7 @@ plugins = ["audit"]
         .await
         .unwrap();
         let entries = storage
-            .list_chain_for_principal(principal.id, PluginSlot::Router)
+            .list_chain_for_principal(principal.id, PluginSlotKind::Router)
             .await
             .unwrap();
         assert_eq!(entries.len(), 1);
@@ -614,7 +619,7 @@ plugins = ["missing-plugin"]
         .unwrap();
 
         let entries = storage
-            .list_chain_for_principal(principal.id, PluginSlot::Router)
+            .list_chain_for_principal(principal.id, PluginSlotKind::Router)
             .await
             .unwrap();
         assert!(entries.is_empty());

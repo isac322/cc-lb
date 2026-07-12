@@ -17,15 +17,15 @@
 //!     for defense-in-depth calls from the admin delete paths that
 //!     may run after a rebuild has already dropped the slot);
 //!   * evicting a key while an in-flight caller still holds an
-//!     `Arc<PluginSlot>` clone from an earlier `get_slot` MUST keep
+//!     `Arc<LoadedPluginSlot>` clone from an earlier `get_slot` MUST keep
 //!     that slot working — the runtime never yanks state out from
 //!     under a live dispatch.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_wire::{CachePricingSummary, FilterRequest, Principal, UpstreamCandidate};
+use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::{WasmtimeRuntime, call_filter_hook};
 use rkyv::rancor::Error;
 
@@ -91,7 +91,7 @@ fn evict_slot_drops_registration_and_returns_true() {
         return;
     };
     let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-    let key = SlotKey::global("evict-probe-A");
+    let key = RuntimeSlotKey::global("evict-probe-A");
 
     rt.register_filter(key.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register");
@@ -112,7 +112,7 @@ fn evict_slot_drops_registration_and_returns_true() {
 #[test]
 fn evict_slot_is_idempotent_when_key_missing() {
     let rt = WasmtimeRuntime::with_defaults().expect("engine");
-    let key = SlotKey::global("never-registered");
+    let key = RuntimeSlotKey::global("never-registered");
 
     let removed = rt.evict_slot(&key);
     assert!(!removed, "evict of absent key returns false");
@@ -130,7 +130,7 @@ fn evict_slot_leaves_prior_arc_dispatchable() {
         return;
     };
     let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-    let key = SlotKey::global("evict-probe-B");
+    let key = RuntimeSlotKey::global("evict-probe-B");
 
     let slot = rt
         .register_filter(key.clone(), "cache-aware-wasmtime", &wasm)

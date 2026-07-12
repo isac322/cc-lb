@@ -373,12 +373,8 @@ async fn put_config_draft(
         Err(error) => return settings_error_response(error, true),
     };
     let draft_value = request.draft.clone();
-    match crate::settings::put_draft(
-        storage,
-        request,
-        cc_lb_engine::clock::unix_secs(state.clock.now()),
-    )
-    .await
+    match crate::settings::put_draft(storage, request, cc_lb_clock::unix_secs(state.clock.now()))
+        .await
     {
         Ok(response) => {
             emit_admin_action(&state, "config_draft_put", "admin_config_draft", None, 200);
@@ -617,7 +613,7 @@ fn emit_admin_action(
     let Some(audit_sink) = &state.audit_sink else {
         return;
     };
-    let ts = cc_lb_engine::clock::unix_secs(state.clock.now());
+    let ts = cc_lb_clock::unix_secs(state.clock.now());
     let _ = audit_sink.try_enqueue(AuditEntry {
         ts,
         request_id: format!("{route}-{ts}"),

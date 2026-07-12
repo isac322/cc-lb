@@ -9,6 +9,10 @@ use async_trait::async_trait;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, PromptCacheShadowConfig};
 use cc_lb_dialect_anthropic::AnthropicDirectDialect;
+use cc_lb_domain::{
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, Principal, RateLimitObservation,
+    Upstream, UpstreamCandidate,
+};
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
     RouterPipelineCache, ShapePluginCache,
@@ -23,23 +27,23 @@ use cc_lb_engine::{
     ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamRateLimitCache, UpstreamStatusEntry,
     UpstreamStatusSnapshot,
 };
-use cc_lb_plugin_api::{
-    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, FilterPlugin, PluginManifest,
-    Principal, RateLimitObservation, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate,
-};
-use cc_lb_runtime_wasmtime::{
-    WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeRuntime, WasmtimeUpstreamDialect,
+use cc_lb_routing::{FilterPlugin, RouteDecision, RouteError, RouterPlugin};
+use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntime};
+
+use crate::wasm_host::{
+    WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeUpstreamDialect,
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, AuditStore, MetadataTierMappingOverrideRecord,
     OrganizationMetadataStore, PlanTierRatioRecord, PlanTierStore, PluginChainEntry,
-    PluginRegistryStore, PluginSlot, PrincipalRecord, PrincipalStore, PromptCacheObservationStore,
-    RateLimitKind, StorageError, StorageResult, TierResolutionSource, UpstreamPlanTierRecord,
-    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
-    UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
+    PluginRegistryStore, PluginSlotKind, PrincipalRecord, PrincipalStore,
+    PromptCacheObservationStore, RateLimitKind, StorageError, StorageResult, TierResolutionSource,
+    UpstreamPlanTierRecord, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
+    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataStore,
+    UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
 };
+use cc_lb_upstream::{Signer, SignerError, SignerFactory};
 use parking_lot::RwLock;
 use thiserror::Error;
 use url::Url;
@@ -47,6 +51,7 @@ use uuid::Uuid;
 
 use cc_lb_engine::PromptCacheObservationSinkLike;
 
+use crate::PluginManifest;
 use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
 use crate::reconcile::collect_revision_hash;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
@@ -79,27 +84,36 @@ pub enum RebindError {
 
 async fn register_filter_slot(
     runtime: &Arc<WasmtimeRuntime>,
-    slot_key: &cc_lb_plugin_api::SlotKey,
+    slot_key: &cc_lb_runtime_wasmtime::RuntimeSlotKey,
     manifest: &PluginManifest,
-) -> Result<Arc<cc_lb_runtime_wasmtime::PluginSlot>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
+) -> Result<
+    Arc<cc_lb_runtime_wasmtime::LoadedPluginSlot>,
+    cc_lb_runtime_wasmtime::WasmtimeRuntimeError,
+> {
     let wasm = read_wasm_for_manifest(manifest).await?;
     runtime.register_filter(slot_key.clone(), manifest.name.clone(), &wasm)
 }
 
 async fn register_shape_slot(
     runtime: &Arc<WasmtimeRuntime>,
-    slot_key: &cc_lb_plugin_api::SlotKey,
+    slot_key: &cc_lb_runtime_wasmtime::RuntimeSlotKey,
     manifest: &PluginManifest,
-) -> Result<Arc<cc_lb_runtime_wasmtime::PluginSlot>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
+) -> Result<
+    Arc<cc_lb_runtime_wasmtime::LoadedPluginSlot>,
+    cc_lb_runtime_wasmtime::WasmtimeRuntimeError,
+> {
     let wasm = read_wasm_for_manifest(manifest).await?;
     runtime.register_shape(slot_key.clone(), manifest.name.clone(), &wasm)
 }
 
 async fn register_observe_slot(
     runtime: &Arc<WasmtimeRuntime>,
-    slot_key: &cc_lb_plugin_api::SlotKey,
+    slot_key: &cc_lb_runtime_wasmtime::RuntimeSlotKey,
     manifest: &PluginManifest,
-) -> Result<Arc<cc_lb_runtime_wasmtime::PluginSlot>, cc_lb_runtime_wasmtime::WasmtimeRuntimeError> {
+) -> Result<
+    Arc<cc_lb_runtime_wasmtime::LoadedPluginSlot>,
+    cc_lb_runtime_wasmtime::WasmtimeRuntimeError,
+> {
     let wasm = read_wasm_for_manifest(manifest).await?;
     runtime.register_observe(slot_key.clone(), manifest.name.clone(), &wasm)
 }
@@ -248,7 +262,7 @@ pub async fn build_dynamic_view(
     // no longer referenced by the freshly-built view. Must run AFTER
     // build_principal_chains succeeds so we don't tear down slots the
     // still-active view is dispatching against; already-cloned
-    // `Arc<PluginSlot>` handles keep the evicted cells alive for the
+    // `Arc<PluginSlotKind>` handles keep the evicted cells alive for the
     // duration of any in-flight call (see `WasmtimeRuntime::evict_slot`
     // docs).
     let evicted = runtime.retain_slots(&registered_slot_keys);
@@ -340,12 +354,12 @@ fn rate_limit_observation(record: UpstreamRateLimitObservationRecord) -> RateLim
     }
 }
 
-fn rate_limit_kind(kind: RateLimitKind) -> cc_lb_plugin_api::RateLimitKind {
+fn rate_limit_kind(kind: RateLimitKind) -> cc_lb_domain::RateLimitKind {
     match kind {
-        RateLimitKind::Requests => cc_lb_plugin_api::RateLimitKind::Requests,
-        RateLimitKind::Tokens => cc_lb_plugin_api::RateLimitKind::Tokens,
-        RateLimitKind::InputTokens => cc_lb_plugin_api::RateLimitKind::InputTokens,
-        RateLimitKind::OutputTokens => cc_lb_plugin_api::RateLimitKind::OutputTokens,
+        RateLimitKind::Requests => cc_lb_domain::RateLimitKind::Requests,
+        RateLimitKind::Tokens => cc_lb_domain::RateLimitKind::Tokens,
+        RateLimitKind::InputTokens => cc_lb_domain::RateLimitKind::InputTokens,
+        RateLimitKind::OutputTokens => cc_lb_domain::RateLimitKind::OutputTokens,
     }
 }
 
@@ -590,7 +604,10 @@ async fn list_principals(stores: &Stores) -> StorageResult<Vec<PrincipalRecord>>
     Ok(all)
 }
 
-fn registry_entry_unsupported_slot(registry_entry: &WasmRegistryEntry, slot: PluginSlot) -> bool {
+fn registry_entry_unsupported_slot(
+    registry_entry: &WasmRegistryEntry,
+    slot: PluginSlotKind,
+) -> bool {
     !registry_entry.is_builtin
         && !registry_entry.supported_slots.is_empty()
         && !registry_entry.supported_slots.contains(&slot)
@@ -604,7 +621,7 @@ async fn build_principal_chains(
 ) -> Result<
     (
         HashMap<String, PrincipalRoutingArtifacts>,
-        HashSet<cc_lb_plugin_api::SlotKey>,
+        HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey>,
     ),
     RebindError,
 > {
@@ -614,11 +631,11 @@ async fn build_principal_chains(
         .map(|principal| principal.id)
         .collect::<Vec<_>>();
     let slots = [
-        PluginSlot::Router,
-        PluginSlot::ObservabilityHook,
-        PluginSlot::Shape,
+        PluginSlotKind::Router,
+        PluginSlotKind::ObservabilityHook,
+        PluginSlotKind::Shape,
     ];
-    let mut chain_entries: HashMap<(Uuid, PluginSlot), Vec<PluginChainEntry>> = stores
+    let mut chain_entries: HashMap<(Uuid, PluginSlotKind), Vec<PluginChainEntry>> = stores
         .plugin_registry
         .list_chains_for_principals(&principal_ids, &slots)
         .await?
@@ -631,16 +648,17 @@ async fn build_principal_chains(
             entries
         });
     let mut chains = HashMap::new();
-    let mut registered_slot_keys: HashSet<cc_lb_plugin_api::SlotKey> = HashSet::new();
+    let mut registered_slot_keys: HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey> = HashSet::new();
     for principal in principals {
         let router_entries =
-            take_chain_entries(&mut chain_entries, principal.id, PluginSlot::Router);
+            take_chain_entries(&mut chain_entries, principal.id, PluginSlotKind::Router);
         let hook_entries = take_chain_entries(
             &mut chain_entries,
             principal.id,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::ObservabilityHook,
         );
-        let shape_entries = take_chain_entries(&mut chain_entries, principal.id, PluginSlot::Shape);
+        let shape_entries =
+            take_chain_entries(&mut chain_entries, principal.id, PluginSlotKind::Shape);
 
         let router = build_router_pipeline(
             stores,
@@ -658,14 +676,14 @@ async fn build_principal_chains(
             let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
             })?;
-            if registry_entry_unsupported_slot(registry_entry, PluginSlot::ObservabilityHook) {
+            if registry_entry_unsupported_slot(registry_entry, PluginSlotKind::ObservabilityHook) {
                 tracing::warn!(
                     target: "cc_lb_server::drift",
                     principal = %principal.name,
                     plugin = registry_entry.name.as_str(),
                     chain_entry_id = %entry.id,
                     wasm_registry_id = %registry_entry.id,
-                    requested_slot = PluginSlot::ObservabilityHook.as_str(),
+                    requested_slot = PluginSlotKind::ObservabilityHook.as_str(),
                     supported_slots = ?registry_entry.supported_slots,
                     "skipping observability_hook chain entry: registry entry does not support requested slot",
                 );
@@ -680,14 +698,19 @@ async fn build_principal_chains(
                 config: entry.config,
                 metadata: std::collections::BTreeMap::new(),
             };
-            let slot_key =
-                cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
+            let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
+                principal.name.clone(),
+                manifest.name.clone(),
+            );
             registered_slot_keys.insert(slot_key.clone());
             match register_observe_slot(runtime, &slot_key, &manifest).await {
                 Ok(slot) => {
-                    let handle: Arc<dyn cc_lb_plugin_api::ObservabilityHook> = Arc::new(
-                        WasmtimeObservabilityHookPlugin::new(slot, runtime.config_arc()),
-                    );
+                    let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
+                        slot,
+                        runtime.config_arc(),
+                    ));
+                    let handle: Arc<dyn cc_lb_observability::ObservabilityHook> =
+                        Arc::new(WasmtimeObservabilityHookPlugin::new(dispatch));
                     hooks.push(handle);
                 }
                 Err(error) => {
@@ -711,14 +734,14 @@ async fn build_principal_chains(
             let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
             })?;
-            if registry_entry_unsupported_slot(registry_entry, PluginSlot::Shape) {
+            if registry_entry_unsupported_slot(registry_entry, PluginSlotKind::Shape) {
                 tracing::warn!(
                     target: "cc_lb_server::drift",
                     principal = %principal.name,
                     plugin = registry_entry.name.as_str(),
                     chain_entry_id = %entry.id,
                     wasm_registry_id = %registry_entry.id,
-                    requested_slot = PluginSlot::Shape.as_str(),
+                    requested_slot = PluginSlotKind::Shape.as_str(),
                     supported_slots = ?registry_entry.supported_slots,
                     "skipping shape chain entry: registry entry does not support requested slot",
                 );
@@ -733,14 +756,19 @@ async fn build_principal_chains(
                     config: entry.config,
                     metadata: std::collections::BTreeMap::new(),
                 };
-                let slot_key =
-                    cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
+                let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
+                    principal.name.clone(),
+                    manifest.name.clone(),
+                );
                 registered_slot_keys.insert(slot_key.clone());
                 match register_shape_slot(runtime, &slot_key, &manifest).await {
                     Ok(slot) => {
-                        let handle: Arc<dyn cc_lb_plugin_api::UpstreamDialect> = Arc::new(
-                            WasmtimeUpstreamDialect::new(slot.clone(), runtime.config_arc()),
-                        );
+                        let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
+                            slot,
+                            runtime.config_arc(),
+                        ));
+                        let handle: Arc<dyn cc_lb_upstream::UpstreamDialect> =
+                            Arc::new(WasmtimeUpstreamDialect::new(dispatch));
                         DialectCache::Explicit(ShapePluginCache { dialect: handle })
                     }
                     Err(error) => {
@@ -765,9 +793,9 @@ async fn build_principal_chains(
 }
 
 fn take_chain_entries(
-    entries: &mut HashMap<(Uuid, PluginSlot), Vec<PluginChainEntry>>,
+    entries: &mut HashMap<(Uuid, PluginSlotKind), Vec<PluginChainEntry>>,
     principal_id: Uuid,
-    slot: PluginSlot,
+    slot: PluginSlotKind,
 ) -> Vec<PluginChainEntry> {
     let mut chain = entries.remove(&(principal_id, slot)).unwrap_or_default();
     chain.sort_by_key(|entry| (entry.order, entry.id));
@@ -834,7 +862,7 @@ async fn build_router_pipeline(
     principal: &PrincipalRecord,
     mut router_entries: Vec<cc_lb_storage_api::PluginChainEntry>,
     registry: &HashMap<Uuid, cc_lb_storage_api::WasmRegistryEntry>,
-    registered_slot_keys: &mut HashSet<cc_lb_plugin_api::SlotKey>,
+    registered_slot_keys: &mut HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey>,
 ) -> Result<Option<Arc<RouterPipelineCache>>, RebindError> {
     if router_entries.is_empty() {
         return Ok(None);
@@ -898,17 +926,21 @@ async fn build_router_pipeline(
                 })));
             }
         };
-        let slot_key =
-            cc_lb_plugin_api::SlotKey::new(principal.name.clone(), manifest.name.clone());
+        let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
+            principal.name.clone(),
+            manifest.name.clone(),
+        );
         registered_slot_keys.insert(slot_key.clone());
         match register_filter_slot(runtime, &slot_key, &manifest).await {
             Ok(slot) => {
-                let handle: Arc<dyn FilterPlugin> = Arc::new(WasmtimeFilterPlugin::new(
+                let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
                     slot,
-                    slot_key,
+                    runtime.config_arc(),
+                ));
+                let handle: Arc<dyn FilterPlugin> = Arc::new(WasmtimeFilterPlugin::new(
+                    dispatch,
                     entry.id,
                     manifest.name.clone(),
-                    runtime.config_arc(),
                 ));
                 filters.push(handle);
             }
@@ -1019,7 +1051,7 @@ struct FirstCandidateRouter;
 impl RouterPlugin for FirstCandidateRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -1186,14 +1218,11 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
 mod tests {
     use std::collections::BTreeSet;
 
+    use cc_lb_domain::{TtlClass as PluginTtlClass, TtlClass as StorageTtlClass};
     use cc_lb_engine::clock::{Clock, TestClock};
     use cc_lb_engine::lifecycle::PromptCacheObservationCacheLike;
     use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
-    use cc_lb_plugin_api::types::TtlClass as PluginTtlClass;
-    use cc_lb_storage_api::{
-        BackendKind, MetaStore, PromptCacheObservationRecord, TtlClass as StorageTtlClass,
-        UpstreamCreate,
-    };
+    use cc_lb_storage_api::{BackendKind, MetaStore, PromptCacheObservationRecord, UpstreamCreate};
     use cc_lb_storage_sqlite::SqliteStorage as Storage;
 
     use super::*;
@@ -1452,7 +1481,7 @@ mod tests {
             upstream_id: upstream.id,
             canonical_model_id: MODEL.to_owned(),
             v3_prefix_key: "sink-wiring-prefix".to_owned(),
-            ttl_class: cc_lb_storage_api::TtlClass::Ephemeral5m,
+            ttl_class: cc_lb_domain::TtlClass::Ephemeral5m,
             expires_at_unix_secs: 4_100_000_300,
             last_observed_at_unix_secs: 1_700_000_000,
             hash_schema_version: HASH_SCHEMA_VERSION,

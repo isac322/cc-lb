@@ -8,7 +8,7 @@ use cc_lb_config::Config;
 use cc_lb_control::spawn_audit_writer;
 use cc_lb_storage_api::{
     AuditStore, BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
-    PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
+    PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind,
     PrincipalStore, WasmBlob, WasmRegistryEntryInput, sparse_order,
 };
 use config_admin_common::{TOKEN, app, authed_json, temp_storage, test_state};
@@ -276,7 +276,7 @@ async fn chain_insert_position_last_uses_next_after() {
         &storage,
         8,
         "plugin-last",
-        vec![PluginSlot::ObservabilityHook],
+        vec![PluginSlotKind::ObservabilityHook],
     )
     .await;
     let app = app(test_state(Config::default(), Some(storage)));
@@ -308,7 +308,7 @@ async fn chain_insert_position_before_uses_sparse_between() {
     let first = seed_chain_with_slot(
         &storage,
         principal_id,
-        PluginSlot::ObservabilityHook,
+        PluginSlotKind::ObservabilityHook,
         entry.id,
         1000,
     )
@@ -316,7 +316,7 @@ async fn chain_insert_position_before_uses_sparse_between() {
     let second = seed_chain_with_slot(
         &storage,
         principal_id,
-        PluginSlot::ObservabilityHook,
+        PluginSlotKind::ObservabilityHook,
         entry.id,
         2000,
     )
@@ -347,7 +347,7 @@ async fn chain_insert_position_first_uses_min_minus_step() {
     seed_chain_with_slot(
         &storage,
         principal_id,
-        PluginSlot::ObservabilityHook,
+        PluginSlotKind::ObservabilityHook,
         entry.id,
         2000,
     )
@@ -458,18 +458,30 @@ async fn plugin_chain_accepts_runtime_slot_aliases() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-slot-aliases").await;
     let entry = seed_registry(&storage, 25, "plugin-slot-aliases").await;
-    let router =
-        seed_chain_with_slot(&storage, principal_id, PluginSlot::Router, entry.id, 1000).await;
-    let observe = seed_chain_with_slot(
+    let router = seed_chain_with_slot(
         &storage,
         principal_id,
-        PluginSlot::ObservabilityHook,
+        PluginSlotKind::Router,
         entry.id,
         1000,
     )
     .await;
-    let shape =
-        seed_chain_with_slot(&storage, principal_id, PluginSlot::Shape, entry.id, 1000).await;
+    let observe = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlotKind::ObservabilityHook,
+        entry.id,
+        1000,
+    )
+    .await;
+    let shape = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlotKind::Shape,
+        entry.id,
+        1000,
+    )
+    .await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     for (slot, expected_id) in [
@@ -545,8 +557,13 @@ async fn chain_insert_unknown_principal_returns_400() {
 async fn chain_insert_rejects_plugin_not_advertising_target_slot() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-unsupported-slot").await;
-    let shape_only =
-        seed_registry_with_slots(&storage, 77, "shape-only-plugin", vec![PluginSlot::Shape]).await;
+    let shape_only = seed_registry_with_slots(
+        &storage,
+        77,
+        "shape-only-plugin",
+        vec![PluginSlotKind::Shape],
+    )
+    .await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (status, _, body, _) = authed_json(
@@ -592,7 +609,7 @@ async fn insert_chain_duplicate_router_returns_201_and_lists_both_entries() {
     let first = seed_chain_with_slot(
         &storage,
         principal_id,
-        PluginSlot::Router,
+        PluginSlotKind::Router,
         entry.id,
         sparse_order::STEP,
     )
@@ -644,7 +661,7 @@ async fn insert_chain_duplicate_shape_returns_409_slot_singleton() {
     let first = seed_chain_with_slot(
         &storage,
         principal_id,
-        PluginSlot::Shape,
+        PluginSlotKind::Shape,
         entry.id,
         sparse_order::STEP,
     )
@@ -728,7 +745,7 @@ async fn chain_delete_forwards_if_match_to_storage_and_returns_204() {
     assert!(bytes.is_empty());
     assert!(
         storage
-            .list_chain_for_principal(principal_id, PluginSlot::Router)
+            .list_chain_for_principal(principal_id, PluginSlotKind::Router)
             .await
             .unwrap()
             .is_empty()
@@ -785,7 +802,7 @@ async fn chain_reorder_then_needs_rebalance_returns_409() {
     let first = seed_chain_with_slot(
         &storage,
         principal_id,
-        PluginSlot::ObservabilityHook,
+        PluginSlotKind::ObservabilityHook,
         entry.id,
         1000,
     )
@@ -793,7 +810,7 @@ async fn chain_reorder_then_needs_rebalance_returns_409() {
     let second = seed_chain_with_slot(
         &storage,
         principal_id,
-        PluginSlot::ObservabilityHook,
+        PluginSlotKind::ObservabilityHook,
         entry.id,
         2000,
     )
@@ -823,7 +840,7 @@ async fn reorder_invalid_order_after_stage_returns_409() {
     let first = seed_chain_with_slot(
         &storage,
         principal_id,
-        PluginSlot::ObservabilityHook,
+        PluginSlotKind::ObservabilityHook,
         entry.id,
         100,
     )
@@ -831,7 +848,7 @@ async fn reorder_invalid_order_after_stage_returns_409() {
     let second = seed_chain_with_slot(
         &storage,
         principal_id,
-        PluginSlot::ObservabilityHook,
+        PluginSlotKind::ObservabilityHook,
         entry.id,
         200,
     )
@@ -839,7 +856,7 @@ async fn reorder_invalid_order_after_stage_returns_409() {
     seed_chain_with_slot(
         &storage,
         principal_id,
-        PluginSlot::ObservabilityHook,
+        PluginSlotKind::ObservabilityHook,
         entry.id,
         300,
     )
@@ -869,7 +886,7 @@ async fn chain_rebalance_evens_spacing_and_returns_new_orders() {
     seed_chain_with_slot(
         &storage,
         principal_id,
-        PluginSlot::ObservabilityHook,
+        PluginSlotKind::ObservabilityHook,
         entry.id,
         1000,
     )
@@ -877,7 +894,7 @@ async fn chain_rebalance_evens_spacing_and_returns_new_orders() {
     seed_chain_with_slot(
         &storage,
         principal_id,
-        PluginSlot::ObservabilityHook,
+        PluginSlotKind::ObservabilityHook,
         entry.id,
         1001,
     )
@@ -908,7 +925,7 @@ async fn chain_rebalance_emits_chain_audit() {
     seed_chain_with_slot(
         &storage,
         principal_id,
-        PluginSlot::ObservabilityHook,
+        PluginSlotKind::ObservabilityHook,
         entry.id,
         1000,
     )
@@ -916,7 +933,7 @@ async fn chain_rebalance_emits_chain_audit() {
     seed_chain_with_slot(
         &storage,
         principal_id,
-        PluginSlot::ObservabilityHook,
+        PluginSlotKind::ObservabilityHook,
         entry.id,
         1001,
     )
@@ -1021,7 +1038,7 @@ async fn seed_registry_with_slots(
     storage: &cc_lb_storage_sqlite::SqliteStorage,
     seed: u8,
     name: &str,
-    slots: Vec<PluginSlot>,
+    slots: Vec<PluginSlotKind>,
 ) -> cc_lb_storage_api::WasmRegistryEntry {
     let entry = seed_registry_raw(storage, seed, name).await;
     storage
@@ -1043,9 +1060,9 @@ async fn seed_registry(
         seed,
         name,
         vec![
-            PluginSlot::Router,
-            PluginSlot::Shape,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::Router,
+            PluginSlotKind::Shape,
+            PluginSlotKind::ObservabilityHook,
         ],
     )
     .await
@@ -1091,7 +1108,7 @@ async fn seed_chain(
     seed_chain_with_slot(
         storage,
         principal_id,
-        PluginSlot::Router,
+        PluginSlotKind::Router,
         wasm_registry_id,
         order,
     )
@@ -1101,7 +1118,7 @@ async fn seed_chain(
 async fn seed_chain_with_slot(
     storage: &cc_lb_storage_sqlite::SqliteStorage,
     principal_id: Uuid,
-    slot: PluginSlot,
+    slot: PluginSlotKind,
     wasm_registry_id: Uuid,
     order: i64,
 ) -> cc_lb_storage_api::PluginChainEntry {

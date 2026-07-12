@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cc_lb_plugin_api::SubscriptionQuotaCandidateSnapshot;
-use cc_lb_plugin_api::types::{CacheScore, TtlClass, WarmCacheEntry};
+use cc_lb_domain::{CacheScore, SubscriptionQuotaCandidateSnapshot, TtlClass, WarmCacheEntry};
 use cc_lb_storage_api::SubscriptionQuotaSample;
 use cc_lb_storage_api::types::{ApiKeyMutation, PrincipalLimitState, StoredApiKeyRecord};
 use uuid::Uuid;
@@ -362,8 +361,8 @@ impl SubscriptionQuotaSampleControl for NoopSubscriptionQuotaCache {
     }
 }
 
-impl cc_lb_contract::AuditSink for AuditWriterSink {
-    fn sink_audit(&self, entry: cc_lb_contract::AuditEntry) {
+impl cc_lb_storage_api::AuditSink for AuditWriterSink {
+    fn sink_audit(&self, entry: cc_lb_storage_api::AuditEntry) {
         let _ = self.try_enqueue(entry);
     }
 }

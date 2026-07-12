@@ -5,13 +5,13 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
 };
 use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
-use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, Principal, RequestContext, RouteDecision, RouteError,
-    RouterPlugin, TerminalStrategy, Upstream, UpstreamCandidate,
+use cc_lb_routing::{
+    FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
 };
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use http::StatusCode;
@@ -67,7 +67,7 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
         let state = TestState::default();
         let hook = Arc::new(RecordingHook::default());
         let test_bus = TestLifecycleBus::new().with_hook_adapter(vec![
-            hook.clone() as Arc<dyn cc_lb_plugin_api::ObservabilityHook>
+            hook.clone() as Arc<dyn cc_lb_observability::ObservabilityHook>
         ]);
         let filters: Vec<Arc<dyn FilterPlugin>> = vec![
             Arc::new(ErrorFilter {
@@ -108,7 +108,7 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
             hook.wait_for_event(|event| {
                 matches!(
                     event,
-                    cc_lb_plugin_api::ObserveEvent::Error { code, source, .. }
+                    cc_lb_observability::ObserveEvent::Error { code, source, .. }
                         if code == "router_filter_passthrough" && source == "router"
                 )
             }),
@@ -250,7 +250,7 @@ struct RecordingTerminalRouter {
 impl RouterPlugin for RecordingTerminalRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -282,7 +282,7 @@ struct RecordingFilter {
 impl FilterPlugin for RecordingFilter {
     fn filter(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
@@ -319,7 +319,7 @@ struct ErrorFilter {
 impl FilterPlugin for ErrorFilter {
     fn filter(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {

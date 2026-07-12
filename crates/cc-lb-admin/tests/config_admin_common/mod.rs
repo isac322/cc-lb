@@ -15,13 +15,15 @@ use cc_lb_control::api_keys::{
     concurrent_guard::KeyConcurrencyManager, key_store::KeyStore, limit_engine::LimitEngine,
     principal_view::PrincipalView,
 };
-use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot};
-use cc_lb_plugin_api::{
-    ApiKeyAwareSignerFactory, ObservabilityHook, Principal, RequestContext, RouteDecision,
-    RouteError, RouterPlugin, SignerFactory, Upstream, UpstreamCandidate,
+use cc_lb_control::{
+    DynamicViewBuilder, DynamicViewHolder, RouteDecision, RouteError, RouterPlugin, RoutingContext,
+    UpstreamStatusSnapshot,
 };
+use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
+use cc_lb_observability::ObservabilityHook;
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -94,8 +96,8 @@ pub fn test_state_with_clock(
     ));
     let dynamic_view = dynamic_view_holder(principal_view);
     let key_store = storage.clone().map(key_store);
-    let event_bus: Option<Arc<dyn cc_lb_contract::RequestEventBus>> = storage.as_ref().map(|_| {
-        Arc::new(cc_lb_engine::InMemoryBus::new()) as Arc<dyn cc_lb_contract::RequestEventBus>
+    let event_bus: Option<Arc<dyn cc_lb_control::RequestEventBus>> = storage.as_ref().map(|_| {
+        Arc::new(cc_lb_control::InMemoryBus::new()) as Arc<dyn cc_lb_control::RequestEventBus>
     });
     AdminState {
         storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
@@ -200,8 +202,8 @@ impl SignerFactory for NoopSignerFactory {
     async fn build(
         &self,
         _upstream: &Upstream,
-    ) -> Result<Arc<dyn cc_lb_plugin_api::Signer>, cc_lb_plugin_api::SignerError> {
-        Err(cc_lb_plugin_api::SignerError::MissingCredentials {
+    ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
+        Err(cc_lb_upstream::SignerError::MissingCredentials {
             reason: "noop test signer factory".to_owned(),
         })
     }
@@ -212,7 +214,7 @@ struct NoopRouter;
 impl RouterPlugin for NoopRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

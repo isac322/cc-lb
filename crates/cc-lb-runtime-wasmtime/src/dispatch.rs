@@ -1,14 +1,12 @@
 use std::sync::Arc;
 
-use cc_lb_plugin_api::SlotKey;
-
 use crate::cache::{call_filter_hook, call_observe_hook, call_shape_hook};
-use crate::{PluginCell, SlotKind, WasmtimeRuntime, WasmtimeRuntimeError};
+use crate::{PluginCell, RuntimeSlotKey, SlotKind, WasmtimeRuntime, WasmtimeRuntimeError};
 
 impl WasmtimeRuntime {
     fn dispatch<F>(
         &self,
-        slot_key: &SlotKey,
+        slot_key: &RuntimeSlotKey,
         expected_kind: SlotKind,
         run: F,
     ) -> Result<Vec<u8>, WasmtimeRuntimeError>
@@ -34,7 +32,7 @@ impl WasmtimeRuntime {
 
     pub fn call_filter(
         &self,
-        slot_key: &SlotKey,
+        slot_key: &RuntimeSlotKey,
         input: &[u8],
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
         self.dispatch(slot_key, SlotKind::Filter, |cell| {
@@ -44,7 +42,7 @@ impl WasmtimeRuntime {
 
     pub fn call_shape(
         &self,
-        slot_key: &SlotKey,
+        slot_key: &RuntimeSlotKey,
         input: &[u8],
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
         self.dispatch(slot_key, SlotKind::Shape, |cell| {
@@ -54,7 +52,7 @@ impl WasmtimeRuntime {
 
     pub fn call_observe(
         &self,
-        slot_key: &SlotKey,
+        slot_key: &RuntimeSlotKey,
         input: &[u8],
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
         self.dispatch(slot_key, SlotKind::Observe, |cell| {

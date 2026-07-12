@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use anyhow::Result;
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot,
+    BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind,
     PrincipalCreate, PrincipalKind, PrincipalStore, WasmBlob, WasmRegistryEntryInput,
 };
 use cc_lb_storage_postgres::PostgresStorage;
@@ -79,7 +79,7 @@ async fn run_test(url: &str) -> Result<()> {
     // Test 1: Verify Shape slot is still singleton
     let input1 = PluginChainEntryInput {
         principal_id,
-        slot: PluginSlot::Shape,
+        slot: PluginSlotKind::Shape,
         order: 100,
         wasm_registry_id: registry_id,
         config: serde_json::json!({}),
@@ -89,7 +89,7 @@ async fn run_test(url: &str) -> Result<()> {
     };
 
     let entry1 = storage.insert_chain_entry(input1.clone()).await?;
-    assert_eq!(entry1.slot, PluginSlot::Shape);
+    assert_eq!(entry1.slot, PluginSlotKind::Shape);
 
     // Attempting to insert another Shape plugin should fail
     let result = storage.insert_chain_entry(input1).await;
@@ -98,7 +98,7 @@ async fn run_test(url: &str) -> Result<()> {
     // Test 2: Verify Router slot is NO LONGER singleton
     let input_router1 = PluginChainEntryInput {
         principal_id,
-        slot: PluginSlot::Router,
+        slot: PluginSlotKind::Router,
         order: 200,
         wasm_registry_id: registry_id,
         config: serde_json::json!({}),
@@ -108,12 +108,12 @@ async fn run_test(url: &str) -> Result<()> {
     };
 
     let entry_router1 = storage.insert_chain_entry(input_router1.clone()).await?;
-    assert_eq!(entry_router1.slot, PluginSlot::Router);
+    assert_eq!(entry_router1.slot, PluginSlotKind::Router);
 
     // Inserting a second Router plugin should succeed (no longer singleton)
     let input_router2 = PluginChainEntryInput {
         principal_id,
-        slot: PluginSlot::Router,
+        slot: PluginSlotKind::Router,
         order: 201,
         wasm_registry_id: registry_id,
         config: serde_json::json!({}),
@@ -123,7 +123,7 @@ async fn run_test(url: &str) -> Result<()> {
     };
 
     let entry_router2 = storage.insert_chain_entry(input_router2).await?;
-    assert_eq!(entry_router2.slot, PluginSlot::Router);
+    assert_eq!(entry_router2.slot, PluginSlotKind::Router);
     assert_ne!(
         entry_router1.id, entry_router2.id,
         "Should be distinct router entries"

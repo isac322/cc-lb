@@ -2,7 +2,7 @@ mod config_admin_common;
 
 use axum::http::StatusCode;
 use cc_lb_config::Config;
-use cc_lb_storage_api::{PluginRegistryStore, PluginSlot, WasmBlob, WasmRegistryEntryInput};
+use cc_lb_storage_api::{PluginRegistryStore, PluginSlotKind, WasmBlob, WasmRegistryEntryInput};
 use config_admin_common::{app, authed_json, temp_storage, test_state};
 use serde_json::json;
 use uuid::Uuid;
@@ -29,9 +29,9 @@ async fn export_supported_slots_serializes_registry_entry_slots_as_snake_case() 
                 usage: "test fixture".to_owned(),
                 hook_metadata: Default::default(),
                 supported_slots: vec![
-                    PluginSlot::Router,
-                    PluginSlot::Shape,
-                    PluginSlot::ObservabilityHook,
+                    PluginSlotKind::Router,
+                    PluginSlotKind::Shape,
+                    PluginSlotKind::ObservabilityHook,
                 ],
             },
         )

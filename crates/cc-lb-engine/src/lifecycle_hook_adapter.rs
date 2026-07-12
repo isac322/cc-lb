@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::{EventId, LifecycleEvent, UsageSnapshot};
-use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent, PrincipalKind};
+use cc_lb_domain::PrincipalKind;
+use cc_lb_lifecycle::{EventId, LifecycleEvent, UsageSnapshot};
+use cc_lb_observability::{ObservabilityHook, ObserveEvent};
 use cc_lb_storage_api::types::PrincipalKindLite;
 use http::StatusCode;
 use tokio::sync::{mpsc, oneshot};
@@ -227,13 +228,13 @@ fn emit_finished(
         }
     }
     metrics::counter!(
-        "cc_lb_contract_hook_adapter_fires_total",
+        "cc_lb_lifecycle_hook_adapter_fires_total",
         "outcome" => "delivered"
     )
     .increment(delivered);
     if delivered == 0 && !hooks.is_empty() {
         metrics::counter!(
-            "cc_lb_contract_hook_adapter_fires_total",
+            "cc_lb_lifecycle_hook_adapter_fires_total",
             "outcome" => "all_dropped"
         )
         .increment(1);
@@ -247,7 +248,7 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
         metrics::counter!(
-            "cc_lb_contract_hook_adapter_fires_total",
+            "cc_lb_lifecycle_hook_adapter_fires_total",
             "outcome" => "orphan_ttl_evicted"
         )
         .increment(removed as u64);
@@ -264,7 +265,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     };
     partials.remove(&oldest_key);
     metrics::counter!(
-        "cc_lb_contract_hook_adapter_fires_total",
+        "cc_lb_lifecycle_hook_adapter_fires_total",
         "outcome" => "cap_evicted"
     )
     .increment(1);
@@ -273,8 +274,8 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_contract::{StreamSuccess, TerminationReason, UsageSource};
-    use cc_lb_plugin_api::{ObservabilityError, ObserveEvent};
+    use cc_lb_lifecycle::{StreamSuccess, TerminationReason, UsageSource};
+    use cc_lb_observability::{ObservabilityError, ObserveEvent};
     use std::sync::Mutex as StdMutex;
 
     #[derive(Default)]

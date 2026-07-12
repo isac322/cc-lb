@@ -716,17 +716,20 @@ dependencies = [
  "cc-lb-aead",
  "cc-lb-clock",
  "cc-lb-config",
- "cc-lb-contract",
  "cc-lb-control",
- "cc-lb-engine",
+ "cc-lb-domain",
+ "cc-lb-lifecycle",
  "cc-lb-oauth-protocol",
- "cc-lb-plugin-api",
+ "cc-lb-observability",
  "cc-lb-plugin-wire",
+ "cc-lb-quota",
+ "cc-lb-request-log",
  "cc-lb-runtime-wasmtime",
  "cc-lb-scheduler",
  "cc-lb-signer-anthropic-oauth",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
+ "cc-lb-upstream",
  "chrono",
  "fake-anthropic",
  "hex",
@@ -805,17 +808,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cc-lb-contract"
-version = "0.1.0"
-dependencies = [
- "cc-lb-plugin-api",
- "serde",
- "serde_json",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "cc-lb-control"
 version = "0.1.0"
 dependencies = [
@@ -826,9 +818,13 @@ dependencies = [
  "bytes",
  "cc-lb-clock",
  "cc-lb-config",
- "cc-lb-contract",
- "cc-lb-plugin-api",
+ "cc-lb-domain",
+ "cc-lb-lifecycle",
+ "cc-lb-observability",
+ "cc-lb-request-log",
+ "cc-lb-routing",
  "cc-lb-storage-api",
+ "cc-lb-upstream",
  "chrono",
  "dashmap",
  "globset",
@@ -857,9 +853,20 @@ name = "cc-lb-dialect-anthropic"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "cc-lb-plugin-api",
+ "cc-lb-domain",
+ "cc-lb-upstream",
  "http",
  "url",
+]
+
+[[package]]
+name = "cc-lb-domain"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -878,13 +885,17 @@ dependencies = [
  "cc-lb-aead",
  "cc-lb-clock",
  "cc-lb-config",
- "cc-lb-contract",
  "cc-lb-control",
+ "cc-lb-domain",
+ "cc-lb-lifecycle",
  "cc-lb-observability",
- "cc-lb-plugin-api",
  "cc-lb-pricing",
+ "cc-lb-quota",
+ "cc-lb-request-log",
+ "cc-lb-routing",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
+ "cc-lb-upstream",
  "chrono",
  "dashmap",
  "eventsource-stream",
@@ -927,6 +938,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-lb-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-domain",
+ "cc-lb-request-log",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "cc-lb-loadgen"
 version = "0.1.0"
 dependencies = [
@@ -952,8 +974,7 @@ name = "cc-lb-observability"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "cc-lb-contract",
- "cc-lb-plugin-api",
+ "cc-lb-domain",
  "http",
  "insta",
  "metrics",
@@ -994,25 +1015,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "cc-lb-plugin-api"
-version = "0.13.0"
-dependencies = [
- "async-trait",
- "bytes",
- "http",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "cc-lb-plugin-conformance"
 version = "0.2.2"
 dependencies = [
  "blake3",
- "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "cc-lb-runtime-wasmtime",
  "rkyv",
@@ -1035,7 +1041,10 @@ dependencies = [
  "arc-swap",
  "bytes",
  "cc-lb-clock",
- "cc-lb-contract",
+ "cc-lb-control",
+ "cc-lb-domain",
+ "cc-lb-lifecycle",
+ "cc-lb-request-log",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
  "futures-lite",
@@ -1064,12 +1073,49 @@ dependencies = [
  "async-stream",
  "axum",
  "bytes",
+ "cc-lb-domain",
  "cc-lb-engine",
- "cc-lb-plugin-api",
+ "cc-lb-observability",
+ "cc-lb-routing",
+ "cc-lb-upstream",
  "http",
  "http-body-util",
  "proptest",
  "tokio",
+]
+
+[[package]]
+name = "cc-lb-quota"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-domain",
+ "cc-lb-storage-api",
+ "http",
+ "serde",
+ "uuid",
+]
+
+[[package]]
+name = "cc-lb-request-log"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-domain",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "cc-lb-routing"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "cc-lb-domain",
+ "cc-lb-upstream",
+ "http",
+ "serde",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -1080,13 +1126,13 @@ dependencies = [
  "arc-swap",
  "blake3",
  "bytes",
- "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
  "http",
  "metrics",
  "metrics-exporter-prometheus",
  "parking_lot",
  "rkyv",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
@@ -1114,7 +1160,7 @@ dependencies = [
  "cc-lb-aead",
  "cc-lb-clock",
  "cc-lb-config",
- "cc-lb-engine",
+ "cc-lb-control",
  "cc-lb-oauth-protocol",
  "cc-lb-pricing",
  "cc-lb-server",
@@ -1168,15 +1214,18 @@ dependencies = [
  "bytes",
  "cc-lb-admin",
  "cc-lb-aead",
+ "cc-lb-clock",
  "cc-lb-config",
- "cc-lb-contract",
  "cc-lb-control",
  "cc-lb-dialect-anthropic",
+ "cc-lb-domain",
  "cc-lb-engine",
  "cc-lb-oauth-protocol",
  "cc-lb-observability",
- "cc-lb-plugin-api",
+ "cc-lb-plugin-wire",
  "cc-lb-pricing",
+ "cc-lb-request-log",
+ "cc-lb-routing",
  "cc-lb-runtime-wasmtime",
  "cc-lb-scheduler",
  "cc-lb-signer-anthropic-key",
@@ -1184,6 +1233,7 @@ dependencies = [
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
+ "cc-lb-upstream",
  "chrono",
  "clap",
  "fake-anthropic",
@@ -1202,6 +1252,7 @@ dependencies = [
  "parking_lot",
  "rand 0.10.1",
  "reqwest",
+ "rkyv",
  "rustls",
  "rustls-pemfile",
  "secrecy",
@@ -1238,8 +1289,9 @@ dependencies = [
  "axum",
  "bytes",
  "cc-lb-aead",
- "cc-lb-plugin-api",
+ "cc-lb-domain",
  "cc-lb-storage-api",
+ "cc-lb-upstream",
  "fake-anthropic",
  "http",
  "http-body-util",
@@ -1257,9 +1309,10 @@ dependencies = [
  "bytes",
  "cc-lb-aead",
  "cc-lb-clock",
+ "cc-lb-domain",
  "cc-lb-oauth-protocol",
- "cc-lb-plugin-api",
  "cc-lb-storage-api",
+ "cc-lb-upstream",
  "chrono",
  "dashmap",
  "http",
@@ -1288,10 +1341,11 @@ dependencies = [
  "blake3",
  "bytes",
  "cc-lb-aead",
- "cc-lb-contract",
+ "cc-lb-clock",
+ "cc-lb-domain",
  "cc-lb-engine",
- "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
+ "cc-lb-request-log",
  "cc-lb-storage-sqlite",
  "chrono",
  "serde",
@@ -1300,6 +1354,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tracing",
  "url",
  "uuid",
 ]
@@ -1311,6 +1366,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "cc-lb-aead",
+ "cc-lb-domain",
  "cc-lb-engine",
  "cc-lb-plugin-wire",
  "cc-lb-storage-api",
@@ -1337,8 +1393,8 @@ dependencies = [
  "bytes",
  "cc-lb-aead",
  "cc-lb-clock",
+ "cc-lb-domain",
  "cc-lb-plugin-wire",
- "cc-lb-pricing",
  "cc-lb-storage-api",
  "cc-lb-storage-conformance",
  "chrono",
@@ -1361,8 +1417,7 @@ dependencies = [
  "async-trait",
  "cc-lb-aead",
  "cc-lb-clock",
- "cc-lb-config",
- "cc-lb-plugin-api",
+ "cc-lb-domain",
  "cc-lb-plugin-wire",
  "cc-lb-storage-api",
  "chrono",
@@ -1394,6 +1449,18 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "url",
+]
+
+[[package]]
+name = "cc-lb-upstream"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "cc-lb-domain",
+ "http",
+ "thiserror 2.0.18",
  "url",
 ]
 

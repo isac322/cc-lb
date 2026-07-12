@@ -1,6 +1,6 @@
 use bytes::Bytes;
-use cc_lb_plugin_api::{RetryDecision, Signer, UpstreamError};
 use cc_lb_signer_anthropic_key::AnthropicKeySigner;
+use cc_lb_upstream::{RetryDecision, Signer, UpstreamError};
 
 #[tokio::test]
 async fn on_unauthorized_returns_fail() {

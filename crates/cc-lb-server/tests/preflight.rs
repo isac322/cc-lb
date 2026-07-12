@@ -4,7 +4,7 @@ use cc_lb_engine::LifecycleConfig;
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_server::preflight::{self, PreflightReport};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot,
+    BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind,
     PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob,
     WasmRegistryEntry, WasmRegistryEntryInput,
 };
@@ -84,7 +84,7 @@ async fn partial_state() {
     seed_chain(
         &fixture.storage,
         enabled.id,
-        PluginSlot::Router,
+        PluginSlotKind::Router,
         registries[0].id,
         1000,
     )
@@ -92,7 +92,7 @@ async fn partial_state() {
     seed_chain(
         &fixture.storage,
         enabled.id,
-        PluginSlot::ObservabilityHook,
+        PluginSlotKind::ObservabilityHook,
         registries[1].id,
         1000,
     )
@@ -100,7 +100,7 @@ async fn partial_state() {
     seed_chain(
         &fixture.storage,
         disabled.id,
-        PluginSlot::Router,
+        PluginSlotKind::Router,
         registries[2].id,
         1000,
     )
@@ -108,7 +108,7 @@ async fn partial_state() {
     seed_chain(
         &fixture.storage,
         disabled.id,
-        PluginSlot::ObservabilityHook,
+        PluginSlotKind::ObservabilityHook,
         registries[3].id,
         1000,
     )
@@ -278,7 +278,7 @@ async fn seed_registry(storage: &SqliteStorage, seed: u8, name: &str) -> WasmReg
 async fn seed_chain(
     storage: &SqliteStorage,
     principal_id: Uuid,
-    slot: PluginSlot,
+    slot: PluginSlotKind,
     wasm_registry_id: Uuid,
     order: i64,
 ) {

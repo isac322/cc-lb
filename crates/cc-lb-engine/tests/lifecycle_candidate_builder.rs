@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
+use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
 use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
@@ -12,15 +13,17 @@ use cc_lb_engine::{
     ApiKeyAwareSignerFactory, Body, DispatchError, DynamicView, DynamicViewBuilder,
     DynamicViewHolder, Lifecycle, LifecycleConfig, RequestKind, UpstreamDispatch, build_candidates,
 };
-use cc_lb_plugin_api::{
-    DialectError, FilterError, FilterOutput, FilterPlugin, ObservabilityError, ObservabilityHook,
-    ObserveEvent, Principal, RequestContext, RetryDecision, RouteDecision, RouteError,
-    RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError,
-    SignerFactory, SigningCapability, TerminalStrategy, Upstream, UpstreamCandidate,
-    UpstreamDialect, UpstreamError,
+use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
+use cc_lb_routing::{
+    FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
 };
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
+    SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, UpstreamDialect,
+    UpstreamError,
+};
 use http::{Request, Response, StatusCode};
 use url::Url;
 use uuid::Uuid;
@@ -66,7 +69,7 @@ struct TestRouter;
 impl RouterPlugin for TestRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -343,7 +346,7 @@ struct KeepIdsFilter {
 impl FilterPlugin for KeepIdsFilter {
     fn filter(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
@@ -376,7 +379,7 @@ struct RecordingRouter {
 impl RouterPlugin for RecordingRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -400,7 +403,7 @@ struct PassthroughDialect;
 impl UpstreamDialect for PassthroughDialect {
     fn shape(
         &self,
-        ctx: &RequestContext,
+        ctx: &DialectShapeContext,
         upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,

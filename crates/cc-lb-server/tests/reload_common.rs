@@ -7,14 +7,14 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use cc_lb_config::Config;
+use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
 };
-use cc_lb_plugin_api::{
-    ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    SignerFactory, Upstream, UpstreamCandidate,
-};
+use cc_lb_observability::ObservabilityHook;
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
+use cc_lb_upstream::SignerFactory;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -109,8 +109,8 @@ impl SignerFactory for NoopSignerFactory {
     async fn build(
         &self,
         _upstream: &Upstream,
-    ) -> Result<Arc<dyn cc_lb_plugin_api::Signer>, cc_lb_plugin_api::SignerError> {
-        Err(cc_lb_plugin_api::SignerError::MissingCredentials {
+    ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
+        Err(cc_lb_upstream::SignerError::MissingCredentials {
             reason: "noop test signer factory".to_owned(),
         })
     }
@@ -121,7 +121,7 @@ struct NoopRouter;
 impl RouterPlugin for NoopRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

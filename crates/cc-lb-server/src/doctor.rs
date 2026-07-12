@@ -1,6 +1,8 @@
 use std::io::Write;
 
-use cc_lb_storage_api::{BackendKind, MetaStore, PluginRegistryStore, PluginSlot, PrincipalStore};
+use cc_lb_storage_api::{
+    BackendKind, MetaStore, PluginRegistryStore, PluginSlotKind, PrincipalStore,
+};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -60,9 +62,9 @@ pub async fn run_list_abandoned_chain_entries(
 
     for principal in principals {
         for slot in [
-            PluginSlot::Router,
-            PluginSlot::ObservabilityHook,
-            PluginSlot::Shape,
+            PluginSlotKind::Router,
+            PluginSlotKind::ObservabilityHook,
+            PluginSlotKind::Shape,
         ] {
             let chain_entries = storage
                 .list_chain_for_principal(principal.id, slot)

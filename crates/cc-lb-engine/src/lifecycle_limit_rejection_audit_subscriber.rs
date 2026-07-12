@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use cc_lb_contract::{LifecycleEvent, LimitDecisionKind};
+use cc_lb_lifecycle::{LifecycleEvent, LimitDecisionKind};
 use http::StatusCode;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -78,7 +78,7 @@ fn handle_event(audit_sink: &AuditWriterSink, event: LifecycleEvent) {
 
     let Some(violation) = limit_violation else {
         metrics::counter!(
-            "cc_lb_contract_limit_rejection_audit_events_total",
+            "cc_lb_lifecycle_limit_rejection_audit_events_total",
             "outcome" => "skipped_no_violation"
         )
         .increment(1);
@@ -86,7 +86,7 @@ fn handle_event(audit_sink: &AuditWriterSink, event: LifecycleEvent) {
     };
     let Some(subject) = subject else {
         metrics::counter!(
-            "cc_lb_contract_limit_rejection_audit_events_total",
+            "cc_lb_lifecycle_limit_rejection_audit_events_total",
             "outcome" => "skipped_no_subject"
         )
         .increment(1);
@@ -106,12 +106,12 @@ fn handle_event(audit_sink: &AuditWriterSink, event: LifecycleEvent) {
         .increment(1);
     }
 
-    let request_summary = request_summary.unwrap_or(cc_lb_contract::LimitRequestSummary {
+    let request_summary = request_summary.unwrap_or(cc_lb_lifecycle::LimitRequestSummary {
         model: String::new(),
         path: String::new(),
         method: String::new(),
     });
-    let route_summary = route_summary.unwrap_or(cc_lb_contract::RouteSummary {
+    let route_summary = route_summary.unwrap_or(cc_lb_lifecycle::RouteSummary {
         upstream_name: String::new(),
     });
 
@@ -139,14 +139,14 @@ fn handle_event(audit_sink: &AuditWriterSink, event: LifecycleEvent) {
     match audit_sink.try_enqueue(entry) {
         Ok(()) => {
             metrics::counter!(
-                "cc_lb_contract_limit_rejection_audit_events_total",
+                "cc_lb_lifecycle_limit_rejection_audit_events_total",
                 "outcome" => "enqueued"
             )
             .increment(1);
         }
         Err(_) => {
             metrics::counter!(
-                "cc_lb_contract_limit_rejection_audit_events_total",
+                "cc_lb_lifecycle_limit_rejection_audit_events_total",
                 "outcome" => "dropped"
             )
             .increment(1);
@@ -163,8 +163,8 @@ fn system_time_unix_secs(t: SystemTime) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_contract::{LimitRequestSummary, LimitSubject, RouteSummary};
     use cc_lb_control::audit_writer::spawn_audit_writer;
+    use cc_lb_lifecycle::{LimitRequestSummary, LimitSubject, RouteSummary};
     use cc_lb_storage_api::{
         AuditEntry as StoredAuditEntry, AuditStore, StorageError, StorageResult,
     };

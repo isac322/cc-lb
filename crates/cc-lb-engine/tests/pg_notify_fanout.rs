@@ -1,6 +1,6 @@
-use cc_lb_contract::{RequestEventBus, RequestEventUpdate};
+use cc_lb_control::RequestEventBus;
 use cc_lb_engine::PgNotifyFanout;
-use cc_lb_storage_api::RequestEventPartial;
+use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
 
 #[tokio::test]
 async fn pg_notify_fanout_notifier_queue_overflow_drops_without_blocking() {

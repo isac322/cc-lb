@@ -1,14 +1,14 @@
 use bytes::Bytes;
-use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_plugin_api::types::{CachePricingSummary, CacheScore};
-use cc_lb_plugin_api::{
-    FilterPlugin, Principal, PrincipalKind, RequestContext, SubscriptionQuotaCandidateSnapshot,
+use cc_lb_domain::{
+    CachePricingSummary, CacheScore, Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot,
     SubscriptionQuotaDataState, SubscriptionTier, UpstreamCandidate, UpstreamKind,
 };
+use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_pricing::{
     CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion, global_catalog,
     init_global_catalog,
 };
+use cc_lb_routing::{FilterPlugin, RoutingContext};
 use http::Method;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -358,23 +358,23 @@ fn same_thread_recomputes_without_successor_convergence() {
     );
 }
 
-fn filter(candidates: &[UpstreamCandidate]) -> cc_lb_plugin_api::FilterOutput {
+fn filter(candidates: &[UpstreamCandidate]) -> cc_lb_routing::FilterOutput {
     SubscriptionPreferenceFilter::new()
         .filter(&ctx(), &principal(), candidates)
         .expect("builtin filter cannot fail")
 }
 
 fn candidate_tier(
-    trace: &cc_lb_plugin_api::SubscriptionPreferenceTrace,
+    trace: &cc_lb_domain::SubscriptionPreferenceTrace,
     upstream_id: Uuid,
 ) -> SubscriptionTier {
     candidate_urgency(trace, upstream_id).tier
 }
 
 fn candidate_urgency(
-    trace: &cc_lb_plugin_api::SubscriptionPreferenceTrace,
+    trace: &cc_lb_domain::SubscriptionPreferenceTrace,
     upstream_id: Uuid,
-) -> &cc_lb_plugin_api::CandidateUrgency {
+) -> &cc_lb_domain::CandidateUrgency {
     trace
         .candidates
         .iter()
@@ -571,8 +571,8 @@ fn clean_known_base(name: &str, id_seed: u8) -> UpstreamCandidate {
     )
 }
 
-fn ctx() -> RequestContext {
-    RequestContext {
+fn ctx() -> RoutingContext {
+    RoutingContext {
         request_id: "req-regression".to_owned(),
         thread_id: None,
         downstream_headers: http::HeaderMap::new(),
@@ -580,14 +580,13 @@ fn ctx() -> RequestContext {
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::new(),
-        cache_breakpoints: Vec::new(),
         canonical_model_id: MODEL_AGNOSTIC.to_owned(),
         cache_pricing: test_cache_pricing(),
     }
 }
 
-fn ctx_with_thread_id(request_id: &str, thread_id: &str) -> RequestContext {
-    RequestContext {
+fn ctx_with_thread_id(request_id: &str, thread_id: &str) -> RoutingContext {
+    RoutingContext {
         request_id: request_id.to_owned(),
         thread_id: Some(thread_id.to_owned()),
         downstream_headers: http::HeaderMap::new(),
@@ -595,7 +594,6 @@ fn ctx_with_thread_id(request_id: &str, thread_id: &str) -> RequestContext {
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::new(),
-        cache_breakpoints: Vec::new(),
         canonical_model_id: MODEL_AGNOSTIC.to_owned(),
         cache_pricing: test_cache_pricing(),
     }

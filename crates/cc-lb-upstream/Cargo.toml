@@ -1,0 +1,15 @@
+[package]
+name = "cc-lb-upstream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+cc-lb-domain.workspace = true
+http.workspace = true
+thiserror.workspace = true
+url.workspace = true

@@ -1,8 +1,8 @@
 mod common;
 mod subscription_preference_v11_preview_support;
 
+use cc_lb_domain::{CandidateUrgency, SubscriptionPreferenceTrace};
 use cc_lb_engine::lifecycle::PreviewRouteOutcome;
-use cc_lb_plugin_api::{CandidateUrgency, SubscriptionPreferenceTrace};
 use uuid::Uuid;
 
 use subscription_preference_v11_preview_support::{PreviewFixture, on_pace_quota, urgent_quota};

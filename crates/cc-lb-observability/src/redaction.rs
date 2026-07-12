@@ -2,12 +2,12 @@ use std::borrow::Cow;
 use std::fmt;
 use std::io::{self, Write};
 
-use cc_lb_plugin_api::types::{
-    CacheAffinityCandidate, CacheAffinityTrace, CandidateUrgency, MAX_ERROR_MESSAGE_LEN,
-    MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN, StageDecision, SubscriptionPreferenceTrace,
-    SubscriptionTier, TerminalDecision, WrhKeySource,
+use cc_lb_domain::{
+    CacheAffinityCandidate, CacheAffinityTrace, CandidateUrgency, InternalError,
+    MAX_ERROR_MESSAGE_LEN, MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN, RoutingTrace,
+    StageDecision, SubscriptionPreferenceTrace, SubscriptionTier, TerminalDecision,
+    TerminalStrategy, WrhKeySource,
 };
-use cc_lb_plugin_api::{InternalError, RoutingTrace, TerminalStrategy};
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex, RegexSet};
 use tracing::field::{Field, Visit};

@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_domain::{Principal, TerminalStrategy, Upstream};
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
     RouterPipelineCache, ShapePluginCache,
@@ -21,13 +22,13 @@ use cc_lb_engine::{
     DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
     UpstreamDispatch,
 };
-use cc_lb_plugin_api::{
-    DialectError, Principal, RequestContext, ResponseTransformError, ShapedRequest,
-    ShapedRequestBuilder, SignedRequest, SseEventTransformHook, TerminalStrategy,
-    TransformSseEventRequest, TransformSseEventResult, Upstream, UpstreamDialect,
-};
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ResponseTransformError, ShapedRequest, ShapedRequestBuilder,
+    SignedRequest, SseEventTransformHook, TransformSseEventRequest, TransformSseEventResult,
+    UpstreamDialect,
+};
 use http::header::CONTENT_TYPE;
 use http::{HeaderValue, Response, StatusCode};
 use tokio::sync::Notify;
@@ -207,7 +208,7 @@ struct FailAfterFirstDialect {
 impl UpstreamDialect for FailAfterFirstDialect {
     fn shape(
         &self,
-        ctx: &RequestContext,
+        ctx: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,

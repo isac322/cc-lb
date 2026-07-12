@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use cc_lb_domain::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_engine::SubscriptionQuotaCacheLike;
-use cc_lb_plugin_api::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_storage_api::{
     StorageResult, SubscriptionQuotaSample, SubscriptionQuotaSource, SubscriptionQuotaStatus,
     SubscriptionQuotaWindow,

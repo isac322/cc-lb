@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::{EventId, LifecycleEvent, RequestEventBus};
+use cc_lb_control::RequestEventBus;
+use cc_lb_lifecycle::{EventId, LifecycleEvent};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -122,7 +123,7 @@ fn handle_event(partials: &mut HashMap<EventId, Partial>, map_cap: usize, event:
             emit_metrics(&partial, status);
         } else {
             metrics::counter!(
-                "cc_lb_contract_api_key_metrics_events_total",
+                "cc_lb_lifecycle_api_key_metrics_events_total",
                 "outcome" => "terminated_without_partial"
             )
             .increment(1);
@@ -151,7 +152,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         }
         LifecycleEvent::AuthCompleted {
             result:
-                Err(cc_lb_contract::AuthFailure::AuthenticationFailed {
+                Err(cc_lb_lifecycle::AuthFailure::AuthenticationFailed {
                     reason: Some(reason),
                     ..
                 }),
@@ -207,7 +208,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
 fn emit_metrics(partial: &Partial, status: u16) {
     let Some(key_id) = partial.key_id.as_deref() else {
         metrics::counter!(
-            "cc_lb_contract_api_key_metrics_events_total",
+            "cc_lb_lifecycle_api_key_metrics_events_total",
             "outcome" => "skipped_no_key_id"
         )
         .increment(1);
@@ -291,7 +292,7 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
         metrics::counter!(
-            "cc_lb_contract_api_key_metrics_events_total",
+            "cc_lb_lifecycle_api_key_metrics_events_total",
             "outcome" => "orphan_ttl_evicted"
         )
         .increment(removed as u64);
@@ -308,7 +309,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     };
     partials.remove(&oldest_key);
     metrics::counter!(
-        "cc_lb_contract_api_key_metrics_events_total",
+        "cc_lb_lifecycle_api_key_metrics_events_total",
         "outcome" => "cap_evicted"
     )
     .increment(1);
@@ -317,9 +318,8 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_contract::{
-        AuthInfo, CostBreakdown, ParseInfo, TerminationReason, UsageSnapshot, UsageSource,
-    };
+    use cc_lb_lifecycle::{AuthInfo, ParseInfo, TerminationReason, UsageSnapshot, UsageSource};
+    use cc_lb_request_log::CostBreakdown;
 
     fn eid(s: &str) -> EventId {
         s.to_owned()

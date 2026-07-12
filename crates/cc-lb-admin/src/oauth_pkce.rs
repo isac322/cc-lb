@@ -127,7 +127,7 @@ pub(crate) async fn complete_pkce_flow(
         &state_token,
         &handshake.verifier,
         &handshake.redirect_uri,
-        cc_lb_engine::clock::unix_secs(clock.now()),
+        cc_lb_clock::unix_secs(clock.now()),
     )
     .await
 }

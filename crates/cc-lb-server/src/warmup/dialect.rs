@@ -3,21 +3,26 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
-use cc_lb_plugin_api::{
-    PluginManifest, Principal, PrincipalKind, RequestContext, SignerFactory, SlotKey, Upstream,
-    shape_request, sign_request,
+use cc_lb_domain::{Principal, PrincipalKind, Upstream};
+use cc_lb_runtime_wasmtime::{
+    RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime, WasmtimeRuntimeError,
 };
-use cc_lb_runtime_wasmtime::{WasmtimeRuntime, WasmtimeRuntimeError, WasmtimeUpstreamDialect};
+
+use crate::wasm_host::WasmtimeUpstreamDialect;
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh, LazyRefreshHandle,
 };
-use cc_lb_storage_api::{PluginSlot, StorageError, UpstreamRecord, WasmRegistryEntry};
+use cc_lb_storage_api::{PluginSlotKind, StorageError, UpstreamRecord, WasmRegistryEntry};
+use cc_lb_upstream::{
+    DialectShapeContext, SignerFactory, UpstreamDialect, shape_request, sign_request,
+};
 use http::{HeaderMap, Method, Request, StatusCode};
 use http_body_util::Full;
 use serde_json::json;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::PluginManifest;
 use crate::dynamic_view_builder::{Stores, materialize_wasm};
 use crate::refresh::LazyRefresher;
 use crate::warmup::request::{WARMUP_MAX_TOKENS, WARMUP_MODEL, WarmupHttpClient};
@@ -50,7 +55,7 @@ pub enum WarmupDispatchError {
     RegistryUnsupportedSlot {
         wasm_registry_id: Uuid,
         plugin_name: String,
-        slot: PluginSlot,
+        slot: PluginSlotKind,
     },
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
@@ -96,7 +101,7 @@ pub async fn dispatch_warmup_with_dialect(
         .ok_or(WarmupDispatchError::RegistryNotFound(
             plugin_ref.wasm_registry_id,
         ))?;
-    let slot = PluginSlot::Shape;
+    let slot = PluginSlotKind::Shape;
     if registry_entry_unsupported_slot(&registry_entry, slot) {
         return Err(WarmupDispatchError::RegistryUnsupportedSlot {
             wasm_registry_id: registry_entry.id,
@@ -123,30 +128,28 @@ pub async fn dispatch_warmup_with_dialect(
         .await
         .map_err(|error| WarmupDispatchError::Materialize(error.to_string()))?;
     let slot = params.runtime.register_shape(
-        SlotKey::new(synth_name.clone(), manifest.name.clone()),
+        RuntimeSlotKey::new(synth_name.clone(), manifest.name.clone()),
         manifest.name.clone(),
         &wasm_bytes,
     )?;
-    let dialect: Arc<dyn cc_lb_plugin_api::UpstreamDialect> = Arc::new(
-        WasmtimeUpstreamDialect::new(slot, params.runtime.config_arc()),
-    );
+    let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
+        slot,
+        params.runtime.config_arc(),
+    ));
+    let dialect: Arc<dyn UpstreamDialect> = Arc::new(WasmtimeUpstreamDialect::new(dispatch));
 
     let body_json = json!({
         "model": WARMUP_MODEL,
         "max_tokens": WARMUP_MAX_TOKENS,
         "messages": [{"role": "user", "content": "."}],
     });
-    let ctx = RequestContext {
+    let context = DialectShapeContext {
         request_id: Uuid::new_v4().to_string(),
-        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from(serde_json::to_vec(&body_json)?),
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: WARMUP_MODEL.to_owned(),
-        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: params.upstream.id.to_string(),
@@ -157,7 +160,7 @@ pub async fn dispatch_warmup_with_dialect(
         base_url: params.upstream.base_url.clone(),
     };
 
-    let shaped = shape_request(dialect.as_ref(), &ctx, &upstream_api, &principal)
+    let shaped = shape_request(dialect.as_ref(), &context, &upstream_api, &principal)
         .map_err(|error| WarmupDispatchError::Shape(error.to_string()))?;
 
     let factory = AnthropicOAuthSignerFactory::for_upstream_name(
@@ -202,7 +205,10 @@ pub async fn dispatch_warmup_with_dialect(
     })
 }
 
-fn registry_entry_unsupported_slot(registry_entry: &WasmRegistryEntry, slot: PluginSlot) -> bool {
+fn registry_entry_unsupported_slot(
+    registry_entry: &WasmRegistryEntry,
+    slot: PluginSlotKind,
+) -> bool {
     !registry_entry.is_builtin
         && !registry_entry.supported_slots.is_empty()
         && !registry_entry.supported_slots.contains(&slot)

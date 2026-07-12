@@ -79,7 +79,7 @@ pub async fn list_credentials(State(state): State<AdminState>) -> Response {
             return internal_error("storage_error");
         }
     };
-    let now = cc_lb_engine::clock::unix_secs(state.clock.now());
+    let now = cc_lb_clock::unix_secs(state.clock.now());
     let mut credentials = Vec::new();
     for principal in &principals {
         let principal_id = principal.id.to_string();
@@ -108,7 +108,7 @@ pub async fn list_oauth_status(State(state): State<AdminState>) -> Response {
             return internal_error("storage_error");
         }
     };
-    let now = cc_lb_engine::clock::unix_secs(state.clock.now());
+    let now = cc_lb_clock::unix_secs(state.clock.now());
     let mut credentials = Vec::new();
     for principal in &principals {
         let principal_id = principal.id.to_string();

@@ -6,16 +6,12 @@ use axum::{
     routing::post,
 };
 use bytes::Bytes;
-use cc_lb_engine::lifecycle::{
-    Lifecycle, PreviewRouteError, PreviewRouteInput, PreviewRouteOutcome,
-};
-use cc_lb_plugin_api::types::RoutingTrace;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use uuid::Uuid;
 
 use crate::AdminState;
+use crate::ports::{RoutePreviewError, RoutePreviewInput};
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-5-20250929";
 
@@ -34,23 +30,15 @@ struct PreviewRequest {
     body: Option<Value>,
 }
 
-#[derive(Debug, Serialize)]
-struct PreviewWinner {
-    upstream_id: Uuid,
-    name: String,
-}
-
-#[derive(Debug, Serialize)]
-struct PreviewResponse {
-    trace: RoutingTrace,
-    winner: Option<PreviewWinner>,
-}
-
 async fn preview_route(
     State(state): State<AdminState>,
     Json(req): Json<PreviewRequest>,
 ) -> axum::response::Response {
-    let Some(lifecycle) = state.lifecycle.as_deref() else {
+    let Some(route_preview) = state
+        .lifecycle
+        .as_ref()
+        .and_then(|ports| ports.route_preview.as_deref())
+    else {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "lifecycle_unavailable",
@@ -72,49 +60,24 @@ async fn preview_route(
         }
     };
 
-    match run_preview(
-        lifecycle,
-        &req.principal_id,
-        req.request_id,
+    match route_preview.preview_route(RoutePreviewInput {
+        principal_id: req.principal_id,
+        request_id: req.request_id,
         headers,
         body_bytes,
-    ) {
+    }) {
         Ok(response) => Json(response).into_response(),
-        Err(PreviewRouteError::PrincipalNotFound(id)) => error_response(
+        Err(RoutePreviewError::PrincipalNotFound(id)) => error_response(
             StatusCode::NOT_FOUND,
             "principal_not_found",
             &format!("principal {id} not found"),
         ),
-        Err(PreviewRouteError::PipelineInstantiationError(detail)) => error_response(
+        Err(RoutePreviewError::PipelineInstantiationError(detail)) => error_response(
             StatusCode::BAD_GATEWAY,
             "router_pipeline_instantiation_error",
             &detail,
         ),
     }
-}
-
-fn run_preview(
-    lifecycle: &Lifecycle,
-    principal_id: &str,
-    request_id: Option<String>,
-    headers: HeaderMap,
-    body_bytes: Bytes,
-) -> Result<PreviewResponse, PreviewRouteError> {
-    let PreviewRouteOutcome {
-        trace,
-        winner_upstream_id,
-        winner_upstream_name,
-    } = lifecycle.preview_route(PreviewRouteInput {
-        principal_id: principal_id.to_owned(),
-        request_id,
-        headers,
-        body_bytes,
-    })?;
-    let winner = match (winner_upstream_id, winner_upstream_name) {
-        (Some(upstream_id), Some(name)) => Some(PreviewWinner { upstream_id, name }),
-        _ => None,
-    };
-    Ok(PreviewResponse { trace, winner })
 }
 
 fn build_headers(headers_in: &HashMap<String, String>) -> Result<HeaderMap, String> {

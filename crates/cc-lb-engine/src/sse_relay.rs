@@ -9,8 +9,10 @@ use std::time::{Duration, Instant as StdInstant};
 
 use axum::body::Body;
 use bytes::{Bytes, BytesMut};
-use cc_lb_contract::{EventId, LifecycleEvent, RequestEventBus};
-use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent, UpstreamDialect};
+use cc_lb_control::RequestEventBus;
+use cc_lb_lifecycle::{EventId, LifecycleEvent};
+use cc_lb_observability::{ObservabilityHook, ObserveEvent};
+use cc_lb_upstream::UpstreamDialect;
 use eventsource_stream::{Event, EventStream, EventStreamError};
 use futures_core::Stream;
 use http::header::CONTENT_TYPE;
@@ -711,14 +713,15 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    use cc_lb_plugin_api::types::{
-        BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, TtlClass, WarmCacheEntry,
+    use cc_lb_domain::{
+        BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, Principal, TtlClass, Upstream,
+        WarmCacheEntry,
     };
-    use cc_lb_plugin_api::{
-        DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal,
-        RequestContext, ShapedRequest, ShapedRequestBuilder, Upstream, UpstreamDialect,
-    };
+    use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
     use cc_lb_storage_api::PromptCacheObservationRecord;
+    use cc_lb_upstream::{
+        DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
+    };
     use http_body_util::BodyExt;
     use uuid::Uuid;
 
@@ -727,7 +730,7 @@ mod tests {
         PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
         PromptCacheObservationInput, PromptCacheObservationSinkLike,
     };
-    use cc_lb_contract::LifecycleBusReceiver;
+    use cc_lb_control::LifecycleBusReceiver;
 
     use super::*;
 
@@ -891,7 +894,7 @@ mod tests {
             prefix_token_count,
             requested_ttl,
             origin: BreakpointOrigin::Explicit,
-            lookback_prefixes: vec![cc_lb_plugin_api::types::CacheLookbackPrefix {
+            lookback_prefixes: vec![cc_lb_domain::CacheLookbackPrefix {
                 prefix_hash: prefix_hash.to_owned(),
                 content_block_index: index,
                 lookback_distance: 0,
@@ -995,7 +998,7 @@ mod tests {
     impl UpstreamDialect for TestDialect {
         fn shape(
             &self,
-            _ctx: &RequestContext,
+            _context: &DialectShapeContext,
             _upstream: &Upstream,
             _principal: &Principal,
             _builder: &mut ShapedRequestBuilder,

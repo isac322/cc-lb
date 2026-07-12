@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use cc_lb_config::RestartRequiredField;
-use cc_lb_contract::ReplicaIdentity;
 use cc_lb_control::ApplyStatus;
+use cc_lb_domain::ReplicaIdentity;
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    PluginChainEntry, PluginRegistryStore, PluginSlot, PrincipalKind, PrincipalRecord,
+    PluginChainEntry, PluginRegistryStore, PluginSlotKind, PrincipalKind, PrincipalRecord,
     PrincipalStore, Storage, StorageError, UpstreamRecord, UpstreamStore, WasmRegistryEntry,
 };
 use serde::Serialize;
@@ -144,7 +144,7 @@ pub(crate) async fn status(State(state): State<AdminState>) -> axum::response::R
 }
 
 async fn export(State(state): State<AdminState>) -> axum::response::Response {
-    match build_export(&state, cc_lb_engine::clock::unix_secs(state.clock.now())).await {
+    match build_export(&state, cc_lb_clock::unix_secs(state.clock.now())).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => status_error_response(error),
     }
@@ -177,7 +177,7 @@ async fn build_status(state: &AdminState) -> Result<StatusResponse, StatusError>
     let replica_identity = state
         .lifecycle
         .as_ref()
-        .and_then(|lifecycle| lifecycle.replica_identity());
+        .and_then(|ports| ports.replica_identity.clone());
 
     Ok(StatusResponse {
         version: env!("CARGO_PKG_VERSION"),
@@ -293,13 +293,13 @@ async fn plugin_chain_summary(
     let mut summary = PluginChainSummary::default();
     for principal in principals {
         let router = storage
-            .list_chain_for_principal(principal.id, PluginSlot::Router)
+            .list_chain_for_principal(principal.id, PluginSlotKind::Router)
             .await?;
         let hooks = storage
-            .list_chain_for_principal(principal.id, PluginSlot::ObservabilityHook)
+            .list_chain_for_principal(principal.id, PluginSlotKind::ObservabilityHook)
             .await?;
         let shape = storage
-            .list_chain_for_principal(principal.id, PluginSlot::Shape)
+            .list_chain_for_principal(principal.id, PluginSlotKind::Shape)
             .await?;
         let count = router.len() + hooks.len() + shape.len();
         if count > 0 {
@@ -318,13 +318,13 @@ async fn export_chains(
     let mut chains = BTreeMap::new();
     for principal in principals {
         let router = storage
-            .list_chain_for_principal(principal.id, PluginSlot::Router)
+            .list_chain_for_principal(principal.id, PluginSlotKind::Router)
             .await?;
         let observability_hook = storage
-            .list_chain_for_principal(principal.id, PluginSlot::ObservabilityHook)
+            .list_chain_for_principal(principal.id, PluginSlotKind::ObservabilityHook)
             .await?;
         let shape = storage
-            .list_chain_for_principal(principal.id, PluginSlot::Shape)
+            .list_chain_for_principal(principal.id, PluginSlotKind::Shape)
             .await?;
         if router.is_empty() && observability_hook.is_empty() && shape.is_empty() {
             continue;

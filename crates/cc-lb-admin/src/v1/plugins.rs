@@ -11,8 +11,8 @@ use cc_lb_control::{AuditEntry, AuditPayload};
 use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainConflictReason,
-    PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginMetadata, PluginSlot,
-    PrincipalStore, Storage, StorageError, WasmRegistryEntry, sparse_order,
+    PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginMetadata,
+    PluginSlotKind, PrincipalStore, Storage, StorageError, WasmRegistryEntry, sparse_order,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -136,12 +136,12 @@ struct ChainListResponse {
 
 #[derive(Debug, Clone, Copy)]
 enum SlotParam {
-    Stored(PluginSlot),
+    Stored(PluginSlotKind),
     RuntimeOnly,
 }
 
 impl SlotParam {
-    fn stored(self) -> Option<PluginSlot> {
+    fn stored(self) -> Option<PluginSlotKind> {
         match self {
             Self::Stored(slot) => Some(slot),
             Self::RuntimeOnly => None,
@@ -384,7 +384,7 @@ async fn insert_chain(
         }) => invalid_order(),
         Err(StorageError::PluginChainConflict {
             reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id },
-        }) if slot == PluginSlot::Shape => slot_singleton(existing_entry_id),
+        }) if slot == PluginSlotKind::Shape => slot_singleton(existing_entry_id),
         Err(error) => storage_error(error),
     }
 }
@@ -637,9 +637,9 @@ async fn find_chain_entry(
         offset += principals.len();
         for principal in principals {
             for slot in [
-                PluginSlot::Router,
-                PluginSlot::ObservabilityHook,
-                PluginSlot::Shape,
+                PluginSlotKind::Router,
+                PluginSlotKind::ObservabilityHook,
+                PluginSlotKind::Shape,
             ] {
                 let entries = storage.list_chain_for_principal(principal.id, slot).await?;
                 if let Some(entry) = entries.into_iter().find(|entry| entry.id == id) {
@@ -657,7 +657,10 @@ fn plugin_chain_update_empty(update: &PluginChainEntryUpdate) -> bool {
         && update.batched_flush_ms.is_none()
 }
 
-fn registry_entry_unsupported_slot(registry_entry: &WasmRegistryEntry, slot: PluginSlot) -> bool {
+fn registry_entry_unsupported_slot(
+    registry_entry: &WasmRegistryEntry,
+    slot: PluginSlotKind,
+) -> bool {
     !registry_entry.is_builtin
         && !registry_entry.supported_slots.is_empty()
         && !registry_entry.supported_slots.contains(&slot)
@@ -667,11 +670,11 @@ async fn infer_reorder_chain(
     storage: &dyn Storage,
     principal_id: Uuid,
     entries: &[ReorderEntry],
-) -> Result<(PluginSlot, Vec<PluginChainEntry>), Box<axum::response::Response>> {
+) -> Result<(PluginSlotKind, Vec<PluginChainEntry>), Box<axum::response::Response>> {
     for slot in [
-        PluginSlot::Router,
-        PluginSlot::ObservabilityHook,
-        PluginSlot::Shape,
+        PluginSlotKind::Router,
+        PluginSlotKind::ObservabilityHook,
+        PluginSlotKind::Shape,
     ] {
         let chain = storage
             .list_chain_for_principal(principal_id, slot)
@@ -854,17 +857,17 @@ fn empty_plugin_chain_audit_metadata(wasm_registry_id: Uuid) -> PluginChainAudit
     }
 }
 
-fn supported_slot_strings(slots: &[PluginSlot]) -> Vec<String> {
+fn supported_slot_strings(slots: &[PluginSlotKind]) -> Vec<String> {
     slots.iter().map(|slot| slot.as_str().to_owned()).collect()
 }
 
 fn parse_slot(value: &str) -> Option<SlotParam> {
     match value {
-        "Router" | "router" | "filter" => Some(SlotParam::Stored(PluginSlot::Router)),
+        "Router" | "router" | "filter" => Some(SlotParam::Stored(PluginSlotKind::Router)),
         "ObservabilityHook" | "observability_hook" | "observe" => {
-            Some(SlotParam::Stored(PluginSlot::ObservabilityHook))
+            Some(SlotParam::Stored(PluginSlotKind::ObservabilityHook))
         }
-        "Shape" | "shape" => Some(SlotParam::Stored(PluginSlot::Shape)),
+        "Shape" | "shape" => Some(SlotParam::Stored(PluginSlotKind::Shape)),
         "build_signer" | "sign" | "on_unauthorized" => Some(SlotParam::RuntimeOnly),
         _ => None,
     }
@@ -1018,7 +1021,7 @@ fn chain_drift_detected(
         .into_response()
 }
 
-fn unsupported_slot(plugin_name: &str, slot: PluginSlot) -> axum::response::Response {
+fn unsupported_slot(plugin_name: &str, slot: PluginSlotKind) -> axum::response::Response {
     (
         StatusCode::BAD_REQUEST,
         Json(json!({
@@ -1077,7 +1080,7 @@ fn error(status: StatusCode, code: &str) -> axum::response::Response {
 fn emit_chain_audit(
     state: &AdminState,
     principal_id: Uuid,
-    slot: PluginSlot,
+    slot: PluginSlotKind,
     wasm_registry_id: String,
     sha256_hex: String,
     supported_slots: Vec<String>,
@@ -1099,7 +1102,7 @@ fn emit_audit(state: &AdminState, payload: AuditPayload) {
         return;
     };
     let action = payload.to_string();
-    let ts = cc_lb_engine::clock::unix_secs(state.clock.now());
+    let ts = cc_lb_clock::unix_secs(state.clock.now());
     let mut entry: AuditEntry = payload.into();
     entry.ts = ts;
     entry.request_id = format!("admin-v1-plugin-{ts}");
