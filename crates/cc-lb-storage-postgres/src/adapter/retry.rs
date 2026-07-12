@@ -58,6 +58,33 @@ where
     }
 }
 
+/// Retries only on Postgres serialization (40001) and deadlock (40P01)
+/// failures. These abort and fully roll back the transaction, so a fresh
+/// attempt is safe even for a non-idempotent operation. Unlike
+/// `with_retry_storage` this deliberately does NOT retry IO/connection errors:
+/// a failure while committing is ambiguous and retrying could mask a write
+/// that actually landed.
+pub async fn with_retry_serialization<T, F, Fut>(
+    policy: &RetryPolicy,
+    mut op: F,
+) -> Result<T, StorageError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, StorageError>>,
+{
+    let mut attempt = 0usize;
+    loop {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(err) if is_serialization_conflict(&err) && attempt < policy.attempts.len() => {
+                tokio::time::sleep(policy.attempts[attempt]).await;
+                attempt += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 fn is_transient(err: &SqlxError) -> bool {
     if matches!(
         err,
@@ -68,6 +95,17 @@ fn is_transient(err: &SqlxError) -> bool {
     // 40001 serialization_failure and 40P01 deadlock_detected abort the whole
     // transaction; a fresh attempt can commit, so treat them as retryable.
     err.as_database_error()
+        .and_then(|db| db.code())
+        .is_some_and(|code| matches!(code.as_ref(), "40001" | "40P01"))
+}
+
+fn is_serialization_conflict(err: &StorageError) -> bool {
+    let StorageError::Transient { source, .. } = err else {
+        return false;
+    };
+    source
+        .downcast_ref::<SqlxError>()
+        .and_then(|sqlx_err| sqlx_err.as_database_error())
         .and_then(|db| db.code())
         .is_some_and(|code| matches!(code.as_ref(), "40001" | "40P01"))
 }
@@ -179,6 +217,27 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(StorageError::Conflict { .. })));
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn serialization_retry_ignores_non_serialization_transient() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let policy = RetryPolicy::default();
+
+        let result: Result<u32, StorageError> = with_retry_serialization(&policy, || {
+            let count = Arc::clone(&call_count);
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Err(StorageError::Transient {
+                    retryable: true,
+                    source: Box::<dyn std::error::Error + Send + Sync>::from("io"),
+                })
+            }
+        })
+        .await;
+
+        assert!(matches!(result, Err(StorageError::Transient { .. })));
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 }

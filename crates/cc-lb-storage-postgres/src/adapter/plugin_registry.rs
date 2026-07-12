@@ -209,7 +209,7 @@ impl PluginRegistryStore for PostgresStorage {
         id: Uuid,
         expected_revision: u64,
     ) -> StorageResult<Option<WasmRegistryEntry>> {
-        retry::with_retry_storage(&retry::RetryPolicy::default(), || {
+        retry::with_retry_serialization(&retry::RetryPolicy::default(), || {
             delete_registry_entry_once(&self.pool, id, expected_revision)
         })
         .await
