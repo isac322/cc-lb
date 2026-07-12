@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use cc_lb_storage_api::StorageError;
 use sqlx::Error as SqlxError;
 
 pub struct RetryPolicy {
@@ -36,11 +37,39 @@ where
     }
 }
 
+pub async fn with_retry_storage<T, F, Fut>(
+    policy: &RetryPolicy,
+    mut op: F,
+) -> Result<T, StorageError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, StorageError>>,
+{
+    let mut attempt = 0usize;
+    loop {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(err) if err.is_retryable() && attempt < policy.attempts.len() => {
+                tokio::time::sleep(policy.attempts[attempt]).await;
+                attempt += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 fn is_transient(err: &SqlxError) -> bool {
-    matches!(
+    if matches!(
         err,
         SqlxError::PoolTimedOut | SqlxError::PoolClosed | SqlxError::Io(_) | SqlxError::Tls(_)
-    )
+    ) {
+        return true;
+    }
+    // 40001 serialization_failure and 40P01 deadlock_detected abort the whole
+    // transaction; a fresh attempt can commit, so treat them as retryable.
+    err.as_database_error()
+        .and_then(|db| db.code())
+        .is_some_and(|code| matches!(code.as_ref(), "40001" | "40P01"))
 }
 
 #[cfg(test)]
@@ -106,5 +135,50 @@ mod tests {
 
         assert!(matches!(result, Err(SqlxError::PoolClosed)));
         assert_eq!(call_count.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn retryable_storage_error_retries_then_succeeds() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let policy = RetryPolicy::default();
+
+        let result = with_retry_storage(&policy, || {
+            let count = Arc::clone(&call_count);
+            async move {
+                let n = count.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Err(StorageError::Transient {
+                        retryable: true,
+                        source: Box::<dyn std::error::Error + Send + Sync>::from("serialize"),
+                    })
+                } else {
+                    Ok(7u32)
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), 7u32);
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn non_retryable_storage_error_not_retried() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let policy = RetryPolicy::default();
+
+        let result: Result<u32, StorageError> = with_retry_storage(&policy, || {
+            let count = Arc::clone(&call_count);
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Err(StorageError::Conflict {
+                    message: "dup".to_owned(),
+                })
+            }
+        })
+        .await;
+
+        assert!(matches!(result, Err(StorageError::Conflict { .. })));
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 }
