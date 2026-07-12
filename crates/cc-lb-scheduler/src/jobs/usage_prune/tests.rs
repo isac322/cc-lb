@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cc_lb_clock::{Clock, ClockHandle, TestClock, unix_millis};
-use cc_lb_engine::usage_pruner::PruneResult;
+use cc_lb_storage_api::usage_pruner::PruneResult;
 
 use super::{UsagePruneJob, UsagePruneJobResult, UsagePruneRunner, handle_usage_prune_job};
 

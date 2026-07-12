@@ -1,0 +1,13 @@
+[package]
+name = "cc-lb-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+url = { workspace = true, features = ["serde"] }
+uuid = { workspace = true, features = ["serde"] }

@@ -11,9 +11,9 @@ use axum::{
     },
     routing::get,
 };
-use cc_lb_contract::{BusReceiver, RequestEventPartial, RequestEventUpdate};
+use cc_lb_control::BusReceiver;
 use cc_lb_control::record_dashboard_sse_lagged;
-use cc_lb_engine::ResetReason;
+use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
 use cc_lb_storage_api::RequestEvent;
 use serde_json::json;
 use tokio::{sync::broadcast::error::RecvError, time::Duration};
@@ -27,6 +27,23 @@ use crate::events::{
 
 const MAX_EMITTED_EVENT_IDS: usize = 10_000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResetReason {
+    BackfillCap,
+    BusLagged,
+    StorageError,
+}
+
+impl ResetReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::BackfillCap => "backfill_cap",
+            Self::BusLagged => "bus_lagged",
+            Self::StorageError => "storage_error",
+        }
+    }
+}
 
 pub fn router() -> Router<AdminState> {
     Router::new()
@@ -208,7 +225,7 @@ pub async fn handle_events_stream(
 }
 
 // `Update` holds an inline `RequestEventUpdate` for the same reason the enum
-// itself keeps its payload inline (see `RequestEventUpdate` in cc-lb-contract):
+// itself keeps its payload inline (see `RequestEventUpdate` in cc-lb-request-log):
 // this value is stack-only per recv, boxing would trade an alloc-per-message
 // for no memory ceiling win.
 #[allow(clippy::large_enum_variant)]

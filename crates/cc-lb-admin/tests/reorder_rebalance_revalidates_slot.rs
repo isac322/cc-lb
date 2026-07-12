@@ -2,7 +2,7 @@ mod admin_test_common;
 
 use axum::http::StatusCode;
 use cc_lb_storage_api::{
-    PluginChainEntry, PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate,
+    PluginChainEntry, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalCreate,
     PrincipalKind, PrincipalStore, WasmBlob, WasmRegistryEntry, WasmRegistryEntryInput,
     sparse_order,
 };
@@ -17,20 +17,20 @@ async fn reorder_chain_revalidates_slot_drift() {
         &server.storage,
         31,
         "shape-drifted-to-router-reorder",
-        vec![PluginSlot::Shape],
+        vec![PluginSlotKind::Shape],
     )
     .await;
     let chain = seed_chain_with_slot(
         &server.storage,
         principal_id,
-        PluginSlot::Shape,
+        PluginSlotKind::Shape,
         registry.id,
         sparse_order::STEP,
     )
     .await;
     server
         .storage
-        .update_supported_slots(registry.id, vec![PluginSlot::Router])
+        .update_supported_slots(registry.id, vec![PluginSlotKind::Router])
         .await
         .unwrap();
 
@@ -65,20 +65,20 @@ async fn rebalance_chain_revalidates_slot_drift() {
         &server.storage,
         32,
         "shape-drifted-to-router-rebalance",
-        vec![PluginSlot::Shape],
+        vec![PluginSlotKind::Shape],
     )
     .await;
     seed_chain_with_slot(
         &server.storage,
         principal_id,
-        PluginSlot::Shape,
+        PluginSlotKind::Shape,
         registry.id,
         sparse_order::STEP,
     )
     .await;
     server
         .storage
-        .update_supported_slots(registry.id, vec![PluginSlot::Router])
+        .update_supported_slots(registry.id, vec![PluginSlotKind::Router])
         .await
         .unwrap();
 
@@ -127,7 +127,7 @@ async fn seed_registry_with_slots(
     storage: &cc_lb_storage_sqlite::SqliteStorage,
     seed: u8,
     name: &str,
-    slots: Vec<PluginSlot>,
+    slots: Vec<PluginSlotKind>,
 ) -> WasmRegistryEntry {
     let (entry, _) = storage
         .persist_wasm_upload(
@@ -158,7 +158,7 @@ async fn seed_registry_with_slots(
 async fn seed_chain_with_slot(
     storage: &cc_lb_storage_sqlite::SqliteStorage,
     principal_id: Uuid,
-    slot: PluginSlot,
+    slot: PluginSlotKind,
     wasm_registry_id: Uuid,
     order: i64,
 ) -> PluginChainEntry {

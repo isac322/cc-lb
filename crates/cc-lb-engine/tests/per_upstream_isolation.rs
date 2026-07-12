@@ -8,7 +8,7 @@ use bytes::Bytes;
 use cc_lb_engine::{
     Body, BulkheadRegistry, BulkheadRuntimeConfig, DispatchError, ExecuteError, UpstreamDispatch,
 };
-use cc_lb_plugin_api::SignedRequest;
+use cc_lb_upstream::SignedRequest;
 use http::{Response, StatusCode};
 use tokio::sync::Notify;
 

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use cc_lb_contract::AuditEntry;
+pub use cc_lb_storage_api::AuditEntry;
 use cc_lb_storage_api::{AuditStore, Storage as StorageTrait};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;

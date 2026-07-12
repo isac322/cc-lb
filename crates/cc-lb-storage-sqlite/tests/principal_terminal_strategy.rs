@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_plugin_api::TerminalStrategy;
+use cc_lb_domain::TerminalStrategy;
 use cc_lb_storage_api::{BackendKind, MetaStore, PrincipalStore};
 use uuid::Uuid;
 

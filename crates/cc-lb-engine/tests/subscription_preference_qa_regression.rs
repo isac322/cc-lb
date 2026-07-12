@@ -1,13 +1,11 @@
 use bytes::Bytes;
+use cc_lb_domain::{
+    CachePricingSummary, CacheScore, CandidateUrgency, Principal, PrincipalKind,
+    SubscriptionPreferenceTrace, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
+    SubscriptionTier, UpstreamCandidate, UpstreamKind, WrhKeySource,
+};
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_plugin_api::types::{
-    CachePricingSummary, CacheScore, CandidateUrgency, SubscriptionPreferenceTrace,
-    SubscriptionTier, WrhKeySource,
-};
-use cc_lb_plugin_api::{
-    FilterPlugin, Principal, PrincipalKind, RequestContext, SubscriptionQuotaCandidateSnapshot,
-    SubscriptionQuotaDataState, UpstreamCandidate, UpstreamKind,
-};
+use cc_lb_routing::{FilterPlugin, RoutingContext};
 use http::{HeaderMap, Method};
 use uuid::Uuid;
 
@@ -277,8 +275,8 @@ fn cache_score(key: &str, read_tokens: u32, create_5m_tokens: u32) -> CacheScore
     }
 }
 
-fn ctx(request_id: &str) -> RequestContext {
-    RequestContext {
+fn ctx(request_id: &str) -> RoutingContext {
+    RoutingContext {
         request_id: request_id.to_owned(),
         thread_id: Some("qa-regression-thread".to_owned()),
         downstream_headers: HeaderMap::new(),
@@ -286,7 +284,6 @@ fn ctx(request_id: &str) -> RequestContext {
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::new(),
-        cache_breakpoints: Vec::new(),
         canonical_model_id: MODEL.to_owned(),
         cache_pricing: cache_pricing(),
     }

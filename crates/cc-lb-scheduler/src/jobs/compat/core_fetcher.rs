@@ -1,5 +1,5 @@
 use cc_lb_clock::{Clock, unix_secs};
-use cc_lb_engine::anthropic_compat::{CompatibilityKey, run_compat_fetcher};
+use cc_lb_control::anthropic_compat::{CompatibilityKey, run_compat_fetcher};
 use cc_lb_storage_api::AnthropicCompatibilityKvStore;
 use tokio_util::sync::CancellationToken;
 

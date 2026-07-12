@@ -3,7 +3,7 @@ mod config_admin_common;
 use axum::http::StatusCode;
 use cc_lb_config::Config;
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
+    BUILTIN_CACHE_AFFINITY_ID, PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind,
     PrincipalStore, WasmBlob, WasmRegistryEntryInput,
 };
 use config_admin_common::{app, authed_json, temp_storage, test_state};
@@ -148,7 +148,7 @@ async fn seed_registry_with_wire_version(
                 description: format!("{name} description"),
                 usage: format!("wire v{wire_version} fixture"),
                 hook_metadata: Default::default(),
-                supported_slots: vec![PluginSlot::Router],
+                supported_slots: vec![PluginSlotKind::Router],
             },
         )
         .await

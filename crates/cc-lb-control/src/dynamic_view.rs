@@ -1,10 +1,13 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwap;
-use cc_lb_plugin_api::{
-    ApiKeyAwareSignerFactory, ObservabilityHook, RateLimitObservation, RouterPlugin,
-};
+#[doc(hidden)]
+pub use cc_lb_domain::PlanInfo;
+use cc_lb_domain::RateLimitObservation;
+use cc_lb_observability::ObservabilityHook;
+use cc_lb_routing::RouterPlugin;
 use cc_lb_storage_api::{UpstreamRateLimitObservationRecord, UpstreamRecord};
+use cc_lb_upstream::ApiKeyAwareSignerFactory;
 use parking_lot::RwLock;
 use uuid::Uuid;
 
@@ -161,14 +164,6 @@ pub enum ApplyStatus {
     Active,
     Disabled,
     Error,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct PlanInfo {
-    pub organization_type: Option<String>,
-    pub rate_limit_tier: Option<String>,
-    pub seat_tier: Option<String>,
-    pub capacity_ratio: f64,
 }
 
 pub struct DynamicViewBuilder {
@@ -335,10 +330,12 @@ impl DynamicViewBuilder {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use cc_lb_plugin_api::{
-        ObservabilityError, ObserveEvent, Principal, RequestContext, RouteDecision, RouteError,
-        SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
-        UpstreamCandidate, UpstreamError,
+    use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
+    use cc_lb_observability::{ObservabilityError, ObserveEvent};
+    use cc_lb_routing::{RouteDecision, RouteError, RoutingContext};
+    use cc_lb_upstream::{
+        RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+        SigningCapability, UpstreamError,
     };
 
     struct TestSignerFactory;
@@ -366,14 +363,14 @@ mod tests {
     impl Signer for TestSigner {
         async fn sign(
             &self,
-            shaped: cc_lb_plugin_api::ShapedRequest,
+            shaped: ShapedRequest,
             capability: &mut SigningCapability,
         ) -> Result<SignedRequest, SignerError> {
             Ok(SignedRequest::from_shaped(shaped, capability))
         }
 
-        async fn on_unauthorized(&self, _err: &UpstreamError) -> cc_lb_plugin_api::RetryDecision {
-            cc_lb_plugin_api::RetryDecision::Fail
+        async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+            RetryDecision::Fail
         }
     }
 
@@ -382,7 +379,7 @@ mod tests {
     impl RouterPlugin for TestRouter {
         fn route(
             &self,
-            _ctx: &RequestContext,
+            _ctx: &RoutingContext,
             _principal: &Principal,
             _candidates: &[UpstreamCandidate],
         ) -> Result<RouteDecision, RouteError> {

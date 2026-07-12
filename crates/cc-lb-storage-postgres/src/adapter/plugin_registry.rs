@@ -5,7 +5,7 @@ use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, MAX_WASM_BLOB_BYTES,
     PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
-    PluginRegistryStore, PluginSlot, StorageError, StorageResult, WasmBlob, WasmBlobRecord,
+    PluginRegistryStore, PluginSlotKind, StorageError, StorageResult, WasmBlob, WasmBlobRecord,
     WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
 };
 use chrono::{DateTime, Utc};
@@ -189,7 +189,7 @@ impl PluginRegistryStore for PostgresStorage {
     async fn update_supported_slots(
         &self,
         id: Uuid,
-        supported_slots: Vec<PluginSlot>,
+        supported_slots: Vec<PluginSlotKind>,
     ) -> StorageResult<()> {
         let slots: Vec<String> = supported_slots
             .iter()
@@ -360,7 +360,7 @@ impl PluginRegistryStore for PostgresStorage {
     async fn list_chain_for_principal(
         &self,
         principal_id: Uuid,
-        slot: PluginSlot,
+        slot: PluginSlotKind,
     ) -> StorageResult<Vec<PluginChainEntry>> {
         let rows = sqlx::query("SELECT * FROM plugin_chains_v2 WHERE principal_id = $1 AND slot = $2 ORDER BY order_value ASC, id ASC")
             .bind(principal_id).bind(slot.as_str()).fetch_all(&self.pool).await.map_err(map_sqlx_error)?;
@@ -370,7 +370,7 @@ impl PluginRegistryStore for PostgresStorage {
     async fn list_chains_for_principals(
         &self,
         principal_ids: &[Uuid],
-        slots: &[PluginSlot],
+        slots: &[PluginSlotKind],
     ) -> StorageResult<Vec<PluginChainEntry>> {
         if principal_ids.is_empty() || slots.is_empty() {
             return Ok(Vec::new());
@@ -445,7 +445,7 @@ impl PluginRegistryStore for PostgresStorage {
     async fn reorder_chain(
         &self,
         principal_id: Uuid,
-        slot: PluginSlot,
+        slot: PluginSlotKind,
         new_orders: Vec<(Uuid, i64, u64)>,
     ) -> StorageResult<Vec<PluginChainEntry>> {
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
@@ -579,7 +579,7 @@ impl PluginRegistryStore for PostgresStorage {
     async fn rebalance_chain(
         &self,
         principal_id: Uuid,
-        slot: PluginSlot,
+        slot: PluginSlotKind,
     ) -> StorageResult<Vec<PluginChainEntry>> {
         let entries = self.list_chain_for_principal(principal_id, slot).await?;
         let orders = sparse_order::rebalance(vec![0; entries.len()]);
@@ -727,7 +727,7 @@ fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEn
             .try_get::<Vec<String>, _>("supported_slots")
             .map_err(map_sqlx_error)?
             .into_iter()
-            .filter_map(|s| PluginSlot::parse(&s))
+            .filter_map(|s| PluginSlotKind::parse(&s))
             .collect(),
         schema_hash: row
             .try_get::<Option<Vec<u8>>, _>("schema_hash")
@@ -751,15 +751,15 @@ fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEn
         && schema_hash_ok
 }
 
-fn is_singleton_slot(slot: PluginSlot) -> bool {
-    matches!(slot, PluginSlot::Shape)
+fn is_singleton_slot(slot: PluginSlotKind) -> bool {
+    matches!(slot, PluginSlotKind::Shape)
 }
 
 fn chain_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PluginChainEntry> {
     Ok(PluginChainEntry {
         id: row.try_get("id").map_err(map_sqlx_error)?,
         principal_id: row.try_get("principal_id").map_err(map_sqlx_error)?,
-        slot: PluginSlot::parse(
+        slot: PluginSlotKind::parse(
             row.try_get::<String, _>("slot")
                 .map_err(map_sqlx_error)?
                 .as_str(),

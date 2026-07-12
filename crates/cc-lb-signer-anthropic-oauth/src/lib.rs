@@ -11,12 +11,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, OAuthTokenBundle};
 use cc_lb_clock::{Clock, ClockHandle, unix_secs};
-use cc_lb_plugin_api::{
-    ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
-    SignerFactory, SigningCapability, Upstream, UpstreamError,
-};
+use cc_lb_domain::Upstream;
 use cc_lb_storage_api::{
     OAuthCredentialStore, OAuthCredentials, StorageError, UpstreamRecord, UpstreamStore,
+};
+use cc_lb_upstream::{
+    ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
+    SignerFactory, SigningCapability, UpstreamError,
 };
 use dashmap::DashMap;
 use http::HeaderMap;
@@ -974,13 +975,14 @@ mod tests {
     use bytes::Bytes;
     use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
     use cc_lb_clock::TestClock;
-    use cc_lb_plugin_api::{
-        RequestContext, Upstream, UpstreamDialect, shape_request, sign_request,
-    };
     use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
     use cc_lb_storage_api::{
         OAuthCredentialStore, StorageError, StorageResult, UpstreamCreate, UpstreamRecord,
         UpstreamRecordId, UpstreamStore, UpstreamUpdate, validate_identifier,
+    };
+    use cc_lb_upstream::{
+        DialectError, DialectShapeContext, ShapedRequestBuilder, UpstreamDialect, shape_request,
+        sign_request,
     };
     use http::header::{AUTHORIZATION, USER_AGENT};
     use http::{HeaderMap, HeaderValue, Method, StatusCode};
@@ -1807,21 +1809,17 @@ mod tests {
     }
 
     fn shaped_request() -> ShapedRequest {
-        let ctx = RequestContext {
+        let ctx = DialectShapeContext {
             request_id: "req-1".to_owned(),
-            thread_id: None,
             downstream_headers: HeaderMap::new(),
             method: Method::POST,
             path: "/v1/messages".to_owned(),
             query: None,
             body_bytes: Bytes::from_static(b"{}"),
-            cache_breakpoints: Vec::new(),
-            canonical_model_id: String::new(),
-            cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
         };
-        let principal = cc_lb_plugin_api::Principal {
+        let principal = cc_lb_domain::Principal {
             id: "principal".to_owned(),
-            kind: cc_lb_plugin_api::PrincipalKind::OAuthSubject,
+            kind: cc_lb_domain::PrincipalKind::OAuthSubject,
             claims: serde_json::Map::new(),
         };
         shape_request(
@@ -1838,11 +1836,11 @@ mod tests {
     impl UpstreamDialect for DirectDialect {
         fn shape(
             &self,
-            _ctx: &RequestContext,
+            _context: &DialectShapeContext,
             _upstream: &Upstream,
-            _principal: &cc_lb_plugin_api::Principal,
-            builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
-        ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
+            _principal: &cc_lb_domain::Principal,
+            builder: &mut ShapedRequestBuilder,
+        ) -> Result<ShapedRequest, DialectError> {
             let mut headers = HeaderMap::new();
             headers.insert(USER_AGENT, HeaderValue::from_static("test-agent"));
             Ok(builder.shaped_request(

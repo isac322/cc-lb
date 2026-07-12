@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::{EngineMetricsHook, EventId, LifecycleEvent};
+use cc_lb_lifecycle::{EventId, LifecycleEvent};
+use cc_lb_observability::EngineMetricsHook;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -121,7 +122,7 @@ fn handle_event(
             emit_metric(metrics, &partial, status);
         } else {
             metrics::counter!(
-                "cc_lb_contract_cache_hit_miss_events_total",
+                "cc_lb_lifecycle_cache_hit_miss_events_total",
                 "outcome" => "terminated_without_partial"
             )
             .increment(1);
@@ -182,7 +183,7 @@ fn emit_metric(metrics_hook: &dyn EngineMetricsHook, partial: &Partial, status: 
     }
     if !partial.usage_seen {
         metrics::counter!(
-            "cc_lb_contract_cache_hit_miss_events_total",
+            "cc_lb_lifecycle_cache_hit_miss_events_total",
             "outcome" => "skipped_no_usage"
         )
         .increment(1);
@@ -197,7 +198,7 @@ fn emit_metric(metrics_hook: &dyn EngineMetricsHook, partial: &Partial, status: 
         metrics_hook.record_cache_miss(upstream, model);
     }
     metrics::counter!(
-        "cc_lb_contract_cache_hit_miss_events_total",
+        "cc_lb_lifecycle_cache_hit_miss_events_total",
         "outcome" => "observed"
     )
     .increment(1);
@@ -210,7 +211,7 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
         metrics::counter!(
-            "cc_lb_contract_cache_hit_miss_events_total",
+            "cc_lb_lifecycle_cache_hit_miss_events_total",
             "outcome" => "orphan_ttl_evicted"
         )
         .increment(removed as u64);
@@ -227,7 +228,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     };
     partials.remove(&oldest_key);
     metrics::counter!(
-        "cc_lb_contract_cache_hit_miss_events_total",
+        "cc_lb_lifecycle_cache_hit_miss_events_total",
         "outcome" => "cap_evicted"
     )
     .increment(1);
@@ -236,10 +237,9 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_contract::{
-        EngineMetricsHook, NoopMetricsHook, ParseInfo, RequestCacheBreakpoint,
-        RequestCacheBreakpointSource, RouteInfo, TerminationReason, UsageSnapshot, UsageSource,
-    };
+    use cc_lb_lifecycle::{ParseInfo, RouteInfo, TerminationReason, UsageSnapshot, UsageSource};
+    use cc_lb_observability::{EngineMetricsHook, NoopMetricsHook};
+    use cc_lb_request_log::{RequestCacheBreakpoint, RequestCacheBreakpointSource};
     use uuid::Uuid;
 
     fn eid(s: &str) -> EventId {

@@ -1,18 +1,11 @@
 //! Storage API records observed prompt-cache prefixes per upstream/model.
 
 use async_trait::async_trait;
+use cc_lb_domain::TtlClass;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{StorageError, StorageResult};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TtlClass {
-    #[default]
-    Ephemeral5m,
-    Ephemeral1h,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptCacheObservationRecord {

@@ -2,12 +2,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cc_lb_contract::{
-    AuthInfo, CostBreakdown as LifecycleCostBreakdown, EngineMetricsHook, EventId, LifecycleEvent,
-    ParseInfo, RequestCacheBreakpoint, RequestCacheState, RequestEventBus, RequestEventPartial,
-    RequestEventUpdate, RequestEventUpstream, RouteInfo, TerminationReason, UsageSnapshot,
+use cc_lb_control::RequestEventBus;
+use cc_lb_domain::{InternalError, RoutingTrace};
+use cc_lb_lifecycle::{
+    AuthInfo, EventId, LifecycleEvent, ParseInfo, RouteInfo, TerminationReason, UsageSnapshot,
 };
-use cc_lb_plugin_api::{InternalError, RoutingTrace};
+use cc_lb_observability::EngineMetricsHook;
+use cc_lb_request_log::{
+    CostBreakdown as LifecycleCostBreakdown, RequestCacheBreakpoint, RequestCacheState,
+    RequestEventPartial, RequestEventUpdate, RequestEventUpstream,
+};
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -369,7 +373,7 @@ impl Partial {
             &str,
             &UsageSnapshot,
             Option<cc_lb_pricing::UpstreamKind>,
-        ) -> cc_lb_contract::CostBreakdown,
+        ) -> LifecycleCostBreakdown,
     ) -> Option<CostBreakdownOptions> {
         if !self.usage_seen {
             return None;
@@ -433,8 +437,8 @@ fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
     }
 }
 
-impl From<cc_lb_contract::CostBreakdown> for CostBreakdownOptions {
-    fn from(cost: cc_lb_contract::CostBreakdown) -> Self {
+impl From<LifecycleCostBreakdown> for CostBreakdownOptions {
+    fn from(cost: LifecycleCostBreakdown) -> Self {
         Self {
             total: cost.total_micros,
             input: cost.input_micros,
@@ -555,7 +559,7 @@ async fn write_finalized_rows(
             } else {
                 "written"
             };
-            metrics::counter!("cc_lb_contract_assembler_rows_total", "outcome" => outcome)
+            metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => outcome)
                 .increment(1);
         }
         Err(error) => {
@@ -592,7 +596,7 @@ async fn flush_expired_terminations(
                 .as_ref()
                 .expect("expired implies termination present");
             metrics::counter!(
-                "cc_lb_contract_assembler_rows_total",
+                "cc_lb_lifecycle_assembler_rows_total",
                 "outcome" => "written_after_grace"
             )
             .increment(1);
@@ -673,7 +677,7 @@ async fn handle_event(
         let is_orphan = existing.is_none();
         if is_orphan {
             metrics::counter!(
-                "cc_lb_contract_assembler_rows_total",
+                "cc_lb_lifecycle_assembler_rows_total",
                 "outcome" => "terminated_without_partial"
             )
             .increment(1);
@@ -838,7 +842,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         }
         LifecycleEvent::LimitDecision {
             decision:
-                cc_lb_contract::LimitDecisionKind::Reserved {
+                cc_lb_lifecycle::LimitDecisionKind::Reserved {
                     limit_reserve_ms, ..
                 },
             ..
@@ -1170,7 +1174,7 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
         metrics::counter!(
-            "cc_lb_contract_assembler_rows_total",
+            "cc_lb_lifecycle_assembler_rows_total",
             "outcome" => "orphan_ttl_evicted"
         )
         .increment(removed as u64);
@@ -1187,7 +1191,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     };
     partials.remove(&oldest_key);
     metrics::counter!(
-        "cc_lb_contract_assembler_rows_total",
+        "cc_lb_lifecycle_assembler_rows_total",
         "outcome" => "cap_evicted"
     )
     .increment(1);
@@ -1197,14 +1201,16 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use cc_lb_contract::{
-        AuthFailure, BusReceiver, CostBreakdown, EngineMetricsHook, HeaderSnapshot,
-        NoopMetricsHook, ParseFailure, RouteInfo, StreamError, StreamSuccess, UsageSource,
-    };
-    use cc_lb_plugin_api::types::{
+    use cc_lb_control::BusReceiver;
+    use cc_lb_domain::{
         CandidateUrgency, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
         TerminalDecision, TerminalStrategy, WrhKeySource,
     };
+    use cc_lb_lifecycle::{
+        AuthFailure, ParseFailure, RouteInfo, StreamError, StreamSuccess, UsageSource,
+    };
+    use cc_lb_observability::{EngineMetricsHook, NoopMetricsHook};
+    use cc_lb_request_log::{CostBreakdown, HeaderSnapshot};
     use cc_lb_storage_api::{RequestEvent, StorageResult};
     use metrics::{Counter, CounterFn, Key, KeyName, Metadata, Recorder, SharedString, Unit};
     use proptest::prelude::*;
@@ -1595,7 +1601,7 @@ mod tests {
     async fn request_terminated_before_started_writes_orphan_and_increments_metric() {
         let recorder = install_counting_recorder();
         let before = recorder.count_matching(
-            "cc_lb_contract_assembler_rows_total",
+            "cc_lb_lifecycle_assembler_rows_total",
             "terminated_without_partial",
         );
         let (tx, rx) = mpsc::channel(16);
@@ -1638,7 +1644,7 @@ mod tests {
         );
         assert!(
             recorder.count_matching(
-                "cc_lb_contract_assembler_rows_total",
+                "cc_lb_lifecycle_assembler_rows_total",
                 "terminated_without_partial",
             ) > before
         );
@@ -1655,13 +1661,13 @@ mod tests {
             sse_event_count: 0,
             ..Default::default()
         };
-        let _ = cc_lb_contract::UsageSource::NonStreamBody;
+        let _ = cc_lb_lifecycle::UsageSource::NonStreamBody;
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn finalized_row_write_republishes_to_bus_for_admin_sse() {
         use crate::event_bus::InMemoryBus;
-        use cc_lb_contract::BusReceiver;
+        use cc_lb_control::BusReceiver;
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
         let bus = Arc::new(InMemoryBus::new());
@@ -1720,7 +1726,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn request_started_then_route_publishes_ordered_enrichment_baseline() {
         use crate::event_bus::InMemoryBus;
-        use cc_lb_contract::BusReceiver;
+        use cc_lb_control::BusReceiver;
 
         // Given an assembler with an in-memory subscriber.
         let (tx, rx) = mpsc::channel(4);
@@ -1808,7 +1814,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn full_lifecycle_publishes_throttled_partials_and_one_final() {
         use crate::event_bus::InMemoryBus;
-        use cc_lb_contract::BusReceiver;
+        use cc_lb_control::BusReceiver;
 
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
@@ -2030,7 +2036,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn parse_and_auth_failures_emit_no_enrichment_partials_and_finalize_once() {
         use crate::event_bus::InMemoryBus;
-        use cc_lb_contract::BusReceiver;
+        use cc_lb_control::BusReceiver;
 
         // Given an assembler subscribed before a request begins.
         let (tx, rx) = mpsc::channel(8);

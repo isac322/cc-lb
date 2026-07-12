@@ -24,8 +24,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_wire::{CachePricingSummary, FilterRequest, Principal, UpstreamCandidate};
+use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use rkyv::rancor::Error;
@@ -92,7 +92,7 @@ fn successful_filter_call_emits_three_metric_families() {
     let handle = recorder.handle();
 
     let plugin_name = "cache-aware-wasmtime";
-    let key = SlotKey::global("metrics-probe");
+    let key = RuntimeSlotKey::global("metrics-probe");
 
     metrics::with_local_recorder(&recorder, || {
         let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));

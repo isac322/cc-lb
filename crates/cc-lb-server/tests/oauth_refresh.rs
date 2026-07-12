@@ -10,15 +10,13 @@ use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::{
     AnthropicOAuthConfig, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind,
 };
+use cc_lb_domain::Upstream;
 use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_engine::{Clock, ClockHandle, DynamicViewHolder, Lifecycle, LifecycleConfig, TestClock};
 use cc_lb_oauth_protocol::{
     ExistingTokenParts, TokenEndpointResponse, parse_token_endpoint_response,
     refresh_token_form_body, refreshed_token_parts,
-};
-use cc_lb_plugin_api::{
-    RequestContext, ShapedRequest, Upstream, UpstreamDialect, shape_request, sign_request,
 };
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
@@ -40,6 +38,10 @@ use cc_lb_storage_api::{
     BackendKind, MetaStore, PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamRecord,
     UpstreamStore,
     types::{KeyStatus, PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
+};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
+    shape_request, sign_request,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -236,7 +238,7 @@ async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
         fixture.clock.clone(),
     );
     let factory = AnthropicOAuthSignerFactoryWithLazyRefresh::new(base, lazy, upstream_id);
-    let signer = cc_lb_plugin_api::SignerFactory::build(
+    let signer = cc_lb_upstream::SignerFactory::build(
         &factory,
         &Upstream::AnthropicDirect { base_url: None },
     )
@@ -741,21 +743,17 @@ fn now_secs(clock: &dyn Clock) -> u64 {
 }
 
 fn shaped_request() -> ShapedRequest {
-    let ctx = RequestContext {
+    let ctx = DialectShapeContext {
         request_id: "req-1".to_owned(),
-        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(b"{}"),
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: String::new(),
-        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     };
-    let principal = cc_lb_plugin_api::Principal {
+    let principal = cc_lb_domain::Principal {
         id: "principal".to_owned(),
-        kind: cc_lb_plugin_api::PrincipalKind::OAuthSubject,
+        kind: cc_lb_domain::PrincipalKind::OAuthSubject,
         claims: serde_json::Map::new(),
     };
     shape_request(
@@ -785,11 +783,11 @@ struct DirectDialect;
 impl UpstreamDialect for DirectDialect {
     fn shape(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &DialectShapeContext,
         _upstream: &Upstream,
-        _principal: &cc_lb_plugin_api::Principal,
-        builder: &mut cc_lb_plugin_api::ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
+        _principal: &cc_lb_domain::Principal,
+        builder: &mut ShapedRequestBuilder,
+    ) -> Result<ShapedRequest, DialectError> {
         Ok(builder.shaped_request(
             Url::parse("https://api.anthropic.com/v1/messages").expect("url"),
             Method::POST,

@@ -20,11 +20,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 
-use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_wire::{
     ArchivedFilterResponse, CachePricingSummary, FilterRequest, FilterResponse, Principal,
     UpstreamCandidate,
 };
+use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use rkyv::rancor::Error;
 use rkyv::util::AlignedVec;
@@ -105,7 +105,7 @@ fn request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRequest {
     }
 }
 
-fn call(runtime: &WasmtimeRuntime, slot: &SlotKey, req: &FilterRequest) -> FilterResponse {
+fn call(runtime: &WasmtimeRuntime, slot: &RuntimeSlotKey, req: &FilterRequest) -> FilterResponse {
     let bytes = rkyv::to_bytes::<Error>(req).expect("encode");
     let out = runtime.call_filter(slot, bytes.as_slice()).expect("call");
     let mut aligned = AlignedVec::<16>::with_capacity(out.len());
@@ -132,8 +132,8 @@ fn multi_slot_independent() {
     };
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
 
-    let slot_a = SlotKey::new("tenant-a", "cache-aware-wasmtime");
-    let slot_b = SlotKey::new("tenant-b", "cache-aware-wasmtime");
+    let slot_a = RuntimeSlotKey::new("tenant-a", "cache-aware-wasmtime");
+    let slot_b = RuntimeSlotKey::new("tenant-b", "cache-aware-wasmtime");
     runtime
         .register_filter(slot_a.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register a");
@@ -163,7 +163,7 @@ fn concurrent_callers_each_build_their_own_worker() {
         return;
     };
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-    let slot = SlotKey::global("concurrent");
+    let slot = RuntimeSlotKey::global("concurrent");
     runtime
         .register_filter(slot.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register");
@@ -193,7 +193,7 @@ fn large_payload_round_trips() {
         return;
     };
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-    let slot = SlotKey::global("large-payload");
+    let slot = RuntimeSlotKey::global("large-payload");
     runtime
         .register_filter(slot.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register");

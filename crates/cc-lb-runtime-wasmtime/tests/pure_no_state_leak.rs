@@ -16,8 +16,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cc_lb_plugin_api::SlotKey;
 use cc_lb_plugin_wire::{CachePricingSummary, FilterRequest, Principal, UpstreamCandidate};
+use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use rkyv::rancor::Error;
 
@@ -123,7 +123,7 @@ fn pure_mode_does_not_accumulate_state() {
         }
     };
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-    let slot = SlotKey::global("pure-leak-probe");
+    let slot = RuntimeSlotKey::global("pure-leak-probe");
     runtime
         .register_filter(slot.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register filter");

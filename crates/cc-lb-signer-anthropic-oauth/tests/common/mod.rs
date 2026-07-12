@@ -9,10 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
 use cc_lb_clock::{Clock, ClockHandle, SystemClock, TestClock, unix_secs};
-use cc_lb_plugin_api::{
-    Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder, Upstream,
-    UpstreamDialect, shape_request,
-};
+use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSigner, AnthropicOAuthSignerHttpParams, OAuthHttpClient, OAuthHttpError,
     OAuthTokenRequest, OAuthTokenResponse,
@@ -22,6 +19,10 @@ use cc_lb_storage_api::{
     HistorySummary, MetaStore, OAuthCredentialStore, OAuthCredentials, RequestEvent,
     RequestEventStore, StorageError, StorageResult, UsageRollup, UsageRollupResolution,
     UsageRollupRun, UsageRollupStore,
+};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
+    UpstreamError, shape_request,
 };
 use http::header::USER_AGENT;
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
@@ -226,17 +227,13 @@ pub fn now_epoch_secs(clock: &dyn Clock) -> u64 {
 }
 
 pub fn shaped_request() -> ShapedRequest {
-    let ctx = RequestContext {
+    let ctx = DialectShapeContext {
         request_id: "req-1".to_owned(),
-        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(b"{}"),
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: String::new(),
-        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "alice".to_owned(),
@@ -257,11 +254,11 @@ struct DirectDialect;
 impl UpstreamDialect for DirectDialect {
     fn shape(
         &self,
-        _ctx: &RequestContext,
+        _context: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
+    ) -> Result<ShapedRequest, DialectError> {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static("test-agent"));
         Ok(builder.shaped_request(
@@ -273,8 +270,8 @@ impl UpstreamDialect for DirectDialect {
     }
 }
 
-pub fn unauthorized_error() -> cc_lb_plugin_api::UpstreamError {
-    cc_lb_plugin_api::UpstreamError::Unauthorized {
+pub fn unauthorized_error() -> UpstreamError {
+    UpstreamError::Unauthorized {
         status: StatusCode::UNAUTHORIZED,
         body: None,
     }

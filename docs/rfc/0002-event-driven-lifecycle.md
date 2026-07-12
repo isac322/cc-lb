@@ -37,12 +37,14 @@ comparison machinery deleted with it.
 
 ### As-shipped shape
 
-- **Event vocabulary** lives in `cc-lb-contract` (a new crate — resolution
-  of unresolved question #2 in the original RFC). Variants match the RFC's
+- **Event vocabulary** lives in `cc-lb-lifecycle` (the resolution of
+  unresolved question #2 in the original RFC). Variants match the RFC's
   10-variant shape, with `HeaderSnapshot`, `RouteInfo`, `AuthInfo`,
   `ParseInfo`, `LimitDecisionKind`, `UsageSnapshot`, `StreamSuccess`,
   `StreamError`, and `TerminationReason` supporting types. `predicted_cache_read_tokens`
   was added to `RouteInfo` for the prompt-cache drift subscriber.
+- **Persisted `RequestEvent` rows** live in `cc-lb-request-log`, and the
+  lifecycle event bus lives in `cc-lb-control`.
 - **`LifecycleContext`** in `crates/cc-lb-engine/src/terminal_observer.rs` is
   the successor to `TerminalObserver`. Its state is now just the 9 fields
   the terminal event carries; `make_request_event` is gone. `Drop` emits
@@ -125,7 +127,10 @@ comparison machinery deleted with it.
 
 ### Where the code lives
 
-- `crates/cc-lb-contract/` — event vocabulary crate.
+- `crates/cc-lb-lifecycle/` — event vocabulary crate.
+- `crates/cc-lb-request-log/` — persisted `RequestEvent` rows.
+- `crates/cc-lb-control/src/event_bus.rs` — `InMemoryBus` and per-channel
+  attach methods.
 - `crates/cc-lb-engine/src/terminal_observer.rs` — `LifecycleContext`.
 - `crates/cc-lb-engine/src/lifecycle_event_assembler.rs` — the assembler.
 - `crates/cc-lb-engine/src/lifecycle_*_subscriber.rs` — the per-concern
@@ -798,9 +803,10 @@ summarised here.
    `cc_lb_lifecycle_assembler_events_total`. TTL 300s + 30s sweeper.
    4096 far exceeds observed peak concurrency (~50), so hitting the cap
    is a bug-detection signal, not a routine backpressure event.
-2. **Cross-crate event definition location.** *Resolved:* new crate
-   `cc-lb-contract`. Both `cc-lb-engine` and `cc-lb-admin` depend on it;
-   no compile-fan-out issues surfaced in practice.
+2. **Cross-crate event definition location.** *Resolved:* the event
+   vocabulary lives in `cc-lb-lifecycle`; the event bus is in `cc-lb-control`,
+   and persisted `RequestEvent` rows live in `cc-lb-request-log`. No
+   compile-fan-out issues surfaced in practice.
 3. **Shadow-mode diff tolerance.** *Resolved (moot):* the transitional
    `writer_source = both` mode + drift metric were removed in Phase 13.
    Empirically, exact equality held on all 68 fields once Phases 1-4

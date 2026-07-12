@@ -6,7 +6,7 @@ use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_SHA256, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
     BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256, MAX_WASM_BLOB_BYTES, PluginBlobRepo,
     PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
-    PluginRegistryStore, PluginSlot, RepoError, StorageError, StorageResult, WasmBlob,
+    PluginRegistryStore, PluginSlotKind, RepoError, StorageError, StorageResult, WasmBlob,
     WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
 };
 use serde_json::Value;
@@ -195,7 +195,7 @@ impl PluginRegistryStore for SqliteStorage {
     async fn update_supported_slots(
         &self,
         id: Uuid,
-        supported_slots: Vec<PluginSlot>,
+        supported_slots: Vec<PluginSlotKind>,
     ) -> StorageResult<()> {
         sqlx::query("UPDATE wasm_registry_v2 SET supported_slots = ? WHERE id = ?")
             .bind(slots_to_json(&supported_slots)?)
@@ -339,7 +339,7 @@ impl PluginRegistryStore for SqliteStorage {
     async fn list_chain_for_principal(
         &self,
         principal_id: Uuid,
-        slot: PluginSlot,
+        slot: PluginSlotKind,
     ) -> StorageResult<Vec<PluginChainEntry>> {
         let rows = sqlx::query(
             "SELECT * FROM plugin_chains_v2 WHERE principal_id = ? AND slot = ? ORDER BY order_value ASC, id ASC",
@@ -355,7 +355,7 @@ impl PluginRegistryStore for SqliteStorage {
     async fn list_chains_for_principals(
         &self,
         principal_ids: &[Uuid],
-        slots: &[PluginSlot],
+        slots: &[PluginSlotKind],
     ) -> StorageResult<Vec<PluginChainEntry>> {
         if principal_ids.is_empty() || slots.is_empty() {
             return Ok(Vec::new());
@@ -441,7 +441,7 @@ impl PluginRegistryStore for SqliteStorage {
     async fn reorder_chain(
         &self,
         principal_id: Uuid,
-        slot: PluginSlot,
+        slot: PluginSlotKind,
         new_orders: Vec<(Uuid, i64, u64)>,
     ) -> StorageResult<Vec<PluginChainEntry>> {
         let mut tx = self.begin_immediate().await?;
@@ -565,7 +565,7 @@ impl PluginRegistryStore for SqliteStorage {
     async fn rebalance_chain(
         &self,
         principal_id: Uuid,
-        slot: PluginSlot,
+        slot: PluginSlotKind,
     ) -> StorageResult<Vec<PluginChainEntry>> {
         let entries = self.list_chain_for_principal(principal_id, slot).await?;
         let orders = sparse_order::rebalance(vec![0; entries.len()]);
@@ -738,7 +738,7 @@ fn chain_from_row(row: SqliteRow) -> StorageResult<PluginChainEntry> {
     Ok(PluginChainEntry {
         id: parse_uuid(&id, "plugin_chain.id")?,
         principal_id: parse_uuid(&principal_id, "plugin_chain.principal_id")?,
-        slot: PluginSlot::parse(
+        slot: PluginSlotKind::parse(
             row.try_get::<String, _>("slot")
                 .map_err(map_sqlx_error)?
                 .as_str(),
@@ -848,8 +848,8 @@ fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEn
         && schema_hash_ok
 }
 
-fn is_singleton_slot(slot: PluginSlot) -> bool {
-    matches!(slot, PluginSlot::Shape)
+fn is_singleton_slot(slot: PluginSlotKind) -> bool {
+    matches!(slot, PluginSlotKind::Shape)
 }
 
 fn conflict(message: &str) -> StorageError {
@@ -913,7 +913,7 @@ fn parse_uuid(value: &str, field: &str) -> StorageResult<Uuid> {
     })
 }
 
-fn slots_to_json(slots: &[PluginSlot]) -> StorageResult<String> {
+fn slots_to_json(slots: &[PluginSlotKind]) -> StorageResult<String> {
     serde_json::to_string(&slots.iter().map(|slot| slot.as_str()).collect::<Vec<_>>())
         .map_err(StorageError::from)
 }
@@ -926,10 +926,10 @@ fn hook_metadata_from_json(value: &str) -> StorageResult<BTreeMap<String, HookMe
     serde_json::from_str(value).map_err(StorageError::from)
 }
 
-fn slots_from_json(value: &str) -> StorageResult<Vec<PluginSlot>> {
+fn slots_from_json(value: &str) -> StorageResult<Vec<PluginSlotKind>> {
     let slots = serde_json::from_str::<Vec<String>>(value)?;
     Ok(slots
         .into_iter()
-        .filter_map(|slot| PluginSlot::parse(&slot))
+        .filter_map(|slot| PluginSlotKind::parse(&slot))
         .collect())
 }

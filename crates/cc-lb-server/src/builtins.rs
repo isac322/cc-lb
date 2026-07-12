@@ -1,4 +1,4 @@
-use cc_lb_plugin_api::{ObservabilityError, ObservabilityHook, ObserveEvent};
+use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
 
 #[derive(Clone)]
 pub struct NoopObservabilityHook;

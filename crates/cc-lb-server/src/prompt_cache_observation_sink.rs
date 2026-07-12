@@ -92,7 +92,8 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use cc_lb_storage_api::{PromptCacheObservationRecord, StorageResult, TtlClass};
+    use cc_lb_domain::TtlClass;
+    use cc_lb_storage_api::{PromptCacheObservationRecord, StorageResult};
     use tokio::sync::mpsc;
     use uuid::Uuid;
 

@@ -1,9 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use cc_lb_plugin_api::{FilterPlugin, ObservabilityHook, TerminalStrategy, UpstreamDialect};
+use cc_lb_domain::TerminalStrategy;
+use cc_lb_observability::ObservabilityHook;
+use cc_lb_routing::FilterPlugin;
 use cc_lb_storage_api::principal::Limit as DbLimit;
 use cc_lb_storage_api::{CacheKeepaliveConfig, PrincipalKind as DbPrincipalKind, PrincipalRecord};
+use cc_lb_upstream::UpstreamDialect;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use uuid::Uuid;
 
@@ -308,16 +311,15 @@ fn is_glob_pattern(model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_plugin_api::{
-        FilterError, FilterOutput, ObservabilityError, ObserveEvent, Principal, RequestContext,
-        UpstreamCandidate,
-    };
+    use cc_lb_domain::{Principal, UpstreamCandidate};
+    use cc_lb_observability::{ObservabilityError, ObserveEvent};
+    use cc_lb_routing::{FilterError, FilterOutput, RoutingContext};
 
     struct StubFilter(&'static str);
     impl FilterPlugin for StubFilter {
         fn filter(
             &self,
-            _: &RequestContext,
+            _: &RoutingContext,
             _: &Principal,
             _: &[UpstreamCandidate],
         ) -> Result<FilterOutput, FilterError> {

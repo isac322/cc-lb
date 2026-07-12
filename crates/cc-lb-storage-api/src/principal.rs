@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::CacheKeepaliveConfig;
 use crate::StorageResult;
-pub use cc_lb_contract::{Limit, LimitKind};
+pub use crate::limits::{Limit, LimitKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,7 +31,7 @@ pub struct PrincipalRecord {
     pub created_at_unix_secs: u64,
     pub updated_at_unix_secs: u64,
     #[serde(default)]
-    pub router_terminal_strategy: cc_lb_plugin_api::TerminalStrategy,
+    pub router_terminal_strategy: cc_lb_domain::TerminalStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_keepalive: Option<CacheKeepaliveConfig>,
 }
@@ -55,7 +55,7 @@ pub struct PrincipalUpdate {
     pub allowed_upstreams: Option<Vec<Uuid>>,
     pub default_limits: Option<Vec<Limit>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub router_terminal_strategy: Option<cc_lb_plugin_api::TerminalStrategy>,
+    pub router_terminal_strategy: Option<cc_lb_domain::TerminalStrategy>,
     /// When `Some`, replaces the principal's cache_keepalive config
     /// (including `Some(None)` to clear it). When `None`, the existing
     /// value is preserved.

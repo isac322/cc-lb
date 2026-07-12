@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use axum::http::{StatusCode, header};
 use cc_lb_storage_api::{
-    AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot, WasmBlob,
+    AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, WasmBlob,
     WasmRegistryEntryInput,
 };
 use serde_json::{Value, json};
@@ -362,7 +362,7 @@ async fn delete_principal_cascades_owned_plugin_chains() {
         .storage
         .insert_chain_entry(PluginChainEntryInput {
             principal_id,
-            slot: PluginSlot::Router,
+            slot: PluginSlotKind::Router,
             order: 1000,
             wasm_registry_id: registry.id,
             config: json!({}),
@@ -382,7 +382,7 @@ async fn delete_principal_cascades_owned_plugin_chains() {
     assert!(
         server
             .storage
-            .list_chain_for_principal(principal_id, PluginSlot::Router)
+            .list_chain_for_principal(principal_id, PluginSlotKind::Router)
             .await
             .unwrap()
             .is_empty()

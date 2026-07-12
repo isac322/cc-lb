@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
+use cc_lb_domain::TtlClass;
 use cc_lb_engine::{ClockHandle, clock::unix_secs};
-use cc_lb_storage_api::{PromptCacheObservationRecord, PromptCacheObservationStore, TtlClass};
+use cc_lb_storage_api::{PromptCacheObservationRecord, PromptCacheObservationStore};
 use uuid::Uuid;
 
 use crate::harness::{ConformanceBackend, with_conformance_fixture};

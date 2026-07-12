@@ -4,9 +4,9 @@ use uuid::Uuid;
 
 use crate::StorageResult;
 
-/// Re-export of [`cc_lb_plugin_api::RateLimitKind`] so that storage-layer code
+/// Re-export of [`cc_lb_domain::RateLimitKind`] so that storage-layer code
 /// and plugin-facing code share a single canonical enum (no stub, no mapping).
-pub use cc_lb_plugin_api::RateLimitKind;
+pub use cc_lb_domain::RateLimitKind;
 
 /// Observation record for upstream rate limit state.
 ///

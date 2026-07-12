@@ -1,7 +1,7 @@
 use async_trait::async_trait;
+use cc_lb_domain::TtlClass;
 use cc_lb_storage_api::{
     PromptCacheObservationRecord, PromptCacheObservationStore, StorageError, StorageResult,
-    TtlClass,
 };
 use sqlx::{QueryBuilder, Row, Sqlite};
 use uuid::Uuid;

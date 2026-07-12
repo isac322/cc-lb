@@ -29,14 +29,16 @@ rust-embed.workspace = true
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-clock = { path = "../cc-lb-clock" }
-cc-lb-contract = { workspace = true }
 cc-lb-control = { path = "../cc-lb-control" }
-cc-lb-engine = { path = "../cc-lb-engine" }
+cc-lb-domain.workspace = true
+cc-lb-lifecycle.workspace = true
+cc-lb-quota.workspace = true
+cc-lb-request-log.workspace = true
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-scheduler = { path = "../cc-lb-scheduler", default-features = false }
-cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
+cc-lb-upstream.workspace = true
 cc-lb-runtime-wasmtime = { workspace = true }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 tracing.workspace = true
@@ -64,6 +66,7 @@ mime_guess = "2.0.5"
 nix = { version = "0.31.3", features = ["signal"] }
 
 [dev-dependencies]
+cc-lb-observability = { path = "../cc-lb-observability" }
 tower.workspace = true
 http-body-util.workspace = true
 wat = "1"

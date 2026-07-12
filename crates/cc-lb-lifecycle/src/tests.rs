@@ -1,0 +1,191 @@
+use cc_lb_domain::PrincipalKindLite;
+use cc_lb_request_log::{CostBreakdown, HeaderSnapshot, RequestCacheState};
+use uuid::Uuid;
+
+use crate::*;
+
+fn sample_event_id() -> EventId {
+    "01978c00-0000-7000-8000-000000000000".to_owned()
+}
+
+#[test]
+fn request_started_roundtrip() {
+    let event = LifecycleEvent::RequestStarted {
+        event_id: sample_event_id(),
+        request_id: "req-123".to_owned(),
+        ts_ms: 1_730_000_000_000,
+        stream: true,
+    };
+    let json = serde_json::to_string(&event).expect("serialize");
+    let restored: LifecycleEvent = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(event, restored);
+}
+
+#[test]
+fn kind_labels_cover_every_variant() {
+    // Anti-regression: if a new variant is added without updating kind()
+    // the compile-checked match in kind() will fail. This runtime test
+    // additionally locks the label strings that Prometheus depends on.
+    let labels = [
+        LifecycleEvent::RequestStarted {
+            event_id: sample_event_id(),
+            request_id: "r".into(),
+            ts_ms: 0,
+            stream: false,
+        }
+        .kind(),
+        LifecycleEvent::ParseCompleted {
+            event_id: sample_event_id(),
+            result: Err(ParseFailure::BodyTooLarge { limit_bytes: 1 }),
+        }
+        .kind(),
+        LifecycleEvent::AuthCompleted {
+            event_id: sample_event_id(),
+            result: Err(AuthFailure::AuthenticationFailed {
+                http_status: 401,
+                reason: None,
+            }),
+        }
+        .kind(),
+        LifecycleEvent::AuthenticationCompleted {
+            event_id: sample_event_id(),
+            principal_id: "principal".into(),
+            principal_kind: PrincipalKindLite::Machine,
+        }
+        .kind(),
+        LifecycleEvent::RouteCompleted {
+            event_id: sample_event_id(),
+            result: Err(RouteFailure::RouteNotConfigured),
+            routing_trace: None,
+        }
+        .kind(),
+        LifecycleEvent::LimitDecision {
+            event_id: sample_event_id(),
+            decision: LimitDecisionKind::Rejected {
+                reason: "quota".into(),
+                subject: None,
+                request_summary: None,
+                route_summary: None,
+                limit_violation: None,
+            },
+        }
+        .kind(),
+        LifecycleEvent::UpstreamAttempt {
+            event_id: sample_event_id(),
+            attempt_num: 1,
+            upstream_id: Uuid::nil(),
+        }
+        .kind(),
+        LifecycleEvent::UpstreamResponseStarted {
+            event_id: sample_event_id(),
+            status: 200,
+            headers: HeaderSnapshot::default(),
+            bulkhead_wait_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
+            shape_ms: None,
+            sign_ms: None,
+            upstream_ttfb_ms: None,
+        }
+        .kind(),
+        LifecycleEvent::ProviderErrorObserved {
+            event_id: sample_event_id(),
+            code: "provider_error".into(),
+            message: "redacted".into(),
+            source: "provider".into(),
+        }
+        .kind(),
+        LifecycleEvent::RequestLogUpstreamErrorObserved {
+            event_id: sample_event_id(),
+            error_type: "rate_limit_error".into(),
+            error_message: "bounded".into(),
+        }
+        .kind(),
+        LifecycleEvent::UsageObserved {
+            event_id: sample_event_id(),
+            usage: UsageSnapshot::default(),
+            source: UsageSource::MessageStart,
+        }
+        .kind(),
+        LifecycleEvent::StreamCompleted {
+            event_id: sample_event_id(),
+            result: Ok(StreamSuccess::default()),
+        }
+        .kind(),
+        LifecycleEvent::RequestTerminated {
+            event_id: sample_event_id(),
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 1,
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+        }
+        .kind(),
+        LifecycleEvent::Priced {
+            event_id: sample_event_id(),
+            cost: CostBreakdown::default(),
+        }
+        .kind(),
+        LifecycleEvent::CacheObserved {
+            event_id: sample_event_id(),
+            cache_state: RequestCacheState::Unknown,
+        }
+        .kind(),
+        LifecycleEvent::PromptCacheObservationsProduced {
+            event_id: sample_event_id(),
+            upstream_id: Uuid::nil(),
+            canonical_model_id: "model".to_owned(),
+            observations: Vec::new(),
+            dropped_below_threshold: 0,
+            dropped_aborted: 0,
+        }
+        .kind(),
+    ];
+    assert_eq!(
+        labels,
+        [
+            "request_started",
+            "parse_completed",
+            "auth_completed",
+            "authentication_completed",
+            "route_completed",
+            "limit_decision",
+            "upstream_attempt",
+            "upstream_response_started",
+            "provider_error_observed",
+            "request_log_upstream_error_observed",
+            "usage_observed",
+            "stream_completed",
+            "request_terminated",
+            "priced",
+            "cache_observed",
+            "prompt_cache_observations_produced",
+        ],
+    );
+}
+
+#[test]
+fn event_id_accessor_returns_stable_reference() {
+    let id = sample_event_id();
+    let event = LifecycleEvent::RequestLogUpstreamErrorObserved {
+        event_id: id.clone(),
+        error_type: "api_error".into(),
+        error_message: "bounded".into(),
+    };
+    assert_eq!(event.event_id(), &id);
+}
+
+#[test]
+fn termination_reason_kind_is_stable() {
+    assert_eq!(TerminationReason::Success.kind(), "success");
+    assert_eq!(
+        TerminationReason::ErrorCode("upstream_4xx".into()).kind(),
+        "error_code",
+    );
+    assert_eq!(TerminationReason::Dropped.kind(), "dropped");
+}

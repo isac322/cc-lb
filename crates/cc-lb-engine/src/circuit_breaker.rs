@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use cc_lb_plugin_api::SignedRequest;
+use cc_lb_upstream::SignedRequest;
 use dashmap::DashMap;
 use http::Response;
 use metrics::Unit;

@@ -1,4 +1,4 @@
-use cc_lb_plugin_api::TerminalStrategy;
+use cc_lb_domain::TerminalStrategy;
 use cc_lb_storage_api::{PrincipalKind, PrincipalRecord};
 use serde_json::json;
 use uuid::Uuid;

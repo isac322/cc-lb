@@ -8,8 +8,8 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DEFAULT_SQLITE_PATH, StorageConfig, TlsConfig};
 use cc_lb_engine::{ClockHandle, LifecycleConfig};
 use cc_lb_storage_api::{
-    PluginChainEntry, PluginSlot, PrincipalRecord, StorageError as ApiStorageError, UpstreamRecord,
-    WasmRegistryEntry,
+    PluginChainEntry, PluginSlotKind, PrincipalRecord, StorageError as ApiStorageError,
+    UpstreamRecord, WasmRegistryEntry,
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -186,9 +186,9 @@ async fn list_plugin_chain_entries(
     let mut entries = Vec::new();
     for principal in principals {
         for slot in [
-            PluginSlot::Router,
-            PluginSlot::ObservabilityHook,
-            PluginSlot::Shape,
+            PluginSlotKind::Router,
+            PluginSlotKind::ObservabilityHook,
+            PluginSlotKind::Shape,
         ] {
             entries.extend(
                 stores
@@ -279,7 +279,10 @@ async fn check_plugin_chain_entry(
     Ok(())
 }
 
-fn registry_entry_unsupported_slot(registry_entry: &WasmRegistryEntry, slot: PluginSlot) -> bool {
+fn registry_entry_unsupported_slot(
+    registry_entry: &WasmRegistryEntry,
+    slot: PluginSlotKind,
+) -> bool {
     !registry_entry.is_builtin
         && !registry_entry.supported_slots.is_empty()
         && !registry_entry.supported_slots.contains(&slot)

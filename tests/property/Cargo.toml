@@ -7,12 +7,17 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+cc-lb-domain.workspace = true
 async-stream.workspace = true
 axum.workspace = true
 bytes.workspace = true
 cc-lb-engine = { path = "../../crates/cc-lb-engine" }
-cc-lb-plugin-api = { path = "../../crates/cc-lb-plugin-api" }
+cc-lb-observability = { path = "../../crates/cc-lb-observability" }
+cc-lb-routing.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 proptest.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+
+[dev-dependencies]
+cc-lb-upstream.workspace = true

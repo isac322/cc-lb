@@ -1,6 +1,6 @@
 mod common;
 
-use cc_lb_plugin_api::{RetryDecision, Signer};
+use cc_lb_upstream::{RetryDecision, Signer};
 
 #[tokio::test]
 async fn circuit_breaker_fails_fast_after_three_failures() {

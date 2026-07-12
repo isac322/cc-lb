@@ -1,10 +1,11 @@
 use axum::body::{Body, to_bytes};
 use bytes::Bytes;
-use cc_lb_plugin_api::{
-    Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder, SignerFactory,
-    Upstream, UpstreamDialect, sign_request,
-};
+use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignerFactory,
+    UpstreamDialect, shape_request, sign_request,
+};
 use fake_anthropic::{AppConfig, app};
 use http::{HeaderMap, Method, Request, StatusCode};
 use serde_json::Value;
@@ -15,11 +16,11 @@ struct E2EDialect;
 impl UpstreamDialect for E2EDialect {
     fn shape(
         &self,
-        _ctx: &RequestContext,
+        _context: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
+    ) -> Result<ShapedRequest, DialectError> {
         Ok(builder.shaped_request(
             "http://127.0.0.1/v1/messages".parse().expect("url"),
             Method::POST,
@@ -31,24 +32,20 @@ impl UpstreamDialect for E2EDialect {
 
 #[tokio::test]
 async fn fake_anthropic_accepts_signed_request() {
-    let ctx = RequestContext {
+    let ctx = DialectShapeContext {
         request_id: "req-e2e".to_owned(),
-        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(b"{}"),
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: String::new(),
-        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "alice".to_owned(),
         kind: PrincipalKind::ApiKey,
         claims: serde_json::Map::new(),
     };
-    let shaped = cc_lb_plugin_api::shape_request(
+    let shaped = shape_request(
         &E2EDialect,
         &ctx,
         &Upstream::AnthropicDirect { base_url: None },

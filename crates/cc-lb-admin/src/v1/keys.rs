@@ -144,8 +144,8 @@ async fn list_keys(
             let last_used_map: std::collections::HashMap<String, u64> = if let Some(storage) =
                 state.storage.as_ref()
             {
-                let now_ms = cc_lb_engine::clock::unix_millis(state.clock.now())
-                    .min(u128::from(u64::MAX)) as u64;
+                let now_ms =
+                    cc_lb_clock::unix_millis(state.clock.now()).min(u128::from(u64::MAX)) as u64;
                 let since_ms = now_ms.saturating_sub(30 * 24 * 60 * 60 * 1000);
                 match storage
                     .query_request_events(since_ms / 1000, now_ms / 1000, 5000)
@@ -234,7 +234,7 @@ async fn revoke_key(
 
     match key_store.revoke(&id, &key_id).await {
         Ok(_) => {
-            let now = cc_lb_engine::clock::unix_secs(state.clock.now());
+            let now = cc_lb_clock::unix_secs(state.clock.now());
             emit_key_audit(&state, &id, &key_id, "principal_key_revoke", 200);
             let response = RevokeKeyResponse {
                 key_id,
@@ -259,7 +259,7 @@ fn emit_key_audit(state: &AdminState, principal_id: &str, key_id: &str, action: 
     let Some(audit_sink) = &state.audit_sink else {
         return;
     };
-    let ts = cc_lb_engine::clock::unix_secs(state.clock.now());
+    let ts = cc_lb_clock::unix_secs(state.clock.now());
     let _ = audit_sink.try_enqueue(AuditEntry {
         ts,
         request_id: format!("admin-v1-key-{key_id}-{ts}"),

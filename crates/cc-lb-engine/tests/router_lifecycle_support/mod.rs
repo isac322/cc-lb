@@ -5,16 +5,18 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle,
     LifecycleConfig, UpstreamDispatch,
 };
-use cc_lb_plugin_api::{
-    DialectError, ObservabilityHook, Principal, RequestContext, RetryDecision, RouteDecision,
-    RouteError, RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer,
-    SignerError, SignerFactory, SigningCapability, Upstream, UpstreamCandidate, UpstreamDialect,
-};
+use cc_lb_observability::ObservabilityHook;
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
+    SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, UpstreamDialect,
+};
 use http::{Response, StatusCode};
 use serde_json::json;
 use url::Url;
@@ -107,7 +109,7 @@ pub struct SelectingRouter {
 impl RouterPlugin for SelectingRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -136,7 +138,7 @@ pub struct RejectingEmptyRouter {
 impl RouterPlugin for RejectingEmptyRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -200,7 +202,7 @@ impl Signer for RecordingSigner {
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
-    async fn on_unauthorized(&self, _err: &cc_lb_plugin_api::UpstreamError) -> RetryDecision {
+    async fn on_unauthorized(&self, _err: &cc_lb_upstream::UpstreamError) -> RetryDecision {
         RetryDecision::Fail
     }
 }
@@ -235,7 +237,7 @@ struct UniversalDialect;
 impl UpstreamDialect for UniversalDialect {
     fn shape(
         &self,
-        ctx: &RequestContext,
+        ctx: &DialectShapeContext,
         upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,

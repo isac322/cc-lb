@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
 use bytes::Bytes;
-use cc_lb_plugin_api::{Principal, PrincipalKind, RequestContext};
+use cc_lb_domain::{Principal, PrincipalKind};
+use cc_lb_upstream::DialectShapeContext;
 use http::{HeaderMap, HeaderValue, Method};
 
 pub fn principal() -> Principal {
@@ -18,18 +19,14 @@ pub fn request_context(
     query: Option<&str>,
     body_bytes: Bytes,
     downstream_headers: HeaderMap,
-) -> RequestContext {
-    RequestContext {
+) -> DialectShapeContext {
+    DialectShapeContext {
         request_id: "req-direct-identity".to_owned(),
-        thread_id: None,
         downstream_headers,
         method,
         path: path.to_owned(),
         query: query.map(ToOwned::to_owned),
         body_bytes,
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: String::new(),
-        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     }
 }
 

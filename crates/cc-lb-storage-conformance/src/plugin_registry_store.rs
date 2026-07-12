@@ -6,7 +6,7 @@ use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_CACHE_AFFINITY_SHA256,
     PluginChainConflictReason, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
-    PluginSlot, PrincipalStore, StorageError, WasmBlob, WasmRegistryEntryInput,
+    PluginSlotKind, PrincipalStore, StorageError, WasmBlob, WasmRegistryEntryInput,
     default_wire_version,
     principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind},
     sparse_order,
@@ -334,7 +334,7 @@ pub async fn insert_chain_entry_with_builtin_cache_affinity_succeeds_on_storage<
     let inserted = storage
         .insert_chain_entry(PluginChainEntryInput {
             principal_id: principal.id,
-            slot: PluginSlot::Router,
+            slot: PluginSlotKind::Router,
             order: sparse_order::STEP,
             wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID,
             config: json!({}),
@@ -349,7 +349,7 @@ pub async fn insert_chain_entry_with_builtin_cache_affinity_succeeds_on_storage<
         "chain entry references builtin cache-affinity"
     );
     let listed = storage
-        .list_chain_for_principal(principal.id, PluginSlot::Router)
+        .list_chain_for_principal(principal.id, PluginSlotKind::Router)
         .await?;
     ensure!(listed.len() == 1, "builtin chain insert is listed");
     ensure!(
@@ -371,7 +371,7 @@ pub async fn chain_insert_preserves_sparse_order<S: PluginRegistryStore + Princi
     storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::ObservabilityHook,
             plugin.id,
             sparse_order::STEP * 2,
         ))
@@ -379,13 +379,13 @@ pub async fn chain_insert_preserves_sparse_order<S: PluginRegistryStore + Princi
     storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::ObservabilityHook,
             plugin.id,
             sparse_order::STEP,
         ))
         .await?;
     let listed = storage
-        .list_chain_for_principal(principal, PluginSlot::ObservabilityHook)
+        .list_chain_for_principal(principal, PluginSlotKind::ObservabilityHook)
         .await?;
     ensure!(listed[0].order < listed[1].order, "chain list is ordered");
     Ok(())
@@ -398,7 +398,7 @@ pub async fn list_chain_for_principal_returns_ordered<S: PluginRegistryStore + P
     storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::ObservabilityHook,
             plugin.id,
             sparse_order::STEP * 2,
         ))
@@ -406,13 +406,13 @@ pub async fn list_chain_for_principal_returns_ordered<S: PluginRegistryStore + P
     storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::ObservabilityHook,
             plugin.id,
             sparse_order::STEP,
         ))
         .await?;
     let listed = storage
-        .list_chain_for_principal(principal, PluginSlot::ObservabilityHook)
+        .list_chain_for_principal(principal, PluginSlotKind::ObservabilityHook)
         .await?;
     ensure!(listed.len() == 2, "chain list includes both entries");
     ensure!(listed[0].order < listed[1].order, "chain list is ordered");
@@ -434,7 +434,7 @@ pub async fn list_chains_for_principals_returns_ordered_and_filtered<
     let first_late = storage
         .insert_chain_entry(chain_with_slot(
             first_principal,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::ObservabilityHook,
             first_plugin.id,
             sparse_order::STEP * 2,
         ))
@@ -442,7 +442,7 @@ pub async fn list_chains_for_principals_returns_ordered_and_filtered<
     let first_early = storage
         .insert_chain_entry(chain_with_slot(
             first_principal,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::ObservabilityHook,
             first_plugin.id,
             sparse_order::STEP,
         ))
@@ -450,7 +450,7 @@ pub async fn list_chains_for_principals_returns_ordered_and_filtered<
     let second_router = storage
         .insert_chain_entry(chain_with_slot(
             second_principal,
-            PluginSlot::Router,
+            PluginSlotKind::Router,
             second_plugin.id,
             sparse_order::STEP,
         ))
@@ -458,7 +458,7 @@ pub async fn list_chains_for_principals_returns_ordered_and_filtered<
     storage
         .insert_chain_entry(chain_with_slot(
             ignored_principal,
-            PluginSlot::Router,
+            PluginSlotKind::Router,
             ignored_plugin.id,
             sparse_order::STEP,
         ))
@@ -467,17 +467,21 @@ pub async fn list_chains_for_principals_returns_ordered_and_filtered<
     let listed = storage
         .list_chains_for_principals(
             &[first_principal, second_principal],
-            &[PluginSlot::ObservabilityHook, PluginSlot::Router],
+            &[PluginSlotKind::ObservabilityHook, PluginSlotKind::Router],
         )
         .await?;
 
     let mut expected_groups = vec![
         (
             first_principal,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::ObservabilityHook,
             vec![first_early.id, first_late.id],
         ),
-        (second_principal, PluginSlot::Router, vec![second_router.id]),
+        (
+            second_principal,
+            PluginSlotKind::Router,
+            vec![second_router.id],
+        ),
     ];
     expected_groups.sort_by_key(|g| (g.0, g.1));
 
@@ -499,7 +503,7 @@ pub async fn list_chains_for_principals_returns_ordered_and_filtered<
     );
 
     let empty = storage
-        .list_chains_for_principals(&[], &[PluginSlot::Router])
+        .list_chains_for_principals(&[], &[PluginSlotKind::Router])
         .await?;
     ensure!(empty.is_empty(), "empty principal filter returns no chains");
 
@@ -522,7 +526,7 @@ async fn router_multi_entry_ordered_on_storage<S: PluginRegistryStore + Principa
     let first = storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::Router,
+            PluginSlotKind::Router,
             plugin.id,
             sparse_order::STEP,
         ))
@@ -530,13 +534,13 @@ async fn router_multi_entry_ordered_on_storage<S: PluginRegistryStore + Principa
     let second = storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::Router,
+            PluginSlotKind::Router,
             plugin.id,
             sparse_order::STEP * 2,
         ))
         .await?;
     let listed = storage
-        .list_chain_for_principal(principal, PluginSlot::Router)
+        .list_chain_for_principal(principal, PluginSlotKind::Router)
         .await?;
     ensure!(listed.len() == 2, "router slot allows multiple entries");
     ensure!(
@@ -562,7 +566,7 @@ async fn router_reorder_preserves_invariants_on_storage<S: PluginRegistryStore +
     let first = storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::Router,
+            PluginSlotKind::Router,
             plugin.id,
             100,
         ))
@@ -570,7 +574,7 @@ async fn router_reorder_preserves_invariants_on_storage<S: PluginRegistryStore +
     let second = storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::Router,
+            PluginSlotKind::Router,
             plugin.id,
             200,
         ))
@@ -578,7 +582,7 @@ async fn router_reorder_preserves_invariants_on_storage<S: PluginRegistryStore +
     let reordered = storage
         .reorder_chain(
             principal,
-            PluginSlot::Router,
+            PluginSlotKind::Router,
             vec![
                 (first.id, 150, first.revision),
                 (second.id, 250, second.revision),
@@ -609,7 +613,7 @@ async fn shape_singleton_preserved_on_storage<S: PluginRegistryStore + Principal
     let first = storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::Shape,
+            PluginSlotKind::Shape,
             plugin.id,
             sparse_order::STEP,
         ))
@@ -617,7 +621,7 @@ async fn shape_singleton_preserved_on_storage<S: PluginRegistryStore + Principal
     let err = storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::Shape,
+            PluginSlotKind::Shape,
             plugin.id,
             sparse_order::STEP * 2,
         ))
@@ -649,7 +653,7 @@ async fn insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage<
     let first = storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::Shape,
+            PluginSlotKind::Shape,
             plugin.id,
             sparse_order::STEP,
         ))
@@ -657,7 +661,7 @@ async fn insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage<
     let err = storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::Shape,
+            PluginSlotKind::Shape,
             plugin.id,
             sparse_order::STEP * 2,
         ))
@@ -689,7 +693,7 @@ async fn insert_chain_entry_allows_multi_for_observability_hook_on_storage<
     storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::ObservabilityHook,
             plugin.id,
             sparse_order::STEP,
         ))
@@ -697,13 +701,13 @@ async fn insert_chain_entry_allows_multi_for_observability_hook_on_storage<
     storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::ObservabilityHook,
             plugin.id,
             sparse_order::STEP * 2,
         ))
         .await?;
     let listed = storage
-        .list_chain_for_principal(principal, PluginSlot::ObservabilityHook)
+        .list_chain_for_principal(principal, PluginSlotKind::ObservabilityHook)
         .await?;
     ensure!(
         listed.len() == 2,
@@ -771,7 +775,7 @@ where
             storage
                 .insert_chain_entry(chain_with_slot(
                     principal.id,
-                    PluginSlot::ObservabilityHook,
+                    PluginSlotKind::ObservabilityHook,
                     plugin.id,
                     sparse_order::STEP * (chain_index as i64 + 1),
                 ))
@@ -805,7 +809,7 @@ where
                 let inserted = task_storage
                     .insert_chain_entry(chain_with_slot(
                         task_principal_id,
-                        PluginSlot::ObservabilityHook,
+                        PluginSlotKind::ObservabilityHook,
                         task_registry_ids[plugin_index],
                         order,
                     ))
@@ -855,9 +859,9 @@ async fn control_refcount_from_chains<S: PluginRegistryStore>(
     let mut refcount = 0;
     for principal_id in principal_ids {
         for slot in [
-            PluginSlot::Router,
-            PluginSlot::ObservabilityHook,
-            PluginSlot::Shape,
+            PluginSlotKind::Router,
+            PluginSlotKind::ObservabilityHook,
+            PluginSlotKind::Shape,
         ] {
             refcount += storage
                 .list_chain_for_principal(*principal_id, slot)
@@ -1321,7 +1325,7 @@ async fn reorder_chain_rejects_final_chain_gap_on_storage<
     let first = storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::ObservabilityHook,
             plugin.id,
             100,
         ))
@@ -1329,7 +1333,7 @@ async fn reorder_chain_rejects_final_chain_gap_on_storage<
     let second = storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::ObservabilityHook,
             plugin.id,
             200,
         ))
@@ -1337,7 +1341,7 @@ async fn reorder_chain_rejects_final_chain_gap_on_storage<
     storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::ObservabilityHook,
             plugin.id,
             300,
         ))
@@ -1346,7 +1350,7 @@ async fn reorder_chain_rejects_final_chain_gap_on_storage<
     let err = storage
         .reorder_chain(
             principal,
-            PluginSlot::ObservabilityHook,
+            PluginSlotKind::ObservabilityHook,
             vec![(second.id, first.order - 1, second.revision)],
         )
         .await
@@ -1610,12 +1614,17 @@ fn entry(name: &str) -> WasmRegistryEntryInput {
 }
 
 fn chain(principal_id: Uuid, wasm_registry_id: Uuid, order: i64) -> PluginChainEntryInput {
-    chain_with_slot(principal_id, PluginSlot::Router, wasm_registry_id, order)
+    chain_with_slot(
+        principal_id,
+        PluginSlotKind::Router,
+        wasm_registry_id,
+        order,
+    )
 }
 
 fn chain_with_slot(
     principal_id: Uuid,
-    slot: PluginSlot,
+    slot: PluginSlotKind,
     wasm_registry_id: Uuid,
     order: i64,
 ) -> PluginChainEntryInput {

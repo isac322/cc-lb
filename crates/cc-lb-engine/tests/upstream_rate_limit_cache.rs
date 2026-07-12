@@ -4,19 +4,21 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use cc_lb_domain::{Principal, RateLimitKind, Upstream, UpstreamCandidate};
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DynamicView, DynamicViewBuilder, RequestKind, UpstreamRateLimitCache,
     build_candidates,
 };
-use cc_lb_plugin_api::{
-    ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RateLimitKind, RequestContext,
-    RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest, SignedRequest, Signer,
-    SignerError, SignerFactory, SigningCapability, Upstream, UpstreamCandidate, UpstreamError,
-};
+use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{RateLimitKind as StoredRateLimitKind, UpstreamRateLimitObservationRecord};
+use cc_lb_upstream::{
+    RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+    SigningCapability, UpstreamError,
+};
 use http::header::HeaderName;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use parking_lot::RwLock;
@@ -257,7 +259,7 @@ struct TestRouter;
 impl RouterPlugin for TestRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

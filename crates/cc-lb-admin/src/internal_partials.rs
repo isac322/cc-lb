@@ -4,13 +4,14 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use cc_lb_engine::PartialRetentionCache;
+
+use crate::ports::RetainedPartialPort;
 
 const CLUSTER_TOKEN_HEADER: &str = "x-cluster-token";
 
 #[derive(Clone)]
 pub struct InternalPartialsState {
-    pub retention: PartialRetentionCache,
+    pub retention: std::sync::Arc<dyn RetainedPartialPort>,
     pub cluster_token: String,
 }
 
@@ -31,11 +32,11 @@ pub async fn handle_internal_partial_fetch(
     if !authorized(&headers, &state.cluster_token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    match state.retention.get(&event_id) {
-        Some(payload) => Response::builder()
+    match state.retention.retained_partial(&event_id) {
+        Some(snapshot) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(payload))
+            .body(Body::from(snapshot.payload))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         None => StatusCode::NOT_FOUND.into_response(),
     }

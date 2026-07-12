@@ -211,7 +211,7 @@ impl Fixture {
 }
 
 fn now_unix_secs(clock: &dyn cc_lb_clock::Clock) -> u64 {
-    cc_lb_engine::clock::unix_secs(clock.now())
+    cc_lb_clock::unix_secs(clock.now())
 }
 
 #[tokio::test]

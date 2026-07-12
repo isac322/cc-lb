@@ -1,0 +1,11 @@
+T3 crate reassembly evidence
+
+Moved symbols: FilterPlugin, RouterPlugin, FilterOutput, FilterError, RouteDecision, PerCandidateReason, RouteError.
+RoutingContext fields: request_id, thread_id, downstream_headers, method, path, query, body_bytes, canonical_model_id, cache_pricing.
+Field reads: WasmtimeFilterPlugin host_to_wire_request reads all nine fields (plugin.rs:200-265); SubscriptionPreferenceFilter evaluate reads canonical_model_id (228), cache_pricing (262-347), request_id (342); CacheAffinityFilter and all routers ignore context. No implementation reads cache_breakpoints.
+slot_key correction: `rg -n 'slot_key' crates/cc-lb-routing/src` and `rg -n '\.slot_key\(' crates/ tests/ plugins/` both returned zero. Dead FilterPlugin::slot_key is removed. Pre-existing unrelated PluginSession::slot_key is intentionally untouched for T12.
+Baseline at e2dd0713 and branch parity: lifecycle_filter_pipeline (3), lifecycle_terminal first_pick (1), lifecycle_preview_route (5), subscription_preference_qa_regression (4), and filter_plugin_trait (23) pass. Fixed-input chosen upstream, filter outcomes/order, and subscription trace/per-candidate reasoning are unchanged.
+Focused proxy QA: Lifecycle routing/filter pipeline; focused slice; observable=chosen upstream, filter outcome/order, subscription trace/per-candidate reasoning; full remote provider parity deferred to F3.
+Verification: fmt check, routing build/clippy, routing tests twice, engine build, focused routing suites, workspace all-target check all passed. Metadata direct cc-lb deps=cc-lb-domain,cc-lb-upstream. no_dep routing->{quota,engine,control,runtime-wasmtime}, upstream->routing passed; has_dep routing->upstream passed. LSP routing, engine, runtime-wasmtime zero errors.
+Adversarial: stale_state=all implementation and test/property signatures compiled; dirty_worktree=T3 only; misleading_success_output=metadata plus fixed observables; flaky_tests=two routing runs; hung=all bounded; malformed_input/prompt_injection/cancel_resume/repeated_interruptions=N/A.
+Cleanup: no residual processes, credentials, databases, or network resources.

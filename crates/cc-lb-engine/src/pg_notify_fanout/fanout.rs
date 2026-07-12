@@ -48,7 +48,7 @@ impl RequestEventBus for PgNotifyFanout {
         self.local_bus.subscribe()
     }
 
-    fn publish_lifecycle(&self, event: cc_lb_contract::LifecycleEvent) {
+    fn publish_lifecycle(&self, event: cc_lb_lifecycle::LifecycleEvent) {
         self.local_bus.publish_lifecycle(event);
     }
 

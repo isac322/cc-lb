@@ -15,7 +15,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::{CostBreakdown, EventId, LifecycleEvent, RequestEventBus};
+use cc_lb_control::RequestEventBus;
+use cc_lb_lifecycle::{EventId, LifecycleEvent};
+use cc_lb_request_log::CostBreakdown;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -124,18 +126,18 @@ fn handle_event(
                     event_id: event_id.clone(),
                     cost: breakdown,
                 });
-                metrics::counter!("cc_lb_contract_pricing_events_total", "outcome" => "priced")
+                metrics::counter!("cc_lb_lifecycle_pricing_events_total", "outcome" => "priced")
                     .increment(1);
             } else {
                 metrics::counter!(
-                    "cc_lb_contract_pricing_events_total",
+                    "cc_lb_lifecycle_pricing_events_total",
                     "outcome" => "skipped_no_usage_or_model"
                 )
                 .increment(1);
             }
         } else {
             metrics::counter!(
-                "cc_lb_contract_pricing_events_total",
+                "cc_lb_lifecycle_pricing_events_total",
                 "outcome" => "terminated_without_partial"
             )
             .increment(1);
@@ -225,7 +227,7 @@ fn pricing_upstream_kind_from_label(label: &str) -> Option<crate::UpstreamKind> 
 
 fn event_cost_breakdown_from_pricing(
     breakdown: crate::ComputedCostBreakdown,
-) -> cc_lb_contract::CostBreakdown {
+) -> cc_lb_request_log::CostBreakdown {
     breakdown.into()
 }
 
@@ -240,7 +242,7 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
         metrics::counter!(
-            "cc_lb_contract_pricing_events_total",
+            "cc_lb_lifecycle_pricing_events_total",
             "outcome" => "orphan_ttl_evicted"
         )
         .increment(removed as u64);
@@ -257,7 +259,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     };
     partials.remove(&oldest_key);
     metrics::counter!(
-        "cc_lb_contract_pricing_events_total",
+        "cc_lb_lifecycle_pricing_events_total",
         "outcome" => "cap_evicted"
     )
     .increment(1);
@@ -266,10 +268,11 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_contract::{
-        BusReceiver, LifecycleBusReceiver, ParseInfo, RequestEventUpdate, RouteInfo, StreamSuccess,
-        TerminationReason, UsageSnapshot, UsageSource,
+    use cc_lb_control::{BusReceiver, LifecycleBusReceiver};
+    use cc_lb_lifecycle::{
+        ParseInfo, RouteInfo, StreamSuccess, TerminationReason, UsageSnapshot, UsageSource,
     };
+    use cc_lb_request_log::RequestEventUpdate;
     use tokio::sync::broadcast;
     use uuid::Uuid;
 

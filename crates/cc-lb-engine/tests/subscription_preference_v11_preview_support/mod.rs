@@ -3,6 +3,10 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use cc_lb_clock::TestClock;
+use cc_lb_domain::{
+    Principal, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy,
+    UpstreamCandidate,
+};
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
 };
@@ -11,11 +15,7 @@ use cc_lb_engine::lifecycle::{PreviewRouteInput, PreviewRouteOutcome};
 use cc_lb_engine::{
     DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig, SubscriptionQuotaCacheLike,
 };
-use cc_lb_plugin_api::{
-    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy,
-    UpstreamCandidate,
-};
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::SubscriptionQuotaSample;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use http::HeaderMap;
@@ -201,7 +201,7 @@ struct NoopRouter;
 impl RouterPlugin for NoopRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

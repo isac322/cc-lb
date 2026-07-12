@@ -338,7 +338,7 @@ Under cc-lb's pre-launch state and first-party trusted plugin assumption, baking
 
 ### Preserved cc-lb primitives
 
-- `cc-lb-plugin-api/src/traits.rs` trait shapes — `FilterPlugin`, `UpstreamDialect`, `ObservabilityHook`, `Signer`, `SignerFactory`, `PluginRuntime`. (Only addition: `slot_key(&self) -> SlotKey` on `FilterPlugin`.)
+- Host-facing trait shapes — `FilterPlugin`, `UpstreamDialect`, `ObservabilityHook`, `Signer`, and `SignerFactory`. These boundaries were subsequently split across `cc-lb-routing`, `cc-lb-upstream`, and `cc-lb-observability`.
 - `cc-lb-engine/src/dynamic_view.rs::DynamicViewHolder = ArcSwap<DynamicView>`.
 - `cc-lb-engine/src/api_keys/principal_view.rs::PrincipalSpecCached` and its `resolved_pipeline / resolved_dialect / resolved_hooks`.
 - Per-principal staging in `cc-lb-server/src/dynamic_view_builder.rs::build_principal_chains`.
@@ -382,7 +382,7 @@ Under cc-lb's pre-launch state and first-party trusted plugin assumption, baking
 
 ### Modified cc-lb code
 
-- `cc-lb-plugin-api/src/traits.rs`: trait signatures unchanged. Add `slot_key(&self) -> SlotKey` to `FilterPlugin`.
+- The host-facing trait module: the trait changes proposed here were superseded by the later split across `cc-lb-routing`, `cc-lb-upstream`, and `cc-lb-observability`.
 - `cc-lb-engine/src/lifecycle.rs::execute_filter_pipeline`: call-site identical. Traps handled by the existing branch.
 - `cc-lb-server/src/dynamic_view_builder.rs::build_principal_chains`: only the runtime call goes through `WasmtimeRuntime` (trait identical).
 - `cc-lb-server/src/reconcile.rs`, `reload.rs`, `tls.rs`: unchanged.

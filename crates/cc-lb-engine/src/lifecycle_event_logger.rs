@@ -1,7 +1,7 @@
 //! Lifecycle-event logger subscriber.
 //!
 //! Consumes the `LifecycleEvent` stream and increments
-//! `cc_lb_contract_events_total{kind="..."}` per event, providing a
+//! `cc_lb_lifecycle_events_total{kind="..."}` per event, providing a
 //! coarse volume-and-shape signal for the bus independent of any
 //! semantic subscriber.
 //!
@@ -10,7 +10,7 @@
 //! Signal, drain, await. Late lifecycle events after shutdown are lost;
 //! this is acceptable because the assembler already persisted the row.
 
-use cc_lb_contract::LifecycleEvent;
+use cc_lb_lifecycle::LifecycleEvent;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -61,7 +61,7 @@ async fn logger_loop(mut rx: mpsc::Receiver<LifecycleEvent>, mut shutdown: onesh
 }
 
 fn record(event: &LifecycleEvent) {
-    metrics::counter!("cc_lb_contract_events_total", "kind" => event.kind()).increment(1);
+    metrics::counter!("cc_lb_lifecycle_events_total", "kind" => event.kind()).increment(1);
 }
 
 #[cfg(test)]

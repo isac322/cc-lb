@@ -116,7 +116,7 @@ async fn seed_attempts(
     dialect_plugin: &UpstreamWarmupDialectPlugin,
     clock: &dyn cc_lb_clock::Clock,
 ) -> Vec<WarmupAttemptRecord> {
-    let now = i64::try_from(cc_lb_engine::clock::unix_secs(clock.now())).unwrap_or(i64::MAX);
+    let now = i64::try_from(cc_lb_clock::unix_secs(clock.now())).unwrap_or(i64::MAX);
     let plugin_snapshot = serde_json::to_value(dialect_plugin).expect("plugin serializes");
     let attempts = (0..30)
         .map(|index| {

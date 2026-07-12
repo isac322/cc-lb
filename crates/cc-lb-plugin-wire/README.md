@@ -72,7 +72,8 @@ versions, and empty description or usage text.
 
 ## Related Crates
 
-- `cc-lb-plugin-api`: host-facing plugin slots and runtime API types.
+- `cc-lb-runtime-wasmtime`: wire-only Wasmtime admission and dispatch; the
+  host adapters live in `cc-lb-server/src/wasm_host/`.
 - `cc-lb-pdk-wasmtime`: guest PDK runtime helpers and macro re-exports.
 - `cc-lb-pdk-wasmtime-macros`: macro implementation for `#[cc_lb_plugin]`,
   `#[handler]`, and `#[derive(WireSchema)]`.

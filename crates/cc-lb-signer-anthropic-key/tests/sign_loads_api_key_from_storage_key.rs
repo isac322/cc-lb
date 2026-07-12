@@ -4,16 +4,17 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_aead::AeadService;
-use cc_lb_plugin_api::{
-    Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder, SignerFactory,
-    Upstream, UpstreamDialect, shape_request, sign_request,
-};
+use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 use cc_lb_storage_api::{
     AnthropicApiKeyCredential, ApiKeyStore, AuditEntry, AuditStore, BackendKind, ConfigDraftState,
     ConfigStore, HistoryEntry, HistorySummary, MetaStore, OAuthCredentialStore, RequestEvent,
     RequestEventStore, StorageError, StorageResult, UsageRollup, UsageRollupResolution,
     UsageRollupRun, UsageRollupStore,
+};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignerFactory,
+    UpstreamDialect, shape_request, sign_request,
 };
 use http::header::{AUTHORIZATION, USER_AGENT};
 use http::{HeaderMap, HeaderValue, Method};
@@ -29,11 +30,11 @@ struct DirectDialect;
 impl UpstreamDialect for DirectDialect {
     fn shape(
         &self,
-        _ctx: &RequestContext,
+        _context: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
+    ) -> Result<ShapedRequest, DialectError> {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static("test-agent"));
         headers.insert(
@@ -69,17 +70,13 @@ async fn sign_loads_api_key_from_storage_key() {
         .await
         .expect("seed real key");
 
-    let ctx = RequestContext {
+    let ctx = DialectShapeContext {
         request_id: "req-internal-key-storage-test".to_owned(),
-        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(b"{}"),
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: String::new(),
-        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "alice".to_owned(),

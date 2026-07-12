@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cc_lb_contract::{EventId, LifecycleEvent, RequestCacheState, RequestEventBus, UsageSnapshot};
+use cc_lb_control::RequestEventBus;
+use cc_lb_lifecycle::{EventId, LifecycleEvent, UsageSnapshot};
+use cc_lb_request_log::RequestCacheState;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -111,13 +113,13 @@ fn handle_event(
                 cache_state,
             });
             metrics::counter!(
-                "cc_lb_contract_cache_obs_subscriber_rows_total",
+                "cc_lb_lifecycle_cache_obs_subscriber_rows_total",
                 "outcome" => "published"
             )
             .increment(1);
         } else {
             metrics::counter!(
-                "cc_lb_contract_cache_obs_subscriber_rows_total",
+                "cc_lb_lifecycle_cache_obs_subscriber_rows_total",
                 "outcome" => "terminated_without_partial"
             )
             .increment(1);
@@ -180,7 +182,7 @@ fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
     let removed = before.saturating_sub(partials.len());
     if removed > 0 {
         metrics::counter!(
-            "cc_lb_contract_cache_obs_subscriber_rows_total",
+            "cc_lb_lifecycle_cache_obs_subscriber_rows_total",
             "outcome" => "orphan_ttl_evicted"
         )
         .increment(removed as u64);
@@ -197,7 +199,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     };
     partials.remove(&oldest_key);
     metrics::counter!(
-        "cc_lb_contract_cache_obs_subscriber_rows_total",
+        "cc_lb_lifecycle_cache_obs_subscriber_rows_total",
         "outcome" => "cap_evicted"
     )
     .increment(1);
@@ -207,7 +209,8 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 mod tests {
     use super::*;
     use crate::event_bus::InMemoryBus;
-    use cc_lb_contract::{LifecycleBusReceiver, ParseInfo, TerminationReason};
+    use cc_lb_control::LifecycleBusReceiver;
+    use cc_lb_lifecycle::{ParseInfo, TerminationReason};
 
     fn eid(s: &str) -> EventId {
         s.to_owned()
@@ -244,7 +247,7 @@ mod tests {
                 cache_read_input_tokens: 100,
                 ..UsageSnapshot::default()
             },
-            source: cc_lb_contract::UsageSource::NonStreamBody,
+            source: cc_lb_lifecycle::UsageSource::NonStreamBody,
         })
         .await
         .unwrap();
@@ -289,7 +292,7 @@ mod tests {
                 cache_creation_input_tokens: 50,
                 ..UsageSnapshot::default()
             },
-            source: cc_lb_contract::UsageSource::NonStreamBody,
+            source: cc_lb_lifecycle::UsageSource::NonStreamBody,
         })
         .await
         .unwrap();

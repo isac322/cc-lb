@@ -10,19 +10,21 @@ use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
+use cc_lb_domain::{Principal, PrincipalKind, Upstream, UpstreamCandidate};
 use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle,
     LifecycleConfig, UpstreamDispatch,
 };
-use cc_lb_plugin_api::{
-    DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
-    RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest,
-    ShapedRequestBuilder, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability,
-    Upstream, UpstreamCandidate, UpstreamDialect, sign_request,
-};
+use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
+    SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, UpstreamDialect,
+    UpstreamError, shape_request, sign_request,
+};
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::BodyExt;
@@ -111,7 +113,7 @@ pub struct TestRouter {
 impl RouterPlugin for TestRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -132,20 +134,20 @@ pub struct PassthroughDialect {
 impl UpstreamDialect for PassthroughDialect {
     fn shape(
         &self,
-        ctx: &RequestContext,
+        context: &DialectShapeContext,
         upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError> {
         let _ = upstream;
         let mut url = self.base_url.clone();
-        url.set_path(ctx.path.trim_start_matches('/'));
-        url.set_query(ctx.query.as_deref());
+        url.set_path(context.path.trim_start_matches('/'));
+        url.set_query(context.query.as_deref());
         Ok(builder.shaped_request(
             url,
-            ctx.method.clone(),
-            ctx.downstream_headers.clone(),
-            ctx.body_bytes.clone(),
+            context.method.clone(),
+            context.downstream_headers.clone(),
+            context.body_bytes.clone(),
         ))
     }
 }
@@ -187,7 +189,7 @@ impl Signer for TestSigner {
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
-    async fn on_unauthorized(&self, _err: &cc_lb_plugin_api::UpstreamError) -> RetryDecision {
+    async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
         if !self.refresh_allowed {
             return RetryDecision::Fail;
         }
@@ -416,24 +418,20 @@ pub async fn settle() {
 
 pub async fn signed_request(base_url: &str) -> SignedRequest {
     let upstream = Upstream::AnthropicDirect { base_url: None };
-    let ctx = RequestContext {
+    let ctx = DialectShapeContext {
         request_id: "test-request".to_owned(),
-        thread_id: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
-        cache_breakpoints: Vec::new(),
-        canonical_model_id: String::new(),
-        cache_pricing: cc_lb_plugin_api::CachePricingSummary::default(),
     };
     let principal = Principal {
         id: "principal-test".to_owned(),
         kind: PrincipalKind::ApiKey,
         claims: serde_json::Map::new(),
     };
-    let shaped = cc_lb_plugin_api::shape_request(
+    let shaped = shape_request(
         &PassthroughDialect {
             base_url: Url::parse(base_url).expect("test URL parses"),
         },
@@ -459,7 +457,7 @@ impl Signer for NoopSigner {
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
-    async fn on_unauthorized(&self, _err: &cc_lb_plugin_api::UpstreamError) -> RetryDecision {
+    async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
         RetryDecision::Fail
     }
 }
@@ -533,12 +531,12 @@ impl TestLifecycleBus {
         let rx = self
             .bus
             .attach_lifecycle_assembler(cc_lb_engine::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY);
-        let bus_arc: Arc<dyn cc_lb_contract::RequestEventBus> = self.bus.clone();
+        let bus_arc: Arc<dyn cc_lb_control::RequestEventBus> = self.bus.clone();
         self._assembler = Some(cc_lb_engine::spawn_request_event_assembler(
             rx,
             storage as Arc<dyn cc_lb_storage_api::RequestEventStore>,
             Some(bus_arc),
-            Arc::new(cc_lb_contract::NoopMetricsHook),
+            Arc::new(cc_lb_observability::NoopMetricsHook),
         ));
         self
     }
@@ -585,7 +583,7 @@ impl TestLifecycleBus {
         self
     }
 
-    pub fn bus_arc(&self) -> Arc<dyn cc_lb_contract::RequestEventBus> {
+    pub fn bus_arc(&self) -> Arc<dyn cc_lb_control::RequestEventBus> {
         self.bus.clone()
     }
 }

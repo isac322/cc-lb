@@ -55,7 +55,7 @@ use rkyv::{Archive, Deserialize, Serialize, with::InlineAsBox};
 
 /// Principal context as seen by the filter plugin.
 ///
-/// Mirrors `cc_lb_plugin_api::Principal` semantically but the rkyv-derived
+/// Mirrors `cc_lb_domain::Principal` semantically but the rkyv-derived
 /// wire form is the source of truth on the host↔guest boundary.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
@@ -261,7 +261,7 @@ pub struct FilterResponse {
 }
 
 /// Upstream backend exposed to plugins. Mirrors
-/// `cc_lb_plugin_api::Upstream` (currently a single variant —
+/// `cc_lb_domain::Upstream` (currently a single variant —
 /// extending the host enum requires extending this one in lockstep
 /// and bumping a wire schema tag).
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
@@ -421,7 +421,7 @@ pub enum TransformSseEventResult {
 }
 
 /// Lifecycle event delivered to the observe hook. rkyv mirror of
-/// `cc_lb_plugin_api::ObserveEvent`.
+/// `cc_lb_observability::ObserveEvent`.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub enum ObserveEvent {

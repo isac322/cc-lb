@@ -1,5 +1,5 @@
 use super::*;
-use crate::UnifiedQuotaObservation;
+use cc_lb_quota::rate_limit_headers::UnifiedQuotaObservation;
 use cc_lb_storage_api::SubscriptionQuotaStatus;
 
 const SCHEDULED_FOR: i64 = 1_782_412_800;

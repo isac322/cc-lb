@@ -10,14 +10,13 @@ use cc_lb_admin::{AdminState, CurrentConfig, DynamicViewRebinder, router};
 use cc_lb_config::Config;
 use cc_lb_control::api_keys::principal_view::PrincipalView;
 use cc_lb_control::{
-    ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamStatusEntry, UpstreamStatusSnapshot,
+    ApplyStatus, DynamicView, DynamicViewBuilder, RouteDecision, RouteError, RouterPlugin,
+    RoutingContext, UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
-use cc_lb_plugin_api::{
-    ApiKeyAwareSignerFactory, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    SignerFactory, Upstream, UpstreamCandidate,
-};
+use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
+use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
@@ -101,8 +100,8 @@ impl SignerFactory for NoopSignerFactory {
     async fn build(
         &self,
         _upstream: &Upstream,
-    ) -> Result<Arc<dyn cc_lb_plugin_api::Signer>, cc_lb_plugin_api::SignerError> {
-        Err(cc_lb_plugin_api::SignerError::MissingCredentials {
+    ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
+        Err(cc_lb_upstream::SignerError::MissingCredentials {
             reason: "noop test signer factory".to_owned(),
         })
     }
@@ -113,7 +112,7 @@ struct NoopRouter;
 impl RouterPlugin for NoopRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {

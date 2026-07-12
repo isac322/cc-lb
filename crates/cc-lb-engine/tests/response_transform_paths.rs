@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_domain::{Principal, PrincipalKind, TerminalStrategy, Upstream};
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
     RouterPipelineCache, ShapePluginCache,
@@ -15,16 +16,17 @@ use cc_lb_engine::{
     DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
     UpstreamDispatch,
 };
-use cc_lb_plugin_api::{
-    DialectError, ObserveEvent, Principal, PrincipalKind, RequestContext, ResponseTransformError,
-    ResponseTransformHook, ShapedRequest, ShapedRequestBuilder, SignedRequest, SseEvent,
-    SseEventTransformHook, TerminalStrategy, TransformResponseRequest, TransformResponseResult,
-    TransformSseEventRequest, TransformSseEventResult, Upstream, UpstreamDialect,
-};
+use cc_lb_observability::ObserveEvent;
 use cc_lb_storage_api::principal::PrincipalRecord;
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ResponseTransformError, ResponseTransformHook,
+    ShapedRequest, ShapedRequestBuilder, SignedRequest, SseEvent, SseEventTransformHook,
+    TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
+    TransformSseEventResult, UpstreamDialect,
+};
 use http::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue, Response, StatusCode};
 use url::Url;
@@ -663,19 +665,19 @@ impl ShapeTransformDialect {
 impl UpstreamDialect for ShapeTransformDialect {
     fn shape(
         &self,
-        ctx: &RequestContext,
+        context: &DialectShapeContext,
         _upstream: &Upstream,
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError> {
         let mut url = Url::parse("http://upstream.local/").expect("test URL parses");
-        url.set_path(ctx.path.trim_start_matches('/'));
-        url.set_query(ctx.query.as_deref());
+        url.set_path(context.path.trim_start_matches('/'));
+        url.set_query(context.query.as_deref());
         Ok(builder.shaped_request(
             url,
-            ctx.method.clone(),
-            ctx.downstream_headers.clone(),
-            ctx.body_bytes.clone(),
+            context.method.clone(),
+            context.downstream_headers.clone(),
+            context.body_bytes.clone(),
         ))
     }
 

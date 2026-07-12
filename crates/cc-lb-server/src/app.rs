@@ -42,6 +42,7 @@ use cc_lb_storage_api::{
     BackendKind, ManagedKeyStore, MetaStore, PluginBlobRepo, RuntimeChangeNotifier, Storage,
     UpstreamRecord,
 };
+use cc_lb_upstream::SignedRequest;
 use http_body_util::BodyExt;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::rt::TokioExecutor;
@@ -53,6 +54,11 @@ use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 
+#[cfg(feature = "postgres")]
+use crate::admin_ports::ServerRetainedPartialPort;
+use crate::admin_ports::{
+    ServerRoutePreviewPort, ServerSubscriptionQuotaIngestionPort, ServerWarmupPort,
+};
 use crate::bootstrap;
 use crate::build_meta::BuildMeta;
 use crate::builtins::NoopObservabilityHook;
@@ -77,8 +83,9 @@ use crate::storage_factory;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 use crate::tls::{ReloadableListener, TlsState};
 use cc_lb_admin::{
-    AdminState, ConfigDraftError, CurrentConfig, DynamicViewRebinder, WarmupDialectDispatchError,
-    WarmupDialectDispatchErrorKind, WarmupDialectDispatchOutcome, WarmupDialectDispatcher,
+    AdminPorts, AdminState, ConfigDraftError, CurrentConfig, DynamicViewRebinder,
+    WarmupDialectDispatchError, WarmupDialectDispatchErrorKind, WarmupDialectDispatchOutcome,
+    WarmupDialectDispatcher,
 };
 
 const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_millis(500);
@@ -727,7 +734,7 @@ async fn build_app_with_storage_inner(
 ) -> Result<App, BuildError> {
     let scheduler_lazy_handle = opened_scheduler.lazy_handle();
     let server_state = Arc::new(ServerStateHandle::new_starting());
-    let metrics_hook: Arc<dyn cc_lb_contract::EngineMetricsHook> =
+    let metrics_hook: Arc<dyn cc_lb_observability::EngineMetricsHook> =
         Arc::new(cc_lb_observability::MetricsCrateHook);
     let key_store = Arc::new(KeyStore::new(managed_store));
     let price_catalog = cc_lb_pricing::global_catalog().clone();
@@ -838,7 +845,7 @@ async fn build_app_with_storage_inner(
 
     let replica_identity = {
         match replica::load_or_create_replica_id(&data_dir) {
-            Ok(id) => Some(cc_lb_contract::ReplicaIdentity { id }),
+            Ok(id) => Some(cc_lb_domain::ReplicaIdentity { id }),
             Err(e) => {
                 tracing::warn!(error = %e, "failed to load or create replica ID; proceeding without it");
                 None
@@ -880,7 +887,7 @@ async fn build_app_with_storage_inner(
     let lifecycle_config = LifecycleConfig {
         messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
         files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
-        replica_identity,
+        replica_identity: replica_identity.clone(),
         prompt_cache_shadow: config.prompt_cache_shadow.clone(),
     };
     let scheduler_replica_id = lifecycle_config
@@ -1089,11 +1096,15 @@ async fn build_app_with_storage_inner(
     let (event_fanout_shutdown_tx, event_fanout_shutdown_rx) = watch::channel(false);
     let mut event_fanout_tasks = Vec::new();
     let mut internal_partials_state = None;
+    #[cfg(feature = "postgres")]
+    let mut retained_partials = None;
+    #[cfg(not(feature = "postgres"))]
+    let retained_partials = None;
     // Shared with AdminState so the SSE handler subscribes to the same broadcast
     // the StorageTailPoller feeds. Kept live for the InMemory transport too —
     // AdminState holds one Sender clone so the channel never closes, and no
     // poller produces on it (finals arrive via the local bus in that mode).
-    let storage_tail_tx: tokio::sync::broadcast::Sender<cc_lb_engine::StorageTailUpdate> =
+    let storage_tail_tx: tokio::sync::broadcast::Sender<cc_lb_request_log::StorageTailUpdate> =
         tokio::sync::broadcast::channel(cc_lb_admin::events::DEFAULT_STORAGE_TAIL_CAPACITY).0;
     #[cfg(not(feature = "postgres"))]
     {
@@ -1101,7 +1112,7 @@ async fn build_app_with_storage_inner(
         let _ = &mut event_fanout_tasks;
         let _ = &mut internal_partials_state;
     }
-    let event_bus: Arc<dyn cc_lb_contract::RequestEventBus> = match config.event_bus.transport {
+    let event_bus: Arc<dyn cc_lb_control::RequestEventBus> = match config.event_bus.transport {
         EventBusTransport::InMemory => Arc::new(in_memory_bus.clone()),
         EventBusTransport::PgNotify => {
             #[cfg(not(feature = "postgres"))]
@@ -1139,7 +1150,7 @@ async fn build_app_with_storage_inner(
                     event_fanout_shutdown_rx.clone(),
                 ));
 
-                let listener_bus: Arc<dyn cc_lb_contract::RequestEventBus> =
+                let listener_bus: Arc<dyn cc_lb_control::RequestEventBus> =
                     Arc::new(in_memory_bus.clone());
                 let http_client = reqwest::Client::builder()
                     .timeout(Duration::from_secs(3))
@@ -1161,11 +1172,14 @@ async fn build_app_with_storage_inner(
                     event_fanout_shutdown_rx.clone(),
                 ));
 
+                let retained_partial_port: Arc<dyn cc_lb_admin::ports::RetainedPartialPort> =
+                    Arc::new(ServerRetainedPartialPort::new(retention.clone()));
                 internal_partials_state =
                     Some(cc_lb_admin::internal_partials::InternalPartialsState {
-                        retention,
+                        retention: retained_partial_port.clone(),
                         cluster_token,
                     });
+                retained_partials = Some(retained_partial_port);
 
                 Arc::new(cc_lb_engine::PgNotifyFanout::new(
                     in_memory_bus.clone(),
@@ -1640,7 +1654,15 @@ async fn build_app_with_storage_inner(
         key_store: Some(key_store),
         aead: aead.clone(),
         limit_engine: limit_engine.clone(),
-        lifecycle: Some(lifecycle.clone()),
+        lifecycle: Some(AdminPorts {
+            route_preview: Some(Arc::new(ServerRoutePreviewPort::new(lifecycle.clone()))),
+            warmup: Some(Arc::new(ServerWarmupPort)),
+            retained_partials,
+            subscription_quota_ingestion: Some(Arc::new(
+                ServerSubscriptionQuotaIngestionPort::new(lifecycle.clone()),
+            )),
+            replica_identity,
+        }),
         subscription_metadata_hook,
         lazy_refresher: lazy_refresher.clone(),
         runtime: Some(runtime.clone()),
@@ -2708,7 +2730,7 @@ fn dispatcher(
 ) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistry>) {
     let bulkhead_config = BulkheadRuntimeConfig::from(config.bulkhead.clone());
     let breaker_config = BreakerRuntimeConfig::from(config.circuit_breaker.clone());
-    let upstream_name = Arc::new(|request: &cc_lb_plugin_api::SignedRequest| {
+    let upstream_name = Arc::new(|request: &SignedRequest| {
         request
             .url()
             .host_str()

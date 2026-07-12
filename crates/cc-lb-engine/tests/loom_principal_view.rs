@@ -5,13 +5,13 @@ mod principal_view_swap {
     use std::time::Duration;
 
     use arc_swap::ArcSwap;
+    use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
     use cc_lb_engine::api_keys::principal_view::{
         DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
     };
-    use cc_lb_plugin_api::{
-        FilterError, FilterOutput, FilterPlugin, ObservabilityError, ObservabilityHook,
-        ObserveEvent, Principal, RequestContext, TerminalStrategy, UpstreamCandidate,
-    };
+    use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
+    use cc_lb_routing::RoutingContext;
+    use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
     use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
     use loom::sync::Arc;
 
@@ -52,7 +52,7 @@ mod principal_view_swap {
                     for hook in hooks {
                         hook.observe(ObserveEvent::AuthnComplete {
                             principal_id: PRINCIPAL_ID.to_owned(),
-                            kind: cc_lb_plugin_api::PrincipalKind::ApiKey,
+                            kind: cc_lb_domain::PrincipalKind::ApiKey,
                         })
                         .expect("stub hook accepts authn event");
                     }
@@ -121,7 +121,7 @@ mod principal_view_swap {
     impl FilterPlugin for StubFilter {
         fn filter(
             &self,
-            _ctx: &RequestContext,
+            _ctx: &RoutingContext,
             _principal: &Principal,
             _candidates: &[UpstreamCandidate],
         ) -> Result<FilterOutput, FilterError> {

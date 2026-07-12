@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
+use cc_lb_domain::{CacheScore, TtlClass, WarmCacheEntry};
 use cc_lb_engine::clock::{ClockHandle, unix_secs};
 use cc_lb_engine::lifecycle::{
     PromptCacheObservationCacheLike, PromptCacheObservationInput, PromptCacheThreadUsage,
 };
-use cc_lb_plugin_api::types::{CacheScore, TtlClass, WarmCacheEntry};
 use cc_lb_storage_api::{PromptCacheObservationStore, StorageResult};
 use parking_lot::RwLock;
 use uuid::Uuid;
@@ -166,7 +166,7 @@ impl PromptCacheObservationCache {
                     upstream_id: record.upstream_id,
                     canonical_model: record.canonical_model_id,
                     prefix_hash: record.v3_prefix_key,
-                    ttl_class: ttl_class_from_storage(record.ttl_class),
+                    ttl_class: record.ttl_class,
                     expires_at_unix_secs: record.expires_at_unix_secs,
                     last_observed_at_unix_secs: record.last_observed_at_unix_secs,
                     prefix_content_block_index: record.prefix_content_block_index,
@@ -447,13 +447,6 @@ fn record_map_entry_inspected() {
     MAP_ENTRIES_INSPECTED.with(|inspected| inspected.set(inspected.get() + 1));
 }
 
-fn ttl_class_from_storage(ttl_class: cc_lb_storage_api::TtlClass) -> TtlClass {
-    match ttl_class {
-        cc_lb_storage_api::TtlClass::Ephemeral5m => TtlClass::Ephemeral5m,
-        cc_lb_storage_api::TtlClass::Ephemeral1h => TtlClass::Ephemeral1h,
-    }
-}
-
 impl PromptCacheObservationCacheLike for PromptCacheObservationCache {
     fn snapshot_for_upstream(
         &self,
@@ -582,11 +575,11 @@ fn ttl_matches_request(request_ttl: TtlClass, entry_ttl: TtlClass) -> bool {
 #[cfg(test)]
 pub(crate) mod tests {
     use async_trait::async_trait;
+    use cc_lb_domain::TtlClass as StorageTtlClass;
     use cc_lb_engine::clock::{Clock, ClockHandle, TestClock};
     use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
     use cc_lb_storage_api::{
         PromptCacheObservationRecord, PromptCacheObservationStore, StorageResult,
-        TtlClass as StorageTtlClass,
     };
     use std::sync::{Arc, Mutex};
 

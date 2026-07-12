@@ -8,6 +8,7 @@ use cc_lb_scheduler::jobs::usage_prune::UsagePruneRunner;
 use cc_lb_storage_api::{
     PromptCacheObservationStore, Storage, StorageError, StorageResult, UpstreamRecord,
     UpstreamStore,
+    usage_pruner::{PruneResult, UsagePruner},
 };
 use uuid::Uuid;
 
@@ -57,9 +58,9 @@ impl UsagePruneRunner for StorageHandle {
     async fn prune_once_for_retention(
         &self,
         retention_days: u64,
-        clock: cc_lb_engine::ClockHandle,
-    ) -> cc_lb_engine::usage_pruner::PruneResult {
-        cc_lb_engine::usage_pruner::UsagePruner::new(self.storage.clone(), retention_days, clock)
+        clock: cc_lb_clock::ClockHandle,
+    ) -> PruneResult {
+        UsagePruner::new(self.storage.clone(), retention_days, clock)
             .prune_once()
             .await
     }

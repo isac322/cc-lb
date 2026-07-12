@@ -1,5 +1,5 @@
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginMetadata, PluginSlot,
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginMetadata, PluginSlotKind,
     WasmRegistryEntry,
 };
 use serde_json::json;
@@ -106,7 +106,7 @@ fn legacy_wasm_registry_entry_defaults_supported_slots_to_empty() {
 #[test]
 fn wasm_registry_entry_round_trips_with_supported_slots() {
     let mut entry = uploaded_entry(None);
-    entry.supported_slots = vec![PluginSlot::Router, PluginSlot::Shape];
+    entry.supported_slots = vec![PluginSlotKind::Router, PluginSlotKind::Shape];
 
     let serialized = serde_json::to_value(&entry).unwrap();
     let roundtripped: WasmRegistryEntry = serde_json::from_value(serialized).unwrap();
@@ -117,7 +117,7 @@ fn wasm_registry_entry_round_trips_with_supported_slots() {
 #[test]
 fn builtin_cache_affinity_entry_advertises_router_slot() {
     let entry = WasmRegistryEntry::builtin_cache_affinity(0);
-    assert_eq!(entry.supported_slots, vec![PluginSlot::Router]);
+    assert_eq!(entry.supported_slots, vec![PluginSlotKind::Router]);
 }
 
 #[test]
@@ -126,7 +126,7 @@ fn builtin_subscription_preference_entry_synthesizes_metadata() {
     let metadata = entry.metadata.expect("builtin metadata is present");
 
     assert_eq!(entry.id, BUILTIN_SUBSCRIPTION_PREFERENCE_ID);
-    assert_eq!(entry.supported_slots, vec![PluginSlot::Router]);
+    assert_eq!(entry.supported_slots, vec![PluginSlotKind::Router]);
     assert_eq!(
         metadata.purpose,
         "Prefer subscription/OAuth upstreams while quota appears alive; use API-key upstreams only when subscription candidates are exhausted."

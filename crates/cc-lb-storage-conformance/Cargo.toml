@@ -12,6 +12,7 @@ postgres = ["dep:cc-lb-storage-postgres", "dep:sqlx"]
 sqlite = ["dep:sqlx"]
 
 [dependencies]
+cc-lb-domain.workspace = true
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
 cc-lb-engine = { path = "../cc-lb-engine" }

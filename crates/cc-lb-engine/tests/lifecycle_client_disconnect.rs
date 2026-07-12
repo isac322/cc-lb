@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_contract::{BusReceiver, RequestEventBus};
+use cc_lb_control::{BusReceiver, RequestEventBus};
 use cc_lb_engine::LifecycleContext;
 use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
 use http::StatusCode;

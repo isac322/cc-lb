@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub use cc_lb_contract::{KeyStatus, Limit, LimitKind};
+pub use cc_lb_storage_api::{KeyStatus, Limit, LimitKind};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -12,9 +12,9 @@ use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveEnqueuer,
 };
 use cc_lb_engine::{DispatchError, LifecycleConfig, UpstreamDispatch};
-use cc_lb_plugin_api::SignedRequest;
 use cc_lb_storage_api::principal::{Limit, PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
+use cc_lb_upstream::SignedRequest;
 use http::{Response, StatusCode};
 use uuid::Uuid;
 

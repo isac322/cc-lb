@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use cc_lb_clock::ClockHandle;
 use cc_lb_config::Config;
-use cc_lb_engine::anthropic_compat::CLAUDE_CODE_STABLE_VERSION_KEY;
+use cc_lb_control::anthropic_compat::CLAUDE_CODE_STABLE_VERSION_KEY;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;

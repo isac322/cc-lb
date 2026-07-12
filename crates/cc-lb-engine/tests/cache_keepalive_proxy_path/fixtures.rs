@@ -3,15 +3,16 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_engine::{ApiKeyAwareSignerFactory, DispatchError, UpstreamDispatch};
-use cc_lb_plugin_api::{
-    Principal, RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin,
-    ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
-    UpstreamCandidate,
-};
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::principal::{Limit, PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
+use cc_lb_upstream::{
+    RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+    SigningCapability,
+};
 use http::{HeaderValue, Response, StatusCode};
 use serde_json::{Value, json};
 use url::Url;
@@ -70,7 +71,7 @@ impl Signer for RecordingSigner {
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
-    async fn on_unauthorized(&self, _err: &cc_lb_plugin_api::UpstreamError) -> RetryDecision {
+    async fn on_unauthorized(&self, _err: &cc_lb_upstream::UpstreamError) -> RetryDecision {
         RetryDecision::Fail
     }
 }
@@ -95,7 +96,7 @@ pub(crate) struct FirstRouter;
 impl RouterPlugin for FirstRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &cc_lb_routing::RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
