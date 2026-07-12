@@ -1,0 +1,47 @@
+/**
+ * Reasoning tier classification based on thinking budget (in tokens).
+ * Single tunable threshold table for budget-to-tier mapping.
+ */
+
+export const REASONING_TIER_THRESHOLDS = {
+  none: { min: 0, max: 1023 },
+  low: { min: 1024, max: 4000 },
+  medium: { min: 4001, max: 12000 },
+  high: { min: 12001, max: 24000 },
+  xhigh: { min: 24001, max: 32000 },
+  max: { min: 32001, max: Infinity },
+} as const;
+
+export type ReasoningTier = keyof typeof REASONING_TIER_THRESHOLDS;
+
+/**
+ * Classify a thinking budget into a reasoning tier.
+ * @param budget - The thinking budget in tokens, or null/undefined
+ * @returns The reasoning tier: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+ */
+export function budgetToTier(budget: number | null | undefined): ReasoningTier {
+  // Handle null/undefined by checking against the 'none' tier's max threshold
+  if (budget === null || budget === undefined) {
+    return 'none';
+  }
+
+  // Iterate through the threshold table to find the matching tier
+  for (const [tier, bounds] of Object.entries(REASONING_TIER_THRESHOLDS)) {
+    if (budget >= bounds.min && budget <= bounds.max) {
+      return tier as ReasoningTier;
+    }
+  }
+
+  // Fallback (should never reach here given the table structure)
+  return 'max';
+}
+
+/**
+ * Determine if a service tier qualifies for fast-path processing.
+ * Only 'priority' tier gets fast-path treatment.
+ * @param tier - The service tier string, or null/undefined
+ * @returns true only if tier === 'priority', false otherwise
+ */
+export function serviceTierToFast(tier: string | null | undefined): boolean {
+  return tier === 'priority';
+}

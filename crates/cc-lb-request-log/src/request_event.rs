@@ -45,6 +45,8 @@ pub struct RequestEvent {
     pub message_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control_block_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_control_message_indices: Vec<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

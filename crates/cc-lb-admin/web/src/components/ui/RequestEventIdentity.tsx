@@ -7,6 +7,7 @@ import {
   statusTone,
 } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
+import { budgetToTier, serviceTierToFast } from '../../lib/reasoningTier';
 import { useCopyButton } from '../../lib/useCopyButton';
 import { Badge, cx, Hint } from './primitives';
 import { RelativeTime } from './RelativeTime';
@@ -165,8 +166,28 @@ export function RequestEventIdentity({
         <KvRow
           label="Model"
           value={
-            <span className="font-mono break-all min-w-0">
-              {event.model ?? DASH}
+            <span className="flex items-center gap-2 justify-end flex-wrap min-w-0">
+              <span className="font-mono break-all min-w-0">
+                {event.model ?? DASH}
+              </span>
+              {budgetToTier(event.thinking_budget_tokens) !== 'none' && (
+                <Badge tone="mono" className="shrink-0">
+                  {budgetToTier(event.thinking_budget_tokens)} ·{' '}
+                  {event.thinking_budget_tokens}
+                </Badge>
+              )}
+              {event.service_tier != null && (
+                <Badge
+                  tone={
+                    serviceTierToFast(event.service_tier) ? 'ok' : 'neutral'
+                  }
+                  className="shrink-0"
+                >
+                  {serviceTierToFast(event.service_tier)
+                    ? 'fast'
+                    : event.service_tier}
+                </Badge>
+              )}
             </span>
           }
         />

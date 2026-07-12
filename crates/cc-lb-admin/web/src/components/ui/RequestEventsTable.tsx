@@ -3,9 +3,10 @@ import { useState } from 'react';
 import { eventTime } from '../../lib/api';
 import { getRequestOutcome, statusTone } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
+import { budgetToTier, serviceTierToFast } from '../../lib/reasoningTier';
 import { CostCell } from './CostCell';
 import { LatencyCell } from './latency/LatencyCell';
-import { cx, SkeletonRow } from './primitives';
+import { Badge, cx, SkeletonRow } from './primitives';
 import { RelativeTime } from './RelativeTime';
 import { RequestEventDrawer } from './RequestEventDrawer';
 import { RequestOutcomeTableCell } from './RequestEventIdentity';
@@ -181,7 +182,27 @@ export function RequestEventsTable({
                     </td>
                   )}
                   <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
-                    {e.model ?? DASH}
+                    <span className="flex items-center gap-2 min-w-0">
+                      <span className="truncate">{e.model ?? DASH}</span>
+                      {budgetToTier(e.thinking_budget_tokens) !== 'none' && (
+                        <Badge tone="mono" className="shrink-0">
+                          {budgetToTier(e.thinking_budget_tokens)} ·{' '}
+                          {e.thinking_budget_tokens}
+                        </Badge>
+                      )}
+                      {e.service_tier != null && (
+                        <Badge
+                          tone={
+                            serviceTierToFast(e.service_tier) ? 'ok' : 'neutral'
+                          }
+                          className="shrink-0"
+                        >
+                          {serviceTierToFast(e.service_tier)
+                            ? 'fast'
+                            : e.service_tier}
+                        </Badge>
+                      )}
+                    </span>
                   </td>
                   <td
                     className={cx(
