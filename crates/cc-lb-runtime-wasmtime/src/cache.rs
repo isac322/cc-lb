@@ -60,29 +60,10 @@ enum HookFn {
     TransformSseEvent,
 }
 
-trait OutputBuffer: Sized {
-    fn empty() -> Self;
-    fn copy_from_slice(slice: &[u8]) -> Self;
-}
-
-impl OutputBuffer for Vec<u8> {
-    fn empty() -> Self {
-        Vec::new()
-    }
-    fn copy_from_slice(slice: &[u8]) -> Self {
-        slice.to_vec()
-    }
-}
-
-impl OutputBuffer for AlignedVec<16> {
-    fn empty() -> Self {
-        AlignedVec::with_capacity(0)
-    }
-    fn copy_from_slice(slice: &[u8]) -> Self {
-        let mut aligned = AlignedVec::with_capacity(slice.len());
-        aligned.extend_from_slice(slice);
-        aligned
-    }
+fn copy_to_aligned(slice: &[u8]) -> AlignedVec<16> {
+    let mut aligned = AlignedVec::with_capacity(slice.len());
+    aligned.extend_from_slice(slice);
+    aligned
 }
 
 impl HookFn {
@@ -116,7 +97,18 @@ pub fn call_filter_hook(
     cell: &Arc<PluginCell>,
     input: &[u8],
 ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-    call_hook(cell, input, HookFn::Filter)
+    call_filter_hook_scoped(cell, input, <[u8]>::to_vec)
+}
+
+pub(crate) fn call_filter_hook_scoped<R, F>(
+    cell: &Arc<PluginCell>,
+    input: &[u8],
+    with_output: F,
+) -> Result<R, WasmtimeRuntimeError>
+where
+    F: for<'a> FnOnce(&'a [u8]) -> R,
+{
+    call_hook_scoped(cell, input, HookFn::Filter, with_output)
 }
 
 /// Synchronous shape call. Input is rkyv-encoded `ShapeRequest`,
@@ -125,7 +117,18 @@ pub fn call_shape_hook(
     cell: &Arc<PluginCell>,
     input: &[u8],
 ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-    call_hook(cell, input, HookFn::Shape)
+    call_shape_hook_scoped(cell, input, <[u8]>::to_vec)
+}
+
+pub(crate) fn call_shape_hook_scoped<R, F>(
+    cell: &Arc<PluginCell>,
+    input: &[u8],
+    with_output: F,
+) -> Result<R, WasmtimeRuntimeError>
+where
+    F: for<'a> FnOnce(&'a [u8]) -> R,
+{
+    call_hook_scoped(cell, input, HookFn::Shape, with_output)
 }
 
 /// Synchronous observe call. Guest returns `(0, 0)`; the returned
@@ -134,34 +137,60 @@ pub fn call_observe_hook(
     cell: &Arc<PluginCell>,
     input: &[u8],
 ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-    call_hook(cell, input, HookFn::Observe)
+    call_hook_scoped(cell, input, HookFn::Observe, <[u8]>::to_vec)
 }
 
 pub fn call_transform_response_hook(
     cell: &Arc<PluginCell>,
     input: &[u8],
 ) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
-    call_hook(cell, input, HookFn::TransformResponse)
+    call_transform_response_hook_scoped(cell, input, copy_to_aligned)
+}
+
+pub(crate) fn call_transform_response_hook_scoped<R, F>(
+    cell: &Arc<PluginCell>,
+    input: &[u8],
+    with_output: F,
+) -> Result<R, WasmtimeRuntimeError>
+where
+    F: for<'a> FnOnce(&'a [u8]) -> R,
+{
+    call_hook_scoped(cell, input, HookFn::TransformResponse, with_output)
 }
 
 pub fn call_transform_sse_event_hook(
     cell: &Arc<PluginCell>,
     input: &[u8],
 ) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
-    call_hook(cell, input, HookFn::TransformSseEvent)
+    call_transform_sse_event_hook_scoped(cell, input, copy_to_aligned)
 }
 
-fn call_hook<O: OutputBuffer>(
+pub(crate) fn call_transform_sse_event_hook_scoped<R, F>(
+    cell: &Arc<PluginCell>,
+    input: &[u8],
+    with_output: F,
+) -> Result<R, WasmtimeRuntimeError>
+where
+    F: for<'a> FnOnce(&'a [u8]) -> R,
+{
+    call_hook_scoped(cell, input, HookFn::TransformSseEvent, with_output)
+}
+
+fn call_hook_scoped<R, F>(
     cell: &Arc<PluginCell>,
     input: &[u8],
     hook: HookFn,
-) -> Result<O, WasmtimeRuntimeError> {
+    with_output: F,
+) -> Result<R, WasmtimeRuntimeError>
+where
+    F: for<'a> FnOnce(&'a [u8]) -> R,
+{
     let _store_permit = cell
         .store_budget
         .try_acquire()
         .inspect_err(record_pool_saturation)?;
     let mut wi = build_worker_instance(cell, hook).inspect_err(record_pool_saturation)?;
-    execute_call(&mut wi, cell, input, hook)
+    execute_call_scoped(&mut wi, cell, input, hook, with_output)
 }
 
 fn record_pool_saturation(err: &WasmtimeRuntimeError) {
@@ -171,12 +200,16 @@ fn record_pool_saturation(err: &WasmtimeRuntimeError) {
     }
 }
 
-fn execute_call<O: OutputBuffer>(
+fn execute_call_scoped<R, F>(
     wi: &mut WorkerInstance,
     cell: &PluginCell,
     input: &[u8],
     hook: HookFn,
-) -> Result<O, WasmtimeRuntimeError> {
+    with_output: F,
+) -> Result<R, WasmtimeRuntimeError>
+where
+    F: for<'a> FnOnce(&'a [u8]) -> R,
+{
     let start = Instant::now();
     // Reuse the cell's owned `Arc<str>` label instead of `.to_string()`
     // per emission — SharedString accepts `Arc<str>` directly, avoiding
@@ -184,7 +217,7 @@ fn execute_call<O: OutputBuffer>(
     let plugin: Arc<str> = Arc::clone(&cell.plugin_name);
     let hook_label = hook.metric_label();
 
-    let result = execute_call_inner(wi, input, hook);
+    let result = execute_call_inner_scoped(wi, input, hook, with_output);
 
     metrics::histogram!(
         "cc_lb_plugin_call_duration_seconds",
@@ -209,11 +242,15 @@ fn execute_call<O: OutputBuffer>(
     result
 }
 
-fn execute_call_inner<O: OutputBuffer>(
+fn execute_call_inner_scoped<R, F>(
     wi: &mut WorkerInstance,
     input: &[u8],
     hook: HookFn,
-) -> Result<O, WasmtimeRuntimeError> {
+    with_output: F,
+) -> Result<R, WasmtimeRuntimeError>
+where
+    F: for<'a> FnOnce(&'a [u8]) -> R,
+{
     let WorkerInstance {
         store,
         memory,
@@ -292,8 +329,8 @@ fn execute_call_inner<O: OutputBuffer>(
     // Filter / shape returning (0, 0) is an ABI
     // violation; collapsing it into empty bytes here would hide the
     // bug from downstream rkyv decode.
-    let out_bytes = if matches!(hook, HookFn::Observe) && out_ptr == 0 && out_len == 0 {
-        O::empty()
+    let output = if matches!(hook, HookFn::Observe) && out_ptr == 0 && out_len == 0 {
+        with_output(&[])
     } else if out_ptr == 0 || out_len == 0 {
         return Err(WasmtimeRuntimeError::ModuleRejected {
             reason: format!(
@@ -318,7 +355,7 @@ fn execute_call_inner<O: OutputBuffer>(
                 ),
             });
         }
-        let bytes = O::copy_from_slice(&mem_view[out_ptr as usize..out_end]);
+        let output = with_output(&mem_view[out_ptr as usize..out_end]);
 
         // Skip `cc_lb_free(out_ptr, out_len, ..)` on the output
         // buffer: the surrounding pure-mode contract drops the whole
@@ -330,8 +367,8 @@ fn execute_call_inner<O: OutputBuffer>(
         // above `hook_fn.call`) — we're only skipping the OUTPUT
         // free because it happens AFTER `hook_fn` returns.
         let _ = free_fn;
-        bytes
+        output
     };
 
-    Ok(out_bytes)
+    Ok(output)
 }
