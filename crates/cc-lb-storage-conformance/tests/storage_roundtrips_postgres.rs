@@ -335,6 +335,14 @@ fn upstream_subscription_quota_checkpoint_history_postgres() {
 }
 
 #[test]
+fn upstream_subscription_quota_aggregate_store_postgres() {
+    run_postgres_scenario(
+        "upstream_subscription_quota_aggregate_store",
+        upstream_subscription_quota_store::aggregate_store,
+    );
+}
+
+#[test]
 fn warmup_attempts_store_postgres() {
     run_postgres_scenario("warmup_attempts_store", |backend| async move {
         warmup_attempts_store::run_all(backend, warmup_attempts_clock()).await

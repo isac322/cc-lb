@@ -269,6 +269,10 @@ upstream_subscription_quota_sqlite_test!(
     upstream_subscription_quota_checkpoint_history_sqlite,
     checkpoint_history
 );
+upstream_subscription_quota_sqlite_test!(
+    upstream_subscription_quota_aggregate_store_sqlite,
+    aggregate_store
+);
 
 #[test]
 fn warmup_attempts_store_sqlite() {

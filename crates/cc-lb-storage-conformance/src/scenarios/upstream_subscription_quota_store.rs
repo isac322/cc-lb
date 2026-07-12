@@ -2,10 +2,12 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
-    SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSeriesQuery,
-    SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
-    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
+    RequestEvent, RequestEventStore, SubscriptionQuotaCheckpointRangeQuery,
+    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample,
+    SubscriptionQuotaSampleKind, SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource,
+    SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
+    UpstreamSubscriptionQuotaAggregateStore, UpstreamSubscriptionQuotaStore, UsageRollupStore,
+    UsageTokenInterval, UsageTokenIntervalStore, UsageTokenIntervalSum,
 };
 use uuid::Uuid;
 
@@ -14,7 +16,11 @@ use crate::harness::{ConformanceBackend, with_conformance_fixture};
 pub async fn run_all<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
-    B::Storage: UpstreamSubscriptionQuotaStore,
+    B::Storage: UpstreamSubscriptionQuotaStore
+        + UpstreamSubscriptionQuotaAggregateStore
+        + UsageTokenIntervalStore
+        + RequestEventStore
+        + UsageRollupStore,
 {
     append_then_list_latest_roundtrip(Arc::clone(&backend)).await?;
     same_millis_appends_with_different_sample_ids_dont_collide(Arc::clone(&backend)).await?;
@@ -30,7 +36,8 @@ where
     checkpoint_writer_latest_freshness(Arc::clone(&backend)).await?;
     checkpoint_writer_decrease(Arc::clone(&backend)).await?;
     checkpoint_series_anchor_merge(Arc::clone(&backend)).await?;
-    checkpoint_history(backend).await?;
+    checkpoint_history(Arc::clone(&backend)).await?;
+    aggregate_store(backend).await?;
     Ok(())
 }
 
@@ -40,6 +47,22 @@ macro_rules! scenario {
         where
             B: ConformanceBackend,
             B::Storage: UpstreamSubscriptionQuotaStore,
+        {
+            with_conformance_fixture(backend, $body).await
+        }
+    };
+}
+
+macro_rules! aggregate_scenario {
+    ($name:ident, $body:expr) => {
+        pub async fn $name<B>(backend: Arc<B>) -> Result<()>
+        where
+            B: ConformanceBackend,
+            B::Storage: UpstreamSubscriptionQuotaStore
+                + UpstreamSubscriptionQuotaAggregateStore
+                + UsageTokenIntervalStore
+                + RequestEventStore
+                + UsageRollupStore,
         {
             with_conformance_fixture(backend, $body).await
         }
@@ -636,6 +659,267 @@ where
     Ok(())
 }
 
+pub async fn aggregate_store<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: UpstreamSubscriptionQuotaStore
+        + UpstreamSubscriptionQuotaAggregateStore
+        + UsageTokenIntervalStore
+        + RequestEventStore
+        + UsageRollupStore,
+{
+    slim_checkpoints_preserve_left_anchor_sources_and_same_millis_ties(Arc::clone(&backend))
+        .await?;
+    provider_lots_keep_header_and_api_streams_separate(Arc::clone(&backend)).await?;
+    interval_sums_match_legacy_inclusive_boundary_bytes(backend).await?;
+    Ok(())
+}
+
+aggregate_scenario!(
+    slim_checkpoints_preserve_left_anchor_sources_and_same_millis_ties,
+    |storage| async move {
+        let upstream = upstream_id(30);
+        let checkpoints = [
+            checkpoint(&observation(
+                upstream,
+                1_000,
+                1,
+                SubscriptionQuotaSource::Header,
+                0.1,
+            )),
+            checkpoint(&observation(
+                upstream,
+                1_000,
+                2,
+                SubscriptionQuotaSource::Header,
+                0.2,
+            )),
+            checkpoint(&observation(
+                upstream,
+                2_000,
+                3,
+                SubscriptionQuotaSource::Header,
+                0.3,
+            )),
+            checkpoint(&observation(
+                upstream,
+                2_000,
+                4,
+                SubscriptionQuotaSource::Header,
+                0.4,
+            )),
+            checkpoint(&observation(
+                upstream,
+                1_000,
+                5,
+                SubscriptionQuotaSource::Api,
+                0.5,
+            )),
+            checkpoint(&observation(
+                upstream,
+                2_000,
+                6,
+                SubscriptionQuotaSource::Api,
+                0.6,
+            )),
+        ];
+        storage
+            .put_subscription_quota_checkpoints(&checkpoints)
+            .await?;
+
+        let query = checkpoint_query(upstream, 2_000, 2_000);
+        let mut expected = storage
+            .list_subscription_quota_checkpoint_ranges(query.clone())
+            .await?
+            .into_iter()
+            .flat_map(|range| {
+                range
+                    .left_anchor
+                    .into_iter()
+                    .chain(range.checkpoints)
+                    .map(slim_checkpoint)
+            })
+            .collect::<Vec<_>>();
+        let mut actual = storage
+            .list_subscription_quota_slim_checkpoints(query)
+            .await?;
+        // The two backends physically order rows by the source column's wire
+        // string (e.g. "api" < "header" alphabetically), not by the
+        // `SubscriptionQuotaSource` enum's declaration order used by
+        // `list_subscription_quota_checkpoint_ranges`'s `BTreeMap` grouping.
+        // Sort both projections onto the same key so this scenario asserts
+        // per-key content parity without depending on either ordering choice.
+        let sort_key = |row: &cc_lb_storage_api::SubscriptionQuotaSlimCheckpoint| {
+            (
+                row.source.as_str().to_owned(),
+                row.changed_at_unix_millis,
+                row.sample_id,
+            )
+        };
+        expected.sort_by_key(sort_key);
+        actual.sort_by_key(sort_key);
+
+        ensure!(
+            actual == expected,
+            "slim checkpoints must preserve the legacy left-anchor and inclusive-range projection: actual={actual:?} expected={expected:?}"
+        );
+
+        let header_sample_ids = actual
+            .iter()
+            .filter(|row| row.source == SubscriptionQuotaSource::Header)
+            .map(|row| row.sample_id)
+            .collect::<Vec<_>>();
+        ensure!(
+            header_sample_ids == [Uuid::from_u128(2), Uuid::from_u128(3), Uuid::from_u128(4)],
+            "header slim checkpoints must select the greatest left-anchor tie and sort in-range ties by sample_id"
+        );
+        let api_sample_ids = actual
+            .iter()
+            .filter(|row| row.source == SubscriptionQuotaSource::Api)
+            .map(|row| row.sample_id)
+            .collect::<Vec<_>>();
+        ensure!(
+            api_sample_ids == [Uuid::from_u128(5), Uuid::from_u128(6)],
+            "api slim checkpoints must not merge with the header stream"
+        );
+        Ok(())
+    }
+);
+
+aggregate_scenario!(
+    provider_lots_keep_header_and_api_streams_separate,
+    |storage| async move {
+        let upstream = upstream_id(31);
+        let mut header = observation(upstream, 60_000, 1, SubscriptionQuotaSource::Header, 0.2);
+        header.resets_at_unix_secs = Some(36_000);
+        let mut api = observation(upstream, 60_000, 2, SubscriptionQuotaSource::Api, 0.8);
+        api.resets_at_unix_secs = Some(54_000);
+        storage
+            .put_subscription_quota_checkpoints(&[checkpoint(&header), checkpoint(&api)])
+            .await?;
+
+        for (source_merge, expected_source, expected_utilization, expected_reset) in [
+            (
+                SubscriptionQuotaSourceMerge::Header,
+                SubscriptionQuotaSourceMerge::Header,
+                0.2,
+                36_000,
+            ),
+            (
+                SubscriptionQuotaSourceMerge::Api,
+                SubscriptionQuotaSourceMerge::Api,
+                0.8,
+                54_000,
+            ),
+        ] {
+            let lots = storage
+                .list_subscription_quota_provider_lots(SubscriptionQuotaProviderLotQuery {
+                    upstream_ids: vec![upstream],
+                    windows: vec![SubscriptionQuotaWindow::FiveHour],
+                    sources: vec![
+                        SubscriptionQuotaSource::Header,
+                        SubscriptionQuotaSource::Api,
+                    ],
+                    since_unix_millis: 0,
+                    until_unix_millis: 120_000,
+                    source_merge,
+                    evaluation_unix_secs: 120,
+                })
+                .await?;
+            ensure!(
+                lots.len() == 1,
+                "each source must yield one independent lot"
+            );
+            let lot = &lots[0];
+            ensure!(
+                lot.source == expected_source
+                    && lot.utilization == expected_utilization
+                    && lot.provider_reset_unix_secs == Some(expected_reset)
+                    && lot.provider_start_unix_secs == Some(expected_reset - 18_000),
+                "provider lots must retain the selected source's reset cycle and utilization"
+            );
+        }
+        Ok(())
+    }
+);
+
+aggregate_scenario!(
+    interval_sums_match_legacy_inclusive_boundary_bytes,
+    |storage| async move {
+        let upstream = upstream_id(32);
+        let provider_start = 1_799_985_000;
+        let cc_start = 1_800_000_000;
+        let provider_sample_end = 1_800_003_000;
+        let now_unix_secs = 1_800_003_600;
+        let buckets = [
+            (provider_start, 11_u64),
+            (cc_start, 17_u64),
+            (provider_sample_end, 13_u64),
+            (now_unix_secs, 19_u64),
+        ];
+        for (timestamp, tokens) in buckets {
+            storage
+                .append_request_event(&usage_event(
+                    timestamp,
+                    &format!("quota-boundary-{timestamp}"),
+                    upstream,
+                    tokens,
+                ))
+                .await?;
+        }
+        storage.rollup_usage_once().await?;
+
+        let intervals = [
+            UsageTokenInterval {
+                interval_id: 1,
+                upstream_id: upstream,
+                start_unix_secs: provider_start,
+                end_unix_secs: provider_sample_end,
+            },
+            UsageTokenInterval {
+                interval_id: 2,
+                upstream_id: upstream,
+                start_unix_secs: provider_start,
+                end_unix_secs: cc_start,
+            },
+            UsageTokenInterval {
+                interval_id: 3,
+                upstream_id: upstream,
+                start_unix_secs: cc_start,
+                end_unix_secs: now_unix_secs,
+            },
+            UsageTokenInterval {
+                interval_id: 4,
+                upstream_id: upstream,
+                start_unix_secs: provider_sample_end,
+                end_unix_secs: now_unix_secs,
+            },
+        ];
+        let actual = storage.sum_usage_tokens_for_intervals(&intervals).await?;
+        let expected = intervals
+            .iter()
+            .map(|interval| UsageTokenIntervalSum {
+                interval_id: interval.interval_id,
+                tokens: legacy_inclusive_tokens(
+                    &buckets,
+                    interval.start_unix_secs,
+                    interval.end_unix_secs,
+                ),
+            })
+            .collect::<Vec<_>>();
+
+        ensure!(
+            actual == expected,
+            "interval sums must include provider-start, provider-sample-end, cc-start, and now buckets"
+        );
+        ensure!(
+            serde_json::to_vec(&actual)? == serde_json::to_vec(&expected)?,
+            "interval-sum JSON must be byte-identical to the legacy inclusive admin token result"
+        );
+        Ok(())
+    }
+);
+
 scenario!(
     sample_writer_persists_seven_day_fable_window,
     |storage| async move {
@@ -933,6 +1217,60 @@ fn series_query(
 
 fn checkpoint(record: &SubscriptionQuotaSample) -> SubscriptionQuotaCheckpointRecord {
     SubscriptionQuotaCheckpointRecord::from(record)
+}
+
+fn slim_checkpoint(
+    record: SubscriptionQuotaCheckpointRecord,
+) -> cc_lb_storage_api::SubscriptionQuotaSlimCheckpoint {
+    cc_lb_storage_api::SubscriptionQuotaSlimCheckpoint {
+        upstream_id: record.upstream_id,
+        window: record.window,
+        source: record.source,
+        changed_at_unix_millis: record.changed_at_unix_millis,
+        sample_id: record.sample_id,
+        utilization: record.utilization,
+        status: record.status,
+        resets_at_unix_secs: record.resets_at_unix_secs,
+    }
+}
+
+fn legacy_inclusive_tokens(
+    buckets: &[(u64, u64)],
+    start_unix_secs: u64,
+    end_unix_secs: u64,
+) -> u64 {
+    buckets
+        .iter()
+        .filter(|(bucket_start_unix_secs, _)| {
+            *bucket_start_unix_secs >= start_unix_secs && *bucket_start_unix_secs <= end_unix_secs
+        })
+        .map(|(_, tokens)| *tokens)
+        .sum()
+}
+
+fn usage_event(
+    timestamp: u64,
+    request_id: &str,
+    upstream_id: Uuid,
+    input_tokens: u64,
+) -> RequestEvent {
+    RequestEvent {
+        ts_ms: Some(timestamp.saturating_mul(1_000)),
+        request_id: request_id.to_owned(),
+        principal_id: Some("quota-boundary-principal".to_owned()),
+        key_id: Some("quota-boundary-key".to_owned()),
+        upstream_id: Some(upstream_id),
+        upstream_name: Some("quota-boundary-upstream".to_owned()),
+        model: Some("quota-boundary-model".to_owned()),
+        status: 200,
+        input_tokens: Some(input_tokens),
+        output_tokens: Some(0),
+        cache_creation_input_tokens: Some(0),
+        cache_read_input_tokens: Some(0),
+        cost_usd_micros: Some(0),
+        duration_ms: 1,
+        ..Default::default()
+    }
 }
 
 fn checkpoint_query(
