@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.25
 #
 # Self-hosted GitHub Actions runner image, based on falcondev-oss/actions-runner.
 # Adds clang + mold for fast Rust builds. Deliberately does NOT install rustup,
