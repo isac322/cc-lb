@@ -1,4 +1,6 @@
-use serde_json::{Value, json};
+use serde::ser::{SerializeMap, SerializeSeq};
+use serde::{Serialize, Serializer};
+use serde_json::Value;
 
 use crate::tokenizer::PrefixTokenizer;
 
@@ -7,6 +9,9 @@ pub const V3_TOKEN_ESTIMATE_SOURCE: &str = "local_tiktoken_v1";
 /// Anthropic's hard cap on explicit `cache_control` breakpoints; more is provider-invalid, so
 /// analysis is skipped (request forwarded as-is) before any per-breakpoint prefix tokenization.
 pub const MAX_EXPLICIT_BREAKPOINTS: usize = 4;
+
+const SERIALIZATION_SCRATCH_INITIAL_CAPACITY: usize = 4 * 1024;
+const SERIALIZATION_SCRATCH_MAX_RETAINED_CAPACITY: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PromptCacheSimulatorKey([u8; 32]);
@@ -85,6 +90,164 @@ pub struct V3PromptCacheAnalysis {
     pub breakpoints: Vec<V3PromptCacheBreakpoint>,
 }
 
+#[derive(Clone, Copy)]
+enum CacheBlockValueRef<'a> {
+    Json(&'a Value),
+    SyntheticText(&'a str),
+}
+
+struct CacheBlockRef<'a> {
+    source: V3PromptCacheBlockSource,
+    path: String,
+    message_index: Option<u64>,
+    value: CacheBlockValueRef<'a>,
+    explicit_ttl: Option<&'a str>,
+}
+
+impl CacheBlockRef<'_> {
+    fn into_owned(self) -> V3PromptCacheBlock {
+        let value = match self.value {
+            CacheBlockValueRef::Json(value) => value.clone(),
+            CacheBlockValueRef::SyntheticText(text) => {
+                let mut value = serde_json::Map::new();
+                value.insert("text".to_owned(), Value::String(text.to_owned()));
+                value.insert("type".to_owned(), Value::String("text".to_owned()));
+                Value::Object(value)
+            }
+        };
+        V3PromptCacheBlock {
+            source: self.source,
+            path: self.path,
+            message_index: self.message_index,
+            value,
+            explicit_ttl: self.explicit_ttl.map(ToOwned::to_owned),
+        }
+    }
+}
+
+struct SerializationScratch {
+    bytes: Vec<u8>,
+}
+
+impl Default for SerializationScratch {
+    fn default() -> Self {
+        Self {
+            bytes: Vec::with_capacity(SERIALIZATION_SCRATCH_INITIAL_CAPACITY),
+        }
+    }
+}
+
+impl SerializationScratch {
+    fn serialize<T: Serialize>(&mut self, value: &T) -> &[u8] {
+        self.clear_for_reuse();
+        if serde_json::to_writer(&mut self.bytes, value).is_err() {
+            self.bytes.clear();
+        }
+        &self.bytes
+    }
+
+    fn clear_for_reuse(&mut self) {
+        if self.bytes.capacity() > SERIALIZATION_SCRATCH_MAX_RETAINED_CAPACITY {
+            self.bytes = Vec::with_capacity(SERIALIZATION_SCRATCH_INITIAL_CAPACITY);
+        } else {
+            self.bytes.clear();
+        }
+    }
+}
+
+struct DigestBlockSerializer<'a, 'value>(&'a CacheBlockRef<'value>);
+
+impl Serialize for DigestBlockSerializer<'_, '_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(3))?;
+        map.serialize_entry("path", &self.0.path)?;
+        map.serialize_entry("source", source_name(self.0.source))?;
+        map.serialize_entry("value", &DigestValueSerializer(&self.0.value))?;
+        map.end()
+    }
+}
+
+struct DigestValueSerializer<'a, 'value>(&'a CacheBlockValueRef<'value>);
+
+impl Serialize for DigestValueSerializer<'_, '_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            CacheBlockValueRef::Json(Value::Object(value)) => {
+                let entry_count = value
+                    .len()
+                    .saturating_sub(usize::from(value.contains_key("cache_control")));
+                let mut map = serializer.serialize_map(Some(entry_count))?;
+                for (key, value) in value {
+                    if key != "cache_control" {
+                        map.serialize_entry(key, value)?;
+                    }
+                }
+                map.end()
+            }
+            CacheBlockValueRef::Json(value) => value.serialize(serializer),
+            CacheBlockValueRef::SyntheticText(text) => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("text", text)?;
+                map.serialize_entry("type", "text")?;
+                map.end()
+            }
+        }
+    }
+}
+
+struct PrefixSerializer<'a, 'value> {
+    model: &'a str,
+    blocks: &'a [CacheBlockRef<'value>],
+}
+
+impl Serialize for PrefixSerializer<'_, '_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("content_blocks", &PrefixBlocksSerializer(self.blocks))?;
+        map.serialize_entry("model", self.model)?;
+        map.end()
+    }
+}
+
+struct PrefixBlocksSerializer<'a, 'value>(&'a [CacheBlockRef<'value>]);
+
+impl Serialize for PrefixBlocksSerializer<'_, '_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for block in self.0 {
+            sequence.serialize_element(&PrefixBlockSerializer(block))?;
+        }
+        sequence.end()
+    }
+}
+
+struct PrefixBlockSerializer<'a, 'value>(&'a CacheBlockRef<'value>);
+
+impl Serialize for PrefixBlockSerializer<'_, '_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("source", source_name(self.0.source))?;
+        map.serialize_entry("value", &PrefixValueSerializer(&self.0.value))?;
+        map.end()
+    }
+}
+
+struct PrefixValueSerializer<'a, 'value>(&'a CacheBlockValueRef<'value>);
+
+impl Serialize for PrefixValueSerializer<'_, '_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            CacheBlockValueRef::Json(value) => value.serialize(serializer),
+            CacheBlockValueRef::SyntheticText(text) => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("text", text)?;
+                map.serialize_entry("type", "text")?;
+                map.end()
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PromptCachePrefixChain {
     keys: Vec<PromptCacheSimulatorKey>,
@@ -138,7 +301,10 @@ pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3Prompt
         };
     }
     let blocks = flatten_cacheable_blocks(value);
-    let block_digests = blocks.iter().map(block_digest);
+    let mut serialization_scratch = SerializationScratch::default();
+    let block_digests = blocks
+        .iter()
+        .map(|block| block_digest(block, &mut serialization_scratch));
     let chain = PromptCachePrefixChain::from_block_digests(
         PromptCacheSimulatorKey::seed(canonical_model),
         block_digests,
@@ -147,14 +313,14 @@ pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3Prompt
         .iter()
         .enumerate()
         .filter_map(|(index, block)| {
-            block.explicit_ttl.as_ref()?;
+            block.explicit_ttl?;
             let prefix_key = chain.prefix_key_hex(index)?;
             Some(V3StructuralBreakpoint {
                 block_index: index as u64,
                 source: block.source,
                 path: block.path.clone(),
                 message_index: block.message_index,
-                ttl: block.explicit_ttl.clone(),
+                ttl: block.explicit_ttl.map(ToOwned::to_owned),
                 prefix_key,
                 lookback_prefixes: lookback_prefixes(&chain, index),
             })
@@ -162,7 +328,7 @@ pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3Prompt
         .collect::<Vec<_>>();
     if structural_breakpoints.len() > MAX_EXPLICIT_BREAKPOINTS {
         return V3PromptCacheAnalysis {
-            blocks,
+            blocks: blocks.into_iter().map(CacheBlockRef::into_owned).collect(),
             breakpoints: Vec::new(),
         };
     }
@@ -179,12 +345,13 @@ pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3Prompt
                 canonical_model,
                 &blocks,
                 breakpoint.block_index as usize,
+                &mut serialization_scratch,
             ),
             lookback_prefixes: breakpoint.lookback_prefixes,
         })
         .collect();
     V3PromptCacheAnalysis {
-        blocks,
+        blocks: blocks.into_iter().map(CacheBlockRef::into_owned).collect(),
         breakpoints,
     }
 }
@@ -234,7 +401,7 @@ fn record_explicit_breakpoint(count: &mut usize, value: &Value) -> bool {
     *count > MAX_EXPLICIT_BREAKPOINTS
 }
 
-fn flatten_cacheable_blocks(value: &Value) -> Vec<V3PromptCacheBlock> {
+fn flatten_cacheable_blocks(value: &Value) -> Vec<CacheBlockRef<'_>> {
     let mut blocks = Vec::new();
     flatten_tools(value.get("tools"), &mut blocks);
     flatten_system(value.get("system"), &mut blocks);
@@ -242,7 +409,7 @@ fn flatten_cacheable_blocks(value: &Value) -> Vec<V3PromptCacheBlock> {
     blocks
 }
 
-fn flatten_tools(value: Option<&Value>, blocks: &mut Vec<V3PromptCacheBlock>) {
+fn flatten_tools<'a>(value: Option<&'a Value>, blocks: &mut Vec<CacheBlockRef<'a>>) {
     let Some(Value::Array(tools)) = value else {
         return;
     };
@@ -250,23 +417,23 @@ fn flatten_tools(value: Option<&Value>, blocks: &mut Vec<V3PromptCacheBlock>) {
         if !tool.is_object() {
             continue;
         }
-        blocks.push(V3PromptCacheBlock {
+        blocks.push(CacheBlockRef {
             source: V3PromptCacheBlockSource::Tools,
             path: format!("tools[{index}]"),
             message_index: None,
-            value: tool.clone(),
+            value: CacheBlockValueRef::Json(tool),
             explicit_ttl: explicit_cache_ttl(tool),
         });
     }
 }
 
-fn flatten_system(value: Option<&Value>, blocks: &mut Vec<V3PromptCacheBlock>) {
+fn flatten_system<'a>(value: Option<&'a Value>, blocks: &mut Vec<CacheBlockRef<'a>>) {
     match value {
-        Some(Value::String(text)) if !text.is_empty() => blocks.push(V3PromptCacheBlock {
+        Some(Value::String(text)) if !text.is_empty() => blocks.push(CacheBlockRef {
             source: V3PromptCacheBlockSource::System,
             path: "system".to_owned(),
             message_index: None,
-            value: json!({ "type": "text", "text": text }),
+            value: CacheBlockValueRef::SyntheticText(text),
             explicit_ttl: None,
         }),
         Some(Value::Array(items)) => {
@@ -284,7 +451,7 @@ fn flatten_system(value: Option<&Value>, blocks: &mut Vec<V3PromptCacheBlock>) {
     }
 }
 
-fn flatten_messages(value: Option<&Value>, blocks: &mut Vec<V3PromptCacheBlock>) {
+fn flatten_messages<'a>(value: Option<&'a Value>, blocks: &mut Vec<CacheBlockRef<'a>>) {
     let Some(Value::Array(messages)) = value else {
         return;
     };
@@ -293,11 +460,11 @@ fn flatten_messages(value: Option<&Value>, blocks: &mut Vec<V3PromptCacheBlock>)
             continue;
         };
         match content {
-            Value::String(text) if !text.is_empty() => blocks.push(V3PromptCacheBlock {
+            Value::String(text) if !text.is_empty() => blocks.push(CacheBlockRef {
                 source: V3PromptCacheBlockSource::Message,
                 path: format!("messages[{message_index}].content"),
                 message_index: Some(message_index as u64),
-                value: json!({ "type": "text", "text": text }),
+                value: CacheBlockValueRef::SyntheticText(text),
                 explicit_ttl: None,
             }),
             Value::Array(items) => {
@@ -316,21 +483,21 @@ fn flatten_messages(value: Option<&Value>, blocks: &mut Vec<V3PromptCacheBlock>)
     }
 }
 
-fn push_content_block(
-    blocks: &mut Vec<V3PromptCacheBlock>,
+fn push_content_block<'a>(
+    blocks: &mut Vec<CacheBlockRef<'a>>,
     source: V3PromptCacheBlockSource,
     path: String,
     message_index: Option<u64>,
-    value: &Value,
+    value: &'a Value,
 ) {
     if !is_cacheable_content_block(value) {
         return;
     }
-    blocks.push(V3PromptCacheBlock {
+    blocks.push(CacheBlockRef {
         source,
         path,
         message_index,
-        value: value.clone(),
+        value: CacheBlockValueRef::Json(value),
         explicit_ttl: explicit_cache_ttl(value),
     });
 }
@@ -349,67 +516,47 @@ fn is_cacheable_content_block(value: &Value) -> bool {
     }
 }
 
-fn explicit_cache_ttl(value: &Value) -> Option<String> {
+fn explicit_cache_ttl(value: &Value) -> Option<&str> {
     value
         .get("cache_control")
         .and_then(|cache_control| cache_control.get("ttl"))
         .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            value
-                .get("cache_control")
-                .is_some()
-                .then(|| "5m".to_owned())
-        })
+        .or_else(|| value.get("cache_control").is_some().then_some("5m"))
 }
 
-fn block_digest(block: &V3PromptCacheBlock) -> [u8; 32] {
-    let value = match &block.value {
-        Value::Object(map) => {
-            let mut value = map.clone();
-            value.remove("cache_control");
-            Value::Object(value)
-        }
-        value => value.clone(),
-    };
-    let hash_input = json!({
-        "source": source_name(block.source),
-        "path": &block.path,
-        "value": value,
-    });
-    let bytes = serde_json::to_vec(&hash_input).unwrap_or_default();
+fn block_digest(block: &CacheBlockRef<'_>, scratch: &mut SerializationScratch) -> [u8; 32] {
+    let bytes = scratch.serialize(&DigestBlockSerializer(block));
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"cc-lb-cache-v4:block");
     hasher.update(&bytes);
-    *hasher.finalize().as_bytes()
+    let digest = *hasher.finalize().as_bytes();
+    scratch.clear_for_reuse();
+    digest
 }
 
 fn breakpoint_prefix_token_count(
     canonical_model: &str,
-    blocks: &[V3PromptCacheBlock],
+    blocks: &[CacheBlockRef<'_>],
     breakpoint_index: usize,
+    scratch: &mut SerializationScratch,
 ) -> u64 {
-    let bytes = serialized_prefix(canonical_model, &blocks[..=breakpoint_index]);
-    std::str::from_utf8(&bytes)
+    let bytes = serialized_prefix(canonical_model, &blocks[..=breakpoint_index], scratch);
+    let token_count = std::str::from_utf8(bytes)
         .map(|text| PrefixTokenizer::global().count_tokens(text) as u64)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    scratch.clear_for_reuse();
+    token_count
 }
 
-fn serialized_prefix(canonical_model: &str, blocks: &[V3PromptCacheBlock]) -> Vec<u8> {
-    let prefix = blocks
-        .iter()
-        .map(|block| {
-            json!({
-            "source": source_name(block.source),
-            "value": block.value,
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::to_vec(&json!({
-        "model": canonical_model,
-        "content_blocks": prefix,
-    }))
-    .unwrap_or_default()
+fn serialized_prefix<'a>(
+    canonical_model: &str,
+    blocks: &[CacheBlockRef<'_>],
+    scratch: &'a mut SerializationScratch,
+) -> &'a [u8] {
+    scratch.serialize(&PrefixSerializer {
+        model: canonical_model,
+        blocks,
+    })
 }
 
 fn lookback_prefixes(
