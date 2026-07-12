@@ -302,6 +302,7 @@ export const RequestEventPartialSchema = z.looseObject({
   cache_creation_input_tokens_1h: z.number().nullable().optional(),
   cache_read_input_tokens: z.number().nullable().optional(),
   thinking_tokens: z.number().nullable().optional(),
+  thinking_budget_tokens: z.number().nullable().optional(),
   web_search_requests: z.number().nullable().optional(),
   web_fetch_requests: z.number().nullable().optional(),
   service_tier: z.string().nullable().optional(),
@@ -442,6 +443,7 @@ export interface RequestEvent {
   upstream_error_type?: string;
   upstream_error_message?: string;
   thinking_tokens?: number;
+  thinking_budget_tokens?: number;
   web_search_requests?: number;
   web_fetch_requests?: number;
   service_tier?: string;

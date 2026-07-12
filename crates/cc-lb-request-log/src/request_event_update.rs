@@ -96,6 +96,8 @@ pub struct RequestEventPartial {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control_block_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_prefix_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched_v3_cache_key: Option<String>,
