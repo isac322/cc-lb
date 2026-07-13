@@ -55,7 +55,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Install cargo-semver-checks
         uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154
@@ -85,7 +85,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Authenticate to crates.io (trusted publishing)
         id: crates-io-auth
@@ -118,7 +118,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Run release-plz release-pr
         uses: MarcoIeni/release-plz-action@v0.5

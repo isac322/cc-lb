@@ -76,7 +76,7 @@ jobs:
       CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: ./.github/actions/setup-rust-cache
 
       - name: Install cargo-semver-checks
@@ -92,7 +92,7 @@ jobs:
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: ./.github/actions/setup-rust-cache
 
       - name: cargo publish --dry-run
