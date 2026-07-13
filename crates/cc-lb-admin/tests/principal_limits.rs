@@ -1,4 +1,4 @@
-mod admin_test_common;
+use crate::admin_test_common;
 
 use std::sync::Arc;
 

@@ -1,4 +1,3 @@
-mod admin_test_common;
 #[path = "admin_warmup_endpoints/scheduler.rs"]
 mod scheduler_support;
 #[path = "admin_warmup_endpoints/support.rs"]

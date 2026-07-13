@@ -1,5 +1,3 @@
-mod common;
-
 use std::env;
 use std::ffi::OsString;
 
@@ -34,7 +32,7 @@ impl Drop for EnvGuard {
 #[test]
 fn double_underscore_env_names_map_to_nested_config_fields() {
     let _guard = EnvGuard::set("CC_LB_LISTENER__PROXY_ADDR", "[::]:9999");
-    let (_dir, path) = common::temp_config(
+    let (_dir, path) = crate::common::temp_config(
         r#"[listener]
 proxy_addr = "[::]:7777"
 "#,

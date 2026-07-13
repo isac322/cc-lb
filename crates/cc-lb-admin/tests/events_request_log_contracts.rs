@@ -1,4 +1,4 @@
-mod config_admin_common;
+use crate::config_admin_common;
 #[path = "events_request_log_contracts/support.rs"]
 mod events_request_log_contracts_support;
 

@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 #[tokio::test]
 async fn debug_does_not_include_raw_token() {

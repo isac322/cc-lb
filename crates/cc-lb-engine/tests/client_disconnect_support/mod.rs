@@ -34,11 +34,11 @@ use http::{HeaderValue, Response, StatusCode};
 use tokio::sync::Notify;
 use url::Url;
 
-use crate::common::{RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState};
+use super::common::{RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState};
 
 pub fn lifecycle(dispatcher: Arc<dyn UpstreamDispatch>, test_bus: &TestLifecycleBus) -> Lifecycle {
     let state = TestState::default();
-    crate::common::lifecycle_with_parts(
+    super::common::lifecycle_with_parts(
         TestAuthn::new(state),
         Arc::new(TestRouter {
             base_url: Url::parse("http://upstream.local/").expect("test URL parses"),

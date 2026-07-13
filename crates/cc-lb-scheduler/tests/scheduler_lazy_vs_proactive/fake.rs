@@ -21,7 +21,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use url::Url;
 
-use crate::common::TestResult;
+use super::common::TestResult;
 
 pub struct FakeAnthropic {
     base: String,
@@ -100,7 +100,7 @@ impl FakeAnthropic {
     }
 
     pub async fn wait_for_refresh_request(&self) -> TestResult<()> {
-        tokio::time::timeout(crate::common::WAIT_TIMEOUT, self.pause.wait_until_entered())
+        tokio::time::timeout(super::common::WAIT_TIMEOUT, self.pause.wait_until_entered())
             .await
             .map_err(|_| "timed out waiting for fake refresh request")?;
         Ok(())

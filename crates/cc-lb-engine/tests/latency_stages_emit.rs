@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;

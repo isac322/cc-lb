@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 #[tokio::test]
 async fn multi_route_dispatch() {

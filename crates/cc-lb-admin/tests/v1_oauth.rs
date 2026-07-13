@@ -3,7 +3,7 @@
 //! nonce, while the server-side entry binds that token to the upstream UUID, verifier, and start
 //! revision. This preserves the shared token exchange path but makes completion upstream-scoped.
 
-mod admin_test_common;
+use crate::admin_test_common;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;

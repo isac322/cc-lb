@@ -40,6 +40,8 @@ jobs:
       - run: cargo fmt --check
       - name: Audit-redaction lint
         run: bash scripts/lint-audit-redaction.sh
+      - name: Integration-test consolidation guard
+        run: bash scripts/check-integration-test-consolidation.sh
 
   clippy:
     runs-on: oracle4-cc-lb
