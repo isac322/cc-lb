@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use cc_lb_storage_api::{PriceCatalogCache, PriceCatalogSnapshotRecord, StorageResult};
+use cc_lb_storage_api::{
+    PriceCatalogCache, PriceCatalogSnapshotRecord, StorageError, StorageResult,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -12,7 +14,12 @@ use crate::{
 #[async_trait]
 impl PriceCatalogCache for PostgresStorage {
     async fn put_price_snapshot(&self, json_bytes: &[u8], fetched_at_ms: u64) -> StorageResult<()> {
-        let payload = serde_json::from_slice::<Value>(json_bytes)?;
+        let _ = serde_json::from_slice::<Value>(json_bytes)?;
+        let payload =
+            std::str::from_utf8(json_bytes).map_err(|error| StorageError::InvalidInput {
+                field: "json_bytes".to_owned(),
+                reason: error.to_string(),
+            })?;
         let payload_hash = sha256_hex(json_bytes);
         let fetched_at_ms = u64_to_i64(fetched_at_ms, "price catalog fetched_at_ms")?;
 
@@ -43,12 +50,14 @@ impl PriceCatalogCache for PostgresStorage {
         .map_err(map_sqlx_error)?;
 
         row.map(|row| {
-            let payload = row.try_get::<Value, _>("payload").map_err(map_sqlx_error)?;
+            let payload = row
+                .try_get::<String, _>("payload")
+                .map_err(map_sqlx_error)?;
             let fetched_at_ms = row
                 .try_get::<i64, _>("fetched_at_ms")
                 .map_err(map_sqlx_error)?;
             Ok(PriceCatalogSnapshotRecord {
-                json_bytes: serde_json::to_vec(&payload)?,
+                json_bytes: payload.into_bytes(),
                 fetched_at_ms: i64_to_u64(fetched_at_ms, "price catalog fetched_at_ms")?,
             })
         })
