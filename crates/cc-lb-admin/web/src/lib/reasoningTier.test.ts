@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   budgetToTier,
   REASONING_TIER_THRESHOLDS,
-  serviceTierToFast,
+  reasoningBadgeText,
+  serviceTierBadgeText,
 } from './reasoningTier';
 
 describe('budgetToTier', () => {
@@ -63,33 +64,67 @@ describe('budgetToTier', () => {
   });
 });
 
-describe('serviceTierToFast', () => {
-  it('returns true for priority', () => {
-    expect(serviceTierToFast('priority')).toBe(true);
+describe('serviceTierBadgeText', () => {
+  it('returns priority for priority', () => {
+    expect(serviceTierBadgeText('priority')).toBe('priority');
   });
 
-  it('returns false for standard', () => {
-    expect(serviceTierToFast('standard')).toBe(false);
+  it('returns batch for batch', () => {
+    expect(serviceTierBadgeText('batch')).toBe('batch');
   });
 
-  it('returns false for batch', () => {
-    expect(serviceTierToFast('batch')).toBe(false);
+  it('returns flex for flex', () => {
+    expect(serviceTierBadgeText('flex')).toBe('flex');
   });
 
-  it('returns false for null', () => {
-    expect(serviceTierToFast(null)).toBe(false);
+  it('returns null for standard', () => {
+    expect(serviceTierBadgeText('standard')).toBeNull();
   });
 
-  it('returns false for undefined', () => {
-    expect(serviceTierToFast(undefined)).toBe(false);
+  it('returns null for empty string', () => {
+    expect(serviceTierBadgeText('')).toBeNull();
   });
 
-  it('returns false for empty string', () => {
-    expect(serviceTierToFast('')).toBe(false);
+  it('returns null for null', () => {
+    expect(serviceTierBadgeText(null)).toBeNull();
   });
 
-  it('returns false for other arbitrary string', () => {
-    expect(serviceTierToFast('unknown')).toBe(false);
+  it('returns null for undefined', () => {
+    expect(serviceTierBadgeText(undefined)).toBeNull();
+  });
+});
+
+describe('reasoningBadgeText', () => {
+  it('returns effort only', () => {
+    expect(reasoningBadgeText('max', null, null)).toBe('max');
+  });
+
+  it('returns effort + tokens', () => {
+    expect(reasoningBadgeText('max', null, 8200)).toBe('max · 8.2k');
+  });
+
+  it('returns legacy budget + tokens', () => {
+    expect(reasoningBadgeText(null, 18000, 8200)).toBe('high · 8.2k');
+  });
+
+  it('returns legacy budget only', () => {
+    expect(reasoningBadgeText(null, 18000, null)).toBe('high');
+  });
+
+  it('returns tokens only', () => {
+    expect(reasoningBadgeText(null, null, 8200)).toBe('8.2k');
+  });
+
+  it('returns nothing', () => {
+    expect(reasoningBadgeText(null, null, null)).toBeNull();
+  });
+
+  it('effort takes precedence over budget', () => {
+    expect(reasoningBadgeText('max', 1024, null)).toBe('max');
+  });
+
+  it('zero/absent tokens not shown', () => {
+    expect(reasoningBadgeText('max', null, 0)).toBe('max');
   });
 });
 

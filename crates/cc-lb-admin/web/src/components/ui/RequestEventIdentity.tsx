@@ -7,7 +7,7 @@ import {
   statusTone,
 } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
-import { budgetToTier, serviceTierToFast } from '../../lib/reasoningTier';
+import { reasoningBadgeText } from '../../lib/reasoningTier';
 import { useCopyButton } from '../../lib/useCopyButton';
 import { Badge, cx, Hint } from './primitives';
 import { RelativeTime } from './RelativeTime';
@@ -81,6 +81,11 @@ export function RequestEventIdentity({
     isPartial,
     event._phase === 'final' ? event.status : 0,
     event._phase === 'final' ? event.error_code : undefined,
+  );
+  const reasoningText = reasoningBadgeText(
+    event.reasoning_effort,
+    event.thinking_budget_tokens,
+    event.thinking_tokens,
   );
 
   return (
@@ -166,31 +171,31 @@ export function RequestEventIdentity({
         <KvRow
           label="Model"
           value={
-            <span className="flex items-center gap-2 justify-end flex-wrap min-w-0">
-              <span className="font-mono break-all min-w-0">
-                {event.model ?? DASH}
-              </span>
-              {budgetToTier(event.thinking_budget_tokens) !== 'none' && (
-                <Badge tone="mono" className="shrink-0">
-                  {budgetToTier(event.thinking_budget_tokens)} ·{' '}
-                  {event.thinking_budget_tokens}
-                </Badge>
-              )}
-              {event.service_tier != null && (
-                <Badge
-                  tone={
-                    serviceTierToFast(event.service_tier) ? 'ok' : 'neutral'
-                  }
-                  className="shrink-0"
-                >
-                  {serviceTierToFast(event.service_tier)
-                    ? 'fast'
-                    : event.service_tier}
-                </Badge>
-              )}
+            <span className="font-mono break-all min-w-0">
+              {event.model ?? DASH}
             </span>
           }
         />
+        {reasoningText != null && (
+          <KvRow
+            label="Reasoning"
+            value={
+              <span className="font-mono break-all min-w-0">
+                {reasoningText}
+              </span>
+            }
+          />
+        )}
+        {event.service_tier != null && event.service_tier !== '' && (
+          <KvRow
+            label="Service tier"
+            value={
+              <span className="font-mono break-all min-w-0">
+                {event.service_tier}
+              </span>
+            }
+          />
+        )}
         <KvRow
           label="Status"
           value={<RequestOutcomeBadge outcome={outcome} />}

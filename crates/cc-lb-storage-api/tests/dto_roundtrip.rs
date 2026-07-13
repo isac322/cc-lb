@@ -534,6 +534,7 @@ fn batch_b_wire_snapshots_are_stable() {
         event_id: Some("0193f76b-1ab2-7a4d-8a3c-44ab3c5e1f0a".to_owned()),
         thinking_tokens: Some(64),
         thinking_budget_tokens: None,
+        reasoning_effort: None,
         web_search_requests: Some(3),
         web_fetch_requests: Some(1),
         service_tier: Some("priority".to_owned()),

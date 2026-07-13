@@ -16,6 +16,8 @@ mod principal_terminal_strategy;
 mod prompt_cache_observation;
 #[path = "quota_aggregates.rs"]
 mod quota_aggregates;
+#[path = "request_events_reasoning_effort.rs"]
+mod request_events_reasoning_effort;
 #[path = "request_events_thinking_budget_tokens.rs"]
 mod request_events_thinking_budget_tokens;
 #[path = "router_singleton_dropped.rs"]

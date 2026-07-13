@@ -312,10 +312,64 @@ describe('RequestEventsTable', () => {
         />,
       );
 
-      expect(screen.getByText('high · 18000')).toBeDefined();
+      expect(screen.getByText('high')).toBeDefined();
     });
 
-    it('renders no reasoning badge when thinking_budget_tokens is omitted', () => {
+    it('renders reasoning badge when reasoning_effort and thinking_tokens are set', () => {
+      const events: RequestEventWithPhase[] = [
+        {
+          event_id: 'evt_reasoning_effort',
+          request_id: 'req_reasoning_effort',
+          ts: 1718553120,
+          ts_ms: 1718553120000,
+          status: 200,
+          duration_ms: 100,
+          model: 'claude-3-5-sonnet',
+          reasoning_effort: 'max',
+          thinking_tokens: 8200,
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
+
+      render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+        />,
+      );
+
+      expect(screen.getByText('max · 8.2k')).toBeDefined();
+    });
+
+    it('renders reasoning badge when thinking_budget_tokens and thinking_tokens are set', () => {
+      const events: RequestEventWithPhase[] = [
+        {
+          event_id: 'evt_reasoning_budget_tokens',
+          request_id: 'req_reasoning_budget_tokens',
+          ts: 1718553120,
+          ts_ms: 1718553120000,
+          status: 200,
+          duration_ms: 100,
+          model: 'claude-3-5-sonnet',
+          thinking_budget_tokens: 18000,
+          thinking_tokens: 8200,
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
+
+      render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+        />,
+      );
+
+      expect(screen.getByText('high · 8.2k')).toBeDefined();
+    });
+
+    it('renders no reasoning badge when thinking_budget_tokens, reasoning_effort, and thinking_tokens are omitted', () => {
       const events: RequestEventWithPhase[] = [
         {
           event_id: 'evt_no_reasoning',
@@ -342,7 +396,7 @@ describe('RequestEventsTable', () => {
       ).toBeNull();
     });
 
-    it('renders fast badge when service_tier is priority', () => {
+    it('renders priority badge when service_tier is priority', () => {
       const events: RequestEventWithPhase[] = [
         {
           event_id: 'evt_fast',
@@ -365,10 +419,10 @@ describe('RequestEventsTable', () => {
         />,
       );
 
-      expect(screen.getByText('fast')).toBeDefined();
+      expect(screen.getByText('priority')).toBeDefined();
     });
 
-    it('renders standard badge when service_tier is standard', () => {
+    it('renders no badge when service_tier is standard', () => {
       const events: RequestEventWithPhase[] = [
         {
           event_id: 'evt_standard',
@@ -391,7 +445,8 @@ describe('RequestEventsTable', () => {
         />,
       );
 
-      expect(screen.getByText('standard')).toBeDefined();
+      expect(screen.queryByText('standard')).toBeNull();
+      expect(screen.queryByText('priority')).toBeNull();
     });
 
     it('renders batch badge when service_tier is batch', () => {
@@ -418,9 +473,37 @@ describe('RequestEventsTable', () => {
       );
 
       expect(screen.getByText('batch')).toBeDefined();
+      expect(screen.queryByText('priority')).toBeNull();
     });
 
-    it('renders no fast badge when service_tier is omitted', () => {
+    it('renders flex badge when service_tier is flex', () => {
+      const events: RequestEventWithPhase[] = [
+        {
+          event_id: 'evt_flex',
+          request_id: 'req_flex',
+          ts: 1718553120,
+          ts_ms: 1718553120000,
+          status: 200,
+          duration_ms: 100,
+          model: 'claude-3-5-sonnet',
+          service_tier: 'flex',
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
+
+      render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+        />,
+      );
+
+      expect(screen.getByText('flex')).toBeDefined();
+      expect(screen.queryByText('priority')).toBeNull();
+    });
+
+    it('renders no priority badge when service_tier is omitted', () => {
       const events: RequestEventWithPhase[] = [
         {
           event_id: 'evt_no_tier',
@@ -442,7 +525,7 @@ describe('RequestEventsTable', () => {
         />,
       );
 
-      expect(screen.queryByText('fast')).toBeNull();
+      expect(screen.queryByText('priority')).toBeNull();
       expect(screen.queryByText('standard')).toBeNull();
       expect(screen.queryByText('batch')).toBeNull();
     });
