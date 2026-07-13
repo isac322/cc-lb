@@ -10,7 +10,11 @@ publish = false
 cc-lb-domain.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sqlx = { workspace = true, features = ["macros"] }
 uuid.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
