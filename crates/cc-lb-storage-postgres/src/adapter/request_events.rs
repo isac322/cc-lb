@@ -35,8 +35,8 @@ impl RequestEventStore for PostgresStorage {
                    quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, quota_weight_factor, \
                    quota_cache_multiplier, quota_warning_multiplier, quota_effective_weight, quota_uniform_fallback, \
                    wrh_key_source, lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, \
-                   thinking_budget_tokens, payload, created_at) \
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,NOW()) \
+                   thinking_budget_tokens, reasoning_effort, payload, created_at) \
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,NOW()) \
               ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
               RETURNING seq",
         )
@@ -192,6 +192,7 @@ impl RequestEventStore for PostgresStorage {
                 .map(|value| u64_to_i64(value, "request event thinking_budget_tokens"))
                 .transpose()?,
         )
+        .bind(event.reasoning_effort.as_deref())
         .bind(payload)
         .fetch_optional(&self.pool)
         .await

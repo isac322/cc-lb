@@ -115,6 +115,7 @@ struct Partial {
     cache_state: Option<RequestCacheState>,
     cache_control_block_count: Option<u64>,
     thinking_budget_tokens: Option<u64>,
+    reasoning_effort: Option<String>,
     cache_breakpoints: Vec<RequestCacheBreakpoint>,
     cache_prefix_hash: Option<String>,
     termination: Option<TerminationInfo>,
@@ -283,6 +284,7 @@ impl Partial {
             cost_cache_read_micros: cost.cache_read,
             cache_control_block_count: self.cache_control_block_count,
             thinking_budget_tokens: self.thinking_budget_tokens,
+            reasoning_effort: self.reasoning_effort.clone(),
             cache_prefix_hash: self.cache_prefix_hash.clone(),
             matched_v3_cache_key: route_matched_v3_cache_key.or_else(|| {
                 self.parse
@@ -816,6 +818,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         } => {
             partial.cache_control_block_count = info.cache_control_block_count;
             partial.thinking_budget_tokens = info.thinking_budget_tokens;
+            partial.reasoning_effort = info.reasoning_effort.clone();
             partial.cache_breakpoints = info.cache_breakpoints.clone();
             partial.cache_prefix_hash = info.cache_prefix_hash.clone();
             partial.parse = Some(info);
@@ -1064,6 +1067,7 @@ fn finalize_base(
         cache_state: partial.cache_state,
         cache_control_block_count: partial.cache_control_block_count,
         thinking_budget_tokens: partial.thinking_budget_tokens,
+        reasoning_effort: partial.reasoning_effort.clone(),
         cache_breakpoints: partial.cache_breakpoints.clone(),
         cache_prefix_hash: partial.cache_prefix_hash.clone(),
         matched_v3_cache_key: matched_v3_cache_key.or_else(|| {
@@ -1823,12 +1827,14 @@ mod tests {
         let cases = [
             (
                 "thinking-budget-enabled",
-                r#"{"model":"claude-sonnet-4-5-20250929","messages":[],"thinking":{"type":"enabled","budget_tokens":18000}}"#,
+                r#"{"model":"claude-sonnet-4-5-20250929","messages":[],"thinking":{"type":"enabled","budget_tokens":18000},"output_config":{"effort":"max"}}"#,
                 Some(18_000),
+                Some("max"),
             ),
             (
                 "thinking-budget-absent",
                 r#"{"model":"claude-sonnet-4-5-20250929","messages":[]}"#,
+                None,
                 None,
             ),
         ];
@@ -1846,7 +1852,7 @@ mod tests {
         );
 
         // When each fixture is parsed, assembled, and terminated.
-        for (event_id, body, _) in cases {
+        for (event_id, body, _, _) in cases {
             let value: serde_json::Value = sonic_rs::from_str(body).expect("valid request fixture");
             let thinking_budget_tokens = value
                 .get("thinking")
@@ -1855,6 +1861,11 @@ mod tests {
                 })
                 .and_then(|thinking| thinking.get("budget_tokens"))
                 .and_then(serde_json::Value::as_u64);
+            let reasoning_effort = value
+                .get("output_config")
+                .and_then(|output_config| output_config.get("effort"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
             let event_id = eid(event_id);
             tx.send(LifecycleEvent::RequestStarted {
                 event_id: event_id.clone(),
@@ -1876,6 +1887,7 @@ mod tests {
                     stream: false,
                     body_bytes: u64::try_from(body.len()).expect("fixture body length fits u64"),
                     thinking_budget_tokens,
+                    reasoning_effort,
                     ..ParseInfo::default()
                 }),
             })
@@ -1904,7 +1916,7 @@ mod tests {
         while let Ok(update) = broadcast_rx.try_recv() {
             updates.push(update);
         }
-        for (event_id, _, expected) in cases {
+        for (event_id, _, expected_budget, expected_effort) in cases {
             let parse_partial = updates
                 .iter()
                 .filter_map(|update| match update {
@@ -1927,8 +1939,10 @@ mod tests {
                 })
                 .expect("final request event");
 
-            assert_eq!(parse_partial.thinking_budget_tokens, expected);
-            assert_eq!(final_event.thinking_budget_tokens, expected);
+            assert_eq!(parse_partial.thinking_budget_tokens, expected_budget);
+            assert_eq!(final_event.thinking_budget_tokens, expected_budget);
+            assert_eq!(parse_partial.reasoning_effort.as_deref(), expected_effort);
+            assert_eq!(final_event.reasoning_effort.as_deref(), expected_effort);
         }
     }
 

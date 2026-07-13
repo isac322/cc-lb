@@ -8,5 +8,7 @@ mod quota_aggregate;
 mod reassembly_serde_fixtures;
 #[path = "request_events_cursor.rs"]
 mod request_events_cursor;
+#[path = "request_events_reasoning_effort.rs"]
+mod request_events_reasoning_effort;
 #[path = "request_events_thinking_budget_tokens.rs"]
 mod request_events_thinking_budget_tokens;

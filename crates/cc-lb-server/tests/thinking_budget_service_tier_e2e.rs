@@ -51,7 +51,8 @@ async fn thinking_enabled_and_priority_tier_are_persisted_after_proxy_request() 
         "model": MODEL,
         "max_tokens": 16,
         "messages": [{"role": "user", "content": "Reply with exactly: pong"}],
-        "thinking": {"type": "enabled", "budget_tokens": 18000}
+        "thinking": {"type": "enabled", "budget_tokens": 18000},
+        "output_config": {"effort": "max"}
     });
 
     // When
@@ -64,6 +65,7 @@ async fn thinking_enabled_and_priority_tier_are_persisted_after_proxy_request() 
     assert_eq!(script.request_count(), 1, "stub upstream received request");
     let event = persisted_model_event(&server).await;
     assert_eq!(event.thinking_budget_tokens, Some(18_000));
+    assert_eq!(event.reasoning_effort.as_deref(), Some("max"));
     assert_eq!(event.service_tier.as_deref(), Some("priority"));
 }
 
@@ -98,5 +100,6 @@ async fn absent_thinking_and_standard_tier_are_persisted_after_proxy_request() {
     assert_eq!(script.request_count(), 1, "stub upstream received request");
     let event = persisted_model_event(&server).await;
     assert_eq!(event.thinking_budget_tokens, None);
+    assert_eq!(event.reasoning_effort, None);
     assert_eq!(event.service_tier.as_deref(), Some("standard"));
 }
