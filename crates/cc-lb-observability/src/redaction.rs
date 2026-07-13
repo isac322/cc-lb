@@ -48,6 +48,7 @@ const SENSITIVE_FIELDS: [&str; 9] = [
 
 const USER_PROMPT_FIELDS: [&str; 4] = ["prompt", "messages", "system", "content"];
 
+// This set is an exact prefilter for `SECRET_REGEXES`; it must not be narrowed.
 static SECRET_REGEX_SET: Lazy<Result<RegexSet, regex::Error>> =
     Lazy::new(|| RegexSet::new(SECRET_PATTERNS));
 
@@ -100,21 +101,21 @@ impl RedactionPolicy {
         {
             REDACTED.to_owned()
         } else {
-            self.redact_text(value)
+            self.redact_text(value).into_owned()
         }
     }
 
-    pub fn redact_text(&self, value: &str) -> String {
-        let mut redacted = redact_known_secret_patterns(value);
-        redacted = redact_json_fields(&redacted, &SENSITIVE_JSON_FIELD_REGEX);
-        redacted = redact_text_fields(&redacted, &SENSITIVE_TEXT_FIELD_REGEX);
+    pub fn redact_text<'a>(&self, value: &'a str) -> Cow<'a, str> {
+        let redacted = redact_known_secret_patterns(value);
+        let redacted = redact_json_fields(redacted, &SENSITIVE_JSON_FIELD_REGEX);
+        let redacted = redact_text_fields(redacted, &SENSITIVE_TEXT_FIELD_REGEX);
 
         if self.redact_user_prompt {
-            redacted = redact_json_fields(&redacted, &USER_PROMPT_JSON_FIELD_REGEX);
-            redacted = redact_text_fields(&redacted, &USER_PROMPT_TEXT_FIELD_REGEX);
+            let redacted = redact_json_fields(redacted, &USER_PROMPT_JSON_FIELD_REGEX);
+            redact_text_fields(redacted, &USER_PROMPT_TEXT_FIELD_REGEX)
+        } else {
+            redacted
         }
-
-        redacted
     }
 }
 
@@ -365,43 +366,55 @@ impl Visit for RedactingVisitor {
     }
 }
 
-fn redact_known_secret_patterns(value: &str) -> String {
+fn redact_known_secret_patterns(value: &str) -> Cow<'_, str> {
     if let Ok(regex_set) = SECRET_REGEX_SET.as_ref()
         && !regex_set.is_match(value)
     {
-        return value.to_owned();
+        return Cow::Borrowed(value);
     }
 
     let mut redacted = Cow::Borrowed(value);
 
     if let Ok(regexes) = SECRET_REGEXES.as_ref() {
         for regex in regexes {
-            redacted = Cow::Owned(regex.replace_all(&redacted, REDACTED).into_owned());
+            if regex.is_match(redacted.as_ref()) {
+                redacted = Cow::Owned(regex.replace_all(redacted.as_ref(), REDACTED).into_owned());
+            }
         }
     }
 
-    redacted.into_owned()
+    redacted
 }
 
-fn redact_json_fields(value: &str, regex: &Lazy<Result<Regex, regex::Error>>) -> String {
+fn redact_json_fields<'a>(
+    value: Cow<'a, str>,
+    regex: &Lazy<Result<Regex, regex::Error>>,
+) -> Cow<'a, str> {
     match regex.as_ref() {
-        Ok(regex) => regex
-            .replace_all(value, |captures: &Captures<'_>| {
-                format!("{}\"{}\"", &captures[1], REDACTED)
-            })
-            .into_owned(),
-        Err(_) => value.to_owned(),
+        Ok(regex) if regex.is_match(value.as_ref()) => Cow::Owned(
+            regex
+                .replace_all(value.as_ref(), |captures: &Captures<'_>| {
+                    format!("{}\"{}\"", &captures[1], REDACTED)
+                })
+                .into_owned(),
+        ),
+        _ => value,
     }
 }
 
-fn redact_text_fields(value: &str, regex: &Lazy<Result<Regex, regex::Error>>) -> String {
+fn redact_text_fields<'a>(
+    value: Cow<'a, str>,
+    regex: &Lazy<Result<Regex, regex::Error>>,
+) -> Cow<'a, str> {
     match regex.as_ref() {
-        Ok(regex) => regex
-            .replace_all(value, |captures: &Captures<'_>| {
-                format!("{}{}{}", &captures[1], &captures[2], REDACTED)
-            })
-            .into_owned(),
-        Err(_) => value.to_owned(),
+        Ok(regex) if regex.is_match(value.as_ref()) => Cow::Owned(
+            regex
+                .replace_all(value.as_ref(), |captures: &Captures<'_>| {
+                    format!("{}{}{}", &captures[1], &captures[2], REDACTED)
+                })
+                .into_owned(),
+        ),
+        _ => value,
     }
 }
 

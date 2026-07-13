@@ -27,7 +27,7 @@ pub fn install_panic_hook(policy: RedactionPolicy) {
 
             tracing::error!(
                 target: "cc_lb_observability::panic",
-                panic_message = redacted_message.as_str(),
+                panic_message = redacted_message.as_ref(),
                 panic_location = location.as_str(),
                 "panic_observed"
             );

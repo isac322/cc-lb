@@ -13,6 +13,8 @@ mod metrics_smoke;
 mod redaction_anthropic_token;
 #[path = "redaction_bearer.rs"]
 mod redaction_bearer;
+#[path = "redaction_fast_path.rs"]
+mod redaction_fast_path;
 #[path = "redaction_field_name.rs"]
 mod redaction_field_name;
 #[path = "redaction_gcp_private_key.rs"]
