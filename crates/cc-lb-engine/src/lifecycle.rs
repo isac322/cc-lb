@@ -8,7 +8,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use axum::body::Body as AxumBody;
 use bytes::Bytes;
+#[cfg(feature = "capture")]
+use cc_lb_capture::{hook::CaptureHandle, schema::CapturedRequestInput};
 use cc_lb_config::PromptCacheShadowConfig;
+#[cfg(feature = "capture")]
+use cc_lb_domain::BUILTIN_SUBSCRIPTION_PREFERENCE_ID;
 use cc_lb_domain::{
     BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix,
     CachePricingSummary, CacheScore, InternalError, InternalErrorKind, InternalErrorStage,
@@ -50,6 +54,8 @@ use crate::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuth
 use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as LimitReservation};
 use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
+#[cfg(feature = "capture")]
+use crate::builtin_filters::subscription_preference::{CACHE_COST_BASIS_VERSION, SALT_VERSION};
 use crate::clock::{Clock, ClockHandle, unix_millis};
 use crate::downstream_stream_drop_guard::DownstreamStreamDropGuard;
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
@@ -1496,6 +1502,47 @@ impl UpstreamDispatch for HyperDispatcher {
     }
 }
 
+#[cfg(feature = "capture")]
+struct PendingCapturedRequestInput {
+    event_id: String,
+    candidates: Vec<UpstreamCandidate>,
+    captured_at_unix_ms: u64,
+}
+
+#[cfg(feature = "capture")]
+impl PendingCapturedRequestInput {
+    fn complete(
+        self,
+        ctx: &RequestContext,
+        subscription_preference_input_upstream_ids: Vec<Uuid>,
+        routing_trace: RoutingTrace,
+    ) -> CapturedRequestInput {
+        let subscription_trace = subscription_preference_trace(&routing_trace);
+        let salt_version = subscription_trace
+            .and_then(|trace| trace.rendezvous_salt_version.clone())
+            .unwrap_or_else(|| SALT_VERSION.to_owned());
+        let cache_cost_basis_version = subscription_trace
+            .and_then(|trace| trace.cache_cost_basis_version.clone())
+            .unwrap_or_else(|| CACHE_COST_BASIS_VERSION.to_owned());
+        CapturedRequestInput {
+            event_id: self.event_id,
+            request_id: ctx.request_id.clone(),
+            thread_id: ctx.thread_id.clone(),
+            canonical_model_id: ctx.canonical_model_id.clone(),
+            cache_pricing: ctx.cache_pricing.clone(),
+            breakpoints: ctx.cache_breakpoints.clone(),
+            candidates: self.candidates,
+            subscription_preference_input_upstream_ids,
+            routing_trace,
+            captured_at_unix_ms: self.captured_at_unix_ms,
+            salt_version,
+            cache_cost_basis_version,
+            capture_schema_version: 1,
+            build_version: env!("CARGO_PKG_VERSION").to_owned(),
+        }
+    }
+}
+
 pub struct Lifecycle {
     authn: Arc<BuiltinAuthn>,
     dynamic_view: Arc<DynamicViewHolder>,
@@ -1509,6 +1556,8 @@ pub struct Lifecycle {
     subscription_metadata_hook: Option<MetadataHookHandle>,
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     cache_keepalive_enqueuer: Option<Arc<dyn crate::cache_keepalive::CacheKeepaliveEnqueuer>>,
+    #[cfg(feature = "capture")]
+    capture_handle: Option<CaptureHandle>,
     clock: ClockHandle,
     rng: Mutex<StdRng>,
 }
@@ -1549,6 +1598,8 @@ impl Lifecycle {
             subscription_metadata_hook: None,
             subscription_quota_cache: None,
             cache_keepalive_enqueuer: None,
+            #[cfg(feature = "capture")]
+            capture_handle: None,
             clock,
             rng: Mutex::new(rand::make_rng()),
         }
@@ -1574,6 +1625,8 @@ impl Lifecycle {
             subscription_metadata_hook: None,
             subscription_quota_cache: None,
             cache_keepalive_enqueuer: None,
+            #[cfg(feature = "capture")]
+            capture_handle: None,
             clock,
             rng: Mutex::new(rand::make_rng()),
         }
@@ -1610,6 +1663,12 @@ impl Lifecycle {
 
     pub fn with_event_bus(mut self, bus: Arc<dyn RequestEventBus>) -> Self {
         self.event_bus = Some(bus);
+        self
+    }
+
+    #[cfg(feature = "capture")]
+    pub fn with_capture_handle(mut self, capture_handle: CaptureHandle) -> Self {
+        self.capture_handle = Some(capture_handle);
         self
     }
 
@@ -2039,6 +2098,16 @@ impl Lifecycle {
             ctx.thread_id.as_deref(),
             &*self.clock,
         );
+        #[cfg(feature = "capture")]
+        let mut pending_capture_input =
+            self.capture_handle
+                .as_ref()
+                .zip(observer.as_ref())
+                .map(|(_, observer)| PendingCapturedRequestInput {
+                    event_id: observer.event_id().to_owned(),
+                    candidates: candidates.clone(),
+                    captured_at_unix_ms: unix_now_ms(&*self.clock),
+                });
         let pipeline_result = execute_filter_pipeline(
             &router_pipeline.user_filters,
             &ctx,
@@ -2051,6 +2120,20 @@ impl Lifecycle {
             &pipeline_result.candidates,
         );
         if pipeline_result.candidates.is_empty() {
+            #[cfg(feature = "capture")]
+            if let Some(pending_input) = pending_capture_input.take()
+                && let Some(capture_handle) = &self.capture_handle
+            {
+                capture_handle.try_capture_input(
+                    pending_input.complete(
+                        &ctx,
+                        pipeline_result
+                            .subscription_preference_input_upstream_ids
+                            .clone(),
+                        pipeline_result.routing_trace(terminal_decision.clone()),
+                    ),
+                );
+            }
             let message = "no upstream candidates remain after routing filters";
             if let Some(o) = observer.as_ref() {
                 o.emit_provider_error("route_no_upstream_after_filter", message, "router");
@@ -2147,6 +2230,20 @@ impl Lifecycle {
         };
         let route_ms = duration_to_ms(route_start.elapsed());
         let routing_trace_value = pipeline_result.routing_trace(terminal_decision.clone());
+        #[cfg(feature = "capture")]
+        if let Some(pending_input) = pending_capture_input.take()
+            && let Some(capture_handle) = &self.capture_handle
+        {
+            capture_handle.try_capture_input(
+                pending_input.complete(
+                    &ctx,
+                    pipeline_result
+                        .subscription_preference_input_upstream_ids
+                        .clone(),
+                    routing_trace_value.clone(),
+                ),
+            );
+        }
         let selected_quota_candidate =
             resolved_candidate_urgency(&routing_trace_value, resolved_upstream_id);
         let selected_cache_score = pipeline_result
@@ -3690,6 +3787,8 @@ struct FilterPipelineResult {
     candidates: Vec<UpstreamCandidate>,
     stages: Vec<StageDecision>,
     internal_errors: Vec<InternalError>,
+    #[cfg(feature = "capture")]
+    subscription_preference_input_upstream_ids: Vec<Uuid>,
 }
 
 impl FilterPipelineResult {
@@ -3733,8 +3832,17 @@ fn execute_filter_pipeline(
     let mut current = candidates;
     let mut stages = Vec::with_capacity(filters.len());
     let mut internal_errors = Vec::new();
+    #[cfg(feature = "capture")]
+    let mut subscription_preference_input_upstream_ids = Vec::new();
 
     for (stage_index, filter) in filters.iter().enumerate() {
+        #[cfg(feature = "capture")]
+        if filter.plugin_id() == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
+            subscription_preference_input_upstream_ids = current
+                .iter()
+                .map(|candidate| candidate.upstream_id)
+                .collect();
+        }
         let stage_name = filter.plugin_name().to_owned();
         let stage_started = Instant::now();
         match filter.filter(&routing_context, principal, &current) {
@@ -3831,6 +3939,8 @@ fn execute_filter_pipeline(
         candidates: current,
         stages,
         internal_errors,
+        #[cfg(feature = "capture")]
+        subscription_preference_input_upstream_ids,
     }
 }
 

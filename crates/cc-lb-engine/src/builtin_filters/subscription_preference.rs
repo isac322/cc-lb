@@ -164,7 +164,7 @@ const FABLE_RENDEZVOUS_SALT: &str =
 const OVERAGE_RENDEZVOUS_SALT: &str =
     "cc-lb:subscription-preference:v10:symmetric-cache-value:2026-07-07";
 
-const CACHE_COST_BASIS_VERSION: &str = "v1";
+pub(crate) const CACHE_COST_BASIS_VERSION: &str = "v1";
 const WARNING_MULTIPLIER: f64 = 0.20;
 
 /// Exponent coefficient on the cache-weighted WRH multiplier:
