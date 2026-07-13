@@ -2,7 +2,7 @@ use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
-use crate::tokenizer::PrefixTokenizer;
+use crate::tokenizer::{PREFIX_TOKEN_COUNT_MEMO_VERSION, PrefixTokenizer};
 
 pub const V3_TOKEN_ESTIMATE_SOURCE: &str = "local_tiktoken_v1";
 
@@ -11,7 +11,6 @@ pub const V3_TOKEN_ESTIMATE_SOURCE: &str = "local_tiktoken_v1";
 pub const MAX_EXPLICIT_BREAKPOINTS: usize = 4;
 
 const SERIALIZATION_SCRATCH_INITIAL_CAPACITY: usize = 4 * 1024;
-const SERIALIZATION_SCRATCH_MAX_RETAINED_CAPACITY: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PromptCacheSimulatorKey([u8; 32]);
@@ -139,19 +138,11 @@ impl Default for SerializationScratch {
 
 impl SerializationScratch {
     fn serialize<T: Serialize>(&mut self, value: &T) -> &[u8] {
-        self.clear_for_reuse();
+        self.bytes.clear();
         if serde_json::to_writer(&mut self.bytes, value).is_err() {
             self.bytes.clear();
         }
         &self.bytes
-    }
-
-    fn clear_for_reuse(&mut self) {
-        if self.bytes.capacity() > SERIALIZATION_SCRATCH_MAX_RETAINED_CAPACITY {
-            self.bytes = Vec::with_capacity(SERIALIZATION_SCRATCH_INITIAL_CAPACITY);
-        } else {
-            self.bytes.clear();
-        }
     }
 }
 
@@ -294,8 +285,44 @@ impl PromptCachePrefixChain {
 }
 
 pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3PromptCacheAnalysis {
+    let ComputedBreakpoints {
+        blocks,
+        breakpoints,
+    } = compute_breakpoints(value, canonical_model);
+    V3PromptCacheAnalysis {
+        blocks: blocks.into_iter().map(CacheBlockRef::into_owned).collect(),
+        breakpoints,
+    }
+}
+
+/// Runtime entry point consumed by the request lifecycle, which only reads
+/// breakpoint metadata: it skips the owned `V3PromptCacheBlock` clones that
+/// `analyze_v3_prompt_cache` allocates for test/inspection callers, and when
+/// the request carries no `cache_control` breakpoint at all, it returns
+/// immediately without flattening, digesting, or tokenizing anything. That
+/// short-circuit is exact rather than approximate: `has_any_cache_control_breakpoint`
+/// scans the identical tools/system/message blocks `compute_breakpoints` would
+/// flatten, so its `false` result guarantees the full path would also produce
+/// zero breakpoints (no block ever sets `explicit_ttl` without a `cache_control`
+/// key present).
+pub fn analyze_v3_prompt_cache_breakpoints(
+    value: &Value,
+    canonical_model: &str,
+) -> Vec<V3PromptCacheBreakpoint> {
+    if !has_any_cache_control_breakpoint(value) {
+        return Vec::new();
+    }
+    compute_breakpoints(value, canonical_model).breakpoints
+}
+
+struct ComputedBreakpoints<'a> {
+    blocks: Vec<CacheBlockRef<'a>>,
+    breakpoints: Vec<V3PromptCacheBreakpoint>,
+}
+
+fn compute_breakpoints<'a>(value: &'a Value, canonical_model: &str) -> ComputedBreakpoints<'a> {
     if exceeds_explicit_breakpoint_cap(value) {
-        return V3PromptCacheAnalysis {
+        return ComputedBreakpoints {
             blocks: Vec::new(),
             breakpoints: Vec::new(),
         };
@@ -327,8 +354,8 @@ pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3Prompt
         })
         .collect::<Vec<_>>();
     if structural_breakpoints.len() > MAX_EXPLICIT_BREAKPOINTS {
-        return V3PromptCacheAnalysis {
-            blocks: blocks.into_iter().map(CacheBlockRef::into_owned).collect(),
+        return ComputedBreakpoints {
+            blocks,
             breakpoints: Vec::new(),
         };
     }
@@ -350,10 +377,44 @@ pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3Prompt
             lookback_prefixes: breakpoint.lookback_prefixes,
         })
         .collect();
-    V3PromptCacheAnalysis {
-        blocks: blocks.into_iter().map(CacheBlockRef::into_owned).collect(),
+    ComputedBreakpoints {
+        blocks,
         breakpoints,
     }
+}
+
+/// Cheap presence scan mirroring `exceeds_explicit_breakpoint_cap`'s traversal
+/// (same tool/system/message filters) but returning as soon as one
+/// `cache_control` key is found, instead of counting toward the cap.
+fn has_any_cache_control_breakpoint(value: &Value) -> bool {
+    if let Some(Value::Array(tools)) = value.get("tools")
+        && tools
+            .iter()
+            .filter(|tool| tool.is_object())
+            .any(|tool| tool.get("cache_control").is_some())
+    {
+        return true;
+    }
+    if let Some(Value::Array(system)) = value.get("system")
+        && system
+            .iter()
+            .filter(|block| is_cacheable_content_block(block))
+            .any(|block| block.get("cache_control").is_some())
+    {
+        return true;
+    }
+    let Some(Value::Array(messages)) = value.get("messages") else {
+        return false;
+    };
+    messages
+        .iter()
+        .filter_map(|message| message.get("content").and_then(Value::as_array))
+        .any(|content| {
+            content
+                .iter()
+                .filter(|block| is_cacheable_content_block(block))
+                .any(|block| block.get("cache_control").is_some())
+        })
 }
 
 fn exceeds_explicit_breakpoint_cap(value: &Value) -> bool {
@@ -529,9 +590,7 @@ fn block_digest(block: &CacheBlockRef<'_>, scratch: &mut SerializationScratch) -
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"cc-lb-cache-v4:block");
     hasher.update(bytes);
-    let digest = *hasher.finalize().as_bytes();
-    scratch.clear_for_reuse();
-    digest
+    *hasher.finalize().as_bytes()
 }
 
 fn breakpoint_prefix_token_count(
@@ -541,11 +600,11 @@ fn breakpoint_prefix_token_count(
     scratch: &mut SerializationScratch,
 ) -> u64 {
     let bytes = serialized_prefix(canonical_model, &blocks[..=breakpoint_index], scratch);
-    let token_count = std::str::from_utf8(bytes)
-        .map(|text| PrefixTokenizer::global().count_tokens(text) as u64)
-        .unwrap_or(0);
-    scratch.clear_for_reuse();
-    token_count
+    PrefixTokenizer::global().count_tokens_for_cached_prefix(
+        PREFIX_TOKEN_COUNT_MEMO_VERSION,
+        canonical_model,
+        bytes,
+    )
 }
 
 fn serialized_prefix<'a>(
@@ -585,12 +644,18 @@ fn source_name(source: V3PromptCacheBlockSource) -> &'static str {
 }
 
 #[cfg(test)]
+#[path = "prompt_cache_simulator_memo_tests.rs"]
+mod prompt_cache_simulator_memo_tests;
+
+#[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use crate::{
         model_resolution::canonical_model_id,
-        tokenizer::{reset_tokenizer_call_count, tokenizer_call_count},
+        tokenizer::{
+            reset_cached_prefix_token_counts, reset_tokenizer_call_count, tokenizer_call_count,
+        },
     };
 
     use super::{
@@ -727,6 +792,7 @@ mod tests {
         });
 
         reset_tokenizer_call_count();
+        reset_cached_prefix_token_counts();
         let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
 
         assert_eq!(analysis.breakpoints.len(), 2);
@@ -746,6 +812,7 @@ mod tests {
         });
 
         reset_tokenizer_call_count();
+        reset_cached_prefix_token_counts();
         let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
 
         assert!(analysis.blocks.is_empty());
@@ -770,6 +837,7 @@ mod tests {
         });
 
         reset_tokenizer_call_count();
+        reset_cached_prefix_token_counts();
         let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
 
         assert_eq!(analysis.breakpoints.len(), 4);
@@ -796,6 +864,7 @@ mod tests {
 
         for block_count in [1, 20, 128, 259] {
             reset_tokenizer_call_count();
+            reset_cached_prefix_token_counts();
             let _ = analyze_v3_prompt_cache(
                 &one_breakpoint(block_count),
                 canonical_model_id("claude-sonnet-4-5"),

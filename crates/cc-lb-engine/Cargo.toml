@@ -52,6 +52,7 @@ hyper = { workspace = true, features = ["client", "http1", "http2"] }
 hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 chrono.workspace = true
+lru = "0.18"
 metrics.workspace = true
 parking_lot = "0.12"
 rand = "0.10"

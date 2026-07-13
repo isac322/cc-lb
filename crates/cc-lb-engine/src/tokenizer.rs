@@ -1,13 +1,53 @@
 //! Single tokenizer wrapper. o200k_base used for ALL Anthropic models.
 //! Drift expected (Anthropic uses its own tokenizer); monitored via cc_lb_cache_token_drift metric.
 
+use lru::LruCache;
+use parking_lot::Mutex;
 use serde_json::Value as JsonValue;
+use std::num::NonZeroUsize;
 use std::sync::OnceLock;
 use tiktoken_rs::o200k_base;
 
 #[cfg(test)]
 thread_local! {
     static TOKENIZER_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Bumping this invalidates every memoized prefix token count (tokenizer/schema changes).
+pub const PREFIX_TOKEN_COUNT_MEMO_VERSION: u32 = 1;
+
+/// Bound on the number of distinct (version, model, prefix-bytes) entries retained.
+const PREFIX_TOKEN_COUNT_MEMO_CAPACITY: usize = 8_192;
+
+type PrefixTokenCountKey = [u8; 32];
+
+fn prefix_token_count_memo() -> &'static Mutex<LruCache<PrefixTokenCountKey, u64>> {
+    static MEMO: OnceLock<Mutex<LruCache<PrefixTokenCountKey, u64>>> = OnceLock::new();
+    MEMO.get_or_init(|| {
+        let capacity =
+            NonZeroUsize::new(PREFIX_TOKEN_COUNT_MEMO_CAPACITY).unwrap_or(NonZeroUsize::MIN);
+        Mutex::new(LruCache::new(capacity))
+    })
+}
+
+fn prefix_token_count_key(
+    version: u32,
+    canonical_model: &str,
+    content: &[u8],
+) -> PrefixTokenCountKey {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"cc-lb-tokenizer-memo:v1");
+    hasher.update(&version.to_le_bytes());
+    hasher.update(&(canonical_model.len() as u64).to_le_bytes());
+    hasher.update(canonical_model.as_bytes());
+    hasher.update(&(content.len() as u64).to_le_bytes());
+    hasher.update(content);
+    *hasher.finalize().as_bytes()
+}
+
+#[cfg(test)]
+pub fn reset_cached_prefix_token_counts() {
+    prefix_token_count_memo().lock().clear();
 }
 
 /// Wraps the o200k_base tokenizer for consistent token counting across the proxy.
@@ -46,6 +86,27 @@ impl PrefixTokenizer {
     pub fn is_above_threshold(&self, prefix_tokens: usize, canonical_model: &str) -> bool {
         let threshold = cache_threshold_tokens(canonical_model);
         prefix_tokens >= threshold
+    }
+
+    /// Count tokens for exact serialized prefix `content` bytes, memoized on
+    /// `(version, canonical_model, content)` in a bounded LRU. Invalid UTF-8 in
+    /// `content` yields `0`, matching the non-memoized fallback it replaces.
+    /// A cache hit returns the stored count without re-invoking the tokenizer.
+    pub fn count_tokens_for_cached_prefix(
+        &self,
+        version: u32,
+        canonical_model: &str,
+        content: &[u8],
+    ) -> u64 {
+        let key = prefix_token_count_key(version, canonical_model, content);
+        if let Some(count) = prefix_token_count_memo().lock().get(&key) {
+            return *count;
+        }
+        let count = std::str::from_utf8(content)
+            .map(|text| self.count_tokens(text) as u64)
+            .unwrap_or(0);
+        prefix_token_count_memo().lock().put(key, count);
+        count
     }
 }
 

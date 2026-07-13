@@ -57,7 +57,7 @@ use crate::error_normalizer::ErrorNormalizer;
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::prompt_cache_simulator::{
-    V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheBlockSource, analyze_v3_prompt_cache,
+    V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheBlockSource, analyze_v3_prompt_cache_breakpoints,
 };
 use crate::request_context::RequestContext;
 use crate::request_timing::{
@@ -4535,9 +4535,8 @@ fn request_cache_metadata_from_value(
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
 
-    let analysis = analyze_v3_prompt_cache(value, &canonical_model_id);
-    let cache_breakpoints = analysis
-        .breakpoints
+    let breakpoints = analyze_v3_prompt_cache_breakpoints(value, &canonical_model_id);
+    let cache_breakpoints = breakpoints
         .iter()
         .map(|breakpoint| RequestCacheBreakpoint {
             block_index: breakpoint.block_index,
@@ -6245,8 +6244,7 @@ mod tests {
             .first()
             .expect("system cache breakpoint");
         let expected_v3 =
-            analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"))
-                .breakpoints
+            analyze_v3_prompt_cache_breakpoints(&request, canonical_model_id("claude-sonnet-4-5"))
                 .first()
                 .expect("system cache breakpoint")
                 .prefix_key
