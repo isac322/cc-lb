@@ -182,3 +182,31 @@ fn request_event_thinking_budget_tokens_includes_some() {
     assert!(json.contains("thinking_budget_tokens"));
     assert!(json.contains("25000"));
 }
+
+#[test]
+fn request_event_reasoning_effort_roundtrip() {
+    let original = RequestEvent {
+        request_id: "req_reasoning_effort".to_owned(),
+        reasoning_effort: Some("max".to_owned()),
+        ..Default::default()
+    };
+
+    let json_str = serde_json::to_string(&original).expect("serialize to string");
+    let parsed: RequestEvent = serde_json::from_str(&json_str).expect("deserialize from string");
+
+    assert_eq!(parsed.reasoning_effort.as_deref(), Some("max"));
+}
+
+#[test]
+fn request_event_reasoning_effort_backward_compat() {
+    let legacy_json = serde_json::json!({
+        "ts": 1_700_000_000u64,
+        "request_id": "req_legacy_no_reasoning_effort",
+        "status": 200u16,
+        "duration_ms": 100u64,
+    });
+
+    let parsed: RequestEvent = serde_json::from_value(legacy_json).expect("deserialize legacy");
+
+    assert_eq!(parsed.reasoning_effort, None);
+}

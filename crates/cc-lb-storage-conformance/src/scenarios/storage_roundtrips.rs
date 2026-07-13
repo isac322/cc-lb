@@ -381,6 +381,7 @@ fn request_events() -> Vec<RequestEvent> {
             message_count: Some(3),
             cache_control_block_count: Some(2),
             thinking_budget_tokens: Some(18000),
+            reasoning_effort: Some("max".to_owned()),
             cache_control_message_indices: vec![0, 2],
             cache_breakpoints: vec![
                 RequestCacheBreakpoint {

@@ -1895,6 +1895,7 @@ impl Lifecycle {
                     body_bytes: ctx.body_bytes.len() as u64,
                     cache_control_block_count: cache_metadata.cache_control_block_count,
                     thinking_budget_tokens: cache_metadata.thinking_budget_tokens,
+                    reasoning_effort: cache_metadata.reasoning_effort.clone(),
                     cache_breakpoints: cache_metadata.cache_breakpoints.clone(),
                     cache_prefix_hash: cache_metadata.cache_prefix_hash.clone(),
                     matched_v3_cache_key: cache_metadata.cache_prefix_hash.clone(),
@@ -4422,6 +4423,7 @@ pub(crate) struct RequestCacheMetadata {
     message_count: Option<u64>,
     cache_control_block_count: Option<u64>,
     thinking_budget_tokens: Option<u64>,
+    reasoning_effort: Option<String>,
     cache_control_message_indices: Vec<u64>,
     pub(crate) cache_breakpoints: Vec<RequestCacheBreakpoint>,
     pub(crate) cache_prefix_hash: Option<String>,
@@ -4571,6 +4573,12 @@ fn request_cache_metadata_from_value(
         .and_then(|t| t.get("budget_tokens"))
         .and_then(Value::as_u64)
         .filter(|v| *v <= 9_007_199_254_740_991);
+    let reasoning_effort = value
+        .get("output_config")
+        .and_then(|c| c.get("effort"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty() && s.len() <= 64)
+        .map(str::to_owned);
     let cache_prefix_hash = cache_breakpoints
         .last()
         .map(|breakpoint| breakpoint.prefix_hash.clone());
@@ -4583,6 +4591,7 @@ fn request_cache_metadata_from_value(
         message_count,
         cache_control_block_count: Some(cache_control_block_count),
         thinking_budget_tokens,
+        reasoning_effort,
         cache_control_message_indices,
         cache_breakpoints,
         cache_prefix_hash,
@@ -6099,7 +6108,7 @@ mod tests {
 
         for budget in budgets {
             let body = Bytes::from(format!(
-                r#"{{"thinking":{{"type":"enabled","budget_tokens":{budget}}}}}"#
+                r#"{{"thinking":{{"type":"enabled","budget_tokens":{budget}}},"output_config":{{"effort":"max"}}}}"#
             ));
 
             // When
@@ -6111,6 +6120,7 @@ mod tests {
                 Some(budget),
                 "enabled budget must remain value-preserving for {budget}"
             );
+            assert_eq!(metadata.reasoning_effort.as_deref(), Some("max"));
         }
     }
 
@@ -6122,29 +6132,53 @@ mod tests {
             (
                 "disabled",
                 r#"{"thinking":{"type":"disabled","budget_tokens":5000}}"#,
+                None,
             ),
-            ("adaptive", r#"{"thinking":{"type":"adaptive"}}"#),
+            (
+                "adaptive",
+                r#"{"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}"#,
+                Some("max"),
+            ),
             (
                 "enabled without budget",
                 r#"{"thinking":{"type":"enabled"}}"#,
+                None,
             ),
-            ("missing thinking", r#"{}"#),
+            ("missing thinking", r#"{}"#, None),
             (
                 "string budget",
                 r#"{"thinking":{"type":"enabled","budget_tokens":"1024"}}"#,
+                None,
             ),
-            ("null thinking", r#"{"thinking":null}"#),
+            ("null thinking", r#"{"thinking":null}"#, None),
             (
                 "one over safe integer maximum",
                 r#"{"thinking":{"type":"enabled","budget_tokens":9007199254740992}}"#,
+                None,
             ),
             (
                 "u64 maximum",
                 r#"{"thinking":{"type":"enabled","budget_tokens":18446744073709551615}}"#,
+                None,
+            ),
+            (
+                "empty reasoning effort",
+                r#"{"output_config":{"effort":""}}"#,
+                None,
+            ),
+            (
+                "non-string reasoning effort",
+                r#"{"output_config":{"effort":123}}"#,
+                None,
+            ),
+            (
+                "reasoning effort over 64 characters",
+                r#"{"output_config":{"effort":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}"#,
+                None,
             ),
         ];
 
-        for (case, fixture) in cases {
+        for (case, fixture, expected_reasoning_effort) in cases {
             // When
             let metadata =
                 request_cache_metadata(&headers, &Bytes::copy_from_slice(fixture.as_bytes()));
@@ -6153,6 +6187,11 @@ mod tests {
             assert_eq!(
                 metadata.thinking_budget_tokens, None,
                 "{case} must not produce a thinking budget"
+            );
+            assert_eq!(
+                metadata.reasoning_effort.as_deref(),
+                expected_reasoning_effort,
+                "{case} must preserve only valid reasoning effort"
             );
         }
     }
