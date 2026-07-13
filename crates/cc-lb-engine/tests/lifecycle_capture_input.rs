@@ -145,6 +145,16 @@ async fn captures_routing_input_when_filters_remove_all_candidates() {
     assert_eq!(payloads.len(), 1, "capture must emit exactly once");
     let record: cc_lb_capture::schema::CaptureRecord =
         serde_json::from_str(&payloads[0]).expect("deserializes capture record");
+    assert_eq!(
+        record.disposition,
+        cc_lb_capture::schema::Disposition::RoutedPreDispatchError
+    );
+    assert_eq!(record.response.attempt_num, Some(0));
+    assert_eq!(record.response.input_tokens, None);
+    assert_eq!(record.response.output_tokens, None);
+    assert_eq!(record.response.cache_read_input_tokens, None);
+    assert_eq!(record.response.cache_creation_input_tokens_5m, None);
+    assert_eq!(record.response.cache_creation_input_tokens_1h, None);
     let input = record.input;
 
     assert_eq!(input.candidates.len(), 2);

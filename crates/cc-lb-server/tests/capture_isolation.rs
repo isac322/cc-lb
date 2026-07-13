@@ -39,7 +39,10 @@ async fn storage_snapshot(path: &Path) -> StorageSnapshot {
             let name: String = row.try_get("name").expect("schema name");
             let table: String = row.try_get("tbl_name").expect("schema table");
             let sql: Option<String> = row.try_get("sql").expect("schema SQL");
-            format!("{object_type}\0{name}\0{table}\0{}", sql.unwrap_or_default())
+            format!(
+                "{object_type}\0{name}\0{table}\0{}",
+                sql.unwrap_or_default()
+            )
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -57,7 +60,11 @@ fn payloads_contain_marker(payloads: &[String], marker: &str) -> bool {
     payloads.iter().any(|payload| payload.contains(marker))
 }
 
-async fn drive_request(capture_enabled: bool, capture_path: &Path, body: &str) -> common::TestServer {
+async fn drive_request(
+    capture_enabled: bool,
+    capture_path: &Path,
+    body: &str,
+) -> common::TestServer {
     let extra_toml = format!(
         r#"[capture]
 enabled = {capture_enabled}

@@ -96,7 +96,7 @@ pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
 /// algorithm/salt change from those caused by upstream or quota state
 /// changes. Bumped in lockstep with `RENDEZVOUS_SALT` — a `debug_assert`
 /// in `tests::rendezvous_salt_embeds_version` guards the invariant.
-pub(crate) const SALT_VERSION: &str = "v11";
+pub const SALT_VERSION: &str = "v11";
 pub(crate) const FABLE_SALT_VERSION: &str = "v11-fable";
 
 /// v11 salt for base and unknown-probe weighted-rendezvous selection. The

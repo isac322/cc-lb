@@ -10,14 +10,13 @@
 /// ACCEPTANCE CRITERIA:
 /// - Default build: `cargo tree -p cc-lb-server -e no-dev | grep -c cc-lb-capture` == 0
 /// - Feature build: `cargo tree -p cc-lb-server -e no-dev --features capture | grep -c cc-lb-capture` > 0
-
 use std::process::Command;
 
 #[test]
 fn test_capture_feature_off_zero_cost_dependency_graph() {
     // Check 1: Default build should NOT include cc-lb-capture in dependency tree
     let output = Command::new("cargo")
-        .args(&["tree", "-p", "cc-lb-server", "-e", "no-dev"])
+        .args(["tree", "-p", "cc-lb-server", "-e", "no-dev"])
         .output()
         .expect("Failed to run cargo tree (default)");
 
@@ -35,7 +34,15 @@ fn test_capture_feature_off_zero_cost_dependency_graph() {
 fn test_capture_feature_on_includes_dependency() {
     // Check 2: Feature-enabled build SHOULD include cc-lb-capture in dependency tree
     let output = Command::new("cargo")
-        .args(&["tree", "-p", "cc-lb-server", "-e", "no-dev", "--features", "capture"])
+        .args([
+            "tree",
+            "-p",
+            "cc-lb-server",
+            "-e",
+            "no-dev",
+            "--features",
+            "capture",
+        ])
         .output()
         .expect("Failed to run cargo tree (with --features capture)");
 
