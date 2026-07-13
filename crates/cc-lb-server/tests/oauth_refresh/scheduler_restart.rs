@@ -7,9 +7,15 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
     // CI latency budget, not a correctness bound: this drives a full proxy ->
     // lazy-refresh-enqueue -> scheduler-dispatch async chain that normally
     // finishes in well under a second, but under llvm-cov instrumentation plus
-    // a co-scheduled heavy build on the shared runner it can overrun a tight
-    // 10s and flake (the dispatch still happens; only the wait was too short).
-    const QA_TIMEOUT: Duration = Duration::from_secs(30);
+    // a co-scheduled heavy build on the shared runner it overran even a 30s
+    // ceiling and flaked (the dispatch still happens; only the wait was too
+    // short). Scale by CC_LB_TEST_READY_TIMEOUT_SECS (120 in CI), the repo's
+    // convention for these tests, instead of a hardcoded value.
+    let qa_timeout = std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(30));
 
     let message_script = MessageScript::new();
     let refresh_pause = OAuthRefreshPause::new();
@@ -79,7 +85,7 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
     let generation_one_cancel = CancellationToken::new();
     let generation_one_task =
         tokio::spawn(generation_one_worker.run_until_cancelled(generation_one_cancel.clone()));
-    let dispatched_a = timeout(QA_TIMEOUT, dispatch_rx.recv())
+    let dispatched_a = timeout(qa_timeout, dispatch_rx.recv())
         .await
         .expect("generation 1 dispatch timed out")
         .expect("generation 1 dispatch channel closed");
@@ -203,13 +209,13 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
         ))
         .expect("request builds");
     let request_task =
-        tokio::spawn(async move { timeout(QA_TIMEOUT, lifecycle.handle(request)).await });
+        tokio::spawn(async move { timeout(qa_timeout, lifecycle.handle(request)).await });
 
-    let dispatched_b = timeout(QA_TIMEOUT, dispatch_rx.recv())
+    let dispatched_b = timeout(qa_timeout, dispatch_rx.recv())
         .await
         .expect("generation 2 dispatch timed out")
         .expect("generation 2 dispatch channel closed");
-    timeout(QA_TIMEOUT, refresh_pause.wait_until_entered())
+    timeout(qa_timeout, refresh_pause.wait_until_entered())
         .await
         .expect("OAuth token endpoint was not reached");
     refresh_pause.release();
