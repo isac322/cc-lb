@@ -14,13 +14,22 @@ async fn persisted_model_event(server: &common::TestServer) -> RequestEvent {
     let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
         .await
         .expect("open server SQLite storage");
-    storage
-        .query_recent_request_events(0, u64::MAX, 10)
-        .await
-        .expect("query persisted request events")
-        .into_iter()
-        .find(|event| event.model.as_deref() == Some(MODEL))
-        .expect("persisted event for proxied model")
+    // The final RequestEvent row is written asynchronously by the lifecycle
+    // assembler task after the proxy response returns, so poll until it lands
+    // rather than racing the single write (which flakes under CI load).
+    for _ in 0..400 {
+        let found = storage
+            .query_recent_request_events(0, u64::MAX, 10)
+            .await
+            .expect("query persisted request events")
+            .into_iter()
+            .find(|event| event.model.as_deref() == Some(MODEL));
+        if let Some(event) = found {
+            return event;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("persisted event for proxied model did not appear within timeout");
 }
 
 #[tokio::test]
