@@ -2528,7 +2528,12 @@ async fn lifecycle_handler(
     let cap = state.body_caps.for_path(parts.uri.path());
     let body = match read_request_body(&parts.headers, body, cap).await {
         Ok(body) => body,
-        Err(RequestBodyReadError::TooLarge) => return body_too_large_response(),
+        Err(RequestBodyReadError::TooLarge) => {
+            if let Some(observer) = parts.extensions.get::<cc_lb_engine::LifecycleContext>() {
+                observer.record_body_too_large_rejection(cap as u64);
+            }
+            return body_too_large_response();
+        }
         Err(RequestBodyReadError::Read(source)) => {
             let mut response = Response::new(Body::from(format!("body read failed: {source}")));
             *response.status_mut() = StatusCode::BAD_REQUEST;

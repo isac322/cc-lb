@@ -156,6 +156,17 @@ impl LifecycleContext {
         self.finish();
     }
 
+    /// Record a body-cap rejection before the server has read the request body.
+    pub fn record_body_too_large_rejection(&self, limit_bytes: u64) {
+        self.emit_request_started(false);
+        self.emit_lifecycle(LifecycleEvent::ParseCompleted {
+            event_id: self.event_id().to_owned(),
+            result: Err(cc_lb_lifecycle::ParseFailure::BodyTooLarge { limit_bytes }),
+        });
+        self.set_terminal(StatusCode::PAYLOAD_TOO_LARGE, error_codes::BODY_TOO_LARGE);
+        self.finish();
+    }
+
     /// Publish the `RequestStarted` lifecycle event.
     ///
     /// Should be called exactly once at handler entry, after the request has
