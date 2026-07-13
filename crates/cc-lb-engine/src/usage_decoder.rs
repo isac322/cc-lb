@@ -20,10 +20,12 @@
 //! a warning. Multiple stacked encodings (`content-encoding: gzip, br`) are
 //! also unsupported because no real upstream sends them.
 
-use std::io::{self, Write};
-
 use http::HeaderMap;
 use http::header::CONTENT_ENCODING;
+
+mod output;
+
+use output::{BudgetedOutput, write_and_drain};
 
 /// Streaming decoder for the metric-extraction side of the response tap.
 ///
@@ -159,67 +161,6 @@ impl UsageDecoder {
     }
 }
 
-// Sink accessor is passed in because the orphan rule blocks a blanket
-// `AsMut<Vec<u8>>` impl on the foreign decoder types from flate2/brotli/zstd.
-fn write_and_drain<W, F>(writer: &mut W, input: &[u8], mut extract: F) -> std::io::Result<Vec<u8>>
-where
-    W: Write,
-    F: FnMut(&mut W) -> &mut BudgetedOutput,
-{
-    writer.write_all(input)?;
-    writer.flush()?;
-    Ok(extract(writer).take_bytes())
-}
-
-pub(crate) struct BudgetedOutput {
-    bytes: Vec<u8>,
-    written_bytes: usize,
-    budget_bytes: usize,
-}
-
-impl BudgetedOutput {
-    const fn new(budget_bytes: usize) -> Self {
-        Self {
-            bytes: Vec::new(),
-            written_bytes: 0,
-            budget_bytes,
-        }
-    }
-
-    fn take_bytes(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.bytes)
-    }
-
-    fn into_bytes(self) -> Vec<u8> {
-        self.bytes
-    }
-}
-
-impl Write for BudgetedOutput {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let Some(next_written_bytes) = self.written_bytes.checked_add(buf.len()) else {
-            return Err(decompression_output_budget_error(self.budget_bytes));
-        };
-        if next_written_bytes > self.budget_bytes {
-            return Err(decompression_output_budget_error(self.budget_bytes));
-        }
-        self.bytes.extend_from_slice(buf);
-        self.written_bytes = next_written_bytes;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-fn decompression_output_budget_error(budget_bytes: usize) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::OutOfMemory,
-        format!("decompression output exceeds {budget_bytes}-byte budget"),
-    )
-}
-
 /// Decode a full body in one shot for the non-streaming JSON response path.
 ///
 /// Returns `Ok(None)` when `content-encoding` is unsupported; callers should
@@ -245,6 +186,8 @@ pub fn decode_full_body<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
     use http::HeaderValue;
 
