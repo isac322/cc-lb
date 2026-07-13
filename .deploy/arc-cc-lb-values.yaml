@@ -12,7 +12,7 @@ template:
   spec:
     initContainers:
       - name: init-dind-externals
-        image: ghcr.io/isac322/cc-lb-actions-runner:2.334.0-cclb-1
+        image: ghcr.io/isac322/cc-lb-actions-runner:2.335.1-cclb-1
         command: ["cp"]
         args: ["-r", "/home/runner/externals/.", "/home/runner/tmpDir/"]
         volumeMounts:
@@ -29,7 +29,7 @@ template:
           - {name: sccache-disk, mountPath: /opt/sccache-disk}
     containers:
       - name: runner
-        image: ghcr.io/isac322/cc-lb-actions-runner:2.334.0-cclb-1
+        image: ghcr.io/isac322/cc-lb-actions-runner:2.335.1-cclb-1
         command: ["/home/runner/run.sh"]
         resources:
           requests:
