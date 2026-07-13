@@ -11,6 +11,7 @@
 mod budget;
 mod cache;
 mod cell;
+mod compiled_cache;
 mod dispatch;
 mod engine;
 mod error;
@@ -39,6 +40,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use budget::StoreBudget;
+use compiled_cache::process_wide_compiled_module_cache;
 use parking_lot::RwLock;
 use wasmtime::{Engine, Linker};
 
@@ -92,13 +94,8 @@ impl WasmtimeRuntime {
         kind: HookKind,
         wasm_bytes: &[u8],
     ) -> Result<ModuleInspection, WasmtimeRuntimeError> {
-        let (_, inspection) = module::admit_wasm(
-            &self.engine,
-            &self.linker,
-            kind,
-            wasm_bytes,
-            self.config.memory_max_pages,
-        )?;
+        let (_, inspection) =
+            module::admit_wasm(&self.engine, &self.linker, kind, wasm_bytes, &self.config)?;
         Ok(inspection)
     }
 
@@ -140,8 +137,7 @@ impl WasmtimeRuntime {
         name: impl Into<String>,
         wasm_bytes: &[u8],
     ) -> Result<Arc<LoadedPluginSlot>, WasmtimeRuntimeError> {
-        let new_content_hash =
-            module::compute_content_hash(wasm_bytes, self.config.memory_max_pages);
+        let new_content_hash = module::compute_content_hash(&self.engine, &self.config, wasm_bytes);
 
         // Fast path: skip the compile entirely when the slot is
         // already registered with byte-identical content. This is the
@@ -159,13 +155,8 @@ impl WasmtimeRuntime {
 
         let name_string: String = name.into();
         let plugin_name: Arc<str> = Arc::from(name_string.as_str());
-        let (instance_pre, inspection) = module::admit_wasm(
-            &self.engine,
-            &self.linker,
-            kind,
-            wasm_bytes,
-            self.config.memory_max_pages,
-        )?;
+        let (instance_pre, inspection) =
+            module::admit_wasm(&self.engine, &self.linker, kind, wasm_bytes, &self.config)?;
         let new_cell = PluginCell {
             version_id: 1,
             instance_pre,
@@ -261,6 +252,12 @@ impl WasmtimeRuntime {
     pub fn retain_slots(&self, keep: &HashSet<RuntimeSlotKey>) -> Vec<RuntimeSlotKey> {
         let (evicted_keys, removed) = {
             let mut slots = self.slots.write();
+            let warm_content = slots
+                .iter()
+                .filter(|(key, _)| keep.contains(*key))
+                .map(|(_, slot)| slot.current.load().content_hash)
+                .collect();
+            process_wide_compiled_module_cache().retain_warm_content(warm_content);
             let orphan_keys: Vec<RuntimeSlotKey> = slots
                 .keys()
                 .filter(|k| !keep.contains(*k))
