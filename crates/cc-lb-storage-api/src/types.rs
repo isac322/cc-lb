@@ -1,5 +1,6 @@
 pub use crate::audit::AuditEntry;
 pub use crate::limits::{KeyStatus, Limit, LimitKind};
+pub use crate::request_event_list::{RequestEventListItem, RequestEventListQuery};
 pub use crate::storage_types_common::*;
 pub use crate::storage_types_keys::*;
 pub use cc_lb_domain::PrincipalKindLite;

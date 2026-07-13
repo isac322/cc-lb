@@ -3,6 +3,7 @@ pub mod credentials;
 pub mod dashboard;
 pub mod dashboard_routes;
 pub mod events;
+pub mod events_detail_route;
 pub mod events_routes;
 pub mod internal_partials;
 pub mod management;

@@ -1,9 +1,11 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventStore, RequestEventStreamFilters, StorageResult,
+    RequestEvent, RequestEventListItem, RequestEventListQuery, RequestEventStore,
+    RequestEventStreamFilters, StorageResult,
 };
 use chrono::{DateTime, Utc};
 
+use super::request_event_list_sql;
 use crate::{
     adapter::{
         PostgresStorage, i64_to_u64, u64_to_i64, unix_secs_to_datetime,
@@ -341,6 +343,17 @@ impl RequestEventStore for PostgresStorage {
                 Err(_) => true,
             })
             .collect()
+    }
+
+    async fn list_request_events(
+        &self,
+        query: &RequestEventListQuery,
+    ) -> StorageResult<Vec<RequestEventListItem>> {
+        request_event_list_sql::list_request_events(self, query).await
+    }
+
+    async fn get_request_event(&self, event_id: &str) -> StorageResult<Option<RequestEvent>> {
+        request_event_list_sql::get_request_event(self, event_id).await
     }
 }
 

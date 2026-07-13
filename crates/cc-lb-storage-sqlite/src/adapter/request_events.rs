@@ -1,10 +1,12 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventStore, RequestEventStreamFilters, StorageError, StorageResult,
+    RequestEvent, RequestEventListItem, RequestEventListQuery, RequestEventStore,
+    RequestEventStreamFilters, StorageError, StorageResult,
 };
 use sqlx::AssertSqlSafe;
 use uuid::Uuid;
 
+use super::request_event_list_sql;
 use crate::{SqliteStorage, map_sqlx_error};
 
 const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
@@ -222,6 +224,17 @@ impl RequestEventStore for SqliteStorage {
             })
             .collect()
     }
+
+    async fn list_request_events(
+        &self,
+        query: &RequestEventListQuery,
+    ) -> StorageResult<Vec<RequestEventListItem>> {
+        request_event_list_sql::list_request_events(self, query).await
+    }
+
+    async fn get_request_event(&self, event_id: &str) -> StorageResult<Option<RequestEvent>> {
+        request_event_list_sql::get_request_event(self, event_id).await
+    }
 }
 
 async fn select_existing_event_id(storage: &SqliteStorage, event_id: &str) -> StorageResult<i64> {
@@ -308,23 +321,23 @@ fn option_u64_to_i64(value: Option<u64>, field: &str) -> StorageResult<Option<i6
     value.map(|value| u64_to_i64(value, field)).transpose()
 }
 
-fn u64_to_i64(value: u64, field: &str) -> StorageResult<i64> {
+pub(super) fn u64_to_i64(value: u64, field: &str) -> StorageResult<i64> {
     i64::try_from(value).map_err(|_| StorageError::Fatal {
         message: format!("{field} cannot be represented as sqlite INTEGER"),
     })
 }
 
-fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
+pub(super) fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
     u64::try_from(value).map_err(|_| StorageError::Corrupted {
         message: format!("{field} is negative"),
     })
 }
 
-fn u64_to_i64_upper(value: u64) -> i64 {
+pub(super) fn u64_to_i64_upper(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-fn usize_to_i64(value: usize, field: &str) -> StorageResult<i64> {
+pub(super) fn usize_to_i64(value: usize, field: &str) -> StorageResult<i64> {
     i64::try_from(value).or_else(|_| {
         if value == usize::MAX {
             Ok(i64::MAX)

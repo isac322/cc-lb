@@ -22,6 +22,8 @@ mod pool_quota_history_summary;
 pub mod price_catalog;
 pub mod principals;
 pub mod prompt_cache_observation;
+mod request_event_list_row;
+mod request_event_list_sql;
 pub mod request_events;
 pub mod retry;
 pub mod upstream_rate_limit;

@@ -2,6 +2,7 @@ import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { Copy, X } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { fmtBytes, fmtMs } from '../../lib/format';
+import { useRequestEventDetail } from '../../lib/queries';
 import { useCopyButton } from '../../lib/useCopyButton';
 import { LatencyTimeline } from './latency/LatencyTimeline';
 import { Badge } from './primitives';
@@ -67,15 +68,28 @@ function RequestDetail({
 }) {
   const { copy } = useCopyButton();
   const usageControl = useActiveSlice();
+  const isPartial = event._phase === 'partial';
+
+  // The list view only carries the fields it displays (see RequestEventListItem
+  // in cc-lb-storage-api); fetch the full payload here, on the single-item
+  // detail path, so latency/body/error diagnostics render for finalized rows
+  // regardless of whether this row came from a slim list page or an
+  // already-complete live-tail update.
+  const detailId = isPartial
+    ? null
+    : (event.event_id ?? (event.request_id || null));
+  const detail = useRequestEventDetail(detailId);
+  const merged: RequestEventWithPhase = detail.data
+    ? ({ ...event, ...detail.data, _phase: 'final' } as RequestEventWithPhase)
+    : event;
 
   const hasAnyToken =
-    (event.input_tokens ?? 0) > 0 ||
-    (event.output_tokens ?? 0) > 0 ||
-    (event.cache_creation_input_tokens ?? 0) > 0 ||
-    (event.cache_read_input_tokens ?? 0) > 0;
+    (merged.input_tokens ?? 0) > 0 ||
+    (merged.output_tokens ?? 0) > 0 ||
+    (merged.cache_creation_input_tokens ?? 0) > 0 ||
+    (merged.cache_read_input_tokens ?? 0) > 0;
 
-  const principalLabel = principalName ?? event.principal_id ?? DASH;
-  const isPartial = event._phase === 'partial';
+  const principalLabel = principalName ?? merged.principal_id ?? DASH;
 
   return (
     <>
@@ -84,15 +98,15 @@ function RequestDetail({
           <div className="flex items-center gap-2 mb-1 flex-wrap min-w-0">
             <span
               className="font-mono text-xs text-text-faint break-all min-w-0"
-              title={event.request_id}
+              title={merged.request_id}
             >
-              {event.request_id}
+              {merged.request_id}
             </span>
             <button
               type="button"
               aria-label="Copy request id"
               className="text-text-faint hover:text-text shrink-0"
-              onClick={() => copy(event.request_id, 'Request ID')}
+              onClick={() => copy(merged.request_id, 'Request ID')}
             >
               <Copy className="w-3 h-3" />
             </button>
@@ -103,7 +117,7 @@ function RequestDetail({
             )}
           </div>
           <div className="text-sm truncate">
-            {principalLabel} → {event.upstream_name ?? event.upstream ?? DASH}
+            {principalLabel} → {merged.upstream_name ?? merged.upstream ?? DASH}
           </div>
         </div>
         <button
@@ -117,23 +131,23 @@ function RequestDetail({
       </div>
       <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 pb-8 space-y-5 text-xs min-w-0">
         <RequestEventIdentity
-          event={event}
+          event={merged}
           principalLabel={principalLabel}
           isPartial={isPartial}
         />
 
-        {event._phase === 'final' &&
-        (event.upstream_error_type || event.upstream_error_message) ? (
+        {merged._phase === 'final' &&
+        (merged.upstream_error_type || merged.upstream_error_message) ? (
           <DetailSection title="Upstream Failure">
             <div className="bg-overlay-2 border border-subtle rounded p-3 space-y-2 min-w-0">
-              {event.upstream_error_type ? (
+              {merged.upstream_error_type ? (
                 <div className="font-mono text-danger break-all min-w-0">
-                  {event.upstream_error_type}
+                  {merged.upstream_error_type}
                 </div>
               ) : null}
-              {event.upstream_error_message ? (
+              {merged.upstream_error_message ? (
                 <div className="text-text-muted whitespace-pre-wrap break-words select-text min-w-0">
-                  {event.upstream_error_message}
+                  {merged.upstream_error_message}
                 </div>
               ) : null}
             </div>
@@ -143,18 +157,18 @@ function RequestDetail({
         {hasAnyToken ? (
           <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-3 min-w-0">
             <DetailSection title="Tokens">
-              <TokenPie event={event} control={usageControl} />
+              <TokenPie event={merged} control={usageControl} />
             </DetailSection>
             <DetailSection title={isPartial ? 'Estimated Cost' : 'Cost'}>
-              <CostPie event={event} control={usageControl} />
+              <CostPie event={merged} control={usageControl} />
             </DetailSection>
           </div>
         ) : null}
 
-        {event._phase === 'final' && event.body_bytes != null ? (
+        {merged._phase === 'final' && merged.body_bytes != null ? (
           <KvRow
             label="Body bytes"
-            value={<MonoNum>{fmtBytes(event.body_bytes)}</MonoNum>}
+            value={<MonoNum>{fmtBytes(merged.body_bytes)}</MonoNum>}
           />
         ) : null}
 
@@ -163,15 +177,15 @@ function RequestDetail({
             <span className="text-text-faint">Total</span>
             <MonoNum>
               {isPartial
-                ? event.elapsed_ms != null
-                  ? fmtMs(event.elapsed_ms)
+                ? merged.elapsed_ms != null
+                  ? fmtMs(merged.elapsed_ms)
                   : DASH
-                : event._phase === 'final'
-                  ? fmtMs(event.duration_ms)
+                : merged._phase === 'final'
+                  ? fmtMs(merged.duration_ms)
                   : DASH}
             </MonoNum>
           </div>
-          <LatencyTimeline event={event} isPartial={isPartial} />
+          <LatencyTimeline event={merged} isPartial={isPartial} />
         </DetailSection>
       </div>
     </>
