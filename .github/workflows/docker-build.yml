@@ -1,0 +1,69 @@
+name: docker-build
+
+# Build the production image whenever the Docker build inputs change, so a
+# Dockerfile/.dockerignore edit can't silently break the image (hadolint in
+# deploy.yml only lints; it never actually compiles). Source-only changes are
+# covered by ci.yml and deliberately do NOT trigger this build.
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/docker-build.yml'
+  push:
+    branches:
+      - master
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/docker-build.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Self-hosted arm64 runner. Cross-compiles the static musl binary (both
+    # storage backends), builds the SPA, and runs a smoke test. The runner pod
+    # already carries the in-cluster sccache S3 creds in its OS env (AWS_* from
+    # the example-cache-credentials secret, per arc-cc-lb-values), so the compile caches
+    # to the same Garage store the cargo jobs use.
+    runs-on: oracle4-cc-lb
+    steps:
+      - uses: actions/checkout@v7
+
+      # network=host + the network.host entitlement let the in-Docker build
+      # reach the in-cluster Garage S3 endpoint (garage.example-build.svc).
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: network=host
+          buildkitd-flags: --allow-insecure-entitlement network.host
+
+      # Builds the DEFAULT (distroless) target. secret-envs forwards the runner
+      # pod's AWS_* OS env vars into the build as BuildKit secrets (the Dockerfile
+      # reads them via --mount=type=secret); the non-secret sccache S3 config goes
+      # in as build-args. Fail-open: without creds the Dockerfile compiles uncached.
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: cc-lb:ci
+          network: host
+          allow: network.host
+          build-args: |
+            GIT_SHA=0000000
+            SOURCE_DATE_EPOCH=0
+            SCCACHE_BUCKET=sccache
+            SCCACHE_ENDPOINT=http://buildkit.example.com:3900
+            SCCACHE_REGION=garage
+            SCCACHE_S3_USE_SSL=false
+          secret-envs: |
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+
+      # A successful build already proves both storage backends compile (default
+      # FEATURES=sqlite,postgres); this just confirms the static binary runs.
+      - name: Smoke test
+        run: docker run --rm cc-lb:ci --version

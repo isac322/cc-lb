@@ -1,0 +1,116 @@
+name: cd
+
+# Build the multi-arch cc-lb image and publish it to GitHub Packages (ghcr.io).
+#
+# Version source — cc-lb-server is not release-plz-managed, so nothing tags it
+# automatically. Either push a vX.Y.Z tag yourself, or add cc-lb-server to
+# release-plz.toml (release = true; it stays publish = false, so release-plz
+# tags + cuts a GitHub release without touching crates.io):
+#   * push tag  vX.Y.Z / vX.Y.Z-rc.N   -> that version
+#   * workflow_dispatch                -> the required `version` input (for debugging)
+#
+# Image tags are strict semver with no `latest`: 1.2.3 publishes 1, 1.2, 1.2.3,
+# while a prerelease (1.2.3-rc.1) publishes only 1.2.3-rc.1 and never moves the
+# 1 / 1.2 tags. The build cross-compiles from the runner's native arch, so no
+# QEMU is needed for the four target platforms.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Semver to publish, without a leading v (e.g. 1.2.3 or 1.2.3-rc.1)'
+        required: true
+        type: string
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  publish:
+    name: build & push image
+    # Runs on the self-hosted oracle4-cc-lb runner: it is arm64 (required — from
+    # an x86_64/musl host the build host's triple equals the x86_64-musl target,
+    # so .cargo/config.toml's static-musl linker leaks into host proc-macro
+    # builds and they fail to link), and being in-cluster it can reach the
+    # garage-S3 sccache that docker-build warms on every PR. xx cross-compiles
+    # all four target arches with no QEMU.
+    runs-on: oracle4-cc-lb
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # workflow_dispatch input is free-form; reject non-semver before it can
+      # reach the registry (otherwise metadata-action emits no tags and the
+      # push is a confusing no-op).
+      - name: Validate dispatch version
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$VERSION' is not valid semver (expected X.Y.Z[-prerelease][+build])"
+            exit 1
+          fi
+
+      # network=host lets the build reach the in-cluster garage sccache endpoint.
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: network=host
+          buildkitd-flags: --allow-insecure-entitlement network.host
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # value= carries the dispatch input; it is empty on tag pushes, where
+      # metadata-action falls back to the git tag. major / major.minor are only
+      # emitted for stable releases — prereleases keep just the full version.
+      - name: Derive tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/isac322/cc-lb
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ inputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.version }}
+            type=semver,pattern={{major}},value=${{ inputs.version }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le
+          push: true
+          provenance: false
+          network: host
+          allow: network.host
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            SCCACHE_BUCKET=sccache
+            SCCACHE_ENDPOINT=http://buildkit.example.com:3900
+            SCCACHE_REGION=garage
+            SCCACHE_S3_USE_SSL=false
+          secret-envs: |
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+
+      # Pull the freshly pushed amd64 image back and confirm the binary runs.
+      - name: Smoke test published image (amd64)
+        env:
+          IMAGE_VERSION: ${{ steps.meta.outputs.version }}
+        run: docker run --rm "ghcr.io/isac322/cc-lb:${IMAGE_VERSION}" --version
