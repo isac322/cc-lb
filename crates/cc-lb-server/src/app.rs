@@ -1689,12 +1689,6 @@ async fn build_app_with_storage_inner(
                 ServerSubscriptionQuotaIngestionPort::new(lifecycle.clone()),
             )),
             replica_identity,
-            #[cfg(feature = "heap-profiling")]
-            heap_profiler: Some(Arc::new(crate::heap_profiler::JemallocHeapProfiler::new(
-                &data_dir,
-            )?)),
-            #[cfg(not(feature = "heap-profiling"))]
-            heap_profiler: None,
         }),
         subscription_metadata_hook,
         lazy_refresher: lazy_refresher.clone(),
