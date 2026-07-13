@@ -20,12 +20,13 @@ template:
             mountPath: /home/runner/tmpDir
       - name: toolcache-perms
         image: busybox:1.38
-        command: ["sh", "-c", "mkdir -p /opt/hostedtoolcache /opt/rustup && chown 1001:1001 /opt/hostedtoolcache /opt/rustup"]
+        command: ["sh", "-c", "mkdir -p /opt/hostedtoolcache /opt/rustup /opt/sccache-disk && chown 1001:1001 /opt/hostedtoolcache /opt/rustup /opt/sccache-disk"]
         securityContext:
           runAsUser: 0
         volumeMounts:
           - {name: tool-cache, mountPath: /opt/hostedtoolcache}
           - {name: rustup-home, mountPath: /opt/rustup}
+          - {name: sccache-disk, mountPath: /opt/sccache-disk}
     containers:
       - name: runner
         image: ghcr.io/isac322/cc-lb-actions-runner:2.334.0-cclb-1
@@ -66,6 +67,20 @@ template:
           - name: AWS_SECRET_ACCESS_KEY
             valueFrom:
               secretKeyRef: {name: sccache-s3-creds, key: AWS_SECRET_ACCESS_KEY}
+          # Multi-level cache: node-local disk L0 in front of the garage S3 L1.
+          # Warm reads hit local disk instead of refetching ~600 objects over the
+          # LAN each run; S3 hits backfill to L0, writes go write-through to both.
+          # L0 is a hostPath shared by up to maxRunners pods, so WRITE_ERROR_POLICY
+          # is ignore — a disk-write race must never fail a build (sccache is
+          # content-addressed: a bad L0 entry just misses and refetches).
+          - name: SCCACHE_MULTILEVEL_CHAIN
+            value: "disk,s3"
+          - name: SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY
+            value: "ignore"
+          - name: SCCACHE_DIR
+            value: /opt/sccache-disk
+          - name: SCCACHE_CACHE_SIZE
+            value: "10G"
           # --- target 축소 (무위험 디스크 이득: incremental 캐시 제거 + 디버그 심볼 축소) ---
           - name: CARGO_INCREMENTAL
             value: "0"
@@ -76,6 +91,7 @@ template:
         volumeMounts:
           - {name: tool-cache, mountPath: /opt/hostedtoolcache}
           - {name: rustup-home, mountPath: /opt/rustup}
+          - {name: sccache-disk, mountPath: /opt/sccache-disk}
           - {name: work, mountPath: /home/runner/_work}
           - {name: dind-sock, mountPath: /var/run}
       - name: dind
@@ -110,5 +126,7 @@ template:
         hostPath: {path: /opt/actions-tool-cache, type: DirectoryOrCreate}
       - name: rustup-home
         hostPath: {path: /opt/actions-rustup, type: DirectoryOrCreate}
+      - name: sccache-disk
+        hostPath: {path: /opt/actions-sccache, type: DirectoryOrCreate}
       - name: registry-proxy-ca
         configMap: {name: registry-proxy-ca}
