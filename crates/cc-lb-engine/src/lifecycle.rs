@@ -1505,6 +1505,9 @@ impl UpstreamDispatch for HyperDispatcher {
 #[cfg(feature = "capture")]
 struct PendingCapturedRequestInput {
     event_id: String,
+    canonical_model_id: String,
+    cache_pricing: CachePricingSummary,
+    breakpoints: Vec<CacheBreakpoint>,
     candidates: Vec<UpstreamCandidate>,
     captured_at_unix_ms: u64,
 }
@@ -1528,9 +1531,9 @@ impl PendingCapturedRequestInput {
             event_id: self.event_id,
             request_id: ctx.request_id.clone(),
             thread_id: ctx.thread_id.clone(),
-            canonical_model_id: ctx.canonical_model_id.clone(),
-            cache_pricing: ctx.cache_pricing.clone(),
-            breakpoints: ctx.cache_breakpoints.clone(),
+            canonical_model_id: self.canonical_model_id,
+            cache_pricing: self.cache_pricing,
+            breakpoints: self.breakpoints,
             candidates: self.candidates,
             subscription_preference_input_upstream_ids,
             routing_trace,
@@ -1936,18 +1939,8 @@ impl Lifecycle {
                 }),
             });
         }
-        let needs_cache_metadata = (view.prompt_cache_observation_cache_opt().is_some()
-            && self.config.prompt_cache_shadow.enabled)
-            || {
-                #[cfg(feature = "capture")]
-                {
-                    self.capture_handle.is_some()
-                }
-                #[cfg(not(feature = "capture"))]
-                {
-                    false
-                }
-            };
+        let needs_cache_metadata = view.prompt_cache_observation_cache_opt().is_some()
+            && self.config.prompt_cache_shadow.enabled;
         let cache_breakpoints = if needs_cache_metadata {
             cache_metadata.plugin_cache_breakpoints()
         } else {
@@ -2113,6 +2106,11 @@ impl Lifecycle {
                 .zip(observer.as_ref())
                 .map(|(_, observer)| PendingCapturedRequestInput {
                     event_id: observer.event_id().to_owned(),
+                    canonical_model_id: cache_metadata.canonical_model_id.clone(),
+                    cache_pricing: cache_pricing_summary_for_model(
+                        &cache_metadata.canonical_model_id,
+                    ),
+                    breakpoints: cache_metadata.plugin_cache_breakpoints(),
                     candidates: candidates.clone(),
                     captured_at_unix_ms: unix_now_ms(&*self.clock),
                 });
