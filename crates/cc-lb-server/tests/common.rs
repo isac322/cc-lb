@@ -12,7 +12,8 @@ use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BackendKind, MetaStore,
     PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind,
-    PrincipalStore, SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    PrincipalStore, PromptCacheObservationRecord, PromptCacheObservationStore,
+    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
     SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamCreate, UpstreamStore,
     UpstreamSubscriptionQuotaStore,
     principal::Limit,
@@ -29,6 +30,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use url::Url;
+
+pub const PRIOR_FILTER_CAPTURE_BODY: &str = r#"{"model":"claude-sonnet-4-5-20250929","system":[{"type":"text","text":"stable prior-filter prefix","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"capture prior filter"}],"max_tokens":10}"#;
 
 pub struct TestProcess {
     child: Child,
@@ -277,6 +280,23 @@ pub async fn spawn_capture_test_server_with_oauth_upstreams(
     .await
 }
 
+pub async fn spawn_capture_test_server_with_prior_filter(
+    extra_toml: &str,
+    fake_config: AppConfig,
+) -> TestServer {
+    spawn_test_server_with_options(
+        extra_toml,
+        TestServerOptions {
+            fake_config,
+            auth_config: AuthConfig::NoneModeOauth,
+            topology: TestTopology::PriorFilterPair,
+            proxy_readiness: ProxyReadiness::Tcp,
+            ..TestServerOptions::default()
+        },
+    )
+    .await
+}
+
 enum AuthConfig {
     NoneMode,
     NoneModeOauth,
@@ -293,6 +313,7 @@ enum TestTopology {
     Single,
     CacheAffinityPair,
     SubscriptionPreferencePair,
+    PriorFilterPair,
 }
 
 struct TestServerOptions {
@@ -320,7 +341,7 @@ impl TestTopology {
         match self {
             Self::Single => &["fake_anthropic"],
             Self::CacheAffinityPair => &["fake_anthropic", "fake_anthropic_secondary"],
-            Self::SubscriptionPreferencePair => {
+            Self::SubscriptionPreferencePair | Self::PriorFilterPair => {
                 &["fake_anthropic_oauth", "fake_anthropic_oauth_secondary"]
             }
         }
@@ -329,21 +350,25 @@ impl TestTopology {
     fn messages_cap_bytes(self) -> u64 {
         match self {
             Self::Single => 256,
-            Self::CacheAffinityPair | Self::SubscriptionPreferencePair => 131_072,
+            Self::CacheAffinityPair | Self::SubscriptionPreferencePair | Self::PriorFilterPair => {
+                131_072
+            }
         }
     }
 
     const fn upstream_kind(self) -> UpstreamKind {
         match self {
             Self::Single | Self::CacheAffinityPair => UpstreamKind::AnthropicApiKey,
-            Self::SubscriptionPreferencePair => UpstreamKind::AnthropicOauth,
+            Self::SubscriptionPreferencePair | Self::PriorFilterPair => {
+                UpstreamKind::AnthropicOauth
+            }
         }
     }
 
     fn extra_config(self, fake_addr: SocketAddr) -> String {
         match self {
             Self::Single | Self::CacheAffinityPair => String::new(),
-            Self::SubscriptionPreferencePair => format!(
+            Self::SubscriptionPreferencePair | Self::PriorFilterPair => format!(
                 r#"[oauth.anthropic]
 client_id = "capture-matrix-client"
 auth_url = "http://{fake_addr}/oauth/authorize"
@@ -642,6 +667,7 @@ async fn seed_storage(
         .initialize(BackendKind::Sqlite)
         .await
         .expect("test storage initializes");
+    let mut upstream_ids = Vec::new();
     for (ordinal, name) in topology.upstream_names().iter().enumerate() {
         let record = UpstreamStore::create(
             storage.as_ref(),
@@ -664,10 +690,48 @@ async fn seed_storage(
         )
         .await
         .expect("seed upstream");
-        if matches!(topology, TestTopology::SubscriptionPreferencePair) {
+        upstream_ids.push(record.id);
+        if matches!(
+            topology,
+            TestTopology::SubscriptionPreferencePair | TestTopology::PriorFilterPair
+        ) {
             seed_oauth_credentials(storage.as_ref(), &record, upstream_addr).await;
             seed_subscription_quota(storage.as_ref(), record.id, ordinal).await;
         }
+    }
+    if matches!(topology, TestTopology::PriorFilterPair) {
+        let body = bytes::Bytes::from_static(PRIOR_FILTER_CAPTURE_BODY.as_bytes());
+        let breakpoints =
+            cc_lb_engine::parse_request_cache_breakpoints(&http::HeaderMap::new(), &body);
+        let breakpoint = breakpoints.first().expect("prior-filter breakpoint exists");
+        let prefix = breakpoint
+            .lookback_prefixes
+            .first()
+            .expect("prior-filter lookback prefix exists");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time follows unix epoch")
+            .as_secs();
+        storage
+            .upsert_observation(&PromptCacheObservationRecord {
+                upstream_id: upstream_ids[1],
+                canonical_model_id: "claude-sonnet-4-5-20250929".to_owned(),
+                v3_prefix_key: prefix.prefix_hash.clone(),
+                ttl_class: breakpoint.requested_ttl,
+                expires_at_unix_secs: now + 3_600,
+                last_observed_at_unix_secs: now,
+                hash_schema_version: 4,
+                prefix_content_block_index: prefix.content_block_index,
+                estimated_prefix_tokens: breakpoint.prefix_token_count,
+                token_estimate_source: breakpoint
+                    .token_estimate_source
+                    .clone()
+                    .unwrap_or_else(|| "local_tiktoken_v1".to_owned()),
+                last_provider_cache_read_tokens: Some(breakpoint.prefix_token_count),
+                last_provider_cache_creation_tokens: Some(0),
+            })
+            .await
+            .expect("seed prior-filter warm cache observation");
     }
     let principal = PrincipalStore::create(
         storage.as_ref(),
@@ -683,7 +747,10 @@ async fn seed_storage(
     )
     .await
     .expect("seed principal");
-    if matches!(topology, TestTopology::CacheAffinityPair) {
+    if matches!(
+        topology,
+        TestTopology::CacheAffinityPair | TestTopology::PriorFilterPair
+    ) {
         PluginRegistryStore::insert_chain_entry(
             storage.as_ref(),
             PluginChainEntryInput {
@@ -700,13 +767,20 @@ async fn seed_storage(
         .await
         .expect("seed cache-affinity router filter");
     }
-    if matches!(topology, TestTopology::SubscriptionPreferencePair) {
+    if matches!(
+        topology,
+        TestTopology::SubscriptionPreferencePair | TestTopology::PriorFilterPair
+    ) {
         PluginRegistryStore::insert_chain_entry(
             storage.as_ref(),
             PluginChainEntryInput {
                 principal_id: principal.id,
                 slot: PluginSlotKind::Router,
-                order: 1_000,
+                order: if matches!(topology, TestTopology::PriorFilterPair) {
+                    2_000
+                } else {
+                    1_000
+                },
                 wasm_registry_id: BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
                 config: serde_json::json!({}),
                 sse_per_event: false,
