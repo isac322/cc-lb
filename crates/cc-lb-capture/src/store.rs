@@ -168,6 +168,7 @@ fn optional_sqlite_integer(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::open_capture_store;
     use crate::schema::{CaptureRecord, CapturedRequestInput, CapturedResponse, Disposition};

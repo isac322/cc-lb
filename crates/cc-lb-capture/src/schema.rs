@@ -58,6 +58,7 @@ pub struct CaptureRecord {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{CaptureRecord, CapturedRequestInput, CapturedResponse, Disposition, Uuid};
     use cc_lb_domain::*;
