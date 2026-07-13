@@ -2,6 +2,8 @@
 mod principal_terminal_strategy;
 #[path = "prompt_cache_observation.rs"]
 mod prompt_cache_observation;
+#[path = "quota_aggregate.rs"]
+mod quota_aggregate;
 #[path = "reassembly_serde_fixtures.rs"]
 mod reassembly_serde_fixtures;
 #[path = "request_events_cursor.rs"]

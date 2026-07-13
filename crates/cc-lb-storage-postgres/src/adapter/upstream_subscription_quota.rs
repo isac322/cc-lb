@@ -4,10 +4,12 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     StorageError, StorageResult, SubscriptionQuotaBucket, SubscriptionQuotaCheckpointRange,
     SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaLatestRecord, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
-    SubscriptionQuotaSemanticFingerprint, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
+    SubscriptionQuotaLatestRecord, SubscriptionQuotaProviderLot, SubscriptionQuotaProviderLotQuery,
+    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSemanticFingerprint,
+    SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery, SubscriptionQuotaSlimCheckpoint,
     SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
-    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
+    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
+    UpstreamSubscriptionQuotaStore,
 };
 use sqlx::{PgConnection, Row, postgres::PgRow};
 use uuid::Uuid;
@@ -16,6 +18,8 @@ use crate::{
     adapter::{PostgresStorage, i64_to_u64, u64_to_i64},
     error_map::map_sqlx_error,
 };
+
+mod aggregate;
 
 #[async_trait]
 impl UpstreamSubscriptionQuotaStore for PostgresStorage {
@@ -115,6 +119,23 @@ impl UpstreamSubscriptionQuotaStore for PostgresStorage {
         query: SubscriptionQuotaCheckpointRangeQuery,
     ) -> StorageResult<Vec<SubscriptionQuotaCheckpointRange>> {
         list_checkpoint_ranges_for_query(self, &query).await
+    }
+}
+
+#[async_trait]
+impl UpstreamSubscriptionQuotaAggregateStore for PostgresStorage {
+    async fn list_subscription_quota_slim_checkpoints(
+        &self,
+        query: SubscriptionQuotaCheckpointRangeQuery,
+    ) -> StorageResult<Vec<SubscriptionQuotaSlimCheckpoint>> {
+        aggregate::list_slim_checkpoints(self, &query).await
+    }
+
+    async fn list_subscription_quota_provider_lots(
+        &self,
+        query: SubscriptionQuotaProviderLotQuery,
+    ) -> StorageResult<Vec<SubscriptionQuotaProviderLot>> {
+        aggregate::list_provider_lots(self, &query).await
     }
 }
 

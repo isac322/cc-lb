@@ -611,6 +611,7 @@ fn seed_price_catalog() {
         },
     );
     global_catalog().install_snapshot(CatalogSnapshot {
+        payload_hash: "test-fixture-hash".to_owned(),
         fetched_at_ms: now_secs() * 1000,
         models,
         raw_json: serde_json::to_vec(&price_catalog_fixture()).expect("price fixture serializes"),

@@ -48,6 +48,7 @@ pub use pool_quota_history::*;
 pub use principal::*;
 pub use prompt_cache_observation::{PromptCacheObservationRecord, PromptCacheObservationStore};
 pub use runtime_change_notifier::*;
+pub use traits::UsageTokenIntervalStore;
 pub use traits::{
     ApiKeyStore, AuditStore, CURRENT_CONTRACT_VERSION, ConfigStore, ManagedKeyStore, MetaStore,
     OAuthCredentialStore, PriceCatalogCache, RequestEventStore, Storage, UsageRollupStore,

@@ -29,6 +29,7 @@ proptest = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-ring"], optional = true }

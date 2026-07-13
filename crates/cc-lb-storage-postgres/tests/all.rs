@@ -14,6 +14,8 @@ mod plan_tier_concurrency;
 mod principal_terminal_strategy;
 #[path = "prompt_cache_observation.rs"]
 mod prompt_cache_observation;
+#[path = "quota_aggregates.rs"]
+mod quota_aggregates;
 #[path = "request_events_thinking_budget_tokens.rs"]
 mod request_events_thinking_budget_tokens;
 #[path = "router_singleton_dropped.rs"]

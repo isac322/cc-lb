@@ -17,7 +17,11 @@ use cc_lb_upstream::{
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 
-use super::filter::{is_stripped_downstream_header, principal_kind_to_wire};
+use super::{
+    access_archived_scoped_or_copy,
+    filter::{is_stripped_downstream_header, principal_kind_to_wire},
+    serialize_with_input_scratch,
+};
 
 pub struct WasmtimeUpstreamDialect {
     dispatch: Arc<WasmPluginWireDispatch>,
@@ -61,55 +65,55 @@ impl UpstreamDialect for WasmtimeUpstreamDialect {
         principal: &Principal,
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError> {
-        let in_bytes = host_to_wire_shape_request(
-            context,
-            upstream,
-            principal,
-            self.dispatch.cookie_redaction(),
-        )
-        .map_err(|e| DialectError::UnsupportedRequest {
-            reason: format!("rkyv encode ShapeRequest: {e}"),
-        })?;
-
         let wire_version = self.dispatch.shape_wire_version();
-        let out_bytes = match wire_version {
-            Some(WireVersion::V1) => self.dispatch.call_shape(in_bytes.as_slice()),
+        match wire_version {
+            Some(WireVersion::V1) => {}
             None => {
                 return Err(DialectError::UnsupportedRequest {
                     reason: "plugin metadata missing shape hook".to_owned(),
                 });
             }
         }
-        .map_err(runtime_error_to_dialect)?;
 
-        let out_bound = self.dispatch.wire_bounds().output_body_bytes;
-        if out_bytes.len() as u64 > out_bound {
-            return Err(DialectError::UnsupportedRequest {
-                reason: format!(
-                    "shape output {} bytes exceeds wire_bounds.output_body_bytes ({})",
-                    out_bytes.len(),
-                    out_bound
-                ),
-            });
-        }
-
-        let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
-        aligned.extend_from_slice(&out_bytes);
-
-        let archived = rkyv::access::<cc_lb_plugin_wire::ArchivedShapeResponse, RkyvError>(
-            &aligned,
+        let guest_result = with_wire_shape_request(
+            context,
+            upstream,
+            principal,
+            self.dispatch.cookie_redaction(),
+            |in_bytes| {
+                self.dispatch.call_shape_scoped(in_bytes, |guest_bytes| {
+                    let out_bound = self.dispatch.wire_bounds().output_body_bytes;
+                    if guest_bytes.len() as u64 > out_bound {
+                        return Err(DialectError::UnsupportedRequest {
+                            reason: format!(
+                                "shape output {} bytes exceeds wire_bounds.output_body_bytes ({out_bound})",
+                                guest_bytes.len(),
+                            ),
+                        });
+                    }
+                    access_archived_scoped_or_copy::<
+                        cc_lb_plugin_wire::ArchivedShapeResponse,
+                        _,
+                    >(guest_bytes, |archived| {
+                        wire_to_host_shaped_request(
+                            builder,
+                            archived,
+                            upstream,
+                            self.dispatch.shape_origin_policy(),
+                            self.dispatch.wire_bounds(),
+                        )
+                    })
+                    .map_err(|e| DialectError::UnsupportedRequest {
+                        reason: format!("rkyv access ShapeResponse: {e}"),
+                    })
+                    .and_then(std::convert::identity)
+                })
+            },
         )
         .map_err(|e| DialectError::UnsupportedRequest {
-            reason: format!("rkyv access ShapeResponse: {e}"),
+            reason: format!("rkyv encode ShapeRequest: {e}"),
         })?;
-
-        wire_to_host_shaped_request(
-            builder,
-            archived,
-            upstream,
-            self.dispatch.shape_origin_policy(),
-            self.dispatch.wire_bounds(),
-        )
+        guest_result.map_err(runtime_error_to_dialect)?
     }
 
     fn response_transform_hook(&self) -> Option<&dyn ResponseTransformHook> {
@@ -201,12 +205,13 @@ pub(super) fn host_upstream_to_wire(upstream: &Upstream) -> cc_lb_plugin_wire::U
     }
 }
 
-fn host_to_wire_shape_request(
+fn with_wire_shape_request<R>(
     context: &DialectShapeContext,
     upstream: &Upstream,
     principal: &Principal,
     cookie_redaction: bool,
-) -> Result<AlignedVec<16>, RkyvError> {
+    with_bytes: impl for<'a> FnOnce(&'a [u8]) -> R,
+) -> Result<R, RkyvError> {
     let principal_kind_str = principal_kind_to_wire(principal);
     let claim_bufs: Vec<(&str, Vec<u8>)> = principal
         .claims
@@ -250,7 +255,7 @@ fn host_to_wire_shape_request(
         },
         upstream: upstream_ref,
     };
-    rkyv::to_bytes::<RkyvError>(&request)
+    serialize_with_input_scratch(&request, with_bytes)
 }
 
 fn upstream_base_url(upstream: &Upstream) -> Option<url::Url> {
