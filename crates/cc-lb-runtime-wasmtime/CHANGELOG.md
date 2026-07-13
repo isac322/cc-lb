@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.1.3...cc-lb-runtime-wasmtime-v0.1.4) - 2026-07-13
+
+### Other
+
+- consolidate integration-test targets into per-crate harnesses ([#427](https://github.com/isac322/cc-lb/pull/427))
+
 ## [0.1.3](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.1.2...cc-lb-runtime-wasmtime-v0.1.3) - 2026-07-12
 
 ### Other
