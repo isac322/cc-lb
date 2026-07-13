@@ -110,25 +110,31 @@ impl UsageDecoder {
     }
 
     /// Feed `input` and drain whatever plaintext became available. Returns
-    /// an empty `Vec` for chunks that produce no output yet (mid-block in
+    /// an empty slice for chunks that produce no output yet (mid-block in
     /// gzip, etc.) — that's normal.
     ///
+    /// The `Identity` path (no `content-encoding`, or `identity`) borrows
+    /// `input` directly instead of copying it — the caller already owns the
+    /// chunk bytes, so this avoids an allocation-and-copy per chunk on the
+    /// (common) uncompressed path. Every other path must materialise decoded
+    /// plaintext into a new buffer, so it returns `Cow::Owned`.
+    ///
     /// On decode error the decoder transitions to `Poisoned`; subsequent
-    /// `push` calls return `Ok(Vec::new())` without doing more work.
-    pub fn push(&mut self, input: &[u8]) -> std::io::Result<Vec<u8>> {
+    /// `push` calls return `Ok(Cow::Borrowed(&[]))` without doing more work.
+    pub fn push<'a>(&mut self, input: &'a [u8]) -> std::io::Result<std::borrow::Cow<'a, [u8]>> {
         if input.is_empty() {
-            return Ok(Vec::new());
+            return Ok(std::borrow::Cow::Borrowed(&[]));
         }
         let result = match self {
-            Self::Identity => return Ok(input.to_vec()),
+            Self::Identity => return Ok(std::borrow::Cow::Borrowed(input)),
             Self::Gzip(inner) => write_and_drain(inner, input, |w| w.get_mut()),
             Self::Deflate(inner) => write_and_drain(inner, input, |w| w.get_mut()),
             Self::Brotli(inner) => write_and_drain(inner.as_mut(), input, |w| w.get_mut()),
             Self::Zstd(inner) => write_and_drain(inner.as_mut(), input, |w| w.get_mut()),
-            Self::Unsupported(_) | Self::Poisoned => return Ok(Vec::new()),
+            Self::Unsupported(_) | Self::Poisoned => return Ok(std::borrow::Cow::Borrowed(&[])),
         };
         match result {
-            Ok(bytes) => Ok(bytes),
+            Ok(bytes) => Ok(std::borrow::Cow::Owned(bytes)),
             Err(error) => {
                 *self = Self::Poisoned;
                 Err(error)
@@ -178,7 +184,7 @@ pub fn decode_full_body<'a>(
     if matches!(decoder, UsageDecoder::Identity) {
         return Ok(Some(std::borrow::Cow::Borrowed(body)));
     }
-    let mut decoded = decoder.push(body)?;
+    let mut decoded = decoder.push(body)?.into_owned();
     let tail = decoder.finish()?;
     decoded.extend_from_slice(&tail);
     Ok(Some(std::borrow::Cow::Owned(decoded)))
@@ -218,6 +224,18 @@ mod tests {
     }
 
     #[test]
+    fn identity_push_borrows_input_and_preserves_bytes() {
+        let h = HeaderMap::new();
+        let input = b"data: {\"usage\":{\"output_tokens\":1}}\n\n";
+        let mut decoder = UsageDecoder::from_headers(&h, TEST_OUTPUT_BUDGET_BYTES);
+
+        let output = decoder.push(input).unwrap();
+
+        assert_eq!(output.as_ptr(), input.as_ptr());
+        assert_eq!(&*output, input);
+    }
+
+    #[test]
     fn x_gzip_aliases_gzip() {
         let h = headers_with("x-gzip");
         assert!(matches!(
@@ -252,7 +270,7 @@ mod tests {
         let mut decoded = Vec::new();
         // chunk in tiny slices to exercise the streaming path
         for window in compressed.chunks(3) {
-            decoded.extend(decoder.push(window).unwrap());
+            decoded.extend_from_slice(&decoder.push(window).unwrap());
         }
         decoded.extend(decoder.finish().unwrap());
         assert_eq!(decoded, plaintext);
@@ -268,7 +286,7 @@ mod tests {
 
         let h = headers_with("deflate");
         let mut decoder = UsageDecoder::from_headers(&h, TEST_OUTPUT_BUDGET_BYTES);
-        let mut decoded = decoder.push(&compressed).unwrap();
+        let mut decoded = decoder.push(&compressed).unwrap().into_owned();
         decoded.extend(decoder.finish().unwrap());
         assert_eq!(decoded, plaintext);
     }
@@ -282,7 +300,7 @@ mod tests {
 
         let h = headers_with("br");
         let mut decoder = UsageDecoder::from_headers(&h, TEST_OUTPUT_BUDGET_BYTES);
-        let mut decoded = decoder.push(&compressed).unwrap();
+        let mut decoded = decoder.push(&compressed).unwrap().into_owned();
         decoded.extend(decoder.finish().unwrap());
         assert_eq!(decoded, plaintext);
     }
@@ -294,7 +312,7 @@ mod tests {
 
         let h = headers_with("zstd");
         let mut decoder = UsageDecoder::from_headers(&h, TEST_OUTPUT_BUDGET_BYTES);
-        let mut decoded = decoder.push(&compressed).unwrap();
+        let mut decoded = decoder.push(&compressed).unwrap().into_owned();
         decoded.extend(decoder.finish().unwrap());
         assert_eq!(decoded, plaintext);
     }
