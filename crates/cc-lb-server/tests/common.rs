@@ -28,6 +28,7 @@ pub struct TestProcess {
     child: Child,
     stderr: Arc<Mutex<Vec<u8>>>,
     stderr_thread: Option<ThreadJoinHandle<()>>,
+    stdout_thread: Option<ThreadJoinHandle<()>>,
 }
 
 impl Drop for TestProcess {
@@ -37,10 +38,31 @@ impl Drop for TestProcess {
         if let Some(stderr_thread) = self.stderr_thread.take() {
             let _ = stderr_thread.join();
         }
+        if let Some(stdout_thread) = self.stdout_thread.take() {
+            let _ = stdout_thread.join();
+        }
     }
 }
 
 impl TestProcess {
+    pub fn graceful_shutdown(&mut self) {
+        #[cfg(unix)]
+        {
+            let pid = self.child.id();
+            let mut kill_cmd = Command::new("kill")
+                .arg("-15")
+                .arg(pid.to_string())
+                .spawn()
+                .expect("spawn kill command");
+            let _ = kill_cmd.wait();
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+    }
+
     fn spawn(config_path: &Path) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
             .arg("serve")
@@ -51,7 +73,7 @@ impl TestProcess {
                 "0000000000000000000000000000000000000000000000000000000000000000",
             )
             .env("CC_LB_ADMIN_TOKEN", "admin-token")
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn cc-lb binary");
@@ -62,7 +84,16 @@ impl TestProcess {
             let mut stderr_bytes = Vec::new();
             let _ = stderr_pipe.read_to_end(&mut stderr_bytes);
             if let Ok(mut captured) = stderr_sink.lock() {
-                *captured = stderr_bytes;
+                captured.extend_from_slice(&stderr_bytes);
+            }
+        });
+        let mut stdout_pipe = child.stdout.take().expect("child stdout pipe");
+        let stdout_sink = Arc::clone(&stderr);
+        let stdout_thread = std::thread::spawn(move || {
+            let mut stdout_bytes = Vec::new();
+            let _ = stdout_pipe.read_to_end(&mut stdout_bytes);
+            if let Ok(mut captured) = stdout_sink.lock() {
+                captured.extend_from_slice(&stdout_bytes);
             }
         });
 
@@ -70,6 +101,7 @@ impl TestProcess {
             child,
             stderr,
             stderr_thread: Some(stderr_thread),
+            stdout_thread: Some(stdout_thread),
         }
     }
 
@@ -77,9 +109,12 @@ impl TestProcess {
         self.child.try_wait()
     }
 
-    fn finish_stderr(&mut self) -> String {
+    pub fn finish_stderr(&mut self) -> String {
         if let Some(stderr_thread) = self.stderr_thread.take() {
             let _ = stderr_thread.join();
+        }
+        if let Some(stdout_thread) = self.stdout_thread.take() {
+            let _ = stdout_thread.join();
         }
         self.stderr
             .lock()
@@ -102,6 +137,16 @@ pub struct TestServer {
 impl Drop for TestServer {
     fn drop(&mut self) {
         self._fake.abort();
+    }
+}
+
+impl TestServer {
+    pub fn graceful_shutdown(&mut self) {
+        self._process.graceful_shutdown();
+    }
+
+    pub fn finish_stderr(&mut self) -> String {
+        self._process.finish_stderr()
     }
 }
 

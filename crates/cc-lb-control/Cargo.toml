@@ -48,5 +48,8 @@ tokio = { workspace = true, features = ["test-util"] }
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
 
+[features]
+capture = []
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

@@ -1230,6 +1230,7 @@ dependencies = [
  "bytes",
  "cc-lb-admin",
  "cc-lb-aead",
+ "cc-lb-capture",
  "cc-lb-clock",
  "cc-lb-config",
  "cc-lb-control",

@@ -19,7 +19,6 @@ use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleCo
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use http::{HeaderValue, StatusCode};
-use tokio::sync::mpsc;
 use url::Url;
 use uuid::Uuid;
 
@@ -32,6 +31,15 @@ use prompt_cache_routing_support::TestPromptCacheObservationCache;
 const FIRST_UPSTREAM_ID: Uuid = Uuid::from_u128(1);
 const SECOND_UPSTREAM_ID: Uuid = Uuid::from_u128(2);
 const CAPTURED_AT_UNIX_SECS: u64 = 1_700_000_000;
+
+struct TestCaptureFixture {
+    lifecycle: Lifecycle,
+    store: cc_lb_capture::store::CaptureStore,
+    writer: cc_lb_capture::sink::CaptureWriterHandle,
+    subscriber:
+        cc_lb_engine::lifecycle_capture_response_subscriber::CaptureResponseSubscriberHandle,
+    _tempdir: tempfile::TempDir,
+}
 
 #[tokio::test]
 async fn captures_full_routing_input_when_prior_filter_narrows_candidates() {
@@ -48,10 +56,11 @@ async fn captures_full_routing_input_when_prior_filter_narrows_candidates() {
             vec![SECOND_UPSTREAM_ID],
         )),
     ];
-    let (lifecycle, mut captured) = lifecycle_with_capture(filters);
+    let fixture = lifecycle_with_capture(filters).await;
 
     // When
-    let response = lifecycle
+    let response = fixture
+        .lifecycle
         .handle(request_with_cache_breakpoint())
         .await
         .expect("lifecycle handles request");
@@ -59,11 +68,21 @@ async fn captures_full_routing_input_when_prior_filter_narrows_candidates() {
 
     // Then
     assert_eq!(status, StatusCode::OK);
-    let input = captured.try_recv().expect("one captured routing input");
-    assert!(
-        captured.try_recv().is_err(),
-        "capture must emit exactly once"
-    );
+
+    // Shutdown subscriber and writer deterministically to flush to DB
+    fixture.subscriber.shutdown().await;
+    fixture.writer.shutdown().await;
+
+    let payloads =
+        sqlx::query_scalar::<_, String>("SELECT payload_json FROM capture_v1 ORDER BY event_id")
+            .fetch_all(fixture.store.pool())
+            .await
+            .expect("queries capture payloads");
+    assert_eq!(payloads.len(), 1, "capture must emit exactly once");
+    let record: cc_lb_capture::schema::CaptureRecord =
+        serde_json::from_str(&payloads[0]).expect("deserializes capture record");
+    let input = record.input;
+
     assert_eq!(input.request_id, "capture-request");
     assert!(!input.event_id.is_empty());
     assert_eq!(
@@ -101,10 +120,11 @@ async fn captures_routing_input_when_filters_remove_all_candidates() {
             Vec::new(),
         )),
     ];
-    let (lifecycle, mut captured) = lifecycle_with_capture(filters);
+    let fixture = lifecycle_with_capture(filters).await;
 
     // When
-    let response = lifecycle
+    let response = fixture
+        .lifecycle
         .handle(request_with_cache_breakpoint())
         .await
         .expect("lifecycle handles request");
@@ -112,11 +132,21 @@ async fn captures_routing_input_when_filters_remove_all_candidates() {
 
     // Then
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    let input = captured.try_recv().expect("failure routing input captured");
-    assert!(
-        captured.try_recv().is_err(),
-        "capture must emit exactly once"
-    );
+
+    // Shutdown subscriber and writer deterministically to flush to DB
+    fixture.subscriber.shutdown().await;
+    fixture.writer.shutdown().await;
+
+    let payloads =
+        sqlx::query_scalar::<_, String>("SELECT payload_json FROM capture_v1 ORDER BY event_id")
+            .fetch_all(fixture.store.pool())
+            .await
+            .expect("queries capture payloads");
+    assert_eq!(payloads.len(), 1, "capture must emit exactly once");
+    let record: cc_lb_capture::schema::CaptureRecord =
+        serde_json::from_str(&payloads[0]).expect("deserializes capture record");
+    let input = record.input;
+
     assert_eq!(input.candidates.len(), 2);
     assert!(input.subscription_preference_input_upstream_ids.is_empty(),);
     assert_eq!(
@@ -128,12 +158,7 @@ async fn captures_routing_input_when_filters_remove_all_candidates() {
     );
 }
 
-fn lifecycle_with_capture(
-    filters: Vec<Arc<dyn FilterPlugin>>,
-) -> (
-    Lifecycle,
-    mpsc::Receiver<cc_lb_capture::schema::CapturedRequestInput>,
-) {
+async fn lifecycle_with_capture(filters: Vec<Arc<dyn FilterPlugin>>) -> TestCaptureFixture {
     let state = TestState::default();
     let principal_view = principal_view(filters);
     let authn = TestAuthn::with_principal_view(state.clone(), Arc::clone(&principal_view));
@@ -155,7 +180,16 @@ fn lifecycle_with_capture(
     let mut config = LifecycleConfig::default();
     config.prompt_cache_shadow.enabled = true;
     let event_bus = TestLifecycleBus::new();
-    let (sender, receiver) = mpsc::channel(4);
+
+    let tempdir = tempfile::tempdir().expect("creates tempdir");
+    let store = cc_lb_capture::store::open_capture_store(&tempdir.path().join("capture.sqlite"))
+        .await
+        .expect("opens capture store");
+    let (sink, writer) = cc_lb_capture::sink::CaptureSink::new(store.clone(), 128);
+
+    let rx = event_bus.bus.attach_lifecycle_writer(128);
+    let subscriber = cc_lb_engine::lifecycle_capture_response_subscriber::spawn_lifecycle_capture_response_subscriber(rx, sink.clone());
+
     let lifecycle = Lifecycle::new_with_dynamic_view(
         authn.authn,
         Arc::new(DynamicViewHolder::new(view)),
@@ -167,8 +201,15 @@ fn lifecycle_with_capture(
         Arc::new(TestClock::new_at_secs(CAPTURED_AT_UNIX_SECS)),
     )
     .with_event_bus(event_bus.bus_arc())
-    .with_capture_handle(CaptureHandle::new(sender));
-    (lifecycle, receiver)
+    .with_capture_handle(CaptureHandle::from_sink(sink));
+
+    TestCaptureFixture {
+        lifecycle,
+        store,
+        writer,
+        subscriber,
+        _tempdir: tempdir,
+    }
 }
 
 fn principal_view(filters: Vec<Arc<dyn FilterPlugin>>) -> Arc<PrincipalView> {

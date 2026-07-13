@@ -65,6 +65,8 @@ pub struct Config {
     #[serde(default)]
     pub subscription_quota: SubscriptionQuotaConfig,
     pub runtime: RuntimeConfig,
+    #[serde(default)]
+    pub capture: CaptureConfig,
     pub circuit_breaker: CircuitBreakerConfig,
     pub bulkhead: BulkheadConfig,
     pub dns: DnsConfig,
@@ -924,6 +926,48 @@ pub struct RuntimeConfig {
     pub wasmtime: WasmtimeConfig,
 }
 
+/// Configuration for request/response capture.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct CaptureConfig {
+    #[serde(default = "default_capture_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_capture_path")]
+    pub path: PathBuf,
+    #[serde(default = "default_capture_channel_capacity")]
+    pub channel_capacity: usize,
+    /// The maximum number of rows to retain in the capture database.
+    #[serde(default = "default_capture_retention_max_rows")]
+    pub retention_max_rows: u64,
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: PathBuf::from("capture.sqlite"),
+            channel_capacity: 1024,
+            retention_max_rows: 100_000,
+        }
+    }
+}
+
+fn default_capture_enabled() -> bool {
+    false
+}
+
+fn default_capture_path() -> PathBuf {
+    PathBuf::from("capture.sqlite")
+}
+
+fn default_capture_channel_capacity() -> usize {
+    1024
+}
+
+fn default_capture_retention_max_rows() -> u64 {
+    100_000
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct WasmtimeConfig {
@@ -1680,5 +1724,28 @@ upstream_kind = "anthropic_key"
         let error = load_config(&config_toml).expect_err("legacy quotas should fail");
 
         assert!(error.to_string().contains(&legacy_removed_message()));
+    }
+
+    #[test]
+    fn capture_config_parses_from_toml() {
+        // Given
+        let config = load_config(
+            r#"
+[capture]
+enabled = true
+path = "custom_capture.sqlite"
+channel_capacity = 2048
+retention_max_rows = 50000
+
+[api_keys]
+"#,
+        )
+        .expect("config should load");
+
+        // Then
+        assert!(config.capture.enabled);
+        assert_eq!(config.capture.path, PathBuf::from("custom_capture.sqlite"));
+        assert_eq!(config.capture.channel_capacity, 2048);
+        assert_eq!(config.capture.retention_max_rows, 50000);
     }
 }

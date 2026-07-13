@@ -1936,17 +1936,25 @@ impl Lifecycle {
                 }),
             });
         }
-        let cache_breakpoints = if view.prompt_cache_observation_cache_opt().is_some()
-            && self.config.prompt_cache_shadow.enabled
-        {
+        let needs_cache_metadata = (view.prompt_cache_observation_cache_opt().is_some()
+            && self.config.prompt_cache_shadow.enabled)
+            || {
+                #[cfg(feature = "capture")]
+                {
+                    self.capture_handle.is_some()
+                }
+                #[cfg(not(feature = "capture"))]
+                {
+                    false
+                }
+            };
+        let cache_breakpoints = if needs_cache_metadata {
             cache_metadata.plugin_cache_breakpoints()
         } else {
             Vec::new()
         };
         ctx.cache_breakpoints = cache_breakpoints;
-        ctx.canonical_model_id = if view.prompt_cache_observation_cache_opt().is_some()
-            && self.config.prompt_cache_shadow.enabled
-        {
+        ctx.canonical_model_id = if needs_cache_metadata {
             cache_metadata.canonical_model_id.clone()
         } else {
             String::new()
