@@ -105,6 +105,7 @@ scheduler-sqlx = { package = "sqlx", version = "=0.8.6", optional = true, defaul
 sqlx = { workspace = true, optional = true }
 tempfile.workspace = true
 thiserror.workspace = true
+tikv-jemallocator = "0.7"
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time", "test-util"] }
 tokio-util.workspace = true
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
@@ -123,6 +124,5 @@ metrics-exporter-prometheus.workspace = true
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
 jemalloc_ctl = { package = "tikv-jemalloc-ctl", version = "0.7", features = ["stats"] }
 sqlx.workspace = true
-tikv-jemallocator = "0.7"
 tracing-subscriber.workspace = true
 wat.workspace = true
