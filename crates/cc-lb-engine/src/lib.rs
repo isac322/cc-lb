@@ -47,6 +47,8 @@ pub mod lifecycle_api_key_metrics_subscriber;
 pub mod lifecycle_cache_hit_miss_subscriber;
 #[cfg(not(loom))]
 pub mod lifecycle_cache_observation_subscriber;
+#[cfg(feature = "capture")]
+pub mod lifecycle_capture_response_subscriber;
 pub mod lifecycle_event_assembler;
 pub mod lifecycle_event_logger;
 pub mod lifecycle_hook_adapter;
@@ -180,6 +182,10 @@ pub use lifecycle_cache_hit_miss_subscriber::{
 #[cfg(not(loom))]
 pub use lifecycle_cache_observation_subscriber::{
     CacheObservationSubscriberHandle, spawn_lifecycle_cache_observation_subscriber,
+};
+#[cfg(feature = "capture")]
+pub use lifecycle_capture_response_subscriber::{
+    CaptureResponseSubscriberHandle, spawn_lifecycle_capture_response_subscriber,
 };
 pub use lifecycle_event_assembler::{RequestEventAssemblerHandle, spawn_request_event_assembler};
 pub use lifecycle_event_logger::{LifecycleEventLoggerHandle, spawn_lifecycle_event_logger};
