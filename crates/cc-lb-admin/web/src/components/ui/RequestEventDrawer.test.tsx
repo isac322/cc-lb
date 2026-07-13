@@ -457,7 +457,7 @@ describe('RequestEventDrawer', () => {
       ).toBeNull();
     });
 
-    it('renders fast badge when service_tier is priority', () => {
+    it('renders priority badge when service_tier is priority', () => {
       const event = {
         event_id: 'evt_fast',
         request_id: 'req_fast',
@@ -478,10 +478,10 @@ describe('RequestEventDrawer', () => {
         />,
       );
 
-      expect(screen.getByText('fast')).toBeDefined();
+      expect(screen.getByText('priority')).toBeDefined();
     });
 
-    it('renders no badge when service_tier is standard', () => {
+    it('renders standard as a field when service_tier is standard', () => {
       const event = {
         event_id: 'evt_standard',
         request_id: 'req_standard',
@@ -502,11 +502,11 @@ describe('RequestEventDrawer', () => {
         />,
       );
 
-      expect(screen.queryByText('standard')).toBeNull();
-      expect(screen.queryByText('fast')).toBeNull();
+      expect(screen.getByText('standard')).toBeDefined();
+      expect(screen.queryByText('priority')).toBeNull();
     });
 
-    it('renders no badge when service_tier is batch', () => {
+    it('renders batch badge when service_tier is batch', () => {
       const event = {
         event_id: 'evt_batch',
         request_id: 'req_batch',
@@ -527,11 +527,36 @@ describe('RequestEventDrawer', () => {
         />,
       );
 
-      expect(screen.queryByText('batch')).toBeNull();
-      expect(screen.queryByText('fast')).toBeNull();
+      expect(screen.getByText('batch')).toBeDefined();
+      expect(screen.queryByText('priority')).toBeNull();
     });
 
-    it('renders no fast badge when service_tier is omitted', () => {
+    it('renders flex badge when service_tier is flex', () => {
+      const event = {
+        event_id: 'evt_flex',
+        request_id: 'req_flex',
+        ts: 1718553120,
+        ts_ms: 1718553120000,
+        status: 200,
+        duration_ms: 100,
+        model: 'claude-3-5-sonnet',
+        service_tier: 'flex',
+        _phase: 'final',
+      } satisfies RequestEventWithPhase;
+
+      render(
+        <RequestEventDrawer
+          event={event}
+          principalName={null}
+          onClose={() => {}}
+        />,
+      );
+
+      expect(screen.getByText('flex')).toBeDefined();
+      expect(screen.queryByText('priority')).toBeNull();
+    });
+
+    it('renders no priority badge when service_tier is omitted', () => {
       const event = {
         event_id: 'evt_no_tier',
         request_id: 'req_no_tier',
@@ -551,7 +576,7 @@ describe('RequestEventDrawer', () => {
         />,
       );
 
-      expect(screen.queryByText('fast')).toBeNull();
+      expect(screen.queryByText('priority')).toBeNull();
       expect(screen.queryByText('standard')).toBeNull();
       expect(screen.queryByText('batch')).toBeNull();
     });

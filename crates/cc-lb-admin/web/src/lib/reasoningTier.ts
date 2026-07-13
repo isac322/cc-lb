@@ -38,14 +38,12 @@ export function budgetToTier(budget: number | null | undefined): ReasoningTier {
   return 'max';
 }
 
-/**
- * Determine if a service tier qualifies for fast-path processing.
- * Only 'priority' tier gets fast-path treatment.
- * @param tier - The service tier string, or null/undefined
- * @returns true only if tier === 'priority', false otherwise
- */
-export function serviceTierToFast(tier: string | null | undefined): boolean {
-  return tier === 'priority';
+/** Service-tier badge text: the raw tier verbatim, or null when it should be hidden (standard / absent). */
+export function serviceTierBadgeText(
+  tier: string | null | undefined,
+): string | null {
+  if (tier == null || tier === '' || tier === 'standard') return null;
+  return tier;
 }
 
 /** Badge text combining requested reasoning effort/tier with actual thinking tokens used. */

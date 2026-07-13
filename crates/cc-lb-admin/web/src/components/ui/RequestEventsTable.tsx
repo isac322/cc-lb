@@ -3,7 +3,10 @@ import { useState } from 'react';
 import { eventTime } from '../../lib/api';
 import { getRequestOutcome, statusTone } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
-import { reasoningBadgeText, serviceTierToFast } from '../../lib/reasoningTier';
+import {
+  reasoningBadgeText,
+  serviceTierBadgeText,
+} from '../../lib/reasoningTier';
 import { CostCell } from './CostCell';
 import { LatencyCell } from './latency/LatencyCell';
 import { Badge, cx, SkeletonRow } from './primitives';
@@ -132,6 +135,7 @@ export function RequestEventsTable({
                 e.thinking_budget_tokens,
                 e.thinking_tokens,
               );
+              const tierBadge = serviceTierBadgeText(e.service_tier);
               return (
                 <tr
                   key={key}
@@ -194,9 +198,9 @@ export function RequestEventsTable({
                           {reasoningBadge}
                         </Badge>
                       )}
-                      {serviceTierToFast(e.service_tier) && (
-                        <Badge tone="ok" className="shrink-0">
-                          fast
+                      {tierBadge != null && (
+                        <Badge tone="neutral" className="shrink-0">
+                          {tierBadge}
                         </Badge>
                       )}
                     </span>

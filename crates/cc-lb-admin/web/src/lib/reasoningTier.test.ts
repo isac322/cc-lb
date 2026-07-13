@@ -3,7 +3,7 @@ import {
   budgetToTier,
   REASONING_TIER_THRESHOLDS,
   reasoningBadgeText,
-  serviceTierToFast,
+  serviceTierBadgeText,
 } from './reasoningTier';
 
 describe('budgetToTier', () => {
@@ -64,33 +64,33 @@ describe('budgetToTier', () => {
   });
 });
 
-describe('serviceTierToFast', () => {
-  it('returns true for priority', () => {
-    expect(serviceTierToFast('priority')).toBe(true);
+describe('serviceTierBadgeText', () => {
+  it('returns priority for priority', () => {
+    expect(serviceTierBadgeText('priority')).toBe('priority');
   });
 
-  it('returns false for standard', () => {
-    expect(serviceTierToFast('standard')).toBe(false);
+  it('returns batch for batch', () => {
+    expect(serviceTierBadgeText('batch')).toBe('batch');
   });
 
-  it('returns false for batch', () => {
-    expect(serviceTierToFast('batch')).toBe(false);
+  it('returns flex for flex', () => {
+    expect(serviceTierBadgeText('flex')).toBe('flex');
   });
 
-  it('returns false for null', () => {
-    expect(serviceTierToFast(null)).toBe(false);
+  it('returns null for standard', () => {
+    expect(serviceTierBadgeText('standard')).toBeNull();
   });
 
-  it('returns false for undefined', () => {
-    expect(serviceTierToFast(undefined)).toBe(false);
+  it('returns null for empty string', () => {
+    expect(serviceTierBadgeText('')).toBeNull();
   });
 
-  it('returns false for empty string', () => {
-    expect(serviceTierToFast('')).toBe(false);
+  it('returns null for null', () => {
+    expect(serviceTierBadgeText(null)).toBeNull();
   });
 
-  it('returns false for other arbitrary string', () => {
-    expect(serviceTierToFast('unknown')).toBe(false);
+  it('returns null for undefined', () => {
+    expect(serviceTierBadgeText(undefined)).toBeNull();
   });
 });
 
