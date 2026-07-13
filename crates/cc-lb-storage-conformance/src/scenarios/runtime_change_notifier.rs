@@ -15,7 +15,12 @@ use tokio_util::sync::CancellationToken;
 use crate::harness::{ConformanceBackend, with_conformance_fixture};
 
 #[cfg(all(test, feature = "postgres"))]
-const RECEIVE_TIMEOUT: Duration = Duration::from_secs(5);
+// CI-latency budget: the coverage-instrumented nextest-cov pass runs all tests
+// under llvm-cov on a shared runner, so the pg LISTEN/NOTIFY round-trip can
+// overrun a tight 5s deadline under load (flaky "deadline has elapsed"). 15s is
+// not race-masking (wait_for_listen_ready_postgres already closes the LISTEN
+// race); it only absorbs scheduling latency.
+const RECEIVE_TIMEOUT: Duration = Duration::from_secs(15);
 const SUBSCRIBE_TIMEOUT: Duration = Duration::from_millis(10);
 const POSTGRES_LATENCY_BUDGET: Duration = Duration::from_millis(5_000);
 const SQLITE_LATENCY_BUDGET: Duration = Duration::from_millis(1_000);

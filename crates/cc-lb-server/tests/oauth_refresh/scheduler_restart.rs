@@ -4,7 +4,12 @@ use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_request() {
-    const QA_TIMEOUT: Duration = Duration::from_secs(10);
+    // CI latency budget, not a correctness bound: this drives a full proxy ->
+    // lazy-refresh-enqueue -> scheduler-dispatch async chain that normally
+    // finishes in well under a second, but under llvm-cov instrumentation plus
+    // a co-scheduled heavy build on the shared runner it can overrun a tight
+    // 10s and flake (the dispatch still happens; only the wait was too short).
+    const QA_TIMEOUT: Duration = Duration::from_secs(30);
 
     let message_script = MessageScript::new();
     let refresh_pause = OAuthRefreshPause::new();
