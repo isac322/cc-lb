@@ -1,0 +1,76 @@
+name: deploy
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'deploy/**'
+      - '.github/workflows/deploy.yml'
+  push:
+    branches:
+      - master
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'deploy/**'
+      - '.github/workflows/deploy.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hadolint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: Dockerfile
+
+  helm:
+    runs-on: ubuntu-latest
+    env:
+      CHART: deploy/helm/cc-lb
+      # helm lint/template never runs the binary, so any non-empty value satisfies
+      # the chart's "master key required" guard for rendering.
+      LINT_MASTER_KEY: ci-lint-placeholder
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.4
+      - uses: bmuschko/setup-kubeconform@v1
+        with:
+          kubeconform-version: '0.8.0'
+
+      - name: Helm lint (sqlite defaults)
+        run: helm lint "$CHART" --set secrets.masterKey="$LINT_MASTER_KEY"
+
+      - name: Helm lint (postgres + autoscaling)
+        run: |
+          helm lint "$CHART" \
+            --set secrets.existingSecret=cc-lb \
+            --set config.storage.kind=postgres \
+            --set persistence.enabled=false \
+            --set autoscaling.enabled=true
+
+      - name: Render + validate manifests (sqlite)
+        run: |
+          helm template rel "$CHART" --set secrets.masterKey="$LINT_MASTER_KEY" \
+            | kubeconform -strict -ignore-missing-schemas -kubernetes-version 1.29.0 -summary
+
+      - name: Render + validate manifests (postgres + all extras)
+        run: |
+          helm template rel "$CHART" \
+            --set secrets.existingSecret=cc-lb \
+            --set config.storage.kind=postgres \
+            --set config.storage.postgres.urlSecret.name=pg \
+            --set config.storage.postgres.urlSecret.key=url \
+            --set autoscaling.enabled=true \
+            --set persistence.enabled=false \
+            --set ingress.enabled=true \
+            --set serviceMonitor.enabled=true \
+            --set podDisruptionBudget.enabled=true \
+            | kubeconform -strict -ignore-missing-schemas -kubernetes-version 1.29.0 -summary

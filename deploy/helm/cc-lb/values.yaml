@@ -1,0 +1,248 @@
+# Default values for the cc-lb chart.
+# This is a YAML-formatted file.
+
+# -- Number of replicas. IMPORTANT: the sqlite backend is a single writer on a
+# ReadWriteOnce volume, so the chart pins replicas to 1 whenever
+# `config.storage.kind == "sqlite"`. Scale out only with the postgres backend.
+replicaCount: 1
+
+image:
+  # -- Full image repository (registry + path).
+  repository: ghcr.io/isac322/cc-lb
+  # -- Image tag. Defaults to the chart appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# -- Image pull secrets for private registries.
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Create a ServiceAccount for the pod.
+  create: true
+  # -- Name of the ServiceAccount to use. Generated when empty and create=true.
+  name: ""
+  annotations: {}
+  # -- cc-lb never calls the Kubernetes API; keep the token off by default.
+  automountServiceAccountToken: false
+
+# -- Deployment update strategy. Overridden to `Recreate` automatically when the
+# sqlite backend uses a ReadWriteOnce PVC (two pods cannot share the volume).
+updateStrategy: {}
+
+podAnnotations: {}
+podLabels: {}
+
+# -- Pod-level security context. Defaults match the distroless `nonroot` user
+# (uid/gid 65532). `fsGroup` makes the data PVC writable by that user.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context. cc-lb needs no write access to its root
+# filesystem; writable paths are provided via mounted volumes (/tmp, data dir).
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+# -- Graceful shutdown budget. cc-lb drains in-flight requests on SIGTERM.
+terminationGracePeriodSeconds: 90
+
+# -- Container ports. Keep aligned with `config.listener.*` below.
+ports:
+  proxy: 8080
+  admin: 9090
+  metrics: 9091
+
+# ---------------------------------------------------------------------------
+# cc-lb server configuration.
+# Rendered verbatim into /etc/cc-lb/cc-lb.toml (a ConfigMap) and passed to
+# `cc-lb serve --config /etc/cc-lb/cc-lb.toml`.
+# ---------------------------------------------------------------------------
+config:
+  # -- Listen addresses INSIDE the pod. Must bind non-loopback so kubelet probes
+  # and Services can reach every listener. Use "[::]:PORT" on IPv6/dual-stack.
+  listener:
+    proxyAddr: "0.0.0.0:8080"
+    adminAddr: "0.0.0.0:9090"
+    metricsAddr: "0.0.0.0:9091"
+
+  # -- Writable runtime directory (replica id, wasm cache). Lives on the data volume.
+  dataDir: /var/lib/cc-lb/data
+
+  storage:
+    # -- Backend: "sqlite" (single-node, default) or "postgres" (horizontally scalable).
+    kind: sqlite
+    # sqlite: database file path (on the data volume).
+    path: /var/lib/cc-lb/storage.sqlite
+    postgres:
+      # -- Inline connection URL. Rendered into the ConfigMap (visible via
+      # `kubectl get configmap`). Prefer `urlSecret` to keep the password secret.
+      url: ""
+      # -- Provide the URL via env `CC_LB_STORAGE__URL` from an existing Secret.
+      urlSecret:
+        name: ""
+        key: url
+      # -- Optional raw TOML for the [storage.pool] section (as a string).
+      poolToml: ""
+
+  admin:
+    # -- Env var name the server reads the admin API token from.
+    tokenEnv: CC_LB_ADMIN_TOKEN
+
+  aead:
+    # -- Env var name the server reads the 32-byte (64 hex) master key from.
+    keyEnv: CC_LB_MASTER_KEY
+
+  priceCatalog:
+    # -- Writable cache path for the LiteLLM price catalog (on the data volume).
+    cachePath: /var/lib/cc-lb/litellm.json
+
+  # -- Extra raw TOML appended verbatim to the generated config. Use for
+  # [oauth.*], [quotas], [timeouts], [observability], [circuit_breaker], etc.
+  extraToml: ""
+
+# -- RUST_LOG value for the container.
+logLevel: info
+
+# ---------------------------------------------------------------------------
+# Secrets. CC_LB_MASTER_KEY is REQUIRED (32 bytes / 64 hex chars). Generate one
+# with: `openssl rand -hex 32`.
+# ---------------------------------------------------------------------------
+secrets:
+  # -- Reference an existing Secret instead of letting the chart create one.
+  existingSecret: ""
+  # Inline values (used only when existingSecret is empty; chart creates a Secret).
+  # -- REQUIRED master key (64 hex chars) unless existingSecret is set.
+  masterKey: ""
+  # -- Optional admin API token.
+  adminToken: ""
+  # -- Optional bootstrap admin token (seeds the "admin" principal on first start).
+  bootstrapAdminToken: ""
+  # Key names to read from `existingSecret` (change if your secret differs).
+  keys:
+    masterKey: CC_LB_MASTER_KEY
+    adminToken: CC_LB_ADMIN_TOKEN
+    bootstrapAdminToken: CC_LB_BOOTSTRAP_ADMIN_TOKEN
+
+# -- Additional environment variables (raw EnvVar list).
+env: []
+# -- Additional envFrom sources (raw list).
+envFrom: []
+
+# ---------------------------------------------------------------------------
+# Persistence — the data volume mounted at /var/lib/cc-lb (sqlite DB, data dir,
+# price cache). Required for the sqlite backend to survive restarts.
+# ---------------------------------------------------------------------------
+persistence:
+  enabled: true
+  # -- Use an existing PVC instead of creating one.
+  existingClaim: ""
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 2Gi
+  annotations: {}
+
+service:
+  type: ClusterIP
+  annotations: {}
+  # -- Optional fixed nodePort/loadBalancer settings are left to the user.
+
+# ---------------------------------------------------------------------------
+# Ingress for the proxy listener (Anthropic-compatible API).
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: cc-lb.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# ---------------------------------------------------------------------------
+# Probes. /healthz (liveness) and /readyz (readiness) are served by the PROXY
+# listener. /readyz returns 503 until at least one principal AND one ready
+# upstream are configured, which would keep a fresh pod out of every Service it
+# backs. Readiness therefore defaults to /healthz; switch to /readyz once
+# upstreams exist if you want upstream-gated traffic admission.
+# ---------------------------------------------------------------------------
+probes:
+  startup:
+    enabled: true
+    path: /healthz
+    port: proxy
+    initialDelaySeconds: 0
+    periodSeconds: 3
+    timeoutSeconds: 2
+    failureThreshold: 40
+  liveness:
+    enabled: true
+    path: /healthz
+    port: proxy
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    path: /healthz
+    port: proxy
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# ---------------------------------------------------------------------------
+# Autoscaling — postgres backend only (sqlite is single-writer). Ignored (and
+# replicas pinned to 1) when config.storage.kind == "sqlite".
+# ---------------------------------------------------------------------------
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 0
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  # maxUnavailable: ""
+
+# -- Prometheus Operator ServiceMonitor scraping /metrics on the metrics port.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  relabelings: []
+  metricRelabelings: []
+
+# -- Extra volumes and mounts for the pod/container.
+extraVolumes: []
+extraVolumeMounts: []
