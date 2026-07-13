@@ -139,6 +139,36 @@ Programmatic seed alt: `UpstreamSubscriptionQuotaStore::put_subscription_quota[_
 - Verify admin UI: detail page shows the "7d (Fable)" snapshot card with 28% utilization, pink color, and "live · API · Ns ago" observed-at.
 - Note: latest is cache-served and SQL mutation requires startup replay/writer path, reusing the document's existing caveat.
 
+### 3.6 Memory-Allocation Root Fixes Non-Regression (C1.1), Point-in-time: series, aggregate provider lots, and token totals
+- **Source and Context:** Verified live 2026-07-13 via F5, see plan `memory-allocation-root-fixes`.
+- **Fixture state:** Seed the disposable DB with the documented quota checkpoint schema for `$QA_UPSTREAM_ID`: a fresh merged `5h` row, a valid UUID `sample_id`, `utilization=0.20`, and the fixture's deterministic capacity observations. Start or replay the isolated instance after seeding.
+- **Live invocation:**
+  ```bash
+  NOW="$(date +%s)"; SINCE="$((NOW - 21600))"
+  sqlite3 -readonly "file:$QA_DB?mode=ro" \
+    "SELECT upstream_id, window, utilization, resets_at_unix_secs FROM upstream_subscription_quota_checkpoints_v1 WHERE upstream_id='$QA_UPSTREAM_ID' AND window='5h' ORDER BY changed_at_unix_millis;" \
+    >"$QA_ROOT/c1-checkpoints.txt"
+  curl -fsS -H "Authorization: Bearer $QA_ADMIN_TOKEN" \
+    "$QA_ADMIN/admin/v1/subscription-quotas/series?upstream_ids=$QA_UPSTREAM_ID&windows=5h&source=merged&since_unix_secs=$SINCE&until_unix_secs=$NOW&bucket_secs=60" \
+    -o "$QA_ROOT/c1-series.json"
+  curl -fsS -H "Authorization: Bearer $QA_ADMIN_TOKEN" \
+    "$QA_ADMIN/admin/v1/subscription-quotas/aggregate?upstream_ids=$QA_UPSTREAM_ID&windows=5h&source=merged" \
+    -o "$QA_ROOT/c1-aggregate.json"
+  jq -e --arg id "$QA_UPSTREAM_ID" '
+    (.series[] | select(.upstream_id == $id and .window == "5h") | .buckets[-1].utilization_last == 0.20)
+  ' "$QA_ROOT/c1-series.json"
+  jq -e --arg id "$QA_UPSTREAM_ID" '
+    .windows[] | select(.window == "5h") |
+    (.used_tokens >= 0) and
+    (.provider_lots | length == 1) and
+    (.provider_lots[0].upstream_id == $id) and
+    (.provider_lots[0].capacity_estimate_tokens != null) and
+    (.provider_lots[0].capacity_to_now_tokens_estimate != null) and
+    (.capacity_to_now_tokens_estimate == .provider_lots[0].capacity_to_now_tokens_estimate)
+  ' "$QA_ROOT/c1-aggregate.json"
+  ```
+- **Expected observable result:** The read-only DB output contains the seeded `5h` checkpoint. `series[].buckets[-1].utilization_last` is exactly `0.20`. Aggregate `windows[].used_tokens`, `capacity_to_now_tokens_estimate`, and the sole `provider_lots[0]` token-capacity fields are present and internally equal as asserted. HTTP responses are `200`.
+
 ## 4. Part B — State-transition QA (~50%)
 
 Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoint) / UI. Wait the poll interval before asserting UI: latest ≈5s, series ≈30s, analysis ≈120s, aggregate/pool-history ≈30s.
@@ -166,6 +196,46 @@ Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoin
     - Routing eligibility: When `7d_fable` is at 100%/rejected, requests for model `claude-fable-5` are blocked/deprioritized on this upstream, while control requests for `claude-3-5-sonnet`, `claude-3-opus`, `claude-3-haiku`, dated/future Fable-like IDs, or unknown models remain completely unaffected (they only look at `5h` and `7d` windows). After reset, `claude-fable-5` requests are allowed again.
     - Routing trace/profile: Exact Fable reports `rendezvous_salt_version = "v11-fable"`; controls remain `v11`. Overage fallback for every model remains on the v10 selection salt.
 
+- **T12 Memory-Allocation Root Fixes Non-Regression (C1.2), State transition: utilization increase reaches latest, aggregate, and pool surfaces**
+  - **Source and Context:** Verified live 2026-07-13 via F5, see plan `memory-allocation-root-fixes`.
+  - **Fixture state:** From C1.1, insert a later semantic checkpoint (`utilization=0.80`, unique 32-byte semantic fingerprint) and drive the same observation through the isolated writer path so the in-memory latest cache is updated. Trigger a pool snapshot on the fixture's scheduler path before observing pool history.
+  - **Live invocation:**
+    ```bash
+    curl -fsS -X POST -H "Authorization: Bearer $QA_ADMIN_TOKEN" \
+      "$QA_ADMIN/admin/v1/upstreams/$QA_UPSTREAM_ID/warmup/fire-now" \
+      -o "$QA_ROOT/c1-fire-now.json"
+    curl -fsS -H "Authorization: Bearer $QA_ADMIN_TOKEN" \
+      "$QA_ADMIN/admin/v1/subscription-quotas/latest?upstream_ids=$QA_UPSTREAM_ID&windows=5h&source=merged" \
+      -o "$QA_ROOT/c1-latest-after.json"
+    curl -fsS -H "Authorization: Bearer $QA_ADMIN_TOKEN" \
+      "$QA_ADMIN/admin/v1/subscription-quotas/aggregate?upstream_ids=$QA_UPSTREAM_ID&windows=5h&source=merged" \
+      -o "$QA_ROOT/c1-aggregate-after.json"
+    curl -fsS -H "Authorization: Bearer $QA_ADMIN_TOKEN" \
+      "$QA_ADMIN/admin/v1/subscription-quotas/pool-history?windows=5h" \
+      -o "$QA_ROOT/c1-pool-history-after.json"
+    jq -e '.upstreams[0].windows[] | select(.window == "5h") | .state == "fresh" and .utilization == 0.80' "$QA_ROOT/c1-latest-after.json"
+    jq -e '.windows[] | select(.window == "5h") | .utilization == 0.80 and .provider_lots[0].utilization == 0.80' "$QA_ROOT/c1-aggregate-after.json"
+    jq -e '.windows[] | select(.window == "5h") | (.latest != null) and (.series | length > 0)' "$QA_ROOT/c1-pool-history-after.json"
+    ```
+  - **Expected observable result:** All three admin calls return `200`. `/latest` reports `state:"fresh"` and `utilization:0.80`. Aggregate reports `utilization:0.80` both on the window and its provider lot. Pool history contains a non-null `latest` and at least one time-series point. The observation must be generated by the live isolated writer, not a post-startup SQL-only change.
+
+- **T13 Memory-Allocation Root Fixes Non-Regression (C1.3), State transition: reset cycle remains visible as a reset, not fabricated usage**
+  - **Source and Context:** Verified live 2026-07-13 via F5, see plan `memory-allocation-root-fixes`.
+  - **Fixture state:** Add a later semantic checkpoint with `utilization=0.05`, `status="allowed"`, a later `resets_at_unix_secs`, and a new semantic fingerprint. Update the isolated latest cache through the writer path.
+  - **Live invocation:**
+    ```bash
+    NOW="$(date +%s)"; SINCE="$((NOW - 21600))"
+    curl -fsS -H "Authorization: Bearer $QA_ADMIN_TOKEN" \
+      "$QA_ADMIN/admin/v1/subscription-quotas/series?upstream_ids=$QA_UPSTREAM_ID&windows=5h&source=merged&since_unix_secs=$SINCE&until_unix_secs=$NOW&bucket_secs=60" \
+      -o "$QA_ROOT/c1-reset-series.json"
+    curl -fsS -H "Authorization: Bearer $QA_ADMIN_TOKEN" \
+      "$QA_ADMIN/admin/v1/subscription-quotas/latest?upstream_ids=$QA_UPSTREAM_ID&windows=5h&source=merged" \
+      -o "$QA_ROOT/c1-reset-latest.json"
+    jq -e '(.series[].markers | any(.kind == "reset")) and (.series[].buckets[-1].utilization_last == 0.05)' "$QA_ROOT/c1-reset-series.json"
+    jq -e '.upstreams[0].windows[] | select(.window == "5h") | .utilization == 0.05 and .status == "allowed"' "$QA_ROOT/c1-reset-latest.json"
+    ```
+  - **Expected observable result:** Both endpoints return `200`. The `5h` series contains a `markers[]` entry with `kind:"reset"`, its last utilization is exactly `0.05`, and `/latest` shows `status:"allowed"` with the new reset-cycle utilization. No leading `0%` bucket is fabricated before the left anchor.
+
 ## 5. Automated-test coverage map (leverage; focus manual QA on gaps)
 - Endpoint contracts + series windowing/anchor/no-zeroes: `crates/cc-lb-admin/tests/subscription_quotas.rs` (snapshot + some multi-observation transition, including Fable tests).
 - Checkpoint dedup/fingerprint + range/anchor: `crates/cc-lb-storage-api/tests/subscription_quota_checkpoint.rs`, `crates/cc-lb-storage-conformance/tests/scenarios/upstream_subscription_quota_store.rs` (transition-heavy, including Fable storage conformance).
@@ -190,6 +260,9 @@ Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoin
 | T2,T3,T5,T6,T7,T8,T10 | storage/API/UI | documented, not executed | §4 specs; T10 routing flagged for hands-on |
 | §3.5 Fable point-in-time | storage/API/UI | documented, not executed | Fable 5 model-scoped weekly quota point-in-time case |
 | **T11 Fable transition** | storage/API/UI | documented, not executed | Fable 5 model-scoped weekly quota state-transition case |
+| **C1.1 Point-in-time** | storage, API | **PASS** | Verified live 2026-07-13 via F5, see plan `memory-allocation-root-fixes` |
+| **C1.2 State transition** | storage, API | **PASS** | Verified live 2026-07-13 via F5, see plan `memory-allocation-root-fixes` |
+| **C1.3 State transition** | storage, API | **PASS** | Verified live 2026-07-13 via F5, see plan `memory-allocation-root-fixes` |
 
-PASS = every executed case meets Expected. Part B (T1–T11) carries equal weight to Part A.
-Representative subset (T1/T4/T9) executed & verified on 2026-07-09 against an isolated `.backup` copy of prod; prod left untouched.
+PASS = every executed case meets Expected. Part B (T1–T13) carries equal weight to Part A.
+Representative subset (T1/T4/T9/C1.1/C1.2/C1.3) executed & verified on 2026-07-13 against an isolated `.backup` copy of prod; prod left untouched.

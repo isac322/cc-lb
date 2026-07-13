@@ -166,6 +166,14 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
   - Mobile 375x667: no horizontal overflow (`document.documentElement.scrollWidth <= window.innerWidth`).
 - State-transition (When backend data changes): push `7d_opus` observed_at to > 1 week old, restart/repoll, reload → the `7d (Opus)` card DISAPPEARS and its chart line is gone in all ranges. Conversely, widening the selected range past a window's last observation reveals it (a window observed 3h ago is hidden at 1h but shown at 6h/24h/7d).
 
+### TC-11, Memory-Allocation Root Fixes Non-Regression (C1.4), Admin-web quota rendering and auto-refresh
+- **Source and Context:** Verified live 2026-07-13 via F5, see plan `memory-allocation-root-fixes`.
+- **Live browser action:** Run `agent-browser skills get core`, open `$QA_ADMIN/`, set `localStorage['cc-lb-admin-token']` to the disposable `$QA_ADMIN_TOKEN`, reload, then open the fixture upstream from the Upstreams list. On the detail page, record the `Subscription Quota` snapshot card, `Quota History`, and `Quota deficit`/caveat area. On the Overview page record the pool quota chart. In the Upstreams sidebar record the mini meter. Apply the C1.2 `0.20 -> 0.80` writer mutation while this same browser page remains open, wait the documented isolated poll interval, and take a second snapshot **without reloading**.
+- **Expected observable result:** Before the mutation, the 5h card/meter and chart show `20%`. After it, the detail snapshot card and sidebar show `80%`, Quota History has the new step, and the Overview pool quota rises. The rendered text/state agrees with `/latest` and `/aggregate`. The UI changes without a manual reload. The range selector shows distinct 1h/6h/24h/7d x-axis spans and never renders a fabricated 0% leading segment.
+- **Visual Evidence (from gitignored `.omo/evidence/task-F5-screenshots/`):**
+  - `c1_4_before_mutation.png`: Showed the upstream detail page with the 5h snapshot card displaying exactly `20.0%` utilization, a green status badge, and the relative observed-at text "live, Header, 10s ago". The Quota History chart rendered a flat line at 20% across the selected 7d range. The sidebar mini meter for the upstream also showed a 20% filled bar.
+  - `c1_4_after_mutation.png` (taken without manual reload): Showed the same page automatically updated. The 5h snapshot card now displayed exactly `80.0%` utilization, an amber status badge, and the relative observed-at text "live, Header, 2s ago". The Quota History chart added a sharp vertical step from 20% to 80% at the mutation timestamp. The sidebar mini meter updated to an 80% filled bar. The Overview pool quota chart also showed a corresponding rise in the stacked bar.
+
 ## 3. Verdict table (fill on execution)
 
 | TC | Surface | Result | Evidence |
@@ -180,6 +188,7 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
 | 8  | QuotaObservedAt | **PASS** | relative observed-at "16초 전" rendered in TC-2 card; unit-tested |
 | 9  | Fable 5 Quota Transition | **PASS** (automated Playwright route-mocked transition executed; isolated real-backend/manual mutation not executed) | TC-9 specs; Fable 5 model-scoped weekly quota transition case. Fresh responsive visual captures cover 1280/768/375. |
 | 10 | Range-scoped stale window visibility | documented, not executed | TC-10 specs; stale/out-of-range windows hidden from chart + model cards expire after 7d while 5h/7d always show |
+| 11 | Memory-Allocation Root Fixes Non-Regression (C1.4) | **PASS** | Verified live 2026-07-13 via F5, see plan `memory-allocation-root-fixes` |
 
 PASS = every executed TC meets Expected; the fix's target (TC-1) is the gating case.
 
