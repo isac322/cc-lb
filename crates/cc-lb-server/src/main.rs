@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 use std::process::ExitCode;
 
@@ -7,6 +7,21 @@ use cc_lb_server::cli::{Cli, Command, ConfigCommand, DoctorCommand};
 use cc_lb_server::doctor::{self, DoctorError};
 use cc_lb_server::{run_serve, validate};
 use clap::FromArgMatches;
+
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// Configures jemalloc to purge unused memory in the background after ten seconds.
+///
+/// jemalloc reads this exported, NUL-terminated string before allocator initialization.
+#[allow(non_upper_case_globals)]
+#[allow(
+    unsafe_code,
+    reason = "jemalloc requires this exported C-ABI configuration symbol"
+)]
+#[unsafe(export_name = "malloc_conf")]
+pub static malloc_conf: &[u8] =
+    b"background_thread:true,dirty_decay_ms:10000,muzzy_decay_ms:10000\0";
 
 enum RunError {
     Validation(validate::ValidateError),
