@@ -5,10 +5,13 @@ use crate::{
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
     cache_keepalive_sessions::CacheKeepaliveSessionStore,
     organization_metadata::OrganizationMetadataStore,
-    prompt_cache_observation::PromptCacheObservationStore, types::*,
+    prompt_cache_observation::PromptCacheObservationStore,
+    types::*,
     upstream_rate_limit::UpstreamRateLimitStateStore,
     upstream_subscription_metadata::UpstreamSubscriptionMetadataStore,
-    upstream_subscription_quota::UpstreamSubscriptionQuotaStore,
+    upstream_subscription_quota::{
+        UpstreamSubscriptionQuotaAggregateStore, UpstreamSubscriptionQuotaStore,
+    },
     warmup_attempts::UpstreamWarmupAttemptStore,
 };
 
@@ -133,6 +136,16 @@ pub trait UsageRollupStore: Send + Sync {
         &self,
         run: &UsageRollupRun,
     ) -> StorageResult<()>;
+}
+
+#[async_trait]
+pub trait UsageTokenIntervalStore: Send + Sync {
+    /// Sums all token columns for each interval. Both boundaries are inclusive:
+    /// `bucket_start >= start_unix_secs AND bucket_start <= end_unix_secs`.
+    async fn sum_usage_tokens_for_intervals(
+        &self,
+        intervals: &[UsageTokenInterval],
+    ) -> StorageResult<Vec<UsageTokenIntervalSum>>;
 }
 
 #[async_trait]
@@ -287,9 +300,21 @@ pub trait MetaStore: Send + Sync {
 pub trait PriceCatalogCache: Send + Sync {
     async fn put_price_snapshot(&self, json_bytes: &[u8], fetched_at_ms: u64) -> StorageResult<()>;
 
-    async fn get_price_snapshot(
+    async fn get_price_snapshot_if_changed(
         &self,
-    ) -> StorageResult<Option<crate::types::PriceCatalogSnapshotRecord>>;
+        current_hash: &str,
+    ) -> StorageResult<PriceCatalogSnapshotFetch>;
+
+    async fn get_price_snapshot(&self) -> StorageResult<Option<PriceCatalogSnapshotRecord>> {
+        match self.get_price_snapshot_if_changed("").await? {
+            PriceCatalogSnapshotFetch::Missing => Ok(None),
+            PriceCatalogSnapshotFetch::Changed(record) => Ok(Some(record)),
+            PriceCatalogSnapshotFetch::Unchanged(_) => Err(StorageError::Corrupted {
+                message: "price catalog returned unchanged for an empty compatibility hash"
+                    .to_owned(),
+            }),
+        }
+    }
 }
 
 #[async_trait]
@@ -303,6 +328,7 @@ pub trait Storage:
     + RequestEventStore
     + UpstreamRateLimitStateStore
     + UpstreamSubscriptionQuotaStore
+    + UpstreamSubscriptionQuotaAggregateStore
     + UpstreamSubscriptionMetadataStore
     + UpstreamWarmupAttemptStore
     + PromptCacheObservationStore
@@ -310,6 +336,7 @@ pub trait Storage:
     + AnthropicCompatibilityKvStore
     + CacheKeepaliveSessionStore
     + UsageRollupStore
+    + UsageTokenIntervalStore
     + OAuthCredentialStore
     + ApiKeyStore
     + PriceCatalogCache
@@ -333,6 +360,7 @@ impl<T> Storage for T where
         + RequestEventStore
         + UpstreamRateLimitStateStore
         + UpstreamSubscriptionQuotaStore
+        + UpstreamSubscriptionQuotaAggregateStore
         + UpstreamSubscriptionMetadataStore
         + UpstreamWarmupAttemptStore
         + PromptCacheObservationStore
@@ -340,6 +368,7 @@ impl<T> Storage for T where
         + AnthropicCompatibilityKvStore
         + CacheKeepaliveSessionStore
         + UsageRollupStore
+        + UsageTokenIntervalStore
         + OAuthCredentialStore
         + ApiKeyStore
         + PriceCatalogCache

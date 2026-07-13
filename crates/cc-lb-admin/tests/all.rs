@@ -76,6 +76,8 @@ mod static_assets_cache;
 mod static_assets_served;
 #[path = "status.rs"]
 mod status;
+#[path = "subscription_quota_slim_parity.rs"]
+mod subscription_quota_slim_parity;
 #[path = "subscription_quotas.rs"]
 mod subscription_quotas;
 #[path = "upstream_health.rs"]

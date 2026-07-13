@@ -1376,6 +1376,7 @@ dependencies = [
  "futures",
  "proptest",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx 0.9.0",
  "tempfile",
  "tokio",

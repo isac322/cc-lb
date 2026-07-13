@@ -29,6 +29,7 @@ pub mod upstream_subscription_metadata;
 pub mod upstream_subscription_quota;
 pub mod upstreams;
 pub mod usage_rollups;
+mod usage_token_intervals;
 mod warmup_attempt_mapping;
 pub mod warmup_attempts;
 

@@ -21,13 +21,20 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use rkyv::util::AlignedVec;
-
 use crate::cell::PluginCell;
 use crate::error::WasmtimeRuntimeError;
 
+mod hooks;
 mod worker;
 
+pub use hooks::{
+    call_filter_hook, call_observe_hook, call_shape_hook, call_transform_response_hook,
+    call_transform_sse_event_hook,
+};
+pub(crate) use hooks::{
+    call_filter_hook_scoped, call_shape_hook_scoped, call_transform_response_hook_scoped,
+    call_transform_sse_event_hook_scoped,
+};
 use worker::{WorkerInstance, build_worker_instance};
 
 // RFC-0001 gap-analysis #5. Label values for the `phase` dimension
@@ -60,31 +67,6 @@ enum HookFn {
     TransformSseEvent,
 }
 
-trait OutputBuffer: Sized {
-    fn empty() -> Self;
-    fn copy_from_slice(slice: &[u8]) -> Self;
-}
-
-impl OutputBuffer for Vec<u8> {
-    fn empty() -> Self {
-        Vec::new()
-    }
-    fn copy_from_slice(slice: &[u8]) -> Self {
-        slice.to_vec()
-    }
-}
-
-impl OutputBuffer for AlignedVec<16> {
-    fn empty() -> Self {
-        AlignedVec::with_capacity(0)
-    }
-    fn copy_from_slice(slice: &[u8]) -> Self {
-        let mut aligned = AlignedVec::with_capacity(slice.len());
-        aligned.extend_from_slice(slice);
-        aligned
-    }
-}
-
 impl HookFn {
     fn export_name(self) -> &'static str {
         match self {
@@ -110,58 +92,21 @@ impl HookFn {
     }
 }
 
-/// Synchronous filter call. Builds a fresh `Store`, runs the hook,
-/// drops the `Store`.
-pub fn call_filter_hook(
-    cell: &Arc<PluginCell>,
-    input: &[u8],
-) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-    call_hook(cell, input, HookFn::Filter)
-}
-
-/// Synchronous shape call. Input is rkyv-encoded `ShapeRequest`,
-/// output rkyv-encoded `ShapeResponse`.
-pub fn call_shape_hook(
-    cell: &Arc<PluginCell>,
-    input: &[u8],
-) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-    call_hook(cell, input, HookFn::Shape)
-}
-
-/// Synchronous observe call. Guest returns `(0, 0)`; the returned
-/// `Vec<u8>` is always empty.
-pub fn call_observe_hook(
-    cell: &Arc<PluginCell>,
-    input: &[u8],
-) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-    call_hook(cell, input, HookFn::Observe)
-}
-
-pub fn call_transform_response_hook(
-    cell: &Arc<PluginCell>,
-    input: &[u8],
-) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
-    call_hook(cell, input, HookFn::TransformResponse)
-}
-
-pub fn call_transform_sse_event_hook(
-    cell: &Arc<PluginCell>,
-    input: &[u8],
-) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
-    call_hook(cell, input, HookFn::TransformSseEvent)
-}
-
-fn call_hook<O: OutputBuffer>(
+fn call_hook_scoped<R, F>(
     cell: &Arc<PluginCell>,
     input: &[u8],
     hook: HookFn,
-) -> Result<O, WasmtimeRuntimeError> {
+    with_output: F,
+) -> Result<R, WasmtimeRuntimeError>
+where
+    F: for<'a> FnOnce(&'a [u8]) -> R,
+{
     let _store_permit = cell
         .store_budget
         .try_acquire()
         .inspect_err(record_pool_saturation)?;
     let mut wi = build_worker_instance(cell, hook).inspect_err(record_pool_saturation)?;
-    execute_call(&mut wi, cell, input, hook)
+    execute_call_scoped(&mut wi, cell, input, hook, with_output)
 }
 
 fn record_pool_saturation(err: &WasmtimeRuntimeError) {
@@ -171,12 +116,16 @@ fn record_pool_saturation(err: &WasmtimeRuntimeError) {
     }
 }
 
-fn execute_call<O: OutputBuffer>(
+fn execute_call_scoped<R, F>(
     wi: &mut WorkerInstance,
     cell: &PluginCell,
     input: &[u8],
     hook: HookFn,
-) -> Result<O, WasmtimeRuntimeError> {
+    with_output: F,
+) -> Result<R, WasmtimeRuntimeError>
+where
+    F: for<'a> FnOnce(&'a [u8]) -> R,
+{
     let start = Instant::now();
     // Reuse the cell's owned `Arc<str>` label instead of `.to_string()`
     // per emission — SharedString accepts `Arc<str>` directly, avoiding
@@ -184,7 +133,7 @@ fn execute_call<O: OutputBuffer>(
     let plugin: Arc<str> = Arc::clone(&cell.plugin_name);
     let hook_label = hook.metric_label();
 
-    let result = execute_call_inner(wi, input, hook);
+    let result = execute_call_inner_scoped(wi, input, hook, with_output);
 
     metrics::histogram!(
         "cc_lb_plugin_call_duration_seconds",
@@ -209,11 +158,15 @@ fn execute_call<O: OutputBuffer>(
     result
 }
 
-fn execute_call_inner<O: OutputBuffer>(
+fn execute_call_inner_scoped<R, F>(
     wi: &mut WorkerInstance,
     input: &[u8],
     hook: HookFn,
-) -> Result<O, WasmtimeRuntimeError> {
+    with_output: F,
+) -> Result<R, WasmtimeRuntimeError>
+where
+    F: for<'a> FnOnce(&'a [u8]) -> R,
+{
     let WorkerInstance {
         store,
         memory,
@@ -292,8 +245,8 @@ fn execute_call_inner<O: OutputBuffer>(
     // Filter / shape returning (0, 0) is an ABI
     // violation; collapsing it into empty bytes here would hide the
     // bug from downstream rkyv decode.
-    let out_bytes = if matches!(hook, HookFn::Observe) && out_ptr == 0 && out_len == 0 {
-        O::empty()
+    let output = if matches!(hook, HookFn::Observe) && out_ptr == 0 && out_len == 0 {
+        with_output(&[])
     } else if out_ptr == 0 || out_len == 0 {
         return Err(WasmtimeRuntimeError::ModuleRejected {
             reason: format!(
@@ -318,7 +271,7 @@ fn execute_call_inner<O: OutputBuffer>(
                 ),
             });
         }
-        let bytes = O::copy_from_slice(&mem_view[out_ptr as usize..out_end]);
+        let output = with_output(&mem_view[out_ptr as usize..out_end]);
 
         // Skip `cc_lb_free(out_ptr, out_len, ..)` on the output
         // buffer: the surrounding pure-mode contract drops the whole
@@ -330,8 +283,8 @@ fn execute_call_inner<O: OutputBuffer>(
         // above `hook_fn.call`) — we're only skipping the OUTPUT
         // free because it happens AFTER `hook_fn` returns.
         let _ = free_fn;
-        bytes
+        output
     };
 
-    Ok(out_bytes)
+    Ok(output)
 }

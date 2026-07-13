@@ -539,6 +539,75 @@ async fn sse_transform_failure_after_transformed_output_terminates_classified() 
 }
 
 #[tokio::test]
+async fn sse_decompression_budget_before_output_fails_open_raw() {
+    let transform = Arc::new(UnchangedSseTransform::default());
+    let plaintext = vec![b'x'; 1024];
+    let compressed = gzip_bytes(&Bytes::from(plaintext));
+    let mut headers = sse_headers();
+    headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    let config = LifecycleConfig {
+        messages_body_cap_bytes: 128,
+        ..LifecycleConfig::default()
+    };
+    let lifecycle = lifecycle_with_transforms_and_config(
+        None,
+        Some(transform),
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers,
+            body: compressed.clone(),
+        }),
+        config,
+    );
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true}"#,
+        )))
+        .await
+        .expect("lifecycle handles over-budget gzip SSE response");
+    let (_status, _headers, output) = collect_body(response).await;
+
+    assert_eq!(output, compressed);
+}
+
+#[tokio::test]
+async fn sse_incomplete_event_budget_after_output_uses_existing_error_frame() {
+    let transform = Arc::new(UnchangedSseTransform::default());
+    let mut body = Vec::from(&b"event: ping\ndata: {\"type\":\"ping\"}\n\n"[..]);
+    body.extend_from_slice(b"data: ");
+    body.extend(std::iter::repeat_n(b'x', 256));
+    let config = LifecycleConfig {
+        messages_body_cap_bytes: 128,
+        ..LifecycleConfig::default()
+    };
+    let lifecycle = lifecycle_with_transforms_and_config(
+        None,
+        Some(transform),
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers: sse_headers(),
+            body: Bytes::from(body),
+        }),
+        config,
+    );
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true}"#,
+        )))
+        .await
+        .expect("lifecycle handles over-budget incomplete SSE event");
+    let (_status, _headers, output) = collect_body(response).await;
+    let text = std::str::from_utf8(&output).expect("output is SSE text");
+
+    assert!(text.starts_with("event: ping\n"));
+    assert!(text.contains("event: error\n"));
+    assert!(text.contains("response_transform_error"));
+    assert!(!text.contains(&"x".repeat(256)));
+}
+
+#[tokio::test]
 async fn sse_accounting_uses_pre_transform_usage() {
     let transform = Arc::new(SseUsageMutatingTransform);
     let recording = Arc::new(RecordingHook::default());
@@ -576,11 +645,26 @@ fn lifecycle_with_transforms(
     sse_transform: Option<Arc<dyn SseEventTransformHook>>,
     dispatcher: Arc<dyn UpstreamDispatch>,
 ) -> Lifecycle {
-    lifecycle_with_transforms_and_hook(
+    lifecycle_with_transforms_and_config(
+        response_transform,
+        sse_transform,
+        dispatcher,
+        LifecycleConfig::default(),
+    )
+}
+
+fn lifecycle_with_transforms_and_config(
+    response_transform: Option<Arc<dyn ResponseTransformHook>>,
+    sse_transform: Option<Arc<dyn SseEventTransformHook>>,
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    config: LifecycleConfig,
+) -> Lifecycle {
+    lifecycle_with_transforms_and_hook_and_config(
         response_transform,
         sse_transform,
         dispatcher,
         Arc::new(RecordingHook::default()),
+        config,
     )
 }
 
@@ -589,6 +673,22 @@ fn lifecycle_with_transforms_and_hook(
     sse_transform: Option<Arc<dyn SseEventTransformHook>>,
     dispatcher: Arc<dyn UpstreamDispatch>,
     hook: Arc<RecordingHook>,
+) -> Lifecycle {
+    lifecycle_with_transforms_and_hook_and_config(
+        response_transform,
+        sse_transform,
+        dispatcher,
+        hook,
+        LifecycleConfig::default(),
+    )
+}
+
+fn lifecycle_with_transforms_and_hook_and_config(
+    response_transform: Option<Arc<dyn ResponseTransformHook>>,
+    sse_transform: Option<Arc<dyn SseEventTransformHook>>,
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    hook: Arc<RecordingHook>,
+    config: LifecycleConfig,
 ) -> Lifecycle {
     let dialect = Arc::new(ShapeTransformDialect::new(
         response_transform,
@@ -640,7 +740,7 @@ fn lifecycle_with_transforms_and_hook(
         authn.authn,
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
-        LifecycleConfig::default(),
+        config,
         Arc::new(cc_lb_engine::SystemClock),
     )
 }
