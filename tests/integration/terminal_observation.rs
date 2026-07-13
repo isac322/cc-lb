@@ -676,12 +676,31 @@ async fn raw_http(
     }
     request.push_str("\r\n");
 
-    let mut stream = TcpStream::connect((host, port)).await?;
-    stream.write_all(request.as_bytes()).await?;
-    stream.write_all(body).await?;
+    let stream = TcpStream::connect((host, port)).await?;
+    let (mut reader, mut writer) = stream.into_split();
+    writer.write_all(request.as_bytes()).await?;
     let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await?;
-    parse_raw_response(&bytes)
+    let (write_result, read_result) = tokio::join!(
+        writer.write_all(body),
+        reader.read_to_end(&mut bytes),
+    );
+    read_result?;
+    let response = parse_raw_response(&bytes)?;
+
+    match write_result {
+        Ok(()) => Ok(response),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            ) =>
+        {
+            Ok(response)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn parse_raw_response(bytes: &[u8]) -> std::io::Result<TestResponse> {
