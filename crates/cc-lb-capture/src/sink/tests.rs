@@ -1,4 +1,5 @@
 use cc_lb_domain::{CachePricingSummary, RoutingTrace};
+use metrics_exporter_prometheus::PrometheusBuilder;
 
 use super::*;
 use crate::{
@@ -129,4 +130,48 @@ async fn returns_immediately_and_counts_drop_when_channel_is_full()
     assert_eq!(sink.dropped_total(), 1);
     writer.shutdown().await;
     Ok(())
+}
+
+#[test]
+fn queue_overflow_increments_prometheus_counter() {
+    // Given
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime builds");
+
+    // When
+    metrics::with_local_recorder(&recorder, || {
+        runtime.block_on(async {
+            let directory = tempfile::tempdir().expect("creates tempdir");
+            let store = open_capture_store(&directory.path().join("capture.sqlite"))
+                .await
+                .expect("opens capture store");
+            let (sink, writer) = CaptureSink::new(store, 1);
+            sink.try_seed(
+                "event-metric-1".to_owned(),
+                "request-metric-1".to_owned(),
+                1,
+            )
+            .expect("first message fills queue");
+            assert_eq!(
+                sink.try_seed(
+                    "event-metric-2".to_owned(),
+                    "request-metric-2".to_owned(),
+                    2
+                ),
+                Err(CaptureEnqueueError::Full)
+            );
+            writer.shutdown().await;
+        });
+    });
+
+    // Then
+    let rendered = handle.render();
+    assert!(
+        rendered.contains("cc_lb_capture_dropped_total 1"),
+        "rendered metrics:\n{rendered}"
+    );
 }

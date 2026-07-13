@@ -60,10 +60,14 @@ fn describes_all_required_metrics() {
             "cc_lb_cache_token_drift",
             "cc_lb_cache_observation_dropped_total",
             "cc_lb_cache_observation_write_failed_total",
+            "cc_lb_capture_dropped_total",
+            "cc_lb_capture_response_without_input_total",
+            "cc_lb_capture_write_failed_total",
+            "cc_lb_capture_partial_ttl_evicted_total",
         ]
     );
 
-    assert_eq!(definitions.len(), 47);
+    assert_eq!(definitions.len(), 51);
     assert_eq!(definitions[0].kind, MetricKind::Counter);
     assert_eq!(definitions[1].kind, MetricKind::Histogram);
     assert_eq!(definitions[3].kind, MetricKind::Gauge);

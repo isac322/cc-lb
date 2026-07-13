@@ -1111,8 +1111,11 @@ async fn build_app_with_storage_inner(
         let path = data_dir.join(&config.capture.path);
         match cc_lb_capture::store::open_capture_store(&path).await {
             Ok(store) => {
-                let (sink, writer_handle) =
-                    cc_lb_capture::sink::CaptureSink::new(store, config.capture.channel_capacity);
+                let (sink, writer_handle) = cc_lb_capture::sink::CaptureSink::new_with_retention(
+                    store,
+                    config.capture.channel_capacity,
+                    config.capture.retention_max_rows,
+                );
                 let rx = in_memory_bus.attach_lifecycle_capture(
                     cc_lb_control::event_bus::DEFAULT_LIFECYCLE_CAPTURE_CAPACITY,
                 );

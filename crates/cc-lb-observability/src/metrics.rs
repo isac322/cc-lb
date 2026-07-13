@@ -2,7 +2,7 @@ use metrics::Unit;
 
 use crate::{MetricDefinition, MetricKind};
 
-pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 20] = [
+pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 24] = [
     MetricDefinition {
         name: "cclb_api_key_requests_total",
         kind: MetricKind::Counter,
@@ -97,6 +97,26 @@ pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 20] = [
         name: "cc_lb_cache_observation_write_failed_total",
         kind: MetricKind::Counter,
         description: "Total prompt-cache observation store writes that failed by store kind.",
+    },
+    MetricDefinition {
+        name: "cc_lb_capture_dropped_total",
+        kind: MetricKind::Counter,
+        description: "Total capture messages dropped due to queue overflow.",
+    },
+    MetricDefinition {
+        name: "cc_lb_capture_response_without_input_total",
+        kind: MetricKind::Counter,
+        description: "Total terminal capture responses discarded because their required input was absent.",
+    },
+    MetricDefinition {
+        name: "cc_lb_capture_write_failed_total",
+        kind: MetricKind::Counter,
+        description: "Total capture records lost to isolated database write or checkpoint failures.",
+    },
+    MetricDefinition {
+        name: "cc_lb_capture_partial_ttl_evicted_total",
+        kind: MetricKind::Counter,
+        description: "Total incomplete capture partials removed by TTL sweeps.",
     },
     MetricDefinition {
         name: "cc_lb_dropped_events_total",
@@ -202,6 +222,26 @@ pub(crate) fn register_prometheus14_metrics() {
         "Total prompt-cache observation store writes that failed by store kind."
     );
     metrics::describe_counter!(
+        "cc_lb_capture_dropped_total",
+        Unit::Count,
+        "Total capture messages dropped due to queue overflow."
+    );
+    metrics::describe_counter!(
+        "cc_lb_capture_response_without_input_total",
+        Unit::Count,
+        "Total terminal capture responses discarded because their required input was absent."
+    );
+    metrics::describe_counter!(
+        "cc_lb_capture_write_failed_total",
+        Unit::Count,
+        "Total capture records lost to isolated database write or checkpoint failures."
+    );
+    metrics::describe_counter!(
+        "cc_lb_capture_partial_ttl_evicted_total",
+        Unit::Count,
+        "Total incomplete capture partials removed by TTL sweeps."
+    );
+    metrics::describe_counter!(
         "cc_lb_dropped_events_total",
         Unit::Count,
         "Total events dropped from a bounded channel or queue by reason."
@@ -282,6 +322,10 @@ pub fn touch_prometheus14_metrics() {
         "store" => "sqlite"
     )
     .increment(1);
+    metrics::counter!("cc_lb_capture_dropped_total").increment(1);
+    metrics::counter!("cc_lb_capture_response_without_input_total").increment(1);
+    metrics::counter!("cc_lb_capture_write_failed_total").increment(1);
+    metrics::counter!("cc_lb_capture_partial_ttl_evicted_total").increment(1);
 }
 
 pub(crate) fn touch_prometheus14_metric_handles() {
@@ -354,6 +398,10 @@ pub(crate) fn touch_prometheus14_metric_handles() {
         "store" => "unknown"
     )
     .increment(0);
+    metrics::counter!("cc_lb_capture_dropped_total").increment(0);
+    metrics::counter!("cc_lb_capture_response_without_input_total").increment(0);
+    metrics::counter!("cc_lb_capture_write_failed_total").increment(0);
+    metrics::counter!("cc_lb_capture_partial_ttl_evicted_total").increment(0);
     metrics::counter!(
         "cc_lb_dropped_events_total",
         "reason" => "unknown"

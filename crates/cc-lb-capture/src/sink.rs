@@ -25,6 +25,7 @@ const DEFAULT_PARTIAL_TTL: Duration = Duration::from_secs(300);
 const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_BATCH_SIZE: usize = 50;
+const DEFAULT_RETENTION_MAX_ROWS: u64 = 100_000;
 const OVERFLOW_WARN_INTERVAL_SECS: u64 = 10;
 
 enum CaptureMessage {
@@ -87,6 +88,22 @@ impl CaptureSink {
     /// Starts a bounded capture queue and its single background writer.
     pub fn new(store: CaptureStore, capacity: usize) -> (Self, CaptureWriterHandle) {
         Self::new_with_config(store, capacity, SinkConfig::default())
+    }
+
+    /// Starts a bounded capture queue with a periodic database row cap.
+    pub fn new_with_retention(
+        store: CaptureStore,
+        capacity: usize,
+        retention_max_rows: u64,
+    ) -> (Self, CaptureWriterHandle) {
+        Self::new_with_config(
+            store,
+            capacity,
+            SinkConfig {
+                retention_max_rows,
+                ..SinkConfig::default()
+            },
+        )
     }
 
     fn new_with_config(
@@ -168,6 +185,7 @@ impl CaptureSink {
             Err(mpsc::error::TrySendError::Closed(_)) => Err(CaptureEnqueueError::Closed),
             Err(mpsc::error::TrySendError::Full(_)) => {
                 let dropped_total = self.stats.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                metrics::counter!("cc_lb_capture_dropped_total").increment(1);
                 self.warn_overflow(dropped_total);
                 Err(CaptureEnqueueError::Full)
             }
@@ -198,6 +216,7 @@ struct SinkConfig {
     sweep_interval: Duration,
     flush_interval: Duration,
     batch_size: usize,
+    retention_max_rows: u64,
 }
 
 impl SinkConfig {
@@ -209,6 +228,7 @@ impl SinkConfig {
             sweep_interval: self.sweep_interval.max(minimum_interval),
             flush_interval: self.flush_interval.max(minimum_interval),
             batch_size: self.batch_size.max(1),
+            retention_max_rows: self.retention_max_rows,
         }
     }
 }
@@ -221,6 +241,7 @@ impl Default for SinkConfig {
             sweep_interval: DEFAULT_SWEEP_INTERVAL,
             flush_interval: DEFAULT_FLUSH_INTERVAL,
             batch_size: DEFAULT_BATCH_SIZE,
+            retention_max_rows: DEFAULT_RETENTION_MAX_ROWS,
         }
     }
 }

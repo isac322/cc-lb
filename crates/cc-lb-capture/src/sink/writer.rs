@@ -44,6 +44,8 @@ pub(super) struct CaptureWriter {
     config: SinkConfig,
     partials: HashMap<String, PendingRecord>,
     pending_writes: VecDeque<CaptureRecord>,
+    #[cfg(test)]
+    sweep_observer: Option<oneshot::Sender<()>>,
 }
 
 enum WriterEvent {
@@ -67,7 +69,15 @@ impl CaptureWriter {
             config,
             partials: HashMap::with_capacity(config.max_partials),
             pending_writes: VecDeque::with_capacity(config.batch_size),
+            #[cfg(test)]
+            sweep_observer: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_sweep_observer(mut self, observer: oneshot::Sender<()>) -> Self {
+        self.sweep_observer = Some(observer);
+        self
     }
 
     pub(super) async fn run(mut self, mut shutdown: oneshot::Receiver<()>) {
@@ -98,7 +108,14 @@ impl CaptureWriter {
                     }
                 }
                 WriterEvent::Message(None) => break,
-                WriterEvent::Sweep => self.sweep_partials(),
+                WriterEvent::Sweep => {
+                    self.sweep_partials();
+                    self.prune_retention().await;
+                    #[cfg(test)]
+                    if let Some(observer) = self.sweep_observer.take() {
+                        let _ = observer.send(());
+                    }
+                }
                 WriterEvent::Flush => self.flush_one_batch().await,
             }
         }
@@ -170,6 +187,7 @@ impl CaptureWriter {
             self.stats
                 .response_without_input
                 .fetch_add(1, Ordering::Relaxed);
+            metrics::counter!("cc_lb_capture_response_without_input_total").increment(1);
             return;
         };
         if let Some(seed) = partial.seed {
@@ -199,6 +217,7 @@ impl CaptureWriter {
         self.stats
             .partial_ttl_evicted
             .fetch_add(removed as u64, Ordering::Relaxed);
+        metrics::counter!("cc_lb_capture_partial_ttl_evicted_total").increment(removed as u64);
     }
 
     fn drop_oldest_partial(&mut self) {
@@ -209,6 +228,15 @@ impl CaptureWriter {
             .map(|(event_id, _)| event_id.clone());
         if let Some(event_id) = oldest {
             self.partials.remove(&event_id);
+        }
+    }
+
+    async fn prune_retention(&self) {
+        if let Err(error) =
+            crate::retention::prune_by_row_cap(self.store.pool(), self.config.retention_max_rows)
+                .await
+        {
+            tracing::warn!(error = ?error, "capture retention prune failed");
         }
     }
 
@@ -224,6 +252,7 @@ impl CaptureWriter {
             .map(|record| disposition_name(&record.disposition));
         if let Err(error) = persist_batch(&self.store, &batch).await {
             self.stats.write_failed.fetch_add(failed, Ordering::Relaxed);
+            metrics::counter!("cc_lb_capture_write_failed_total").increment(failed);
             tracing::warn!(error = ?error, records = failed, first_disposition, "capture batch write failed");
         }
     }
@@ -234,6 +263,7 @@ impl CaptureWriter {
             .await
         {
             self.stats.write_failed.fetch_add(1, Ordering::Relaxed);
+            metrics::counter!("cc_lb_capture_write_failed_total").increment(1);
             tracing::warn!(error = ?error, "capture WAL checkpoint failed");
         }
     }
