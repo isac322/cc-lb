@@ -201,25 +201,8 @@ jobs:
             --output-path target/coverage.lcov \
             --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
 
-      # The lcov step above already merged .profraw into .profdata; drop the raw
-      # profiles so the 11 per-package gates below reuse it and skip re-merging.
-      - name: Drop raw profiles so per-package gates reuse the merged profdata
-        run: cargo llvm-cov clean --profraw-only
-
       - name: Check per-package coverage gates
-        run: |
-          set -euo pipefail
-          cargo llvm-cov report --package cc-lb-engine                  --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov report --package cc-lb-dialect-anthropic     --fail-under-lines 80 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov report --package cc-lb-admin                 --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov report --package cc-lb-config                --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov report --package cc-lb-observability         --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov report --package cc-lb-signer-anthropic-key  --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov report --package cc-lb-signer-anthropic-oauth --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov report --package cc-lb-server                --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov report --package cc-lb-storage-sqlite        --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov report --package cc-lb-storage-postgres      --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov report --package cc-lb-scheduler             --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+        run: scripts/coverage-gate.sh target/coverage.lcov
 
       - name: Show sccache stats
         if: always()
