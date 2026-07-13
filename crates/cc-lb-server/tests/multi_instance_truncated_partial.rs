@@ -25,9 +25,27 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 const CLUSTER_TOKEN: &str = "test-cluster-token";
 const LARGE_PAYLOAD_MIN_BYTES: usize = 7_500;
-const RECEIVE_TIMEOUT: Duration = Duration::from_secs(15);
+// CI latency budgets (not correctness bounds): positive-path SSE receipt +
+// warmup normally finish fast, but under llvm-cov plus a co-scheduled heavy
+// build on the shared runner they can overrun. Scale by
+// CC_LB_TEST_READY_TIMEOUT_SECS (120 in CI), the repo's convention.
+// NEGATIVE_RECEIVE_TIMEOUT stays fixed: it bounds a "confirm nothing arrives"
+// wait, which contention cannot make flake (an absent event never appears).
+fn receive_timeout() -> Duration {
+    std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(15))
+}
 const NEGATIVE_RECEIVE_TIMEOUT: Duration = Duration::from_millis(500);
-const WARMUP_TIMEOUT: Duration = Duration::from_secs(10);
+fn warmup_timeout() -> Duration {
+    std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(10))
+}
 const WARMUP_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
 static POSTGRES_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -218,7 +236,7 @@ async fn publish_until_received(
     partial: RequestEventPartial,
 ) -> TestResult<()> {
     let event_id = partial.event_id.clone();
-    let deadline = Instant::now() + WARMUP_TIMEOUT;
+    let deadline = Instant::now() + warmup_timeout();
     while Instant::now() < deadline {
         producer_tx
             .send(RequestEventUpdate::Partial(partial.clone()))
@@ -266,7 +284,7 @@ async fn wait_for_partial(
         return Err(error("remote bus receiver unsupported in this test"));
     };
     let timeout = if expect_delivery {
-        RECEIVE_TIMEOUT
+        receive_timeout()
     } else {
         NEGATIVE_RECEIVE_TIMEOUT
     };
@@ -324,7 +342,7 @@ async fn wait_for_counter(
     outcome: &str,
     expected: f64,
 ) -> f64 {
-    let deadline = Instant::now() + RECEIVE_TIMEOUT;
+    let deadline = Instant::now() + receive_timeout();
     loop {
         let value = labeled_counter_value(handle, name, outcome);
         if value >= expected || Instant::now() >= deadline {
