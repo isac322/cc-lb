@@ -265,4 +265,4 @@ Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoin
 | **C1.3 State transition** | storage, API | **PASS** | Verified live 2026-07-13 via F5, see plan `memory-allocation-root-fixes` |
 
 PASS = every executed case meets Expected. Part B (T1–T13) carries equal weight to Part A.
-Representative subset (T1/T4/T9/C1.1/C1.2/C1.3) executed & verified on 2026-07-13 against an isolated `.backup` copy of prod; prod left untouched.
+Representative subset (T1/T4/T9) executed & verified on 2026-07-09 against an isolated `.backup` copy of prod; C1.1/C1.2/C1.3 executed & verified on 2026-07-13 against a fresh throwaway instance with a disposable temp SQLite DB (see `memory-allocation-root-fixes` plan, F5); prod left untouched in both cases.
