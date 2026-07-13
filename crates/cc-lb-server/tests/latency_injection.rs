@@ -1,6 +1,6 @@
 #![cfg(any())]
 
-mod chaos_common;
+use crate::chaos_common;
 
 use std::time::{Duration, Instant};
 

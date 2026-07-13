@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 #[path = "cache_keepalive_proxy_path/fixtures.rs"]
 mod fixtures;
 

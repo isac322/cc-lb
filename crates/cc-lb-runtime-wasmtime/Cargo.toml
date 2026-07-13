@@ -4,11 +4,16 @@ version = "0.1.3"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+autotests = false
 description = "Wasmtime-based plugin runtime for cc-lb. Host-side wasm plugin admission + dispatch."
 repository = "https://github.com/isac322/cc-lb"
 readme = "README.md"
 keywords = ["cc-lb", "plugin", "wasm", "wasmtime", "runtime"]
 categories = ["wasm", "web-programming"]
+
+[[test]]
+name = "integration"
+path = "tests/all.rs"
 
 [dependencies]
 cc-lb-plugin-wire = { workspace = true, features = ["std"] }

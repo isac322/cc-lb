@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/all.rs"
 
 [features]
 sqlite = []

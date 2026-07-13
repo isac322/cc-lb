@@ -1,5 +1,4 @@
 #![cfg(feature = "dto-roundtrip")]
-#![recursion_limit = "512"]
 
 use cc_lb_domain::{
     InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace, StageDecision,

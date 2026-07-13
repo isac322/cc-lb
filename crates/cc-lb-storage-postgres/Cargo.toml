@@ -1,11 +1,16 @@
 [package]
 name = "cc-lb-storage-postgres"
+autotests = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
 build = "build.rs"
+
+[[test]]
+name = "integration"
+path = "tests/all.rs"
 
 [features]
 postgres = []

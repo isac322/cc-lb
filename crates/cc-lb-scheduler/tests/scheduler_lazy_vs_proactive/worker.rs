@@ -21,8 +21,8 @@ use cc_lb_storage_api::UpstreamRecord;
 use url::Url;
 use uuid::Uuid;
 
-use crate::common::now_secs;
-use crate::fake::raw_http;
+use super::common::now_secs;
+use super::fake::raw_http;
 
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<JobOutcome>> + Send>>;
 
@@ -75,7 +75,7 @@ impl<Upstreams> OAuthWorkerState<Upstreams> {
         probe: OAuthWorkerProbe,
     ) -> Self {
         let config = OAuthRefreshConfig {
-            retry_delay: crate::common::POLL_INTERVAL,
+            retry_delay: super::common::POLL_INTERVAL,
         };
         Self {
             handler: OAuthRefreshJobHandler::with_config(upstreams, replica_id, config),

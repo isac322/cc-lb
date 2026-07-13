@@ -5,14 +5,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
+autotests = false
 
 [[test]]
-name = "managed_api_key_full_flow"
-path = "managed_api_key_full_flow.rs"
-
-[[test]]
-name = "terminal_observation"
-path = "terminal_observation.rs"
+name = "integration"
+path = "all.rs"
 
 [dev-dependencies]
 cc-lb-config = { path = "../../crates/cc-lb-config" }

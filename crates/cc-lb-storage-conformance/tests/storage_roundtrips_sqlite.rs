@@ -1,9 +1,9 @@
 #![cfg(feature = "sqlite")]
 
+use crate::request_event_quota_support;
+
 #[path = "support/request_event_quota_sqlite.rs"]
 mod request_event_quota_sqlite;
-#[path = "support/request_event_quota.rs"]
-mod request_event_quota_support;
 
 request_event_quota_sqlite::define_request_event_quota_sqlite_tests!();
 

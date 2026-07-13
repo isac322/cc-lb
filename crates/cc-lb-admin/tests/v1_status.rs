@@ -1,4 +1,4 @@
-mod config_admin_common;
+use crate::config_admin_common;
 
 use axum::http::StatusCode;
 use cc_lb_admin::AdminPorts;

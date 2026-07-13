@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 #[tokio::test]
 async fn server_starts_and_responds() {

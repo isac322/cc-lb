@@ -1,5 +1,3 @@
-mod common;
-
 use bytes::Bytes;
 use cc_lb_dialect_anthropic::AnthropicDirectDialect;
 use cc_lb_domain::Upstream;
@@ -8,10 +6,10 @@ use http::{HeaderMap, HeaderValue, Method};
 
 #[test]
 fn anthropic_and_custom_headers_are_preserved_exactly() {
-    let mut headers = common::anthropic_headers();
+    let mut headers = crate::common::anthropic_headers();
     headers.append("x-repeat", HeaderValue::from_static("one"));
     headers.append("x-repeat", HeaderValue::from_static("two"));
-    let ctx = common::request_context(
+    let ctx = crate::common::request_context(
         Method::POST,
         "/v1/messages",
         None,
@@ -23,7 +21,7 @@ fn anthropic_and_custom_headers_are_preserved_exactly() {
         &AnthropicDirectDialect::default(),
         &ctx,
         &Upstream::AnthropicDirect { base_url: None },
-        &common::principal(),
+        &crate::common::principal(),
     )
     .expect("direct shape should succeed");
 

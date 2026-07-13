@@ -21,7 +21,7 @@ use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use http::HeaderMap;
 use uuid::Uuid;
 
-use crate::common::{DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState};
+use super::common::{DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState};
 
 const PRINCIPAL: &str = "principal-test";
 const NOW: u64 = 1_700_000_000;
