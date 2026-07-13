@@ -1,10 +1,8 @@
-mod common;
-
 use cc_lb_config::{Config, SchedulerConfig};
 
 #[test]
 fn missing_scheduler_section_applies_default_config() {
-    let (_dir, path) = common::temp_config("[listener]\n");
+    let (_dir, path) = crate::common::temp_config("[listener]\n");
 
     let config = Config::load(&path).unwrap();
 

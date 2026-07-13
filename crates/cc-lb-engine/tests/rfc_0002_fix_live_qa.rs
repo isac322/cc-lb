@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;

@@ -1,4 +1,4 @@
-mod config_admin_common;
+use crate::config_admin_common;
 
 use axum::http::StatusCode;
 use config_admin_common::{app, authed_json, test_state_without_storage, unauthenticated_status};

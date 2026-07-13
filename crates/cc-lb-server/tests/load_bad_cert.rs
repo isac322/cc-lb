@@ -1,4 +1,4 @@
-mod tls_common;
+use crate::tls_common;
 
 use std::sync::Arc;
 

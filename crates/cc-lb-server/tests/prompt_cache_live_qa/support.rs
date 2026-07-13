@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
 
-use crate::common;
+use super::common;
 
 #[derive(Debug)]
 pub struct CacheEvent {

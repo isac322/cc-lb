@@ -8,7 +8,7 @@
 //! Verification uses direct SQLite queries and `/metrics` scrapes — no
 //! network mocks beyond `fake_anthropic`.
 
-mod common;
+use crate::common;
 
 use std::net::SocketAddr;
 use std::time::Duration;

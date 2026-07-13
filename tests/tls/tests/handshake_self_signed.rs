@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn handshake_self_signed_proxy_tls_only() {

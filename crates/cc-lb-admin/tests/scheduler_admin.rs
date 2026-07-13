@@ -1,6 +1,5 @@
 #![allow(clippy::manual_async_fn)]
 
-mod admin_test_common;
 #[path = "scheduler_admin/support.rs"]
 mod support;
 

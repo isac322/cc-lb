@@ -1,6 +1,6 @@
 #![cfg(feature = "postgres")]
 
-mod common;
+use crate::common;
 
 use std::net::SocketAddr;
 use std::process::{Child, Command, Stdio};

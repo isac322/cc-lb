@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tls12_only_client_is_accepted_by_current_ring_tls12_policy() {
