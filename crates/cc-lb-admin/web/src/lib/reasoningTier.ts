@@ -1,3 +1,5 @@
+import { splitNum } from './format';
+
 /**
  * Reasoning tier classification based on thinking budget (in tokens).
  * Single tunable threshold table for budget-to-tier mapping.
@@ -44,4 +46,30 @@ export function budgetToTier(budget: number | null | undefined): ReasoningTier {
  */
 export function serviceTierToFast(tier: string | null | undefined): boolean {
   return tier === 'priority';
+}
+
+/** Badge text combining requested reasoning effort/tier with actual thinking tokens used. */
+export function reasoningBadgeText(
+  effort: string | null | undefined,
+  budget: number | null | undefined,
+  thinkingTokens: number | null | undefined,
+): string | null {
+  const requested =
+    effort != null && effort !== ''
+      ? effort
+      : budgetToTier(budget) !== 'none'
+        ? budgetToTier(budget)
+        : null;
+  let actual: string | null = null;
+  if (
+    thinkingTokens != null &&
+    Number.isFinite(thinkingTokens) &&
+    thinkingTokens > 0
+  ) {
+    const s = splitNum(thinkingTokens);
+    actual = `${s.value}${s.unit}`;
+  }
+  if (requested == null && actual == null) return null;
+  if (requested != null && actual != null) return `${requested} · ${actual}`;
+  return requested ?? actual;
 }

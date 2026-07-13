@@ -227,7 +227,7 @@ describe('RequestEventsTable - Live & Outcomes', () => {
       );
 
       // Reasoning badge should be visible immediately
-      expect(screen.getByText('high · 18000')).toBeDefined();
+      expect(screen.getByText('high')).toBeDefined();
       // Fast badge should not be visible yet
       expect(screen.queryByText('fast')).toBeNull();
 
@@ -237,6 +237,7 @@ describe('RequestEventsTable - Live & Outcomes', () => {
         status: 200,
         duration_ms: 1500,
         service_tier: 'priority',
+        thinking_tokens: 8200,
         _phase: 'final',
       } satisfies RequestEventWithPhase;
 
@@ -249,7 +250,7 @@ describe('RequestEventsTable - Live & Outcomes', () => {
       );
 
       // Both badges should now be visible
-      expect(screen.getByText('high · 18000')).toBeDefined();
+      expect(screen.getByText('high · 8.2k')).toBeDefined();
       expect(screen.getByText('fast')).toBeDefined();
     });
   });

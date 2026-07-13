@@ -7,7 +7,7 @@ import {
   statusTone,
 } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
-import { budgetToTier, serviceTierToFast } from '../../lib/reasoningTier';
+import { reasoningBadgeText, serviceTierToFast } from '../../lib/reasoningTier';
 import { useCopyButton } from '../../lib/useCopyButton';
 import { Badge, cx, Hint } from './primitives';
 import { RelativeTime } from './RelativeTime';
@@ -81,6 +81,11 @@ export function RequestEventIdentity({
     isPartial,
     event._phase === 'final' ? event.status : 0,
     event._phase === 'final' ? event.error_code : undefined,
+  );
+  const reasoningBadge = reasoningBadgeText(
+    event.reasoning_effort,
+    event.thinking_budget_tokens,
+    event.thinking_tokens,
   );
 
   return (
@@ -170,22 +175,14 @@ export function RequestEventIdentity({
               <span className="font-mono break-all min-w-0">
                 {event.model ?? DASH}
               </span>
-              {budgetToTier(event.thinking_budget_tokens) !== 'none' && (
+              {reasoningBadge != null && (
                 <Badge tone="mono" className="shrink-0">
-                  {budgetToTier(event.thinking_budget_tokens)} ·{' '}
-                  {event.thinking_budget_tokens}
+                  {reasoningBadge}
                 </Badge>
               )}
-              {event.service_tier != null && (
-                <Badge
-                  tone={
-                    serviceTierToFast(event.service_tier) ? 'ok' : 'neutral'
-                  }
-                  className="shrink-0"
-                >
-                  {serviceTierToFast(event.service_tier)
-                    ? 'fast'
-                    : event.service_tier}
+              {serviceTierToFast(event.service_tier) && (
+                <Badge tone="ok" className="shrink-0">
+                  fast
                 </Badge>
               )}
             </span>
