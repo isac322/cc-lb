@@ -216,6 +216,8 @@ async fn open_postgres_pool(
         .min_connections(pool_config.min_connections)
         .acquire_timeout(Duration::from_secs(pool_config.acquire_timeout_secs))
         .idle_timeout(Duration::from_secs(pool_config.idle_timeout_secs))
+        .max_lifetime(Duration::from_secs(pool_config.max_lifetime_secs))
+        .test_before_acquire(pool_config.test_before_acquire)
         .after_connect(move |conn, _meta| {
             Box::pin(async move {
                 let statement_timeout =
