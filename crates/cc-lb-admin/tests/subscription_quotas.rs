@@ -401,6 +401,124 @@ async fn subscription_quota_checkpoint_aggregate_carries_unaligned_checkpoints_t
     assert_eq!(body["windows"][0]["contributing_upstreams"], 2);
 }
 
+#[tokio::test]
+async fn subscription_quota_aggregate_matches_legacy_golden_for_multiple_windows_and_boundaries() {
+    // Given: two upstreams with 5h/7d observations and usage exactly on the
+    // provider-start and cc-lb-start interval boundaries.
+    let now_unix_secs = CHECKPOINT_TEST_NOW_UNIX_SECS + 3_600;
+    let clock: ClockHandle = Arc::new(TestClock::new_at_secs(now_unix_secs));
+    let server = admin_test_common::spawn_admin_server_with_clock(clock).await;
+    let first_upstream_id = create_oauth_upstream(&server, "aggregate-golden-a").await;
+    let second_upstream_id = create_oauth_upstream(&server, "aggregate-golden-b").await;
+    let five_hour_reset = now_unix_secs + 3_600;
+    let seven_day_reset = now_unix_secs + 2 * 24 * 3_600;
+    let five_hour_provider_start = five_hour_reset - 5 * 3_600;
+    let seven_day_provider_start = seven_day_reset - 7 * 24 * 3_600;
+    let five_hour_cc_start = now_unix_secs - now_unix_secs % (5 * 3_600);
+    let seven_day_cc_start = now_unix_secs - now_unix_secs % (7 * 24 * 3_600);
+
+    let mut checkpoints = Vec::new();
+    for (upstream_id, seed, five_hour_utilization, seven_day_utilization) in [
+        (first_upstream_id, 100_u128, 0.25, 0.40),
+        (second_upstream_id, 200_u128, 0.50, 0.20),
+    ] {
+        checkpoints.push(checkpoint_record(quota_observation_with_status_and_reset(
+            upstream_id,
+            now_unix_secs - 1_200,
+            seed,
+            SubscriptionQuotaSource::Header,
+            five_hour_utilization,
+            Some(SubscriptionQuotaStatus::Allowed),
+            five_hour_reset,
+        )));
+        let mut seven_day = quota_observation_with_status_and_reset(
+            upstream_id,
+            now_unix_secs - 1_800,
+            seed + 1,
+            SubscriptionQuotaSource::Header,
+            seven_day_utilization,
+            Some(SubscriptionQuotaStatus::Allowed),
+            seven_day_reset,
+        );
+        seven_day.window = SubscriptionQuotaWindow::SevenDay;
+        checkpoints.push(checkpoint_record(seven_day));
+    }
+    server
+        .storage
+        .put_subscription_quota_checkpoints(&checkpoints)
+        .await
+        .unwrap();
+
+    for (upstream_id, upstream_name, tokens) in [
+        (
+            first_upstream_id,
+            "aggregate-golden-a",
+            [200_u64, 300, 100, 400],
+        ),
+        (
+            second_upstream_id,
+            "aggregate-golden-b",
+            [75_u64, 125, 50, 175],
+        ),
+    ] {
+        for (index, (timestamp, token_count)) in [
+            seven_day_provider_start,
+            seven_day_cc_start,
+            five_hour_provider_start,
+            five_hour_cc_start,
+        ]
+        .into_iter()
+        .zip(tokens)
+        .enumerate()
+        {
+            server
+                .storage
+                .append_request_event(&usage_event(
+                    timestamp,
+                    &format!("aggregate-golden-{upstream_id}-{index}"),
+                    upstream_id,
+                    upstream_name,
+                    token_count,
+                ))
+                .await
+                .unwrap();
+        }
+    }
+    server.storage.rollup_usage_once().await.unwrap();
+
+    // When: the public aggregate endpoint computes both windows.
+    let (status, _, body) = server
+        .client
+        .get(&format!(
+            "/admin/v1/subscription-quotas/aggregate?upstream_ids={first_upstream_id},{second_upstream_id}&windows=5h,7d&source=header"
+        ))
+        .await;
+
+    // Then: the pre-slim-path response remains the numeric golden authority.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["upstream_count"], 2);
+    let windows = body["windows"].as_array().expect("aggregate windows");
+    assert_eq!(windows.len(), 2);
+    assert_aggregate_window_matches_golden(
+        &windows[0],
+        "5h",
+        575,
+        0.375,
+        1_725.0,
+        1_150.0,
+        &[(0.25, 2_000.0, 500), (0.50, 450.0, 225)],
+    );
+    assert_aggregate_window_matches_golden(
+        &windows[1],
+        "7d",
+        1_150,
+        0.30,
+        3_925.0,
+        2_775.0,
+        &[(0.40, 2_500.0, 500), (0.20, 2_125.0, 200)],
+    );
+}
+
 async fn create_oauth_upstream(server: &admin_test_common::SpawnedAdminServer, name: &str) -> Uuid {
     let (status, _, body) = server
         .client
@@ -541,4 +659,48 @@ fn usage_event(
         duration_ms: 10,
         ..Default::default()
     }
+}
+
+fn assert_aggregate_window_matches_golden(
+    window: &serde_json::Value,
+    expected_window: &str,
+    expected_used_tokens: u64,
+    expected_utilization: f64,
+    expected_capacity_to_now: f64,
+    expected_remaining_to_now: f64,
+    expected_lots: &[(f64, f64, u64)],
+) {
+    assert_eq!(window["window"], expected_window);
+    assert_eq!(window["used_tokens"], expected_used_tokens);
+    assert_eq!(window["confidence"], "plan_weighted");
+    assert_close(window["utilization"].as_f64(), expected_utilization);
+    assert_close(
+        window["capacity_to_now_tokens_estimate"].as_f64(),
+        expected_capacity_to_now,
+    );
+    assert_close(
+        window["remaining_to_now_tokens_estimate"].as_f64(),
+        expected_remaining_to_now,
+    );
+
+    let lots = window["provider_lots"]
+        .as_array()
+        .expect("provider lots are returned");
+    assert_eq!(lots.len(), expected_lots.len());
+    for (lot, (utilization, capacity, used_before)) in lots.iter().zip(expected_lots) {
+        assert_eq!(lot["source"], "header");
+        assert_eq!(lot["state"], "fresh");
+        assert_eq!(lot["confidence"], "estimated");
+        assert_eq!(lot["used_before_cc_window_tokens"], *used_before);
+        assert_close(lot["utilization"].as_f64(), *utilization);
+        assert_close(lot["capacity_estimate_tokens"].as_f64(), *capacity);
+    }
+}
+
+fn assert_close(actual: Option<f64>, expected: f64) {
+    let actual = actual.expect("golden aggregate field is numeric");
+    assert!(
+        (actual - expected).abs() <= 1e-9,
+        "expected {expected}, got {actual}"
+    );
 }

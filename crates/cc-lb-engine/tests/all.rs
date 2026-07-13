@@ -112,6 +112,8 @@ mod preserve_anthropic_headers;
 mod principal_view_pipeline_cache;
 #[path = "principal_view_smoke.rs"]
 mod principal_view_smoke;
+#[path = "prompt_cache_byte_oracle.rs"]
+mod prompt_cache_byte_oracle;
 #[path = "prompt_cache_routing_component.rs"]
 mod prompt_cache_routing_component;
 #[path = "prompt_cache_structural_properties.rs"]

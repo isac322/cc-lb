@@ -460,6 +460,7 @@ fn install_test_pricing() {
     let mut cache_read_per_million_usd = HashMap::new();
     cache_read_per_million_usd.insert(model.to_owned(), UsdPerMillion::from_micros_usd(500_000));
     let snapshot = CatalogSnapshot {
+        payload_hash: "test-fixture-hash".to_owned(),
         fetched_at_ms: 1,
         models,
         raw_json: b"{}".to_vec(),

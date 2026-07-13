@@ -3,9 +3,10 @@ use std::collections::{BTreeMap, HashMap};
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     RequestEvent, RequestEventUpstream, StorageError, StorageResult, UsageRollup,
-    UsageRollupResolution, UsageRollupRun, UsageRollupStore,
+    UsageRollupResolution, UsageRollupRun, UsageRollupStore, UsageTokenInterval,
+    UsageTokenIntervalStore, UsageTokenIntervalSum,
 };
-use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
+use sqlx::{AssertSqlSafe, Row, Sqlite, Transaction, sqlite::SqliteRow};
 use uuid::Uuid;
 
 use crate::{SqliteStorage, map_sqlx_error};
@@ -16,6 +17,7 @@ const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
 const UNKNOWN_DIMENSION: &str = "unknown";
 const MAX_DIMENSION_CHARS: usize = 64;
+const TOKEN_INTERVAL_BATCH_SIZE: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct RollupKey {
@@ -171,6 +173,75 @@ impl UsageRollupStore for SqliteStorage {
         _run: &UsageRollupRun,
     ) -> StorageResult<()> {
         rollup_usage_once_inner(self).await.map(|_| ())
+    }
+}
+
+#[async_trait]
+impl UsageTokenIntervalStore for SqliteStorage {
+    async fn sum_usage_tokens_for_intervals(
+        &self,
+        intervals: &[UsageTokenInterval],
+    ) -> StorageResult<Vec<UsageTokenIntervalSum>> {
+        let mut sums = Vec::with_capacity(intervals.len());
+        for (batch_index, batch) in intervals.chunks(TOKEN_INTERVAL_BATCH_SIZE).enumerate() {
+            let values = std::iter::repeat_n("(?, ?, ?, ?, ?)", batch.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "WITH intervals(ordinal, interval_id, upstream_id, start_unix_secs, end_unix_secs) \
+                 AS (VALUES {values}) \
+                 SELECT intervals.interval_id AS interval_id, \
+                        COALESCE(SUM(rollup.input_tokens + rollup.output_tokens + \
+                                     rollup.cache_creation_input_tokens + \
+                                     rollup.cache_read_input_tokens), 0) AS tokens \
+                 FROM intervals \
+                 LEFT JOIN usage_rollups_v2 rollup \
+                   ON rollup.upstream_id = intervals.upstream_id \
+                  AND rollup.resolution = 'minute' \
+                  AND rollup.bucket_start_unix_secs >= intervals.start_unix_secs \
+                  AND rollup.bucket_start_unix_secs <= intervals.end_unix_secs \
+                 GROUP BY intervals.ordinal, intervals.interval_id \
+                 ORDER BY intervals.ordinal ASC"
+            );
+            let mut query = sqlx::query(AssertSqlSafe(sql));
+            for (interval_index, interval) in batch.iter().enumerate() {
+                let ordinal = batch_index
+                    .checked_mul(TOKEN_INTERVAL_BATCH_SIZE)
+                    .and_then(|value| value.checked_add(interval_index))
+                    .and_then(|value| i64::try_from(value).ok())
+                    .ok_or_else(|| StorageError::Fatal {
+                        message:
+                            "usage token interval ordinal cannot be represented as sqlite INTEGER"
+                                .to_owned(),
+                    })?;
+                query = query
+                    .bind(ordinal)
+                    .bind(u64_to_i64(interval.interval_id, "usage token interval id")?)
+                    .bind(interval.upstream_id.to_string())
+                    .bind(u64_to_i64(
+                        interval.start_unix_secs,
+                        "usage token interval start",
+                    )?)
+                    .bind(u64_to_i64(
+                        interval.end_unix_secs,
+                        "usage token interval end",
+                    )?);
+            }
+            let rows = query.fetch_all(self.pool()).await.map_err(map_sqlx_error)?;
+            for row in rows {
+                sums.push(UsageTokenIntervalSum {
+                    interval_id: i64_to_u64(
+                        row.try_get("interval_id").map_err(map_sqlx_error)?,
+                        "usage token interval id",
+                    )?,
+                    tokens: i64_to_u64(
+                        row.try_get("tokens").map_err(map_sqlx_error)?,
+                        "usage token interval sum",
+                    )?,
+                });
+            }
+        }
+        Ok(sums)
     }
 }
 
