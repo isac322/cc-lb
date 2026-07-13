@@ -52,6 +52,17 @@ impl CaptureStore {
 
     /// Persists one complete capture record.
     pub async fn insert_record(&self, record: &CaptureRecord) -> Result<(), CaptureStoreError> {
+        let mut transaction = self.begin_immediate().await?;
+        self.insert_record_in_tx(&mut transaction, record).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn insert_record_in_tx(
+        &self,
+        transaction: &mut Transaction<'static, Sqlite>,
+        record: &CaptureRecord,
+    ) -> Result<(), CaptureStoreError> {
         let payload_json = serde_json::to_string(record)?;
         let disposition_json = serde_json::to_string(&record.disposition)?;
         let disposition = disposition_json.trim_matches('"');
@@ -101,7 +112,7 @@ impl CaptureStore {
         .bind(record.input.capture_schema_version)
         .bind(&record.input.salt_version)
         .bind(payload_json)
-        .execute(&self.pool)
+        .execute(&mut **transaction)
         .await?;
 
         Ok(())
