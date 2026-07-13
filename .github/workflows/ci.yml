@@ -133,7 +133,17 @@ jobs:
       # to cut link time; the only cost is less precise test-failure backtraces.
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
-      CC_LB_TEST_READY_TIMEOUT_SECS: "120"
+      # Raised 120 -> 240: nextest-cov runs the full --all-features workspace
+      # suite under llvm-cov instrumentation on this 4-core, CARGO_BUILD_JOBS=4
+      # self-hosted node. Contention there stalls Postgres's xmin snapshot
+      # advancement (multi_instance_storage_tail's pg_snapshot_xmin visibility
+      # check, runtime_change_notifier's LISTEN/NOTIFY round-trip), so tests
+      # already scaled by this var still occasionally exceed 120s at full
+      # instance-count parallelism — observed here and independently on
+      # master (run 29223361998, a different test in the same category).
+      # 240 keeps the same env-scale convention (0696a516, 4013d027) with
+      # headroom for this runner's real contention envelope.
+      CC_LB_TEST_READY_TIMEOUT_SECS: "240"
       CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
       # Alias the same Postgres URL under DATABASE_URL and DATABASE_URL_TEST so
       # tests that check one of the latter env vars (cc-lb-scheduler integration
