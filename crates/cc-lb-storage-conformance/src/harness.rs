@@ -13,6 +13,21 @@ pub trait ConformanceBackend: Send + Sync + 'static {
     async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Storage>;
     async fn teardown(&self, fixture: Self::Fixture) -> Result<()>;
     fn kind(&self) -> BackendKind;
+
+    /// Waits until every request event already durably appended through
+    /// `storage` is visible to a subsequent `rollup_usage_once()` call.
+    /// Backends whose rollup cursor has no cross-transaction visibility
+    /// horizon can rely on the default no-op. Postgres overrides this:
+    /// its rollup cursor only admits events whose commit has fallen below
+    /// the current MVCC snapshot xmin horizon, and that horizon is shared
+    /// by every schema in the same test database, so a concurrently open
+    /// transaction in a sibling test can transiently hold it back. A
+    /// scenario that appends events and immediately rolls them up MUST
+    /// call this first to avoid a genuine (not sleep-masked) visibility
+    /// race against sibling tests sharing the same database.
+    async fn wait_for_events_visible_for_rollup(&self, _storage: &Self::Storage) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub struct ConformanceFixture<B: ConformanceBackend> {

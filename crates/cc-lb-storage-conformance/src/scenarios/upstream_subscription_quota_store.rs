@@ -843,9 +843,17 @@ aggregate_scenario!(
     }
 );
 
-aggregate_scenario!(
-    interval_sums_match_legacy_inclusive_boundary_bytes,
-    |storage| async move {
+pub async fn interval_sums_match_legacy_inclusive_boundary_bytes<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: UpstreamSubscriptionQuotaStore
+        + UpstreamSubscriptionQuotaAggregateStore
+        + UsageTokenIntervalStore
+        + RequestEventStore
+        + UsageRollupStore,
+{
+    let wait_backend = Arc::clone(&backend);
+    with_conformance_fixture(backend, move |storage| async move {
         let upstream = upstream_id(32);
         let provider_start = 1_799_985_000;
         let cc_start = 1_800_000_000;
@@ -867,6 +875,9 @@ aggregate_scenario!(
                 ))
                 .await?;
         }
+        wait_backend
+            .wait_for_events_visible_for_rollup(&storage)
+            .await?;
         storage.rollup_usage_once().await?;
 
         let intervals = [
@@ -917,8 +928,9 @@ aggregate_scenario!(
             "interval-sum JSON must be byte-identical to the legacy inclusive admin token result"
         );
         Ok(())
-    }
-);
+    })
+    .await
+}
 
 scenario!(
     sample_writer_persists_seven_day_fable_window,

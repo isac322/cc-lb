@@ -114,6 +114,32 @@ impl ConformanceBackend for PostgresConformanceBackend {
     fn kind(&self) -> BackendKind {
         BackendKind::Postgres
     }
+
+    async fn wait_for_events_visible_for_rollup(
+        &self,
+        storage: &Self::Storage,
+    ) -> anyhow::Result<()> {
+        for _ in 0..600 {
+            let eligible = sqlx::query_scalar::<_, bool>(
+                "SELECT NOT EXISTS ( \
+                     SELECT 1 FROM request_events_v1 \
+                     WHERE COALESCE(tx_id, '0'::xid8) >= pg_snapshot_xmin(pg_current_snapshot()) \
+                 )",
+            )
+            .fetch_one(storage.pool())
+            .await?;
+
+            if eligible {
+                return Ok(());
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        anyhow::bail!(
+            "timed out waiting for seeded request events to fall below the Postgres snapshot xmin horizon"
+        );
+    }
 }
 
 #[async_trait]
