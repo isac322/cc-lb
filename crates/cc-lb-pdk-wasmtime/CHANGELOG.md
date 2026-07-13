@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/isac322/cc-lb/compare/cc-lb-pdk-wasmtime-v0.1.1...cc-lb-pdk-wasmtime-v0.1.2) - 2026-07-13
+
+### Other
+
+- consolidate integration-test targets into per-crate harnesses ([#427](https://github.com/isac322/cc-lb/pull/427))
+
 ## [0.1.1](https://github.com/isac322/cc-lb/compare/cc-lb-pdk-wasmtime-v0.1.0...cc-lb-pdk-wasmtime-v0.1.1) - 2026-07-09
 
 ### Added
