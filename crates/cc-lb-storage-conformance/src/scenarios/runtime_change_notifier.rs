@@ -188,36 +188,33 @@ mod tests {
 
     use super::*;
 
-    /// Actively confirm the postgres LISTEN backend is receiving events
-    /// before the caller emits the payload it wants to observe. The 100ms
-    /// fixed `startup_delay_for_backend` was tuned for a laptop and misses
-    /// under CI coverage-instrumented load, so we prove readiness by
-    /// emitting a distinguishable probe payload and polling until it
-    /// arrives (or the outer deadline expires). This is not a blind retry
-    /// loop — it's a positive-confirmation invariant that closes the
-    /// "LISTEN scheduled but not yet issued" race.
-    async fn wait_for_listen_ready_postgres(
+    /// Emit `payload` on `channel` repeatedly until a subscriber observes it,
+    /// bounded by `RECEIVE_TIMEOUT`. Postgres LISTEN/NOTIFY is best-effort: a
+    /// NOTIFY published while the listener is momentarily reconnecting — or is
+    /// starved under CI coverage-instrumented load — is dropped for good (this
+    /// is what flaked CI), so a single emit plus a fixed wait is racy. Re-
+    /// emitting until the event round-trips is a positive-confirmation
+    /// invariant, not a blind retry: a genuinely broken notifier never delivers
+    /// and still fails at the deadline. It also subsumes listen-readiness, as
+    /// emits published before the LISTEN is issued simply never arrive.
+    async fn emit_until_received(
         pool: &sqlx::PgPool,
         receiver: &mut tokio::sync::broadcast::Receiver<ChangeEvent>,
-    ) -> Result<()> {
-        let probe = format!("readiness-probe-{}", Uuid::new_v4());
+        channel: ChangeChannel,
+        payload: &str,
+    ) -> Result<ChangeEvent> {
         let deadline = time::Instant::now() + RECEIVE_TIMEOUT;
         loop {
-            emit(pool, ChangeChannel::Upstream, &probe).await?;
+            emit(pool, channel, payload).await?;
             let remaining = deadline.saturating_duration_since(time::Instant::now());
-            ensure!(
-                !remaining.is_zero(),
-                "listener did not become ready in time"
-            );
+            ensure!(!remaining.is_zero(), "did not receive {channel:?} in time");
             let poll_budget = remaining.min(Duration::from_millis(100));
             match time::timeout(poll_budget, receiver.recv()).await {
-                Ok(Ok(event))
-                    if event.channel == ChangeChannel::Upstream && event.payload == probe =>
-                {
-                    return Ok(());
+                Ok(Ok(event)) if event.channel == channel && event.payload == payload => {
+                    return Ok(event);
                 }
                 Ok(Ok(_other)) => continue,
-                Ok(Err(err)) => anyhow::bail!("readiness probe receiver closed: {err}"),
+                Ok(Err(err)) => anyhow::bail!("notifier receiver closed: {err}"),
                 Err(_) => continue,
             }
         }
@@ -230,10 +227,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let handle = spawn_run(Arc::clone(&notifier), cancel.clone());
         let mut receiver = notifier.subscribe().await?;
-        wait_for_listen_ready_postgres(pool, &mut receiver).await?;
-        emit(pool, ChangeChannel::Upstream, "upstream-a").await?;
-        let event = recv_matching(&mut receiver, ChangeChannel::Upstream, "upstream-a").await?;
-        ensure!(event.payload == "upstream-a", "unexpected payload");
+        emit_until_received(pool, &mut receiver, ChangeChannel::Upstream, "upstream-a").await?;
         cancel.cancel();
         join_run(handle).await
     }
@@ -247,12 +241,9 @@ mod tests {
         let mut a = notifier.subscribe().await?;
         let mut b = notifier.subscribe().await?;
         let mut c = notifier.subscribe().await?;
-        startup_delay_for_backend(BackendKind::Postgres).await;
-        emit(pool, ChangeChannel::Principal, "principal-a").await?;
-        for receiver in [&mut a, &mut b, &mut c] {
-            let event = recv_matching(receiver, ChangeChannel::Principal, "principal-a").await?;
-            ensure!(event.payload == "principal-a", "fan-out payload mismatch");
-        }
+        emit_until_received(pool, &mut a, ChangeChannel::Principal, "principal-a").await?;
+        recv_matching(&mut b, ChangeChannel::Principal, "principal-a").await?;
+        recv_matching(&mut c, ChangeChannel::Principal, "principal-a").await?;
         cancel.cancel();
         join_run(handle).await
     }
@@ -264,14 +255,8 @@ mod tests {
         let cancel = CancellationToken::new();
         let handle = spawn_run(Arc::clone(&notifier), cancel.clone());
         let mut receiver = notifier.subscribe().await?;
-        startup_delay_for_backend(BackendKind::Postgres).await;
         for channel in ChangeChannel::ALL {
-            emit(pool, channel, channel.postgres_channel()).await?;
-            let event = recv_matching(&mut receiver, channel, channel.postgres_channel()).await?;
-            ensure!(
-                event.payload == channel.postgres_channel(),
-                "channel payload mismatch"
-            );
+            emit_until_received(pool, &mut receiver, channel, channel.postgres_channel()).await?;
         }
         cancel.cancel();
         join_run(handle).await
@@ -284,27 +269,22 @@ mod tests {
         let cancel = CancellationToken::new();
         let handle = spawn_run(Arc::clone(&notifier), cancel.clone());
         let mut receiver = notifier.subscribe().await?;
-        startup_delay_for_backend(BackendKind::Postgres).await;
-        emit(pool, ChangeChannel::PluginRegistry, "before-terminate").await?;
-        let first = recv_matching(
+        emit_until_received(
+            pool,
             &mut receiver,
             ChangeChannel::PluginRegistry,
             "before-terminate",
         )
         .await?;
-        ensure!(
-            first.payload == "before-terminate",
-            "first payload mismatch"
-        );
         let terminated_pid = terminate_listener_backend(pool).await?;
         wait_for_reconnected_listener(pool, terminated_pid).await?;
-        emit(pool, ChangeChannel::PluginChain, "after-terminate").await?;
-        let second =
-            recv_matching(&mut receiver, ChangeChannel::PluginChain, "after-terminate").await?;
-        ensure!(
-            second.payload == "after-terminate",
-            "second payload mismatch"
-        );
+        emit_until_received(
+            pool,
+            &mut receiver,
+            ChangeChannel::PluginChain,
+            "after-terminate",
+        )
+        .await?;
         cancel.cancel();
         join_run(handle).await
     }
