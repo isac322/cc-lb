@@ -1,5 +1,3 @@
-mod common;
-
 use std::env;
 use std::ffi::OsString;
 
@@ -33,7 +31,7 @@ impl Drop for EnvGuard {
 
 #[test]
 fn missing_tls_files_fail_with_field_path() {
-    let (_dir, path) = common::temp_config(
+    let (_dir, path) = crate::common::temp_config(
         r#"[tls]
 cert_path = "/definitely/missing/cert.pem"
 "#,
@@ -56,7 +54,7 @@ fn encrypted_storage_retains_master_key_env_name() {
 storage_path = "{}"
 oauth_aead_key_env = "CC_LB_TEST_MASTER_KEY_INVALID"
 "#,
-            common::toml_path(&dir.path().join("credentials.sqlite"))
+            crate::common::toml_path(&dir.path().join("credentials.sqlite"))
         ),
     )
     .unwrap();
@@ -74,7 +72,7 @@ oauth_aead_key_env = "CC_LB_TEST_MASTER_KEY_INVALID"
 
 #[test]
 fn validation_failures_none_mode_legacy_field() {
-    let (_dir, path) = common::temp_config(
+    let (_dir, path) = crate::common::temp_config(
         r#"[none_mode]
 upstream_credential_ref = "x"
 
@@ -93,7 +91,7 @@ upstream_credential_ref = "x"
 
 #[test]
 fn none_mode_loads_without_upstream_credential_ref() {
-    let (_dir, path) = common::temp_config(
+    let (_dir, path) = crate::common::temp_config(
         r#"[downstream_auth]
 mode = "none"
 

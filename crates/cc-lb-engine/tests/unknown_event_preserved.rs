@@ -1,4 +1,4 @@
-mod sse_relay_support;
+use crate::sse_relay_support;
 
 use std::sync::Arc;
 use std::time::Duration;

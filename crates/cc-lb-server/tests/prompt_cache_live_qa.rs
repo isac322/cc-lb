@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 #[path = "prompt_cache_live_qa/support.rs"]
 mod support;
 

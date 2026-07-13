@@ -1,4 +1,4 @@
-mod config_admin_common;
+use crate::config_admin_common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

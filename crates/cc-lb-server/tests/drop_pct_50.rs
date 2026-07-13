@@ -1,6 +1,6 @@
 #![cfg(any())]
 
-mod chaos_common;
+use crate::chaos_common;
 
 #[tokio::test]
 async fn drop_pct_50() {
