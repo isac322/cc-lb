@@ -528,7 +528,7 @@ fn block_digest(block: &CacheBlockRef<'_>, scratch: &mut SerializationScratch) -
     let bytes = scratch.serialize(&DigestBlockSerializer(block));
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"cc-lb-cache-v4:block");
-    hasher.update(&bytes);
+    hasher.update(bytes);
     let digest = *hasher.finalize().as_bytes();
     scratch.clear_for_reuse();
     digest

@@ -1084,7 +1084,6 @@ pub async fn build_cc_lb_aggregate_response(
             (window, ids)
         })
         .collect::<HashMap<_, _>>();
-    drop(push_interval);
     let token_sums = storage
         .sum_usage_tokens_for_intervals(&intervals)
         .await?
