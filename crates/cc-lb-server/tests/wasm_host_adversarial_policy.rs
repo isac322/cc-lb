@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_domain::{Principal, PrincipalKind, Upstream};
-use cc_lb_plugin_wire::schema::WireSchema;
 use cc_lb_plugin_wire::ShapeResponse;
+use cc_lb_plugin_wire::schema::WireSchema;
 use cc_lb_runtime_wasmtime::{
     HotEngineConfig, RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime,
     policy::ShapeOriginPolicy,

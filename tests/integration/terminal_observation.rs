@@ -680,10 +680,8 @@ async fn raw_http(
     let (mut reader, mut writer) = stream.into_split();
     writer.write_all(request.as_bytes()).await?;
     let mut bytes = Vec::new();
-    let (write_result, read_result) = tokio::join!(
-        writer.write_all(body),
-        reader.read_to_end(&mut bytes),
-    );
+    let (write_result, read_result) =
+        tokio::join!(writer.write_all(body), reader.read_to_end(&mut bytes),);
     read_result?;
     let response = parse_raw_response(&bytes)?;
 

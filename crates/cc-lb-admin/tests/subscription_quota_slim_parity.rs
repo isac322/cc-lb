@@ -87,7 +87,8 @@ async fn subscription_quota_aggregate_exact_boundary_tokens_match_legacy_inclusi
 }
 
 #[tokio::test]
-async fn subscription_quota_slim_aggregate_matches_legacy_reference_for_seven_days_and_fifty_upstreams() {
+async fn subscription_quota_slim_aggregate_matches_legacy_reference_for_seven_days_and_fifty_upstreams()
+ {
     let clock: ClockHandle = Arc::new(TestClock::new_at_secs(NOW_UNIX_SECS));
     let server = admin_test_common::spawn_admin_server_with_clock(clock).await;
     let mut upstream_ids = Vec::with_capacity(50);
