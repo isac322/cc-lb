@@ -430,14 +430,18 @@ impl Default for AeadConfig {
 pub struct PostgresPoolConfig {
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
-    #[serde(default)]
+    #[serde(default = "default_min_connections")]
     pub min_connections: u32,
     #[serde(default = "default_acquire_timeout_secs")]
     pub acquire_timeout_secs: u64,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    #[serde(default = "default_max_lifetime_secs")]
+    pub max_lifetime_secs: u64,
     #[serde(default = "default_statement_timeout_secs")]
     pub statement_timeout_secs: u64,
+    #[serde(default = "default_test_before_acquire")]
+    pub test_before_acquire: bool,
     #[serde(default = "default_sslmode")]
     pub sslmode: String,
 }
@@ -446,10 +450,12 @@ impl Default for PostgresPoolConfig {
     fn default() -> Self {
         Self {
             max_connections: default_max_connections(),
-            min_connections: 0,
+            min_connections: default_min_connections(),
             acquire_timeout_secs: default_acquire_timeout_secs(),
             idle_timeout_secs: default_idle_timeout_secs(),
+            max_lifetime_secs: default_max_lifetime_secs(),
             statement_timeout_secs: default_statement_timeout_secs(),
+            test_before_acquire: default_test_before_acquire(),
             sslmode: default_sslmode(),
         }
     }
@@ -1243,6 +1249,18 @@ fn default_statement_timeout_secs() -> u64 {
 
 fn default_sslmode() -> String {
     "prefer".to_owned()
+}
+
+fn default_min_connections() -> u32 {
+    1
+}
+
+fn default_max_lifetime_secs() -> u64 {
+    1800
+}
+
+fn default_test_before_acquire() -> bool {
+    true
 }
 
 fn default_scheduler_pool_max_connections() -> u32 {

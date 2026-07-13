@@ -50,10 +50,12 @@ fn test_postgres_pool_defaults() {
     let pool = PostgresPoolConfig::default();
 
     assert_eq!(pool.max_connections, 10);
-    assert_eq!(pool.min_connections, 0);
+    assert_eq!(pool.min_connections, 1);
     assert_eq!(pool.acquire_timeout_secs, 5);
     assert_eq!(pool.idle_timeout_secs, 600);
+    assert_eq!(pool.max_lifetime_secs, 1800);
     assert_eq!(pool.statement_timeout_secs, 30);
+    assert!(pool.test_before_acquire);
     assert_eq!(pool.sslmode, "prefer");
 }
 
