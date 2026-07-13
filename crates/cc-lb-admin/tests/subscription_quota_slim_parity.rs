@@ -1,4 +1,4 @@
-mod admin_test_common;
+use crate::admin_test_common;
 #[path = "support/subscription_quota_fixture.rs"]
 mod subscription_quota_fixture;
 

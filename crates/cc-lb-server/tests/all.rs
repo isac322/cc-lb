@@ -104,6 +104,8 @@ mod prompt_cache_live_qa;
 mod prompt_cache_observation_metrics;
 #[path = "prompt_cache_shadow_disabled_is_no_op.rs"]
 mod prompt_cache_shadow_disabled_is_no_op;
+#[path = "proxy_body_limits.rs"]
+mod proxy_body_limits;
 #[path = "proxy_error_fallbacks.rs"]
 mod proxy_error_fallbacks;
 #[path = "readyz_503_during_drain.rs"]
@@ -160,5 +162,7 @@ mod validate_fail_missing_tls;
 mod validate_ok_config;
 #[path = "version_includes_sha.rs"]
 mod version_includes_sha;
+#[path = "wasm_host_adversarial_policy.rs"]
+mod wasm_host_adversarial_policy;
 #[path = "wasm_host_shape.rs"]
 mod wasm_host_shape;
