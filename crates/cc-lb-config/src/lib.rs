@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 pub use types::{
-    AdminConfig, AnthropicOAuthConfig, ApiKeysConfig, BodyConfig, BulkheadConfig,
+    AdminConfig, AnthropicOAuthConfig, ApiKeysConfig, BodyConfig, BulkheadConfig, CaptureConfig,
     CircuitBreakerConfig, ClusterConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV,
     DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
     DEFAULT_SQLITE_PATH, DnsConfig, DownstreamAuthConfig, DownstreamAuthMode, EgressConfig,

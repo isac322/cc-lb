@@ -47,6 +47,8 @@ pub mod lifecycle_api_key_metrics_subscriber;
 pub mod lifecycle_cache_hit_miss_subscriber;
 #[cfg(not(loom))]
 pub mod lifecycle_cache_observation_subscriber;
+#[cfg(feature = "capture")]
+mod lifecycle_capture;
 pub mod lifecycle_event_assembler;
 pub mod lifecycle_event_logger;
 pub mod lifecycle_hook_adapter;
