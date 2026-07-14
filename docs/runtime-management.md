@@ -152,8 +152,10 @@ principal, or `null` when unset. `PATCH /admin/v1/principals/{id}` with
 |---|---|---|---|---|---|
 | GET | `/admin/v1/plugins/registry` | Bearer | None | RegistryListResponse | None |
 | GET | `/admin/v1/plugins/registry/{id}` | Bearer | None | RegistryEntryResponse | `unknown_registry_entry` |
+| GET | `/admin/v1/plugins/registry/{id}/references` | Bearer | None | RegistryReferencesResponse | `unknown_registry_entry` |
 | PATCH | `/admin/v1/plugins/registry/{id}` | Bearer | PatchRegistryBody | RegistryEntryResponse | `stale_revision` |
-| DELETE | `/admin/v1/plugins/registry/{id}` | Bearer | None | None | `referenced_by` |
+| DELETE | `/admin/v1/plugins/registry/{id}` | Bearer + `If-Match` | None | None | `referenced_by`, `stale_revision` |
+| DELETE | `/admin/v1/plugins/registry/{id}?cascade=references` | Bearer + `If-Match` + `X-Reference-Fingerprint` | None | RegistryCascadeDeleteResponse | `reference_fingerprint_required`, `references_changed`, `stale_revision` |
 | GET | `/admin/v1/principals/{principal_id}/plugin-chain` | Bearer | None | ChainListResponse | None |
 | POST | `/admin/v1/principals/{principal_id}/plugin-chain` | Bearer | InsertChainBody | PluginChainEntry | `conflict` |
 | POST | `/admin/v1/principals/{principal_id}/plugin-chain/reorder` | Bearer | ReorderBody | None | `stale_revision` |
@@ -174,6 +176,10 @@ principal, or `null` when unset. `PATCH /admin/v1/principals/{id}` with
   "position": null
 }
 ```
+
+`RegistryEntryResponse` includes the inspected plugin metadata name, nullable `version`, SHA-256, supported slots, revision, and a live `refcount`. The `refcount` is computed from both principal plugin-chain bindings and upstream warmup dialect plugin bindings.
+
+`GET /admin/v1/plugins/registry/{id}/references` returns a `reference_fingerprint` plus the concrete chain and warmup resources that currently reference the plugin. Use that fingerprint when intentionally deleting a referenced plugin with `?cascade=references`; stale fingerprints are rejected with `409 references_changed` so operators see a fresh impact list before removing bindings.
 
 ### Status and Export API
 
@@ -261,10 +267,12 @@ You upload Wasm plugins via a multipart POST request to `/admin/v1/plugins/wasm`
 ```bash
 curl -X POST http://localhost:8001/admin/v1/plugins/wasm \
   -H "Authorization: Bearer <TOKEN>" \
-  -F "name=my-plugin" \
+  -F "slot_kind=shape" \
   -F "original_filename=plugin.wasm" \
   -F "bytes=@path/to/plugin.wasm"
 ```
+
+`slot_kind` is required and must be one of `filter`, `shape`, or `observe`. `name` is optional legacy input; if present, it must match the plugin metadata name embedded in the Wasm. `original_filename` is optional and defaults to `<metadata-name>.wasm`.
 
 Response:
 
@@ -274,18 +282,43 @@ Response:
   "id": "<PLUGIN_ID>",
   "size_bytes": 1024,
   "original_filename": "plugin.wasm",
+  "version": "1.0.0",
   "revision": 1,
-  "idempotent": false
+  "idempotent": false,
+  "action": "created"
 }
 ```
+
+Upload actions are:
+
+- `created`: new plugin metadata name.
+- `noop`: same metadata name and same SHA-256; returns `200` and preserves the registry row.
+- `replaced`: same metadata name and different SHA-256; preserves the registry `id`, updates the version/SHA/metadata, and triggers dynamic rebind.
+
+Higher semantic versions replace in place without a confirmation round trip. Same, lower, missing, or unparseable replacement versions require a `409 replacement_confirmation_required` response first:
+
+```json
+{
+  "error": "replacement_confirmation_required",
+  "name": "my-plugin",
+  "replace_registry_id": "<PLUGIN_ID>",
+  "expected_revision": 3,
+  "current_version": "1.0.0",
+  "incoming_version": "1.0.0",
+  "current_sha256_hex": "...",
+  "incoming_sha256_hex": "..."
+}
+```
+
+Retry the same upload with `confirm_replacement=true`, `replace_registry_id`, and `expected_revision` to approve the replacement.
 
 ### Validation and Deduplication
 
 - **Size Limit**: The upload is limited to 32 MiB per blob.
 - **Magic Bytes**: The server performs a magic-bytes check to verify that the uploaded file starts with `\0asm`.
 - **Wasmtime Validation**: The server inspects the plugin with wasmtime (`inspect_wasm`) to verify required exports (`cc_lb_alloc`, `cc_lb_free`, `memory`, and the per-slot hook), reject disallowed host imports, and confirm the embedded BLAKE3 schema hash matches the slot's wire contract.
-- **SHA-256 Deduplication**: The server computes the SHA-256 hash of the bytes to deduplicate uploads. If the blob already exists, the server updates the registry metadata without duplicating the file on disk.
-- **Reference Counting**: The server tracks references to each plugin blob. If you attempt to delete a registry entry that is currently referenced by a principal's plugin chain, the delete operation is blocked with a `referenced_by` conflict error.
+- **SHA-256 Deduplication**: The server computes the SHA-256 hash of the bytes to deduplicate uploads. Same-name/same-SHA uploads are noops; same-name/different-SHA uploads follow the semantic-version replacement policy above.
+- **Reference Counting**: The server computes plugin references from principal plugin-chain rows and upstream warmup dialect plugin rows. A normal delete of a referenced registry entry is blocked with `referenced_by`; an intentional cascade delete requires the latest reference fingerprint and removes all listed references atomically.
 
 ## Multi-Replica Operations
 
