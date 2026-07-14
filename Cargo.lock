@@ -1444,6 +1444,7 @@ dependencies = [
  "cc-lb-plugin-wire",
  "cc-lb-storage-api",
  "chrono",
+ "metrics",
  "serde",
  "serde_json",
  "sha2 0.11.0",

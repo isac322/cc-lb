@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 
 use crate::{
-    BackendKind, RuntimeChangeNotifier, StorageError, StorageResult,
+    BackendKind, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket,
+    RequestEventKeyUsageQuery, RuntimeChangeNotifier, StorageError, StorageResult,
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
     cache_keepalive_sessions::CacheKeepaliveSessionStore,
     organization_metadata::OrganizationMetadataStore,
@@ -125,6 +126,28 @@ pub trait RequestEventStore: Send + Sync {
         let _ = query;
         Err(StorageError::Fatal {
             message: "list_request_events is not implemented for this storage backend".to_owned(),
+        })
+    }
+
+    async fn request_event_key_last_used(
+        &self,
+        query: &RequestEventKeyLastUsedQuery,
+    ) -> StorageResult<Vec<RequestEventKeyLastUsed>> {
+        let _ = query;
+        Err(StorageError::Fatal {
+            message: "request_event_key_last_used is not implemented for this storage backend"
+                .to_owned(),
+        })
+    }
+
+    async fn request_event_key_usage(
+        &self,
+        query: &RequestEventKeyUsageQuery,
+    ) -> StorageResult<Vec<RequestEventKeyUsageBucket>> {
+        let _ = query;
+        Err(StorageError::Fatal {
+            message: "request_event_key_usage is not implemented for this storage backend"
+                .to_owned(),
         })
     }
 

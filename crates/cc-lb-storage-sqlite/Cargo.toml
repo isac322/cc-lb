@@ -22,6 +22,7 @@ chrono = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+metrics = { workspace = true }
 sqlx = { workspace = true, features = ["chrono", "json", "macros", "migrate", "runtime-tokio", "sqlite", "tls-rustls-ring", "uuid"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

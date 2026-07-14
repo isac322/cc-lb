@@ -8,6 +8,7 @@ use axum::{
 use cc_lb_control::AuditEntry;
 use cc_lb_control::api_keys::key_store::CreateParams;
 use cc_lb_control::api_keys::secret;
+use cc_lb_storage_api::RequestEventKeyLastUsedQuery;
 use cc_lb_storage_api::types::{KeyStatus, PrincipalKindLite, UpstreamKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -139,8 +140,6 @@ async fn list_keys(
 
     match key_store.list_all().await {
         Ok(records) => {
-            // Build key_id -> max(ts) map from recent request events.
-            // Window: last 30 days, capped to 5000 events. Best-effort.
             let last_used_map: std::collections::HashMap<String, u64> = if let Some(storage) =
                 state.storage.as_ref()
             {
@@ -148,27 +147,19 @@ async fn list_keys(
                     cc_lb_clock::unix_millis(state.clock.now()).min(u128::from(u64::MAX)) as u64;
                 let since_ms = now_ms.saturating_sub(30 * 24 * 60 * 60 * 1000);
                 match storage
-                    .query_request_events(since_ms / 1000, now_ms / 1000, 5000)
+                    .request_event_key_last_used(&RequestEventKeyLastUsedQuery {
+                        principal_id: id.clone(),
+                        since_unix_secs: since_ms / 1000,
+                        until_unix_secs: now_ms / 1000,
+                    })
                     .await
                 {
-                    Ok(events) => {
-                        let mut map: std::collections::HashMap<String, u64> =
-                            std::collections::HashMap::new();
-                        for ev in events {
-                            if let Some(kid) = ev.key_id.as_ref() {
-                                if kid.is_empty() {
-                                    continue;
-                                }
-                                let entry = map.entry(kid.clone()).or_insert(0);
-                                if ev.ts > *entry {
-                                    *entry = ev.ts;
-                                }
-                            }
-                        }
-                        map
-                    }
+                    Ok(rows) => rows
+                        .into_iter()
+                        .map(|row| (row.key_id, row.last_used_at_unix_secs))
+                        .collect(),
                     Err(err) => {
-                        tracing::warn!(%err, "list_keys: query_request_events failed; last_used unavailable");
+                        tracing::warn!(%err, "list_keys: request_event_key_last_used failed; last_used unavailable");
                         std::collections::HashMap::new()
                     }
                 }

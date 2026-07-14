@@ -79,9 +79,13 @@ impl CompiledModuleCache {
         let next_use = bump_use(&mut state.next_use);
         if let Some(entry) = state.entries.get_mut(&key) {
             entry.last_used = next_use;
-            return Ok(Arc::clone(&entry.instance_pre));
+            let instance_pre = Arc::clone(&entry.instance_pre);
+            metrics::counter!("cc_lb_compiled_module_cache_hits_total").increment(1);
+            record_cache_size_metrics(&state);
+            return Ok(instance_pre);
         }
 
+        metrics::counter!("cc_lb_compiled_module_cache_misses_total").increment(1);
         let (instance_pre, compiled_bytes) = compile()?;
         state.total_bytes = state.total_bytes.saturating_add(compiled_bytes);
         state.entries.insert(
@@ -93,6 +97,7 @@ impl CompiledModuleCache {
             },
         );
         evict_to_limits(&mut state, self.limits);
+        record_cache_size_metrics(&state);
         Ok(instance_pre)
     }
 
@@ -102,6 +107,7 @@ impl CompiledModuleCache {
         let mut state = self.state.lock();
         state.warm_keys = warm_keys;
         evict_to_limits(&mut state, self.limits);
+        record_cache_size_metrics(&state);
     }
 }
 
@@ -126,7 +132,13 @@ fn evict_to_limits(state: &mut CacheState, limits: CacheLimits) {
         };
         if let Some(entry) = state.entries.remove(&eviction_key) {
             state.total_bytes = state.total_bytes.saturating_sub(entry.compiled_bytes);
+            metrics::counter!("cc_lb_compiled_module_cache_evictions_total").increment(1);
         }
         state.warm_keys.remove(&eviction_key);
     }
+}
+
+fn record_cache_size_metrics(state: &CacheState) {
+    metrics::gauge!("cc_lb_compiled_module_cache_entries").set(state.entries.len() as f64);
+    metrics::gauge!("cc_lb_compiled_module_cache_bytes").set(state.total_bytes as f64);
 }

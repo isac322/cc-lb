@@ -96,6 +96,7 @@ impl RouterPlugin for NoopRouter {
 pub struct SpawnedAdminServer {
     pub _dir: tempfile::TempDir,
     pub storage: Arc<SqliteStorage>,
+    pub dynamic_view: Arc<DynamicViewHolder>,
     pub client: AdminClient,
     pub _audit_task: tokio::task::JoinHandle<()>,
 }
@@ -115,6 +116,7 @@ pub async fn spawn_admin_server_with_clock(clock: ClockHandle) -> SpawnedAdminSe
     let storage = sqlite_storage_with_clock(dir.path(), "admin.sqlite", clock.clone()).await;
     let (audit_sink, audit_task) = spawn_audit_writer(storage.clone(), 128);
     let config = Config::default();
+    let dynamic_view = dynamic_view_holder(&config);
     let state = cc_lb_admin::AdminState {
         storage: Some(storage.clone()),
         key_store: Some(key_store(storage.clone())),
@@ -127,7 +129,7 @@ pub async fn spawn_admin_server_with_clock(clock: ClockHandle) -> SpawnedAdminSe
         data_dir: None,
         warmup_dialect_dispatcher: None,
         audit_sink: Some(Arc::new(audit_sink)),
-        dynamic_view: dynamic_view_holder(&config),
+        dynamic_view: dynamic_view.clone(),
         config: Arc::new(config),
         scheduler: None,
         admin_token: Some("test-token".to_owned()),
@@ -139,12 +141,31 @@ pub async fn spawn_admin_server_with_clock(clock: ClockHandle) -> SpawnedAdminSe
     SpawnedAdminServer {
         _dir: dir,
         storage,
+        dynamic_view,
         client: AdminClient {
             app: cc_lb_admin::router(state),
             token: "test-token".to_owned(),
         },
         _audit_task: audit_task,
     }
+}
+
+pub fn set_dynamic_principal(dynamic_view: &DynamicViewHolder, principal_id: &str) {
+    let principal_view = Arc::new(PrincipalView::for_tests(
+        principal_id,
+        true,
+        Vec::new(),
+        Vec::new(),
+        std::collections::HashMap::new(),
+    ));
+    let view = DynamicViewBuilder::new(dynamic_view.generation().saturating_add(1))
+        .signer_factory(Arc::new(NoopSignerFactory))
+        .global_router(Arc::new(NoopRouter))
+        .global_observability_hooks(Vec::<Arc<dyn ObservabilityHook>>::new())
+        .principal_view(principal_view)
+        .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
+        .build();
+    dynamic_view.store(view);
 }
 
 pub async fn sqlite_storage(dir: &std::path::Path, filename: &str) -> Arc<SqliteStorage> {

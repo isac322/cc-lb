@@ -119,6 +119,63 @@ async fn quota_slim_checkpoints_match_old_ranges_with_anchor_and_sample_ties() {
 }
 
 #[tokio::test]
+async fn quota_left_anchor_plan_avoids_correlated_anti_join() {
+    let (_temp_dir, storage) = quota_storage("left-anchor-plan.sqlite").await;
+    let upstream_id = Uuid::from_u128(0x101);
+
+    let plan = sqlx::query(
+        "EXPLAIN QUERY PLAN \
+         WITH anchor_ts AS ( \
+             SELECT upstream_id, window, source, MAX(changed_at_unix_millis) AS changed_at_unix_millis \
+             FROM upstream_subscription_quota_checkpoints_v1 \
+             WHERE upstream_id IN (?) \
+               AND window IN ('5h') \
+               AND source IN ('header') \
+               AND changed_at_unix_millis < ? \
+             GROUP BY upstream_id, window, source \
+         ), \
+         anchor_ids AS ( \
+             SELECT checkpoint.upstream_id, checkpoint.window, checkpoint.source, \
+                    checkpoint.changed_at_unix_millis, MAX(checkpoint.sample_id) AS sample_id \
+             FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
+             INNER JOIN anchor_ts anchor \
+               ON anchor.upstream_id = checkpoint.upstream_id \
+              AND anchor.window = checkpoint.window \
+              AND anchor.source = checkpoint.source \
+              AND anchor.changed_at_unix_millis = checkpoint.changed_at_unix_millis \
+             GROUP BY checkpoint.upstream_id, checkpoint.window, checkpoint.source, \
+                      checkpoint.changed_at_unix_millis \
+         ) \
+         SELECT checkpoint.upstream_id, checkpoint.window, checkpoint.source, \
+                checkpoint.changed_at_unix_millis, checkpoint.sample_id, \
+                checkpoint.utilization, checkpoint.status, checkpoint.resets_at_unix_secs \
+         FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
+         INNER JOIN anchor_ids anchor \
+           ON anchor.upstream_id = checkpoint.upstream_id \
+          AND anchor.window = checkpoint.window \
+          AND anchor.source = checkpoint.source \
+          AND anchor.changed_at_unix_millis = checkpoint.changed_at_unix_millis \
+          AND anchor.sample_id = checkpoint.sample_id",
+    )
+    .bind(upstream_id.to_string())
+    .bind(2_000_i64)
+    .fetch_all(storage.pool())
+    .await
+    .expect("explain left-anchor query");
+    let details = plan
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("detail").expect("plan detail"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        details
+            .iter()
+            .all(|detail| !detail.contains("CORRELATED SCALAR SUBQUERY")),
+        "left-anchor query must not use a correlated anti-join plan: {details:?}"
+    );
+}
+
+#[tokio::test]
 async fn quota_provider_lots_preserve_reset_cycles_without_full_records() {
     let (_temp_dir, storage) = quota_storage("provider-lots.sqlite").await;
     let upstream_id = Uuid::from_u128(0x200);

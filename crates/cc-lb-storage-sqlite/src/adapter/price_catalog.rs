@@ -8,6 +8,8 @@ use sqlx::Row;
 
 use crate::{SqliteStorage, map_sqlx_error};
 
+const PRICE_CATALOG_SNAPSHOT_RETENTION: i64 = 3;
+
 #[async_trait]
 impl PriceCatalogCache for SqliteStorage {
     async fn put_price_snapshot(&self, json_bytes: &[u8], fetched_at_ms: u64) -> StorageResult<()> {
@@ -28,6 +30,19 @@ impl PriceCatalogCache for SqliteStorage {
         .bind(payload)
         .bind(&payload_hash)
         .bind(fetched_at_ms)
+        .execute(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+
+        sqlx::query(
+            "DELETE FROM price_catalog_snapshots_v1 \
+             WHERE id NOT IN ( \
+                 SELECT id FROM price_catalog_snapshots_v1 \
+                 ORDER BY fetched_at_ms DESC, id DESC \
+                 LIMIT ? \
+             )",
+        )
+        .bind(PRICE_CATALOG_SNAPSHOT_RETENTION)
         .execute(self.pool())
         .await
         .map_err(map_sqlx_error)?;
