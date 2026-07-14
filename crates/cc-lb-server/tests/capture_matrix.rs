@@ -264,6 +264,7 @@ async fn replay_consistency_matches_deterministic_trace() {
     let ctx = RoutingContext {
         request_id: input.request_id.clone(),
         thread_id: input.thread_id.clone(),
+        requested_service_tier: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),

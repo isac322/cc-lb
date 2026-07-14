@@ -2167,7 +2167,11 @@ impl Lifecycle {
                     PendingCapturedRequestInput::new(
                         observer.event_id().to_owned(),
                         cache_metadata.canonical_model_id.clone(),
-                        cache_pricing_summary_for_model(&cache_metadata.canonical_model_id),
+                        cache_pricing_summary_for_model(
+                            cc_lb_pricing::global_catalog(),
+                            &cache_metadata.canonical_model_id,
+                            cache_metadata.requested_service_tier.as_deref(),
+                        ),
                         cache_metadata.plugin_cache_breakpoints(),
                         candidates.clone(),
                         unix_now_ms(&*self.clock),
