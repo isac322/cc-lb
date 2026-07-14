@@ -58,7 +58,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.0
 
       - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853
         with:
           tool: cargo-semver-checks@0.48
 
@@ -95,7 +95,7 @@ jobs:
 
       - name: Run release-plz release
         id: release-plz
-        uses: MarcoIeni/release-plz-action@v0.5
+        uses: MarcoIeni/release-plz-action@v0.5.131
         with:
           command: release
         env:
@@ -156,7 +156,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.0
 
       - name: Run release-plz release-pr
-        uses: MarcoIeni/release-plz-action@v0.5
+        uses: MarcoIeni/release-plz-action@v0.5.131
         with:
           command: release-pr
         env:
