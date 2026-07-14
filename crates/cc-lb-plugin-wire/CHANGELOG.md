@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-wire-v0.6.1...cc-lb-plugin-wire-v0.6.2) - 2026-07-14
+
+### Other
+
+- consolidate integration-test targets into per-crate harnesses ([#427](https://github.com/isac322/cc-lb/pull/427))
+
 ## [0.6.1](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-wire-v0.6.0...cc-lb-plugin-wire-v0.6.1) - 2026-07-12
 
 ### Other
