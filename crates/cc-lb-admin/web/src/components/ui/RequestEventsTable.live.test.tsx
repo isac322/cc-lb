@@ -229,7 +229,7 @@ describe('RequestEventsTable - Live & Outcomes', () => {
       expect(screen.queryByText('sess_123')).toBeNull();
     });
 
-    it('shows reasoning badge on partial event, and priority badge only after final update', async () => {
+    it('shows the service-tier badge only after the final update provides service_tier', async () => {
       cleanup();
       const partialEvent = {
         event_id: 'evt_badges',
@@ -251,9 +251,7 @@ describe('RequestEventsTable - Live & Outcomes', () => {
         />,
       );
 
-      // Reasoning badge should be visible immediately
-      expect(screen.getByText('high')).toBeDefined();
-      // Priority badge should not be visible yet
+      // No service_tier yet → no tier badge
       expect(screen.queryByText('priority')).toBeNull();
 
       // Rerender with final event that includes service_tier
@@ -274,9 +272,9 @@ describe('RequestEventsTable - Live & Outcomes', () => {
         />,
       );
 
-      // Both badges should now be visible
-      expect(screen.getByText('high · 8.2k')).toBeDefined();
+      // Tier badge appears; reasoning is never shown in the table
       expect(screen.getByText('priority')).toBeDefined();
+      expect(screen.queryByText('high · 8.2k')).toBeNull();
     });
   });
 });

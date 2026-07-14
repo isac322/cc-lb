@@ -206,7 +206,15 @@ pub fn inspect_wasm(kind: HookKind, wasm: &[u8]) -> Result<ModuleInspection, Was
                     hook.as_str()
                 ),
             })?;
-        let expected = expected_fingerprint(hook, wire_version);
+        let expected = expected_fingerprint(hook, wire_version).ok_or_else(|| {
+            WasmtimeRuntimeError::ModuleRejected {
+                reason: format!(
+                    "host has no schema for hook `{}` wire version {}",
+                    hook.as_str(),
+                    wire_version.as_u8()
+                ),
+            }
+        })?;
         if observed != expected {
             return Err(WasmtimeRuntimeError::ModuleRejected {
                 reason: format!(
@@ -311,23 +319,30 @@ pub(crate) fn schema_section_name(hook: HookKind, version: WireVersion) -> Strin
     format!("{}.{}", hook.section_prefix(), version.as_str())
 }
 
-pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> [u8; 32] {
+pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> Option<[u8; 32]> {
     match (hook, version) {
         (HookKind::Filter, WireVersion::V1) => {
-            <cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT
+            Some(<cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT)
+        }
+        (HookKind::Filter, WireVersion::V2) => {
+            Some(<cc_lb_plugin_wire::v2::FilterRequest as WireSchema>::FINGERPRINT)
         }
         (HookKind::Shape, WireVersion::V1) => {
-            <cc_lb_plugin_wire::v1::ShapeRequest as WireSchema>::FINGERPRINT
+            Some(<cc_lb_plugin_wire::v1::ShapeRequest as WireSchema>::FINGERPRINT)
         }
         (HookKind::Observe, WireVersion::V1) => {
-            <cc_lb_plugin_wire::v1::ObserveEvent as WireSchema>::FINGERPRINT
+            Some(<cc_lb_plugin_wire::v1::ObserveEvent as WireSchema>::FINGERPRINT)
         }
         (HookKind::TransformResponse, WireVersion::V1) => {
-            <cc_lb_plugin_wire::v1::TransformResponseRequest as WireSchema>::FINGERPRINT
+            Some(<cc_lb_plugin_wire::v1::TransformResponseRequest as WireSchema>::FINGERPRINT)
         }
         (HookKind::TransformSseEvent, WireVersion::V1) => {
-            <cc_lb_plugin_wire::v1::TransformSseEventRequest as WireSchema>::FINGERPRINT
+            Some(<cc_lb_plugin_wire::v1::TransformSseEventRequest as WireSchema>::FINGERPRINT)
         }
+        (HookKind::Shape, WireVersion::V2)
+        | (HookKind::Observe, WireVersion::V2)
+        | (HookKind::TransformResponse, WireVersion::V2)
+        | (HookKind::TransformSseEvent, WireVersion::V2) => None,
     }
 }
 
@@ -341,23 +356,35 @@ fn hex32(bytes: &[u8; 32]) -> String {
 }
 
 #[cfg(test)]
+mod filter_version_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
 
     fn filter_section_bytes() -> Vec<u8> {
-        expected_fingerprint(HookKind::Filter, WireVersion::V1).to_vec()
+        expected_fingerprint(HookKind::Filter, WireVersion::V1)
+            .expect("filter V1 schema")
+            .to_vec()
     }
     fn shape_section_bytes() -> Vec<u8> {
-        expected_fingerprint(HookKind::Shape, WireVersion::V1).to_vec()
+        expected_fingerprint(HookKind::Shape, WireVersion::V1)
+            .expect("shape V1 schema")
+            .to_vec()
     }
     fn observe_section_bytes() -> Vec<u8> {
-        expected_fingerprint(HookKind::Observe, WireVersion::V1).to_vec()
+        expected_fingerprint(HookKind::Observe, WireVersion::V1)
+            .expect("observe V1 schema")
+            .to_vec()
     }
     fn transform_response_section_bytes() -> Vec<u8> {
-        expected_fingerprint(HookKind::TransformResponse, WireVersion::V1).to_vec()
+        expected_fingerprint(HookKind::TransformResponse, WireVersion::V1)
+            .expect("transform response V1 schema")
+            .to_vec()
     }
     fn transform_sse_event_section_bytes() -> Vec<u8> {
-        expected_fingerprint(HookKind::TransformSseEvent, WireVersion::V1).to_vec()
+        expected_fingerprint(HookKind::TransformSseEvent, WireVersion::V1)
+            .expect("transform SSE V1 schema")
+            .to_vec()
     }
 
     fn metadata_section(hook: &str) -> Vec<u8> {

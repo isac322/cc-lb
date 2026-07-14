@@ -366,6 +366,7 @@ impl Partial {
                 usage.cache_creation_input_tokens_1h,
                 usage.cache_read_input_tokens,
                 upstream_kind,
+                usage.service_tier.as_deref(),
             )
             .into()
         })

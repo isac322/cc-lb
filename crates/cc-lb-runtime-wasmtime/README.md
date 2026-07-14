@@ -11,7 +11,8 @@ crates, it depends only on the wire contract; guest plugins use
 
 - `admit_wasm(engine, wasm_bytes)` — full admission gate: `inspect_wasm` (static
   metadata + fingerprint check) followed by canonical sample payload probe per
-  declared hook.
+  declared hook and wire version. Filter V2 probes carry
+  `service_tier = Some("priority")`; Filter V1 probes keep the V1 layout.
 - `inspect_wasm(kind, wasm_bytes)` — structural-only load-time verification.
 - Wire-level dispatch primitives consumed by host adapters. The
   `WasmtimeFilterPlugin`, `WasmtimeUpstreamDialect`, and

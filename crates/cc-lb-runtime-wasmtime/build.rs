@@ -28,6 +28,10 @@ const FIXTURE_CRATES: &[Fixture] = &[
         src_path: "../../plugins/test-fixtures/wasmtime-observe-noop/src/lib.rs",
     },
     Fixture {
+        crate_name: "wasmtime-filter-v2",
+        src_path: "../../plugins/test-fixtures/wasmtime-filter-v2/src/lib.rs",
+    },
+    Fixture {
         crate_name: "cache-aware-wasmtime",
         src_path: "../../plugins/router/cache-aware-wasmtime/src/lib.rs",
     },

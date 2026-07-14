@@ -824,7 +824,7 @@ async fn wait_for_price_catalog() -> Result<(), Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if global_catalog()
-            .lookup(MODEL, Some(PricingUpstreamKind::AnthropicKey))
+            .lookup(MODEL, Some(PricingUpstreamKind::AnthropicKey), None)
             .is_some()
         {
             return Ok(());
@@ -844,6 +844,7 @@ fn seed_price_catalog() {
             model: MODEL.to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(3),
             output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+            by_tier: Default::default(),
         },
     );
     global_catalog().install_snapshot(CatalogSnapshot {
@@ -853,6 +854,8 @@ fn seed_price_catalog() {
         raw_json: serde_json::to_vec(&price_catalog_fixture()).expect("price fixture serializes"),
         cache_creation_per_million_usd: std::collections::HashMap::new(),
         cache_read_per_million_usd: std::collections::HashMap::new(),
+        cache_creation_per_million_usd_by_tier: std::collections::HashMap::new(),
+        cache_read_per_million_usd_by_tier: std::collections::HashMap::new(),
         status: CatalogStatus::Ok,
     });
 }

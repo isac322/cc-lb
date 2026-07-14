@@ -13,7 +13,7 @@ pub(crate) fn expand(args: PluginArgs, mut module: ItemMod) -> TokenStream2 {
     if handlers.is_empty() {
         return Error::new_spanned(
             &module.ident,
-            "#[plugin] module must contain at least one #[handler(<kind>, wire = 1, description = \"...\", usage = \"...\")] function",
+            "#[plugin] module must contain at least one #[handler(<kind>, wire = N, description = \"...\", usage = \"...\")] function",
         )
         .to_compile_error();
     }
@@ -43,10 +43,17 @@ pub(crate) fn expand(args: PluginArgs, mut module: ItemMod) -> TokenStream2 {
 
     for handler in &handlers {
         let export_ident = syn::Ident::new(handler.kind.export_name(), Span::call_site());
-        let dispatch_ident = syn::Ident::new(
-            handler.kind.dispatch_helper(handler.view),
-            Span::call_site(),
-        );
+        let Some(dispatch_helper) = handler
+            .kind
+            .dispatch_helper(handler.wire_version, handler.view)
+        else {
+            return Error::new_spanned(
+                &handler.fn_ident,
+                "unsupported hook wire version reached plugin expansion",
+            )
+            .to_compile_error();
+        };
+        let dispatch_ident = syn::Ident::new(dispatch_helper, Span::call_site());
         let fn_ident = &handler.fn_ident;
         items.push(syn::parse_quote! {
             #[unsafe(no_mangle)]
@@ -60,7 +67,10 @@ pub(crate) fn expand(args: PluginArgs, mut module: ItemMod) -> TokenStream2 {
     let metadata_bytes = metadata_json.as_bytes();
     let metadata_len = metadata_bytes.len();
     let metadata_array = byte_array_tokens(metadata_bytes);
-    let schema_section_items = schema_sections(&handlers);
+    let schema_section_items = match schema_sections(&handlers) {
+        Ok(items) => items,
+        Err(error) => return error.to_compile_error(),
+    };
 
     quote! {
         #module
@@ -91,21 +101,29 @@ fn reject_duplicates(handlers: &[DiscoveredHandler]) -> syn::Result<()> {
     Ok(())
 }
 
-fn schema_sections(handlers: &[DiscoveredHandler]) -> Vec<TokenStream2> {
+fn schema_sections(handlers: &[DiscoveredHandler]) -> syn::Result<Vec<TokenStream2>> {
     handlers
         .iter()
         .map(|handler| {
             let section = handler.kind.schema_section(handler.wire_version);
-            let fingerprint_type = handler.kind.fingerprint_type();
+            let fingerprint_type = handler
+                .kind
+                .fingerprint_type(handler.wire_version)
+                .ok_or_else(|| {
+                    Error::new_spanned(
+                        &handler.fn_ident,
+                        "unsupported hook wire version reached schema expansion",
+                    )
+                })?;
             let static_ident = syn::Ident::new(
                 &format!("__CC_LB_SCHEMA_HASH_{}", handler.kind.const_suffix()),
                 Span::call_site(),
             );
-            quote! {
+            Ok(quote! {
                 #[used]
                 #[unsafe(link_section = #section)]
                 static #static_ident: [u8; 32] = <#fingerprint_type as ::cc_lb_pdk_wasmtime::types::schema::WireSchema>::FINGERPRINT;
-            }
+            })
         })
         .collect()
 }

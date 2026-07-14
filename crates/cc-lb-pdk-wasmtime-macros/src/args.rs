@@ -95,14 +95,7 @@ impl Parse for HandlerArgs {
                     })?);
                 }
                 Meta::NameValue(nv) if nv.path.is_ident("wire") => {
-                    let version = expect_u8(&nv)?;
-                    if version != 1 {
-                        return Err(Error::new_spanned(
-                            &nv.value,
-                            "only `wire = 1` is supported by this PDK",
-                        ));
-                    }
-                    wire_version = Some(version);
+                    wire_version = Some(expect_u8(&nv)?);
                 }
                 Meta::NameValue(nv) if nv.path.is_ident("description") => {
                     description = Some(expect_string(&nv)?);
@@ -123,7 +116,7 @@ impl Parse for HandlerArgs {
                 other => {
                     return Err(Error::new_spanned(
                         other,
-                        "expected `<kind>`, `wire = 1`, `description = \"...\"`, `usage = \"...\"`, `mode = \"active\"|\"noop\"`, or `view`",
+                        "expected `<kind>`, `wire = 1|2`, `description = \"...\"`, `usage = \"...\"`, `mode = \"active\"|\"noop\"`, or `view`",
                     ));
                 }
             }
@@ -137,11 +130,17 @@ impl Parse for HandlerArgs {
                 "`mode = \"noop\"` is only valid for transform_response and transform_sse_event handlers",
             ));
         }
+        let wire_version = wire_version
+            .ok_or_else(|| Error::new(Span::call_site(), "#[handler] missing required `wire`"))?;
+        if !kind.supports_wire_version(wire_version) {
+            return Err(Error::new(
+                Span::call_site(),
+                "this hook does not support the requested wire version; filter accepts 1 or 2 and all other hooks require 1",
+            ));
+        }
         Ok(Self {
             kind,
-            wire_version: wire_version.ok_or_else(|| {
-                Error::new(Span::call_site(), "#[handler] missing required `wire`")
-            })?,
+            wire_version,
             description: description.ok_or_else(|| {
                 Error::new(
                     Span::call_site(),
@@ -215,6 +214,15 @@ impl HandlerKind {
         matches!(self, Self::TransformResponse | Self::TransformSseEvent)
     }
 
+    pub(crate) const fn supports_wire_version(self, wire_version: u8) -> bool {
+        match self {
+            Self::Filter => matches!(wire_version, 1 | 2),
+            Self::Shape | Self::Observe | Self::TransformResponse | Self::TransformSseEvent => {
+                wire_version == 1
+            }
+        }
+    }
+
     pub(crate) fn export_name(self) -> &'static str {
         match self {
             Self::Filter => "cc_lb_filter",
@@ -225,18 +233,25 @@ impl HandlerKind {
         }
     }
 
-    pub(crate) fn dispatch_helper(self, view: bool) -> &'static str {
-        match (self, view) {
-            (Self::Filter, false) => "run_filter",
-            (Self::Filter, true) => "run_filter_view",
-            (Self::Shape, false) => "run_shape",
-            (Self::Shape, true) => "run_shape_view",
-            (Self::Observe, false) => "run_observe",
-            (Self::Observe, true) => "run_observe_view",
-            (Self::TransformResponse, false) => "run_transform_response",
-            (Self::TransformResponse, true) => "run_transform_response_view",
-            (Self::TransformSseEvent, false) => "run_transform_sse_event",
-            (Self::TransformSseEvent, true) => "run_transform_sse_event_view",
+    pub(crate) fn dispatch_helper(self, wire_version: u8, view: bool) -> Option<&'static str> {
+        match (self, wire_version, view) {
+            (Self::Filter, 1, false) => Some("run_filter"),
+            (Self::Filter, 1, true) => Some("run_filter_view"),
+            (Self::Filter, 2, false) => Some("run_filter_v2"),
+            (Self::Filter, 2, true) => Some("run_filter_v2_view"),
+            (Self::Shape, 1, false) => Some("run_shape"),
+            (Self::Shape, 1, true) => Some("run_shape_view"),
+            (Self::Observe, 1, false) => Some("run_observe"),
+            (Self::Observe, 1, true) => Some("run_observe_view"),
+            (Self::TransformResponse, 1, false) => Some("run_transform_response"),
+            (Self::TransformResponse, 1, true) => Some("run_transform_response_view"),
+            (Self::TransformSseEvent, 1, false) => Some("run_transform_sse_event"),
+            (Self::TransformSseEvent, 1, true) => Some("run_transform_sse_event_view"),
+            (Self::Filter, _, _)
+            | (Self::Shape, _, _)
+            | (Self::Observe, _, _)
+            | (Self::TransformResponse, _, _)
+            | (Self::TransformSseEvent, _, _) => None,
         }
     }
 
@@ -244,17 +259,23 @@ impl HandlerKind {
         format!("cc_lb.schema.{}.v{}", self.wire_name(), wire_version)
     }
 
-    pub(crate) fn fingerprint_type(self) -> TokenStream2 {
-        match self {
-            Self::Filter => quote! { ::cc_lb_pdk_wasmtime::types::FilterRequest },
-            Self::Shape => quote! { ::cc_lb_pdk_wasmtime::types::ShapeRequest },
-            Self::Observe => quote! { ::cc_lb_pdk_wasmtime::types::ObserveEvent },
-            Self::TransformResponse => {
-                quote! { ::cc_lb_pdk_wasmtime::types::TransformResponseRequest }
+    pub(crate) fn fingerprint_type(self, wire_version: u8) -> Option<TokenStream2> {
+        match (self, wire_version) {
+            (Self::Filter, 1) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::FilterRequest }),
+            (Self::Filter, 2) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v2::FilterRequest }),
+            (Self::Shape, 1) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::ShapeRequest }),
+            (Self::Observe, 1) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::ObserveEvent }),
+            (Self::TransformResponse, 1) => {
+                Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::TransformResponseRequest })
             }
-            Self::TransformSseEvent => {
-                quote! { ::cc_lb_pdk_wasmtime::types::TransformSseEventRequest }
+            (Self::TransformSseEvent, 1) => {
+                Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::TransformSseEventRequest })
             }
+            (Self::Filter, _)
+            | (Self::Shape, _)
+            | (Self::Observe, _)
+            | (Self::TransformResponse, _)
+            | (Self::TransformSseEvent, _) => None,
         }
     }
 
@@ -336,3 +357,6 @@ fn expect_u8(nv: &MetaNameValue) -> syn::Result<u8> {
         Err(Error::new_spanned(&nv.value, "expected integer literal"))
     }
 }
+
+#[cfg(test)]
+mod tests;

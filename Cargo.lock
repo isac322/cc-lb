@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-plugin-wire"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "blake3",
  "rkyv",
@@ -7095,6 +7095,13 @@ dependencies = [
  "wasmprinter",
  "wasmtime-internal-component-util",
  "wasmtime-internal-core",
+]
+
+[[package]]
+name = "wasmtime-filter-v2"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-pdk-wasmtime",
 ]
 
 [[package]]

@@ -451,6 +451,7 @@ fn install_test_pricing() {
         model: model.to_owned(),
         input_per_million_usd: UsdPerMillion::from_whole_usd(5),
         output_per_million_usd: UsdPerMillion::from_whole_usd(25),
+        by_tier: Default::default(),
     };
     let mut models = HashMap::new();
     models.insert(model.to_owned(), pricing);
@@ -466,6 +467,8 @@ fn install_test_pricing() {
         raw_json: b"{}".to_vec(),
         cache_creation_per_million_usd,
         cache_read_per_million_usd,
+        cache_creation_per_million_usd_by_tier: HashMap::new(),
+        cache_read_per_million_usd_by_tier: HashMap::new(),
         status: CatalogStatus::Ok,
     };
     let catalog = PriceCatalog::new_empty();
@@ -576,6 +579,7 @@ fn ctx() -> RoutingContext {
     RoutingContext {
         request_id: "req-regression".to_owned(),
         thread_id: None,
+        requested_service_tier: None,
         downstream_headers: http::HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
@@ -590,6 +594,7 @@ fn ctx_with_thread_id(request_id: &str, thread_id: &str) -> RoutingContext {
     RoutingContext {
         request_id: request_id.to_owned(),
         thread_id: Some(thread_id.to_owned()),
+        requested_service_tier: None,
         downstream_headers: http::HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
