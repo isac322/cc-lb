@@ -678,6 +678,7 @@ plugins = ["missing-plugin"]
                 WasmRegistryEntryInput {
                     schema_hash: None,
                     name: name.to_owned(),
+                    version: None,
                     original_filename: format!("{name}.wasm"),
                     label: None,
                     uploaded_at_unix_secs: 1_800_000_000,

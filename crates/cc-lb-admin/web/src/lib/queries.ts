@@ -143,6 +143,7 @@ export interface PluginEntry {
   is_builtin?: boolean;
   kind?: string;
   wire_version?: number;
+  version?: string | null;
   metadata: PluginMetadata | null;
   supported_slots?: ChainSlot[];
 }
@@ -1089,16 +1090,44 @@ export interface UploadWasmResponse {
   original_filename: string;
   revision: number;
   idempotent: boolean;
+  version?: string;
+  action: 'created' | 'noop' | 'replaced';
 }
 export function useUploadWasm() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (file: File): Promise<UploadWasmResponse> => {
+    mutationFn: async ({
+      file,
+      slotKind,
+      confirmReplacement,
+      replaceRegistryId,
+      expectedRevision,
+    }: {
+      file: File;
+      slotKind: ChainSlot;
+      confirmReplacement?: boolean;
+      replaceRegistryId?: string;
+      expectedRevision?: number;
+    }): Promise<UploadWasmResponse> => {
       const form = new FormData();
       // Do NOT set Content-Type: the browser must inject the multipart boundary.
       form.append('name', file.name.replace(/\.wasm$/, ''));
       form.append('original_filename', file.name);
       form.append('bytes', file);
+
+      const slotMap: Record<ChainSlot, string> = {
+        router: 'filter',
+        shape: 'shape',
+        observability_hook: 'observe',
+      };
+      form.append('slot_kind', slotMap[slotKind]);
+
+      if (confirmReplacement) form.append('confirm_replacement', 'true');
+      if (replaceRegistryId)
+        form.append('replace_registry_id', replaceRegistryId);
+      if (expectedRevision !== undefined)
+        form.append('expected_revision', String(expectedRevision));
+
       const res = await fetchWithAuth('/admin/v1/plugins/wasm', {
         method: 'POST',
         body: form,
@@ -1108,12 +1137,63 @@ export function useUploadWasm() {
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.pluginRegistry }),
   });
 }
+export interface PluginReference {
+  kind: 'plugin_chain' | 'upstream_warmup_dialect';
+  chain_entry_id?: string;
+  principal_id?: string;
+  principal_name?: string;
+  slot?: ChainSlot;
+  revision: number;
+  upstream_id?: string;
+  upstream_name?: string;
+}
+
+export interface PluginReferencesResponse {
+  registry: PluginEntry;
+  refcount: number;
+  reference_fingerprint: string;
+  references: PluginReference[];
+}
+
+export function usePluginReferences(id: string | null) {
+  return useQuery({
+    queryKey: ['plugin-references', id],
+    queryFn: () =>
+      getJson<PluginReferencesResponse>(
+        `/admin/v1/plugins/registry/${id}/references`,
+      ),
+    enabled: !!id,
+  });
+}
+
 export function useDeletePlugin() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, revision }: { id: string; revision: number }) =>
-      deleteJson(`/admin/v1/plugins/registry/${id}`, { ifMatch: revision }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.pluginRegistry }),
+    mutationFn: ({
+      id,
+      revision,
+      cascade,
+      referenceFingerprint,
+    }: {
+      id: string;
+      revision: number;
+      cascade?: boolean;
+      referenceFingerprint?: string;
+    }) => {
+      const headers: Record<string, string> = {};
+      if (referenceFingerprint) {
+        headers['X-Reference-Fingerprint'] = referenceFingerprint;
+      }
+      const qs = cascade ? '?cascade=references' : '';
+      return deleteJson(`/admin/v1/plugins/registry/${id}${qs}`, {
+        ifMatch: revision,
+        headers,
+      });
+    },
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: qk.pluginRegistry });
+      qc.invalidateQueries({ queryKey: ['plugin-references', vars.id] });
+    },
   });
 }
 export function usePatchPlugin() {

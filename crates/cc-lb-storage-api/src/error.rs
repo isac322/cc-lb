@@ -55,6 +55,8 @@ pub enum StorageError {
     PluginRegistryReferenced { id: String },
     #[error("stale plugin registry revision; current revision is {current}")]
     StalePluginRegistryRevision { current: u64 },
+    #[error("plugin registry references changed")]
+    StalePluginRegistryReferences,
     #[error("stale plugin chain revision; current revision is {current}")]
     StalePluginChainRevision { current: u64 },
     #[error("plugin chain conflict: {reason}")]

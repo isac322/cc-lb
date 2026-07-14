@@ -42,6 +42,8 @@ pub struct WasmBlobRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WasmRegistryEntryInput {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     pub original_filename: String,
     pub label: Option<String>,
     pub uploaded_at_unix_secs: u64,
@@ -79,6 +81,8 @@ pub struct WasmRegistryEntry {
     pub id: Uuid,
     pub sha256: [u8; 32],
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     pub original_filename: String,
     pub label: Option<String>,
     pub uploaded_at_unix_secs: u64,
@@ -112,6 +116,7 @@ impl WasmRegistryEntry {
             id: BUILTIN_CACHE_AFFINITY_ID,
             sha256: BUILTIN_CACHE_AFFINITY_SHA256,
             name: BUILTIN_CACHE_AFFINITY_NAME.to_owned(),
+            version: None,
             original_filename: "builtin://cache-affinity".to_owned(),
             label: Some("Built-in cache affinity filter".to_owned()),
             uploaded_at_unix_secs: 0,
@@ -140,6 +145,7 @@ impl WasmRegistryEntry {
             id: BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
             sha256: BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256,
             name: BUILTIN_SUBSCRIPTION_PREFERENCE_NAME.to_owned(),
+            version: None,
             original_filename: "builtin://subscription-preference".to_owned(),
             label: Some("Built-in subscription preference filter".to_owned()),
             uploaded_at_unix_secs: 0,
@@ -239,4 +245,95 @@ pub struct PluginChainEntryUpdate {
     pub sse_per_event: Option<bool>,
     pub batched_events_per_flush: Option<u32>,
     pub batched_flush_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WasmRegistryReferenceFingerprint([u8; 32]);
+
+impl WasmRegistryReferenceFingerprint {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn from_references(references: &[WasmRegistryReference]) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"cc-lb-wasm-registry-references-v1");
+        for reference in references {
+            match reference {
+                WasmRegistryReference::PluginChain {
+                    chain_entry_id,
+                    principal_id,
+                    principal_name,
+                    slot,
+                    revision,
+                } => {
+                    hasher.update(&[0]);
+                    hasher.update(chain_entry_id.as_bytes());
+                    hasher.update(principal_id.as_bytes());
+                    update_fingerprint_bytes(&mut hasher, principal_name.as_bytes());
+                    update_fingerprint_bytes(&mut hasher, slot.as_str().as_bytes());
+                    hasher.update(&revision.to_be_bytes());
+                }
+                WasmRegistryReference::UpstreamWarmupDialect {
+                    upstream_id,
+                    upstream_name,
+                    revision,
+                } => {
+                    hasher.update(&[1]);
+                    hasher.update(upstream_id.as_bytes());
+                    update_fingerprint_bytes(&mut hasher, upstream_name.as_bytes());
+                    hasher.update(&revision.to_be_bytes());
+                }
+            }
+        }
+        Self(*hasher.finalize().as_bytes())
+    }
+}
+
+fn update_fingerprint_bytes(hasher: &mut blake3::Hasher, value: &[u8]) {
+    hasher.update(&value.len().to_be_bytes());
+    hasher.update(value);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WasmRegistryReference {
+    PluginChain {
+        chain_entry_id: Uuid,
+        principal_id: Uuid,
+        principal_name: String,
+        slot: PluginSlotKind,
+        revision: u64,
+    },
+    UpstreamWarmupDialect {
+        upstream_id: Uuid,
+        upstream_name: String,
+        revision: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmRegistryReferences {
+    pub references: Vec<WasmRegistryReference>,
+    pub fingerprint: WasmRegistryReferenceFingerprint,
+}
+
+impl WasmRegistryReferences {
+    pub fn from_references(references: Vec<WasmRegistryReference>) -> Self {
+        let fingerprint = WasmRegistryReferenceFingerprint::from_references(&references);
+        Self {
+            references,
+            fingerprint,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmRegistryCascadeDelete {
+    pub entry: WasmRegistryEntry,
+    pub references: Vec<WasmRegistryReference>,
 }

@@ -37,7 +37,28 @@ pub trait PluginRegistryStore: Send + Sync {
         sha256: [u8; 32],
     ) -> StorageResult<Option<WasmRegistryEntry>>;
 
+    async fn get_registry_entry_by_name(
+        &self,
+        name: &str,
+    ) -> StorageResult<Option<WasmRegistryEntry>>;
+
     async fn get_registry_entry_by_id(&self, id: Uuid) -> StorageResult<Option<WasmRegistryEntry>>;
+
+    async fn replace_wasm_entry(
+        &self,
+        blob: WasmBlob,
+        entry: WasmRegistryEntryInput,
+        expected_revision: u64,
+    ) -> StorageResult<WasmRegistryEntry>;
+
+    async fn list_registry_references(&self, id: Uuid) -> StorageResult<WasmRegistryReferences>;
+
+    async fn cascade_delete_registry_entry(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+        expected_references: WasmRegistryReferenceFingerprint,
+    ) -> StorageResult<Option<WasmRegistryCascadeDelete>>;
 
     async fn update_registry_label(
         &self,

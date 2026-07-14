@@ -12,7 +12,8 @@ use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainConflictReason,
     PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginMetadata,
-    PluginSlotKind, PrincipalStore, Storage, StorageError, WasmRegistryEntry, sparse_order,
+    PluginSlotKind, PrincipalStore, Storage, StorageError, WasmRegistryEntry,
+    WasmRegistryReference, WasmRegistryReferenceFingerprint, sparse_order,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -28,6 +29,10 @@ const MAX_LIMIT: usize = 1000;
 pub fn router() -> Router<AdminState> {
     Router::new()
         .route("/admin/v1/plugins/registry", get(list_registry))
+        .route(
+            "/admin/v1/plugins/registry/{id}/references",
+            get(get_registry_references),
+        )
         .route(
             "/admin/v1/plugins/registry/{id}",
             get(get_registry)
@@ -66,6 +71,11 @@ struct SlotQuery {
 #[derive(Debug, Deserialize)]
 struct PatchRegistryBody {
     label: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteRegistryQuery {
+    cascade: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,6 +125,7 @@ struct RegistryEntryResponse {
     sha256_hex: String,
     name: String,
     original_filename: String,
+    version: Option<String>,
     label: Option<String>,
     size_bytes: u64,
     refcount: i64,
@@ -127,6 +138,21 @@ struct RegistryEntryResponse {
     is_builtin: bool,
     metadata: Option<PluginMetadata>,
     supported_slots: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RegistryReferencesResponse {
+    registry: RegistryEntryResponse,
+    refcount: i64,
+    reference_fingerprint: String,
+    references: Vec<WasmRegistryReference>,
+}
+
+#[derive(Debug, Serialize)]
+struct RegistryCascadeDeleteResponse {
+    deleted: RegistryEntryResponse,
+    reference_fingerprint: String,
+    removed_references: Vec<WasmRegistryReference>,
 }
 
 #[derive(Debug, Serialize)]
@@ -256,9 +282,40 @@ async fn patch_registry(
     }
 }
 
+async fn get_registry_references(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+) -> axum::response::Response {
+    let Some(storage) = state.storage.as_deref() else {
+        return storage_unavailable();
+    };
+    let entry = match storage.get_registry_entry_by_id(id).await {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return error(StatusCode::NOT_FOUND, "unknown_registry_entry"),
+        Err(error) => return storage_error(error),
+    };
+    let size_bytes = match registry_size_bytes(storage, entry.sha256).await {
+        Ok(size_bytes) => size_bytes,
+        Err(error) => return storage_error(error),
+    };
+    let references = match storage.list_registry_references(id).await {
+        Ok(references) => references,
+        Err(error) => return storage_error(error),
+    };
+    let reference_fingerprint = fingerprint_hex(&references.fingerprint);
+    Json(RegistryReferencesResponse {
+        refcount: entry.refcount,
+        registry: registry_response(entry, size_bytes),
+        reference_fingerprint,
+        references: references.references,
+    })
+    .into_response()
+}
+
 async fn delete_registry(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    Query(query): Query<DeleteRegistryQuery>,
     headers: HeaderMap,
 ) -> axum::response::Response {
     let Some(expected_revision) = if_match_revision(&headers) else {
@@ -269,6 +326,47 @@ async fn delete_registry(
     };
     if id == BUILTIN_CACHE_AFFINITY_ID || id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
         return builtin_plugin_immutable();
+    }
+    if query.cascade.as_deref() == Some("references") {
+        let Some(fingerprint) = reference_fingerprint_header(&headers) else {
+            return error(
+                StatusCode::PRECONDITION_REQUIRED,
+                "reference_fingerprint_required",
+            );
+        };
+        return match storage
+            .cascade_delete_registry_entry(id, expected_revision, fingerprint)
+            .await
+        {
+            Ok(Some(deleted)) => {
+                let size_bytes = match registry_size_bytes(storage, deleted.entry.sha256).await {
+                    Ok(size_bytes) => size_bytes,
+                    Err(error) => return storage_error(error),
+                };
+                remove_wasm_cache_file(&state, deleted.entry.sha256).await;
+                emit_audit(
+                    &state,
+                    AuditPayload::PluginRegistryDelete {
+                        sha256: hex_sha256(deleted.entry.sha256),
+                    },
+                );
+                let reference_fingerprint = fingerprint_hex(
+                    &WasmRegistryReferenceFingerprint::from_references(&deleted.references),
+                );
+                let mut response = Json(RegistryCascadeDeleteResponse {
+                    deleted: registry_response(deleted.entry, size_bytes),
+                    reference_fingerprint,
+                    removed_references: deleted.references,
+                })
+                .into_response();
+                add_dynamic_rebind_headers(&mut response, &state).await;
+                response
+            }
+            Ok(None) => error(StatusCode::NOT_FOUND, "unknown_registry_entry"),
+            Err(StorageError::StalePluginRegistryRevision { current }) => stale_revision(current),
+            Err(StorageError::StalePluginRegistryReferences) => references_changed(),
+            Err(error) => storage_mutation_error(error),
+        };
     }
     match storage.delete_registry_entry(id, expected_revision).await {
         Ok(Some(deleted)) => {
@@ -806,6 +904,7 @@ fn registry_response(entry: WasmRegistryEntry, size_bytes: u64) -> RegistryEntry
         sha256_hex: hex_sha256(entry.sha256),
         name: entry.name,
         original_filename: entry.original_filename,
+        version: entry.version,
         label: entry.label,
         size_bytes,
         refcount: entry.refcount,
@@ -876,6 +975,21 @@ fn parse_slot(value: &str) -> Option<SlotParam> {
 fn if_match_revision(headers: &HeaderMap) -> Option<u64> {
     let value = headers.get(header::IF_MATCH)?.to_str().ok()?.trim();
     parse_revision(value)
+}
+
+fn reference_fingerprint_header(headers: &HeaderMap) -> Option<WasmRegistryReferenceFingerprint> {
+    let value = headers
+        .get("x-reference-fingerprint")?
+        .to_str()
+        .ok()?
+        .trim();
+    let bytes = hex::decode(value).ok()?;
+    let bytes: [u8; 32] = bytes.try_into().ok()?;
+    Some(WasmRegistryReferenceFingerprint::from_bytes(bytes))
+}
+
+fn fingerprint_hex(fingerprint: &WasmRegistryReferenceFingerprint) -> String {
+    hex::encode(fingerprint.as_bytes())
 }
 
 fn required_if_match_revision(headers: &HeaderMap) -> Result<u64, IfMatchError> {
@@ -972,6 +1086,14 @@ fn stale_revision(current: u64) -> axum::response::Response {
     (
         StatusCode::PRECONDITION_FAILED,
         Json(json!({ "error": "stale_revision", "current": current })),
+    )
+        .into_response()
+}
+
+fn references_changed() -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({ "error": "references_changed" })),
     )
         .into_response()
 }
