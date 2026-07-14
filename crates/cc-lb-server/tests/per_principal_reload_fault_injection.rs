@@ -1,4 +1,4 @@
-mod reload_common;
+use crate::reload_common;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

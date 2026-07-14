@@ -8,8 +8,9 @@ use cc_lb_plugin_wire::{
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, PerCandidateReason, RoutingContext};
 use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntimeError};
 use rkyv::rancor::Error as RkyvError;
-use rkyv::util::AlignedVec;
 use uuid::Uuid;
+
+use super::{access_archived_scoped_or_copy, serialize_with_input_scratch};
 
 pub struct WasmtimeFilterPlugin {
     dispatch: Arc<WasmPluginWireDispatch>,
@@ -38,47 +39,52 @@ impl FilterPlugin for WasmtimeFilterPlugin {
         principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
-        let in_bytes =
-            host_to_wire_request(ctx, principal, candidates, self.dispatch.cookie_redaction())
-                .map_err(|e| FilterError::Runtime {
-                    reason: format!("rkyv encode request: {e}"),
-                })?;
-
         let wire_version = self.dispatch.filter_wire_version();
-        let out_bytes = match wire_version {
-            Some(cc_lb_plugin_wire::schema::WireVersion::V1) => {
-                self.dispatch.call_filter(in_bytes.as_slice())
-            }
+        match wire_version {
+            Some(cc_lb_plugin_wire::schema::WireVersion::V1) => {}
             None => {
                 return Err(FilterError::Runtime {
                     reason: "plugin metadata missing filter hook".to_owned(),
                 });
             }
         }
-        .map_err(runtime_error_to_filter)?;
 
-        let bound = self.dispatch.wire_bounds().output_body_bytes;
-        if out_bytes.len() as u64 > bound {
-            return Err(FilterError::Runtime {
-                reason: format!(
-                    "filter output {} bytes exceeds wire_bounds.output_body_bytes ({})",
-                    out_bytes.len(),
-                    bound
-                ),
-            });
-        }
-
-        let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
-        aligned.extend_from_slice(&out_bytes);
-
-        let archived =
-            rkyv::access::<ArchivedFilterResponse, RkyvError>(&aligned).map_err(|e| {
-                FilterError::Runtime {
-                    reason: format!("rkyv access response: {e}"),
-                }
-            })?;
-
-        wire_to_host_output(archived, self.dispatch.wire_bounds().reason_bytes as usize)
+        let guest_result = with_wire_request(
+            ctx,
+            principal,
+            candidates,
+            self.dispatch.cookie_redaction(),
+            |in_bytes| {
+                self.dispatch.call_filter_scoped(in_bytes, |guest_bytes| {
+                    let bound = self.dispatch.wire_bounds().output_body_bytes;
+                    if guest_bytes.len() as u64 > bound {
+                        return Err(FilterError::Runtime {
+                            reason: format!(
+                                "filter output {} bytes exceeds wire_bounds.output_body_bytes ({bound})",
+                                guest_bytes.len(),
+                            ),
+                        });
+                    }
+                    access_archived_scoped_or_copy::<ArchivedFilterResponse, _>(
+                        guest_bytes,
+                        |archived| {
+                            wire_to_host_output(
+                                archived,
+                                self.dispatch.wire_bounds().reason_bytes as usize,
+                            )
+                        },
+                    )
+                    .map_err(|e| FilterError::Runtime {
+                        reason: format!("rkyv access response: {e}"),
+                    })
+                    .and_then(std::convert::identity)
+                })
+            },
+        )
+        .map_err(|e| FilterError::Runtime {
+            reason: format!("rkyv encode request: {e}"),
+        })?;
+        guest_result.map_err(runtime_error_to_filter)?
     }
 
     fn plugin_id(&self) -> Uuid {
@@ -101,12 +107,13 @@ fn runtime_error_to_filter(err: WasmtimeRuntimeError) -> FilterError {
     }
 }
 
-pub(super) fn host_to_wire_request(
+pub(super) fn with_wire_request<R>(
     ctx: &RoutingContext,
     principal: &Principal,
     candidates: &[UpstreamCandidate],
     cookie_redaction: bool,
-) -> Result<AlignedVec<16>, RkyvError> {
+    with_bytes: impl for<'a> FnOnce(&'a [u8]) -> R,
+) -> Result<R, RkyvError> {
     let principal_kind_str = principal_kind_to_wire(principal);
     let claim_bufs: Vec<(&str, Vec<u8>)> = principal
         .claims
@@ -191,7 +198,7 @@ pub(super) fn host_to_wire_request(
         },
         candidates: &candidate_refs,
     };
-    rkyv::to_bytes::<RkyvError>(&request)
+    serialize_with_input_scratch(&request, with_bytes)
 }
 
 pub(super) fn principal_kind_to_wire(principal: &Principal) -> &'static str {
@@ -326,22 +333,25 @@ mod tests {
     fn host_to_wire_strips_auth_headers() {
         let principal = fixture_principal();
         let ctx = fixture_request();
-        let bytes = host_to_wire_request(&ctx, &principal, &[], false).expect("encode");
-        let archived = rkyv::access::<cc_lb_plugin_wire::ArchivedFilterRequest, RkyvError>(&bytes)
-            .expect("archived");
-        let request_id: &str = &archived.request_id;
-        let method: &str = &archived.method;
-        let path: &str = &archived.path;
-        assert_eq!(request_id, "req-123");
-        assert_eq!(method, "POST");
-        assert_eq!(path, "/v1/messages");
-        assert_eq!(
-            archived.headers.len(),
-            1,
-            "authorization must be filtered out"
-        );
-        let header_name: &str = &archived.headers[0].name;
-        assert_eq!(header_name, "content-type");
+        with_wire_request(&ctx, &principal, &[], false, |bytes| {
+            let archived =
+                rkyv::access::<cc_lb_plugin_wire::ArchivedFilterRequest, RkyvError>(bytes)
+                    .expect("archived");
+            let request_id: &str = &archived.request_id;
+            let method: &str = &archived.method;
+            let path: &str = &archived.path;
+            assert_eq!(request_id, "req-123");
+            assert_eq!(method, "POST");
+            assert_eq!(path, "/v1/messages");
+            assert_eq!(
+                archived.headers.len(),
+                1,
+                "authorization must be filtered out"
+            );
+            let header_name: &str = &archived.headers[0].name;
+            assert_eq!(header_name, "content-type");
+        })
+        .expect("encode");
     }
 
     #[test]
@@ -361,10 +371,8 @@ mod tests {
             ]),
         };
         let bytes = rkyv::to_bytes::<RkyvError>(&response).expect("encode");
-        let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
-        aligned.extend_from_slice(&bytes);
         let archived =
-            rkyv::access::<ArchivedFilterResponse, RkyvError>(&aligned).expect("archived view");
+            rkyv::access::<ArchivedFilterResponse, RkyvError>(&bytes).expect("archived view");
         let out = wire_to_host_output(archived, 256).expect("conversion must succeed");
         assert_eq!(out.kept_upstream_ids.len(), 1);
         assert_eq!(

@@ -1,6 +1,6 @@
 #![cfg(feature = "capture")]
 
-mod common;
+use crate::common;
 #[allow(dead_code)]
 mod prompt_cache_routing_support;
 

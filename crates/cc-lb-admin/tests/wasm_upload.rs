@@ -5,8 +5,7 @@
 //! cases the wasmtime `inspect_wasm` gate enforces (missing
 //! required exports, schema_hash mismatch, host import).
 
-#[path = "admin_test_common.rs"]
-mod admin_test_common;
+use crate::admin_test_common;
 
 use admin_test_common::spawn_admin_server;
 use axum::http::StatusCode;

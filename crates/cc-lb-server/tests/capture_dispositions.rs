@@ -1,7 +1,6 @@
 #![cfg(feature = "capture")]
 
-mod capture_matrix_support;
-mod common;
+use crate::{capture_matrix_support, common};
 
 use capture_matrix_support::{
     MESSAGE_BODY, capture_config, count_rows, disconnect_after_message_start, joined_row,

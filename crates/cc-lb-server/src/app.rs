@@ -14,10 +14,11 @@ use axum::Router;
 use axum::body::Body;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::State;
-use axum::http::header::HeaderValue;
-use axum::http::{HeaderName, Request, Response, StatusCode};
+use axum::http::header::{CONTENT_LENGTH, HeaderValue};
+use axum::http::{HeaderMap, HeaderName, Request, Response, StatusCode};
 use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
+use bytes::{Bytes, BytesMut};
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DownstreamAuthMode, EventBusTransport, TlsConfig};
 use cc_lb_engine::{
@@ -43,7 +44,7 @@ use cc_lb_storage_api::{
     UpstreamRecord,
 };
 use cc_lb_upstream::SignedRequest;
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::rt::TokioExecutor;
 use serde::Serialize;
@@ -94,6 +95,27 @@ const WASMTIME_POOL_METRICS_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy)]
 struct TowerTimeoutMarker;
+
+#[derive(Clone, Copy)]
+struct RequestBodyCaps {
+    messages: usize,
+    files: usize,
+}
+
+impl RequestBodyCaps {
+    fn for_path(self, path: &str) -> usize {
+        if path.starts_with("/v1/files") {
+            self.files
+        } else {
+            self.messages
+        }
+    }
+}
+
+enum RequestBodyReadError {
+    TooLarge,
+    Read(tower::BoxError),
+}
 
 struct PricingLimitCostEstimator {
     catalog: Arc<cc_lb_pricing::PriceCatalog>,
@@ -897,9 +919,13 @@ async fn build_app_with_storage_inner(
     } else {
         (None, None, None)
     };
+    let body_caps = RequestBodyCaps {
+        messages: cap_to_usize(config.body.messages_cap_bytes),
+        files: cap_to_usize(config.body.files_cap_bytes),
+    };
     let lifecycle_config = LifecycleConfig {
-        messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
-        files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
+        messages_body_cap_bytes: body_caps.messages,
+        files_body_cap_bytes: body_caps.files,
         replica_identity: replica_identity.clone(),
         prompt_cache_shadow: config.prompt_cache_shadow.clone(),
     };
@@ -1703,6 +1729,7 @@ async fn build_app_with_storage_inner(
     spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
     let state = ProxyState {
         lifecycle: lifecycle.clone(),
+        body_caps,
         server_state: server_state.clone(),
         start_time,
         drain_controller: drain_controller.clone(),
@@ -2172,6 +2199,7 @@ impl CurrentConfig for InMemoryCurrentConfig {
 #[derive(Clone)]
 struct ProxyState {
     lifecycle: Arc<Lifecycle>,
+    body_caps: RequestBodyCaps,
     server_state: Arc<ServerStateHandle>,
     start_time: std::time::Instant,
     drain_controller: DrainController,
@@ -2313,6 +2341,7 @@ fn claude_default_snapshot(clock: &dyn cc_lb_engine::Clock) -> cc_lb_pricing::Ca
     }
 
     CatalogSnapshot {
+        payload_hash: String::new(),
         fetched_at_ms: cc_lb_engine::clock::unix_millis(clock.now())
             .try_into()
             .unwrap_or(u64::MAX),
@@ -2562,9 +2591,16 @@ async fn lifecycle_handler(
     request: Request<Body>,
 ) -> Response<Body> {
     let (parts, body) = request.into_parts();
-    let body = match body.collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(source) => {
+    let cap = state.body_caps.for_path(parts.uri.path());
+    let body = match read_request_body(&parts.headers, body, cap).await {
+        Ok(body) => body,
+        Err(RequestBodyReadError::TooLarge) => {
+            if let Some(observer) = parts.extensions.get::<cc_lb_engine::LifecycleContext>() {
+                observer.record_body_too_large_rejection(cap as u64);
+            }
+            return body_too_large_response();
+        }
+        Err(RequestBodyReadError::Read(source)) => {
             let mut response = Response::new(Body::from(format!("body read failed: {source}")));
             *response.status_mut() = StatusCode::BAD_REQUEST;
             return response;
@@ -2579,6 +2615,67 @@ async fn lifecycle_handler(
             response
         }
     }
+}
+
+async fn read_request_body(
+    headers: &HeaderMap,
+    body: Body,
+    cap: usize,
+) -> Result<Bytes, RequestBodyReadError> {
+    if content_length_exceeds_cap(headers, cap) {
+        return Err(RequestBodyReadError::TooLarge);
+    }
+    collect_limited_body(body, cap).await.map_err(|source| {
+        if source.is::<LengthLimitError>() {
+            RequestBodyReadError::TooLarge
+        } else {
+            RequestBodyReadError::Read(source)
+        }
+    })
+}
+
+fn content_length_exceeds_cap(headers: &HeaderMap, cap: usize) -> bool {
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| usize::try_from(length).map_or(true, |length| length > cap))
+}
+
+async fn collect_limited_body(body: Body, cap: usize) -> Result<Bytes, tower::BoxError> {
+    let mut body = Limited::new(body, cap);
+    let mut first: Option<Bytes> = None;
+    let mut combined: Option<BytesMut> = None;
+
+    while let Some(frame) = body.frame().await {
+        let frame = frame?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        if data.is_empty() {
+            continue;
+        }
+        if let Some(buffer) = combined.as_mut() {
+            buffer.extend_from_slice(&data);
+        } else if let Some(initial) = first.take() {
+            let mut buffer = BytesMut::with_capacity(initial.len().saturating_add(data.len()));
+            buffer.extend_from_slice(&initial);
+            buffer.extend_from_slice(&data);
+            combined = Some(buffer);
+        } else {
+            first = Some(data);
+        }
+    }
+
+    Ok(combined.map(BytesMut::freeze).or(first).unwrap_or_default())
+}
+
+fn body_too_large_response() -> Response<Body> {
+    anthropic_error_response(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "body_too_large",
+        "request body exceeds configured cap",
+    )
 }
 
 async fn oauth_usage_handler(
@@ -2836,13 +2933,126 @@ fn dispatcher(
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use futures_util::stream;
     use http_body_util::BodyExt;
     use serde_json::Value;
     use tower::ServiceExt;
 
     use super::*;
+
+    async fn panic_when_polled() -> Result<Bytes, Infallible> {
+        panic!("request body must not be polled")
+    }
+
+    #[tokio::test]
+    async fn oversized_content_length_rejects_without_polling_body() {
+        // Given
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("6"));
+        let body = Body::from_stream(stream::once(panic_when_polled()));
+
+        // When
+        let result = read_request_body(&headers, body, 5).await;
+
+        // Then
+        assert!(matches!(result, Err(RequestBodyReadError::TooLarge)));
+    }
+
+    #[tokio::test]
+    async fn single_frame_body_remains_zero_copy_at_cap() {
+        // Given
+        let input = Bytes::from_static(b"single frame");
+        let input_ptr = input.as_ptr();
+
+        // When
+        let output = collect_limited_body(Body::from(input.clone()), input.len())
+            .await
+            .expect("body at cap should collect");
+
+        // Then
+        assert_eq!(output, input);
+        assert_eq!(output.as_ptr(), input_ptr);
+    }
+
+    #[tokio::test]
+    async fn multi_frame_body_collects_into_contiguous_bytes_at_cap() {
+        // Given
+        let body = Body::from_stream(stream::iter([
+            Ok::<_, Infallible>(Bytes::from_static(b"abc")),
+            Ok::<_, Infallible>(Bytes::from_static(b"def")),
+        ]));
+
+        // When
+        let output = collect_limited_body(body, 6)
+            .await
+            .expect("body at cap should collect");
+
+        // Then
+        assert_eq!(output, Bytes::from_static(b"abcdef"));
+    }
+
+    #[tokio::test]
+    async fn multi_frame_body_over_cap_maps_to_too_large() {
+        // Given
+        let headers = HeaderMap::new();
+        let body = Body::from_stream(stream::iter([
+            Ok::<_, Infallible>(Bytes::from_static(b"abc")),
+            Ok::<_, Infallible>(Bytes::from_static(b"def")),
+        ]));
+
+        // When
+        let result = read_request_body(&headers, body, 5).await;
+
+        // Then
+        assert!(matches!(result, Err(RequestBodyReadError::TooLarge)));
+    }
+
+    #[test]
+    fn request_body_caps_select_files_and_messages_independently() {
+        // Given
+        let caps = RequestBodyCaps {
+            messages: 3,
+            files: 7,
+        };
+
+        // When / Then
+        assert_eq!(caps.for_path("/v1/messages"), 3);
+        assert_eq!(caps.for_path("/v1/files"), 7);
+        assert_eq!(caps.for_path("/v1/files/id/content"), 7);
+        assert_eq!(caps.for_path("/v1/models"), 3);
+    }
+
+    #[tokio::test]
+    async fn body_too_large_response_reuses_anthropic_error_shape() {
+        // Given / When
+        let response = body_too_large_response();
+        let status = response.status();
+        let content_type = response.headers()[axum::http::header::CONTENT_TYPE].clone();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("error body should collect")
+            .to_bytes();
+
+        // Then
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(content_type, "application/json; charset=utf-8");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).expect("error body should be json"),
+            serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "body_too_large",
+                    "message": "request body exceeds configured cap",
+                },
+            })
+        );
+    }
 
     #[tokio::test]
     async fn admin_health_state_reports_current_state() {
@@ -2921,6 +3131,7 @@ mod tests {
             },
         );
         catalog.install_snapshot(cc_lb_pricing::CatalogSnapshot {
+            payload_hash: String::new(),
             fetched_at_ms: 0,
             models,
             raw_json: Vec::new(),

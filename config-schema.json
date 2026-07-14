@@ -937,10 +937,16 @@
           "default": 10,
           "minimum": 0
         },
+        "max_lifetime_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 1800,
+          "minimum": 0
+        },
         "min_connections": {
           "type": "integer",
           "format": "uint32",
-          "default": 0,
+          "default": 1,
           "minimum": 0
         },
         "sslmode": {
@@ -952,6 +958,10 @@
           "format": "uint64",
           "default": 30,
           "minimum": 0
+        },
+        "test_before_acquire": {
+          "type": "boolean",
+          "default": true
         }
       }
     },
@@ -1325,9 +1335,11 @@
                 "acquire_timeout_secs": 5,
                 "idle_timeout_secs": 600,
                 "max_connections": 10,
-                "min_connections": 0,
+                "max_lifetime_secs": 1800,
+                "min_connections": 1,
                 "sslmode": "prefer",
-                "statement_timeout_secs": 30
+                "statement_timeout_secs": 30,
+                "test_before_acquire": true
               }
             },
             "url": {

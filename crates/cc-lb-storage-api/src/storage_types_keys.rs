@@ -180,3 +180,16 @@ pub struct PriceCatalogSnapshotRecord {
     pub json_bytes: Vec<u8>,
     pub fetched_at_ms: u64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriceCatalogSnapshotMetadata {
+    pub payload_hash: String,
+    pub fetched_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PriceCatalogSnapshotFetch {
+    Missing,
+    Unchanged(PriceCatalogSnapshotMetadata),
+    Changed(PriceCatalogSnapshotRecord),
+}

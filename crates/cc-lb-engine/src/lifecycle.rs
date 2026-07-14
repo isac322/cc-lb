@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::body::Body as AxumBody;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 #[cfg(feature = "capture")]
 use cc_lb_capture::{hook::CaptureHandle, schema::CapturedRequestInput};
 use cc_lb_config::PromptCacheShadowConfig;
@@ -94,6 +94,36 @@ const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
 const DEFAULT_MAX_INPUT_ESTIMATE: i64 = 4000;
+const DECOMPRESSION_OUTPUT_BUDGET_BODY_CAP_MULTIPLIER: usize = 4;
+const INCOMPLETE_SSE_EVENT_BUDGET_BODY_CAP_MULTIPLIER: usize = 1;
+const SSE_BUFFER_MAX_RETAINED_CAPACITY_BYTES: usize = 1024 * 1024;
+const SSE_BUFFER_SMALL_EVENT_CAPACITY_FRACTION: usize = 8;
+
+const fn decompression_output_budget_bytes(body_cap_bytes: usize) -> usize {
+    body_cap_bytes.saturating_mul(DECOMPRESSION_OUTPUT_BUDGET_BODY_CAP_MULTIPLIER)
+}
+
+const fn incomplete_sse_event_budget_bytes(body_cap_bytes: usize) -> usize {
+    body_cap_bytes.saturating_mul(INCOMPLETE_SSE_EVENT_BUDGET_BODY_CAP_MULTIPLIER)
+}
+
+fn split_sse_event(buffer: &mut BytesMut, end: usize) -> Bytes {
+    let raw = buffer.split_to(end).freeze();
+    let retained_capacity = buffer.capacity();
+    if retained_capacity > SSE_BUFFER_MAX_RETAINED_CAPACITY_BYTES
+        && raw.len() < retained_capacity / SSE_BUFFER_SMALL_EVENT_CAPACITY_FRACTION
+    {
+        *buffer = BytesMut::from(buffer.as_ref());
+    }
+    raw
+}
+
+fn semantic_body_bytes(body: &Bytes, plaintext: std::borrow::Cow<'_, [u8]>) -> Bytes {
+    match plaintext {
+        std::borrow::Cow::Owned(bytes) => Bytes::from(bytes),
+        std::borrow::Cow::Borrowed(_) => body.clone(),
+    }
+}
 
 /// Cap on the retained non-200 upstream error body: an admin-visible diagnostic
 /// that can echo request text, so the byte cap bounds the blast radius.
@@ -1926,6 +1956,8 @@ impl Lifecycle {
                     stream: body_view.stream(),
                     body_bytes: ctx.body_bytes.len() as u64,
                     cache_control_block_count: cache_metadata.cache_control_block_count,
+                    thinking_budget_tokens: cache_metadata.thinking_budget_tokens,
+                    reasoning_effort: cache_metadata.reasoning_effort.clone(),
                     cache_breakpoints: cache_metadata.cache_breakpoints.clone(),
                     cache_prefix_hash: cache_metadata.cache_prefix_hash.clone(),
                     matched_v3_cache_key: cache_metadata.cache_prefix_hash.clone(),
@@ -2781,8 +2813,12 @@ impl Lifecycle {
             total_ms = duration_to_ms(duration),
             "request latency breakdown"
         );
-        let semantic_body = match decode_full_body(&parts.headers, &body) {
-            Ok(Some(plaintext)) => Some(Bytes::copy_from_slice(&plaintext)),
+        let semantic_body = match decode_full_body(
+            &parts.headers,
+            &body,
+            decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
+        ) {
+            Ok(Some(plaintext)) => Some(semantic_body_bytes(&body, plaintext)),
             Ok(None) => {
                 if let Some(encoding) = parts
                     .headers
@@ -3222,7 +3258,12 @@ impl Lifecycle {
     ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
-        let usage_decoder = UsageDecoder::from_headers(&parts.headers);
+        let decompression_output_budget_bytes =
+            decompression_output_budget_bytes(self.config.messages_body_cap_bytes);
+        let incomplete_sse_event_budget_bytes =
+            incomplete_sse_event_budget_bytes(self.config.messages_body_cap_bytes);
+        let usage_decoder =
+            UsageDecoder::from_headers(&parts.headers, decompression_output_budget_bytes);
         let transform_requested = transform_ctx.dialect.sse_event_transform_hook().is_some();
         let transform_decode_supported = usage_decoder.unsupported_encoding().is_none();
         let response_headers = (transform_requested && transform_decode_supported)
@@ -3264,7 +3305,7 @@ impl Lifecycle {
             let mut downstream_drop_guard = downstream_drop_guard;
             let mut usage_decoder = usage_decoder;
             let mut batch_index = 0_u64;
-            let mut buffer: Vec<u8> = Vec::new();
+            let mut buffer = BytesMut::new();
             let mut usage = UsageCounts::default();
             let mut first_chunk_at: Option<Instant> = None;
             let mut last_chunk_at: Option<Instant> = None;
@@ -3289,7 +3330,9 @@ impl Lifecycle {
             let mut upstream_error_body: Vec<u8> = Vec::new();
             let mut upstream_error_body_truncated = false;
             let mut upstream_error_body_decode_failed = false;
-            while let Some(frame) = body.frame().await {
+            let mut parse_sse_events_active = parse_sse_events;
+            let mut raw_before_transform_output: Vec<Bytes> = Vec::new();
+            'upstream: while let Some(frame) = body.frame().await {
                 match frame {
                     Ok(frame) => {
                         if let Ok(data) = frame.into_data() {
@@ -3309,7 +3352,7 @@ impl Lifecycle {
                                             &mut upstream_error_body_truncated,
                                         );
                                     }
-                                    if parse_sse_events {
+                                    if parse_sse_events_active {
                                         buffer.extend_from_slice(&plaintext);
                                     }
                                 }
@@ -3319,9 +3362,11 @@ impl Lifecycle {
                                         %error,
                                         "skipping streaming usage extraction: chunk decode failed"
                                     );
-                                        upstream_error_body_decode_failed = true;
-                                        if sse_transform_active {
-                                            if transformed_output_started {
+                                    upstream_error_body_decode_failed = true;
+                                    parse_sse_events_active = false;
+                                    buffer.clear();
+                                    if sse_transform_active {
+                                        if transformed_output_started {
                                             let transform_error = ResponseTransformError::Runtime {
                                                 reason: format!("streaming response decode failed after transform output: {error}"),
                                             };
@@ -3340,19 +3385,27 @@ impl Lifecycle {
                                             }
                                             downstream_drop_guard.disarm();
                                             yield Ok::<Bytes, Infallible>(frame);
-                                            break;
-                                            }
-                                            sse_transform_active = false;
-                                            raw_passthrough_current_chunk = true;
+                                            break 'upstream;
+                                        }
+                                        sse_transform_active = false;
+                                        raw_passthrough_current_chunk = true;
+                                        for raw in raw_before_transform_output.drain(..) {
+                                            observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                                batch_index,
+                                                event_count: 1,
+                                                total_bytes: raw.len(),
+                                            });
+                                            batch_index = batch_index.saturating_add(1);
+                                            yield Ok::<Bytes, Infallible>(raw);
                                         }
                                     }
                                 }
+                            }
                                 while !raw_passthrough_current_chunk {
                                     let Some(end) = usage_parser::find_sse_event_end(&buffer) else {
                                         break;
                                     };
-                                let raw = buffer.drain(..end).collect::<Vec<u8>>();
-                                let raw = Bytes::from(raw);
+                                let raw = split_sse_event(&mut buffer, end);
                                 let usage_update = accumulate_sse_usage(&raw, &mut usage);
                                 if let Some(o) = observer.as_ref()
                                     && let Some(err) =
@@ -3491,10 +3544,12 @@ impl Lifecycle {
                                             raw.clone(),
                                         ) {
                                             SseTransformOutcome::Emit(bytes) => {
+                                                raw_before_transform_output.clear();
                                                 transformed_output_started = true;
                                                 bytes
                                             }
                                             SseTransformOutcome::Drop => {
+                                                raw_before_transform_output.clear();
                                                 transformed_output_started = true;
                                                 continue;
                                             }
@@ -3518,10 +3573,21 @@ impl Lifecycle {
                                                     }
                                                     downstream_drop_guard.disarm();
                                                     yield Ok::<Bytes, Infallible>(frame);
-                                                    break;
+                                                    break 'upstream;
                                                 }
+                                                parse_sse_events_active = false;
+                                                buffer.clear();
                                                 sse_transform_active = false;
                                                 raw_passthrough_current_chunk = true;
+                                                for raw in raw_before_transform_output.drain(..) {
+                                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                                        batch_index,
+                                                        event_count: 1,
+                                                        total_bytes: raw.len(),
+                                                    });
+                                                    batch_index = batch_index.saturating_add(1);
+                                                    yield Ok::<Bytes, Infallible>(raw);
+                                                }
                                                 Bytes::new()
                                             }
                                             SseTransformOutcome::Error(error) => {
@@ -3546,10 +3612,21 @@ impl Lifecycle {
                                                     }
                                                     downstream_drop_guard.disarm();
                                                     yield Ok::<Bytes, Infallible>(frame);
-                                                    break;
+                                                    break 'upstream;
                                                 }
+                                                parse_sse_events_active = false;
+                                                buffer.clear();
                                                 sse_transform_active = false;
                                                 raw_passthrough_current_chunk = true;
+                                                for raw in raw_before_transform_output.drain(..) {
+                                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                                        batch_index,
+                                                        event_count: 1,
+                                                        total_bytes: raw.len(),
+                                                    });
+                                                    batch_index = batch_index.saturating_add(1);
+                                                    yield Ok::<Bytes, Infallible>(raw);
+                                                }
                                                 Bytes::new()
                                             }
                                         }
@@ -3570,6 +3647,53 @@ impl Lifecycle {
                                     yield Ok::<Bytes, Infallible>(outgoing);
                                 }
                             }
+                            if parse_sse_events_active
+                                && buffer.len() > incomplete_sse_event_budget_bytes
+                            {
+                                tracing::warn!(
+                                    request_id = %event_ctx.request_id,
+                                    buffered_bytes = buffer.len(),
+                                    budget_bytes = incomplete_sse_event_budget_bytes,
+                                    "stopping SSE parsing: incomplete event exceeds configured body-derived budget"
+                                );
+                                parse_sse_events_active = false;
+                                buffer.clear();
+                                if sse_transform_active {
+                                    if transformed_output_started {
+                                        let error = ResponseTransformError::Runtime {
+                                            reason: format!(
+                                                "incomplete SSE event exceeds {incomplete_sse_event_budget_bytes}-byte budget after transform output"
+                                            ),
+                                        };
+                                        let frame = make_response_transform_error_frame(&error);
+                                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                            batch_index,
+                                            event_count: 1,
+                                            total_bytes: frame.len(),
+                                        });
+                                        stream_transform_error = Some(error);
+                                        if let Some(o) = observer.as_ref() {
+                                            o.set_terminal(
+                                                StatusCode::OK,
+                                                error_codes::UPSTREAM_STREAM_ERROR,
+                                            );
+                                        }
+                                        downstream_drop_guard.disarm();
+                                        yield Ok::<Bytes, Infallible>(frame);
+                                        break 'upstream;
+                                    }
+                                    sse_transform_active = false;
+                                    for raw in raw_before_transform_output.drain(..) {
+                                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                            batch_index,
+                                            event_count: 1,
+                                            total_bytes: raw.len(),
+                                        });
+                                        batch_index = batch_index.saturating_add(1);
+                                        yield Ok::<Bytes, Infallible>(raw);
+                                    }
+                                }
+                            }
                             if !sse_transform_active {
                                 // Chunk fanout stays inline — high-volume, not bus-worthy.
                                 observe_many(hooks.as_slice(), ObserveEvent::Chunk {
@@ -3579,6 +3703,8 @@ impl Lifecycle {
                                 });
                                 batch_index = batch_index.saturating_add(1);
                                 yield Ok::<Bytes, Infallible>(data);
+                            } else if !transformed_output_started {
+                                raw_before_transform_output.push(data);
                             }
                         }
                     }
@@ -3595,10 +3721,10 @@ impl Lifecycle {
                             &mut upstream_error_body_truncated,
                         );
                     }
-                    if parse_sse_events {
+                    if parse_sse_events_active {
                         buffer.extend_from_slice(&tail);
                         while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
-                            let raw = buffer.drain(..end).collect::<Vec<u8>>();
+                            let raw = split_sse_event(&mut buffer, end);
                             let _ = accumulate_sse_usage(&raw, &mut usage);
                             keepalive_response.observe(sse_event_name(&raw), &raw);
                             if let Some(o) = observer.as_ref()
@@ -3611,6 +3737,42 @@ impl Lifecycle {
                             }
                             sse_event_count = sse_event_count.saturating_add(1);
                         }
+                        if buffer.len() > incomplete_sse_event_budget_bytes {
+                            tracing::warn!(
+                                request_id = %event_ctx.request_id,
+                                buffered_bytes = buffer.len(),
+                                budget_bytes = incomplete_sse_event_budget_bytes,
+                                "stopping SSE parsing: final incomplete event exceeds configured body-derived budget"
+                            );
+                            buffer.clear();
+                            if sse_transform_active && stream_transform_error.is_none() {
+                                if transformed_output_started {
+                                    let error = ResponseTransformError::Runtime {
+                                        reason: format!(
+                                            "incomplete SSE event exceeds {incomplete_sse_event_budget_bytes}-byte budget after transform output"
+                                        ),
+                                    };
+                                    let frame = make_response_transform_error_frame(&error);
+                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                        batch_index,
+                                        event_count: 1,
+                                        total_bytes: frame.len(),
+                                    });
+                                    stream_transform_error = Some(error);
+                                    yield Ok::<Bytes, Infallible>(frame);
+                                } else {
+                                    for raw in raw_before_transform_output.drain(..) {
+                                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                            batch_index,
+                                            event_count: 1,
+                                            total_bytes: raw.len(),
+                                        });
+                                        batch_index = batch_index.saturating_add(1);
+                                        yield Ok::<Bytes, Infallible>(raw);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 Ok(_) => {}
@@ -3621,6 +3783,33 @@ impl Lifecycle {
                         %error,
                         "streaming usage extractor decoder finish failed"
                     );
+                    if sse_transform_active && stream_transform_error.is_none() {
+                        if transformed_output_started {
+                            let transform_error = ResponseTransformError::Runtime {
+                                reason: format!(
+                                    "streaming response decode failed after transform output: {error}"
+                                ),
+                            };
+                            let frame = make_response_transform_error_frame(&transform_error);
+                            observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                batch_index,
+                                event_count: 1,
+                                total_bytes: frame.len(),
+                            });
+                            stream_transform_error = Some(transform_error);
+                            yield Ok::<Bytes, Infallible>(frame);
+                        } else {
+                            for raw in raw_before_transform_output.drain(..) {
+                                observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                    batch_index,
+                                    event_count: 1,
+                                    total_bytes: raw.len(),
+                                });
+                                batch_index = batch_index.saturating_add(1);
+                                yield Ok::<Bytes, Infallible>(raw);
+                            }
+                        }
+                    }
                 }
             }
             if status == StatusCode::OK
@@ -4349,6 +4538,8 @@ pub(crate) struct RequestCacheMetadata {
     message_index: Option<u64>,
     message_count: Option<u64>,
     cache_control_block_count: Option<u64>,
+    thinking_budget_tokens: Option<u64>,
+    reasoning_effort: Option<String>,
     cache_control_message_indices: Vec<u64>,
     pub(crate) cache_breakpoints: Vec<RequestCacheBreakpoint>,
     pub(crate) cache_prefix_hash: Option<String>,
@@ -4492,6 +4683,18 @@ fn request_cache_metadata_from_value(
     cache_control_message_indices.dedup();
 
     let cache_control_block_count = cache_breakpoints.len() as u64;
+    let thinking_budget_tokens = value
+        .get("thinking")
+        .filter(|t| t.get("type").and_then(Value::as_str) == Some("enabled"))
+        .and_then(|t| t.get("budget_tokens"))
+        .and_then(Value::as_u64)
+        .filter(|v| *v <= 9_007_199_254_740_991);
+    let reasoning_effort = value
+        .get("output_config")
+        .and_then(|c| c.get("effort"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty() && s.len() <= 64)
+        .map(str::to_owned);
     let cache_prefix_hash = cache_breakpoints
         .last()
         .map(|breakpoint| breakpoint.prefix_hash.clone());
@@ -4503,6 +4706,8 @@ fn request_cache_metadata_from_value(
         message_index,
         message_count,
         cache_control_block_count: Some(cache_control_block_count),
+        thinking_budget_tokens,
+        reasoning_effort,
         cache_control_message_indices,
         cache_breakpoints,
         cache_prefix_hash,
@@ -5061,6 +5266,42 @@ mod tests {
     use super::*;
 
     const TEST_MODEL: &str = "claude-sonnet-4-5-20250929";
+
+    #[test]
+    fn sse_event_split_reuses_allocation_and_releases_oversized_remainder() {
+        let event = b"event: ping\ndata: {\"type\":\"ping\"}\n\n";
+        let mut buffer = BytesMut::with_capacity(SSE_BUFFER_MAX_RETAINED_CAPACITY_BYTES * 2);
+        buffer.extend_from_slice(event);
+        buffer.extend_from_slice(b"partial");
+        let input_ptr = buffer.as_ptr();
+
+        let raw = split_sse_event(&mut buffer, event.len());
+
+        assert_eq!(raw.as_ptr(), input_ptr, "split event must reuse allocation");
+        assert_eq!(raw.as_ref(), event);
+        assert_eq!(buffer.as_ref(), b"partial");
+        assert!(buffer.capacity() <= SSE_BUFFER_MAX_RETAINED_CAPACITY_BYTES);
+    }
+
+    #[test]
+    fn semantic_body_conversion_reuses_owned_and_identity_allocations() {
+        let owned = vec![1_u8, 2, 3, 4];
+        let owned_ptr = owned.as_ptr();
+        let compressed_body = Bytes::from_static(b"compressed");
+
+        let decoded = semantic_body_bytes(&compressed_body, std::borrow::Cow::Owned(owned));
+
+        assert_eq!(decoded.as_ptr(), owned_ptr);
+
+        let identity_body = Bytes::from_static(b"identity");
+        let identity_ptr = identity_body.as_ptr();
+        let identity = semantic_body_bytes(
+            &identity_body,
+            std::borrow::Cow::Borrowed(identity_body.as_ref()),
+        );
+
+        assert_eq!(identity.as_ptr(), identity_ptr);
+    }
 
     #[test]
     fn build_candidates_cache_score() {
@@ -5974,6 +6215,104 @@ mod tests {
     }
 
     #[test]
+    fn request_cache_metadata_preserves_enabled_thinking_budgets_across_badge_boundaries() {
+        // Given
+        let headers = HeaderMap::new();
+        let budgets = [
+            1_024, 4_000, 4_001, 12_000, 12_001, 24_000, 24_001, 32_000, 32_001,
+        ];
+
+        for budget in budgets {
+            let body = Bytes::from(format!(
+                r#"{{"thinking":{{"type":"enabled","budget_tokens":{budget}}},"output_config":{{"effort":"max"}}}}"#
+            ));
+
+            // When
+            let metadata = request_cache_metadata(&headers, &body);
+
+            // Then
+            assert_eq!(
+                metadata.thinking_budget_tokens,
+                Some(budget),
+                "enabled budget must remain value-preserving for {budget}"
+            );
+            assert_eq!(metadata.reasoning_effort.as_deref(), Some("max"));
+        }
+    }
+
+    #[test]
+    fn request_cache_metadata_rejects_inapplicable_or_unsafe_thinking_budgets() {
+        // Given
+        let headers = HeaderMap::new();
+        let cases = [
+            (
+                "disabled",
+                r#"{"thinking":{"type":"disabled","budget_tokens":5000}}"#,
+                None,
+            ),
+            (
+                "adaptive",
+                r#"{"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}"#,
+                Some("max"),
+            ),
+            (
+                "enabled without budget",
+                r#"{"thinking":{"type":"enabled"}}"#,
+                None,
+            ),
+            ("missing thinking", r#"{}"#, None),
+            (
+                "string budget",
+                r#"{"thinking":{"type":"enabled","budget_tokens":"1024"}}"#,
+                None,
+            ),
+            ("null thinking", r#"{"thinking":null}"#, None),
+            (
+                "one over safe integer maximum",
+                r#"{"thinking":{"type":"enabled","budget_tokens":9007199254740992}}"#,
+                None,
+            ),
+            (
+                "u64 maximum",
+                r#"{"thinking":{"type":"enabled","budget_tokens":18446744073709551615}}"#,
+                None,
+            ),
+            (
+                "empty reasoning effort",
+                r#"{"output_config":{"effort":""}}"#,
+                None,
+            ),
+            (
+                "non-string reasoning effort",
+                r#"{"output_config":{"effort":123}}"#,
+                None,
+            ),
+            (
+                "reasoning effort over 64 characters",
+                r#"{"output_config":{"effort":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}"#,
+                None,
+            ),
+        ];
+
+        for (case, fixture, expected_reasoning_effort) in cases {
+            // When
+            let metadata =
+                request_cache_metadata(&headers, &Bytes::copy_from_slice(fixture.as_bytes()));
+
+            // Then
+            assert_eq!(
+                metadata.thinking_budget_tokens, None,
+                "{case} must not produce a thinking budget"
+            );
+            assert_eq!(
+                metadata.reasoning_effort.as_deref(),
+                expected_reasoning_effort,
+                "{case} must preserve only valid reasoning effort"
+            );
+        }
+    }
+
+    #[test]
     fn request_cache_metadata_uses_opencode_session_affinity_as_thread_id() {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -6546,7 +6885,10 @@ mod tests {
             http::header::CONTENT_ENCODING,
             HeaderValue::from_static("gzip"),
         );
-        let mut decoder = UsageDecoder::from_headers(&headers);
+        let mut decoder = UsageDecoder::from_headers(
+            &headers,
+            decompression_output_budget_bytes(DEFAULT_MESSAGES_CAP_BYTES),
+        );
         assert!(decoder.is_active(), "gzip decoder should be active");
 
         let mut buffer: Vec<u8> = Vec::new();

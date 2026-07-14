@@ -1,5 +1,3 @@
-mod common;
-
 use cc_lb_config::{
     Config, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES,
     DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_SQLITE_PATH, StorageConfig,
@@ -7,7 +5,7 @@ use cc_lb_config::{
 
 #[test]
 fn load_minimal_toml_applies_plan_defaults() {
-    let (_dir, path) = common::temp_config("[listener]\n");
+    let (_dir, path) = crate::common::temp_config("[listener]\n");
 
     let config = Config::load(&path).unwrap();
 

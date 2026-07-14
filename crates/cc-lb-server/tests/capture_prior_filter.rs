@@ -1,7 +1,6 @@
 #![cfg(feature = "capture")]
 
-mod capture_matrix_support;
-mod common;
+use crate::{capture_matrix_support, common};
 
 use capture_matrix_support::{capture_config, capture_record, open_capture_pool};
 use fake_anthropic::AppConfig;

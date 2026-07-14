@@ -203,5 +203,55 @@ describe('RequestEventsTable - Live & Outcomes', () => {
       // Drawer should close cleanly (or at least not show the stale event)
       expect(screen.queryByText('sess_123')).toBeNull();
     });
+
+    it('shows reasoning badge on partial event, and priority badge only after final update', async () => {
+      cleanup();
+      const partialEvent = {
+        event_id: 'evt_badges',
+        request_id: 'req_badges',
+        ts: 1718553120,
+        ts_ms: 1718553120000,
+        status: 0,
+        duration_ms: 0,
+        model: 'claude-3-5-sonnet',
+        thinking_budget_tokens: 18000,
+        _phase: 'partial',
+      } satisfies RequestEventWithPhase;
+
+      const { rerender } = render(
+        <RequestEventsTable
+          events={[partialEvent]}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+        />,
+      );
+
+      // Reasoning badge should be visible immediately
+      expect(screen.getByText('high')).toBeDefined();
+      // Priority badge should not be visible yet
+      expect(screen.queryByText('priority')).toBeNull();
+
+      // Rerender with final event that includes service_tier
+      const finalEvent = {
+        ...partialEvent,
+        status: 200,
+        duration_ms: 1500,
+        service_tier: 'priority',
+        thinking_tokens: 8200,
+        _phase: 'final',
+      } satisfies RequestEventWithPhase;
+
+      rerender(
+        <RequestEventsTable
+          events={[finalEvent]}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+        />,
+      );
+
+      // Both badges should now be visible
+      expect(screen.getByText('high · 8.2k')).toBeDefined();
+      expect(screen.getByText('priority')).toBeDefined();
+    });
   });
 });

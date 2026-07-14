@@ -3,8 +3,8 @@ use std::sync::Arc;
 use rkyv::util::AlignedVec;
 
 use crate::cache::{
-    call_filter_hook, call_observe_hook, call_shape_hook, call_transform_response_hook,
-    call_transform_sse_event_hook,
+    call_filter_hook_scoped, call_observe_hook, call_shape_hook_scoped,
+    call_transform_response_hook_scoped, call_transform_sse_event_hook_scoped,
 };
 use crate::cell::{LoadedPluginSlot, PluginCell};
 use crate::error::WasmtimeRuntimeError;
@@ -62,13 +62,51 @@ impl WasmPluginWireDispatch {
     /// Dispatch a filter call. `input` must be rkyv-encoded `FilterRequest` bytes.
     /// Returns rkyv-encoded `FilterResponse` bytes.
     pub fn call_filter(&self, input: &[u8]) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        call_filter_hook(&self.cell, input)
+        self.call_filter_scoped(input, <[u8]>::to_vec)
+    }
+
+    /// Dispatch a filter call and consume its checked output while guest memory is borrowed.
+    ///
+    /// The callback receives only the bounded guest-memory slice. Its higher-ranked lifetime
+    /// prevents that slice from escaping in the return value:
+    ///
+    /// ```compile_fail
+    /// use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntimeError};
+    ///
+    /// fn escape_guest_output<'a>(
+    ///     dispatch: &'a WasmPluginWireDispatch,
+    ///     input: &'a [u8],
+    /// ) -> Result<&'a [u8], WasmtimeRuntimeError> {
+    ///     dispatch.call_filter_scoped(input, |guest_output| guest_output)
+    /// }
+    /// ```
+    pub fn call_filter_scoped<R, F>(
+        &self,
+        input: &[u8],
+        with_output: F,
+    ) -> Result<R, WasmtimeRuntimeError>
+    where
+        F: for<'a> FnOnce(&'a [u8]) -> R,
+    {
+        call_filter_hook_scoped(&self.cell, input, with_output)
     }
 
     /// Dispatch a shape call. `input` must be rkyv-encoded `ShapeRequest` bytes.
     /// Returns rkyv-encoded `ShapeResponse` bytes.
     pub fn call_shape(&self, input: &[u8]) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        call_shape_hook(&self.cell, input)
+        self.call_shape_scoped(input, <[u8]>::to_vec)
+    }
+
+    /// Dispatch a shape call and consume its checked output before the fresh Store is dropped.
+    pub fn call_shape_scoped<R, F>(
+        &self,
+        input: &[u8],
+        with_output: F,
+    ) -> Result<R, WasmtimeRuntimeError>
+    where
+        F: for<'a> FnOnce(&'a [u8]) -> R,
+    {
+        call_shape_hook_scoped(&self.cell, input, with_output)
     }
 
     /// Dispatch an observe call. `input` must be rkyv-encoded `ObserveEvent` bytes.
@@ -82,7 +120,23 @@ impl WasmPluginWireDispatch {
         &self,
         input: &[u8],
     ) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
-        call_transform_response_hook(&self.cell, input)
+        self.call_transform_response_scoped(input, |output| {
+            let mut aligned = AlignedVec::with_capacity(output.len());
+            aligned.extend_from_slice(output);
+            aligned
+        })
+    }
+
+    /// Dispatch a response transform and consume its checked output before the Store is dropped.
+    pub fn call_transform_response_scoped<R, F>(
+        &self,
+        input: &[u8],
+        with_output: F,
+    ) -> Result<R, WasmtimeRuntimeError>
+    where
+        F: for<'a> FnOnce(&'a [u8]) -> R,
+    {
+        call_transform_response_hook_scoped(&self.cell, input, with_output)
     }
 
     /// Dispatch a transform_sse_event call. Returns aligned bytes for rkyv access.
@@ -90,7 +144,23 @@ impl WasmPluginWireDispatch {
         &self,
         input: &[u8],
     ) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
-        call_transform_sse_event_hook(&self.cell, input)
+        self.call_transform_sse_event_scoped(input, |output| {
+            let mut aligned = AlignedVec::with_capacity(output.len());
+            aligned.extend_from_slice(output);
+            aligned
+        })
+    }
+
+    /// Dispatch an SSE transform and consume its checked output before the Store is dropped.
+    pub fn call_transform_sse_event_scoped<R, F>(
+        &self,
+        input: &[u8],
+        with_output: F,
+    ) -> Result<R, WasmtimeRuntimeError>
+    where
+        F: for<'a> FnOnce(&'a [u8]) -> R,
+    {
+        call_transform_sse_event_hook_scoped(&self.cell, input, with_output)
     }
 
     /// Wire version for the filter hook, if declared in plugin metadata.

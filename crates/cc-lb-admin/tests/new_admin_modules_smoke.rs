@@ -1,4 +1,4 @@
-mod admin_test_common;
+use crate::admin_test_common;
 
 use admin_test_common::spawn_admin_server;
 use axum::http::{StatusCode, header};

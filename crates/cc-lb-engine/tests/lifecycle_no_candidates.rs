@@ -1,5 +1,4 @@
-mod common;
-mod router_lifecycle_support;
+use crate::{common, router_lifecycle_support};
 
 use std::sync::Arc;
 

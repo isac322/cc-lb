@@ -1,5 +1,3 @@
-mod common;
-
 use cc_lb_config::{Config, ConfigError, PostgresPoolConfig, StorageConfig, validate_postgres_url};
 
 #[test]
@@ -14,7 +12,7 @@ fn test_legacy_flat_storage_parses() {
 storage_path = "{}"
 oauth_aead_key_env = "MY_KEY"
 "#,
-            common::toml_path(&storage_path)
+            crate::common::toml_path(&storage_path)
         ),
     )
     .unwrap();
@@ -50,10 +48,12 @@ fn test_postgres_pool_defaults() {
     let pool = PostgresPoolConfig::default();
 
     assert_eq!(pool.max_connections, 10);
-    assert_eq!(pool.min_connections, 0);
+    assert_eq!(pool.min_connections, 1);
     assert_eq!(pool.acquire_timeout_secs, 5);
     assert_eq!(pool.idle_timeout_secs, 600);
+    assert_eq!(pool.max_lifetime_secs, 1800);
     assert_eq!(pool.statement_timeout_secs, 30);
+    assert!(pool.test_before_acquire);
     assert_eq!(pool.sslmode, "prefer");
 }
 

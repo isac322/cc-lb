@@ -1,7 +1,6 @@
 #![cfg(feature = "capture")]
 
-mod capture_matrix_support;
-mod common;
+use crate::{capture_matrix_support, common};
 
 use bytes::Bytes;
 use capture_matrix_support::{MESSAGE_BODY, capture_config, capture_record, open_capture_pool};

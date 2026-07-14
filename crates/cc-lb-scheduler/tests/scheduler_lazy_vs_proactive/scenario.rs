@@ -8,10 +8,10 @@ use cc_lb_server::refresh::LazyRefresher;
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use uuid::Uuid;
 
-use crate::common::{
+use super::common::{
     LAZY_REQUEST_DELAY, LOSER_SETTLE_DELAY, POLL_INTERVAL, TestResult, WAIT_TIMEOUT,
 };
-use crate::fake::FakeAnthropic;
+use super::fake::FakeAnthropic;
 
 pub async fn run_race_scenario<
     ReadUpstream,

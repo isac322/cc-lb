@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
 use std::fs;

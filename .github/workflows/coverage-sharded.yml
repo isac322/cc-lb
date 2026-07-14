@@ -1,0 +1,240 @@
+# =============================================================================
+# Sharded coverage pipeline — PREPARED, INTENTIONALLY INACTIVE.
+#
+# WHAT
+#   A multi-node replacement for the single-runner `nextest-cov` job in ci.yml.
+#   It builds the instrumented test binaries ONCE (an archive), fans that
+#   archive out to N shard runners that each run a slice of the ~1700 tests in
+#   parallel, then merges every shard's profile data and enforces the coverage
+#   gates in one place. Uses the taiki-e/cargo-llvm-cov archive recipe:
+#     nextest-archive               -> build + archive instrumented binaries once
+#     nextest --archive-file
+#             --partition slice:i/N  -> run one shard from the archive (no rebuild)
+#     report  --nextest-archive-file -> merge all shards' profraw + gate
+#
+# WHY IT IS INACTIVE (workflow_dispatch only — never runs on push/PR)
+#   Sharding only helps when the shard runners land on DIFFERENT physical nodes.
+#   Today ARC runs on a SINGLE 4-core node (maxRunners: 3 — see
+#   .deploy/arc-cc-lb-values.yaml), so N shard pods would pile onto that one node
+#   and fight for the same 4 cores: no wall-clock win, plus each shard needs its
+#   own Postgres service and the extra merge round-trip. So this stays
+#   manual-dispatch-only until the cluster actually has multiple nodes.
+#
+# HOW TO ENABLE (after adding nodes to the ARC pool)
+#   1. Scale runners: add nodes and raise `maxRunners` in
+#      .deploy/arc-cc-lb-values.yaml to >= SHARD_TOTAL plus headroom for the
+#      other CI jobs (clippy/e2e/fmt still share the pool).
+#   2. Pick the shard count in ONE place: set `SHARD_TOTAL` below AND make the
+#      `shard:` matrix list exactly 1..SHARD_TOTAL. They MUST match.
+#   3. Flip the trigger: replace the `on: workflow_dispatch` block with the same
+#      pull_request/push triggers ci.yml uses (a commented copy sits below it).
+#   4. Retire the single-runner path: delete the `nextest-cov` job from ci.yml.
+#      Do NOT run both — they duplicate the same gate.
+#   5. Keep the Rust toolchain pin and the coverage env (CARGO_PROFILE_*_DEBUG,
+#      SQLX_OFFLINE, DATABASE_URL*, etc.) in sync with ci.yml's nextest-cov job.
+#
+# VERIFY BEFORE YOU TRUST IT (cross-machine coverage has sharp edges)
+#   Dispatch this manually first (Actions -> coverage-sharded -> Run workflow),
+#   even on one node, and confirm the merged total line coverage matches a
+#   single-runner `nextest-cov` run. The parts most likely to need a tweak:
+#     - profraw filenames must not collide when the merge job flattens every
+#       shard's artifact (handled here via a shard-unique LLVM_PROFILE_FILE_NAME
+#       prefix — verify the files actually land in target/llvm-cov-target/).
+#     - `report --nextest-archive-file ... --package <p>` must resolve each
+#       package against the archived binaries (verify each gate reports > 0%).
+#     - workspace paths embedded in the archive's coverage map must match the
+#       merge runner's checkout path (same runner image => same /home/runner
+#       path, but confirm the ignore-filename-regex still filters correctly).
+#     - actions/download-artifact is pinned @v7 to match upload-artifact; no
+#       existing workflow uses it yet, so confirm the runner action mirror
+#       carries download-artifact@v7 (needs the v4+ pattern / merge-multiple
+#       inputs used by the merge job).
+# =============================================================================
+name: coverage-sharded
+
+on:
+  # INACTIVE: manual-only. Nothing runs this on push/PR today (single node).
+  workflow_dispatch: {}
+  # ENABLE: replace the line above with ci.yml's triggers once you have nodes:
+  # pull_request:
+  #   paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore', '.editorconfig']
+  # push:
+  #   branches: [master]
+  #   paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore', '.editorconfig']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CC_LB_ADMIN_SKIP_SPA: "1"
+  # Shard count. MUST equal the length of the `shard:` matrix list in the
+  # coverage-shard job (which must be 1..SHARD_TOTAL). Rescale both together.
+  SHARD_TOTAL: "4"
+
+jobs:
+  # ---- 1) Build the instrumented test binaries ONCE, then archive them ------
+  # This is the single expensive compile. Every shard reuses this archive
+  # instead of recompiling the workspace, which is what makes sharding a net
+  # win (fan-out of run time, not N-times-duplicated build time).
+  coverage-build:
+    runs-on: oracle4-cc-lb
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: llvm-tools-preview
+      - name: Install wasm targets for pinned toolchain
+        run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
+      - uses: ./.github/actions/setup-rust-cache
+        with:
+          rust-cache-key: coverage
+          cache-targets: false
+          stable-build-metadata: "true"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      - name: Clean coverage artifacts
+        run: cargo llvm-cov clean --workspace
+      - name: Build and archive instrumented test binaries
+        run: |
+          cargo llvm-cov nextest-archive \
+            --workspace \
+            --exclude cc-lb-loadgen \
+            --all-features \
+            --archive-file nextest-archive.tar.zst
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-nextest-archive
+          path: nextest-archive.tar.zst
+          if-no-files-found: error
+
+  # ---- 2) Run one slice of the tests per shard, upload its profile data -----
+  # `--partition slice:i/N` is nextest's cross-binary, evenly balanced
+  # partitioner (cargo-nextest 0.9.127+). Each shard runs from the shared
+  # archive (no rebuild) and keeps its raw profiles (--no-report) for the merge.
+  coverage-shard:
+    needs: coverage-build
+    runs-on: oracle4-cc-lb
+    strategy:
+      # Let every shard finish even if one fails, so the merge sees full data
+      # and one flaky shard does not mask the others.
+      fail-fast: false
+      matrix:
+        # MUST be exactly 1..SHARD_TOTAL. Rescale together with SHARD_TOTAL.
+        shard: [1, 2, 3, 4]
+    services:
+      # Every shard needs its own Postgres: slice:i/N can place the Postgres
+      # integration tests in any shard.
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: testpw
+          POSTGRES_DB: cc_lb_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # Keep this coverage env in sync with ci.yml's nextest-cov job.
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CC_LB_TEST_READY_TIMEOUT_SECS: "120"
+      CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
+      DATABASE_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
+      DATABASE_URL_TEST: postgres://postgres:testpw@localhost:5432/cc_lb_test
+      SQLX_OFFLINE: "true"
+      # Shard-unique profraw prefix so the merge job can flatten every shard's
+      # artifact into one dir without filename collisions. %p (pid) + %m keep
+      # per-process files distinct within a shard.
+      LLVM_PROFILE_FILE_NAME: shard-${{ matrix.shard }}-%p-%m.profraw
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: llvm-tools-preview
+      - uses: ./.github/actions/setup-rust-cache
+        with:
+          rust-cache-key: coverage
+          cache-targets: false
+          stable-build-metadata: "true"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest,sqlx-cli
+      - uses: actions/download-artifact@v7
+        with:
+          name: coverage-nextest-archive
+      - name: Run Postgres migrations
+        run: sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
+        env:
+          DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
+      - name: Run test shard ${{ matrix.shard }}/${{ env.SHARD_TOTAL }}
+        run: |
+          cargo llvm-cov nextest \
+            --archive-file nextest-archive.tar.zst \
+            --partition slice:${{ matrix.shard }}/${{ env.SHARD_TOTAL }} \
+            --no-report
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-profraw-${{ matrix.shard }}
+          path: target/llvm-cov-target/*.profraw
+          if-no-files-found: error
+
+  # ---- 3) Merge every shard's profiles, generate the report, enforce gates --
+  # Downloads the shared archive (for the binaries + coverage map) and every
+  # shard's profraw into one target dir, then a single report pass merges them.
+  coverage-merge:
+    needs: coverage-shard
+    runs-on: oracle4-cc-lb
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - uses: actions/download-artifact@v7
+        with:
+          name: coverage-nextest-archive
+      - name: Collect every shard's raw profiles
+        uses: actions/download-artifact@v7
+        with:
+          pattern: coverage-profraw-*
+          path: target/llvm-cov-target
+          merge-multiple: true
+      - name: Generate workspace lcov report
+        run: |
+          cargo llvm-cov report \
+            --nextest-archive-file nextest-archive.tar.zst \
+            --lcov \
+            --output-path target/coverage.lcov \
+            --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+      # The lcov step above merged the shards' profraw into .profdata; drop the
+      # raw profiles so the per-package gates below reuse it and skip re-merging.
+      - name: Drop raw profiles so per-package gates reuse the merged profdata
+        run: cargo llvm-cov clean --profraw-only
+      - name: Check per-package coverage gates
+        run: |
+          set -euo pipefail
+          A=(--nextest-archive-file nextest-archive.tar.zst)
+          R=(--ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)')
+          cargo llvm-cov report "${A[@]}" --package cc-lb-engine                  --fail-under-lines 60 "${R[@]}"
+          cargo llvm-cov report "${A[@]}" --package cc-lb-dialect-anthropic       --fail-under-lines 80 "${R[@]}"
+          cargo llvm-cov report "${A[@]}" --package cc-lb-admin                    --fail-under-lines 60 "${R[@]}"
+          cargo llvm-cov report "${A[@]}" --package cc-lb-config                   --fail-under-lines 60 "${R[@]}"
+          cargo llvm-cov report "${A[@]}" --package cc-lb-observability            --fail-under-lines 60 "${R[@]}"
+          cargo llvm-cov report "${A[@]}" --package cc-lb-signer-anthropic-key     --fail-under-lines 60 "${R[@]}"
+          cargo llvm-cov report "${A[@]}" --package cc-lb-signer-anthropic-oauth   --fail-under-lines 60 "${R[@]}"
+          cargo llvm-cov report "${A[@]}" --package cc-lb-server                   --fail-under-lines 60 "${R[@]}"
+          cargo llvm-cov report "${A[@]}" --package cc-lb-storage-sqlite           --fail-under-lines 60 "${R[@]}"
+          cargo llvm-cov report "${A[@]}" --package cc-lb-storage-postgres         --fail-under-lines 60 "${R[@]}"
+          cargo llvm-cov report "${A[@]}" --package cc-lb-scheduler                --fail-under-lines 60 "${R[@]}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: task-43-coverage-lcov-sharded
+          path: target/coverage.lcov
+          if-no-files-found: error

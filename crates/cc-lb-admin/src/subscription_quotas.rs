@@ -1,5 +1,7 @@
 #![allow(clippy::result_large_err, clippy::manual_clamp)]
 
+mod series;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use axum::{
@@ -16,15 +18,17 @@ use cc_lb_quota::plan_capacity::{PRO_CAPACITY_RATIO, plan_capacity_ratio};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaHistoryStore,
     PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord, Storage, StorageError,
-    SubscriptionQuotaBucket, SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource,
-    SubscriptionQuotaSourceMerge, SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore,
-    UpstreamSubscriptionMetadataRecord, UsageRollup, UsageRollupResolution, upstream::UpstreamKind,
+    SubscriptionQuotaBucket, SubscriptionQuotaProviderLot, SubscriptionQuotaProviderLotQuery,
+    SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
+    SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
+    UsageRollup, UsageRollupResolution, UsageTokenInterval, upstream::UpstreamKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::AdminState;
+use series::list_subscription_quota_series;
 
 const STORE_PAGE_LIMIT: usize = 1_000;
 const DEFAULT_SERIES_BUCKET_SECS: u64 = 300;
@@ -354,9 +358,9 @@ struct AnalysisObservation {
     sources_seen: Vec<SubscriptionQuotaSource>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservationCycle {
-    observations: Vec<AnalysisObservation>,
+#[derive(Debug, Clone, Copy)]
+struct ObservationCycle<'a> {
+    observations: &'a [AnalysisObservation],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -755,8 +759,9 @@ async fn build_series_response(
         .map(|upstream| upstream.id)
         .collect::<Vec<_>>();
 
-    let series = storage
-        .list_subscription_quota_series(SubscriptionQuotaSeriesQuery {
+    let series = list_subscription_quota_series(
+        storage,
+        SubscriptionQuotaSeriesQuery {
             upstream_ids,
             windows,
             sources: sources_for_merge(source),
@@ -765,24 +770,25 @@ async fn build_series_response(
             bucket_secs,
             max_points_per_series,
             source_merge: source,
-        })
-        .await
-        .map_err(storage_error)?
-        .into_iter()
-        .map(|series| {
-            let markers = build_markers(&series.buckets, bucket_secs);
-            SeriesResponseItem {
-                upstream_id: series.upstream_id.to_string(),
-                upstream_name: upstream_names
-                    .get(&series.upstream_id)
-                    .cloned()
-                    .unwrap_or_default(),
-                window: series.window.as_str().to_owned(),
-                buckets: series.buckets.iter().map(series_bucket_response).collect(),
-                markers,
-            }
-        })
-        .collect();
+        },
+    )
+    .await
+    .map_err(storage_error)?
+    .into_iter()
+    .map(|series| {
+        let markers = build_markers(&series.buckets, bucket_secs);
+        SeriesResponseItem {
+            upstream_id: series.upstream_id.to_string(),
+            upstream_name: upstream_names
+                .get(&series.upstream_id)
+                .cloned()
+                .unwrap_or_default(),
+            window: series.window.as_str().to_owned(),
+            buckets: series.buckets.iter().map(series_bucket_response).collect(),
+            markers,
+        }
+    })
+    .collect();
 
     Ok(SeriesResponse {
         since_unix_secs: query.since_unix_secs,
@@ -813,8 +819,9 @@ async fn build_analysis_response(
         )
         .await
         .map_err(storage_error)?;
-    let quota_series = storage
-        .list_subscription_quota_series(SubscriptionQuotaSeriesQuery {
+    let quota_series = list_subscription_quota_series(
+        storage,
+        SubscriptionQuotaSeriesQuery {
             upstream_ids: requested_upstream_ids.clone(),
             windows: windows.clone(),
             sources: sources_for_merge(source),
@@ -823,9 +830,10 @@ async fn build_analysis_response(
             bucket_secs: ANALYSIS_BUCKET_SECS,
             max_points_per_series: ANALYSIS_MAX_POINTS,
             source_merge: source,
-        })
-        .await
-        .map_err(storage_error)?;
+        },
+    )
+    .await
+    .map_err(storage_error)?;
     let max_staleness_secs = state
         .dynamic_view
         .load()
@@ -941,13 +949,8 @@ pub async fn build_cc_lb_aggregate_response(
         .map(|secs| cc_window_bounds(now_unix_secs, secs).0)
         .min()
         .unwrap_or(now_unix_secs);
-    let upstream_ids = upstreams
-        .iter()
-        .map(|upstream| upstream.id)
-        .collect::<HashSet<_>>();
     let upstream_by_id = upstreams
         .iter()
-        .cloned()
         .map(|upstream| (upstream.id, upstream))
         .collect::<HashMap<_, _>>();
     let subscription_metadata = storage.list_upstream_subscription_metadata().await?;
@@ -955,25 +958,24 @@ pub async fn build_cc_lb_aggregate_response(
     let capacity_ratios =
         capacity_ratios_by_upstream(&subscription_metadata, &organization_metadata);
 
-    let quota_series = if upstreams.is_empty() || duration_windows.is_empty() {
+    let provider_lots = if upstreams.is_empty() || duration_windows.is_empty() {
         Vec::new()
     } else {
         storage
-            .list_subscription_quota_series(SubscriptionQuotaSeriesQuery {
+            .list_subscription_quota_provider_lots(SubscriptionQuotaProviderLotQuery {
                 upstream_ids: upstreams.iter().map(|upstream| upstream.id).collect(),
                 windows: duration_windows.clone(),
                 sources: sources_for_merge(source),
                 since_unix_millis: query_start.saturating_mul(1_000),
                 until_unix_millis: now_unix_millis,
-                bucket_secs: ANALYSIS_BUCKET_SECS,
-                max_points_per_series: ANALYSIS_MAX_POINTS,
                 source_merge: source,
+                evaluation_unix_secs: now_unix_secs,
             })
             .await?
     };
 
     let dynamic_view = dynamic_view.load();
-    let mut latest_inputs = Vec::new();
+    let mut latest_candidates = Vec::new();
     for upstream in &upstreams {
         for snapshot in dynamic_view.subscription_quota_cache.snapshot_for_upstream(
             upstream.id,
@@ -989,61 +991,140 @@ pub async fn build_cc_lb_aggregate_response(
             if !windows.contains(&window) || window_secs(window).is_none() {
                 continue;
             }
-            latest_inputs.push(provider_lot_input_from_snapshot(
-                upstream,
+            latest_candidates.push((
+                upstream.id,
                 window,
-                &snapshot,
+                snapshot,
                 capacity_ratios
                     .get(&upstream.id)
                     .copied()
                     .unwrap_or(PRO_CAPACITY_RATIO),
-                now_unix_secs,
             ));
         }
     }
 
-    let mut lot_inputs = provider_lot_inputs_from_series(
-        &quota_series,
-        &upstream_by_id,
-        &capacity_ratios,
-        now_unix_secs,
-    );
-    let covered_by_series = lot_inputs
+    let mut lot_inputs = provider_lots
         .iter()
-        .map(|input| (input.upstream.id, input.window))
+        .filter_map(|lot| {
+            let upstream = upstream_by_id.get(&lot.upstream_id)?;
+            Some(provider_lot_input_from_storage(
+                upstream,
+                lot,
+                capacity_ratios
+                    .get(&lot.upstream_id)
+                    .copied()
+                    .unwrap_or(PRO_CAPACITY_RATIO),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let covered_by_provider_lots = lot_inputs
+        .iter()
+        .map(|input| (input.upstream_id, input.window))
         .collect::<HashSet<_>>();
     lot_inputs.extend(
-        latest_inputs
-            .into_iter()
-            .filter(|input| !covered_by_series.contains(&(input.upstream.id, input.window))),
+        latest_candidates
+            .iter()
+            .filter(|(upstream_id, window, _, _)| {
+                !covered_by_provider_lots.contains(&(*upstream_id, *window))
+            })
+            .filter_map(|(upstream_id, window, snapshot, capacity_ratio)| {
+                upstream_by_id.get(upstream_id).map(|upstream| {
+                    provider_lot_input_from_snapshot(
+                        upstream,
+                        *window,
+                        snapshot,
+                        *capacity_ratio,
+                        now_unix_secs,
+                    )
+                })
+            }),
     );
 
-    let earliest_rollup_start = lot_inputs
+    let mut intervals = Vec::new();
+    let mut push_interval = |upstream_id, start_unix_secs, end_unix_secs| {
+        let interval_id = u64::try_from(intervals.len()).unwrap_or(u64::MAX);
+        intervals.push(UsageTokenInterval {
+            interval_id,
+            upstream_id,
+            start_unix_secs,
+            end_unix_secs,
+        });
+        interval_id
+    };
+    let lot_interval_ids = lot_inputs
         .iter()
-        .filter_map(|input| input.provider_start)
-        .min()
-        .unwrap_or(query_start)
-        .min(query_start);
-    let rollups = storage
-        .query_usage_rollups_in_range(
-            UsageRollupResolution::Minute,
-            earliest_rollup_start,
-            now_unix_secs,
-        )
-        .await?;
+        .map(|input| {
+            let secs = window_secs(input.window).expect("aggregate windows are duration-backed");
+            let (cc_start, cc_reset) = cc_window_bounds(now_unix_secs, secs);
+            let provider_reset = input.provider_reset.or(Some(cc_reset));
+            let provider_sample_end = provider_reset
+                .unwrap_or(now_unix_secs)
+                .min(input.evaluation_unix_secs)
+                .min(now_unix_secs);
+            AggregateProviderLotIntervalIds {
+                provider_tokens: input
+                    .provider_start
+                    .map(|start| push_interval(input.upstream_id, start, provider_sample_end)),
+                used_before_cc_window: input
+                    .provider_start
+                    .map(|start| push_interval(input.upstream_id, start, cc_start)),
+            }
+        })
+        .collect::<Vec<_>>();
+    let window_interval_ids = duration_windows
+        .iter()
+        .copied()
+        .map(|window| {
+            let secs = window_secs(window).expect("aggregate windows are duration-backed");
+            let (cc_start, _) = cc_window_bounds(now_unix_secs, secs);
+            let ids = upstreams
+                .iter()
+                .map(|upstream| push_interval(upstream.id, cc_start, now_unix_secs))
+                .collect::<Vec<_>>();
+            (window, ids)
+        })
+        .collect::<HashMap<_, _>>();
+    let token_sums = storage
+        .sum_usage_tokens_for_intervals(&intervals)
+        .await?
+        .into_iter()
+        .map(|sum| (sum.interval_id, sum.tokens))
+        .collect::<HashMap<_, _>>();
 
     let mut aggregate_windows = Vec::new();
     for window in duration_windows {
         let window_lots = lot_inputs
             .iter()
-            .filter(|input| input.window == window)
-            .map(|input| build_provider_lot_response(input, &rollups, now_unix_secs))
+            .zip(&lot_interval_ids)
+            .filter(|(input, _)| input.window == window)
+            .map(|(input, interval_ids)| {
+                build_provider_lot_response(
+                    input,
+                    ProviderLotTokenSums {
+                        provider_tokens: interval_ids
+                            .provider_tokens
+                            .and_then(|id| token_sums.get(&id).copied())
+                            .unwrap_or(0),
+                        used_before_cc_window: interval_ids
+                            .used_before_cc_window
+                            .and_then(|id| token_sums.get(&id).copied())
+                            .unwrap_or(0),
+                    },
+                    now_unix_secs,
+                )
+            })
             .collect::<Vec<_>>();
+        let used_tokens = window_interval_ids
+            .get(&window)
+            .into_iter()
+            .flatten()
+            .filter_map(|interval_id| token_sums.get(interval_id))
+            .copied()
+            .sum();
         aggregate_windows.push(build_aggregate_window_response(
             window,
             &window_lots,
-            &rollups,
-            &upstream_ids,
+            used_tokens,
             now_unix_secs,
         ));
     }
@@ -1153,14 +1234,11 @@ pub async fn record_pool_quota_snapshots_now(
 fn build_aggregate_window_response(
     window: SubscriptionQuotaWindow,
     lots: &[AggregateProviderLotResponse],
-    rollups: &[UsageRollup],
-    upstream_ids: &HashSet<Uuid>,
+    used_tokens: u64,
     now_unix_secs: u64,
 ) -> AggregateWindowResponse {
     let secs = window_secs(window).expect("aggregate windows are duration-backed");
     let (cc_start, cc_reset) = cc_window_bounds(now_unix_secs, secs);
-    let used_tokens =
-        tokens_in_interval_for_upstreams(rollups, upstream_ids, cc_start, now_unix_secs);
     let capacity_to_now = sum_optional(lots.iter().map(|lot| lot.capacity_to_now_tokens_estimate));
     let projected_capacity = sum_optional(
         lots.iter()
@@ -1297,11 +1375,12 @@ fn latest_lot_per_upstream(
     result
 }
 
-#[derive(Clone)]
-struct AggregateProviderLotInput {
-    upstream: UpstreamRecord,
+#[derive(Clone, Copy)]
+struct AggregateProviderLotInput<'a> {
+    upstream_id: Uuid,
+    upstream_name: &'a str,
     window: SubscriptionQuotaWindow,
-    source: Option<String>,
+    source: Option<&'a str>,
     state: SubscriptionQuotaDataState,
     provider_start: Option<u64>,
     provider_reset: Option<u64>,
@@ -1311,19 +1390,20 @@ struct AggregateProviderLotInput {
     capacity_ratio: f64,
 }
 
-fn provider_lot_input_from_snapshot(
-    upstream: &UpstreamRecord,
+fn provider_lot_input_from_snapshot<'a>(
+    upstream: &'a UpstreamRecord,
     window: SubscriptionQuotaWindow,
-    snapshot: &SubscriptionQuotaCandidateSnapshot,
+    snapshot: &'a SubscriptionQuotaCandidateSnapshot,
     capacity_ratio: f64,
     now_unix_secs: u64,
-) -> AggregateProviderLotInput {
+) -> AggregateProviderLotInput<'a> {
     let secs = window_secs(window).expect("aggregate windows are duration-backed");
     let (_, cc_reset) = cc_window_bounds(now_unix_secs, secs);
     AggregateProviderLotInput {
-        upstream: upstream.clone(),
+        upstream_id: upstream.id,
+        upstream_name: upstream.name.as_str(),
         window,
-        source: snapshot.source.clone(),
+        source: snapshot.source.as_deref(),
         state: snapshot.state,
         provider_start: provider_window_start_unix_secs(window, snapshot, now_unix_secs),
         provider_reset: snapshot.resets_at_unix_secs.or(Some(cc_reset)),
@@ -1334,89 +1414,56 @@ fn provider_lot_input_from_snapshot(
     }
 }
 
-fn provider_lot_inputs_from_series(
-    series: &[cc_lb_storage_api::SubscriptionQuotaSeries],
-    upstream_by_id: &HashMap<Uuid, UpstreamRecord>,
-    capacity_ratios: &HashMap<Uuid, f64>,
-    evaluation_unix_secs: u64,
-) -> Vec<AggregateProviderLotInput> {
-    let mut inputs = Vec::new();
-    for series in series {
-        let Some(upstream) = upstream_by_id.get(&series.upstream_id) else {
-            continue;
-        };
-        let Some(secs) = window_secs(series.window) else {
-            continue;
-        };
-        let observations = step_observations(&series.buckets);
-        let cycles = split_reset_cycles(&observations);
-        let cycle_count = cycles.len();
-        for (cycle_index, cycle) in cycles.into_iter().enumerate() {
-            let Some(last) = cycle.observations.last() else {
-                continue;
-            };
-            let cycle_evaluation_unix_secs = if cycle_index + 1 == cycle_count {
-                evaluation_unix_secs
-            } else {
-                last.bucket_start_unix_secs
-            };
-            let provider_reset = last.resets_at_unix_secs_last;
-            inputs.push(AggregateProviderLotInput {
-                upstream: upstream.clone(),
-                window: series.window,
-                source: Some(series.source.as_str().to_owned()),
-                state: SubscriptionQuotaDataState::Fresh,
-                provider_start: provider_reset
-                    .map(|reset| reset.saturating_sub(secs))
-                    .or_else(|| {
-                        cycle
-                            .observations
-                            .first()
-                            .map(|first| first.observed_at_unix_millis_last / 1_000)
-                    }),
-                provider_reset,
-                observed_at_unix_millis: Some(last.observed_at_unix_millis_last),
-                evaluation_unix_secs: cycle_evaluation_unix_secs,
-                utilization: Some(last.utilization_last),
-                capacity_ratio: capacity_ratios
-                    .get(&upstream.id)
-                    .copied()
-                    .unwrap_or(PRO_CAPACITY_RATIO),
-            });
-        }
+fn provider_lot_input_from_storage<'a>(
+    upstream: &'a UpstreamRecord,
+    lot: &'a SubscriptionQuotaProviderLot,
+    capacity_ratio: f64,
+) -> AggregateProviderLotInput<'a> {
+    AggregateProviderLotInput {
+        upstream_id: upstream.id,
+        upstream_name: upstream.name.as_str(),
+        window: lot.window,
+        source: Some(lot.source.as_str()),
+        state: SubscriptionQuotaDataState::Fresh,
+        provider_start: lot.provider_start_unix_secs,
+        provider_reset: lot.provider_reset_unix_secs,
+        observed_at_unix_millis: Some(lot.observed_at_unix_millis),
+        evaluation_unix_secs: lot.evaluation_unix_secs,
+        utilization: Some(lot.utilization),
+        capacity_ratio,
     }
-    inputs
+}
+
+#[derive(Clone, Copy)]
+struct AggregateProviderLotIntervalIds {
+    provider_tokens: Option<u64>,
+    used_before_cc_window: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+struct ProviderLotTokenSums {
+    provider_tokens: u64,
+    used_before_cc_window: u64,
 }
 
 fn build_provider_lot_response(
-    input: &AggregateProviderLotInput,
-    rollups: &[UsageRollup],
+    input: &AggregateProviderLotInput<'_>,
+    token_sums: ProviderLotTokenSums,
     now_unix_secs: u64,
 ) -> AggregateProviderLotResponse {
-    let upstream = &input.upstream;
     let window = input.window;
     let secs = window_secs(window).expect("aggregate windows are duration-backed");
     let (cc_start, cc_reset) = cc_window_bounds(now_unix_secs, secs);
     let provider_start = input.provider_start;
     let provider_reset = input.provider_reset.or(Some(cc_reset));
-    let provider_sample_end = provider_reset
-        .unwrap_or(now_unix_secs)
-        .min(input.evaluation_unix_secs)
-        .min(now_unix_secs);
-    let provider_tokens = provider_start
-        .map(|start| {
-            tokens_in_interval_for_upstream(rollups, upstream.id, start, provider_sample_end)
-        })
-        .unwrap_or(0);
+    let provider_tokens = token_sums.provider_tokens;
     let capacity_estimate = match (input.utilization, provider_tokens) {
         (Some(utilization), tokens) if utilization > 0.0 && tokens > 0 => {
             Some(tokens as f64 / utilization)
         }
         _ => None,
     };
-    let used_before_cc_window = provider_start
-        .map(|start| tokens_in_interval_for_upstream(rollups, upstream.id, start, cc_start))
-        .unwrap_or(0);
+    let used_before_cc_window = token_sums.used_before_cc_window;
     let capacity_to_now = match (provider_start, provider_reset, capacity_estimate) {
         (Some(start), Some(reset), Some(capacity)) => Some(capacity_contribution_for_prefix(
             start,
@@ -1450,10 +1497,10 @@ fn build_provider_lot_response(
     };
 
     AggregateProviderLotResponse {
-        upstream_id: upstream.id.to_string(),
-        upstream_name: upstream.name.clone(),
+        upstream_id: input.upstream_id.to_string(),
+        upstream_name: input.upstream_name.to_owned(),
         window: window.as_str().to_owned(),
-        source: input.source.clone(),
+        source: input.source.map(str::to_owned),
         state: data_state_str(input.state).to_owned(),
         provider_start_unix_secs: provider_start,
         provider_reset_unix_secs: provider_reset,
@@ -1609,38 +1656,6 @@ fn window_secs(window: SubscriptionQuotaWindow) -> Option<u64> {
         | SubscriptionQuotaWindow::SevenDayFable => Some(7 * 24 * 3_600),
         SubscriptionQuotaWindow::Overage | SubscriptionQuotaWindow::Unified => None,
     }
-}
-
-fn tokens_in_interval_for_upstreams(
-    rollups: &[UsageRollup],
-    upstream_ids: &HashSet<Uuid>,
-    start_unix_secs: u64,
-    end_unix_secs: u64,
-) -> u64 {
-    rollups
-        .iter()
-        .filter(|rollup| upstream_ids.contains(&rollup.upstream_id))
-        .filter(|rollup| {
-            rollup.bucket_start >= start_unix_secs && rollup.bucket_start <= end_unix_secs
-        })
-        .map(proxy_tokens)
-        .sum()
-}
-
-fn tokens_in_interval_for_upstream(
-    rollups: &[UsageRollup],
-    upstream_id: Uuid,
-    start_unix_secs: u64,
-    end_unix_secs: u64,
-) -> u64 {
-    rollups
-        .iter()
-        .filter(|rollup| rollup.upstream_id == upstream_id)
-        .filter(|rollup| {
-            rollup.bucket_start >= start_unix_secs && rollup.bucket_start <= end_unix_secs
-        })
-        .map(proxy_tokens)
-        .sum()
 }
 
 fn sum_optional(values: impl Iterator<Item = Option<f64>>) -> Option<f64> {
@@ -1896,28 +1911,27 @@ fn deficit_for_window(
     })
 }
 
-fn split_reset_cycles(observations: &[AnalysisObservation]) -> Vec<ObservationCycle> {
-    let mut sorted = observations.to_vec();
-    sorted.sort_by_key(|observation| observation.observed_at_unix_millis_last);
+fn split_reset_cycles(observations: &[AnalysisObservation]) -> Vec<ObservationCycle<'_>> {
+    debug_assert!(observations.windows(2).all(|pair| {
+        pair[0].observed_at_unix_millis_last <= pair[1].observed_at_unix_millis_last
+    }));
+    if observations.is_empty() {
+        return Vec::new();
+    }
+
     let mut cycles = Vec::new();
-    let mut current = Vec::new();
-
-    for observation in sorted {
-        if let Some(previous) = current.last()
-            && starts_new_cycle(previous, &observation)
-        {
+    let mut cycle_start = 0;
+    for current in 1..observations.len() {
+        if starts_new_cycle(&observations[current - 1], &observations[current]) {
             cycles.push(ObservationCycle {
-                observations: std::mem::take(&mut current),
+                observations: &observations[cycle_start..current],
             });
+            cycle_start = current;
         }
-        current.push(observation);
     }
-
-    if !current.is_empty() {
-        cycles.push(ObservationCycle {
-            observations: current,
-        });
-    }
+    cycles.push(ObservationCycle {
+        observations: &observations[cycle_start..],
+    });
     cycles
 }
 
@@ -1935,7 +1949,7 @@ fn starts_new_cycle(previous: &AnalysisObservation, current: &AnalysisObservatio
     reset_changed || synthetic_reset
 }
 
-fn valid_utilization_intervals(cycles: &[ObservationCycle]) -> Vec<UtilizationInterval> {
+fn valid_utilization_intervals(cycles: &[ObservationCycle<'_>]) -> Vec<UtilizationInterval> {
     let mut intervals = Vec::new();
     for cycle in cycles {
         for pair in cycle.observations.windows(2) {
@@ -2010,14 +2024,6 @@ fn build_markers(
         }
     }
     markers
-}
-
-fn step_observations(buckets: &[SubscriptionQuotaBucket]) -> Vec<AnalysisObservation> {
-    buckets
-        .iter()
-        .filter(|bucket| bucket.observed)
-        .filter_map(analysis_observation_from_bucket)
-        .collect()
 }
 
 fn checkpoint_observations(buckets: &[SubscriptionQuotaBucket]) -> Vec<AnalysisObservation> {
@@ -2456,6 +2462,10 @@ mod tests {
         assert_eq!(cycles.len(), 2);
         assert_eq!(cycles[0].observations.len(), 2);
         assert_eq!(cycles[1].observations.len(), 2);
+        assert!(std::ptr::eq(
+            cycles[0].observations.as_ptr(),
+            observations.as_ptr()
+        ));
     }
 
     #[test]
@@ -2540,34 +2550,51 @@ mod tests {
     fn aggregate_window_counts_historical_provider_lots_after_reset() {
         let upstream_id = Uuid::new_v4();
         let upstream = upstream_record(upstream_id);
-        let series = cc_lb_storage_api::SubscriptionQuotaSeries {
-            upstream_id,
-            window: SubscriptionQuotaWindow::FiveHour,
-            source: SubscriptionQuotaSourceMerge::Merged,
-            buckets: vec![
-                quota_bucket(44_000, 0.5, 45_000),
-                quota_bucket(50_000, 0.5, 63_000),
-            ],
-        };
-        let upstreams = HashMap::from([(upstream_id, upstream)]);
-        let ratios = HashMap::from([(upstream_id, PRO_CAPACITY_RATIO)]);
-        let inputs = provider_lot_inputs_from_series(&[series], &upstreams, &ratios, 50_000);
-        let rollups = vec![
-            usage_rollup(upstream_id, 40_000, 50),
-            usage_rollup(upstream_id, 48_000, 100),
+        let inputs = [
+            AggregateProviderLotInput {
+                upstream_id,
+                upstream_name: upstream.name.as_str(),
+                window: SubscriptionQuotaWindow::FiveHour,
+                source: Some("merged"),
+                state: SubscriptionQuotaDataState::Fresh,
+                provider_start: Some(27_000),
+                provider_reset: Some(45_000),
+                observed_at_unix_millis: Some(44_000_000),
+                evaluation_unix_secs: 44_000,
+                utilization: Some(0.5),
+                capacity_ratio: PRO_CAPACITY_RATIO,
+            },
+            AggregateProviderLotInput {
+                upstream_id,
+                upstream_name: upstream.name.as_str(),
+                window: SubscriptionQuotaWindow::FiveHour,
+                source: Some("merged"),
+                state: SubscriptionQuotaDataState::Fresh,
+                provider_start: Some(45_000),
+                provider_reset: Some(63_000),
+                observed_at_unix_millis: Some(50_000_000),
+                evaluation_unix_secs: 50_000,
+                utilization: Some(0.5),
+                capacity_ratio: PRO_CAPACITY_RATIO,
+            },
         ];
         let lots = inputs
             .iter()
-            .map(|input| build_provider_lot_response(input, &rollups, 50_000))
+            .zip([
+                ProviderLotTokenSums {
+                    provider_tokens: 50,
+                    used_before_cc_window: 0,
+                },
+                ProviderLotTokenSums {
+                    provider_tokens: 100,
+                    used_before_cc_window: 0,
+                },
+            ])
+            .map(|(input, sums)| build_provider_lot_response(input, sums, 50_000))
             .collect::<Vec<_>>();
 
-        let response = build_aggregate_window_response(
-            SubscriptionQuotaWindow::FiveHour,
-            &lots,
-            &rollups,
-            &HashSet::from([upstream_id]),
-            50_000,
-        );
+        let response =
+            build_aggregate_window_response(SubscriptionQuotaWindow::FiveHour, &lots, 150, 50_000);
 
         assert_eq!(lots.len(), 2);
         assert_eq!(response.used_tokens, 150);
@@ -2603,13 +2630,10 @@ mod tests {
             lot_with_ratio("team-standard", Some(0.50), Some(1_000), None, None, 1.25),
             lot_with_ratio("team-premium", Some(0.10), Some(1_000), None, None, 6.25),
         ];
-        let upstream_ids = HashSet::new();
-        let rollups = Vec::<UsageRollup>::new();
         let response = build_aggregate_window_response(
             SubscriptionQuotaWindow::FiveHour,
             &lots,
-            &rollups,
-            &upstream_ids,
+            0,
             now_unix_secs_test(),
         );
 
@@ -2706,58 +2730,6 @@ mod tests {
         }
     }
 
-    fn quota_bucket(
-        observed_at_unix_secs: u64,
-        utilization: f64,
-        resets_at_unix_secs: u64,
-    ) -> SubscriptionQuotaBucket {
-        SubscriptionQuotaBucket {
-            bucket_start_unix_secs: observed_at_unix_secs,
-            observed: true,
-            sample_count: 1,
-            utilization_min: Some(utilization),
-            utilization_avg: Some(utilization),
-            utilization_max: Some(utilization),
-            utilization_last: Some(utilization),
-            status_last: None,
-            resets_at_unix_secs_last: Some(resets_at_unix_secs),
-            observed_at_unix_millis_last: Some(observed_at_unix_secs * 1_000),
-            sources_seen: vec![SubscriptionQuotaSource::Api],
-        }
-    }
-
-    fn usage_rollup(upstream_id: Uuid, bucket_start: u64, tokens: u64) -> UsageRollup {
-        UsageRollup {
-            resolution: UsageRollupResolution::Minute,
-            bucket_start,
-            principal: "principal".to_owned(),
-            upstream_id,
-            upstream_name: "oauth-upstream".to_owned(),
-            model: "model".to_owned(),
-            request_count: 1,
-            input_tokens: tokens,
-            output_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            error_count: 0,
-            latency_count: 0,
-            latency_ms_sum: 0,
-            latency_ms_min: None,
-            latency_ms_max: None,
-            proxy_setup_ms_count: 0,
-            proxy_setup_ms_sum: 0,
-            shape_ms_count: 0,
-            shape_ms_sum: 0,
-            sign_ms_count: 0,
-            sign_ms_sum: 0,
-            upstream_ttfb_ms_count: 0,
-            upstream_ttfb_ms_sum: 0,
-            upstream_body_ms_count: 0,
-            upstream_body_ms_sum: 0,
-            virtual_cost_micros: 0,
-        }
-    }
-
     fn observation(
         at_unix_secs: u64,
         utilization: f64,
@@ -2823,13 +2795,10 @@ mod tests {
             lot("u-2", Some(0.30), Some(100_000), None, None),
             lot("u-3", None, None, None, None),
         ];
-        let upstream_ids = HashSet::new();
-        let rollups = Vec::<UsageRollup>::new();
         let response = build_aggregate_window_response(
             SubscriptionQuotaWindow::FiveHour,
             &lots,
-            &rollups,
-            &upstream_ids,
+            0,
             now_unix_secs_test(),
         );
         let utilization = response
@@ -2848,13 +2817,10 @@ mod tests {
             lot("u-1", Some(0.60), Some(2_000), None, None),
             lot("u-2", Some(0.20), Some(1_500), None, None),
         ];
-        let upstream_ids = HashSet::new();
-        let rollups = Vec::<UsageRollup>::new();
         let response = build_aggregate_window_response(
             SubscriptionQuotaWindow::FiveHour,
             &lots,
-            &rollups,
-            &upstream_ids,
+            0,
             now_unix_secs_test(),
         );
         let utilization = response
@@ -2874,13 +2840,10 @@ mod tests {
             Some(1_000_000.0),
             Some(500_000.0),
         )];
-        let upstream_ids = HashSet::new();
-        let rollups = Vec::<UsageRollup>::new();
         let response = build_aggregate_window_response(
             SubscriptionQuotaWindow::FiveHour,
             &lots,
-            &rollups,
-            &upstream_ids,
+            0,
             now_unix_secs_test(),
         );
         assert!(response.utilization.is_some());
