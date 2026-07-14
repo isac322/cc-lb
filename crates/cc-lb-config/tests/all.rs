@@ -8,6 +8,8 @@ mod load_env_override;
 mod load_minimal;
 #[path = "scheduler_config.rs"]
 mod scheduler_config;
+#[path = "schema_freshness.rs"]
+mod schema_freshness;
 #[path = "storage_postgres.rs"]
 mod storage_postgres;
 #[path = "validation_failures.rs"]

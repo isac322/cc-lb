@@ -27,7 +27,7 @@ FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0 AS xx
 FROM --platform=$BUILDPLATFORM oven/bun:1.3.14-alpine AS bun
 
 # ---- Builder: cross toolchain, source, and the compile ----
-FROM --platform=$BUILDPLATFORM rust:1.96.0-alpine AS builder
+FROM --platform=$BUILDPLATFORM rust:1.97.0-alpine AS builder
 SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 
 # clang/lld: xx uses clang as the cross linker driver (overrides the repo's
