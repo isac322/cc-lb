@@ -1,3 +1,5 @@
+#[path = "price_catalog_retention.rs"]
+mod price_catalog_retention;
 #[path = "principal_terminal_strategy.rs"]
 mod principal_terminal_strategy;
 #[path = "prompt_cache_observation.rs"]

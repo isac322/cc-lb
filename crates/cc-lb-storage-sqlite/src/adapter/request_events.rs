@@ -1,9 +1,12 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventListItem, RequestEventListQuery, RequestEventStore,
-    RequestEventStreamFilters, StorageError, StorageResult,
+    RequestEvent, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
+    RequestEventKeyUsageBucket, RequestEventKeyUsageQuery, RequestEventListItem,
+    RequestEventListQuery, RequestEventStore, RequestEventStreamFilters, StorageError,
+    StorageResult,
 };
 use sqlx::AssertSqlSafe;
+use std::time::Instant;
 use uuid::Uuid;
 
 use super::request_event_list_sql;
@@ -19,8 +22,8 @@ impl RequestEventStore for SqliteStorage {
         let event_id = storage_event_id(event);
         let inserted_id = sqlx::query_scalar::<_, i64>(
             "INSERT INTO request_events_v1 \
-             (request_id, ts, event_type, upstream_id, principal_id, created_at, key_id, model, upstream_name, cache_state, thread_id, message_id, message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, event_id, error_code, upstream_error_type, upstream_error_message, thinking_tokens, web_search_requests, web_fetch_requests, service_tier, inference_geo, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, matched_v3_cache_key, breakpoint_content_block_index, matched_content_block_index, lookback_distance, predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, predicted_cache_creation_tokens_1h, token_estimate_source, cache_value_micros, formula_winner_upstream_id, kept_upstream_id, quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, quota_weight_factor, quota_cache_multiplier, quota_warning_multiplier, quota_effective_weight, quota_uniform_fallback, wrh_key_source, lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, thinking_budget_tokens, reasoning_effort, payload) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             (request_id, ts, event_type, upstream_id, principal_id, created_at, key_id, model, upstream_name, cache_state, thread_id, message_id, message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, event_id, error_code, upstream_error_type, upstream_error_message, thinking_tokens, web_search_requests, web_fetch_requests, service_tier, inference_geo, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, matched_v3_cache_key, breakpoint_content_block_index, matched_content_block_index, lookback_distance, predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, predicted_cache_creation_tokens_1h, token_estimate_source, cache_value_micros, formula_winner_upstream_id, kept_upstream_id, quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, quota_weight_factor, quota_cache_multiplier, quota_warning_multiplier, quota_effective_weight, quota_uniform_fallback, wrh_key_source, lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, thinking_budget_tokens, reasoning_effort, payload, list_ts_ms, list_event_key, list_upstream, list_status, list_duration_ms, list_auth_ms, list_route_ms, list_limit_reserve_ms, list_bulkhead_wait_ms, list_dns_ms, list_connect_ms, list_connection_reused, list_limit_reconcile_ms, list_observability_post_ms, list_proxy_setup_ms, list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, list_upstream_body_ms, list_stream_first_content_delta_ms, list_stream_last_content_delta_ms, list_inter_token_avg_ms, list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
              RETURNING id",
         )
@@ -117,6 +120,72 @@ impl RequestEventStore for SqliteStorage {
         .bind(option_u64_to_i64(event.thinking_budget_tokens, "thinking_budget_tokens")?)
         .bind(event.reasoning_effort.as_deref())
         .bind(payload)
+        .bind(u64_to_i64(
+            event.ts_ms.unwrap_or_else(|| event_ts_secs(event).saturating_mul(1_000)),
+            "request event list_ts_ms",
+        )?)
+        .bind(event.event_id.as_deref().unwrap_or(&event.request_id))
+        .bind(event.upstream.map(|upstream| match upstream {
+            cc_lb_storage_api::RequestEventUpstream::AnthropicDirect => "anthropic_direct",
+        }))
+        .bind(i64::from(event.status))
+        .bind(u64_to_i64(event.duration_ms, "request event list_duration_ms")?)
+        .bind(option_u64_to_i64(event.auth_ms, "request event list_auth_ms")?)
+        .bind(option_u64_to_i64(event.route_ms, "request event list_route_ms")?)
+        .bind(option_u64_to_i64(
+            event.limit_reserve_ms,
+            "request event list_limit_reserve_ms",
+        )?)
+        .bind(option_u64_to_i64(
+            event.bulkhead_wait_ms,
+            "request event list_bulkhead_wait_ms",
+        )?)
+        .bind(option_u64_to_i64(event.dns_ms, "request event list_dns_ms")?)
+        .bind(option_u64_to_i64(
+            event.connect_ms,
+            "request event list_connect_ms",
+        )?)
+        .bind(event.connection_reused.map(i64::from))
+        .bind(option_u64_to_i64(
+            event.limit_reconcile_ms,
+            "request event list_limit_reconcile_ms",
+        )?)
+        .bind(option_u64_to_i64(
+            event.observability_post_ms,
+            "request event list_observability_post_ms",
+        )?)
+        .bind(option_u64_to_i64(
+            event.proxy_setup_ms,
+            "request event list_proxy_setup_ms",
+        )?)
+        .bind(option_u64_to_i64(event.shape_ms, "request event list_shape_ms")?)
+        .bind(option_u64_to_i64(event.sign_ms, "request event list_sign_ms")?)
+        .bind(option_u64_to_i64(
+            event.upstream_ttfb_ms,
+            "request event list_upstream_ttfb_ms",
+        )?)
+        .bind(option_u64_to_i64(
+            event.upstream_body_ms,
+            "request event list_upstream_body_ms",
+        )?)
+        .bind(option_u64_to_i64(
+            event.stream_first_content_delta_ms,
+            "request event list_stream_first_content_delta_ms",
+        )?)
+        .bind(option_u64_to_i64(
+            event.stream_last_content_delta_ms,
+            "request event list_stream_last_content_delta_ms",
+        )?)
+        .bind(option_u64_to_i64(
+            event.inter_token_avg_ms,
+            "request event list_inter_token_avg_ms",
+        )?)
+        .bind(event.cost_usd_micros)
+        .bind(event.cost_input_micros)
+        .bind(event.cost_output_micros)
+        .bind(event.cost_cache_creation_5m_micros)
+        .bind(event.cost_cache_creation_1h_micros)
+        .bind(event.cost_cache_read_micros)
         .fetch_optional(self.pool())
         .await
         .map_err(map_sqlx_error)?;
@@ -229,11 +298,169 @@ impl RequestEventStore for SqliteStorage {
         &self,
         query: &RequestEventListQuery,
     ) -> StorageResult<Vec<RequestEventListItem>> {
-        request_event_list_sql::list_request_events(self, query).await
+        let start = Instant::now();
+        let result = request_event_list_sql::list_request_events(self, query).await;
+        record_storage_operation("request_event_list", start, &result);
+        self.record_pool_metrics();
+        result
+    }
+
+    async fn request_event_key_last_used(
+        &self,
+        query: &RequestEventKeyLastUsedQuery,
+    ) -> StorageResult<Vec<RequestEventKeyLastUsed>> {
+        let start = Instant::now();
+        let result = request_event_key_last_used(self, query).await;
+        record_storage_operation("request_event_key_last_used", start, &result);
+        self.record_pool_metrics();
+        result
+    }
+
+    async fn request_event_key_usage(
+        &self,
+        query: &RequestEventKeyUsageQuery,
+    ) -> StorageResult<Vec<RequestEventKeyUsageBucket>> {
+        let start = Instant::now();
+        let result = request_event_key_usage(self, query).await;
+        record_storage_operation("request_event_key_usage", start, &result);
+        self.record_pool_metrics();
+        result
     }
 
     async fn get_request_event(&self, event_id: &str) -> StorageResult<Option<RequestEvent>> {
         request_event_list_sql::get_request_event(self, event_id).await
+    }
+}
+
+async fn request_event_key_last_used(
+    storage: &SqliteStorage,
+    query: &RequestEventKeyLastUsedQuery,
+) -> StorageResult<Vec<RequestEventKeyLastUsed>> {
+    if query.until_unix_secs < query.since_unix_secs {
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query_as::<_, (String, i64)>(
+        "SELECT key_id, MAX(ts) AS last_used_at_unix_secs \
+         FROM request_events_v1 \
+         WHERE principal_id = ? \
+           AND key_id IS NOT NULL \
+           AND key_id <> '' \
+           AND ts >= ? \
+           AND ts <= ? \
+         GROUP BY key_id",
+    )
+    .bind(query.principal_id.as_str())
+    .bind(u64_to_i64(
+        query.since_unix_secs,
+        "request event key last-used since",
+    )?)
+    .bind(u64_to_i64_upper(query.until_unix_secs))
+    .fetch_all(storage.pool())
+    .await
+    .map_err(map_sqlx_error)?;
+
+    rows.into_iter()
+        .map(|(key_id, last_used_at_unix_secs)| {
+            Ok(RequestEventKeyLastUsed {
+                key_id,
+                last_used_at_unix_secs: i64_to_u64(
+                    last_used_at_unix_secs,
+                    "request event key last-used timestamp",
+                )?,
+            })
+        })
+        .collect()
+}
+
+async fn request_event_key_usage(
+    storage: &SqliteStorage,
+    query: &RequestEventKeyUsageQuery,
+) -> StorageResult<Vec<RequestEventKeyUsageBucket>> {
+    if query.bucket_count == 0 || query.step_ms == 0 || query.range_end_ms < query.range_start_ms {
+        return Ok(Vec::new());
+    }
+
+    let bucket_count = usize::try_from(query.bucket_count).map_err(|_| StorageError::Fatal {
+        message: "request event key usage bucket_count cannot be represented as usize".to_owned(),
+    })?;
+    let mut buckets = vec![RequestEventKeyUsageBucket::default(); bucket_count];
+    for (index, bucket) in buckets.iter_mut().enumerate() {
+        let bucket_start_ms = query
+            .range_start_ms
+            .saturating_add((index as u64).saturating_mul(query.step_ms));
+        bucket.bucket_start_unix_secs = bucket_start_ms / 1_000;
+    }
+
+    let rows = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
+        "SELECT MIN(((list_ts_ms - ?) / ?), ?) AS bucket_index, \
+                COUNT(*) AS request_count, \
+                COALESCE(SUM(COALESCE(input_tokens, 0) \
+                    + COALESCE(cache_creation_input_tokens, 0) \
+                    + COALESCE(cache_read_input_tokens, 0)), 0) AS input_tokens, \
+                COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS output_tokens, \
+                COALESCE(SUM(COALESCE(list_cost_usd_micros, 0)), 0) AS cost_usd_micros \
+         FROM request_events_v1 \
+         WHERE principal_id = ? \
+           AND key_id = ? \
+           AND list_ts_ms >= ? \
+           AND list_ts_ms <= ? \
+         GROUP BY bucket_index",
+    )
+    .bind(u64_to_i64(
+        query.range_start_ms,
+        "request event key usage range start",
+    )?)
+    .bind(u64_to_i64(query.step_ms, "request event key usage step")?)
+    .bind(u64_to_i64(
+        query.bucket_count.saturating_sub(1),
+        "request event key usage last bucket",
+    )?)
+    .bind(query.principal_id.as_str())
+    .bind(query.key_id.as_str())
+    .bind(u64_to_i64(
+        query.range_start_ms,
+        "request event key usage lower bound",
+    )?)
+    .bind(u64_to_i64_upper(query.range_end_ms))
+    .fetch_all(storage.pool())
+    .await
+    .map_err(map_sqlx_error)?;
+
+    for (bucket_index, request_count, input_tokens, output_tokens, cost_usd_micros) in rows {
+        let bucket_index = usize::try_from(bucket_index).map_err(|_| StorageError::Corrupted {
+            message: "request event key usage bucket index is negative".to_owned(),
+        })?;
+        let Some(bucket) = buckets.get_mut(bucket_index) else {
+            return Err(StorageError::Corrupted {
+                message: "request event key usage bucket index is out of range".to_owned(),
+            });
+        };
+        bucket.request_count = i64_to_u64(request_count, "request event key usage request count")?;
+        bucket.input_tokens = i64_to_u64(input_tokens, "request event key usage input tokens")?;
+        bucket.output_tokens = i64_to_u64(output_tokens, "request event key usage output tokens")?;
+        bucket.cost_usd_micros = cost_usd_micros;
+    }
+
+    Ok(buckets)
+}
+
+fn record_storage_operation<T>(operation: &'static str, start: Instant, result: &StorageResult<T>) {
+    let status = if result.is_ok() { "ok" } else { "error" };
+    metrics::histogram!(
+        "cc_lb_storage_operation_duration_seconds",
+        "store" => "sqlite",
+        "operation" => operation,
+        "status" => status
+    )
+    .record(start.elapsed().as_secs_f64());
+    if result.is_err() {
+        metrics::counter!(
+            "cc_lb_storage_operation_errors_total",
+            "store" => "sqlite",
+            "operation" => operation
+        )
+        .increment(1);
     }
 }
 

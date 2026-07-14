@@ -28,6 +28,15 @@ impl SqliteStorage {
         begin_immediate(&self.pool).await
     }
 
+    pub(crate) fn record_pool_metrics(&self) {
+        let size = self.pool.size();
+        let idle = self.pool.num_idle() as u32;
+        metrics::gauge!("cc_lb_sqlx_pool_size", "store" => "sqlite").set(f64::from(size));
+        metrics::gauge!("cc_lb_sqlx_pool_idle", "store" => "sqlite").set(f64::from(idle));
+        metrics::gauge!("cc_lb_sqlx_pool_in_use", "store" => "sqlite")
+            .set(f64::from(size.saturating_sub(idle)));
+    }
+
     pub(crate) fn clock(&self) -> &dyn Clock {
         &*self.clock
     }

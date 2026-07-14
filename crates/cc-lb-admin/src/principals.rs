@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::{AdminState, management::ManagementError};
 use cc_lb_clock::Clock;
 use cc_lb_control::api_keys::limit_engine::{IdentityFilter, PrincipalLimitsSnapshot};
-use cc_lb_storage_api::{StorageError, UsageRollup, UsageRollupResolution};
+use cc_lb_storage_api::{
+    RequestEventKeyUsageQuery, StorageError, UsageRollup, UsageRollupResolution,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct KeyUsageQuery {
@@ -133,41 +135,25 @@ pub async fn principal_key_usage(
         .div_ceil(step_ms)
         .max(1);
 
-    let events = storage
-        .query_request_events(range_start_ms / 1000, range_end_ms / 1000, usize::MAX)
-        .await?;
-
-    let mut aggregates: BTreeMap<u64, UsageSeries> = BTreeMap::new();
-    for event in events.into_iter().filter(|event| {
-        event.principal_id.as_deref() == Some(principal_id.as_str())
-            && event.key_id.as_deref() == Some(key_id.as_str())
-    }) {
-        let event_ts_ms = event.ts_ms.unwrap_or_else(|| event.ts.saturating_mul(1000));
-        let bucket_offset = event_ts_ms.saturating_sub(range_start_ms) / step_ms;
-        let bucket_offset = bucket_offset.min(bucket_count - 1);
-        let bucket_start_ms = range_start_ms.saturating_add(bucket_offset.saturating_mul(step_ms));
-        let entry = aggregates
-            .entry(bucket_start_ms)
-            .or_insert_with(|| UsageSeries {
-                bucket_start_unix_secs: bucket_start_ms / 1000,
-                ..UsageSeries::default()
-            });
-        entry.request_count += 1;
-        entry.input_tokens += event.input_tokens.unwrap_or(0)
-            + event.cache_creation_input_tokens.unwrap_or(0)
-            + event.cache_read_input_tokens.unwrap_or(0);
-        entry.output_tokens += event.output_tokens.unwrap_or(0);
-        entry.cost_usd_micros += event.cost_usd_micros.unwrap_or(0);
-    }
-
-    let mut series = Vec::new();
-    for bucket_index in 0..bucket_count {
-        let bucket_start_ms = range_start_ms.saturating_add(bucket_index.saturating_mul(step_ms));
-        series.push(aggregates.remove(&bucket_start_ms).unwrap_or(UsageSeries {
-            bucket_start_unix_secs: bucket_start_ms / 1000,
-            ..UsageSeries::default()
-        }));
-    }
+    let series = storage
+        .request_event_key_usage(&RequestEventKeyUsageQuery {
+            principal_id: principal_id.clone(),
+            key_id: key_id.clone(),
+            range_start_ms,
+            range_end_ms,
+            step_ms,
+            bucket_count,
+        })
+        .await?
+        .into_iter()
+        .map(|bucket| UsageSeries {
+            bucket_start_unix_secs: bucket.bucket_start_unix_secs,
+            request_count: bucket.request_count,
+            input_tokens: bucket.input_tokens,
+            output_tokens: bucket.output_tokens,
+            cost_usd_micros: bucket.cost_usd_micros,
+        })
+        .collect();
 
     Ok(Json(DashboardUsageResponse {
         range: range_raw,
