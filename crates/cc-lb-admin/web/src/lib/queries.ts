@@ -1111,7 +1111,8 @@ export function useUploadWasm() {
     }): Promise<UploadWasmResponse> => {
       const form = new FormData();
       // Do NOT set Content-Type: the browser must inject the multipart boundary.
-      form.append('name', file.name.replace(/\.wasm$/, ''));
+      // Do NOT send `name`: backend uses it as a strict equality guard against the
+      // embedded metadata name, which a filename stem almost never matches (400).
       form.append('original_filename', file.name);
       form.append('bytes', file);
 
