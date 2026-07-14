@@ -58,5 +58,6 @@ Create `references/scenarios/<feature>.md`, then add a row to the Scenario index
 | Request log exploration | bounded live/history retention, session → All transition, time ranges, status-class filtering, select geometry, and client pagination | `references/scenarios/request-log-exploration.md` |
 | Scheduler restart — quota freshness | replacement scheduler worker consumption → quota writer/SQLite latest freshness → checkpoint-series API without fabricated leading zeroes | `references/scenarios/scheduler-restart-quota-freshness.md` |
 | Price catalog refresh | price-catalog refresh and priced usage correctness, plus state transitions C4.1 and C4.2 | `references/scenarios/price-catalog-refresh.md` |
+| Plugin upload and library | wasm upload → detected plugin capabilities → Plugins library/detail UI → replacement/reference/delete lifecycle | `references/scenarios/plugin-upload-replacement-and-refs.md` |
 
 _Add a row here for every new scenario._

@@ -31,8 +31,8 @@ pub use cc_lb_plugin_wire::schema::HookKind as SlotKind;
 pub use cell::{LoadedPluginSlot, PluginCell};
 pub use engine::{HostState, HotEngineAllocationStrategy, HotEngineConfig, build_hot_engine};
 pub use error::WasmtimeRuntimeError;
-pub use inspect::{ModuleInspection, inspect_wasm};
-pub use module::{admit_wasm, compile_module};
+pub use inspect::{ModuleInspection, inspect_wasm, inspect_wasm_agnostic};
+pub use module::{admit_wasm, admit_wasm_agnostic, compile_module};
 pub use slot::RuntimeSlotKey;
 pub use wire_dispatch::WasmPluginWireDispatch;
 
@@ -96,6 +96,15 @@ impl WasmtimeRuntime {
     ) -> Result<ModuleInspection, WasmtimeRuntimeError> {
         let (_, inspection) =
             module::admit_wasm(&self.engine, &self.linker, kind, wasm_bytes, &self.config)?;
+        Ok(inspection)
+    }
+
+    pub fn admit_wasm_agnostic(
+        &self,
+        wasm_bytes: &[u8],
+    ) -> Result<ModuleInspection, WasmtimeRuntimeError> {
+        let (_, inspection) =
+            module::admit_wasm_agnostic(&self.engine, &self.linker, wasm_bytes, &self.config)?;
         Ok(inspection)
     }
 

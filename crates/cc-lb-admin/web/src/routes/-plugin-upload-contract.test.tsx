@@ -27,7 +27,7 @@ function wrapper({ children }: { children: ReactNode }) {
   );
 }
 
-test('upload omits name field so backend uses embedded metadata identity', async () => {
+test('upload omits registry identity fields while preserving the file payload', async () => {
   fetchWithAuthMock.mockResolvedValue({
     json: async () => ({
       id: 'reg-1',
@@ -48,15 +48,15 @@ test('upload omits name field so backend uses embedded metadata identity', async
     { type: 'application/wasm' },
   );
 
-  await result.current.mutateAsync({ file, slotKind: 'router' });
+  await result.current.mutateAsync({ file });
 
   expect(fetchWithAuthMock).toHaveBeenCalledTimes(1);
   const init = fetchWithAuthMock.mock.calls[0][1] as { body: FormData };
   const form = init.body;
   expect(form.has('name')).toBe(false);
-  expect(form.get('slot_kind')).toBe('filter');
+  expect(form.has('slot_kind')).toBe(false);
   expect(form.get('original_filename')).toBe(
     'cc_lb_plugin_subscription_launderer.wasm',
   );
-  expect(form.has('bytes')).toBe(true);
+  expect(form.get('bytes')).toBe(file);
 });

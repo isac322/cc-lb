@@ -10,7 +10,10 @@ use crate::admin_test_common;
 use admin_test_common::spawn_admin_server;
 use axum::http::StatusCode;
 use cc_lb_plugin_wire::schema::{HookKind, WireSchema, WireVersion};
-use cc_lb_plugin_wire::{FilterRequest, FilterResponse};
+use cc_lb_plugin_wire::{
+    FilterRequest, FilterResponse, ObserveEvent, ShapeRequest, TransformResponseRequest,
+    TransformSseEventRequest,
+};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -161,6 +164,89 @@ fn filter_wasm_with_import() -> Vec<u8> {
             ("cc_lb.plugin.v1", metadata("with-import").as_bytes()),
         ],
     )
+}
+
+fn plugin_wasm(name: &str, declared_hooks: &[(HookKind, Option<&str>)]) -> Vec<u8> {
+    let response = rkyv::to_bytes::<rkyv::rancor::Error>(&FilterResponse {
+        results: Box::new([]),
+    })
+    .expect("encode filter response");
+    let response_data = wat_data_bytes(&response);
+    let packed_response = ((4096u64) << 32) | response.len() as u64;
+    let hook_exports = declared_hooks
+        .iter()
+        .map(|(hook, _)| match hook {
+            HookKind::Filter => format!(
+                r#"(func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const {packed_response})"#
+            ),
+            HookKind::Shape => {
+                r#"(func (export "cc_lb_shape") (param i32 i32) (result i64) i64.const 0)"#
+                    .to_owned()
+            }
+            HookKind::Observe => {
+                r#"(func (export "cc_lb_observe") (param i32 i32) (result i64) i64.const 0)"#
+                    .to_owned()
+            }
+            HookKind::TransformResponse => {
+                r#"(func (export "cc_lb_transform_response") (param i32 i32) (result i64) i64.const 0)"#
+                    .to_owned()
+            }
+            HookKind::TransformSseEvent => {
+                r#"(func (export "cc_lb_transform_sse_event") (param i32 i32) (result i64) i64.const 0)"#
+                    .to_owned()
+            }
+        })
+        .collect::<String>();
+    let wat = format!(
+        r#"
+        (module
+            (memory (export "memory") 1)
+            (data (i32.const 4096) "{response_data}")
+            (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 1024)
+            (func (export "cc_lb_free") (param i32 i32 i32))
+            {hook_exports}
+        )
+        "#
+    );
+    let mut wasm = wat::parse_str(wat).expect("valid wat");
+    for (hook, _) in declared_hooks {
+        let fingerprint = match hook {
+            HookKind::Filter => <FilterRequest as WireSchema>::FINGERPRINT,
+            HookKind::Shape => <ShapeRequest as WireSchema>::FINGERPRINT,
+            HookKind::Observe => <ObserveEvent as WireSchema>::FINGERPRINT,
+            HookKind::TransformResponse => <TransformResponseRequest as WireSchema>::FINGERPRINT,
+            HookKind::TransformSseEvent => <TransformSseEventRequest as WireSchema>::FINGERPRINT,
+        };
+        append_custom_section(
+            &mut wasm,
+            &format!("{}.{}", hook.section_prefix(), WireVersion::V1.as_str()),
+            &fingerprint,
+        );
+    }
+    let hooks = declared_hooks
+        .iter()
+        .map(|(hook, mode)| {
+            let mut metadata = serde_json::json!({
+                "wire_version": 1,
+                "description": format!("{} hook", hook.as_str()),
+                "usage": format!("call {}", hook.as_str()),
+            });
+            if let Some(mode) = mode {
+                metadata["mode"] = serde_json::Value::String((*mode).to_owned());
+            }
+            (hook.as_str().to_owned(), metadata)
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let metadata = serde_json::to_vec(&serde_json::json!({
+        "name": name,
+        "version": "0.0.1",
+        "description": "multi-hook upload fixture",
+        "usage": "test only",
+        "hooks": hooks,
+    }))
+    .expect("serialize metadata");
+    append_custom_section(&mut wasm, "cc_lb.plugin.v1", &metadata);
+    wasm
 }
 
 #[tokio::test]
@@ -448,17 +534,101 @@ async fn rejects_when_metadata_section_absent() {
 }
 
 #[tokio::test]
-async fn rejects_missing_slot_kind_part() {
+async fn accepts_upload_without_slot_kind() {
+    // Given: a valid artifact and multipart body with no legacy slot selector.
     let server = spawn_admin_server().await;
     let wasm = filter_wasm_valid();
     let body = multipart_body(&[
-        ("name", b"no-slot"),
+        ("name", b"cache-aware-test"),
         ("original_filename", b"no-slot.wasm"),
         ("bytes", &wasm),
     ]);
+
+    // When: the artifact is uploaded through the admin endpoint.
     let (status, value) = upload(&server, body).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(value["error"], "missing_part");
+
+    // Then: upload succeeds without requiring a primary slot.
+    assert_eq!(status, StatusCode::CREATED, "body={value}");
+    assert_eq!(value["action"], "created");
+}
+
+#[tokio::test]
+async fn registers_all_supported_slots_for_multi_hook_upload_without_slot_kind() {
+    use cc_lb_storage_api::{PluginRegistryStore, PluginSlotKind};
+
+    // Given: one artifact declaring valid Filter and Observe hooks.
+    let server = spawn_admin_server().await;
+    let wasm = plugin_wasm(
+        "multi-slot",
+        &[(HookKind::Filter, None), (HookKind::Observe, None)],
+    );
+    let body = multipart_body(&[
+        ("name", b"multi-slot"),
+        ("original_filename", b"multi-slot.wasm"),
+        ("bytes", &wasm),
+    ]);
+
+    // When: the artifact is uploaded without a legacy slot selector.
+    let (status, value) = upload(&server, body).await;
+
+    // Then: both derived runtime slots are persisted on the registry entry.
+    assert_eq!(status, StatusCode::CREATED, "body={value}");
+    let entry = server
+        .storage
+        .get_registry_entry_by_name("multi-slot")
+        .await
+        .expect("storage lookup succeeds")
+        .expect("entry persisted");
+    assert_eq!(
+        entry.supported_slots,
+        vec![PluginSlotKind::Router, PluginSlotKind::ObservabilityHook]
+    );
+}
+
+#[tokio::test]
+async fn rejects_incomplete_shape_without_slot_kind() {
+    // Given: Shape is declared without either Shape-owned response hook.
+    let server = spawn_admin_server().await;
+    let wasm = plugin_wasm("incomplete-shape", &[(HookKind::Shape, Some("active"))]);
+    let body = multipart_body(&[
+        ("name", b"incomplete-shape"),
+        ("original_filename", b"incomplete-shape.wasm"),
+        ("bytes", &wasm),
+    ]);
+
+    // When: upload runs the runtime's agnostic contract inspection.
+    let (status, value) = upload(&server, body).await;
+
+    // Then: the incomplete Shape contract is rejected at upload time.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={value}");
+    assert_eq!(value["error"], "invalid_wasm");
+    assert!(
+        value["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("transform_response")),
+        "body={value}"
+    );
+}
+
+#[tokio::test]
+async fn rejects_legacy_slot_kind_not_derived_from_artifact() {
+    // Given: a Filter-only artifact paired with a legacy Observe selector.
+    let server = spawn_admin_server().await;
+    let wasm = filter_wasm_valid();
+    let body = multipart_body(&[
+        ("name", b"cache-aware-test"),
+        ("original_filename", b"legacy-mismatch.wasm"),
+        ("slot_kind", b"observe"),
+        ("bytes", &wasm),
+    ]);
+
+    // When: the legacy selector is checked against the derived slots.
+    let (status, value) = upload(&server, body).await;
+
+    // Then: compatibility validation reports the typed unsupported-slot error.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={value}");
+    assert_eq!(value["error"], "unsupported_slot");
+    assert_eq!(value["slot"], "observability_hook");
 }
 
 // === server hookup that bypasses the private AdminClient internals ===

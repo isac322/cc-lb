@@ -20,7 +20,7 @@ use crate::engine::HotEngineConfig;
 use crate::error::WasmtimeRuntimeError;
 use cc_lb_plugin_wire::schema::HookKind;
 
-use crate::inspect::{ModuleInspection, inspect_wasm};
+use crate::inspect::{ModuleInspection, inspect_wasm, inspect_wasm_agnostic};
 use crate::probe::probe_hook_dispatch;
 
 // Bumpable on validation-policy change (import allowlist, schema-hash
@@ -125,6 +125,27 @@ pub fn admit_wasm(
     config: &HotEngineConfig,
 ) -> Result<(Arc<wasmtime::InstancePre<HostState>>, ModuleInspection), WasmtimeRuntimeError> {
     let inspection = inspect_wasm(kind, wasm_bytes)?;
+    admit_inspected_wasm(engine, linker, wasm_bytes, config, inspection)
+}
+
+/// Compile and probe every metadata-declared hook without selecting a slot.
+pub fn admit_wasm_agnostic(
+    engine: &Engine,
+    linker: &Linker<HostState>,
+    wasm_bytes: &[u8],
+    config: &HotEngineConfig,
+) -> Result<(Arc<wasmtime::InstancePre<HostState>>, ModuleInspection), WasmtimeRuntimeError> {
+    let inspection = inspect_wasm_agnostic(wasm_bytes)?;
+    admit_inspected_wasm(engine, linker, wasm_bytes, config, inspection)
+}
+
+fn admit_inspected_wasm(
+    engine: &Engine,
+    linker: &Linker<HostState>,
+    wasm_bytes: &[u8],
+    config: &HotEngineConfig,
+    inspection: ModuleInspection,
+) -> Result<(Arc<wasmtime::InstancePre<HostState>>, ModuleInspection), WasmtimeRuntimeError> {
     let content_hash = compute_content_hash(engine, config, wasm_bytes);
     let compiled_modules = crate::compiled_cache::process_wide_compiled_module_cache();
     let instance_pre = compiled_modules.get_or_compile(content_hash, || {
@@ -143,6 +164,8 @@ pub fn admit_wasm(
     Ok((instance_pre, inspection))
 }
 
+#[cfg(test)]
+mod agnostic_tests;
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};

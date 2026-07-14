@@ -171,15 +171,30 @@ async fn upload_wasm_inner(
         ))
     })?;
     validate_wasm_bytes(&bytes).map_err(Box::new)?;
-    let slot_kind_str = parts.slot_kind.ok_or_else(|| {
-        Box::new(json_error(
-            StatusCode::BAD_REQUEST,
-            "missing_part",
-            format!("missing multipart part: slot_kind (must be one of {SLOT_KIND_NAMES})"),
-        ))
-    })?;
-    let (hook_kind, _) = parse_slot_kind(&slot_kind_str).map_err(Box::new)?;
-    let inspection = inspect_with_wasmtime(state, &bytes, hook_kind).await?;
+    let legacy_slot = parts
+        .slot_kind
+        .as_deref()
+        .map(parse_slot_kind)
+        .transpose()
+        .map_err(Box::new)?
+        .map(|(_, slot)| slot);
+    let inspection = inspect_with_wasmtime(state, &bytes).await?;
+    let declared_slots = supported_slots_from_inspection(&inspection);
+    if let Some(slot) = legacy_slot
+        && !declared_slots.contains(&slot)
+    {
+        return Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "unsupported_slot",
+                    "plugin_name": inspection.metadata.name.as_str(),
+                    "slot": slot.as_str(),
+                })),
+            )
+                .into_response(),
+        ));
+    }
     let inspected_schema_hash = inspection.primary_schema_hash();
     if let Some(name) = &parts.name
         && inspection.metadata.name != *name
@@ -219,7 +234,6 @@ async fn upload_wasm_inner(
         .get_registry_entry_by_name(&registry_name)
         .await
         .map_err(|error| Box::new(storage_response(error)))?;
-    let declared_slots = supported_slots_from_inspection(&inspection);
     let supported_slots = match &existing_by_name {
         Some(entry) if !entry.supported_slots.is_empty() => entry.supported_slots.clone(),
         _ => declared_slots,
@@ -650,13 +664,12 @@ fn parse_slot_kind(value: &str) -> Result<(HookKind, PluginSlotKind), Response> 
 async fn inspect_with_wasmtime(
     state: &AdminState,
     bytes: &[u8],
-    hook_kind: HookKind,
 ) -> Result<ModuleInspection, Box<Response>> {
     let bytes = bytes.to_vec();
     let runtime = state.runtime.clone();
     let inspection = tokio::task::spawn_blocking(move || match runtime {
-        Some(runtime) => runtime.admit_wasm(hook_kind, &bytes),
-        None => WasmtimeRuntime::with_defaults()?.admit_wasm(hook_kind, &bytes),
+        Some(runtime) => runtime.admit_wasm_agnostic(&bytes),
+        None => WasmtimeRuntime::with_defaults()?.admit_wasm_agnostic(&bytes),
     })
     .await
     .map_err(|error| {

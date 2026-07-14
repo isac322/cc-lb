@@ -130,11 +130,21 @@ export type PluginMetadata = {
   examples: string[];
 };
 
+export type HookMetadata = {
+  wire_version: number;
+  description: string;
+  usage: string;
+  mode?: 'active' | 'noop';
+};
+
 export interface PluginEntry {
   id: string;
   sha256_hex: string;
   name: string;
   original_filename: string;
+  description: string;
+  usage: string;
+  hook_metadata: Record<string, HookMetadata>;
   label: string | null;
   size_bytes: number;
   refcount: number;
@@ -1098,13 +1108,11 @@ export function useUploadWasm() {
   return useMutation({
     mutationFn: async ({
       file,
-      slotKind,
       confirmReplacement,
       replaceRegistryId,
       expectedRevision,
     }: {
       file: File;
-      slotKind: ChainSlot;
       confirmReplacement?: boolean;
       replaceRegistryId?: string;
       expectedRevision?: number;
@@ -1115,13 +1123,6 @@ export function useUploadWasm() {
       // embedded metadata name, which a filename stem almost never matches (400).
       form.append('original_filename', file.name);
       form.append('bytes', file);
-
-      const slotMap: Record<ChainSlot, string> = {
-        router: 'filter',
-        shape: 'shape',
-        observability_hook: 'observe',
-      };
-      form.append('slot_kind', slotMap[slotKind]);
 
       if (confirmReplacement) form.append('confirm_replacement', 'true');
       if (replaceRegistryId)
