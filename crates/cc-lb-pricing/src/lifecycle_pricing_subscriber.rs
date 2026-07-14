@@ -62,6 +62,7 @@ struct Partial {
     inserted_at: Option<Instant>,
     model: Option<String>,
     upstream_kind_label: Option<String>,
+    service_tier: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
     cache_creation_5m: u64,
@@ -179,6 +180,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.cache_creation_5m = usage.cache_creation_input_tokens_5m;
             partial.cache_creation_1h = usage.cache_creation_input_tokens_1h;
             partial.cache_read = usage.cache_read_input_tokens;
+            partial.service_tier = usage.service_tier;
             partial.usage_seen = true;
         }
         LifecycleEvent::StreamCompleted {
@@ -190,6 +192,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.cache_creation_5m = success.usage.cache_creation_input_tokens_5m;
             partial.cache_creation_1h = success.usage.cache_creation_input_tokens_1h;
             partial.cache_read = success.usage.cache_read_input_tokens;
+            partial.service_tier = success.usage.service_tier;
             partial.usage_seen = true;
         }
         _ => {}
@@ -213,6 +216,7 @@ fn compute_cost(partial: &Partial) -> Option<CostBreakdown> {
         partial.cache_creation_1h,
         partial.cache_read,
         upstream_kind,
+        partial.service_tier.as_deref(),
     );
     Some(event_cost_breakdown_from_pricing(breakdown))
 }
@@ -264,6 +268,10 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     )
     .increment(1);
 }
+
+#[cfg(test)]
+#[path = "lifecycle_pricing_subscriber_tier_tests.rs"]
+mod tier_tests;
 
 #[cfg(test)]
 mod tests {

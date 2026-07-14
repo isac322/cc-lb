@@ -27,6 +27,11 @@ impl ObservabilityHook for WasmtimeObservabilityHookPlugin {
             })?;
         match self.dispatch.observe_wire_version() {
             Some(WireVersion::V1) => self.dispatch.call_observe(in_bytes.as_slice()),
+            Some(WireVersion::V2) => {
+                return Err(ObservabilityError::Dropped {
+                    reason: "observe hook does not support wire V2".to_owned(),
+                });
+            }
             None => {
                 return Err(ObservabilityError::Dropped {
                     reason: "plugin metadata missing observe hook".to_owned(),

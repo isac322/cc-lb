@@ -7098,6 +7098,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasmtime-filter-v2"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-pdk-wasmtime",
+]
+
+[[package]]
 name = "wasmtime-internal-cache"
 version = "46.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

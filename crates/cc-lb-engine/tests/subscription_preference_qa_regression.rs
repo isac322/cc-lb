@@ -279,6 +279,7 @@ fn ctx(request_id: &str) -> RoutingContext {
     RoutingContext {
         request_id: request_id.to_owned(),
         thread_id: Some("qa-regression-thread".to_owned()),
+        requested_service_tier: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),

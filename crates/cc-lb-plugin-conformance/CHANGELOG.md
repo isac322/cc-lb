@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add a Filter V2 conformance sample carrying the requested `priority` service tier.
+
+### Fixed
+
+- Select the `ConformanceSuite::run()` filter payload from the plugin's declared wire version while preserving Filter V1 behavior.
+
 ## [0.2.3](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.2.2...cc-lb-plugin-conformance-v0.2.3) - 2026-07-12
 
 ### Other

@@ -7,6 +7,7 @@ members = [
     "plugins/router/cache-aware-wasmtime",
     "plugins/test-fixtures/wasmtime-shape-passthrough",
     "plugins/test-fixtures/wasmtime-observe-noop",
+    "plugins/test-fixtures/wasmtime-filter-v2",
     "tests/fixtures/fake-anthropic",
     "tests/fixtures/mock-anthropic-oauth-server",
     "tests/load",

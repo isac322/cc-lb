@@ -1,9 +1,13 @@
 use crate::common;
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use cc_lb_engine::LimitCostEstimator;
+use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
+use cc_lb_engine::api_keys::limit_engine::LimitEngine;
+use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use http_body_util::BodyExt;
 use tokio::time::{Duration, timeout};
 
@@ -11,6 +15,28 @@ use common::{
     DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestLifecycleBus, TestState,
     lifecycle_with, messages_request,
 };
+
+#[derive(Default)]
+struct RecordingLimitCostEstimator {
+    service_tiers: Mutex<Vec<Option<String>>>,
+}
+
+impl LimitCostEstimator for RecordingLimitCostEstimator {
+    fn estimate_max(
+        &self,
+        _model: &str,
+        _max_input: u64,
+        _max_output: u64,
+        _upstream_kind: Option<&str>,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.service_tiers
+            .lock()
+            .expect("service tier lock")
+            .push(service_tier.map(ToOwned::to_owned));
+        Some(1)
+    }
+}
 
 #[tokio::test]
 async fn happy_sse_relays_incrementally_and_observes_chunks() {
@@ -122,4 +148,50 @@ async fn happy_non_streaming_observes_usage_tokens() {
     )
     .await
     .expect("request-finished observation arrives");
+}
+
+#[tokio::test]
+async fn requested_service_tier_reaches_limit_cost_estimator_before_dispatch() {
+    // Given a priority request with limit reservation enabled.
+    let state = TestState::default();
+    let hook = Arc::new(RecordingHook::default());
+    let estimator = Arc::new(RecordingLimitCostEstimator::default());
+    let limit_engine = LimitEngine::new(
+        Arc::new(KeyConcurrencyManager::new()),
+        Arc::new(cc_lb_engine::SystemClock),
+    );
+    let lifecycle = lifecycle_with(
+        TestAuthn::new(state.clone()),
+        MockDispatch {
+            state,
+            mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
+        },
+        hook,
+    )
+    .with_static_limit_subject(
+        limit_engine,
+        "principal-test".to_owned(),
+        "key-test".to_owned(),
+        StoredApiKeyRecord {
+            key_hash_b64: "key-test".to_owned(),
+            status: KeyStatus::Active,
+            ..StoredApiKeyRecord::default()
+        },
+    )
+    .with_limit_cost_estimator(estimator.clone());
+
+    // When the request crosses the proxy lifecycle.
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","max_tokens":16,"service_tier":"Priority-Raw","messages":[]}"#,
+        )))
+        .await
+        .expect("lifecycle handles request");
+
+    // Then reservation uses the exact raw requested tier.
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(
+        *estimator.service_tiers.lock().expect("service tier lock"),
+        vec![Some("Priority-Raw".to_owned())]
+    );
 }

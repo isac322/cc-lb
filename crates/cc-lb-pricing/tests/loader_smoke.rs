@@ -114,7 +114,11 @@ async fn refresh_once_fetches_installs_and_persists() -> Result<(), Box<dyn std:
     );
 
     loader.refresh_once().await?;
-    assert!(catalog.lookup("claude-3-5-sonnet-20241022", None).is_some());
+    assert!(
+        catalog
+            .lookup("claude-3-5-sonnet-20241022", None, None)
+            .is_some()
+    );
     assert_eq!(
         catalog.current().payload_hash,
         hex::encode(Sha256::digest(SAMPLE_LITELLM_JSON.as_bytes()))
@@ -155,7 +159,11 @@ async fn install_latest_local_reads_disk_cache_after_refresh_failure()
         .expect_err("refresh should fail");
     assert!(error.to_string().contains("unexpected status 500"));
     assert!(loader.install_latest_local().await?);
-    assert!(catalog.lookup("claude-3-5-sonnet-20241022", None).is_some());
+    assert!(
+        catalog
+            .lookup("claude-3-5-sonnet-20241022", None, None)
+            .is_some()
+    );
     server.verify().await;
     Ok(())
 }
@@ -209,6 +217,8 @@ async fn install_latest_local_does_not_fetch_or_replace_payload_when_unchanged()
         raw_json: vec![b'x'; 1_600_000],
         cache_creation_per_million_usd: HashMap::new(),
         cache_read_per_million_usd: HashMap::new(),
+        cache_creation_per_million_usd_by_tier: HashMap::new(),
+        cache_read_per_million_usd_by_tier: HashMap::new(),
         status: CatalogStatus::Ok,
     });
     let before = catalog.current();
@@ -245,6 +255,8 @@ async fn install_latest_local_retains_snapshot_and_skips_disk_fallback_on_storag
         raw_json: vec![b'x'; 1_600_000],
         cache_creation_per_million_usd: HashMap::new(),
         cache_read_per_million_usd: HashMap::new(),
+        cache_creation_per_million_usd_by_tier: HashMap::new(),
+        cache_read_per_million_usd_by_tier: HashMap::new(),
         status: CatalogStatus::Ok,
     });
     let before = catalog.current();
@@ -284,6 +296,8 @@ async fn install_latest_local_propagates_corruption_without_installing_payload()
         raw_json: b"known-good-catalog".to_vec(),
         cache_creation_per_million_usd: HashMap::new(),
         cache_read_per_million_usd: HashMap::new(),
+        cache_creation_per_million_usd_by_tier: HashMap::new(),
+        cache_read_per_million_usd_by_tier: HashMap::new(),
         status: CatalogStatus::Ok,
     });
     let before = catalog.current();

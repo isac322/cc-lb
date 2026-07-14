@@ -21,6 +21,7 @@ extern crate std;
 pub mod metadata;
 pub mod schema;
 pub mod v1;
+pub mod v2;
 
 #[cfg(feature = "std")]
 pub use metadata::{HookMetadata, MetadataError, PluginMetadata};

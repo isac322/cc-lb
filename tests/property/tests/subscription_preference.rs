@@ -362,6 +362,7 @@ fn make_context(request_id: &str, model: &str) -> RoutingContext {
     RoutingContext {
         request_id: request_id.to_owned(),
         thread_id: None,
+        requested_service_tier: None,
         downstream_headers: http::HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),

@@ -3,10 +3,9 @@ use std::sync::Arc;
 use cc_lb_plugin_wire::metadata::{HookMode, PluginMetadata};
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
 use cc_lb_plugin_wire::v1::{
-    ArchivedFilterResponse, ArchivedShapeResponse, ArchivedTransformResponseResult,
-    ArchivedTransformSseEventResult, CachePricingSummary, FilterRequest, Header, ObserveEvent,
-    Principal, ShapeRequest, SseEvent, TransformResponseRequest, TransformSseEventRequest,
-    Upstream,
+    ArchivedShapeResponse, ArchivedTransformResponseResult, ArchivedTransformSseEventResult,
+    Header, ObserveEvent, Principal, ShapeRequest, SseEvent, TransformResponseRequest,
+    TransformSseEventRequest, Upstream,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
@@ -14,12 +13,15 @@ use wasmtime::InstancePre;
 
 use crate::budget::StoreBudget;
 use crate::cache::{
-    call_filter_hook, call_observe_hook, call_shape_hook, call_transform_response_hook,
-    call_transform_sse_event_hook,
+    call_observe_hook, call_shape_hook, call_transform_response_hook, call_transform_sse_event_hook,
 };
 use crate::cell::PluginCell;
 use crate::engine::HostState;
 use crate::error::WasmtimeRuntimeError;
+
+mod filter;
+
+use filter::{probe_filter_v1, probe_filter_v2};
 
 pub(crate) fn probe_hook_dispatch(
     instance_pre: Arc<InstancePre<HostState>>,
@@ -50,25 +52,19 @@ pub(crate) fn probe_hook_dispatch(
     });
     match (hook, wire_version) {
         (HookKind::Filter, WireVersion::V1) => probe_filter_v1(&cell),
+        (HookKind::Filter, WireVersion::V2) => probe_filter_v2(&cell),
         (HookKind::Shape, WireVersion::V1) => probe_shape_v1(&cell),
         (HookKind::Observe, WireVersion::V1) => probe_observe_v1(&cell),
         (HookKind::TransformResponse, WireVersion::V1) => probe_transform_response_v1(&cell),
         (HookKind::TransformSseEvent, WireVersion::V1) => probe_transform_sse_event_v1(&cell),
+        (HookKind::Shape, WireVersion::V2)
+        | (HookKind::Observe, WireVersion::V2)
+        | (HookKind::TransformResponse, WireVersion::V2)
+        | (HookKind::TransformSseEvent, WireVersion::V2) => Err(probe_failed(
+            hook,
+            format!("unsupported wire version {}", wire_version.as_u8()),
+        )),
     }
-}
-
-fn probe_filter_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRuntimeError> {
-    let input = rkyv::to_bytes::<RkyvError>(&sample_filter_request()).map_err(|error| {
-        probe_failed(HookKind::Filter, format!("encode FilterRequest: {error}"))
-    })?;
-    let output = call_filter_hook(cell, input.as_slice())
-        .map_err(|error| probe_failed(HookKind::Filter, error.to_string()))?;
-    let mut aligned = AlignedVec::<16>::with_capacity(output.len());
-    aligned.extend_from_slice(&output);
-    rkyv::access::<ArchivedFilterResponse, RkyvError>(&aligned).map_err(|error| {
-        probe_failed(HookKind::Filter, format!("decode FilterResponse: {error}"))
-    })?;
-    Ok(())
 }
 
 fn probe_shape_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRuntimeError> {
@@ -128,28 +124,6 @@ fn probe_transform_sse_event_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRu
         )
     })?;
     Ok(())
-}
-
-fn sample_filter_request() -> FilterRequest {
-    FilterRequest {
-        request_id: Box::from("probe-req-1"),
-        thread_id: None,
-        canonical_model_id: Box::from("claude-3-haiku-20240307"),
-        cache_pricing: CachePricingSummary {
-            status: Box::from("unknown"),
-            input_micros_per_million: None,
-            cache_creation_5m_micros_per_million: None,
-            cache_creation_1h_micros_per_million: None,
-            cache_read_micros_per_million: None,
-        },
-        method: Box::from("POST"),
-        path: Box::from("/v1/messages"),
-        query: None,
-        headers: Box::new([hdr("content-type", "application/json")]),
-        body: Box::from(&br#"{"model":"claude-3-haiku-20240307","messages":[]}"#[..]),
-        principal: synth_principal(),
-        candidates: Box::new([]),
-    }
 }
 
 fn sample_shape_request() -> ShapeRequest {

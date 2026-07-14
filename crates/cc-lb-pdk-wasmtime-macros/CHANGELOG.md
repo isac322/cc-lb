@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Accept `wire = 2` for filter handlers and emit the V2 schema fingerprint and dispatcher.
+
 ## [0.1.1](https://github.com/isac322/cc-lb/compare/cc-lb-pdk-wasmtime-macros-v0.1.0...cc-lb-pdk-wasmtime-macros-v0.1.1) - 2026-07-09
 
 ### Added
