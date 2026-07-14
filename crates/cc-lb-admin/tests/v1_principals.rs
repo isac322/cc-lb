@@ -346,6 +346,7 @@ async fn delete_principal_cascades_owned_plugin_chains() {
             WasmRegistryEntryInput {
                 schema_hash: None,
                 name: "filter-plugin".to_owned(),
+                version: None,
                 original_filename: "filter.wasm".to_owned(),
                 label: None,
                 uploaded_at_unix_secs: 1,
