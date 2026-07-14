@@ -1,4 +1,5 @@
 pub mod filter;
+mod filter_request;
 pub mod observe;
 mod scratch;
 pub mod shape;
@@ -8,6 +9,8 @@ pub use observe::WasmtimeObservabilityHookPlugin;
 pub(super) use scratch::{access_archived_scoped_or_copy, serialize_with_input_scratch};
 pub use shape::WasmtimeUpstreamDialect;
 
+#[cfg(test)]
+mod filter_v2_tests;
 #[cfg(test)]
 mod tests {
     use std::mem::align_of;
@@ -166,6 +169,7 @@ mod tests {
         RoutingContext {
             request_id: "req-123".to_owned(),
             thread_id: None,
+            requested_service_tier: None,
             downstream_headers: headers,
             method: Method::POST,
             path: "/v1/messages".to_owned(),

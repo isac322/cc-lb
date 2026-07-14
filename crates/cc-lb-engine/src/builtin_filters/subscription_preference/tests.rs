@@ -2060,6 +2060,7 @@ fn ctx_with_request_id(canonical_model: &str, request_id: &str) -> RoutingContex
     RoutingContext {
         request_id: request_id.to_owned(),
         thread_id: None,
+        requested_service_tier: None,
         downstream_headers: http::HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),
@@ -2074,6 +2075,7 @@ fn ctx_with_thread_id(canonical_model: &str, request_id: &str, thread_id: &str) 
     RoutingContext {
         request_id: request_id.to_owned(),
         thread_id: Some(thread_id.to_owned()),
+        requested_service_tier: None,
         downstream_headers: http::HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),

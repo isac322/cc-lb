@@ -147,6 +147,33 @@ fn main() {
         },
     ];
 
+    let v2_entries = [
+        SchemaEntry {
+            impl_generics: "",
+            ty: "FilterRequest",
+            descriptor: "FilterRequest{body:Box<[u8]>,cache_pricing:CachePricingSummary,candidates:Box<[UpstreamCandidate]>,canonical_model_id:Box<str>,headers:Box<[Header]>,method:Box<str>,path:Box<str>,principal:Principal,query:Option<Box<str>>,request_id:Box<str>,service_tier:Option<Box<str>>,thread_id:Option<Box<str>>}",
+        },
+        SchemaEntry {
+            impl_generics: "<'a>",
+            ty: "FilterRequestRef<'a>",
+            descriptor: "FilterRequestRef{body:&[u8],cache_pricing:CachePricingSummaryRef,candidates:&[UpstreamCandidateRef],canonical_model_id:&str,headers:&[HeaderRef],method:&str,path:&str,principal:PrincipalRef,query:Option<QueryRef>,request_id:&str,service_tier:Option<QueryRef>,thread_id:Option<QueryRef>}",
+        },
+    ];
+
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by Cargo"));
+    fs::write(
+        out_dir.join("wire_schema_impls.rs"),
+        render_schema_impls(&entries),
+    )
+    .expect("write generated V1 WireSchema impls");
+    fs::write(
+        out_dir.join("wire_schema_v2_impls.rs"),
+        render_schema_impls(&v2_entries),
+    )
+    .expect("write generated V2 WireSchema impls");
+}
+
+fn render_schema_impls(entries: &[SchemaEntry]) -> String {
     let mut output = String::new();
     for entry in entries {
         let digest = blake3::hash(entry.descriptor.as_bytes());
@@ -162,7 +189,5 @@ fn main() {
         ));
     }
 
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by Cargo"));
-    fs::write(out_dir.join("wire_schema_impls.rs"), output)
-        .expect("write generated WireSchema impls");
+    output
 }

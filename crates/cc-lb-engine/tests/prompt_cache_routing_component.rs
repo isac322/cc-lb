@@ -212,6 +212,7 @@ fn ctx(
     RoutingContext {
         request_id: "req-1".to_owned(),
         thread_id: Some(thread_id.to_owned()),
+        requested_service_tier: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),

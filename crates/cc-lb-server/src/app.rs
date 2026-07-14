@@ -128,10 +128,11 @@ impl cc_lb_engine::LimitCostEstimator for PricingLimitCostEstimator {
         max_input: u64,
         max_output: u64,
         upstream_kind: Option<&str>,
+        service_tier: Option<&str>,
     ) -> Option<i64> {
         let upstream_kind = upstream_kind.and_then(pricing_upstream_kind_from_label);
         self.catalog
-            .estimate_max(model, max_input, max_output, upstream_kind)
+            .estimate_max(model, max_input, max_output, upstream_kind, service_tier)
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
 }
@@ -2282,6 +2283,7 @@ fn claude_default_snapshot(clock: &dyn cc_lb_engine::Clock) -> cc_lb_pricing::Ca
                 model: (*name).to_owned(),
                 input_per_million_usd: UsdPerMillion::from_micros_usd(*input),
                 output_per_million_usd: UsdPerMillion::from_micros_usd(*output),
+                by_tier: Default::default(),
             },
         );
         cache_creation.insert(
@@ -2300,6 +2302,8 @@ fn claude_default_snapshot(clock: &dyn cc_lb_engine::Clock) -> cc_lb_pricing::Ca
         raw_json: Vec::new(),
         cache_creation_per_million_usd: cache_creation,
         cache_read_per_million_usd: cache_read,
+        cache_creation_per_million_usd_by_tier: HashMap::new(),
+        cache_read_per_million_usd_by_tier: HashMap::new(),
         status: CatalogStatus::Ok,
     }
 }
@@ -2884,6 +2888,7 @@ fn dispatcher(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::convert::Infallible;
 
     use axum::body::Body;
@@ -2894,6 +2899,27 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    const TIER_PRICING_TEST_MODEL: &str = "tier-pricing-test-model";
+
+    fn pricing_limit_cost_estimator(
+        by_tier: BTreeMap<String, cc_lb_pricing::TierRate>,
+    ) -> PricingLimitCostEstimator {
+        let catalog = cc_lb_pricing::PriceCatalog::new_empty();
+        let mut snapshot = cc_lb_pricing::CatalogSnapshot::empty_cost_disabled();
+        snapshot.status = cc_lb_pricing::CatalogStatus::Ok;
+        snapshot.models.insert(
+            TIER_PRICING_TEST_MODEL.to_owned(),
+            cc_lb_pricing::Pricing {
+                model: TIER_PRICING_TEST_MODEL.to_owned(),
+                input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(2),
+                output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(8),
+                by_tier,
+            },
+        );
+        catalog.install_snapshot(snapshot);
+        PricingLimitCostEstimator { catalog }
+    }
 
     async fn panic_when_polled() -> Result<Bytes, Infallible> {
         panic!("request body must not be polled")
@@ -3027,7 +3053,51 @@ mod tests {
         install_default_fallback_if_uninitialized(&catalog, &clock);
 
         assert!(matches!(catalog.status(), cc_lb_pricing::CatalogStatus::Ok));
-        assert!(catalog.lookup("claude-opus-4-5", None).is_some());
+        assert!(catalog.lookup("claude-opus-4-5", None, None).is_some());
+    }
+
+    #[test]
+    fn pricing_limit_cost_estimator_uses_requested_priority_tier() {
+        // Given an estimator with a distinct priority price.
+        let estimator = pricing_limit_cost_estimator(BTreeMap::from([(
+            "priority".to_owned(),
+            cc_lb_pricing::TierRate {
+                input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(3),
+                output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(12),
+            },
+        )]));
+
+        // When maximum cost is estimated for a priority request.
+        let estimate = cc_lb_engine::LimitCostEstimator::estimate_max(
+            &estimator,
+            TIER_PRICING_TEST_MODEL,
+            1_000_000,
+            1_000_000,
+            Some("anthropic_key"),
+            Some("priority"),
+        );
+
+        // Then the explicit priority rates are reserved.
+        assert_eq!(estimate, Some(15_000_000));
+    }
+
+    #[test]
+    fn pricing_limit_cost_estimator_uses_batch_fallback() {
+        // Given an estimator whose catalog has only base prices.
+        let estimator = pricing_limit_cost_estimator(BTreeMap::new());
+
+        // When maximum cost is estimated for a batch request.
+        let estimate = cc_lb_engine::LimitCostEstimator::estimate_max(
+            &estimator,
+            TIER_PRICING_TEST_MODEL,
+            1_000_000,
+            1_000_000,
+            Some("anthropic_key"),
+            Some("batch"),
+        );
+
+        // Then the catalog's exact-half batch fallback is reserved.
+        assert_eq!(estimate, Some(5_000_000));
     }
 
     #[test]
@@ -3038,7 +3108,7 @@ mod tests {
         install_default_fallback_if_uninitialized(&catalog, &clock);
 
         let pricing = catalog
-            .lookup("claude-fable-5", None)
+            .lookup("claude-fable-5", None, None)
             .expect("fable fallback pricing exists");
         assert_eq!(pricing.input_per_million_usd.as_micros_usd(), 10_000_000);
         assert_eq!(pricing.output_per_million_usd.as_micros_usd(), 50_000_000);
@@ -3079,6 +3149,7 @@ mod tests {
                 model: "operator-model-a".to_owned(),
                 input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(8),
+                by_tier: Default::default(),
             },
         );
         catalog.install_snapshot(cc_lb_pricing::CatalogSnapshot {
@@ -3088,14 +3159,16 @@ mod tests {
             raw_json: Vec::new(),
             cache_creation_per_million_usd: HashMap::new(),
             cache_read_per_million_usd: HashMap::new(),
+            cache_creation_per_million_usd_by_tier: HashMap::new(),
+            cache_read_per_million_usd_by_tier: HashMap::new(),
             status: cc_lb_pricing::CatalogStatus::Ok,
         });
 
         let clock = cc_lb_engine::SystemClock;
         install_default_fallback_if_uninitialized(&catalog, &clock);
 
-        assert!(catalog.lookup("operator-model-a", None).is_some());
-        assert!(catalog.lookup("claude-opus-4-5", None).is_none());
+        assert!(catalog.lookup("operator-model-a", None, None).is_some());
+        assert!(catalog.lookup("claude-opus-4-5", None, None).is_none());
     }
 
     #[test]

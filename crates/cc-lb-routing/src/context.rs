@@ -9,6 +9,8 @@ pub struct RoutingContext {
     pub request_id: String,
     /// Conversation identifier used by session-aware routing filters.
     pub thread_id: Option<String>,
+    /// Raw service tier requested in the downstream request body.
+    pub requested_service_tier: Option<String>,
     /// Downstream headers after hop-by-hop stripping.
     pub downstream_headers: HeaderMap,
     /// Downstream HTTP method.

@@ -4,6 +4,8 @@ mod cache_aware_wasmtime_e2e;
 mod compiled_module_cache;
 #[path = "conformance.rs"]
 mod conformance;
+#[path = "filter_v2_round_trip.rs"]
+mod filter_v2_round_trip;
 #[path = "malicious_plugin.rs"]
 mod malicious_plugin;
 #[path = "observe_drain.rs"]

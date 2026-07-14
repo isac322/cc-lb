@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add wire-version-aware runtime probes for Filter V1 and V2, including requested service-tier delivery in the V2 sample.
+
 ## [0.1.3](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.1.2...cc-lb-runtime-wasmtime-v0.1.3) - 2026-07-12
 
 ### Other

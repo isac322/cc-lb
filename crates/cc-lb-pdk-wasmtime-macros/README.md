@@ -45,9 +45,12 @@ pub fn filter(req: FilterRequest) -> FilterResponse {
 }
 ```
 
-Supported hook kinds are `filter`, `shape`, and `observe`. The current PDK
-accepts `wire = 1`. Add `view` when the handler wants an archived zero-copy
-request reference instead of an owned request.
+Supported hook kinds are `filter`, `shape`, and `observe`, plus the shape-owned
+response-transform hooks. The PDK accepts `wire = 1` for every hook and
+`wire = 2` for filter only. Add `view` when the handler wants an archived
+zero-copy request reference instead of an owned request. The macro selects the
+matching V1 or V2 filter fingerprint and guest dispatcher from the declared
+wire version.
 
 ## `#[derive(WireSchema)]`
 

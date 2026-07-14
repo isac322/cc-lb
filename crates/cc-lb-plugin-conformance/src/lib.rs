@@ -67,13 +67,16 @@
 
 pub mod fixtures;
 pub mod prelude;
+#[cfg(test)]
+mod tests;
 
 use cc_lb_plugin_wire::{
     ArchivedFilterResponse, ArchivedShapeResponse, FilterRequest, FilterResponse, ObserveEvent,
-    ShapeRequest, ShapeResponse,
+    ShapeRequest, ShapeResponse, WireVersion,
 };
 use cc_lb_runtime_wasmtime::{
-    HotEngineConfig, ModuleInspection, RuntimeSlotKey, SlotKind, WasmtimeRuntime, inspect_wasm,
+    HotEngineConfig, ModuleInspection, RuntimeSlotKey, SlotKind, WasmPluginWireDispatch,
+    WasmtimeRuntime, inspect_wasm,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
@@ -197,8 +200,8 @@ impl<'a> ConformanceSuite<'a> {
             .unwrap_or_else(|e| panic!("admit_wasm rejected plugin: {e}"));
     }
 
-    /// Build a fresh [`WasmtimeRuntime`], register the plugin under
-    /// [`Self::plugin_name`], and return the live session.
+    /// Build a fresh [`WasmtimeRuntime`], register the plugin under the
+    /// configured plugin name, and return the live session.
     ///
     /// A successful `session()` return IS the static admission proof —
     /// `register_*` invokes `inspect_wasm` before instantiate.
@@ -206,24 +209,29 @@ impl<'a> ConformanceSuite<'a> {
         let runtime = WasmtimeRuntime::new(self.engine_config.clone())
             .expect("wasmtime engine build must succeed");
         let slot_key = RuntimeSlotKey::global(self.plugin_name.clone());
-        match self.kind {
+        let slot = match self.kind {
             ConformanceKind::Filter => runtime
                 .register_filter(slot_key.clone(), self.plugin_name.clone(), self.wasm)
-                .map(|_| ())
                 .expect("register_filter must accept a conforming plugin"),
             ConformanceKind::Shape => runtime
                 .register_shape(slot_key.clone(), self.plugin_name.clone(), self.wasm)
-                .map(|_| ())
                 .expect("register_shape must accept a conforming plugin"),
             ConformanceKind::Observe => runtime
                 .register_observe(slot_key.clone(), self.plugin_name.clone(), self.wasm)
-                .map(|_| ())
                 .expect("register_observe must accept a conforming plugin"),
+        };
+        let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
+        let wire_version = match self.kind {
+            ConformanceKind::Filter => dispatch.filter_wire_version(),
+            ConformanceKind::Shape => dispatch.shape_wire_version(),
+            ConformanceKind::Observe => dispatch.observe_wire_version(),
         }
+        .expect("registered plugin must declare the selected hook wire version");
         PluginSession {
             runtime,
             slot_key,
             kind: self.kind,
+            wire_version,
         }
     }
 
@@ -235,7 +243,7 @@ impl<'a> ConformanceSuite<'a> {
     /// have missed it.
     ///
     /// Coverage:
-    /// - `Filter` → `call_filter(sample_filter_request())`
+    /// - `Filter` → canonical V1 or V2 request selected from hook metadata
     /// - `Shape` → `call_shape(sample_shape_request())`
     /// - `Observe` → [`PluginSession::exercise_observe_variants`]
     ///
@@ -246,9 +254,16 @@ impl<'a> ConformanceSuite<'a> {
     pub fn run(&self) {
         let session = self.session();
         match self.kind {
-            ConformanceKind::Filter => {
-                let _ = session.call_filter(fixtures::sample_filter_request());
-            }
+            ConformanceKind::Filter => match session.wire_version {
+                WireVersion::V1 => {
+                    let _ = session.call_filter(fixtures::sample_filter_request());
+                }
+                WireVersion::V2 => {
+                    let input = rkyv::to_bytes::<RkyvError>(&fixtures::sample_filter_request_v2())
+                        .expect("rkyv encode filter V2 request");
+                    let _ = session.call_filter_bytes(input.as_slice());
+                }
+            },
             ConformanceKind::Shape => {
                 let _ = session.call_shape(fixtures::sample_shape_request());
             }
@@ -266,6 +281,7 @@ pub struct PluginSession {
     runtime: WasmtimeRuntime,
     slot_key: RuntimeSlotKey,
     kind: ConformanceKind,
+    wire_version: WireVersion,
 }
 
 impl PluginSession {
@@ -289,15 +305,19 @@ impl PluginSession {
     /// Round-trip a [`FilterRequest`] through the guest boundary.
     /// Panics if this session is not Filter-kind.
     pub fn call_filter(&self, request: FilterRequest) -> FilterResponse {
+        let input = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode FilterRequest");
+        self.call_filter_bytes(input.as_slice())
+    }
+
+    fn call_filter_bytes(&self, input: &[u8]) -> FilterResponse {
         assert!(
             matches!(self.kind, ConformanceKind::Filter),
             "call_filter requires SlotKind::Filter, got {:?}",
             self.kind.slot_kind()
         );
-        let in_bytes = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode FilterRequest");
         let out_bytes = self
             .runtime
-            .call_filter(&self.slot_key, in_bytes.as_slice())
+            .call_filter(&self.slot_key, input)
             .expect("guest cc_lb_filter must complete without trap");
         let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
         aligned.extend_from_slice(&out_bytes);

@@ -557,10 +557,17 @@ fn eligible_ttls_for_entry(requested: TtlClass, entry: TtlClass) -> bool {
 
 #[cfg(test)]
 mod cache_score_tests {
-    use super::{anthropic_family_cache_pricing_summary, build_cache_score};
+    use std::collections::BTreeMap;
+
+    use super::{
+        anthropic_family_cache_pricing_summary, build_cache_score, cache_pricing_summary_for_model,
+    };
     use cc_lb_domain::{
         BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, TtlClass,
         WarmCacheEntry,
+    };
+    use cc_lb_pricing::{
+        CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, TierRate, UsdPerMillion,
     };
     use proptest::prelude::*;
 
@@ -674,6 +681,59 @@ mod cache_score_tests {
     #[test]
     fn anthropic_family_cache_pricing_fallback_leaves_non_claude_unknown() {
         assert!(anthropic_family_cache_pricing_summary("gpt-5.5").is_none());
+    }
+
+    #[test]
+    fn cache_pricing_summary_uses_requested_service_tier() {
+        // Given a catalog whose priority tier differs from every base cache rate.
+        let catalog = PriceCatalog::new_empty();
+        let mut snapshot = CatalogSnapshot::empty_cost_disabled();
+        snapshot.status = CatalogStatus::Ok;
+        snapshot.models.insert(
+            "tier-model".to_owned(),
+            Pricing {
+                model: "tier-model".to_owned(),
+                input_per_million_usd: UsdPerMillion::from_whole_usd(2),
+                output_per_million_usd: UsdPerMillion::from_whole_usd(8),
+                by_tier: BTreeMap::from([(
+                    "priority".to_owned(),
+                    TierRate {
+                        input_per_million_usd: UsdPerMillion::from_whole_usd(3),
+                        output_per_million_usd: UsdPerMillion::from_whole_usd(12),
+                    },
+                )]),
+            },
+        );
+        snapshot
+            .cache_creation_per_million_usd
+            .insert("tier-model".to_owned(), UsdPerMillion::from_whole_usd(4));
+        snapshot.cache_creation_per_million_usd_by_tier.insert(
+            "tier-model".to_owned(),
+            BTreeMap::from([("priority".to_owned(), UsdPerMillion::from_whole_usd(6))]),
+        );
+        snapshot
+            .cache_read_per_million_usd
+            .insert("tier-model".to_owned(), UsdPerMillion::from_whole_usd(1));
+        snapshot.cache_read_per_million_usd_by_tier.insert(
+            "tier-model".to_owned(),
+            BTreeMap::from([("priority".to_owned(), UsdPerMillion::from_whole_usd(2))]),
+        );
+        catalog.install_snapshot(snapshot);
+
+        // When the routing summary is built with the requested priority tier.
+        let pricing = cache_pricing_summary_for_model(&catalog, "tier-model", Some("priority"));
+
+        // Then all cache-affinity estimate rates reflect that tier.
+        assert_eq!(pricing.input_micros_per_million, Some(3_000_000));
+        assert_eq!(
+            pricing.cache_creation_5m_micros_per_million,
+            Some(6_000_000)
+        );
+        assert_eq!(
+            pricing.cache_creation_1h_micros_per_million,
+            Some(9_600_000)
+        );
+        assert_eq!(pricing.cache_read_micros_per_million, Some(2_000_000));
     }
 
     #[test]
@@ -1069,7 +1129,11 @@ mod cache_score_tests {
     }
 }
 
-fn cache_pricing_summary_for_model(model: &str) -> CachePricingSummary {
+fn cache_pricing_summary_for_model(
+    catalog: &cc_lb_pricing::PriceCatalog,
+    model: &str,
+    service_tier: Option<&str>,
+) -> CachePricingSummary {
     if model.is_empty() {
         return CachePricingSummary {
             status: "unknown".to_owned(),
@@ -1081,20 +1145,23 @@ fn cache_pricing_summary_for_model(model: &str) -> CachePricingSummary {
     }
 
     let normalized = cc_lb_pricing::normalize_model_id(model, None);
-    let snapshot = cc_lb_pricing::global_catalog().current();
-    let input = snapshot
-        .models
-        .get(&normalized)
-        .map(|pricing| pricing.input_per_million_usd.as_micros_usd());
-    let cache_creation_5m = snapshot
-        .cache_creation_per_million_usd
-        .get(&normalized)
-        .map(|price| price.as_micros_usd());
-    let cache_creation_1h = cache_creation_5m.map(cache_creation_1h_micros_from_5m);
-    let cache_read = snapshot
-        .cache_read_per_million_usd
-        .get(&normalized)
-        .map(|price| price.as_micros_usd());
+    let pricing = catalog.routing_cache_pricing(model, service_tier);
+    let input = pricing.map(|rates| rates.input_per_million_usd.as_micros_usd());
+    let cache_creation_5m = pricing.and_then(|rates| {
+        rates
+            .cache_creation_5m_per_million_usd
+            .map(|price| price.as_micros_usd())
+    });
+    let cache_creation_1h = pricing.and_then(|rates| {
+        rates
+            .cache_creation_1h_per_million_usd
+            .map(|price| price.as_micros_usd())
+    });
+    let cache_read = pricing.and_then(|rates| {
+        rates
+            .cache_read_per_million_usd
+            .map(|price| price.as_micros_usd())
+    });
     let status = if input.is_some() && cache_creation_5m.is_some() && cache_read.is_some() {
         "known"
     } else {
@@ -1150,11 +1217,6 @@ fn cache_read_micros_from_input(input_micros: u64) -> u64 {
     (u128::from(input_micros) / 10)
         .try_into()
         .unwrap_or(u64::MAX)
-}
-
-fn cache_creation_1h_micros_from_5m(cache_creation_5m_micros: u64) -> u64 {
-    let micros = (u128::from(cache_creation_5m_micros) * 8 + 2) / 5;
-    micros.try_into().unwrap_or(u64::MAX)
 }
 
 fn saturating_u64_to_u32(value: u64) -> u32 {
@@ -1423,6 +1485,7 @@ pub trait LimitCostEstimator: Send + Sync {
         max_input: u64,
         max_output: u64,
         upstream_kind: Option<&str>,
+        service_tier: Option<&str>,
     ) -> Option<i64>;
 }
 
@@ -1776,6 +1839,7 @@ impl Lifecycle {
         let ctx = RequestContext::builder()
             .request_id(request_id)
             .thread_id(cache_metadata.thread_id.clone())
+            .requested_service_tier(cache_metadata.requested_service_tier.clone())
             .downstream_headers(input.headers)
             .method(http::Method::POST)
             .path("/v1/messages".to_owned())
@@ -1784,7 +1848,9 @@ impl Lifecycle {
             .cache_breakpoints(cache_breakpoints)
             .canonical_model_id(canonical_model_id)
             .cache_pricing(cache_pricing_summary_for_model(
+                cc_lb_pricing::global_catalog(),
                 &cache_metadata.canonical_model_id,
+                cache_metadata.requested_service_tier.as_deref(),
             ))
             .build();
         let principal = Principal {
@@ -1940,8 +2006,13 @@ impl Lifecycle {
         } else {
             String::new()
         };
-        ctx.cache_pricing = cache_pricing_summary_for_model(&ctx.canonical_model_id);
         ctx.thread_id = cache_metadata.thread_id.clone();
+        ctx.requested_service_tier = cache_metadata.requested_service_tier.clone();
+        ctx.cache_pricing = cache_pricing_summary_for_model(
+            cc_lb_pricing::global_catalog(),
+            &ctx.canonical_model_id,
+            ctx.requested_service_tier.as_deref(),
+        );
 
         let auth_start = Instant::now();
         let success = if let Some(success) = self
@@ -2096,7 +2167,11 @@ impl Lifecycle {
                     PendingCapturedRequestInput::new(
                         observer.event_id().to_owned(),
                         cache_metadata.canonical_model_id.clone(),
-                        cache_pricing_summary_for_model(&cache_metadata.canonical_model_id),
+                        cache_pricing_summary_for_model(
+                            cc_lb_pricing::global_catalog(),
+                            &cache_metadata.canonical_model_id,
+                            cache_metadata.requested_service_tier.as_deref(),
+                        ),
                         cache_metadata.plugin_cache_breakpoints(),
                         candidates.clone(),
                         unix_now_ms(&*self.clock),
@@ -2637,6 +2712,7 @@ impl Lifecycle {
                 max_input_estimate as u64,
                 limit_request.max_tokens.max(0) as u64,
                 upstream_kind,
+                limit_request.service_tier.as_deref(),
             )
         });
 
@@ -3072,6 +3148,7 @@ impl Lifecycle {
         let ctx = RequestContext::builder()
             .request_id(request_id)
             .thread_id(None)
+            .requested_service_tier(None)
             .downstream_headers(downstream_headers)
             .method(parts.method)
             .path(path)
@@ -4434,6 +4511,7 @@ struct LimitRequest {
     model: String,
     max_tokens: i64,
     stream: bool,
+    service_tier: Option<String>,
 }
 
 impl LimitRequest {
@@ -4452,6 +4530,10 @@ impl LimitRequest {
                 .and_then(|v| v.get("stream"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            service_tier: value
+                .and_then(|v| v.get("service_tier"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
         }
     }
 }
@@ -4490,6 +4572,7 @@ pub(crate) use crate::response_transform::{
 pub(crate) struct RequestCacheMetadata {
     pub(crate) request_json: Option<Value>,
     pub(crate) thread_id: Option<String>,
+    requested_service_tier: Option<String>,
     message_id: Option<String>,
     message_index: Option<u64>,
     message_count: Option<u64>,
@@ -4597,6 +4680,10 @@ fn request_cache_metadata_from_value(
         .map(canonical_model_id)
         .unwrap_or_default()
         .to_owned();
+    let requested_service_tier = value
+        .get("service_tier")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
 
     let messages = value.get("messages").and_then(Value::as_array);
     let message_count = messages.map(|items| items.len() as u64);
@@ -4658,6 +4745,7 @@ fn request_cache_metadata_from_value(
     RequestCacheMetadata {
         request_json: None,
         thread_id,
+        requested_service_tier,
         message_id,
         message_index,
         message_count,
@@ -6168,6 +6256,23 @@ mod tests {
         assert_eq!(hash.len(), 64);
         assert_eq!(hash, metadata.cache_breakpoints[2].prefix_hash);
         assert!(!hash.contains("secret"));
+    }
+
+    #[test]
+    fn request_cache_metadata_preserves_raw_requested_service_tier() {
+        // Given a request body with a mixed-case tier value.
+        let body = Bytes::from_static(
+            br#"{"model":"claude-test","service_tier":"Priority-Raw","messages":[]}"#,
+        );
+
+        // When request metadata is extracted from the parsed body.
+        let metadata = request_cache_metadata(&HeaderMap::new(), &body);
+
+        // Then the pre-request path retains the exact requested value.
+        assert_eq!(
+            metadata.requested_service_tier.as_deref(),
+            Some("Priority-Raw")
+        );
     }
 
     #[test]
