@@ -61,10 +61,28 @@ impl ModuleInspection {
     }
 }
 
+enum InspectionScope {
+    Slot(HookKind),
+    DeclaredHooks,
+}
+
 /// Walk `wasm` bytes once, enforcing the structural invariants in the
 /// module docs. The check is purely structural and never executes guest
 /// code.
 pub fn inspect_wasm(kind: HookKind, wasm: &[u8]) -> Result<ModuleInspection, WasmtimeRuntimeError> {
+    inspect_wasm_with_scope(InspectionScope::Slot(kind), wasm)
+}
+
+/// Inspect an artifact against every metadata-declared hook contract without
+/// selecting a runtime slot.
+pub fn inspect_wasm_agnostic(wasm: &[u8]) -> Result<ModuleInspection, WasmtimeRuntimeError> {
+    inspect_wasm_with_scope(InspectionScope::DeclaredHooks, wasm)
+}
+
+fn inspect_wasm_with_scope(
+    scope: InspectionScope,
+    wasm: &[u8],
+) -> Result<ModuleInspection, WasmtimeRuntimeError> {
     let mut observed_sections: HashMap<String, [u8; 32]> = HashMap::new();
     let mut plugin_metadata: Option<Vec<u8>> = None;
     let mut found_func_exports: HashSet<String> = HashSet::new();
@@ -146,7 +164,12 @@ pub fn inspect_wasm(kind: HookKind, wasm: &[u8]) -> Result<ModuleInspection, Was
     })?;
 
     reject_non_response_noop_modes(&metadata)?;
-    require_hooks_for_slot(kind, &metadata, &metadata_json)?;
+    match scope {
+        InspectionScope::Slot(kind) => require_hooks_for_slot(kind, &metadata, &metadata_json)?,
+        InspectionScope::DeclaredHooks => {
+            require_declared_hook_contracts(&metadata, &metadata_json)?
+        }
+    }
 
     if !found_memory_export {
         return Err(WasmtimeRuntimeError::ModuleRejected {
@@ -241,27 +264,53 @@ fn require_hooks_for_slot(
     metadata_json: &serde_json::Value,
 ) -> Result<(), WasmtimeRuntimeError> {
     match kind {
-        HookKind::Shape => {
-            for hook in SHAPE_OWNED_HOOKS {
-                require_declared_hook(metadata, hook, "shape plugin")?;
-            }
-            for hook in [HookKind::TransformResponse, HookKind::TransformSseEvent] {
-                if !hook_mode_declared(metadata_json, hook) {
-                    return Err(WasmtimeRuntimeError::ModuleRejected {
-                        reason: format!(
-                            "shape plugin hook `{}` must explicitly declare mode `active` or `noop`",
-                            hook.as_str()
-                        ),
-                    });
-                }
-            }
-            Ok(())
-        }
+        HookKind::Shape => require_shape_hook_contracts(metadata, metadata_json),
         HookKind::Filter => require_declared_hook(metadata, HookKind::Filter, "this slot"),
         HookKind::Observe => require_declared_hook(metadata, HookKind::Observe, "this slot"),
         HookKind::TransformResponse => reject_shape_owned_hook_as_slot(HookKind::TransformResponse),
         HookKind::TransformSseEvent => reject_shape_owned_hook_as_slot(HookKind::TransformSseEvent),
     }
+}
+
+fn require_declared_hook_contracts(
+    metadata: &PluginMetadata,
+    metadata_json: &serde_json::Value,
+) -> Result<(), WasmtimeRuntimeError> {
+    if metadata.hooks.contains_key(HookKind::Shape.as_str()) {
+        return require_shape_hook_contracts(metadata, metadata_json);
+    }
+
+    for hook in [HookKind::TransformResponse, HookKind::TransformSseEvent] {
+        if metadata.hooks.contains_key(hook.as_str()) {
+            return Err(WasmtimeRuntimeError::ModuleRejected {
+                reason: format!(
+                    "shape-owned hook `{}` requires a declared `shape` hook",
+                    hook.as_str()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn require_shape_hook_contracts(
+    metadata: &PluginMetadata,
+    metadata_json: &serde_json::Value,
+) -> Result<(), WasmtimeRuntimeError> {
+    for hook in SHAPE_OWNED_HOOKS {
+        require_declared_hook(metadata, hook, "shape plugin")?;
+    }
+    for hook in [HookKind::TransformResponse, HookKind::TransformSseEvent] {
+        if !hook_mode_declared(metadata_json, hook) {
+            return Err(WasmtimeRuntimeError::ModuleRejected {
+                reason: format!(
+                    "shape plugin hook `{}` must explicitly declare mode `active` or `noop`",
+                    hook.as_str()
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn reject_shape_owned_hook_as_slot(hook: HookKind) -> Result<(), WasmtimeRuntimeError> {
