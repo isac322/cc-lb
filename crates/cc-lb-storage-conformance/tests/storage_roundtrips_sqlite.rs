@@ -423,6 +423,30 @@ plugin_registry_sqlite_test!(
     plugin_registry_same_sha_metadata_mismatch_conflicts_sqlite,
     same_sha_metadata_mismatch_conflicts
 );
+plugin_registry_sqlite_test!(
+    plugin_registry_refcount_counts_chain_and_warmup_references_sqlite,
+    refcount_counts_chain_and_warmup_references
+);
+plugin_registry_sqlite_test!(
+    plugin_registry_replace_wasm_entry_preserves_id_and_references_sqlite,
+    replace_wasm_entry_preserves_id_and_references
+);
+plugin_registry_sqlite_test!(
+    plugin_registry_replace_wasm_entry_with_stale_revision_conflicts_sqlite,
+    replace_wasm_entry_with_stale_revision_conflicts
+);
+plugin_registry_sqlite_test!(
+    plugin_registry_list_registry_references_returns_chain_and_warmup_sqlite,
+    list_registry_references_returns_chain_and_warmup
+);
+plugin_registry_sqlite_test!(
+    plugin_registry_cascade_delete_registry_entry_removes_chain_warmup_and_blob_sqlite,
+    cascade_delete_registry_entry_removes_chain_warmup_and_blob
+);
+plugin_registry_sqlite_test!(
+    plugin_registry_cascade_delete_registry_entry_rejects_changed_fingerprint_sqlite,
+    cascade_delete_registry_entry_rejects_changed_fingerprint
+);
 
 #[test]
 fn price_catalog_roundtrip_smoke_sqlite() {

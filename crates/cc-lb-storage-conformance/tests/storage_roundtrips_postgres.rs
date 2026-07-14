@@ -188,6 +188,54 @@ fn plugin_registry_store_postgres() {
 }
 
 #[test]
+fn plugin_registry_refcount_counts_chain_and_warmup_references_postgres() {
+    run_postgres_scenario(
+        "refcount_counts_chain_and_warmup_references",
+        plugin_registry_store::refcount_counts_chain_and_warmup_references,
+    );
+}
+
+#[test]
+fn plugin_registry_replace_wasm_entry_preserves_id_and_references_postgres() {
+    run_postgres_scenario(
+        "replace_wasm_entry_preserves_id_and_references",
+        plugin_registry_store::replace_wasm_entry_preserves_id_and_references,
+    );
+}
+
+#[test]
+fn plugin_registry_replace_wasm_entry_with_stale_revision_conflicts_postgres() {
+    run_postgres_scenario(
+        "replace_wasm_entry_with_stale_revision_conflicts",
+        plugin_registry_store::replace_wasm_entry_with_stale_revision_conflicts,
+    );
+}
+
+#[test]
+fn plugin_registry_list_registry_references_returns_chain_and_warmup_postgres() {
+    run_postgres_scenario(
+        "list_registry_references_returns_chain_and_warmup",
+        plugin_registry_store::list_registry_references_returns_chain_and_warmup,
+    );
+}
+
+#[test]
+fn plugin_registry_cascade_delete_registry_entry_removes_chain_warmup_and_blob_postgres() {
+    run_postgres_scenario(
+        "cascade_delete_registry_entry_removes_chain_warmup_and_blob",
+        plugin_registry_store::cascade_delete_registry_entry_removes_chain_warmup_and_blob,
+    );
+}
+
+#[test]
+fn plugin_registry_cascade_delete_registry_entry_rejects_changed_fingerprint_postgres() {
+    run_postgres_scenario(
+        "cascade_delete_registry_entry_rejects_changed_fingerprint",
+        plugin_registry_store::cascade_delete_registry_entry_rejects_changed_fingerprint,
+    );
+}
+
+#[test]
 fn plugin_registry_registry_by_id_returns_seeded_builtin_cache_affinity_postgres() {
     run_postgres_scenario(
         "registry_by_id_returns_seeded_builtin_cache_affinity",
@@ -534,6 +582,7 @@ async fn concurrent_upload_returns_existed_once_on_fixture(
     let input = WasmRegistryEntryInput {
         schema_hash: None,
         name: "plugin-concurrent-upload".to_owned(),
+        version: None,
         original_filename: "plugin-concurrent-upload.wasm".to_owned(),
         label: None,
         uploaded_at_unix_secs: 1_800_000_100,

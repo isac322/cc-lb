@@ -141,6 +141,7 @@ fn uploaded_entry(metadata: Option<PluginMetadata>) -> WasmRegistryEntry {
         id: Uuid::new_v4(),
         sha256: [1; 32],
         name: "uploaded".to_owned(),
+        version: None,
         original_filename: "uploaded.wasm".to_owned(),
         label: None,
         uploaded_at_unix_secs: 1_800_000_000,

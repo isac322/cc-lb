@@ -100,8 +100,12 @@ fn wat_data_bytes(bytes: &[u8]) -> String {
 }
 
 fn metadata(name: &str) -> String {
+    metadata_with_version(name, "0.0.1")
+}
+
+fn metadata_with_version(name: &str, version: &str) -> String {
     format!(
-        r#"{{"name":"{name}","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{{"filter":{{"wire_version":1,"description":"filter hook","usage":"called by router"}}}}}}"#
+        r#"{{"name":"{name}","version":"{version}","description":"test plugin","usage":"test usage","hooks":{{"filter":{{"wire_version":1,"description":"filter hook","usage":"called by router"}}}}}}"#
     )
 }
 
@@ -259,13 +263,116 @@ async fn rejects_host_import_violation() {
 }
 
 fn filter_wasm_with_embedded_name(embedded_name: &str) -> Vec<u8> {
+    filter_wasm_with_name_version(embedded_name, "0.0.1")
+}
+
+fn filter_wasm_with_name_version(name: &str, version: &str) -> Vec<u8> {
     wat_with_sections(
         &minimal_filter_wat(),
         &[
             (&schema_section_name(), &schema_section_bytes()),
-            ("cc_lb.plugin.v1", metadata(embedded_name).as_bytes()),
+            (
+                "cc_lb.plugin.v1",
+                metadata_with_version(name, version).as_bytes(),
+            ),
         ],
     )
+}
+
+#[tokio::test]
+async fn same_name_same_hash_upload_is_noop() {
+    let server = spawn_admin_server().await;
+    let wasm = filter_wasm_with_name_version("replaceable-filter", "1.0.0");
+    let first = multipart_body(&[
+        ("name", b"replaceable-filter"),
+        ("original_filename", b"replaceable-filter.wasm"),
+        ("slot_kind", b"filter"),
+        ("bytes", &wasm),
+    ]);
+    let (status, value) = upload(&server, first).await;
+    assert_eq!(status, StatusCode::CREATED, "body={value}");
+
+    let second = multipart_body(&[
+        ("name", b"replaceable-filter"),
+        ("original_filename", b"replaceable-filter.wasm"),
+        ("slot_kind", b"filter"),
+        ("bytes", &wasm),
+    ]);
+    let (status, value) = upload(&server, second).await;
+    assert_eq!(status, StatusCode::OK, "body={value}");
+    assert_eq!(value["idempotent"], serde_json::json!(true));
+    assert_eq!(value["action"], "noop");
+}
+
+#[tokio::test]
+async fn higher_version_replaces_same_name_entry() {
+    let server = spawn_admin_server().await;
+    let first_wasm = filter_wasm_with_name_version("replaceable-filter", "1.0.0");
+    let first = multipart_body(&[
+        ("name", b"replaceable-filter"),
+        ("original_filename", b"replaceable-filter-v1.wasm"),
+        ("slot_kind", b"filter"),
+        ("bytes", &first_wasm),
+    ]);
+    let (status, first_value) = upload(&server, first).await;
+    assert_eq!(status, StatusCode::CREATED, "body={first_value}");
+
+    let second_wasm = filter_wasm_with_name_version("replaceable-filter", "2.0.0");
+    let second = multipart_body(&[
+        ("name", b"replaceable-filter"),
+        ("original_filename", b"replaceable-filter-v2.wasm"),
+        ("slot_kind", b"filter"),
+        ("bytes", &second_wasm),
+    ]);
+    let (status, value) = upload(&server, second).await;
+    assert_eq!(status, StatusCode::OK, "body={value}");
+    assert_eq!(value["id"], first_value["id"]);
+    assert_eq!(value["version"], "2.0.0");
+    assert_eq!(value["action"], "replaced");
+}
+
+#[tokio::test]
+async fn same_version_different_hash_requires_confirmation_then_replaces() {
+    let server = spawn_admin_server().await;
+    let first_wasm = filter_wasm_with_name_version("replaceable-filter", "1.0.0");
+    let first = multipart_body(&[
+        ("name", b"replaceable-filter"),
+        ("original_filename", b"replaceable-filter-v1.wasm"),
+        ("slot_kind", b"filter"),
+        ("bytes", &first_wasm),
+    ]);
+    let (status, first_value) = upload(&server, first).await;
+    assert_eq!(status, StatusCode::CREATED, "body={first_value}");
+
+    let mut second_wasm = filter_wasm_with_name_version("replaceable-filter", "1.0.0");
+    append_custom_section(&mut second_wasm, "cc_lb.test.rebuild", b"1");
+    let blocked = multipart_body(&[
+        ("name", b"replaceable-filter"),
+        ("original_filename", b"replaceable-filter-rebuilt.wasm"),
+        ("slot_kind", b"filter"),
+        ("bytes", &second_wasm),
+    ]);
+    let (status, blocked_value) = upload(&server, blocked).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={blocked_value}");
+    assert_eq!(blocked_value["error"], "replacement_confirmation_required");
+
+    let replace_registry_id = blocked_value["replace_registry_id"]
+        .as_str()
+        .expect("replace id string");
+    let expected_revision = blocked_value["expected_revision"].to_string();
+    let confirmed = multipart_body(&[
+        ("name", b"replaceable-filter"),
+        ("original_filename", b"replaceable-filter-rebuilt.wasm"),
+        ("slot_kind", b"filter"),
+        ("confirm_replacement", b"true"),
+        ("replace_registry_id", replace_registry_id.as_bytes()),
+        ("expected_revision", expected_revision.as_bytes()),
+        ("bytes", &second_wasm),
+    ]);
+    let (status, value) = upload(&server, confirmed).await;
+    assert_eq!(status, StatusCode::OK, "body={value}");
+    assert_eq!(value["id"], first_value["id"]);
+    assert_eq!(value["action"], "replaced");
 }
 
 #[tokio::test]
