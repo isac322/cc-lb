@@ -250,6 +250,97 @@ async fn registry_delete_cascade_blocks_when_chain_references_it() {
 }
 
 #[tokio::test]
+async fn registry_references_endpoint_lists_chain_and_cascade_delete_removes_it() {
+    let (_dir, storage) = temp_storage().await;
+    let principal_id = seed_principal(&storage, "principal-reference-preview").await;
+    let entry = seed_registry(&storage, 37, "plugin-reference-preview").await;
+    let chain_entry = seed_chain(&storage, principal_id, entry.id, sparse_order::STEP).await;
+    let app = app(test_state(Config::default(), Some(storage.clone())));
+
+    let (status, _, preview) = request_json(
+        app.clone(),
+        "GET",
+        &format!("/admin/v1/plugins/registry/{}/references", entry.id),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={preview}");
+    assert_eq!(preview["refcount"], 1);
+    assert_eq!(preview["references"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        preview["references"][0]["chain_entry_id"],
+        chain_entry.id.to_string()
+    );
+
+    let fingerprint = preview["reference_fingerprint"]
+        .as_str()
+        .expect("fingerprint string");
+    let (status, _, deleted) = request_json_with_reference_fingerprint(
+        app,
+        "DELETE",
+        &format!("/admin/v1/plugins/registry/{}?cascade=references", entry.id),
+        Some("W/\"0\""),
+        fingerprint,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body={deleted}");
+    assert_eq!(deleted["deleted"]["id"], entry.id.to_string());
+    assert_eq!(deleted["removed_references"].as_array().unwrap().len(), 1);
+    assert!(
+        storage
+            .list_chain_for_principal(principal_id, PluginSlotKind::Router)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        storage
+            .get_blob_bytes(entry.sha256)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn registry_cascade_delete_rejects_stale_reference_fingerprint() {
+    let (_dir, storage) = temp_storage().await;
+    let principal_id = seed_principal(&storage, "principal-stale-fingerprint").await;
+    let entry = seed_registry(&storage, 38, "plugin-stale-fingerprint").await;
+    seed_chain(&storage, principal_id, entry.id, sparse_order::STEP).await;
+    let app = app(test_state(Config::default(), Some(storage.clone())));
+
+    let (status, _, body) = request_json_with_reference_fingerprint(
+        app,
+        "DELETE",
+        &format!("/admin/v1/plugins/registry/{}?cascade=references", entry.id),
+        Some("W/\"0\""),
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "body={body}");
+    assert_eq!(body["error"], "references_changed");
+    assert_eq!(
+        storage
+            .list_chain_for_principal(principal_id, PluginSlotKind::Router)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        storage
+            .get_blob_bytes(entry.sha256)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn registry_delete_stale_if_match_returns_412_with_current_revision() {
     let (_dir, storage) = temp_storage().await;
     let entry = seed_registry(&storage, 14, "plugin-delete-stale").await;
@@ -988,6 +1079,32 @@ async fn request_json(
     (status, headers, json)
 }
 
+async fn request_json_with_reference_fingerprint(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    if_match: Option<&str>,
+    reference_fingerprint: &str,
+) -> (StatusCode, HeaderMap, Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("Authorization", format!("Bearer {TOKEN}"))
+        .header("X-Reference-Fingerprint", reference_fingerprint);
+    if let Some(if_match) = if_match {
+        builder = builder.header("If-Match", if_match);
+    }
+    let response = app
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let json = serde_json::from_slice(&bytes).unwrap();
+    (status, headers, json)
+}
+
 async fn request_bytes(
     app: axum::Router,
     method: &str,
@@ -1084,6 +1201,7 @@ async fn seed_registry_raw(
             WasmRegistryEntryInput {
                 schema_hash: None,
                 name: name.to_owned(),
+                version: None,
                 original_filename: format!("{name}.wasm"),
                 label: None,
                 uploaded_at_unix_secs: 1_800_000_000,
