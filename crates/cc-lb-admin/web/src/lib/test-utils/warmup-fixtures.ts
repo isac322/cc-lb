@@ -91,6 +91,9 @@ export function makePluginRegistryEntry(
     revision: 1,
     uploaded_at_unix_secs: 1718380800,
     metadata: null,
+    description: 'Mock description',
+    usage: 'Mock usage',
+    hook_metadata: {},
     supported_slots: ['shape'],
     ...overrides,
   };
