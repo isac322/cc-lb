@@ -1,8 +1,7 @@
 #![cfg(feature = "capture")]
 
 use crate::common;
-#[allow(dead_code)]
-mod prompt_cache_routing_support;
+use crate::prompt_cache_routing_support;
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -122,6 +122,7 @@ mod principal_view_smoke;
 mod prompt_cache_byte_oracle;
 #[path = "prompt_cache_routing_component.rs"]
 mod prompt_cache_routing_component;
+mod prompt_cache_routing_support;
 #[path = "prompt_cache_structural_properties.rs"]
 mod prompt_cache_structural_properties;
 #[path = "queue_full_returns_503.rs"]
