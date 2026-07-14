@@ -48,6 +48,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Derive reproducible build timestamp
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
       # workflow_dispatch input is free-form; reject non-semver before it can
       # reach the registry (otherwise metadata-action emits no tags and the
       # push is a confusing no-op).
@@ -101,6 +104,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             GIT_SHA=${{ github.sha }}
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
             SCCACHE_BUCKET=sccache
             SCCACHE_ENDPOINT=http://buildkit.example.com:3900
             SCCACHE_REGION=garage

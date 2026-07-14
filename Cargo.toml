@@ -95,7 +95,7 @@ proptest = "1"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 ring = "0.17"
-rust-embed = "8"
+rust-embed = { version = "8", features = ["deterministic-timestamps"] }
 secrecy = "0.10"
 schemars = { version = "1", features = ["url2"] }
 serde = "1"
