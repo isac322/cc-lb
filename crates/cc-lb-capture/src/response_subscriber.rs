@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use cc_lb_capture::sink::CaptureSink;
 use cc_lb_lifecycle::LifecycleEvent;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -10,6 +9,7 @@ use tokio::{
 };
 
 use self::joiner::ResponseJoiner;
+use crate::sink::CaptureSink;
 
 pub const DEFAULT_CAPTURE_RESPONSE_MAP_CAP: usize = 4_096;
 pub const DEFAULT_CAPTURE_RESPONSE_TTL: Duration = Duration::from_secs(300);

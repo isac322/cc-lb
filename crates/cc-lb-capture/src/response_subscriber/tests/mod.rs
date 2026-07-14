@@ -1,8 +1,9 @@
 mod fixtures;
 
-use cc_lb_capture::schema::Disposition;
 use cc_lb_lifecycle::{LifecycleEvent, LimitDecisionKind, TerminationReason};
 use uuid::Uuid;
+
+use crate::schema::Disposition;
 
 use fixtures::*;
 

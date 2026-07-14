@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 cc-lb-domain.workspace = true
+cc-lb-lifecycle.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 sqlx = { workspace = true, features = ["macros"] }
@@ -18,6 +19,7 @@ tracing.workspace = true
 metrics.workspace = true
 
 [dev-dependencies]
+cc-lb-request-log.workspace = true
 metrics-exporter-prometheus.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

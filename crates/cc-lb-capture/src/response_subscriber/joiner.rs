@@ -1,11 +1,12 @@
 use std::{collections::HashMap, time::Duration, time::Instant};
 
-use cc_lb_capture::{
-    schema::{CapturedResponse, Disposition},
-    sink::CaptureSink,
-};
 use cc_lb_lifecycle::{
     EventId, LifecycleEvent, LimitDecisionKind, TerminationReason, UsageSnapshot,
+};
+
+use crate::{
+    schema::{CapturedResponse, Disposition},
+    sink::CaptureSink,
 };
 
 const CLIENT_CLOSED_STATUS: u16 = 499;

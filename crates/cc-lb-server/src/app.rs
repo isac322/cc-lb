@@ -1133,28 +1133,8 @@ async fn build_app_with_storage_inner(
             None
         };
     #[cfg(feature = "capture")]
-    let (capture_sink, capture_writer_handle, lifecycle_capture_rx) = if config.capture.enabled {
-        let path = data_dir.join(&config.capture.path);
-        match cc_lb_capture::store::open_capture_store(&path).await {
-            Ok(store) => {
-                let (sink, writer_handle) = cc_lb_capture::sink::CaptureSink::new_with_retention(
-                    store,
-                    config.capture.channel_capacity,
-                    config.capture.retention_max_rows,
-                );
-                let rx = in_memory_bus.attach_lifecycle_capture(
-                    cc_lb_control::event_bus::DEFAULT_LIFECYCLE_CAPTURE_CAPACITY,
-                );
-                (Some(sink), Some(writer_handle), Some(rx))
-            }
-            Err(error) => {
-                tracing::warn!(%error, "failed to open capture store; capture will be disabled");
-                (None, None, None)
-            }
-        }
-    } else {
-        (None, None, None)
-    };
+    let capture_runtime =
+        crate::capture_bootstrap::start_capture_runtime(&config, &data_dir, &in_memory_bus).await;
     let (event_fanout_shutdown_tx, event_fanout_shutdown_rx) = watch::channel(false);
     let mut event_fanout_tasks = Vec::new();
     let mut internal_partials_state = None;
@@ -1324,12 +1304,6 @@ async fn build_app_with_storage_inner(
                 )
             })
         });
-    #[cfg(feature = "capture")]
-    let lifecycle_capture_subscriber_handle = lifecycle_capture_rx.and_then(|rx| {
-        capture_sink
-            .clone()
-            .map(|sink| cc_lb_engine::spawn_lifecycle_capture_response_subscriber(rx, sink))
-    });
     let lifecycle_event_logger_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::LifecycleEventLoggerHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(lifecycle_event_logger_handle)));
@@ -1392,14 +1366,6 @@ async fn build_app_with_storage_inner(
     > = Arc::new(tokio::sync::Mutex::new(
         lifecycle_prompt_cache_observation_subscriber_handle,
     ));
-    #[cfg(feature = "capture")]
-    let capture_subscriber_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_engine::CaptureResponseSubscriberHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(lifecycle_capture_subscriber_handle));
-    #[cfg(feature = "capture")]
-    let capture_writer_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_capture::sink::CaptureWriterHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(capture_writer_handle));
     let keepalive_dispatcher = Arc::new(AnthropicKeepaliveDispatcher::new(
         Arc::clone(&dynamic_view_holder),
         Arc::clone(&stores.upstreams),
@@ -1434,9 +1400,9 @@ async fn build_app_with_storage_inner(
     }
     lifecycle = lifecycle.with_subscription_quota_cache(subscription_quota_cache.clone());
     #[cfg(feature = "capture")]
-    if let Some(sink) = capture_sink {
-        let handle = cc_lb_capture::hook::CaptureHandle::from_sink(sink);
-        lifecycle = lifecycle.with_capture_handle(handle);
+    {
+        lifecycle =
+            crate::capture_bootstrap::attach_capture_handle(lifecycle, capture_runtime.as_ref());
     }
     let lifecycle = Arc::new(lifecycle);
     let dynamic_view = lifecycle.dynamic_view();
@@ -1662,22 +1628,7 @@ async fn build_app_with_storage_inner(
         });
     }
     #[cfg(feature = "capture")]
-    {
-        let subscriber_slot = capture_subscriber_slot.clone();
-        let writer_slot = capture_writer_slot.clone();
-        signals.add_shutdown_hook(move || {
-            let subscriber_slot = subscriber_slot.clone();
-            let writer_slot = writer_slot.clone();
-            async move {
-                if let Some(handle) = subscriber_slot.lock().await.take() {
-                    handle.shutdown().await;
-                }
-                if let Some(handle) = writer_slot.lock().await.take() {
-                    handle.shutdown().await;
-                }
-            }
-        });
-    }
+    crate::capture_bootstrap::add_shutdown_hook(&signals, capture_runtime);
     let scheduler_cancel = CancellationToken::new();
     let scheduler_ctx = crate::scheduler_dispatch::build_scheduler_ctx(
         crate::scheduler_dispatch::SchedulerDispatchDeps {

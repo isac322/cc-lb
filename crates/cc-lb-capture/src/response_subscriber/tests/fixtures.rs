@@ -1,10 +1,5 @@
 use std::error::Error;
 
-use cc_lb_capture::{
-    schema::{CaptureRecord, CapturedRequestInput},
-    sink::CaptureSink,
-    store::open_capture_store,
-};
 use cc_lb_domain::{CachePricingSummary, RoutingTrace};
 use cc_lb_lifecycle::{
     LifecycleEvent, RouteFailure, RouteInfo, TerminationReason, UsageSnapshot, UsageSource,
@@ -13,6 +8,11 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::super::spawn_lifecycle_capture_response_subscriber;
+use crate::{
+    schema::{CaptureRecord, CapturedRequestInput},
+    sink::CaptureSink,
+    store::open_capture_store,
+};
 
 pub(super) type TestResult<T> = Result<T, Box<dyn Error>>;
 

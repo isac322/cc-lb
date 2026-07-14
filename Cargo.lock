@@ -787,6 +787,8 @@ name = "cc-lb-capture"
 version = "0.1.0"
 dependencies = [
  "cc-lb-domain",
+ "cc-lb-lifecycle",
+ "cc-lb-request-log",
  "metrics",
  "metrics-exporter-prometheus",
  "serde",

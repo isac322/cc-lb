@@ -133,29 +133,28 @@ async fn returns_immediately_and_counts_drop_when_channel_is_full()
 }
 
 #[test]
-fn queue_overflow_increments_prometheus_counter() {
+fn queue_overflow_increments_prometheus_counter() -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let recorder = PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
-        .build()
-        .expect("runtime builds");
+        .build()?;
 
     // When
-    metrics::with_local_recorder(&recorder, || {
+    metrics::with_local_recorder(&recorder, || -> Result<(), Box<dyn std::error::Error>> {
         runtime.block_on(async {
-            let directory = tempfile::tempdir().expect("creates tempdir");
-            let store = open_capture_store(&directory.path().join("capture.sqlite"))
-                .await
-                .expect("opens capture store");
+            let directory = tempfile::tempdir()?;
+            let store = open_capture_store(&directory.path().join("capture.sqlite")).await?;
             let (sink, writer) = CaptureSink::new(store, 1);
-            sink.try_seed(
-                "event-metric-1".to_owned(),
-                "request-metric-1".to_owned(),
-                1,
-            )
-            .expect("first message fills queue");
+            assert_eq!(
+                sink.try_seed(
+                    "event-metric-1".to_owned(),
+                    "request-metric-1".to_owned(),
+                    1,
+                ),
+                Ok(())
+            );
             assert_eq!(
                 sink.try_seed(
                     "event-metric-2".to_owned(),
@@ -165,8 +164,9 @@ fn queue_overflow_increments_prometheus_counter() {
                 Err(CaptureEnqueueError::Full)
             );
             writer.shutdown().await;
-        });
-    });
+            Ok(())
+        })
+    })?;
 
     // Then
     let rendered = handle.render();
@@ -174,4 +174,5 @@ fn queue_overflow_increments_prometheus_counter() {
         rendered.contains("cc_lb_capture_dropped_total 1"),
         "rendered metrics:\n{rendered}"
     );
+    Ok(())
 }

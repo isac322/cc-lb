@@ -35,8 +35,7 @@ struct TestCaptureFixture {
     lifecycle: Lifecycle,
     store: cc_lb_capture::store::CaptureStore,
     writer: cc_lb_capture::sink::CaptureWriterHandle,
-    subscriber:
-        cc_lb_engine::lifecycle_capture_response_subscriber::CaptureResponseSubscriberHandle,
+    subscriber: cc_lb_capture::response_subscriber::CaptureResponseSubscriberHandle,
     _tempdir: tempfile::TempDir,
 }
 
@@ -197,7 +196,11 @@ async fn lifecycle_with_capture(filters: Vec<Arc<dyn FilterPlugin>>) -> TestCapt
     let (sink, writer) = cc_lb_capture::sink::CaptureSink::new(store.clone(), 128);
 
     let rx = event_bus.bus.attach_lifecycle_writer(128);
-    let subscriber = cc_lb_engine::lifecycle_capture_response_subscriber::spawn_lifecycle_capture_response_subscriber(rx, sink.clone());
+    let subscriber =
+        cc_lb_capture::response_subscriber::spawn_lifecycle_capture_response_subscriber(
+            rx,
+            sink.clone(),
+        );
 
     let lifecycle = Lifecycle::new_with_dynamic_view(
         authn.authn,
