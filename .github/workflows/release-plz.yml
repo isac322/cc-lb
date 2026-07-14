@@ -75,6 +75,8 @@ jobs:
     name: release-plz release
     needs: preflight
     runs-on: ubuntu-latest
+    outputs:
+      cc_lb_server_version: ${{ steps.cc-lb-server-release.outputs.version }}
     permissions:
       contents: write
       pull-requests: write
@@ -92,6 +94,7 @@ jobs:
         uses: rust-lang/crates-io-auth-action@v1
 
       - name: Run release-plz release
+        id: release-plz
         uses: MarcoIeni/release-plz-action@v0.5
         with:
           command: release
@@ -106,6 +109,38 @@ jobs:
           # is both impossible and unnecessary. The build.rs exposes this
           # exact escape hatch (see crates/cc-lb-runtime-wasmtime/build.rs).
           CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
+
+      - name: Extract cc-lb-server release
+        id: cc-lb-server-release
+        env:
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          VERSION=$(printf '%s' "${RELEASES:-[]}" | jq -r 'map(select(.package_name == "cc-lb-server"))[0].version // ""')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  publish-docker:
+    name: publish docker image
+    needs: release
+    if: needs.release.outputs.cc_lb_server_version != ''
+    uses: ./.github/workflows/cd.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      version: ${{ needs.release.outputs.cc_lb_server_version }}
+    secrets: inherit
+
+  publish-chart:
+    name: publish helm chart
+    needs: release
+    if: needs.release.outputs.cc_lb_server_version != ''
+    uses: ./.github/workflows/publish-chart.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      version: ${{ needs.release.outputs.cc_lb_server_version }}
+    secrets: inherit
 
   release-pr:
     name: release-plz release-pr
