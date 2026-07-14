@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Instant,
+};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
@@ -314,21 +317,34 @@ async fn list_slim_checkpoints_for_query(
                       checkpoint.changed_at_unix_millis, checkpoint.sample_id, \
                       checkpoint.utilization, checkpoint.status, checkpoint.resets_at_unix_secs";
     let sql = format!(
-        "SELECT {projection} FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
-         WHERE checkpoint.upstream_id IN ({upstream_placeholders}) \
-         AND checkpoint.window IN ({window_placeholders}) \
-         AND checkpoint.source IN ({source_placeholders}) \
-         AND checkpoint.changed_at_unix_millis < ? \
-         AND NOT EXISTS ( \
-             SELECT 1 FROM upstream_subscription_quota_checkpoints_v1 newer \
-             WHERE newer.upstream_id = checkpoint.upstream_id \
-             AND newer.window = checkpoint.window \
-             AND newer.source = checkpoint.source \
-             AND newer.changed_at_unix_millis < ? \
-             AND (newer.changed_at_unix_millis > checkpoint.changed_at_unix_millis \
-                  OR (newer.changed_at_unix_millis = checkpoint.changed_at_unix_millis \
-                      AND newer.sample_id > checkpoint.sample_id)) \
+        "WITH anchor_ts AS ( \
+             SELECT upstream_id, window, source, MAX(changed_at_unix_millis) AS changed_at_unix_millis \
+             FROM upstream_subscription_quota_checkpoints_v1 \
+             WHERE upstream_id IN ({upstream_placeholders}) \
+             AND window IN ({window_placeholders}) \
+             AND source IN ({source_placeholders}) \
+             AND changed_at_unix_millis < ? \
+             GROUP BY upstream_id, window, source \
+         ), \
+         anchor_ids AS ( \
+             SELECT checkpoint.upstream_id, checkpoint.window, checkpoint.source, \
+                    checkpoint.changed_at_unix_millis, MAX(checkpoint.sample_id) AS sample_id \
+             FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
+             INNER JOIN anchor_ts anchor \
+               ON anchor.upstream_id = checkpoint.upstream_id \
+              AND anchor.window = checkpoint.window \
+              AND anchor.source = checkpoint.source \
+              AND anchor.changed_at_unix_millis = checkpoint.changed_at_unix_millis \
+             GROUP BY checkpoint.upstream_id, checkpoint.window, checkpoint.source, \
+                      checkpoint.changed_at_unix_millis \
          ) \
+         SELECT {projection} FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
+         INNER JOIN anchor_ids anchor \
+           ON anchor.upstream_id = checkpoint.upstream_id \
+          AND anchor.window = checkpoint.window \
+          AND anchor.source = checkpoint.source \
+          AND anchor.changed_at_unix_millis = checkpoint.changed_at_unix_millis \
+          AND anchor.sample_id = checkpoint.sample_id \
          UNION ALL \
          SELECT {projection} FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
          WHERE checkpoint.upstream_id IN ({upstream_placeholders}) \
@@ -348,15 +364,17 @@ async fn list_slim_checkpoints_for_query(
         "subscription quota checkpoint until_unix_millis",
     )?;
     let mut q = sqlx::query(AssertSqlSafe(sql));
-    q = bind_checkpoint_filters(q, query, &windows, &sources)
-        .bind(since)
-        .bind(since);
+    q = bind_checkpoint_filters(q, query, &windows, &sources).bind(since);
     q = bind_checkpoint_filters(q, query, &windows, &sources)
         .bind(since)
         .bind(until);
 
+    let start = Instant::now();
     let mut tx = storage.pool().begin().await.map_err(map_sqlx_error)?;
-    let rows = q.fetch_all(&mut *tx).await.map_err(map_sqlx_error)?;
+    let rows_result = q.fetch_all(&mut *tx).await.map_err(map_sqlx_error);
+    record_storage_operation("quota_slim_checkpoint_range", start, &rows_result);
+    storage.record_pool_metrics();
+    let rows = rows_result?;
     tx.commit().await.map_err(map_sqlx_error)?;
     rows.into_iter().map(row_to_slim_checkpoint).collect()
 }
@@ -371,35 +389,47 @@ async fn list_checkpoint_anchors(
     let window_placeholders = placeholders(windows.len());
     let source_placeholders = placeholders(sources.len());
     let sql = format!(
-        "SELECT checkpoint.* FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
-         WHERE checkpoint.upstream_id IN ({upstream_placeholders}) \
-         AND checkpoint.window IN ({window_placeholders}) \
-         AND checkpoint.source IN ({source_placeholders}) \
-         AND checkpoint.changed_at_unix_millis < ? \
-         AND NOT EXISTS ( \
-             SELECT 1 FROM upstream_subscription_quota_checkpoints_v1 newer \
-             WHERE newer.upstream_id = checkpoint.upstream_id \
-             AND newer.window = checkpoint.window \
-             AND newer.source = checkpoint.source \
-             AND newer.changed_at_unix_millis < ? \
-             AND (newer.changed_at_unix_millis > checkpoint.changed_at_unix_millis \
-                  OR (newer.changed_at_unix_millis = checkpoint.changed_at_unix_millis \
-                      AND newer.sample_id > checkpoint.sample_id)) \
+        "WITH anchor_ts AS ( \
+             SELECT upstream_id, window, source, MAX(changed_at_unix_millis) AS changed_at_unix_millis \
+             FROM upstream_subscription_quota_checkpoints_v1 \
+             WHERE upstream_id IN ({upstream_placeholders}) \
+             AND window IN ({window_placeholders}) \
+             AND source IN ({source_placeholders}) \
+             AND changed_at_unix_millis < ? \
+             GROUP BY upstream_id, window, source \
+         ), \
+         anchor_ids AS ( \
+             SELECT checkpoint.upstream_id, checkpoint.window, checkpoint.source, \
+                    checkpoint.changed_at_unix_millis, MAX(checkpoint.sample_id) AS sample_id \
+             FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
+             INNER JOIN anchor_ts anchor \
+               ON anchor.upstream_id = checkpoint.upstream_id \
+              AND anchor.window = checkpoint.window \
+              AND anchor.source = checkpoint.source \
+              AND anchor.changed_at_unix_millis = checkpoint.changed_at_unix_millis \
+             GROUP BY checkpoint.upstream_id, checkpoint.window, checkpoint.source, \
+                      checkpoint.changed_at_unix_millis \
          ) \
+         SELECT checkpoint.* FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
+         INNER JOIN anchor_ids anchor \
+           ON anchor.upstream_id = checkpoint.upstream_id \
+          AND anchor.window = checkpoint.window \
+          AND anchor.source = checkpoint.source \
+          AND anchor.changed_at_unix_millis = checkpoint.changed_at_unix_millis \
+          AND anchor.sample_id = checkpoint.sample_id \
          ORDER BY checkpoint.upstream_id ASC, checkpoint.window ASC, checkpoint.source ASC"
     );
     let mut q = sqlx::query(AssertSqlSafe(sql));
     q = bind_checkpoint_filters(q, query, windows, sources);
-    q = q
-        .bind(u64_to_i64(
-            query.since_unix_millis,
-            "subscription quota checkpoint since_unix_millis",
-        )?)
-        .bind(u64_to_i64(
-            query.since_unix_millis,
-            "subscription quota checkpoint since_unix_millis",
-        )?);
-    let rows = q.fetch_all(storage.pool()).await.map_err(map_sqlx_error)?;
+    q = q.bind(u64_to_i64(
+        query.since_unix_millis,
+        "subscription quota checkpoint since_unix_millis",
+    )?);
+    let start = Instant::now();
+    let rows_result = q.fetch_all(storage.pool()).await.map_err(map_sqlx_error);
+    record_storage_operation("quota_checkpoint_anchor", start, &rows_result);
+    storage.record_pool_metrics();
+    let rows = rows_result?;
     rows.into_iter().map(row_to_checkpoint_record).collect()
 }
 
@@ -433,8 +463,31 @@ async fn list_checkpoints_inside_range(
             query.until_unix_millis,
             "subscription quota checkpoint until_unix_millis",
         )?);
-    let rows = q.fetch_all(storage.pool()).await.map_err(map_sqlx_error)?;
+    let start = Instant::now();
+    let rows_result = q.fetch_all(storage.pool()).await.map_err(map_sqlx_error);
+    record_storage_operation("quota_checkpoint_range", start, &rows_result);
+    storage.record_pool_metrics();
+    let rows = rows_result?;
     rows.into_iter().map(row_to_checkpoint_record).collect()
+}
+
+fn record_storage_operation<T>(operation: &'static str, start: Instant, result: &StorageResult<T>) {
+    let status = if result.is_ok() { "ok" } else { "error" };
+    metrics::histogram!(
+        "cc_lb_storage_operation_duration_seconds",
+        "store" => "sqlite",
+        "operation" => operation,
+        "status" => status
+    )
+    .record(start.elapsed().as_secs_f64());
+    if result.is_err() {
+        metrics::counter!(
+            "cc_lb_storage_operation_errors_total",
+            "store" => "sqlite",
+            "operation" => operation
+        )
+        .increment(1);
+    }
 }
 
 fn placeholders(count: usize) -> String {

@@ -13,7 +13,7 @@ use super::request_events::{u64_to_i64, u64_to_i64_upper, usize_to_i64};
 const LIST_REQUEST_EVENTS_SQL: &str = "\
 SELECT \
     ts, \
-    json_extract(payload, '$.ts_ms') AS ts_ms, \
+    list_ts_ms AS ts_ms, \
     request_id, \
     event_id, \
     principal_id, \
@@ -25,56 +25,56 @@ SELECT \
     thinking_budget_tokens, \
     thinking_tokens, \
     service_tier, \
-    json_extract(payload, '$.upstream') AS upstream, \
-    CAST(json_extract(payload, '$.status') AS INTEGER) AS status, \
-    CAST(json_extract(payload, '$.duration_ms') AS INTEGER) AS duration_ms, \
+    list_upstream AS upstream, \
+    list_status AS status, \
+    list_duration_ms AS duration_ms, \
     error_code, \
     upstream_error_type, \
     upstream_error_message, \
-    CAST(json_extract(payload, '$.auth_ms') AS INTEGER) AS auth_ms, \
-    CAST(json_extract(payload, '$.route_ms') AS INTEGER) AS route_ms, \
-    CAST(json_extract(payload, '$.limit_reserve_ms') AS INTEGER) AS limit_reserve_ms, \
-    CAST(json_extract(payload, '$.bulkhead_wait_ms') AS INTEGER) AS bulkhead_wait_ms, \
-    CAST(json_extract(payload, '$.dns_ms') AS INTEGER) AS dns_ms, \
-    CAST(json_extract(payload, '$.connect_ms') AS INTEGER) AS connect_ms, \
-    json_extract(payload, '$.connection_reused') AS connection_reused, \
-    CAST(json_extract(payload, '$.limit_reconcile_ms') AS INTEGER) AS limit_reconcile_ms, \
-    CAST(json_extract(payload, '$.observability_post_ms') AS INTEGER) AS observability_post_ms, \
-    CAST(json_extract(payload, '$.proxy_setup_ms') AS INTEGER) AS proxy_setup_ms, \
-    CAST(json_extract(payload, '$.shape_ms') AS INTEGER) AS shape_ms, \
-    CAST(json_extract(payload, '$.sign_ms') AS INTEGER) AS sign_ms, \
-    CAST(json_extract(payload, '$.upstream_ttfb_ms') AS INTEGER) AS upstream_ttfb_ms, \
-    CAST(json_extract(payload, '$.upstream_body_ms') AS INTEGER) AS upstream_body_ms, \
-    CAST(json_extract(payload, '$.stream_first_content_delta_ms') AS INTEGER) AS stream_first_content_delta_ms, \
-    CAST(json_extract(payload, '$.stream_last_content_delta_ms') AS INTEGER) AS stream_last_content_delta_ms, \
-    CAST(json_extract(payload, '$.inter_token_avg_ms') AS INTEGER) AS inter_token_avg_ms, \
+    list_auth_ms AS auth_ms, \
+    list_route_ms AS route_ms, \
+    list_limit_reserve_ms AS limit_reserve_ms, \
+    list_bulkhead_wait_ms AS bulkhead_wait_ms, \
+    list_dns_ms AS dns_ms, \
+    list_connect_ms AS connect_ms, \
+    list_connection_reused AS connection_reused, \
+    list_limit_reconcile_ms AS limit_reconcile_ms, \
+    list_observability_post_ms AS observability_post_ms, \
+    list_proxy_setup_ms AS proxy_setup_ms, \
+    list_shape_ms AS shape_ms, \
+    list_sign_ms AS sign_ms, \
+    list_upstream_ttfb_ms AS upstream_ttfb_ms, \
+    list_upstream_body_ms AS upstream_body_ms, \
+    list_stream_first_content_delta_ms AS stream_first_content_delta_ms, \
+    list_stream_last_content_delta_ms AS stream_last_content_delta_ms, \
+    list_inter_token_avg_ms AS inter_token_avg_ms, \
     input_tokens, \
     output_tokens, \
     cache_creation_input_tokens, \
     cache_creation_input_tokens_5m, \
     cache_creation_input_tokens_1h, \
     cache_read_input_tokens, \
-    CAST(json_extract(payload, '$.cost_usd_micros') AS INTEGER) AS cost_usd_micros, \
-    CAST(json_extract(payload, '$.cost_input_micros') AS INTEGER) AS cost_input_micros, \
-    CAST(json_extract(payload, '$.cost_output_micros') AS INTEGER) AS cost_output_micros, \
-    CAST(json_extract(payload, '$.cost_cache_creation_5m_micros') AS INTEGER) AS cost_cache_creation_5m_micros, \
-    CAST(json_extract(payload, '$.cost_cache_creation_1h_micros') AS INTEGER) AS cost_cache_creation_1h_micros, \
-    CAST(json_extract(payload, '$.cost_cache_read_micros') AS INTEGER) AS cost_cache_read_micros \
+    list_cost_usd_micros AS cost_usd_micros, \
+    list_cost_input_micros AS cost_input_micros, \
+    list_cost_output_micros AS cost_output_micros, \
+    list_cost_cache_creation_5m_micros AS cost_cache_creation_5m_micros, \
+    list_cost_cache_creation_1h_micros AS cost_cache_creation_1h_micros, \
+    list_cost_cache_read_micros AS cost_cache_read_micros \
 FROM request_events_v1 \
 WHERE ts >= ?1 AND ts <= ?2 \
   AND (?3 IS NULL OR principal_id = ?3) \
   AND (?4 IS NULL OR model = ?4) \
   AND (?5 IS NULL OR upstream_id = ?5) \
-  AND (?6 IS NULL OR json_extract(payload, '$.upstream') = ?6) \
-  AND (?7 IS NULL OR CAST(json_extract(payload, '$.status') AS INTEGER) BETWEEN ?7 AND ?8) \
+  AND (?6 IS NULL OR list_upstream = ?6) \
+  AND (?7 IS NULL OR list_status BETWEEN ?7 AND ?8) \
   AND ( \
         ?9 IS NULL \
-     OR COALESCE(json_extract(payload, '$.ts_ms'), ts * 1000) < ?9 \
-     OR (COALESCE(json_extract(payload, '$.ts_ms'), ts * 1000) = ?9 \
-         AND ?10 IS NOT NULL AND COALESCE(event_id, request_id) < ?10) \
+     OR list_ts_ms < ?9 \
+     OR (list_ts_ms = ?9 \
+         AND ?10 IS NOT NULL AND list_event_key < ?10) \
   ) \
-ORDER BY COALESCE(json_extract(payload, '$.ts_ms'), ts * 1000) DESC, \
-         COALESCE(event_id, request_id) DESC, \
+ORDER BY list_ts_ms DESC, \
+         list_event_key DESC, \
          id DESC \
 LIMIT ?11";
 
