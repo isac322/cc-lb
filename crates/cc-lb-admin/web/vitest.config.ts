@@ -23,7 +23,8 @@ export default defineConfig({
             'src/lib/hooks/__tests__/**/*.test.ts',
             'src/components/__tests__/**/*.test.tsx',
             'src/components/**/*.test.tsx',
-            'src/routes/**/*.test.tsx',
+            // Route-adjacent tests use the TanStack `-` prefix (e.g. `-plugins.test.tsx`).
+            'src/routes/**/-*.test.tsx',
           ],
         },
       },
