@@ -23,6 +23,7 @@ export default defineConfig({
             'src/lib/hooks/__tests__/**/*.test.ts',
             'src/components/__tests__/**/*.test.tsx',
             'src/components/**/*.test.tsx',
+            'src/routes/**/*.test.tsx',
           ],
         },
       },

@@ -16,9 +16,12 @@ import {
   Skeleton,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
+import { ApiError } from '../lib/api';
 import {
+  type ChainSlot,
   useDeletePlugin,
   useGcPlugins,
+  usePluginReferences,
   usePluginRegistry,
   usePluginStatus,
   usePrincipals,
@@ -45,6 +48,32 @@ const TABS: { id: PluginsTab; label: string }[] = [
   { id: 'chains', label: 'Chains by Principal' },
   { id: 'status', label: 'Runtime status' },
 ];
+
+interface ReplacementConfirmationBody {
+  error: 'replacement_confirmation_required';
+  name: string;
+  replace_registry_id: string;
+  expected_revision: number;
+  current_version?: string | null;
+  incoming_version?: string | null;
+  current_sha256_hex: string;
+  incoming_sha256_hex: string;
+}
+
+function isReplacementConfirmationBody(
+  body: unknown,
+): body is ReplacementConfirmationBody {
+  if (!body || typeof body !== 'object') return false;
+  const record = body as Record<string, unknown>;
+  return (
+    record.error === 'replacement_confirmation_required' &&
+    typeof record.name === 'string' &&
+    typeof record.replace_registry_id === 'string' &&
+    typeof record.expected_revision === 'number' &&
+    typeof record.current_sha256_hex === 'string' &&
+    typeof record.incoming_sha256_hex === 'string'
+  );
+}
 
 function PluginsPage() {
   const [tab, setTab] = useState<PluginsTab>('registry');
@@ -206,10 +235,97 @@ function Stat({
   );
 }
 
+function DeleteConfirmDialog({
+  pendingDelete,
+  onClose,
+}: {
+  pendingDelete: {
+    id: string;
+    revision: number;
+    name: string;
+    refcount: number;
+  } | null;
+  onClose: () => void;
+}) {
+  const del = useDeletePlugin();
+  const refs = usePluginReferences(
+    pendingDelete?.refcount ? pendingDelete.id : null,
+  );
+
+  return (
+    <ConfirmDialog
+      open={pendingDelete !== null}
+      onOpenChange={(o) => {
+        if (!o) onClose();
+      }}
+      title={
+        pendingDelete?.refcount
+          ? 'Cascade Delete Plugin?'
+          : 'Delete Wasm plugin?'
+      }
+      description={
+        pendingDelete ? (
+          <span className="space-y-2 block">
+            <span>
+              <span className="font-mono">{pendingDelete.name}</span> will be
+              removed from the registry. This cannot be undone.
+            </span>
+            {pendingDelete.refcount > 0 && (
+              <span className="text-xs bg-overlay-1 p-2 rounded-sm border border-subtle block mt-2">
+                <span className="font-medium text-red-400 mb-1 block">
+                  Warning: This plugin is currently referenced{' '}
+                  {pendingDelete.refcount} time(s).
+                </span>
+                {refs.isLoading ? (
+                  <Skeleton className="h-4 w-32" />
+                ) : refs.data ? (
+                  <ul className="list-disc pl-4 space-y-1">
+                    {refs.data.references.map((r, i) => (
+                      <li key={i}>
+                        {r.kind === 'plugin_chain'
+                          ? `Chain entry for ${r.principal_name ?? r.principal_id} (slot: ${r.slot})`
+                          : `Warmup dialect for ${r.upstream_name ?? r.upstream_id}`}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                <span className="mt-2 block">
+                  Deleting will cascade and remove these references.
+                </span>
+              </span>
+            )}
+          </span>
+        ) : null
+      }
+      confirmLabel={pendingDelete?.refcount ? 'Cascade Delete' : 'Delete'}
+      destructive
+      onConfirm={() => {
+        if (!pendingDelete) return;
+        if (pendingDelete.refcount > 0 && !refs.data?.reference_fingerprint) {
+          toast.error('Reference preview is still loading');
+          return;
+        }
+        del.mutate(
+          {
+            id: pendingDelete.id,
+            revision: pendingDelete.revision,
+            cascade: pendingDelete.refcount > 0,
+            referenceFingerprint: refs.data?.reference_fingerprint,
+          },
+          {
+            onSuccess: () => toast.success('Plugin deleted'),
+            onError: (e) => toast.error(String(e)),
+          },
+        );
+        onClose();
+      }}
+    />
+  );
+}
+
 function RegistryTab() {
   const reg = usePluginRegistry();
   const upload = useUploadWasm();
-  const del = useDeletePlugin();
   const gc = useGcPlugins();
   const { copy } = useCopyButton();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -217,17 +333,53 @@ function RegistryTab() {
     id: string;
     revision: number;
     name: string;
+    refcount: number;
+  } | null>(null);
+  const [uploadSlot, setUploadSlot] = useState<ChainSlot>('router');
+  const [pendingReplacement, setPendingReplacement] = useState<{
+    file: File;
+    slotKind: ChainSlot;
+    name: string;
+    replaceRegistryId: string;
+    expectedRevision: number;
+    currentVersion?: string;
+    incomingVersion?: string;
+    currentSha256Hex: string;
+    incomingSha256Hex: string;
   } | null>(null);
 
   const handleFile = (file: File | null | undefined) => {
     if (!file || upload.isPending) return;
-    upload.mutate(file, {
-      onSuccess: (data) => {
-        const suffix = data.idempotent ? ' (already in registry)' : '';
-        toast.success(`Uploaded ${data.original_filename}${suffix}`);
+    upload.mutate(
+      { file, slotKind: uploadSlot },
+      {
+        onSuccess: (data) => {
+          const suffix = data.idempotent ? ' (already in registry)' : '';
+          toast.success(`Uploaded ${data.original_filename}${suffix}`);
+        },
+        onError: (error) => {
+          if (
+            error instanceof ApiError &&
+            error.code === 'replacement_confirmation_required' &&
+            isReplacementConfirmationBody(error.body)
+          ) {
+            setPendingReplacement({
+              file,
+              slotKind: uploadSlot,
+              name: error.body.name,
+              replaceRegistryId: error.body.replace_registry_id,
+              expectedRevision: error.body.expected_revision,
+              currentVersion: error.body.current_version ?? undefined,
+              incomingVersion: error.body.incoming_version ?? undefined,
+              currentSha256Hex: error.body.current_sha256_hex,
+              incomingSha256Hex: error.body.incoming_sha256_hex,
+            });
+          } else {
+            toast.error(error instanceof Error ? error.message : String(error));
+          }
+        },
       },
-      onError: (e) => toast.error(e instanceof Error ? e.message : String(e)),
-    });
+    );
   };
 
   const uploading = upload.isPending;
@@ -239,17 +391,31 @@ function RegistryTab() {
           title="Upload Wasm Plugin"
           subtitle="Drag & drop or click. Max 32 MiB. SHA-256 deduped."
           action={
-            <Button
-              size="sm"
-              onClick={() =>
-                gc.mutate(undefined, {
-                  onSuccess: (r) =>
-                    toast.success(`GC removed ${r.count} orphans`),
-                })
-              }
-            >
-              GC orphans
-            </Button>
+            <div className="flex items-center gap-2">
+              <select
+                value={uploadSlot}
+                onChange={(e) => setUploadSlot(e.target.value as ChainSlot)}
+                className="text-sm border border-subtle rounded-sm px-2 py-1 bg-bg-sub"
+                aria-label="Upload slot kind"
+              >
+                {SLOTS.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+              <Button
+                size="sm"
+                onClick={() =>
+                  gc.mutate(undefined, {
+                    onSuccess: (r) =>
+                      toast.success(`GC removed ${r.count} orphans`),
+                  })
+                }
+              >
+                GC orphans
+              </Button>
+            </div>
           }
         />
         <div
@@ -338,6 +504,11 @@ function RegistryTab() {
                       >
                         {p.name}
                       </div>
+                      {p.version ? (
+                        <div className="text-[11px] text-text-faint truncate">
+                          v{p.version}
+                        </div>
+                      ) : null}
                       {p.label ? (
                         <div
                           className="text-[11px] text-text-faint truncate"
@@ -394,29 +565,19 @@ function RegistryTab() {
                     <td className="px-4 py-2 text-right">
                       <button
                         type="button"
-                        aria-label={
-                          p.refcount > 0
-                            ? 'Cannot delete — plugin is referenced'
-                            : 'Delete plugin'
-                        }
+                        aria-label="Delete plugin"
                         title={
                           p.refcount > 0
-                            ? `In use by ${p.refcount} chain entr${p.refcount === 1 ? 'y' : 'ies'}`
+                            ? `In use by ${p.refcount} reference(s)`
                             : 'Delete plugin'
                         }
-                        disabled={p.refcount > 0}
-                        className={cx(
-                          'transition-colors',
-                          p.refcount > 0
-                            ? 'text-text-faint/40 cursor-not-allowed'
-                            : 'text-text-faint hover:text-red-400',
-                        )}
+                        className="transition-colors text-text-faint hover:text-red-400"
                         onClick={() => {
-                          if (p.refcount > 0) return;
                           setPendingDelete({
                             id: p.id,
                             revision: p.revision,
                             name: p.name,
+                            refcount: p.refcount,
                           });
                         }}
                       >
@@ -440,32 +601,67 @@ function RegistryTab() {
         </div>
       </Card>
 
+      <DeleteConfirmDialog
+        pendingDelete={pendingDelete}
+        onClose={() => setPendingDelete(null)}
+      />
+
       <ConfirmDialog
-        open={pendingDelete !== null}
+        open={pendingReplacement !== null}
         onOpenChange={(o) => {
-          if (!o) setPendingDelete(null);
+          if (!o) setPendingReplacement(null);
         }}
-        title="Delete Wasm plugin?"
+        title="Confirm Plugin Replacement"
         description={
-          pendingDelete ? (
-            <>
-              <span className="font-mono">{pendingDelete.name}</span> will be
-              removed from the registry. This cannot be undone.
-            </>
+          pendingReplacement ? (
+            <span className="space-y-2 block">
+              <span className="block">
+                A plugin named{' '}
+                <span className="font-mono">{pendingReplacement.name}</span>{' '}
+                already exists.
+              </span>
+              <span className="text-xs bg-overlay-1 p-2 rounded-sm border border-subtle block">
+                <span className="block">
+                  <strong>Current:</strong>{' '}
+                  {pendingReplacement.currentVersion || 'none'} (
+                  <code className="text-[10px]">
+                    {pendingReplacement.currentSha256Hex.slice(0, 12)}
+                  </code>
+                  )
+                </span>
+                <span className="block">
+                  <strong>Incoming:</strong>{' '}
+                  {pendingReplacement.incomingVersion || 'none'} (
+                  <code className="text-[10px]">
+                    {pendingReplacement.incomingSha256Hex.slice(0, 12)}
+                  </code>
+                  )
+                </span>
+              </span>
+              <span className="block">Do you want to replace it?</span>
+            </span>
           ) : null
         }
-        confirmLabel="Delete"
-        destructive
+        confirmLabel="Replace"
         onConfirm={() => {
-          if (!pendingDelete) return;
-          del.mutate(
-            { id: pendingDelete.id, revision: pendingDelete.revision },
+          if (!pendingReplacement) return;
+          upload.mutate(
             {
-              onSuccess: () => toast.success('Plugin deleted'),
-              onError: (e) => toast.error(String(e)),
+              file: pendingReplacement.file,
+              slotKind: pendingReplacement.slotKind,
+              confirmReplacement: true,
+              replaceRegistryId: pendingReplacement.replaceRegistryId,
+              expectedRevision: pendingReplacement.expectedRevision,
+            },
+            {
+              onSuccess: (data) => {
+                toast.success(`Replaced ${data.original_filename}`);
+              },
+              onError: (e) =>
+                toast.error(e instanceof Error ? e.message : String(e)),
             },
           );
-          setPendingDelete(null);
+          setPendingReplacement(null);
         }}
       />
     </div>
