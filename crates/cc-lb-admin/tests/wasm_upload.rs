@@ -410,6 +410,27 @@ async fn accepts_when_embedded_name_matches_multipart() {
 }
 
 #[tokio::test]
+async fn accepts_when_multipart_name_absent() {
+    let server = spawn_admin_server().await;
+    let wasm = filter_wasm_with_embedded_name("subscription-launderer");
+    let body = multipart_body(&[
+        (
+            "original_filename",
+            b"cc_lb_plugin_subscription_launderer.wasm",
+        ),
+        ("slot_kind", b"filter"),
+        ("bytes", &wasm),
+    ]);
+    let (status, value) = upload(&server, body).await;
+    assert_eq!(status, StatusCode::CREATED, "body={value}");
+    assert_eq!(value["action"], "created");
+    assert_eq!(
+        value["original_filename"],
+        "cc_lb_plugin_subscription_launderer.wasm"
+    );
+}
+
+#[tokio::test]
 async fn rejects_when_metadata_section_absent() {
     let server = spawn_admin_server().await;
     let wasm = wat_with_sections(
