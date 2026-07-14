@@ -489,6 +489,7 @@ fn reject_unknown_top_level_keys(value: &Value) -> Result<(), String> {
         "admin",
         "oauth",
         "runtime",
+        "capture",
         "circuit_breaker",
         "bulkhead",
         "dns",
