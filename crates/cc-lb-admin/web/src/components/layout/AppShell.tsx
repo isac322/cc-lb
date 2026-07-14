@@ -41,7 +41,8 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
     : health.isError
       ? 'down'
       : 'live';
-  const version = health.data?.version ?? null;
+  const version =
+    import.meta.env.VITE_CC_LB_VERSION || health.data?.version || null;
 
   return (
     <div className="min-h-screen flex bg-bg text-text">

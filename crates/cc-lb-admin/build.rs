@@ -45,6 +45,7 @@ fn main() {
     let status = Command::new(&bun)
         .arg("run")
         .arg("build")
+        .env("VITE_CC_LB_VERSION", env!("CARGO_PKG_VERSION"))
         .current_dir(&web_dir)
         .status()
         .unwrap_or_else(|error| panic!("failed to invoke bun for cc-lb-admin SPA build: {error}"));
@@ -55,6 +56,8 @@ fn main() {
 }
 
 fn emit_rerun_directives() {
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=../../Cargo.toml");
     println!("cargo:rerun-if-changed=web/src");
     println!("cargo:rerun-if-changed=web/public");
     println!("cargo:rerun-if-changed=web/package.json");
