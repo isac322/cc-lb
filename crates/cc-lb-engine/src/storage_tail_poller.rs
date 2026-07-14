@@ -82,11 +82,14 @@ where
         };
 
         metrics::gauge!("sse_storage_tail_backlog_rows").set(rows.len() as f64);
+        let last_delivered = rows.last().map(|(cursor, _)| *cursor);
         for (cursor, event) in rows {
             record_lag(&event);
             let _ = self.tx.send(StorageTailUpdate { cursor, event });
         }
-        self.last_seen.store(current, Ordering::SeqCst);
+        if let Some(cursor) = last_delivered {
+            self.last_seen.store(cursor, Ordering::SeqCst);
+        }
     }
 }
 

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventStreamFilters, RequestEventUpstream, StatusClass, Storage,
-    StorageError,
+    RequestEvent, RequestEventListItem, RequestEventListQuery, RequestEventStreamFilters,
+    RequestEventUpstream, StatusClass, Storage, StorageError,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -10,8 +10,6 @@ use uuid::Uuid;
 
 pub const DEFAULT_RECENT_EVENTS_LIMIT: usize = 100;
 pub const MAX_RECENT_EVENTS_LIMIT: usize = 500;
-pub const RECENT_EVENTS_PULL_INFLATION_FACTOR: usize = 10;
-pub const MAX_RECENT_EVENTS_PULL_LIMIT: usize = 5_000;
 
 /// Upper bound on how many events a single reconnect may replay from storage.
 ///
@@ -58,7 +56,7 @@ pub use cc_lb_request_log::StorageTailUpdate;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RecentEventsPayload {
-    pub events: Vec<RequestEvent>,
+    pub events: Vec<RequestEventListItem>,
     pub observed: bool,
     pub count: usize,
     pub limit: usize,
@@ -257,20 +255,8 @@ pub async fn build_recent_events_payload(
     storage: &dyn Storage,
     params: &RecentEventsParams,
 ) -> Result<RecentEventsPayload, EventsError> {
-    let pull_limit =
-        (params.limit * RECENT_EVENTS_PULL_INFLATION_FACTOR).min(MAX_RECENT_EVENTS_PULL_LIMIT);
-    let filters = params.stream_filters();
-    let mut events = storage
-        .query_recent_request_events(params.since_unix_secs, params.until_unix_secs, pull_limit)
-        .await?;
-    events.retain(|event| apply_filters_to_event(event, &filters));
-    events.retain(|event| {
-        before_recent_cursor(event, params.until_ts_ms, params.until_event_id.as_deref())
-    });
-    events.sort_by(compare_recent_events_desc);
-    events.truncate(params.limit);
+    let events = storage.list_request_events(&params.list_query()).await?;
     let count = events.len();
-
     let observed = !events.is_empty();
     Ok(RecentEventsPayload {
         events,
@@ -278,6 +264,13 @@ pub async fn build_recent_events_payload(
         count,
         limit: params.limit,
     })
+}
+
+pub async fn fetch_request_event_detail(
+    storage: &dyn Storage,
+    event_id: &str,
+) -> Result<Option<RequestEvent>, EventsError> {
+    Ok(storage.get_request_event(event_id).await?)
 }
 
 impl RecentEventsParams {
@@ -288,6 +281,17 @@ impl RecentEventsParams {
             upstream: self.upstream,
             upstream_id: self.upstream_id,
             status_class: self.status_class,
+        }
+    }
+
+    pub fn list_query(&self) -> RequestEventListQuery {
+        RequestEventListQuery {
+            since_unix_secs: self.since_unix_secs,
+            until_unix_secs: self.until_unix_secs,
+            until_ts_ms: self.until_ts_ms,
+            until_event_id: self.until_event_id.clone(),
+            limit: self.limit,
+            filters: self.stream_filters().storage_filters(),
         }
     }
 }
@@ -342,35 +346,4 @@ fn parse_status_class(value: &str) -> Result<StatusClass, EventsError> {
         "5xx" => Ok(StatusClass::FiveXx),
         _ => Err(EventsError::InvalidStatusClass),
     }
-}
-
-fn before_recent_cursor(
-    event: &RequestEvent,
-    until_ts_ms: Option<u64>,
-    until_event_id: Option<&str>,
-) -> bool {
-    let Some(until_ts_ms) = until_ts_ms else {
-        return true;
-    };
-    let event_ts_ms = event_ts_ms(event);
-    if event_ts_ms != until_ts_ms {
-        return event_ts_ms < until_ts_ms;
-    }
-    until_event_id.is_some_and(|cursor_id| event_identity(event) < cursor_id)
-}
-
-fn compare_recent_events_desc(left: &RequestEvent, right: &RequestEvent) -> std::cmp::Ordering {
-    event_ts_ms(right)
-        .cmp(&event_ts_ms(left))
-        .then_with(|| event_identity(right).cmp(event_identity(left)))
-}
-
-fn event_ts_ms(event: &RequestEvent) -> u64 {
-    event
-        .ts_ms
-        .unwrap_or_else(|| event.ts.saturating_mul(1_000))
-}
-
-fn event_identity(event: &RequestEvent) -> &str {
-    event.event_id.as_deref().unwrap_or(&event.request_id)
 }

@@ -112,6 +112,31 @@ pub trait RequestEventStore: Send + Sync {
             message: "query_request_events_between_cursors not implemented".to_owned(),
         })
     }
+
+    /// Returns a page of the request-event LIST view: cursor, limit, and
+    /// `query.filters` are all evaluated in SQL, and only the columns the
+    /// list view displays are selected and decoded (never the full
+    /// `payload`). See [`crate::RequestEventListQuery`] for the exact
+    /// ordering/cursor contract.
+    async fn list_request_events(
+        &self,
+        query: &RequestEventListQuery,
+    ) -> StorageResult<Vec<RequestEventListItem>> {
+        let _ = query;
+        Err(StorageError::Fatal {
+            message: "list_request_events is not implemented for this storage backend".to_owned(),
+        })
+    }
+
+    /// Fetches the single full [`RequestEvent`] for the DETAIL view, byte-identical
+    /// to what `append_request_event` persisted. Returns `Ok(None)` when no row
+    /// with this `event_id` exists.
+    async fn get_request_event(&self, event_id: &str) -> StorageResult<Option<RequestEvent>> {
+        let _ = event_id;
+        Err(StorageError::Fatal {
+            message: "get_request_event is not implemented for this storage backend".to_owned(),
+        })
+    }
 }
 
 #[async_trait]

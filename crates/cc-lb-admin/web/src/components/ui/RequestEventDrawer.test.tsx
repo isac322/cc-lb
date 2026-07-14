@@ -1,11 +1,36 @@
-import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import {
+  cleanup,
+  type RenderOptions,
+  render as rtlRender,
+  screen,
+} from '@testing-library/react';
+import type { ReactElement } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { RequestEventDrawer } from './RequestEventDrawer';
 
+function render(ui: ReactElement, options?: RenderOptions) {
+  const queryClient = new QueryClient();
+  return rtlRender(ui, {
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+    ...options,
+  });
+}
+
 describe('RequestEventDrawer', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new Error('network disabled in test'))),
+    );
+  });
+
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
   });
 
   it('updates terminal-only sections when transitioning from partial to final', () => {
