@@ -23,10 +23,10 @@ use cc_lb_storage_conformance::{
     scenarios::{
         anthropic_compatibility_kv_store, organization_metadata_store, plan_tier_store,
         plan_tier_store_backfill, plugin_registry_store, price_catalog, principal_store,
-        prompt_cache_observation_store, storage_roundtrips, storage_roundtrips_cache_split,
-        storage_roundtrips_latency_stages, upstream_rate_limit_store,
-        upstream_subscription_metadata_store, upstream_subscription_quota_store,
-        warmup_attempts_store,
+        prompt_cache_observation_store, request_event_list, storage_roundtrips,
+        storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
+        upstream_rate_limit_store, upstream_subscription_metadata_store,
+        upstream_subscription_quota_store, warmup_attempts_store,
     },
 };
 use cc_lb_storage_postgres::PostgresStorage;
@@ -179,6 +179,14 @@ fn request_event_latency_stage_round_trip_postgres() {
     run_postgres_scenario(
         "request_event_latency_stage_round_trip",
         storage_roundtrips_latency_stages::request_event_latency_stage_round_trip,
+    );
+}
+
+#[test]
+fn request_event_list_projects_rows_and_preserves_detail_postgres() {
+    run_postgres_scenario(
+        "request_event_list_projects_rows_and_preserves_detail",
+        request_event_list::request_event_list_projects_rows_and_preserves_detail,
     );
 }
 

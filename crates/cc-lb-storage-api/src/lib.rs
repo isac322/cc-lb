@@ -14,6 +14,7 @@ pub mod plugin_slot_kind;
 pub mod pool_quota_history;
 pub mod principal;
 pub mod prompt_cache_observation;
+pub mod request_event_list;
 pub mod runtime_change_notifier;
 pub mod sparse_order;
 mod storage_types_common;

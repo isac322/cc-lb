@@ -1,12 +1,37 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import {
+  cleanup,
+  type RenderOptions,
+  render as rtlRender,
+  screen,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it } from 'vitest';
+import type { ReactElement } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { RequestEventsTable } from './RequestEventsTable';
 
+function render(ui: ReactElement, options?: RenderOptions) {
+  const queryClient = new QueryClient();
+  return rtlRender(ui, {
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+    ...options,
+  });
+}
+
 describe('RequestEventsTable - Live & Outcomes', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new Error('network disabled in test'))),
+    );
+  });
+
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
   });
 
   const principalNameMap = new Map<string, string>();

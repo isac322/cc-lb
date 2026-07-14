@@ -38,6 +38,7 @@ import {
   postJson,
   putJson,
   type RecentEventsPayload,
+  type RequestEvent,
   type RequestEventUpdate,
   type SeriesResponse,
   type SubscriptionMetadataResponse,
@@ -384,6 +385,18 @@ export function useRecentEvents(filters: Record<string, string | undefined>) {
     },
     POLLING_INTERVALS.RECENT_EVENTS_MS,
   );
+}
+
+export function useRequestEventDetail(eventId: string | null) {
+  return useQuery({
+    queryKey: ['request-event-detail', eventId ?? ''],
+    queryFn: () =>
+      getJson<RequestEvent>(
+        `/admin/v1/events/detail/${encodeURIComponent(eventId ?? '')}`,
+      ),
+    enabled: !!eventId,
+    staleTime: Infinity,
+  });
 }
 
 const RECENT_EVENTS_PAGE_SIZE = 200;
