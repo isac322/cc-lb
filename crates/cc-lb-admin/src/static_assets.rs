@@ -73,3 +73,16 @@ fn if_none_match_matches(headers: &HeaderMap, etag: &str) -> bool {
                 .any(|token| token == "*" || token == etag)
         })
 }
+
+#[cfg(all(test, not(debug_assertions)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_asset_timestamps_are_deterministic() {
+        let index = Assets::get("index.html").expect("index.html is embedded");
+
+        assert_eq!(index.metadata.last_modified(), Some(0));
+        assert_eq!(index.metadata.created(), Some(0));
+    }
+}

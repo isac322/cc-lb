@@ -27,16 +27,18 @@ FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0 AS xx
 FROM --platform=$BUILDPLATFORM oven/bun:1.3.14-alpine AS bun
 
 # ---- Builder: cross toolchain, source, and the compile ----
-FROM --platform=$BUILDPLATFORM rust:1.96.0-alpine AS builder
+FROM --platform=$BUILDPLATFORM rust:1.97.0-alpine AS builder
 SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 
 # clang/lld: xx uses clang as the cross linker driver (overrides the repo's
 #            .cargo/config.toml rust-lld, which is expected and correct).
 # git:       cc-lb-server/build.rs reads `git rev-parse` (falls back gracefully).
 # libstdc++/libgcc: Bun's runtime dependencies on Alpine.
+# make:      tikv-jemalloc-sys builds its vendored jemalloc via autotools (runs
+#            `make` on BUILDPLATFORM); the rust:alpine image does not ship it.
 # sccache: Rust compiler cache; uses the S3/garage backend when creds are passed.
 # hadolint ignore=DL3018
-RUN apk add --no-cache clang lld git libstdc++ libgcc sccache
+RUN apk add --no-cache clang lld git libstdc++ libgcc make sccache
 
 # xx scripts (xx-cargo, xx-apk, xx-verify, ...).
 COPY --from=xx / /
