@@ -299,9 +299,22 @@ impl App {
         };
 
         let drain_complete = signals.subscribe_drain_complete();
-        let proxy_result = tokio::select! {
-            result = &mut proxy => server_join_result(result),
-            _ = signal::wait_for_shutdown(drain_complete) => {
+        let proxy_finished = tokio::select! {
+            result = &mut proxy => Some(result),
+            _ = signal::wait_for_shutdown(drain_complete.clone()) => None,
+        };
+        // `proxy` can resolve before `drain_complete`, which only fires after
+        // `shutdown_hooks.run_all()` finishes; wait for it unconditionally
+        // whenever a shutdown actually started, so hooks (e.g. the capture
+        // writer's flush + WAL checkpoint) finish before teardown proceeds.
+        // The `signals.subscribe()` guard avoids waiting forever on a proxy
+        // failure that is unrelated to any shutdown.
+        if *signals.subscribe().borrow() {
+            signal::wait_for_shutdown(drain_complete).await;
+        }
+        let proxy_result = match proxy_finished {
+            Some(result) => server_join_result(result),
+            None => {
                 if !proxy.is_finished() {
                     proxy.abort();
                 }
@@ -1119,6 +1132,9 @@ async fn build_app_with_storage_inner(
         } else {
             None
         };
+    #[cfg(feature = "capture")]
+    let capture_runtime =
+        crate::capture_bootstrap::start_capture_runtime(&config, &data_dir, &in_memory_bus).await;
     let (event_fanout_shutdown_tx, event_fanout_shutdown_rx) = watch::channel(false);
     let mut event_fanout_tasks = Vec::new();
     let mut internal_partials_state = None;
@@ -1383,6 +1399,11 @@ async fn build_app_with_storage_inner(
         lifecycle = lifecycle.with_subscription_metadata_hook(subscription_metadata_hook);
     }
     lifecycle = lifecycle.with_subscription_quota_cache(subscription_quota_cache.clone());
+    #[cfg(feature = "capture")]
+    {
+        lifecycle =
+            crate::capture_bootstrap::attach_capture_handle(lifecycle, capture_runtime.as_ref());
+    }
     let lifecycle = Arc::new(lifecycle);
     let dynamic_view = lifecycle.dynamic_view();
 
@@ -1606,6 +1627,8 @@ async fn build_app_with_storage_inner(
             }
         });
     }
+    #[cfg(feature = "capture")]
+    crate::capture_bootstrap::add_shutdown_hook(&signals, capture_runtime);
     let scheduler_cancel = CancellationToken::new();
     let scheduler_ctx = crate::scheduler_dispatch::build_scheduler_ctx(
         crate::scheduler_dispatch::SchedulerDispatchDeps {

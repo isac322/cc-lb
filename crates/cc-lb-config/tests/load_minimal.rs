@@ -29,4 +29,12 @@ fn load_minimal_toml_applies_plan_defaults() {
     assert_eq!(config.bulkhead.semaphore_per_upstream, 100);
     assert_eq!(config.dns.cache_ttl_floor_secs, 30);
     assert_eq!(config.dns.cache_ttl_ceiling_secs, 300);
+
+    assert!(!config.capture.enabled);
+    assert_eq!(
+        config.capture.path,
+        std::path::PathBuf::from("capture.sqlite")
+    );
+    assert_eq!(config.capture.channel_capacity, 1024);
+    assert_eq!(config.capture.retention_max_rows, 100_000);
 }

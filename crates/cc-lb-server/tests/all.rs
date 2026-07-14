@@ -18,6 +18,29 @@ mod builtin_authn_smoke;
 mod cache_keepalive_server_wiring;
 #[path = "cache_memory_bound.rs"]
 mod cache_memory_bound;
+#[cfg(feature = "capture")]
+#[path = "capture_dispositions.rs"]
+mod capture_dispositions;
+#[cfg(feature = "capture")]
+#[path = "capture_e2e.rs"]
+mod capture_e2e;
+#[cfg(feature = "capture")]
+#[path = "capture_isolation.rs"]
+mod capture_isolation;
+#[cfg(feature = "capture")]
+#[path = "capture_matrix.rs"]
+mod capture_matrix;
+#[cfg(feature = "capture")]
+#[path = "capture_matrix_support.rs"]
+mod capture_matrix_support;
+#[cfg(feature = "capture")]
+#[path = "capture_prior_filter.rs"]
+mod capture_prior_filter;
+#[cfg(feature = "capture")]
+#[path = "capture_replay.rs"]
+mod capture_replay;
+#[path = "capture_zero_cost.rs"]
+mod capture_zero_cost;
 #[path = "chaos_common.rs"]
 mod chaos_common;
 #[path = "claude_fable_5_proxy_path.rs"]

@@ -7,9 +7,15 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle as ThreadJoinHandle;
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore,
-    PluginSlotKind, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore,
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BackendKind, MetaStore,
+    PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind,
+    PrincipalStore, PromptCacheObservationRecord, PromptCacheObservationStore,
+    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamCreate, UpstreamStore,
+    UpstreamSubscriptionQuotaStore,
     principal::Limit,
     types::{PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
 };
@@ -18,16 +24,20 @@ use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_sqlite::open_sqlite;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use url::Url;
 
+pub const PRIOR_FILTER_CAPTURE_BODY: &str = r#"{"model":"claude-sonnet-4-5-20250929","system":[{"type":"text","text":"stable prior-filter prefix","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"capture prior filter"}],"max_tokens":10}"#;
+
 pub struct TestProcess {
     child: Child,
     stderr: Arc<Mutex<Vec<u8>>>,
     stderr_thread: Option<ThreadJoinHandle<()>>,
+    stdout_thread: Option<ThreadJoinHandle<()>>,
 }
 
 impl Drop for TestProcess {
@@ -37,10 +47,31 @@ impl Drop for TestProcess {
         if let Some(stderr_thread) = self.stderr_thread.take() {
             let _ = stderr_thread.join();
         }
+        if let Some(stdout_thread) = self.stdout_thread.take() {
+            let _ = stdout_thread.join();
+        }
     }
 }
 
 impl TestProcess {
+    pub fn graceful_shutdown(&mut self) {
+        #[cfg(unix)]
+        {
+            let pid = self.child.id();
+            let mut kill_cmd = Command::new("kill")
+                .arg("-15")
+                .arg(pid.to_string())
+                .spawn()
+                .expect("spawn kill command");
+            let _ = kill_cmd.wait();
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+    }
+
     fn spawn(config_path: &Path) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
             .arg("serve")
@@ -51,7 +82,7 @@ impl TestProcess {
                 "0000000000000000000000000000000000000000000000000000000000000000",
             )
             .env("CC_LB_ADMIN_TOKEN", "admin-token")
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn cc-lb binary");
@@ -62,7 +93,16 @@ impl TestProcess {
             let mut stderr_bytes = Vec::new();
             let _ = stderr_pipe.read_to_end(&mut stderr_bytes);
             if let Ok(mut captured) = stderr_sink.lock() {
-                *captured = stderr_bytes;
+                captured.extend_from_slice(&stderr_bytes);
+            }
+        });
+        let mut stdout_pipe = child.stdout.take().expect("child stdout pipe");
+        let stdout_sink = Arc::clone(&stderr);
+        let stdout_thread = std::thread::spawn(move || {
+            let mut stdout_bytes = Vec::new();
+            let _ = stdout_pipe.read_to_end(&mut stdout_bytes);
+            if let Ok(mut captured) = stdout_sink.lock() {
+                captured.extend_from_slice(&stdout_bytes);
             }
         });
 
@@ -70,6 +110,7 @@ impl TestProcess {
             child,
             stderr,
             stderr_thread: Some(stderr_thread),
+            stdout_thread: Some(stdout_thread),
         }
     }
 
@@ -77,9 +118,12 @@ impl TestProcess {
         self.child.try_wait()
     }
 
-    fn finish_stderr(&mut self) -> String {
+    pub fn finish_stderr(&mut self) -> String {
         if let Some(stderr_thread) = self.stderr_thread.take() {
             let _ = stderr_thread.join();
+        }
+        if let Some(stdout_thread) = self.stdout_thread.take() {
+            let _ = stdout_thread.join();
         }
         self.stderr
             .lock()
@@ -105,6 +149,16 @@ impl Drop for TestServer {
     }
 }
 
+impl TestServer {
+    pub fn graceful_shutdown(&mut self) {
+        self._process.graceful_shutdown();
+    }
+
+    pub fn finish_stderr(&mut self) -> String {
+        self._process.finish_stderr()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ManagedTestKey {
     pub key_id: String,
@@ -116,12 +170,16 @@ pub async fn spawn_test_server() -> TestServer {
 }
 
 pub async fn spawn_test_server_with_extra_config(extra_toml: &str) -> TestServer {
+    spawn_test_server_with_options(extra_toml, TestServerOptions::default()).await
+}
+
+pub async fn spawn_capture_test_server_with_extra_config(extra_toml: &str) -> TestServer {
     spawn_test_server_with_options(
         extra_toml,
-        AppConfig::default(),
-        AuthConfig::NoneMode,
-        Vec::new(),
-        TestTopology::Single,
+        TestServerOptions {
+            proxy_readiness: ProxyReadiness::Tcp,
+            ..TestServerOptions::default()
+        },
     )
     .await
 }
@@ -132,10 +190,25 @@ pub async fn spawn_test_server_with_fake_config(
 ) -> TestServer {
     spawn_test_server_with_options(
         extra_toml,
-        fake_config,
-        AuthConfig::NoneMode,
-        Vec::new(),
-        TestTopology::Single,
+        TestServerOptions {
+            fake_config,
+            ..TestServerOptions::default()
+        },
+    )
+    .await
+}
+
+pub async fn spawn_capture_test_server_with_fake_config(
+    extra_toml: &str,
+    fake_config: AppConfig,
+) -> TestServer {
+    spawn_test_server_with_options(
+        extra_toml,
+        TestServerOptions {
+            fake_config,
+            proxy_readiness: ProxyReadiness::Tcp,
+            ..TestServerOptions::default()
+        },
     )
     .await
 }
@@ -146,10 +219,11 @@ pub async fn spawn_test_server_with_two_upstreams(
 ) -> TestServer {
     spawn_test_server_with_options(
         extra_toml,
-        fake_config,
-        AuthConfig::NoneMode,
-        Vec::new(),
-        TestTopology::CacheAffinityPair,
+        TestServerOptions {
+            fake_config,
+            topology: TestTopology::CacheAffinityPair,
+            ..TestServerOptions::default()
+        },
     )
     .await
 }
@@ -161,23 +235,105 @@ pub async fn spawn_test_server_with_apikey_mode(
 ) -> TestServer {
     spawn_test_server_with_options(
         extra_toml,
-        fake_config,
-        AuthConfig::ApiKey,
-        principal_limits,
-        TestTopology::Single,
+        TestServerOptions {
+            fake_config,
+            auth_config: AuthConfig::ApiKey,
+            principal_limits,
+            ..TestServerOptions::default()
+        },
+    )
+    .await
+}
+
+pub async fn spawn_capture_test_server_with_apikey_mode(
+    extra_toml: &str,
+    principal_limits: Vec<Limit>,
+    fake_config: AppConfig,
+) -> TestServer {
+    spawn_test_server_with_options(
+        extra_toml,
+        TestServerOptions {
+            fake_config,
+            auth_config: AuthConfig::ApiKey,
+            principal_limits,
+            proxy_readiness: ProxyReadiness::Tcp,
+            ..TestServerOptions::default()
+        },
+    )
+    .await
+}
+
+pub async fn spawn_capture_test_server_with_oauth_upstreams(
+    extra_toml: &str,
+    fake_config: AppConfig,
+) -> TestServer {
+    spawn_test_server_with_options(
+        extra_toml,
+        TestServerOptions {
+            fake_config,
+            auth_config: AuthConfig::NoneModeOauth,
+            topology: TestTopology::SubscriptionPreferencePair,
+            proxy_readiness: ProxyReadiness::Tcp,
+            ..TestServerOptions::default()
+        },
+    )
+    .await
+}
+
+pub async fn spawn_capture_test_server_with_prior_filter(
+    extra_toml: &str,
+    fake_config: AppConfig,
+) -> TestServer {
+    spawn_test_server_with_options(
+        extra_toml,
+        TestServerOptions {
+            fake_config,
+            auth_config: AuthConfig::NoneModeOauth,
+            topology: TestTopology::PriorFilterPair,
+            proxy_readiness: ProxyReadiness::Tcp,
+            ..TestServerOptions::default()
+        },
     )
     .await
 }
 
 enum AuthConfig {
     NoneMode,
+    NoneModeOauth,
     ApiKey,
+}
+
+enum ProxyReadiness {
+    RoutedModels,
+    Tcp,
 }
 
 #[derive(Clone, Copy)]
 enum TestTopology {
     Single,
     CacheAffinityPair,
+    SubscriptionPreferencePair,
+    PriorFilterPair,
+}
+
+struct TestServerOptions {
+    fake_config: AppConfig,
+    auth_config: AuthConfig,
+    principal_limits: Vec<Limit>,
+    topology: TestTopology,
+    proxy_readiness: ProxyReadiness,
+}
+
+impl Default for TestServerOptions {
+    fn default() -> Self {
+        Self {
+            fake_config: AppConfig::default(),
+            auth_config: AuthConfig::NoneMode,
+            principal_limits: Vec::new(),
+            topology: TestTopology::Single,
+            proxy_readiness: ProxyReadiness::RoutedModels,
+        }
+    }
 }
 
 impl TestTopology {
@@ -185,13 +341,42 @@ impl TestTopology {
         match self {
             Self::Single => &["fake_anthropic"],
             Self::CacheAffinityPair => &["fake_anthropic", "fake_anthropic_secondary"],
+            Self::SubscriptionPreferencePair | Self::PriorFilterPair => {
+                &["fake_anthropic_oauth", "fake_anthropic_oauth_secondary"]
+            }
         }
     }
 
     fn messages_cap_bytes(self) -> u64 {
         match self {
             Self::Single => 256,
-            Self::CacheAffinityPair => 131_072,
+            Self::CacheAffinityPair | Self::SubscriptionPreferencePair | Self::PriorFilterPair => {
+                131_072
+            }
+        }
+    }
+
+    const fn upstream_kind(self) -> UpstreamKind {
+        match self {
+            Self::Single | Self::CacheAffinityPair => UpstreamKind::AnthropicApiKey,
+            Self::SubscriptionPreferencePair | Self::PriorFilterPair => {
+                UpstreamKind::AnthropicOauth
+            }
+        }
+    }
+
+    fn extra_config(self, fake_addr: SocketAddr) -> String {
+        match self {
+            Self::Single | Self::CacheAffinityPair => String::new(),
+            Self::SubscriptionPreferencePair | Self::PriorFilterPair => format!(
+                r#"[oauth.anthropic]
+client_id = "capture-matrix-client"
+auth_url = "http://{fake_addr}/oauth/authorize"
+token_url = "http://{fake_addr}/oauth/token"
+redirect_uri = "http://localhost/callback"
+scopes = ["messages"]
+"#
+            ),
         }
     }
 }
@@ -215,11 +400,15 @@ const SERVER_START_ATTEMPTS: usize = 4;
 
 async fn spawn_test_server_with_options(
     extra_toml: &str,
-    fake_config: AppConfig,
-    auth_config: AuthConfig,
-    principal_limits: Vec<Limit>,
-    topology: TestTopology,
+    options: TestServerOptions,
 ) -> TestServer {
+    let TestServerOptions {
+        fake_config,
+        auth_config,
+        principal_limits,
+        topology,
+        proxy_readiness,
+    } = options;
     let fake_listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind fake listener");
@@ -236,6 +425,7 @@ async fn spawn_test_server_with_options(
             &auth_config,
             principal_limits.clone(),
             topology,
+            &proxy_readiness,
         )
         .await
         {
@@ -270,6 +460,7 @@ async fn spawn_test_server_attempt(
     auth_config: &AuthConfig,
     principal_limits: Vec<Limit>,
     topology: TestTopology,
+    proxy_readiness: &ProxyReadiness,
 ) -> Result<SpawnedTestServer, StartupFailure> {
     let proxy_listener = reserve_addr();
     let admin_listener = reserve_addr();
@@ -280,12 +471,19 @@ async fn spawn_test_server_attempt(
     let config_dir = tempfile::tempdir().expect("temp config dir");
     let config_path = config_dir.path().join("cc-lb.toml");
     let sqlite_path = config_path.with_file_name("cc-lb.sqlite");
+    let topology_config = topology.extra_config(fake_addr);
+    let combined_extra = match (extra_toml.is_empty(), topology_config.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => extra_toml.to_owned(),
+        (true, false) => topology_config,
+        (false, false) => format!("{extra_toml}\n\n{topology_config}"),
+    };
     write_config_with_extra(
         &config_path,
         proxy_addr,
         admin_addr,
         metrics_addr,
-        extra_toml,
+        &combined_extra,
         auth_config,
         topology.messages_cap_bytes(),
     );
@@ -302,7 +500,12 @@ async fn spawn_test_server_attempt(
 
     let mut process = TestProcess::spawn(&config_path);
 
-    wait_for_proxy_ready_or_exit(&mut process, proxy_addr, managed_key.as_ref()).await?;
+    match proxy_readiness {
+        ProxyReadiness::RoutedModels => {
+            wait_for_proxy_ready_or_exit(&mut process, proxy_addr, managed_key.as_ref()).await?;
+        }
+        ProxyReadiness::Tcp => wait_for_tcp_ready_or_exit(&mut process, proxy_addr).await?,
+    }
     wait_for_status_or_exit(&mut process, admin_addr, "/admin/health", 200).await?;
 
     Ok(SpawnedTestServer {
@@ -364,20 +567,27 @@ fn write_config_with_extra(
         format!("{}\n\n", extra_toml.trim())
     };
     let downstream_auth = match auth_config {
-        AuthConfig::NoneMode => {
-            r#"[downstream_auth]
+        AuthConfig::NoneMode | AuthConfig::NoneModeOauth => {
+            let upstream_kind = match auth_config {
+                AuthConfig::NoneMode => "anthropic_key",
+                AuthConfig::NoneModeOauth => "anthropic_o_auth",
+                AuthConfig::ApiKey => unreachable!("API-key auth is handled separately"),
+            };
+            format!(
+                r#"[downstream_auth]
 mode = "none"
 
 [downstream_auth.none_mode]
 principal_id = "api-key"
-upstream_kind = "anthropic_key"
+upstream_kind = "{upstream_kind}"
 "#
+            )
         }
-        AuthConfig::ApiKey => {
+        AuthConfig::ApiKey => String::from(
             r#"[downstream_auth]
 mode = "api_key"
-"#
-        }
+"#,
+        ),
     };
     let config = format!(
         r#"{extra_prefix}
@@ -457,17 +667,22 @@ async fn seed_storage(
         .initialize(BackendKind::Sqlite)
         .await
         .expect("test storage initializes");
-    for name in topology.upstream_names() {
-        UpstreamStore::create(
+    let mut upstream_ids = Vec::new();
+    for (ordinal, name) in topology.upstream_names().iter().enumerate() {
+        let record = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
                 name: (*name).to_owned(),
-                kind: UpstreamKind::AnthropicApiKey,
+                kind: topology.upstream_kind(),
                 base_url: Some(
                     Url::parse(&format!("http://{upstream_addr}"))
                         .expect("fake upstream URL parses"),
                 ),
-                api_key_ciphertext: Some(vec![0; 32]),
+                api_key_ciphertext: matches!(
+                    topology.upstream_kind(),
+                    UpstreamKind::AnthropicApiKey
+                )
+                .then(|| vec![0; 32]),
                 oauth_token_generation: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
@@ -475,6 +690,48 @@ async fn seed_storage(
         )
         .await
         .expect("seed upstream");
+        upstream_ids.push(record.id);
+        if matches!(
+            topology,
+            TestTopology::SubscriptionPreferencePair | TestTopology::PriorFilterPair
+        ) {
+            seed_oauth_credentials(storage.as_ref(), &record, upstream_addr).await;
+            seed_subscription_quota(storage.as_ref(), record.id, ordinal).await;
+        }
+    }
+    if matches!(topology, TestTopology::PriorFilterPair) {
+        let body = bytes::Bytes::from_static(PRIOR_FILTER_CAPTURE_BODY.as_bytes());
+        let breakpoints =
+            cc_lb_engine::parse_request_cache_breakpoints(&http::HeaderMap::new(), &body);
+        let breakpoint = breakpoints.first().expect("prior-filter breakpoint exists");
+        let prefix = breakpoint
+            .lookback_prefixes
+            .first()
+            .expect("prior-filter lookback prefix exists");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time follows unix epoch")
+            .as_secs();
+        storage
+            .upsert_observation(&PromptCacheObservationRecord {
+                upstream_id: upstream_ids[1],
+                canonical_model_id: "claude-sonnet-4-5-20250929".to_owned(),
+                v3_prefix_key: prefix.prefix_hash.clone(),
+                ttl_class: breakpoint.requested_ttl,
+                expires_at_unix_secs: now + 3_600,
+                last_observed_at_unix_secs: now,
+                hash_schema_version: 4,
+                prefix_content_block_index: prefix.content_block_index,
+                estimated_prefix_tokens: breakpoint.prefix_token_count,
+                token_estimate_source: breakpoint
+                    .token_estimate_source
+                    .clone()
+                    .unwrap_or_else(|| "local_tiktoken_v1".to_owned()),
+                last_provider_cache_read_tokens: Some(breakpoint.prefix_token_count),
+                last_provider_cache_creation_tokens: Some(0),
+            })
+            .await
+            .expect("seed prior-filter warm cache observation");
     }
     let principal = PrincipalStore::create(
         storage.as_ref(),
@@ -490,7 +747,10 @@ async fn seed_storage(
     )
     .await
     .expect("seed principal");
-    if matches!(topology, TestTopology::CacheAffinityPair) {
+    if matches!(
+        topology,
+        TestTopology::CacheAffinityPair | TestTopology::PriorFilterPair
+    ) {
         PluginRegistryStore::insert_chain_entry(
             storage.as_ref(),
             PluginChainEntryInput {
@@ -507,8 +767,32 @@ async fn seed_storage(
         .await
         .expect("seed cache-affinity router filter");
     }
+    if matches!(
+        topology,
+        TestTopology::SubscriptionPreferencePair | TestTopology::PriorFilterPair
+    ) {
+        PluginRegistryStore::insert_chain_entry(
+            storage.as_ref(),
+            PluginChainEntryInput {
+                principal_id: principal.id,
+                slot: PluginSlotKind::Router,
+                order: if matches!(topology, TestTopology::PriorFilterPair) {
+                    2_000
+                } else {
+                    1_000
+                },
+                wasm_registry_id: BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+                config: serde_json::json!({}),
+                sse_per_event: false,
+                batched_events_per_flush: 1,
+                batched_flush_ms: 100,
+            },
+        )
+        .await
+        .expect("seed subscription-preference router filter");
+    }
     match auth_config {
-        AuthConfig::NoneMode => None,
+        AuthConfig::NoneMode | AuthConfig::NoneModeOauth => None,
         AuthConfig::ApiKey => {
             let key_store = KeyStore::new(storage.clone());
             let (_record, plaintext) = key_store
@@ -533,6 +817,153 @@ async fn seed_storage(
             })
         }
     }
+}
+
+async fn seed_oauth_credentials(
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    record: &cc_lb_storage_api::UpstreamRecord,
+    fake_addr: SocketAddr,
+) {
+    let tokens = issue_fake_oauth_tokens(fake_addr).await;
+    let bundle = OAuthTokenBundle {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expires_at_unix_secs: unix_now_secs().saturating_add(3_600),
+        scopes: vec!["messages".to_owned()],
+    };
+    let encrypted = EncryptedOAuthTokens::encrypt(
+        &AeadService::from_master_key([0; 32]),
+        &bundle,
+        record.id.as_bytes(),
+    )
+    .expect("encrypt fake OAuth tokens");
+    UpstreamStore::store_oauth_tokens(storage, record.id, record.revision, encrypted)
+        .await
+        .expect("store fake OAuth tokens");
+}
+
+async fn seed_subscription_quota(
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    upstream_id: uuid::Uuid,
+    ordinal: usize,
+) {
+    let now_secs = unix_now_secs();
+    let now_millis = now_secs.saturating_mul(1_000);
+    let utilization = if ordinal == 0 { 0.20 } else { 0.65 };
+    let samples = [
+        subscription_quota_sample(
+            upstream_id,
+            SubscriptionQuotaWindow::FiveHour,
+            utilization,
+            now_secs.saturating_add(9_000),
+            now_millis,
+        ),
+        subscription_quota_sample(
+            upstream_id,
+            SubscriptionQuotaWindow::SevenDay,
+            utilization,
+            now_secs.saturating_add(302_400),
+            now_millis,
+        ),
+    ];
+    storage
+        .record_subscription_quota_samples(&samples)
+        .await
+        .expect("store subscription quota samples");
+}
+
+fn subscription_quota_sample(
+    upstream_id: uuid::Uuid,
+    window: SubscriptionQuotaWindow,
+    utilization: f64,
+    resets_at_unix_secs: u64,
+    observed_at_unix_millis: u64,
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
+        upstream_id,
+        window,
+        source: SubscriptionQuotaSource::Api,
+        sample_kind: SubscriptionQuotaSampleKind::Sample,
+        observed_at_unix_millis,
+        sample_id: uuid::Uuid::new_v4(),
+        utilization: Some(utilization),
+        status: Some(SubscriptionQuotaStatus::Allowed),
+        resets_at_unix_secs: Some(resets_at_unix_secs),
+        surpassed_threshold: None,
+        representative_claim: None,
+        fallback_percentage: None,
+        fallback_available: None,
+        overage_in_use: None,
+        overage_period_monthly_utilization: None,
+        upgrade_paths: None,
+        disabled_reason: None,
+        extra_usage_enabled: None,
+        extra_usage_monthly_limit: None,
+        extra_usage_used_credits: None,
+        ingested_at_unix_millis: observed_at_unix_millis,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct IssuedOAuthTokens {
+    access_token: String,
+    refresh_token: String,
+}
+
+async fn issue_fake_oauth_tokens(fake_addr: SocketAddr) -> IssuedOAuthTokens {
+    let verifier = "capture-matrix-verifier";
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build fake OAuth client");
+    let authorize = client
+        .get(format!("http://{fake_addr}/oauth/authorize"))
+        .query(&[
+            ("response_type", "code"),
+            ("client_id", "capture-matrix-client"),
+            ("redirect_uri", "http://localhost/callback"),
+            ("code_challenge", challenge.as_str()),
+            ("code_challenge_method", "S256"),
+            ("scope", "messages"),
+        ])
+        .send()
+        .await
+        .expect("authorize fake OAuth token");
+    let location = authorize
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .expect("fake OAuth authorization redirect");
+    let code = Url::parse(location)
+        .expect("parse fake OAuth redirect")
+        .query_pairs()
+        .find_map(|(name, value)| (name == "code").then(|| value.into_owned()))
+        .expect("fake OAuth authorization code");
+    client
+        .post(format!("http://{fake_addr}/oauth/token"))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", "capture-matrix-client"),
+            ("redirect_uri", "http://localhost/callback"),
+            ("code", code.as_str()),
+            ("code_verifier", verifier),
+        ])
+        .send()
+        .await
+        .expect("exchange fake OAuth authorization code")
+        .error_for_status()
+        .expect("fake OAuth token exchange succeeds")
+        .json()
+        .await
+        .expect("decode fake OAuth tokens")
+}
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn ready_timeout(default: std::time::Duration) -> std::time::Duration {
@@ -588,6 +1019,29 @@ async fn wait_for_proxy_ready_or_exit(
         ),
     )
     .await
+}
+
+async fn wait_for_tcp_ready_or_exit(
+    process: &mut TestProcess,
+    addr: SocketAddr,
+) -> Result<(), StartupFailure> {
+    let deadline = std::time::Instant::now() + ready_timeout(std::time::Duration::from_secs(60));
+    loop {
+        if let Some(exit_status) = process.try_wait().expect("poll cc-lb child") {
+            let stderr = process.finish_stderr();
+            return Err(startup_failure_for_exit(exit_status, stderr));
+        }
+        if TcpStream::connect(addr).await.is_ok() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(StartupFailure {
+                message: format!("server did not accept TCP connections at {addr}"),
+                address_in_use: false,
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 async fn wait_for_status_or_exit(
