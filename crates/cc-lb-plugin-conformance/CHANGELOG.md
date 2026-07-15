@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.2.3...cc-lb-plugin-conformance-v0.2.4) - 2026-07-15
+
+### Added
+
+- add service-tier pricing support ([#455](https://github.com/isac322/cc-lb/pull/455))
+
+### Other
+
+- fold filter service tier into wire v1 ([#475](https://github.com/isac322/cc-lb/pull/475))
+
 ## [0.2.3](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.2.2...cc-lb-plugin-conformance-v0.2.3) - 2026-07-12
 
 ### Other
