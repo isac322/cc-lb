@@ -224,6 +224,7 @@ jobs:
           cargo llvm-cov nextest \
             --workspace \
             --exclude cc-lb-loadgen \
+            --exclude cc-lb-stress-suite \
             --all-features \
             --no-report
 

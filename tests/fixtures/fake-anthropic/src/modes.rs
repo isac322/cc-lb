@@ -9,6 +9,7 @@ pub enum FakeMode {
     /// `upstream_error_message` cap, so request-log QA can exercise truncation
     /// (storage/API) and long/multiline wrapping (admin-web drawer).
     RateLimitedLong,
+    Overloaded,
     ServerError,
     Timeout,
     Slow,
@@ -30,6 +31,7 @@ impl FakeMode {
             "401" => Self::Unauthorized,
             "429" => Self::RateLimited,
             "429-long" => Self::RateLimitedLong,
+            "529" => Self::Overloaded,
             "500" => Self::ServerError,
             "timeout" => Self::Timeout,
             "slow" => Self::Slow,

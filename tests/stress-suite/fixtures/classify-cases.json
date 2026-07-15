@@ -1,0 +1,35 @@
+{
+  "cases": [
+    {
+      "case_id": "healthy-200",
+      "expected_label": "healthy",
+      "observed": { "kind": "http", "status": 200 },
+      "expected_classification": "expected"
+    },
+    {
+      "case_id": "expected-529",
+      "expected_label": "provider_error",
+      "observed": { "kind": "http", "status": 529 },
+      "expected_classification": "expected"
+    },
+    {
+      "case_id": "expected-client-cancel",
+      "expected_label": "client_cancel",
+      "observed": { "kind": "client_cancelled" },
+      "expected_classification": "expected"
+    },
+    {
+      "case_id": "malformed-400",
+      "expected_label": "malformed",
+      "observed": { "kind": "http", "status": 400 },
+      "expected_classification": "expected"
+    },
+    {
+      "case_id": "unexpected-500-on-healthy",
+      "expected_label": "healthy",
+      "report_label": "unexpected_5xx",
+      "observed": { "kind": "http", "status": 500 },
+      "expected_classification": "unexpected"
+    }
+  ]
+}

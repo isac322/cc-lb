@@ -1,0 +1,110 @@
+{
+  "environment": {
+    "binary_hashes": {
+      "cc-lb": "sha256:synthetic"
+    },
+    "cgroup": "synthetic",
+    "cpu_count": 1,
+    "cpu_model": "synthetic-cpu",
+    "docker_version": "docker-synthetic",
+    "fd_soft_limit": "1024",
+    "git_dirty": false,
+    "git_sha": "synthetic",
+    "image_digests": {
+      "cc-lb": "sha256:synthetic"
+    },
+    "kernel": "synthetic-kernel",
+    "max_one_minute_load": 0.0,
+    "memory_limit": "unlimited",
+    "tc_version": "iproute2-synthetic"
+  },
+  "evidence_schema_version": 1,
+  "policy": {
+    "max_confidence_band_ratio": 2.0,
+    "max_host_load_ratio": 2.0,
+    "max_qdisc_schedule_drift_ms": 100,
+    "min_samples": 5,
+    "qdisc_drop_ratio_delta": 0.02,
+    "rps_budget_ratio": 0.1
+  },
+  "schema_version": 1,
+  "waves": [
+    {
+      "achieved_rps": 5.0,
+      "metrics": {
+        "latency_ms": {
+          "dispersion": {
+            "iqr": 20,
+            "mad": 10
+          },
+          "p95": {
+            "lower": 82.46922705640165,
+            "upper": 117.53077294359835
+          },
+          "p99": {
+            "lower": 82.46922705640165,
+            "upper": 117.53077294359835
+          },
+          "samples": 5
+        },
+        "schedule_drift_ms": {
+          "dispersion": {
+            "iqr": 2,
+            "mad": 1
+          },
+          "p95": {
+            "lower": 0.7367869447766671,
+            "upper": 5.263213055223333
+          },
+          "p99": {
+            "lower": 0.7367869447766671,
+            "upper": 5.263213055223333
+          },
+          "samples": 3
+        },
+        "ttfb_ms": {
+          "dispersion": {
+            "iqr": 10,
+            "mad": 5
+          },
+          "p95": {
+            "lower": 3.6839347238833327,
+            "upper": 26.316065276116667
+          },
+          "p99": {
+            "lower": 3.6839347238833327,
+            "upper": 26.316065276116667
+          },
+          "samples": 3
+        },
+        "ttft_ms": {
+          "dispersion": {
+            "iqr": 8,
+            "mad": 4
+          },
+          "p95": {
+            "lower": 6.947147779106668,
+            "upper": 25.05285222089333
+          },
+          "p99": {
+            "lower": 6.947147779106668,
+            "upper": 25.05285222089333
+          },
+          "samples": 3
+        }
+      },
+      "name": "healthy-traffic",
+      "qdisc": [
+        {
+          "device": "eth0",
+          "drop_ratio": 0.0,
+          "edge": "probe-to-cc-lb",
+          "overlimits": 0,
+          "packets": 4,
+          "requeues": 0
+        }
+      ],
+      "sample_count": 5
+    }
+  ]
+}
