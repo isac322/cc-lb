@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
 
@@ -65,7 +65,30 @@ pub async fn count_request_id(pool: &SqlitePool, request_id: &str) -> i64 {
 }
 
 pub async fn joined_row(pool: &SqlitePool, request_id: &str) -> JoinedRow {
-    let row = sqlx::query(
+    let row = fetch_joined_row(pool, request_id)
+        .await
+        .expect("fetch joined capture row");
+    joined_row_from_sql(row)
+}
+
+pub async fn wait_for_joined_row(pool: &SqlitePool, request_id: &str) -> JoinedRow {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match fetch_joined_row(pool, request_id).await {
+            Ok(row) => return joined_row_from_sql(row),
+            Err(sqlx::Error::RowNotFound) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("fetch joined capture row: {error}"),
+        }
+    }
+}
+
+async fn fetch_joined_row(
+    pool: &SqlitePool,
+    request_id: &str,
+) -> Result<sqlx::sqlite::SqliteRow, sqlx::Error> {
+    sqlx::query(
         "SELECT disposition, attempt_num, upstream_status, client_status, input_tokens, \
          output_tokens, cache_read_input_tokens, cache_creation_5m, cache_creation_1h \
          FROM capture_v1 WHERE request_id = ?",
@@ -73,7 +96,9 @@ pub async fn joined_row(pool: &SqlitePool, request_id: &str) -> JoinedRow {
     .bind(request_id)
     .fetch_one(pool)
     .await
-    .expect("fetch joined capture row");
+}
+
+fn joined_row_from_sql(row: sqlx::sqlite::SqliteRow) -> JoinedRow {
     JoinedRow {
         disposition: row.try_get("disposition").expect("capture disposition"),
         attempt_num: row.try_get("attempt_num").expect("capture attempt number"),
