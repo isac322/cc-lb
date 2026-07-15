@@ -4,7 +4,7 @@ use crate::{capture_matrix_support, common};
 
 use capture_matrix_support::{
     MESSAGE_BODY, capture_config, count_rows, disconnect_after_message_start, joined_row,
-    open_capture_pool,
+    open_capture_pool, wait_for_joined_row,
 };
 use cc_lb_storage_api::{Limit, LimitKind};
 use fake_anthropic::AppConfig;
@@ -98,11 +98,11 @@ async fn client_disconnect_during_slow_stream_captures_499_partial_row() {
     disconnect_after_message_start(server.proxy_addr, "capture-client-disconnect")
         .await
         .expect("disconnect slow streaming client");
+    let pool = open_capture_pool(&capture_path).await;
+    let row = wait_for_joined_row(&pool, "capture-client-disconnect").await;
     server.graceful_shutdown();
 
     // Then: downstream drop handling finalizes one partial row as status 499.
-    let pool = open_capture_pool(&capture_path).await;
-    let row = joined_row(&pool, "capture-client-disconnect").await;
     assert_eq!(row.disposition, "routed_client_disconnected");
     assert_eq!(row.client_status, Some(499));
     assert_eq!(row.attempt_num, Some(1));
