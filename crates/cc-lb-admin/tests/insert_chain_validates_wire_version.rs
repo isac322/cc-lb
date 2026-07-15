@@ -1,4 +1,4 @@
-mod config_admin_common;
+use crate::config_admin_common;
 
 use axum::http::StatusCode;
 use cc_lb_config::Config;
@@ -141,6 +141,7 @@ async fn seed_registry_with_wire_version(
             WasmRegistryEntryInput {
                 schema_hash: None,
                 name: name.to_owned(),
+                version: None,
                 original_filename: format!("{name}.wasm"),
                 label: None,
                 uploaded_at_unix_secs: 1_800_000_000,

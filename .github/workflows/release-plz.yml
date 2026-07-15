@@ -58,7 +58,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.0
 
       - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853
         with:
           tool: cargo-semver-checks@0.48
 
@@ -75,6 +75,8 @@ jobs:
     name: release-plz release
     needs: preflight
     runs-on: ubuntu-latest
+    outputs:
+      cc_lb_server_version: ${{ steps.cc-lb-server-release.outputs.version }}
     permissions:
       contents: write
       pull-requests: write
@@ -92,7 +94,8 @@ jobs:
         uses: rust-lang/crates-io-auth-action@v1
 
       - name: Run release-plz release
-        uses: MarcoIeni/release-plz-action@v0.5
+        id: release-plz
+        uses: MarcoIeni/release-plz-action@v0.5.131
         with:
           command: release
         env:
@@ -106,6 +109,38 @@ jobs:
           # is both impossible and unnecessary. The build.rs exposes this
           # exact escape hatch (see crates/cc-lb-runtime-wasmtime/build.rs).
           CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
+
+      - name: Extract cc-lb-server release
+        id: cc-lb-server-release
+        env:
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          VERSION=$(printf '%s' "${RELEASES:-[]}" | jq -r 'map(select(.package_name == "cc-lb-server"))[0].version // ""')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  publish-docker:
+    name: publish docker image
+    needs: release
+    if: needs.release.outputs.cc_lb_server_version != ''
+    uses: ./.github/workflows/cd.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      version: ${{ needs.release.outputs.cc_lb_server_version }}
+    secrets: inherit
+
+  publish-chart:
+    name: publish helm chart
+    needs: release
+    if: needs.release.outputs.cc_lb_server_version != ''
+    uses: ./.github/workflows/publish-chart.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      version: ${{ needs.release.outputs.cc_lb_server_version }}
+    secrets: inherit
 
   release-pr:
     name: release-plz release-pr
@@ -121,7 +156,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.0
 
       - name: Run release-plz release-pr
-        uses: MarcoIeni/release-plz-action@v0.5
+        uses: MarcoIeni/release-plz-action@v0.5.131
         with:
           command: release-pr
         env:

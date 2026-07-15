@@ -7,6 +7,7 @@ import {
   statusTone,
 } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
+import { reasoningBadgeText } from '../../lib/reasoningTier';
 import { useCopyButton } from '../../lib/useCopyButton';
 import { Badge, cx, Hint } from './primitives';
 import { RelativeTime } from './RelativeTime';
@@ -80,6 +81,11 @@ export function RequestEventIdentity({
     isPartial,
     event._phase === 'final' ? event.status : 0,
     event._phase === 'final' ? event.error_code : undefined,
+  );
+  const reasoningText = reasoningBadgeText(
+    event.reasoning_effort,
+    event.thinking_budget_tokens,
+    event.thinking_tokens,
   );
 
   return (
@@ -170,6 +176,26 @@ export function RequestEventIdentity({
             </span>
           }
         />
+        {reasoningText != null && (
+          <KvRow
+            label="Reasoning"
+            value={
+              <span className="font-mono break-all min-w-0">
+                {reasoningText}
+              </span>
+            }
+          />
+        )}
+        {event.service_tier != null && event.service_tier !== '' && (
+          <KvRow
+            label="Service tier"
+            value={
+              <span className="font-mono break-all min-w-0">
+                {event.service_tier}
+              </span>
+            }
+          />
+        )}
         <KvRow
           label="Status"
           value={<RequestOutcomeBadge outcome={outcome} />}

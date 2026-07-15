@@ -6,6 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 build = "build.rs"
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/all.rs"
 
 [features]
 default = ["sqlite"]
@@ -55,6 +60,7 @@ hyper-util = { workspace = true, features = ["client", "client-legacy", "http1",
 oauth2.workspace = true
 secrecy.workspace = true
 sha2.workspace = true
+semver = "1"
 siphasher = "1"
 tower.workspace = true
 thiserror.workspace = true

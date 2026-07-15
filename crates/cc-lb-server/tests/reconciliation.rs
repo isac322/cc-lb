@@ -129,6 +129,7 @@ async fn seed_registry(storage: &Storage, seed: u8, name: &str) -> WasmRegistryE
             WasmRegistryEntryInput {
                 schema_hash: None,
                 name: name.to_owned(),
+                version: None,
                 original_filename: format!("{name}.wasm"),
                 label: None,
                 uploaded_at_unix_secs: 1_800_000_000,
@@ -804,6 +805,34 @@ impl PluginRegistryStore for EmptyPluginRegistryStore {
         &self,
         _id: Uuid,
     ) -> StorageResult<Option<WasmRegistryEntry>> {
+        unimplemented!()
+    }
+    async fn get_registry_entry_by_name(
+        &self,
+        _name: &str,
+    ) -> StorageResult<Option<WasmRegistryEntry>> {
+        unimplemented!()
+    }
+    async fn replace_wasm_entry(
+        &self,
+        _blob: WasmBlob,
+        _entry: WasmRegistryEntryInput,
+        _expected_revision: u64,
+    ) -> StorageResult<WasmRegistryEntry> {
+        unimplemented!()
+    }
+    async fn list_registry_references(
+        &self,
+        _id: Uuid,
+    ) -> StorageResult<cc_lb_storage_api::WasmRegistryReferences> {
+        unimplemented!()
+    }
+    async fn cascade_delete_registry_entry(
+        &self,
+        _id: Uuid,
+        _expected_revision: u64,
+        _expected_references: cc_lb_storage_api::WasmRegistryReferenceFingerprint,
+    ) -> StorageResult<Option<cc_lb_storage_api::WasmRegistryCascadeDelete>> {
         unimplemented!()
     }
     async fn update_registry_label(

@@ -1,9 +1,9 @@
 #![cfg(feature = "sqlite")]
 
+use crate::request_event_quota_support;
+
 #[path = "support/request_event_quota_sqlite.rs"]
 mod request_event_quota_sqlite;
-#[path = "support/request_event_quota.rs"]
-mod request_event_quota_support;
 
 request_event_quota_sqlite::define_request_event_quota_sqlite_tests!();
 
@@ -17,10 +17,10 @@ use cc_lb_storage_conformance::{
     scenarios::{
         anthropic_compatibility_kv_store, atomicity, organization_metadata_store, plan_tier_store,
         plan_tier_store_backfill, plugin_registry_store, price_catalog, principal_store,
-        prompt_cache_observation_store, storage_roundtrips, storage_roundtrips_cache_split,
-        storage_roundtrips_latency_stages, upstream_rate_limit_store,
-        upstream_subscription_metadata_store, upstream_subscription_quota_store,
-        warmup_attempts_store,
+        prompt_cache_observation_store, request_event_list, storage_roundtrips,
+        storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
+        upstream_rate_limit_store, upstream_subscription_metadata_store,
+        upstream_subscription_quota_store, warmup_attempts_store,
     },
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
@@ -63,6 +63,27 @@ impl ConformanceBackend for SqliteConformanceBackend {
     }
 }
 
+#[async_trait]
+impl price_catalog::PriceCatalogCorruptionBackend for SqliteConformanceBackend {
+    async fn corrupt_latest_price_catalog_hash(
+        &self,
+        fixture: &Self::Fixture,
+    ) -> anyhow::Result<()> {
+        let pool = sqlx::SqlitePool::connect(&fixture.database_url).await?;
+        let result = sqlx::query(
+            "UPDATE price_catalog_snapshots_v1 SET payload_hash = ? \
+             WHERE id = (SELECT id FROM price_catalog_snapshots_v1 \
+             ORDER BY fetched_at_ms DESC, id DESC LIMIT 1)",
+        )
+        .bind("corrupted-payload-hash")
+        .execute(&pool)
+        .await?;
+        pool.close().await;
+        anyhow::ensure!(result.rows_affected() == 1, "expected one corrupted row");
+        Ok(())
+    }
+}
+
 #[test]
 fn storage_roundtrips_sqlite() {
     run_sqlite_scenario("storage_roundtrips", storage_roundtrips::run_all);
@@ -81,6 +102,14 @@ fn request_event_latency_stage_round_trip_sqlite() {
     run_sqlite_scenario(
         "request_event_latency_stage_round_trip",
         storage_roundtrips_latency_stages::request_event_latency_stage_round_trip,
+    );
+}
+
+#[test]
+fn request_event_list_projects_rows_and_preserves_detail_sqlite() {
+    run_sqlite_scenario(
+        "request_event_list_projects_rows_and_preserves_detail",
+        request_event_list::request_event_list_projects_rows_and_preserves_detail,
     );
 }
 
@@ -248,6 +277,10 @@ upstream_subscription_quota_sqlite_test!(
     upstream_subscription_quota_checkpoint_history_sqlite,
     checkpoint_history
 );
+upstream_subscription_quota_sqlite_test!(
+    upstream_subscription_quota_aggregate_store_sqlite,
+    aggregate_store
+);
 
 #[test]
 fn warmup_attempts_store_sqlite() {
@@ -398,6 +431,30 @@ plugin_registry_sqlite_test!(
     plugin_registry_same_sha_metadata_mismatch_conflicts_sqlite,
     same_sha_metadata_mismatch_conflicts
 );
+plugin_registry_sqlite_test!(
+    plugin_registry_refcount_counts_chain_and_warmup_references_sqlite,
+    refcount_counts_chain_and_warmup_references
+);
+plugin_registry_sqlite_test!(
+    plugin_registry_replace_wasm_entry_preserves_id_and_references_sqlite,
+    replace_wasm_entry_preserves_id_and_references
+);
+plugin_registry_sqlite_test!(
+    plugin_registry_replace_wasm_entry_with_stale_revision_conflicts_sqlite,
+    replace_wasm_entry_with_stale_revision_conflicts
+);
+plugin_registry_sqlite_test!(
+    plugin_registry_list_registry_references_returns_chain_and_warmup_sqlite,
+    list_registry_references_returns_chain_and_warmup
+);
+plugin_registry_sqlite_test!(
+    plugin_registry_cascade_delete_registry_entry_removes_chain_warmup_and_blob_sqlite,
+    cascade_delete_registry_entry_removes_chain_warmup_and_blob
+);
+plugin_registry_sqlite_test!(
+    plugin_registry_cascade_delete_registry_entry_rejects_changed_fingerprint_sqlite,
+    cascade_delete_registry_entry_rejects_changed_fingerprint
+);
 
 #[test]
 fn price_catalog_roundtrip_smoke_sqlite() {
@@ -412,6 +469,14 @@ fn price_catalog_put_same_payload_twice_updates_fetched_at_sqlite() {
     run_sqlite_scenario(
         "price_catalog_put_same_payload_twice_updates_fetched_at",
         price_catalog::put_same_payload_twice_updates_fetched_at,
+    );
+}
+
+#[test]
+fn price_catalog_corrupted_payload_hash_is_rejected_sqlite() {
+    run_sqlite_scenario(
+        "price_catalog_corrupted_payload_hash_is_rejected",
+        price_catalog::corrupted_payload_hash_is_rejected,
     );
 }
 

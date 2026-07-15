@@ -2,7 +2,7 @@ use metrics::Unit;
 
 use crate::{MetricDefinition, MetricKind};
 
-pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 20] = [
+pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 34] = [
     MetricDefinition {
         name: "cclb_api_key_requests_total",
         kind: MetricKind::Counter,
@@ -99,9 +99,79 @@ pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 20] = [
         description: "Total prompt-cache observation store writes that failed by store kind.",
     },
     MetricDefinition {
+        name: "cc_lb_capture_dropped_total",
+        kind: MetricKind::Counter,
+        description: "Total capture messages dropped due to queue overflow.",
+    },
+    MetricDefinition {
+        name: "cc_lb_capture_response_without_input_total",
+        kind: MetricKind::Counter,
+        description: "Total terminal capture responses discarded because their required input was absent.",
+    },
+    MetricDefinition {
+        name: "cc_lb_capture_write_failed_total",
+        kind: MetricKind::Counter,
+        description: "Total capture records lost to isolated database write or checkpoint failures.",
+    },
+    MetricDefinition {
+        name: "cc_lb_capture_partial_ttl_evicted_total",
+        kind: MetricKind::Counter,
+        description: "Total incomplete capture partials removed by TTL sweeps.",
+    },
+    MetricDefinition {
         name: "cc_lb_dropped_events_total",
         kind: MetricKind::Counter,
         description: "Total events dropped from a bounded channel or queue by reason.",
+    },
+    MetricDefinition {
+        name: "cc_lb_compiled_module_cache_hits_total",
+        kind: MetricKind::Counter,
+        description: "Total compiled Wasm module cache hits.",
+    },
+    MetricDefinition {
+        name: "cc_lb_compiled_module_cache_misses_total",
+        kind: MetricKind::Counter,
+        description: "Total compiled Wasm module cache misses.",
+    },
+    MetricDefinition {
+        name: "cc_lb_compiled_module_cache_evictions_total",
+        kind: MetricKind::Counter,
+        description: "Total compiled Wasm module cache evictions.",
+    },
+    MetricDefinition {
+        name: "cc_lb_compiled_module_cache_entries",
+        kind: MetricKind::Gauge,
+        description: "Current compiled Wasm module cache entry count.",
+    },
+    MetricDefinition {
+        name: "cc_lb_compiled_module_cache_bytes",
+        kind: MetricKind::Gauge,
+        description: "Current compiled Wasm module cache byte size.",
+    },
+    MetricDefinition {
+        name: "cc_lb_storage_operation_duration_seconds",
+        kind: MetricKind::Histogram,
+        description: "Storage operation latency by store, operation, and status.",
+    },
+    MetricDefinition {
+        name: "cc_lb_storage_operation_errors_total",
+        kind: MetricKind::Counter,
+        description: "Storage operation errors by store and operation.",
+    },
+    MetricDefinition {
+        name: "cc_lb_sqlx_pool_size",
+        kind: MetricKind::Gauge,
+        description: "Current SQLx pool connection count by store.",
+    },
+    MetricDefinition {
+        name: "cc_lb_sqlx_pool_idle",
+        kind: MetricKind::Gauge,
+        description: "Current SQLx pool idle connection count by store.",
+    },
+    MetricDefinition {
+        name: "cc_lb_sqlx_pool_in_use",
+        kind: MetricKind::Gauge,
+        description: "Current SQLx pool in-use connection count by store.",
     },
 ];
 
@@ -202,9 +272,79 @@ pub(crate) fn register_prometheus14_metrics() {
         "Total prompt-cache observation store writes that failed by store kind."
     );
     metrics::describe_counter!(
+        "cc_lb_capture_dropped_total",
+        Unit::Count,
+        "Total capture messages dropped due to queue overflow."
+    );
+    metrics::describe_counter!(
+        "cc_lb_capture_response_without_input_total",
+        Unit::Count,
+        "Total terminal capture responses discarded because their required input was absent."
+    );
+    metrics::describe_counter!(
+        "cc_lb_capture_write_failed_total",
+        Unit::Count,
+        "Total capture records lost to isolated database write or checkpoint failures."
+    );
+    metrics::describe_counter!(
+        "cc_lb_capture_partial_ttl_evicted_total",
+        Unit::Count,
+        "Total incomplete capture partials removed by TTL sweeps."
+    );
+    metrics::describe_counter!(
         "cc_lb_dropped_events_total",
         Unit::Count,
         "Total events dropped from a bounded channel or queue by reason."
+    );
+    metrics::describe_counter!(
+        "cc_lb_compiled_module_cache_hits_total",
+        Unit::Count,
+        "Total compiled Wasm module cache hits."
+    );
+    metrics::describe_counter!(
+        "cc_lb_compiled_module_cache_misses_total",
+        Unit::Count,
+        "Total compiled Wasm module cache misses."
+    );
+    metrics::describe_counter!(
+        "cc_lb_compiled_module_cache_evictions_total",
+        Unit::Count,
+        "Total compiled Wasm module cache evictions."
+    );
+    metrics::describe_gauge!(
+        "cc_lb_compiled_module_cache_entries",
+        Unit::Count,
+        "Current compiled Wasm module cache entry count."
+    );
+    metrics::describe_gauge!(
+        "cc_lb_compiled_module_cache_bytes",
+        Unit::Bytes,
+        "Current compiled Wasm module cache byte size."
+    );
+    metrics::describe_histogram!(
+        "cc_lb_storage_operation_duration_seconds",
+        Unit::Seconds,
+        "Storage operation latency by store, operation, and status."
+    );
+    metrics::describe_counter!(
+        "cc_lb_storage_operation_errors_total",
+        Unit::Count,
+        "Storage operation errors by store and operation."
+    );
+    metrics::describe_gauge!(
+        "cc_lb_sqlx_pool_size",
+        Unit::Count,
+        "Current SQLx pool connection count by store."
+    );
+    metrics::describe_gauge!(
+        "cc_lb_sqlx_pool_idle",
+        Unit::Count,
+        "Current SQLx pool idle connection count by store."
+    );
+    metrics::describe_gauge!(
+        "cc_lb_sqlx_pool_in_use",
+        Unit::Count,
+        "Current SQLx pool in-use connection count by store."
     );
 }
 
@@ -282,6 +422,31 @@ pub fn touch_prometheus14_metrics() {
         "store" => "sqlite"
     )
     .increment(1);
+    metrics::counter!("cc_lb_capture_dropped_total").increment(1);
+    metrics::counter!("cc_lb_capture_response_without_input_total").increment(1);
+    metrics::counter!("cc_lb_capture_write_failed_total").increment(1);
+    metrics::counter!("cc_lb_capture_partial_ttl_evicted_total").increment(1);
+    metrics::counter!("cc_lb_compiled_module_cache_hits_total").increment(1);
+    metrics::counter!("cc_lb_compiled_module_cache_misses_total").increment(1);
+    metrics::counter!("cc_lb_compiled_module_cache_evictions_total").increment(1);
+    metrics::gauge!("cc_lb_compiled_module_cache_entries").set(1.0);
+    metrics::gauge!("cc_lb_compiled_module_cache_bytes").set(1.0);
+    metrics::histogram!(
+        "cc_lb_storage_operation_duration_seconds",
+        "store" => "sqlite",
+        "operation" => "smoke",
+        "status" => "ok"
+    )
+    .record(0.0);
+    metrics::counter!(
+        "cc_lb_storage_operation_errors_total",
+        "store" => "sqlite",
+        "operation" => "smoke"
+    )
+    .increment(1);
+    metrics::gauge!("cc_lb_sqlx_pool_size", "store" => "sqlite").set(1.0);
+    metrics::gauge!("cc_lb_sqlx_pool_idle", "store" => "sqlite").set(1.0);
+    metrics::gauge!("cc_lb_sqlx_pool_in_use", "store" => "sqlite").set(0.0);
 }
 
 pub(crate) fn touch_prometheus14_metric_handles() {
@@ -354,9 +519,34 @@ pub(crate) fn touch_prometheus14_metric_handles() {
         "store" => "unknown"
     )
     .increment(0);
+    metrics::counter!("cc_lb_capture_dropped_total").increment(0);
+    metrics::counter!("cc_lb_capture_response_without_input_total").increment(0);
+    metrics::counter!("cc_lb_capture_write_failed_total").increment(0);
+    metrics::counter!("cc_lb_capture_partial_ttl_evicted_total").increment(0);
     metrics::counter!(
         "cc_lb_dropped_events_total",
         "reason" => "unknown"
     )
     .increment(0);
+    metrics::counter!("cc_lb_compiled_module_cache_hits_total").increment(0);
+    metrics::counter!("cc_lb_compiled_module_cache_misses_total").increment(0);
+    metrics::counter!("cc_lb_compiled_module_cache_evictions_total").increment(0);
+    metrics::gauge!("cc_lb_compiled_module_cache_entries").set(0.0);
+    metrics::gauge!("cc_lb_compiled_module_cache_bytes").set(0.0);
+    metrics::histogram!(
+        "cc_lb_storage_operation_duration_seconds",
+        "store" => "unknown",
+        "operation" => "unknown",
+        "status" => "unknown"
+    )
+    .record(0.0);
+    metrics::counter!(
+        "cc_lb_storage_operation_errors_total",
+        "store" => "unknown",
+        "operation" => "unknown"
+    )
+    .increment(0);
+    metrics::gauge!("cc_lb_sqlx_pool_size", "store" => "unknown").set(0.0);
+    metrics::gauge!("cc_lb_sqlx_pool_idle", "store" => "unknown").set(0.0);
+    metrics::gauge!("cc_lb_sqlx_pool_in_use", "store" => "unknown").set(0.0);
 }

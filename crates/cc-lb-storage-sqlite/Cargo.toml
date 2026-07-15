@@ -1,10 +1,15 @@
 [package]
 name = "cc-lb-storage-sqlite"
+autotests = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
+
+[[test]]
+name = "integration"
+path = "tests/all.rs"
 
 [dependencies]
 cc-lb-aead = { path = "../cc-lb-aead" }
@@ -17,6 +22,7 @@ chrono = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+metrics = { workspace = true }
 sqlx = { workspace = true, features = ["chrono", "json", "macros", "migrate", "runtime-tokio", "sqlite", "tls-rustls-ring", "uuid"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

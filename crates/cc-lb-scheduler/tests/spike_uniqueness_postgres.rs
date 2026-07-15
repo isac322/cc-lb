@@ -1,3 +1,5 @@
+#![cfg(feature = "postgres")]
+
 //! Spike: apalis-sqlite vs apalis-postgres job-uniqueness divergence (Postgres half).
 //!
 //! Confirms two behavioral facts at the raw-SQL level:

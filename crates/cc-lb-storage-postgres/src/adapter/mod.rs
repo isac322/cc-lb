@@ -22,6 +22,8 @@ mod pool_quota_history_summary;
 pub mod price_catalog;
 pub mod principals;
 pub mod prompt_cache_observation;
+mod request_event_list_row;
+mod request_event_list_sql;
 pub mod request_events;
 pub mod retry;
 pub mod upstream_rate_limit;
@@ -29,6 +31,7 @@ pub mod upstream_subscription_metadata;
 pub mod upstream_subscription_quota;
 pub mod upstreams;
 pub mod usage_rollups;
+mod usage_token_intervals;
 mod warmup_attempt_mapping;
 pub mod warmup_attempts;
 

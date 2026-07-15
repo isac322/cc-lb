@@ -114,6 +114,8 @@ struct Partial {
     cost: Option<LifecycleCostBreakdown>,
     cache_state: Option<RequestCacheState>,
     cache_control_block_count: Option<u64>,
+    thinking_budget_tokens: Option<u64>,
+    reasoning_effort: Option<String>,
     cache_breakpoints: Vec<RequestCacheBreakpoint>,
     cache_prefix_hash: Option<String>,
     termination: Option<TerminationInfo>,
@@ -281,6 +283,8 @@ impl Partial {
             cost_cache_creation_1h_micros: cost.cache_creation_1h,
             cost_cache_read_micros: cost.cache_read,
             cache_control_block_count: self.cache_control_block_count,
+            thinking_budget_tokens: self.thinking_budget_tokens,
+            reasoning_effort: self.reasoning_effort.clone(),
             cache_prefix_hash: self.cache_prefix_hash.clone(),
             matched_v3_cache_key: route_matched_v3_cache_key.or_else(|| {
                 self.parse
@@ -362,6 +366,7 @@ impl Partial {
                 usage.cache_creation_input_tokens_1h,
                 usage.cache_read_input_tokens,
                 upstream_kind,
+                usage.service_tier.as_deref(),
             )
             .into()
         })
@@ -813,6 +818,8 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             result: Ok(info), ..
         } => {
             partial.cache_control_block_count = info.cache_control_block_count;
+            partial.thinking_budget_tokens = info.thinking_budget_tokens;
+            partial.reasoning_effort = info.reasoning_effort.clone();
             partial.cache_breakpoints = info.cache_breakpoints.clone();
             partial.cache_prefix_hash = info.cache_prefix_hash.clone();
             partial.parse = Some(info);
@@ -1060,6 +1067,8 @@ fn finalize_base(
             .then_some(partial.usage.cache_read_input_tokens),
         cache_state: partial.cache_state,
         cache_control_block_count: partial.cache_control_block_count,
+        thinking_budget_tokens: partial.thinking_budget_tokens,
+        reasoning_effort: partial.reasoning_effort.clone(),
         cache_breakpoints: partial.cache_breakpoints.clone(),
         cache_prefix_hash: partial.cache_prefix_hash.clone(),
         matched_v3_cache_key: matched_v3_cache_key.or_else(|| {
@@ -1809,6 +1818,133 @@ mod tests {
         assert_eq!(routed.model.as_deref(), Some("claude-3-5-sonnet-20241022"));
         assert_eq!(routed.upstream_name.as_deref(), Some("primary"));
         assert_eq!(routed.route_ms, Some(7));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn thinking_budget_tokens_preserve_partial_and_final_parity() {
+        use crate::event_bus::InMemoryBus;
+
+        // Given request fixtures with and without enabled thinking budgets.
+        let cases = [
+            (
+                "thinking-budget-enabled",
+                r#"{"model":"claude-sonnet-4-5-20250929","messages":[],"thinking":{"type":"enabled","budget_tokens":18000},"output_config":{"effort":"max"}}"#,
+                Some(18_000),
+                Some("max"),
+            ),
+            (
+                "thinking-budget-absent",
+                r#"{"model":"claude-sonnet-4-5-20250929","messages":[]}"#,
+                None,
+                None,
+            ),
+        ];
+        let (tx, rx) = mpsc::channel(16);
+        let store = Arc::new(CapturingStore::default());
+        let bus = Arc::new(InMemoryBus::new());
+        let BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
+            panic!("expected InMemory receiver");
+        };
+        let handle = spawn_request_event_assembler(
+            rx,
+            store,
+            Some(bus.clone() as Arc<dyn RequestEventBus>),
+            noop_metrics(),
+        );
+
+        // When each fixture is parsed, assembled, and terminated.
+        for (event_id, body, _, _) in cases {
+            let value: serde_json::Value = sonic_rs::from_str(body).expect("valid request fixture");
+            let thinking_budget_tokens = value
+                .get("thinking")
+                .filter(|thinking| {
+                    thinking.get("type").and_then(serde_json::Value::as_str) == Some("enabled")
+                })
+                .and_then(|thinking| thinking.get("budget_tokens"))
+                .and_then(serde_json::Value::as_u64);
+            let reasoning_effort = value
+                .get("output_config")
+                .and_then(|output_config| output_config.get("effort"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let event_id = eid(event_id);
+            tx.send(LifecycleEvent::RequestStarted {
+                event_id: event_id.clone(),
+                request_id: format!("req-{event_id}"),
+                ts_ms: 1_730_000_000_000,
+                stream: false,
+            })
+            .await
+            .unwrap();
+            tx.send(LifecycleEvent::ParseCompleted {
+                event_id: event_id.clone(),
+                result: Ok(ParseInfo {
+                    path: "/v1/messages".to_owned(),
+                    method: "POST".to_owned(),
+                    model: value
+                        .get("model")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned),
+                    stream: false,
+                    body_bytes: u64::try_from(body.len()).expect("fixture body length fits u64"),
+                    thinking_budget_tokens,
+                    reasoning_effort,
+                    ..ParseInfo::default()
+                }),
+            })
+            .await
+            .unwrap();
+            tx.send(LifecycleEvent::RequestTerminated {
+                event_id,
+                reason: TerminationReason::Success,
+                client_status: 200,
+                duration_ms: 10,
+                first_body_chunk_ms: None,
+                internal_errors: Vec::new(),
+                limit_reconcile_ms: None,
+                observability_post_ms: None,
+                proxy_setup_ms: None,
+                upstream_body_ms: None,
+            })
+            .await
+            .unwrap();
+        }
+        drop(tx);
+        handle.shutdown().await;
+
+        // Then the post-parse partial and final event preserve the same value.
+        let mut updates = Vec::new();
+        while let Ok(update) = broadcast_rx.try_recv() {
+            updates.push(update);
+        }
+        for (event_id, _, expected_budget, expected_effort) in cases {
+            let parse_partial = updates
+                .iter()
+                .filter_map(|update| match update {
+                    RequestEventUpdate::Partial(partial) if partial.event_id == event_id => {
+                        Some(partial)
+                    }
+                    RequestEventUpdate::Partial(_) | RequestEventUpdate::Final(_) => None,
+                })
+                .nth(1)
+                .expect("partial snapshot immediately after ParseCompleted");
+            let final_event = updates
+                .iter()
+                .find_map(|update| match update {
+                    RequestEventUpdate::Final(final_update)
+                        if final_update.event.event_id.as_deref() == Some(event_id) =>
+                    {
+                        Some(&final_update.event)
+                    }
+                    RequestEventUpdate::Partial(_) | RequestEventUpdate::Final(_) => None,
+                })
+                .expect("final request event");
+
+            assert_eq!(parse_partial.thinking_budget_tokens, expected_budget);
+            assert_eq!(final_event.thinking_budget_tokens, expected_budget);
+            assert_eq!(parse_partial.reasoning_effort.as_deref(), expected_effort);
+            assert_eq!(final_event.reasoning_effort.as_deref(), expected_effort);
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

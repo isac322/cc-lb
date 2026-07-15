@@ -9,9 +9,8 @@
 use core::fmt;
 
 /// Wire schema version. Distinct enum values indicate incompatible
-/// struct layouts. Bump when adding/removing/reordering fields of ANY
-/// hook's wire type. Once V2 is added, V1 stays as a supported legacy
-/// version until deprecated by explicit host-list removal.
+/// struct layouts. Filter-only additions currently stay on V1 because
+/// the filter plugin is internal to cc-lb.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum WireVersion {

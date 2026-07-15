@@ -1,9 +1,15 @@
 mod storage_support;
 
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use cc_lb_engine::StorageTailPoller;
-use cc_lb_storage_api::{RequestEvent, RequestEventStore};
+use cc_lb_storage_api::{
+    RequestEvent, RequestEventStore, RequestEventStreamFilters, StorageResult,
+};
 use storage_support::TestStorage;
 
 #[tokio::test]
@@ -75,4 +81,107 @@ async fn storage_tail_poller_heals_final_missed_by_local_publish_path() {
 
     shutdown_tx.send(true).expect("shutdown signal sends");
     handle.await.expect("poller task joins");
+}
+
+#[tokio::test]
+async fn storage_tail_poller_does_not_advance_past_ineligible_cursor() {
+    let storage = HorizonBlockedStorage::new();
+    let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let handle =
+        StorageTailPoller::spawn(storage.clone(), tx, Duration::from_millis(10), shutdown_rx);
+
+    storage.first_empty_query.notified().await;
+    storage.make_cursor_visible(RequestEvent {
+        request_id: "req-horizon-blocked".to_owned(),
+        event_id: Some("event-horizon-blocked".to_owned()),
+        ts: 1_700_000_002,
+        ts_ms: Some(1_700_000_002_000),
+        status: 200,
+        duration_ms: 13,
+        ..RequestEvent::default()
+    });
+
+    let update = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("tail poller should retry a cursor whose row was not yet eligible")
+        .expect("tail broadcast should be open");
+    assert_eq!(update.cursor, 1);
+    assert_eq!(
+        update.event.event_id.as_deref(),
+        Some("event-horizon-blocked")
+    );
+
+    shutdown_tx.send(true).expect("shutdown signal sends");
+    handle.await.expect("poller task joins");
+}
+
+struct HorizonBlockedStorage {
+    current: AtomicU64,
+    rows: Mutex<VecDeque<(u64, RequestEvent)>>,
+    query_count: AtomicU64,
+    first_empty_query: tokio::sync::Notify,
+}
+
+impl HorizonBlockedStorage {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            current: AtomicU64::new(1),
+            rows: Mutex::new(VecDeque::new()),
+            query_count: AtomicU64::new(0),
+            first_empty_query: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn make_cursor_visible(&self, event: RequestEvent) {
+        self.rows
+            .lock()
+            .expect("horizon-blocked rows lock")
+            .push_back((1, event));
+    }
+}
+
+#[async_trait]
+impl RequestEventStore for HorizonBlockedStorage {
+    async fn append_request_event(&self, _event: &RequestEvent) -> StorageResult<u64> {
+        unreachable!("horizon-blocked storage is read-only for this test")
+    }
+
+    async fn query_request_events(
+        &self,
+        _since: u64,
+        _until: u64,
+        _limit: usize,
+    ) -> StorageResult<Vec<RequestEvent>> {
+        unreachable!("horizon-blocked storage does not support timestamp queries")
+    }
+
+    async fn current_request_event_cursor(&self) -> StorageResult<u64> {
+        Ok(self.current.load(Ordering::SeqCst))
+    }
+
+    async fn query_request_events_between_cursors(
+        &self,
+        after: u64,
+        until: u64,
+        limit: usize,
+        _filters: &RequestEventStreamFilters,
+    ) -> StorageResult<Vec<(u64, RequestEvent)>> {
+        let count = self.query_count.fetch_add(1, Ordering::SeqCst);
+        if count == 0 {
+            self.first_empty_query.notify_one();
+            return Ok(Vec::new());
+        }
+
+        let rows = self
+            .rows
+            .lock()
+            .expect("horizon-blocked rows lock")
+            .iter()
+            .filter(|(cursor, _)| *cursor > after && *cursor <= until)
+            .take(limit)
+            .cloned()
+            .collect();
+        Ok(rows)
+    }
 }

@@ -676,12 +676,29 @@ async fn raw_http(
     }
     request.push_str("\r\n");
 
-    let mut stream = TcpStream::connect((host, port)).await?;
-    stream.write_all(request.as_bytes()).await?;
-    stream.write_all(body).await?;
+    let stream = TcpStream::connect((host, port)).await?;
+    let (mut reader, mut writer) = stream.into_split();
+    writer.write_all(request.as_bytes()).await?;
     let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await?;
-    parse_raw_response(&bytes)
+    let (write_result, read_result) =
+        tokio::join!(writer.write_all(body), reader.read_to_end(&mut bytes),);
+    read_result?;
+    let response = parse_raw_response(&bytes)?;
+
+    match write_result {
+        Ok(()) => Ok(response),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            ) =>
+        {
+            Ok(response)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn parse_raw_response(bytes: &[u8]) -> std::io::Result<TestResponse> {
@@ -807,7 +824,7 @@ async fn wait_for_price_catalog() -> Result<(), Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if global_catalog()
-            .lookup(MODEL, Some(PricingUpstreamKind::AnthropicKey))
+            .lookup(MODEL, Some(PricingUpstreamKind::AnthropicKey), None)
             .is_some()
         {
             return Ok(());
@@ -827,14 +844,18 @@ fn seed_price_catalog() {
             model: MODEL.to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(3),
             output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+            by_tier: Default::default(),
         },
     );
     global_catalog().install_snapshot(CatalogSnapshot {
+        payload_hash: "test-fixture-hash".to_owned(),
         fetched_at_ms: now_secs() * 1000,
         models,
         raw_json: serde_json::to_vec(&price_catalog_fixture()).expect("price fixture serializes"),
         cache_creation_per_million_usd: std::collections::HashMap::new(),
         cache_read_per_million_usd: std::collections::HashMap::new(),
+        cache_creation_per_million_usd_by_tier: std::collections::HashMap::new(),
+        cache_read_per_million_usd_by_tier: std::collections::HashMap::new(),
         status: CatalogStatus::Ok,
     });
 }

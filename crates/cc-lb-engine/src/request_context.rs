@@ -19,6 +19,8 @@ pub struct RequestContext {
     /// all requests belonging to the same conversation land on the same
     /// upstream and reuse the Anthropic prompt cache.
     pub thread_id: Option<String>,
+    /// Raw service tier requested in the downstream request body.
+    pub requested_service_tier: Option<String>,
     /// Downstream request headers after hop-by-hop stripping.
     pub downstream_headers: HeaderMap,
     /// Downstream HTTP method.
@@ -61,6 +63,7 @@ impl RequestContext {
         RoutingContext {
             request_id: self.request_id.clone(),
             thread_id: self.thread_id.clone(),
+            requested_service_tier: self.requested_service_tier.clone(),
             downstream_headers: self.downstream_headers.clone(),
             method: self.method.clone(),
             path: self.path.clone(),
@@ -76,6 +79,7 @@ impl RequestContext {
 pub struct ParsedRequestBuilder {
     request_id: String,
     thread_id: Option<String>,
+    requested_service_tier: Option<String>,
     downstream_headers: HeaderMap,
     method: Method,
     path: String,
@@ -92,6 +96,7 @@ impl ParsedRequestBuilder {
         Self {
             request_id: String::new(),
             thread_id: None,
+            requested_service_tier: None,
             downstream_headers: HeaderMap::new(),
             method: Method::GET,
             path: String::new(),
@@ -112,6 +117,12 @@ impl ParsedRequestBuilder {
     /// Sets the optional conversation identifier.
     pub fn thread_id(mut self, thread_id: Option<String>) -> Self {
         self.thread_id = thread_id;
+        self
+    }
+
+    /// Sets the raw service tier requested in the downstream body.
+    pub fn requested_service_tier(mut self, requested_service_tier: Option<String>) -> Self {
+        self.requested_service_tier = requested_service_tier;
         self
     }
 
@@ -168,6 +179,7 @@ impl ParsedRequestBuilder {
         RequestContext {
             request_id: self.request_id,
             thread_id: self.thread_id,
+            requested_service_tier: self.requested_service_tier,
             downstream_headers: self.downstream_headers,
             method: self.method,
             path: self.path,

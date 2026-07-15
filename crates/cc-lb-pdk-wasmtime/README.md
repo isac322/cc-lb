@@ -29,7 +29,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 cc-lb-pdk-wasmtime = "0.1"
-cc-lb-plugin-wire = "0.2"
+cc-lb-plugin-wire = "0.6"
 ```
 
 Do not declare another global allocator in the same plugin unless you intend to
@@ -76,6 +76,23 @@ mod accept_all {
     pub fn filter(_req: FilterRequest) -> FilterResponse {
         FilterResponse { results: Box::from([]) }
     }
+}
+```
+
+Filter handlers receive the requested service tier on the V1 request:
+
+```rust
+use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse};
+
+#[handler(
+    filter,
+    wire = 1,
+    description = "Uses the requested service tier.",
+    usage = "Attach to tier-aware filter chains.",
+)]
+pub fn filter(request: FilterRequest) -> FilterResponse {
+    let _ = request.service_tier;
+    FilterResponse { results: Box::from([]) }
 }
 ```
 

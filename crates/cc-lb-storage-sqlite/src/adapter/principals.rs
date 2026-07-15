@@ -348,29 +348,11 @@ async fn cascade_plugin_chains_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     principal_id: Uuid,
 ) -> StorageResult<()> {
-    let shas = sqlx::query_scalar::<_, Vec<u8>>(
-        "SELECT DISTINCT wasm_registry_v2.sha256 FROM plugin_chains_v2 JOIN wasm_registry_v2 ON wasm_registry_v2.id = plugin_chains_v2.wasm_registry_id WHERE plugin_chains_v2.principal_id = ?",
-    )
-    .bind(principal_id.to_string())
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(map_sqlx_error)?;
-
     sqlx::query("DELETE FROM plugin_chains_v2 WHERE principal_id = ?")
         .bind(principal_id.to_string())
         .execute(&mut **tx)
         .await
         .map_err(map_sqlite_error)?;
-
-    for sha in shas {
-        sqlx::query(
-            "UPDATE wasm_blobs_v2 SET refcount = (SELECT COUNT(1) FROM plugin_chains_v2 JOIN wasm_registry_v2 ON wasm_registry_v2.id = plugin_chains_v2.wasm_registry_id WHERE wasm_registry_v2.sha256 = wasm_blobs_v2.sha256) WHERE sha256 = ?",
-        )
-        .bind(sha.as_slice())
-        .execute(&mut **tx)
-        .await
-        .map_err(map_sqlx_error)?;
-    }
     Ok(())
 }
 

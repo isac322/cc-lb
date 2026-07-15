@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/all.rs"
 
 [dependencies]
 arc-swap.workspace = true
@@ -47,6 +52,9 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
+
+[features]
+capture = []
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

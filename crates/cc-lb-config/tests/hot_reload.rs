@@ -1,5 +1,3 @@
-mod common;
-
 use std::fs;
 use std::time::{Duration, Instant};
 
@@ -9,7 +7,7 @@ use tokio::time::timeout;
 
 #[tokio::test(flavor = "current_thread")]
 async fn hot_reload_sends_valid_changes_and_skips_invalid_configs() {
-    let (_dir, path) = common::temp_config(
+    let (_dir, path) = crate::common::temp_config(
         r#"[listener]
 proxy_addr = "[::]:8080"
 "#,

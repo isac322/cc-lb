@@ -13,8 +13,8 @@ use http::{HeaderMap, Method};
 use url::Url;
 use uuid::Uuid;
 
-mod common;
-mod prompt_cache_routing_support;
+use crate::common;
+use crate::prompt_cache_routing_support;
 
 use common::{TestAuthn, TestRouter, TestState};
 use prompt_cache_routing_support::{
@@ -212,6 +212,7 @@ fn ctx(
     RoutingContext {
         request_id: "req-1".to_owned(),
         thread_id: Some(thread_id.to_owned()),
+        requested_service_tier: None,
         downstream_headers: HeaderMap::new(),
         method: Method::POST,
         path: "/v1/messages".to_owned(),

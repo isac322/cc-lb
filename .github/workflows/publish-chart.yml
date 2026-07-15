@@ -1,0 +1,81 @@
+name: publish-chart
+
+on:
+  release:
+    types: [published]
+  workflow_call:
+    inputs:
+      version:
+        description: 'Semver to publish, without a leading v (e.g. 1.2.3 or 1.2.3-rc.1)'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Semver to publish, without a leading v (e.g. 1.2.3 or 1.2.3-rc.1)'
+        required: true
+        type: string
+
+concurrency:
+  group: publish-chart-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  publish:
+    name: package & push chart
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      CHART: deploy/helm/cc-lb
+      LINT_MASTER_KEY: ci-lint-placeholder
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Determine version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${RELEASE_TAG#v}"
+          else
+            VERSION="$INPUT_VERSION"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Validate version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$VERSION' is not valid semver (expected X.Y.Z[-prerelease][+build])"
+            exit 1
+          fi
+
+      - uses: azure/setup-helm@v5.0.1
+        with:
+          version: v3.16.4
+
+      - name: Helm lint
+        run: helm lint "$CHART" --set secrets.masterKey="$LINT_MASTER_KEY"
+
+      - name: Log in to ghcr.io
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GITHUB_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Package chart
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: helm package "$CHART" --version "$VERSION" --app-version "$VERSION" --destination .
+
+      - name: Push chart
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: helm push "cc-lb-${VERSION}.tgz" oci://ghcr.io/isac322/charts

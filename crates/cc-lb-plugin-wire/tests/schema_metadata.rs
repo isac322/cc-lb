@@ -1,7 +1,7 @@
 use cc_lb_plugin_wire::{HookKind, WireVersion, schema};
 
 #[test]
-fn root_schema_exports_describe_v1_hooks() {
+fn root_schema_exports_describe_supported_hooks() {
     assert_eq!(WireVersion::V1.as_u8(), 1);
     assert_eq!(WireVersion::from_u8(1), Some(WireVersion::V1));
     assert_eq!(WireVersion::from_u8(2), None);
@@ -33,6 +33,7 @@ fn root_schema_exports_describe_v1_hooks() {
         WireVersion::V1
     ));
     assert!(schema::host_supports(HookKind::Observe, WireVersion::V1));
+    assert!(schema::host_supports(HookKind::Filter, WireVersion::V1));
 }
 
 #[cfg(feature = "std")]

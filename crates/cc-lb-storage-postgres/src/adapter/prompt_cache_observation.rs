@@ -10,6 +10,13 @@ use crate::{
     error_map::map_sqlx_error,
 };
 
+/// Bounds how many rows one purge DELETE removes so a large expired backlog cannot
+/// hold a long row-lock / WAL burst that stalls request-path writers.
+const PURGE_BATCH_SIZE: i64 = 1_000;
+// Bound work per call so a continuous influx of already-expired rows cannot pin
+// the purge in an unbounded loop; the scheduler re-runs the job to finish later.
+const PURGE_MAX_BATCHES: usize = 1_024;
+
 #[async_trait]
 impl PromptCacheObservationStore for PostgresStorage {
     async fn upsert_observation(&self, record: &PromptCacheObservationRecord) -> StorageResult<()> {
@@ -99,15 +106,42 @@ impl PromptCacheObservationStore for PostgresStorage {
     }
 
     async fn purge_expired_before(&self, ts_unix_secs: u64) -> StorageResult<u64> {
-        let result = sqlx::query("DELETE FROM prompt_cache_observations WHERE expires_at < $1")
-            .bind(u64_to_i64(
-                ts_unix_secs,
-                "prompt cache purge cutoff unix secs",
-            )?)
-            .execute(&self.pool)
+        let cutoff = u64_to_i64(ts_unix_secs, "prompt cache purge cutoff unix secs")?;
+        let mut total_removed = 0u64;
+        for _ in 0..PURGE_MAX_BATCHES {
+            // Break on how many expired rows were found, not how many were
+            // removed. A concurrent upsert can bump expires_at on a selected
+            // ctid so the outer predicate skips it; keying the break on the
+            // removed count could stop while other expired rows still remain.
+            let row = sqlx::query(
+                "WITH candidates AS MATERIALIZED ( \
+                     SELECT ctid FROM prompt_cache_observations \
+                     WHERE expires_at < $1 LIMIT $2 \
+                 ), deleted AS ( \
+                     DELETE FROM prompt_cache_observations \
+                     WHERE ctid IN (SELECT ctid FROM candidates) AND expires_at < $1 \
+                     RETURNING 1 \
+                 ) \
+                 SELECT \
+                     (SELECT count(*) FROM candidates) AS candidate_count, \
+                     (SELECT count(*) FROM deleted) AS deleted_count",
+            )
+            .bind(cutoff)
+            .bind(PURGE_BATCH_SIZE)
+            .fetch_one(&self.pool)
             .await
             .map_err(map_sqlx_error)?;
-        Ok(result.rows_affected())
+            let candidate_count: i64 = row.try_get("candidate_count").map_err(map_sqlx_error)?;
+            let deleted_count: i64 = row.try_get("deleted_count").map_err(map_sqlx_error)?;
+            total_removed = total_removed.saturating_add(i64_to_u64(
+                deleted_count,
+                "prompt cache purge deleted count",
+            )?);
+            if candidate_count < PURGE_BATCH_SIZE {
+                break;
+            }
+        }
+        Ok(total_removed)
     }
 
     async fn count(&self) -> StorageResult<u64> {

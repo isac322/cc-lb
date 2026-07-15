@@ -15,8 +15,10 @@ use cc_lb_control::{AuditEntry, AuditPayload};
 use cc_lb_plugin_wire::schema::HookKind;
 use cc_lb_runtime_wasmtime::{ModuleInspection, WasmtimeRuntime, WasmtimeRuntimeError};
 use cc_lb_storage_api::{
-    MAX_WASM_BLOB_BYTES, PluginSlotKind, StorageError, WasmBlob, WasmRegistryEntryInput,
+    MAX_WASM_BLOB_BYTES, PluginSlotKind, StorageError, WasmBlob, WasmRegistryEntry,
+    WasmRegistryEntryInput,
 };
+use semver::Version;
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -44,8 +46,19 @@ struct UploadResponse {
     id: Uuid,
     size_bytes: u64,
     original_filename: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
     revision: u64,
     idempotent: bool,
+    action: UploadAction,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum UploadAction {
+    Created,
+    Noop,
+    Replaced,
 }
 
 #[derive(Default)]
@@ -54,6 +67,9 @@ struct UploadParts {
     name: Option<String>,
     original_filename: Option<String>,
     slot_kind: Option<String>,
+    confirm_replacement: bool,
+    replace_registry_id: Option<Uuid>,
+    expected_revision: Option<u64>,
 }
 
 const SLOT_KIND_NAMES: &str = "filter|shape|observe";
@@ -147,21 +163,6 @@ async fn upload_wasm_inner(
         ))
     })?;
     let parts = read_upload_parts(multipart).await?;
-    let name = parts.name.ok_or_else(|| {
-        Box::new(json_error(
-            StatusCode::BAD_REQUEST,
-            "missing_part",
-            "missing multipart part: name",
-        ))
-    })?;
-    let original_filename = parts.original_filename.ok_or_else(|| {
-        Box::new(json_error(
-            StatusCode::BAD_REQUEST,
-            "missing_part",
-            "missing multipart part: original_filename",
-        ))
-    })?;
-    validate_original_filename(&original_filename).map_err(Box::new)?;
     let bytes = parts.bytes.ok_or_else(|| {
         Box::new(json_error(
             StatusCode::BAD_REQUEST,
@@ -170,17 +171,34 @@ async fn upload_wasm_inner(
         ))
     })?;
     validate_wasm_bytes(&bytes).map_err(Box::new)?;
-    let slot_kind_str = parts.slot_kind.ok_or_else(|| {
-        Box::new(json_error(
-            StatusCode::BAD_REQUEST,
-            "missing_part",
-            format!("missing multipart part: slot_kind (must be one of {SLOT_KIND_NAMES})"),
-        ))
-    })?;
-    let (hook_kind, _) = parse_slot_kind(&slot_kind_str).map_err(Box::new)?;
-    let inspection = inspect_with_wasmtime(state, &bytes, hook_kind).await?;
+    let legacy_slot = parts
+        .slot_kind
+        .as_deref()
+        .map(parse_slot_kind)
+        .transpose()
+        .map_err(Box::new)?
+        .map(|(_, slot)| slot);
+    let inspection = inspect_with_wasmtime(state, &bytes).await?;
+    let declared_slots = supported_slots_from_inspection(&inspection);
+    if let Some(slot) = legacy_slot
+        && !declared_slots.contains(&slot)
+    {
+        return Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "unsupported_slot",
+                    "plugin_name": inspection.metadata.name.as_str(),
+                    "slot": slot.as_str(),
+                })),
+            )
+                .into_response(),
+        ));
+    }
     let inspected_schema_hash = inspection.primary_schema_hash();
-    if inspection.metadata.name != name {
+    if let Some(name) = &parts.name
+        && inspection.metadata.name != *name
+    {
         return Err(Box::new(json_error(
             StatusCode::BAD_REQUEST,
             "identity_mismatch",
@@ -190,6 +208,13 @@ async fn upload_wasm_inner(
             ),
         )));
     }
+    let registry_name = inspection.metadata.name.clone();
+    let original_filename = parts
+        .original_filename
+        .as_deref()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("{registry_name}.wasm"));
+    validate_original_filename(&original_filename).map_err(Box::new)?;
 
     let sha256 = tokio::task::spawn_blocking({
         let bytes = bytes.clone();
@@ -205,12 +230,11 @@ async fn upload_wasm_inner(
         ))
     })?;
     let sha256_hex = hex_sha256(sha256);
-    let existing = storage
-        .get_registry_entry_by_sha(sha256)
+    let existing_by_name = storage
+        .get_registry_entry_by_name(&registry_name)
         .await
         .map_err(|error| Box::new(storage_response(error)))?;
-    let declared_slots = supported_slots_from_inspection(&inspection);
-    let supported_slots = match &existing {
+    let supported_slots = match &existing_by_name {
         Some(entry) if !entry.supported_slots.is_empty() => entry.supported_slots.clone(),
         _ => declared_slots,
     };
@@ -224,7 +248,8 @@ async fn upload_wasm_inner(
     };
     let entry_input = WasmRegistryEntryInput {
         schema_hash: Some(inspected_schema_hash),
-        name,
+        name: registry_name.clone(),
+        version: Some(inspection.metadata.version.clone()),
         original_filename: original_filename.clone(),
         label: None,
         uploaded_at_unix_secs,
@@ -234,34 +259,94 @@ async fn upload_wasm_inner(
         hook_metadata: inspection.metadata.hooks.clone(),
         supported_slots: supported_slots.clone(),
     };
-    let (mut entry, existed) = storage
-        .persist_wasm_upload(blob, entry_input)
-        .await
-        .map_err(storage_response)?;
-    if existed && entry.supported_slots.is_empty() && !supported_slots.is_empty() {
+
+    let (mut entry, status, action, idempotent, old_sha256_hex) = match existing_by_name {
+        Some(existing) if existing.sha256 == sha256 => {
+            materialize_cache(state, &sha256_hex, &bytes)
+                .await
+                .map_err(cache_materialization_response(&sha256_hex))?;
+            (existing, StatusCode::OK, UploadAction::Noop, true, None)
+        }
+        Some(existing) => {
+            let replacement = decide_replacement(&existing.version, &inspection.metadata.version);
+            if !parts.confirm_replacement && !replacement.is_auto_allowed {
+                return Err(Box::new(replacement_confirmation_required(
+                    &existing,
+                    &sha256_hex,
+                    &inspection.metadata.version,
+                )));
+            }
+            if parts.confirm_replacement {
+                validate_replacement_confirmation(
+                    parts.replace_registry_id,
+                    parts.expected_revision,
+                    &existing,
+                )?;
+            }
+            let old_sha256_hex = hex_sha256(existing.sha256);
+            let expected_revision = parts.expected_revision.unwrap_or(existing.revision);
+            materialize_cache(state, &sha256_hex, &bytes)
+                .await
+                .map_err(cache_materialization_response(&sha256_hex))?;
+            let entry = storage
+                .replace_wasm_entry(blob, entry_input, expected_revision)
+                .await
+                .map_err(storage_response)?;
+            (
+                entry,
+                StatusCode::OK,
+                UploadAction::Replaced,
+                false,
+                Some(old_sha256_hex),
+            )
+        }
+        None => {
+            let same_sha_entry = storage
+                .get_registry_entry_by_sha(sha256)
+                .await
+                .map_err(|error| Box::new(storage_response(error)))?;
+            if let Some(entry) = same_sha_entry {
+                return Err(Box::new(json_error(
+                    StatusCode::CONFLICT,
+                    "wasm_upload_conflict",
+                    format!(
+                        "wasm sha already belongs to registry entry `{}` ({})",
+                        entry.name, entry.id
+                    ),
+                )));
+            }
+            materialize_cache(state, &sha256_hex, &bytes)
+                .await
+                .map_err(cache_materialization_response(&sha256_hex))?;
+            let (entry, existed) = storage
+                .persist_wasm_upload(blob, entry_input)
+                .await
+                .map_err(storage_response)?;
+            let status = if existed {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            };
+            let action = if existed {
+                UploadAction::Noop
+            } else {
+                UploadAction::Created
+            };
+            (entry, status, action, existed, None)
+        }
+    };
+
+    if idempotent && entry.supported_slots.is_empty() && !supported_slots.is_empty() {
         storage
             .update_supported_slots(entry.id, supported_slots.clone())
             .await
             .map_err(|error| Box::new(storage_response(error)))?;
         entry.supported_slots = supported_slots;
     }
-    materialize_cache(state, &sha256_hex, &bytes)
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, sha256 = %sha256_hex, "wasm cache materialization failed");
-            Box::new(json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cache_materialization_failed",
-                "failed to write wasm cache file",
-            ))
-        })?;
+    if let Some(old_sha256_hex) = old_sha256_hex {
+        remove_cache_file(state, &old_sha256_hex).await;
+    }
     enqueue_upload_audit(state, &sha256_hex, bytes.len() as u64, &original_filename);
-    let idempotent = existed;
-    let status = if idempotent {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
     Ok((
         status,
         UploadResponse {
@@ -269,8 +354,10 @@ async fn upload_wasm_inner(
             id: entry.id,
             size_bytes: bytes.len() as u64,
             original_filename: entry.original_filename,
+            version: entry.version,
             revision: entry.revision,
             idempotent,
+            action,
         },
     ))
 }
@@ -327,10 +414,72 @@ async fn read_upload_parts(mut multipart: Multipart) -> Result<UploadParts, Box<
                     ))
                 })?);
             }
+            "confirm_replacement" => {
+                let value = field.text().await.map_err(|error| {
+                    Box::new(json_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_multipart",
+                        error.to_string(),
+                    ))
+                })?;
+                parts.confirm_replacement = parse_bool_field("confirm_replacement", &value)?;
+            }
+            "replace_registry_id" => {
+                let value = field.text().await.map_err(|error| {
+                    Box::new(json_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_multipart",
+                        error.to_string(),
+                    ))
+                })?;
+                parts.replace_registry_id = Some(parse_uuid_field("replace_registry_id", &value)?);
+            }
+            "expected_revision" => {
+                let value = field.text().await.map_err(|error| {
+                    Box::new(json_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_multipart",
+                        error.to_string(),
+                    ))
+                })?;
+                parts.expected_revision = Some(parse_u64_field("expected_revision", &value)?);
+            }
             _ => {}
         }
     }
     Ok(parts)
+}
+
+fn parse_bool_field(name: &str, value: &str) -> Result<bool, Box<Response>> {
+    match value {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        _ => Err(Box::new(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_multipart",
+            format!("{name} must be true or false"),
+        ))),
+    }
+}
+
+fn parse_uuid_field(name: &str, value: &str) -> Result<Uuid, Box<Response>> {
+    Uuid::parse_str(value).map_err(|error| {
+        Box::new(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_multipart",
+            format!("{name} must be a UUID: {error}"),
+        ))
+    })
+}
+
+fn parse_u64_field(name: &str, value: &str) -> Result<u64, Box<Response>> {
+    value.parse::<u64>().map_err(|error| {
+        Box::new(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_multipart",
+            format!("{name} must be an unsigned integer: {error}"),
+        ))
+    })
 }
 
 fn multipart_error_response(error: axum::extract::multipart::MultipartError) -> Response {
@@ -345,6 +494,69 @@ fn multipart_error_response(error: axum::extract::multipart::MultipartError) -> 
         StatusCode::BAD_REQUEST
     };
     json_error(status, "invalid_multipart", reason)
+}
+
+struct ReplacementDecision {
+    is_auto_allowed: bool,
+}
+
+fn decide_replacement(current: &Option<String>, incoming: &str) -> ReplacementDecision {
+    let is_auto_allowed = current
+        .as_deref()
+        .and_then(|value| Version::parse(value).ok())
+        .zip(Version::parse(incoming).ok())
+        .is_some_and(|(current, incoming)| incoming > current);
+    ReplacementDecision { is_auto_allowed }
+}
+
+fn validate_replacement_confirmation(
+    replace_registry_id: Option<Uuid>,
+    expected_revision: Option<u64>,
+    existing: &WasmRegistryEntry,
+) -> Result<(), Box<Response>> {
+    let Some(replace_registry_id) = replace_registry_id else {
+        return Err(Box::new(json_error(
+            StatusCode::BAD_REQUEST,
+            "missing_part",
+            "missing multipart part: replace_registry_id",
+        )));
+    };
+    if replace_registry_id != existing.id {
+        return Err(Box::new(json_error(
+            StatusCode::CONFLICT,
+            "replacement_confirmation_mismatch",
+            "replace_registry_id does not match the current registry entry",
+        )));
+    }
+    if expected_revision.is_none() {
+        return Err(Box::new(json_error(
+            StatusCode::BAD_REQUEST,
+            "missing_part",
+            "missing multipart part: expected_revision",
+        )));
+    }
+    Ok(())
+}
+
+fn replacement_confirmation_required(
+    existing: &WasmRegistryEntry,
+    incoming_sha256_hex: &str,
+    incoming_version: &str,
+) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": "replacement_confirmation_required",
+            "name": existing.name,
+            "replace_registry_id": existing.id,
+            "expected_revision": existing.revision,
+            "current_version": existing.version,
+            "incoming_version": incoming_version,
+            "current_sha256_hex": hex_sha256(existing.sha256),
+            "incoming_sha256_hex": incoming_sha256_hex,
+        })),
+    )
+        .into_response()
 }
 
 async fn gc_wasm(State(state): State<AdminState>) -> Response {
@@ -452,13 +664,12 @@ fn parse_slot_kind(value: &str) -> Result<(HookKind, PluginSlotKind), Response> 
 async fn inspect_with_wasmtime(
     state: &AdminState,
     bytes: &[u8],
-    hook_kind: HookKind,
 ) -> Result<ModuleInspection, Box<Response>> {
     let bytes = bytes.to_vec();
     let runtime = state.runtime.clone();
     let inspection = tokio::task::spawn_blocking(move || match runtime {
-        Some(runtime) => runtime.admit_wasm(hook_kind, &bytes),
-        None => WasmtimeRuntime::with_defaults()?.admit_wasm(hook_kind, &bytes),
+        Some(runtime) => runtime.admit_wasm_agnostic(&bytes),
+        None => WasmtimeRuntime::with_defaults()?.admit_wasm_agnostic(&bytes),
     })
     .await
     .map_err(|error| {
@@ -533,6 +744,30 @@ async fn materialize_cache(state: &AdminState, sha256_hex: &str, bytes: &[u8]) -
         Err(error) => {
             let _ = tokio::fs::remove_file(&tmp).await;
             Err(error)
+        }
+    }
+}
+
+fn cache_materialization_response(
+    sha256_hex: &str,
+) -> impl FnOnce(io::Error) -> Box<Response> + '_ {
+    move |error| {
+        tracing::error!(%error, sha256 = %sha256_hex, "wasm cache materialization failed");
+        Box::new(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cache_materialization_failed",
+            "failed to write wasm cache file",
+        ))
+    }
+}
+
+async fn remove_cache_file(state: &AdminState, sha256_hex: &str) {
+    let cache_path = wasm_cache_path(state, sha256_hex);
+    match tokio::fs::remove_file(&cache_path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(%error, path = %cache_path.display(), "failed to remove wasm cache file")
         }
     }
 }

@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;

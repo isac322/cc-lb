@@ -6,8 +6,8 @@ use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_CACHE_AFFINITY_SHA256,
     PluginChainConflictReason, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
-    PluginSlotKind, PrincipalStore, StorageError, WasmBlob, WasmRegistryEntryInput,
-    default_wire_version,
+    PluginSlotKind, PrincipalStore, StorageError, UpstreamCreate, UpstreamStore,
+    UpstreamWarmupDialectPlugin, WasmBlob, WasmRegistryEntryInput, default_wire_version,
     principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind},
     sparse_order,
 };
@@ -25,7 +25,7 @@ const REFCOUNT_CONCURRENCY_OPS_PER_TASK: usize = 16;
 pub async fn run_all<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
-    B::Storage: PluginRegistryStore + PrincipalStore,
+    B::Storage: PluginRegistryStore + PrincipalStore + UpstreamStore,
 {
     with_conformance_fixture(backend, |storage| async move {
         run_all_on_storage(storage.as_ref()).await
@@ -35,7 +35,7 @@ where
 
 pub async fn run_all_on_storage<S>(storage: &S) -> Result<()>
 where
-    S: PluginRegistryStore + PrincipalStore + 'static,
+    S: PluginRegistryStore + PrincipalStore + UpstreamStore + 'static,
 {
     persist_wasm_upload_creates_blob_and_registry(storage).await?;
     persist_wasm_upload_idempotent_on_same_entry_input(storage).await?;
@@ -45,6 +45,13 @@ where
     get_blob_bytes_returns_persisted_blob(storage).await?;
     registry_list_paginates(storage).await?;
     get_registry_entry_by_sha_returns_entry(storage).await?;
+    get_registry_entry_by_name_returns_entry(storage).await?;
+    refcount_counts_chain_and_warmup_references_on_storage(storage).await?;
+    replace_wasm_entry_preserves_id_and_references_on_storage(storage).await?;
+    replace_wasm_entry_with_stale_revision_conflicts_on_storage(storage).await?;
+    list_registry_references_returns_chain_and_warmup_on_storage(storage).await?;
+    cascade_delete_registry_entry_removes_chain_warmup_and_blob_on_storage(storage).await?;
+    cascade_delete_registry_entry_rejects_changed_fingerprint_on_storage(storage).await?;
     registry_by_id_returns_seeded_builtin_cache_affinity_on_storage(storage).await?;
     insert_chain_entry_with_builtin_cache_affinity_succeeds_on_storage(storage).await?;
     registry_label_update_with_correct_revision_bumps_and_persists(storage).await?;
@@ -99,6 +106,47 @@ macro_rules! plugin_registry_scenario {
         }
     };
 }
+
+macro_rules! plugin_registry_upstream_scenario {
+    ($name:ident, $inner:ident) => {
+        pub async fn $name<B>(backend: Arc<B>) -> Result<()>
+        where
+            B: ConformanceBackend,
+            B::Storage: PluginRegistryStore + PrincipalStore + UpstreamStore,
+        {
+            with_conformance_fixture(
+                backend,
+                |storage| async move { $inner(storage.as_ref()).await },
+            )
+            .await
+        }
+    };
+}
+
+plugin_registry_upstream_scenario!(
+    refcount_counts_chain_and_warmup_references,
+    refcount_counts_chain_and_warmup_references_on_storage
+);
+plugin_registry_upstream_scenario!(
+    replace_wasm_entry_preserves_id_and_references,
+    replace_wasm_entry_preserves_id_and_references_on_storage
+);
+plugin_registry_upstream_scenario!(
+    replace_wasm_entry_with_stale_revision_conflicts,
+    replace_wasm_entry_with_stale_revision_conflicts_on_storage
+);
+plugin_registry_upstream_scenario!(
+    list_registry_references_returns_chain_and_warmup,
+    list_registry_references_returns_chain_and_warmup_on_storage
+);
+plugin_registry_upstream_scenario!(
+    cascade_delete_registry_entry_removes_chain_warmup_and_blob,
+    cascade_delete_registry_entry_removes_chain_warmup_and_blob_on_storage
+);
+plugin_registry_upstream_scenario!(
+    cascade_delete_registry_entry_rejects_changed_fingerprint,
+    cascade_delete_registry_entry_rejects_changed_fingerprint_on_storage
+);
 
 pub async fn registry_label_update_with_correct_revision_bumps_and_persists<
     S: PluginRegistryStore,
@@ -266,6 +314,268 @@ pub async fn get_registry_entry_by_sha_returns_entry<S: PluginRegistryStore>(
             .map(|entry| entry.id)
             == Some(created.id),
         "sha lookup works"
+    );
+    Ok(())
+}
+
+pub async fn get_registry_entry_by_name_returns_entry<S: PluginRegistryStore>(
+    storage: &S,
+) -> Result<()> {
+    let (created, _) = storage
+        .persist_wasm_upload(blob(52, b"name".to_vec()), entry("plugin-name"))
+        .await?;
+    let found = storage.get_registry_entry_by_name("plugin-name").await?;
+    ensure!(
+        found.map(|entry| entry.id) == Some(created.id),
+        "name lookup returns the registry entry"
+    );
+    Ok(())
+}
+
+async fn refcount_counts_chain_and_warmup_references_on_storage<
+    S: PluginRegistryStore + PrincipalStore + UpstreamStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let (principal, plugin) = principal_and_plugin(storage, 44, "plugin-live-refcount").await?;
+    storage
+        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
+        .await?;
+    UpstreamStore::create(
+        storage,
+        warmup_upstream("plugin-live-refcount-upstream", plugin.id),
+    )
+    .await?;
+
+    let entry = storage
+        .get_registry_entry_by_id(plugin.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("live refcount registry entry is present"))?;
+    ensure!(
+        entry.refcount == 2,
+        "chain and warmup references are counted"
+    );
+    Ok(())
+}
+
+async fn replace_wasm_entry_preserves_id_and_references_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let mut initial = entry("plugin-replace");
+    initial.label = Some("Operator label".to_owned());
+    let (created, _) = storage
+        .persist_wasm_upload(blob(45, b"replace-original".to_vec()), initial)
+        .await?;
+    let principal = PrincipalStore::create(storage, principal_create(45), BASE_TS + 45).await?;
+    let chain_entry = storage
+        .insert_chain_entry(chain(principal.id, created.id, sparse_order::STEP))
+        .await?;
+
+    let mut replacement = entry("plugin-replace");
+    replacement.version = Some("2.0.0".to_owned());
+    replacement.original_filename = "plugin-replace-v2.wasm".to_owned();
+    replacement.label = Some("Ignored replacement label".to_owned());
+    replacement.description = "replacement description".to_owned();
+    replacement.usage = "replacement usage".to_owned();
+    replacement.uploaded_at_unix_secs += 1;
+    let updated = storage
+        .replace_wasm_entry(
+            blob(46, b"replace-updated".to_vec()),
+            replacement,
+            created.revision,
+        )
+        .await?;
+
+    ensure!(
+        updated.id == created.id,
+        "replacement preserves registry id"
+    );
+    ensure!(updated.sha256 == [46; 32], "replacement updates sha");
+    ensure!(
+        updated.version.as_deref() == Some("2.0.0"),
+        "replacement updates version"
+    );
+    ensure!(
+        updated.label.as_deref() == Some("Operator label"),
+        "replacement preserves operator label"
+    );
+    ensure!(updated.refcount == 1, "replacement preserves references");
+    ensure!(
+        storage
+            .list_chain_for_principal(principal.id, PluginSlotKind::Router)
+            .await?
+            .into_iter()
+            .any(|entry| entry.id == chain_entry.id && entry.wasm_registry_id == created.id),
+        "chain retains stable registry id"
+    );
+    ensure!(
+        storage.get_blob(created.sha256).await?.is_none(),
+        "unreferenced replacement blob is removed"
+    );
+    Ok(())
+}
+
+async fn replace_wasm_entry_with_stale_revision_conflicts_on_storage<S: PluginRegistryStore>(
+    storage: &S,
+) -> Result<()> {
+    let (created, _) = storage
+        .persist_wasm_upload(
+            blob(47, b"replace-stale".to_vec()),
+            entry("plugin-replace-stale"),
+        )
+        .await?;
+    let err = storage
+        .replace_wasm_entry(
+            blob(48, b"replace-stale-update".to_vec()),
+            entry("plugin-replace-stale"),
+            created.revision + 1,
+        )
+        .await
+        .expect_err("stale replacement revision conflicts");
+    ensure!(
+        matches!(err, StorageError::StalePluginRegistryRevision { .. }),
+        "stale replacement returns typed registry conflict"
+    );
+    Ok(())
+}
+
+async fn list_registry_references_returns_chain_and_warmup_on_storage<
+    S: PluginRegistryStore + PrincipalStore + UpstreamStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let (principal, plugin) = principal_and_plugin(storage, 49, "plugin-reference-list").await?;
+    let chain_entry = storage
+        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
+        .await?;
+    let upstream = UpstreamStore::create(
+        storage,
+        warmup_upstream("plugin-reference-list-upstream", plugin.id),
+    )
+    .await?;
+
+    let references = storage.list_registry_references(plugin.id).await?;
+    ensure!(
+        references.references.len() == 2,
+        "all references are listed"
+    );
+    ensure!(
+        references.references.iter().any(|reference| matches!(
+            reference,
+            cc_lb_storage_api::WasmRegistryReference::PluginChain {
+                chain_entry_id,
+                principal_id,
+                principal_name,
+                revision,
+                ..
+            } if *chain_entry_id == chain_entry.id
+                && *principal_id == principal
+                && principal_name == "plugin-principal-0049"
+                && *revision == chain_entry.revision
+        )),
+        "chain reference includes ids, name, and revision"
+    );
+    ensure!(
+        references.references.iter().any(|reference| matches!(
+            reference,
+            cc_lb_storage_api::WasmRegistryReference::UpstreamWarmupDialect {
+                upstream_id,
+                upstream_name,
+                revision,
+            } if *upstream_id == upstream.id
+                && upstream_name == "plugin-reference-list-upstream"
+                && *revision == upstream.revision
+        )),
+        "warmup reference includes id, name, and revision"
+    );
+    Ok(())
+}
+
+async fn cascade_delete_registry_entry_removes_chain_warmup_and_blob_on_storage<
+    S: PluginRegistryStore + PrincipalStore + UpstreamStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let (principal, plugin) = principal_and_plugin(storage, 50, "plugin-cascade-delete").await?;
+    storage
+        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
+        .await?;
+    let upstream = UpstreamStore::create(
+        storage,
+        warmup_upstream("plugin-cascade-delete-upstream", plugin.id),
+    )
+    .await?;
+    let references = storage.list_registry_references(plugin.id).await?;
+    let deleted = storage
+        .cascade_delete_registry_entry(plugin.id, plugin.revision, references.fingerprint)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("cascade delete returns registry entry"))?;
+
+    ensure!(
+        deleted.entry.id == plugin.id,
+        "cascade returns deleted entry"
+    );
+    ensure!(deleted.references.len() == 2, "cascade returns references");
+    ensure!(
+        storage
+            .list_chain_for_principal(principal, PluginSlotKind::Router)
+            .await?
+            .is_empty(),
+        "cascade removes chain references"
+    );
+    let updated_upstream = UpstreamStore::get_by_id(storage, upstream.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("cascade upstream remains present"))?;
+    ensure!(
+        updated_upstream.warmup_dialect_plugin.is_none(),
+        "cascade clears warmup reference"
+    );
+    ensure!(
+        updated_upstream.revision == upstream.revision + 1,
+        "cascade bumps upstream revision"
+    );
+    ensure!(
+        storage.get_registry_entry_by_id(plugin.id).await?.is_none(),
+        "cascade removes registry row"
+    );
+    ensure!(
+        storage.get_blob(plugin.sha256).await?.is_none(),
+        "cascade removes orphaned blob"
+    );
+    Ok(())
+}
+
+async fn cascade_delete_registry_entry_rejects_changed_fingerprint_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let (principal, plugin) = principal_and_plugin(storage, 51, "plugin-cascade-stale").await?;
+    let references = storage.list_registry_references(plugin.id).await?;
+    let chain_entry = storage
+        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
+        .await?;
+    let err = storage
+        .cascade_delete_registry_entry(plugin.id, plugin.revision, references.fingerprint)
+        .await
+        .expect_err("changed references block cascade delete");
+    ensure!(
+        matches!(err, StorageError::StalePluginRegistryReferences),
+        "changed reference fingerprint returns typed conflict"
+    );
+    ensure!(
+        storage.get_registry_entry_by_id(plugin.id).await?.is_some(),
+        "stale cascade leaves registry row"
+    );
+    ensure!(
+        storage
+            .list_chain_for_principal(principal, PluginSlotKind::Router)
+            .await?
+            .into_iter()
+            .any(|entry| entry.id == chain_entry.id),
+        "stale cascade leaves references"
     );
     Ok(())
 }
@@ -1484,7 +1794,7 @@ async fn insert_orphan_blob_if_exposed<S: PluginRegistryStore + 'static>(
         if let Some(postgres) = (storage as &dyn std::any::Any)
             .downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
         {
-            sqlx::query("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, refcount, created_at) VALUES ($1, $2, $3, NOW(), 0, NOW()) ON CONFLICT (sha256) DO NOTHING")
+            sqlx::query("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, created_at) VALUES ($1, $2, $3, NOW(), NOW()) ON CONFLICT (sha256) DO NOTHING")
                 .bind(blob.sha256.as_slice())
                 .bind(blob.bytes.as_slice())
                 .bind(i64::try_from(blob.size_bytes)?)
@@ -1602,6 +1912,7 @@ fn entry(name: &str) -> WasmRegistryEntryInput {
     WasmRegistryEntryInput {
         schema_hash: None,
         name: name.to_owned(),
+        version: None,
         original_filename: format!("{name}.wasm"),
         label: None,
         uploaded_at_unix_secs: 1_800_000_100,
@@ -1637,6 +1948,20 @@ fn chain_with_slot(
         sse_per_event: false,
         batched_events_per_flush: 1,
         batched_flush_ms: 100,
+    }
+}
+
+fn warmup_upstream(name: &str, wasm_registry_id: Uuid) -> UpstreamCreate {
+    UpstreamCreate {
+        name: name.to_owned(),
+        kind: cc_lb_storage_api::upstream::UpstreamKind::AnthropicApiKey,
+        warmup_enabled: true,
+        warmup_dialect_plugin: Some(UpstreamWarmupDialectPlugin {
+            wasm_registry_id,
+            config: json!({}),
+            wire_version: None,
+        }),
+        ..Default::default()
     }
 }
 

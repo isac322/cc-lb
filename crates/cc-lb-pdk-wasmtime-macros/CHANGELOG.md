@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- add service-tier pricing and filter wire v2 ([#455](https://github.com/isac322/cc-lb/pull/455))
+- add service-tier pricing support ([#455](https://github.com/isac322/cc-lb/pull/455))
 
 ### Other
 

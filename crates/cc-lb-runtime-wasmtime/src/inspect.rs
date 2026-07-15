@@ -61,10 +61,28 @@ impl ModuleInspection {
     }
 }
 
+enum InspectionScope {
+    Slot(HookKind),
+    DeclaredHooks,
+}
+
 /// Walk `wasm` bytes once, enforcing the structural invariants in the
 /// module docs. The check is purely structural and never executes guest
 /// code.
 pub fn inspect_wasm(kind: HookKind, wasm: &[u8]) -> Result<ModuleInspection, WasmtimeRuntimeError> {
+    inspect_wasm_with_scope(InspectionScope::Slot(kind), wasm)
+}
+
+/// Inspect an artifact against every metadata-declared hook contract without
+/// selecting a runtime slot.
+pub fn inspect_wasm_agnostic(wasm: &[u8]) -> Result<ModuleInspection, WasmtimeRuntimeError> {
+    inspect_wasm_with_scope(InspectionScope::DeclaredHooks, wasm)
+}
+
+fn inspect_wasm_with_scope(
+    scope: InspectionScope,
+    wasm: &[u8],
+) -> Result<ModuleInspection, WasmtimeRuntimeError> {
     let mut observed_sections: HashMap<String, [u8; 32]> = HashMap::new();
     let mut plugin_metadata: Option<Vec<u8>> = None;
     let mut found_func_exports: HashSet<String> = HashSet::new();
@@ -146,7 +164,12 @@ pub fn inspect_wasm(kind: HookKind, wasm: &[u8]) -> Result<ModuleInspection, Was
     })?;
 
     reject_non_response_noop_modes(&metadata)?;
-    require_hooks_for_slot(kind, &metadata, &metadata_json)?;
+    match scope {
+        InspectionScope::Slot(kind) => require_hooks_for_slot(kind, &metadata, &metadata_json)?,
+        InspectionScope::DeclaredHooks => {
+            require_declared_hook_contracts(&metadata, &metadata_json)?
+        }
+    }
 
     if !found_memory_export {
         return Err(WasmtimeRuntimeError::ModuleRejected {
@@ -206,7 +229,15 @@ pub fn inspect_wasm(kind: HookKind, wasm: &[u8]) -> Result<ModuleInspection, Was
                     hook.as_str()
                 ),
             })?;
-        let expected = expected_fingerprint(hook, wire_version);
+        let expected = expected_fingerprint(hook, wire_version).ok_or_else(|| {
+            WasmtimeRuntimeError::ModuleRejected {
+                reason: format!(
+                    "host has no schema for hook `{}` wire version {}",
+                    hook.as_str(),
+                    wire_version.as_u8()
+                ),
+            }
+        })?;
         if observed != expected {
             return Err(WasmtimeRuntimeError::ModuleRejected {
                 reason: format!(
@@ -233,27 +264,53 @@ fn require_hooks_for_slot(
     metadata_json: &serde_json::Value,
 ) -> Result<(), WasmtimeRuntimeError> {
     match kind {
-        HookKind::Shape => {
-            for hook in SHAPE_OWNED_HOOKS {
-                require_declared_hook(metadata, hook, "shape plugin")?;
-            }
-            for hook in [HookKind::TransformResponse, HookKind::TransformSseEvent] {
-                if !hook_mode_declared(metadata_json, hook) {
-                    return Err(WasmtimeRuntimeError::ModuleRejected {
-                        reason: format!(
-                            "shape plugin hook `{}` must explicitly declare mode `active` or `noop`",
-                            hook.as_str()
-                        ),
-                    });
-                }
-            }
-            Ok(())
-        }
+        HookKind::Shape => require_shape_hook_contracts(metadata, metadata_json),
         HookKind::Filter => require_declared_hook(metadata, HookKind::Filter, "this slot"),
         HookKind::Observe => require_declared_hook(metadata, HookKind::Observe, "this slot"),
         HookKind::TransformResponse => reject_shape_owned_hook_as_slot(HookKind::TransformResponse),
         HookKind::TransformSseEvent => reject_shape_owned_hook_as_slot(HookKind::TransformSseEvent),
     }
+}
+
+fn require_declared_hook_contracts(
+    metadata: &PluginMetadata,
+    metadata_json: &serde_json::Value,
+) -> Result<(), WasmtimeRuntimeError> {
+    if metadata.hooks.contains_key(HookKind::Shape.as_str()) {
+        return require_shape_hook_contracts(metadata, metadata_json);
+    }
+
+    for hook in [HookKind::TransformResponse, HookKind::TransformSseEvent] {
+        if metadata.hooks.contains_key(hook.as_str()) {
+            return Err(WasmtimeRuntimeError::ModuleRejected {
+                reason: format!(
+                    "shape-owned hook `{}` requires a declared `shape` hook",
+                    hook.as_str()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn require_shape_hook_contracts(
+    metadata: &PluginMetadata,
+    metadata_json: &serde_json::Value,
+) -> Result<(), WasmtimeRuntimeError> {
+    for hook in SHAPE_OWNED_HOOKS {
+        require_declared_hook(metadata, hook, "shape plugin")?;
+    }
+    for hook in [HookKind::TransformResponse, HookKind::TransformSseEvent] {
+        if !hook_mode_declared(metadata_json, hook) {
+            return Err(WasmtimeRuntimeError::ModuleRejected {
+                reason: format!(
+                    "shape plugin hook `{}` must explicitly declare mode `active` or `noop`",
+                    hook.as_str()
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn reject_shape_owned_hook_as_slot(hook: HookKind) -> Result<(), WasmtimeRuntimeError> {
@@ -311,22 +368,22 @@ pub(crate) fn schema_section_name(hook: HookKind, version: WireVersion) -> Strin
     format!("{}.{}", hook.section_prefix(), version.as_str())
 }
 
-pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> [u8; 32] {
+pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> Option<[u8; 32]> {
     match (hook, version) {
         (HookKind::Filter, WireVersion::V1) => {
-            <cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT
+            Some(<cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT)
         }
         (HookKind::Shape, WireVersion::V1) => {
-            <cc_lb_plugin_wire::v1::ShapeRequest as WireSchema>::FINGERPRINT
+            Some(<cc_lb_plugin_wire::v1::ShapeRequest as WireSchema>::FINGERPRINT)
         }
         (HookKind::Observe, WireVersion::V1) => {
-            <cc_lb_plugin_wire::v1::ObserveEvent as WireSchema>::FINGERPRINT
+            Some(<cc_lb_plugin_wire::v1::ObserveEvent as WireSchema>::FINGERPRINT)
         }
         (HookKind::TransformResponse, WireVersion::V1) => {
-            <cc_lb_plugin_wire::v1::TransformResponseRequest as WireSchema>::FINGERPRINT
+            Some(<cc_lb_plugin_wire::v1::TransformResponseRequest as WireSchema>::FINGERPRINT)
         }
         (HookKind::TransformSseEvent, WireVersion::V1) => {
-            <cc_lb_plugin_wire::v1::TransformSseEventRequest as WireSchema>::FINGERPRINT
+            Some(<cc_lb_plugin_wire::v1::TransformSseEventRequest as WireSchema>::FINGERPRINT)
         }
     }
 }
@@ -341,23 +398,35 @@ fn hex32(bytes: &[u8; 32]) -> String {
 }
 
 #[cfg(test)]
+mod filter_version_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
 
     fn filter_section_bytes() -> Vec<u8> {
-        expected_fingerprint(HookKind::Filter, WireVersion::V1).to_vec()
+        expected_fingerprint(HookKind::Filter, WireVersion::V1)
+            .expect("filter V1 schema")
+            .to_vec()
     }
     fn shape_section_bytes() -> Vec<u8> {
-        expected_fingerprint(HookKind::Shape, WireVersion::V1).to_vec()
+        expected_fingerprint(HookKind::Shape, WireVersion::V1)
+            .expect("shape V1 schema")
+            .to_vec()
     }
     fn observe_section_bytes() -> Vec<u8> {
-        expected_fingerprint(HookKind::Observe, WireVersion::V1).to_vec()
+        expected_fingerprint(HookKind::Observe, WireVersion::V1)
+            .expect("observe V1 schema")
+            .to_vec()
     }
     fn transform_response_section_bytes() -> Vec<u8> {
-        expected_fingerprint(HookKind::TransformResponse, WireVersion::V1).to_vec()
+        expected_fingerprint(HookKind::TransformResponse, WireVersion::V1)
+            .expect("transform response V1 schema")
+            .to_vec()
     }
     fn transform_sse_event_section_bytes() -> Vec<u8> {
-        expected_fingerprint(HookKind::TransformSseEvent, WireVersion::V1).to_vec()
+        expected_fingerprint(HookKind::TransformSseEvent, WireVersion::V1)
+            .expect("transform SSE V1 schema")
+            .to_vec()
     }
 
     fn metadata_section(hook: &str) -> Vec<u8> {

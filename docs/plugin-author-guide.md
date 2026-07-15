@@ -1,6 +1,6 @@
 # cc-lb Plugin Author Guide
 
-This guide describes the current v1 wasmtime plugin contract for cc-lb plugin
+This guide describes the current wasmtime plugin contract for cc-lb plugin
 authors. It covers the published crates, metadata requirements, per-hook wire
 versioning, layout fingerprints, upload admission, and conformance testing.
 
@@ -59,7 +59,7 @@ can reach it:
 crate-type = ["cdylib"]
 
 [dependencies]
-cc-lb-plugin-wire = "0.2"
+cc-lb-plugin-wire = "0.6"
 cc-lb-pdk-wasmtime = "0.1"
 ```
 
@@ -145,7 +145,7 @@ cc-lb supports three plugin slot kinds. A wasm artifact may implement one or mor
 
 | Slot | Export | Request type | Response type | Use |
 |---|---|---|---|---|
-| `filter` | `cc_lb_filter` | `FilterRequest` | `FilterResponse` | Keep or reject upstream candidates. |
+| `filter` | `cc_lb_filter` | `v1::FilterRequest` | `FilterResponse` | Keep or reject upstream candidates. The V1 request exposes the requested service tier. |
 | `shape` | `cc_lb_shape`<br>`cc_lb_transform_response`<br>`cc_lb_transform_sse_event` | `ShapeRequest`<br>`TransformResponseRequest`<br>`TransformSseEventRequest` | `ShapeResponse`<br>`TransformResponseResult`<br>`TransformSseEventResult` | Unified slot that produces the upstream-bound request and transforms downstream responses (both buffered and SSE). |
 | `observe` | `cc_lb_observe` | `ObserveEvent` | none | Receive lifecycle events for side effects. |
 
@@ -259,8 +259,8 @@ pub fn observe(event: ObserveEvent) {
 }
 ```
 
-Each handler declares its own `wire = N`. The current published PDK supports
-`wire = 1`.
+Each handler declares its own `wire = N`. The published PDK supports `wire = 1`
+for every hook.
 
 ## Metadata Contract
 
@@ -294,8 +294,7 @@ Upload rejection names relevant to plugin authors include:
 
 ## Wire Versioning
 
-Wire versions are independent per hook. A future host can support filter v1 and
-v2 while shape and observe remain on v1. The plugin declares the version on each
+Wire versions are independent per hook. The plugin declares the version on each
 handler:
 
 ```rust
@@ -311,11 +310,35 @@ pub fn filter(req: FilterRequest) -> FilterResponse {
 }
 ```
 
+Filter plugins receive the requested tier on the V1 filter request:
+
+```rust
+use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse};
+
+#[handler(
+    filter,
+    wire = 1,
+    description = "Filters candidates using the requested service tier.",
+    usage = "Attach to router filter chains that distinguish service tiers.",
+)]
+pub fn filter(req: FilterRequest) -> FilterResponse {
+    let requested_service_tier = req.service_tier.as_deref();
+    let _ = requested_service_tier;
+    FilterResponse { results: Box::from([]) }
+}
+```
+
+`service_tier` is the optional tier requested in the inbound request body. A
+pre-request filter cannot observe the tier ultimately reported by an upstream
+response.
+
 The host maintains supported-version lists per hook:
 
 - `HOST_SUPPORTED_FILTER_VERSIONS`
 - `HOST_SUPPORTED_SHAPE_VERSIONS`
 - `HOST_SUPPORTED_OBSERVE_VERSIONS`
+- `HOST_SUPPORTED_TRANSFORM_RESPONSE_VERSIONS`
+- `HOST_SUPPORTED_TRANSFORM_SSE_EVENT_VERSIONS`
 
 Admission rejects a plugin when the declared hook version is not in the host's
 supported list. This rejection happens before the plugin is persisted into a
@@ -337,7 +360,8 @@ the requested hook and wire version. Mismatches are rejected as `invalid_wasm`.
 
 Static metadata and fingerprints do not catch every integration bug. The host
 therefore runs `admit_wasm` for uploads, which compiles the module and executes
-a canonical sample payload for each declared hook.
+a canonical sample payload for each declared hook and wire version. Filter
+probes use a V1 request with `service_tier = Some("priority")`.
 
 The runtime probe catches issues such as:
 
@@ -462,9 +486,11 @@ fn plugin_passes_boundary_smoke() {
 `assert_recognisable_by_current_host()` is the admission gate. It proves the
 current host can inspect, compile, fingerprint-check, and probe the plugin.
 
-`run()` builds a live runtime session and performs ABI round-trips using
-canonical payloads. It proves the boundary works; it does not replace semantic
-tests for your plugin's routing, shaping, or observability behavior.
+`run()` builds a live runtime session and performs ABI round-trips using the
+canonical payload for each hook's declared wire version. A filter plugin
+receives the V1 request with `service_tier = Some("priority")`. It proves the
+boundary works; it does not replace semantic tests for your plugin's routing,
+shaping, or observability behavior.
 
 ## Wire Version Bump Policy
 
@@ -472,21 +498,6 @@ Bump a hook's wire version when the hook request or response layout changes
 incompatibly. Examples include adding fields, removing fields, renaming fields,
 reordering fields, changing field types, or changing enum variants.
 
-Host-side migration policy:
-
-1. Add new v2 wire types for the changed hook.
-2. Add `WireVersion::V2`.
-3. Add v2 to that hook's supported-version list.
-4. Keep v1 in the list while existing plugins are still supported.
-5. Update admission, probe fixtures, and conformance coverage for v2.
-
-Plugin author migration policy:
-
-1. Update `cc-lb-plugin-wire` and `cc-lb-pdk-wasmtime`.
-2. Change only the affected handler to `wire = 2`.
-3. Update handler signatures and response construction for the new types.
-4. Run conformance tests against the target host version.
-5. Upload the rebuilt wasm and rebind chains after admission succeeds.
-
-Because versions are per-hook, a multi-hook plugin can migrate one hook at a
-time. For example, `filter` can move to v2 while `observe` remains on v1.
+When a future public plugin boundary needs a new incompatible layout, update the
+affected hook's version, supported-version list, admission fingerprints, probe
+fixtures, and conformance coverage together.

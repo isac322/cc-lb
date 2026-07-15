@@ -24,12 +24,12 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
-use crate::common::{
+use super::common::{
     TestResult, create_oauth_upstream, read_upstream_generation, stores_from_storage,
 };
-use crate::fake::FakeAnthropic;
-use crate::scenario::run_race_scenario;
-use crate::worker::{OAuthWorkerProbe, OAuthWorkerState, entity_job_handler};
+use super::fake::FakeAnthropic;
+use super::scenario::run_race_scenario;
+use super::worker::{OAuthWorkerProbe, OAuthWorkerState, entity_job_handler};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestResult<()> {

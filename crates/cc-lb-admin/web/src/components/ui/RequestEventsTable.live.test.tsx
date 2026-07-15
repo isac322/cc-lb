@@ -1,12 +1,37 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import {
+  cleanup,
+  type RenderOptions,
+  render as rtlRender,
+  screen,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it } from 'vitest';
+import type { ReactElement } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { RequestEventsTable } from './RequestEventsTable';
 
+function render(ui: ReactElement, options?: RenderOptions) {
+  const queryClient = new QueryClient();
+  return rtlRender(ui, {
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+    ...options,
+  });
+}
+
 describe('RequestEventsTable - Live & Outcomes', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new Error('network disabled in test'))),
+    );
+  });
+
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
   });
 
   const principalNameMap = new Map<string, string>();
@@ -202,6 +227,54 @@ describe('RequestEventsTable - Live & Outcomes', () => {
 
       // Drawer should close cleanly (or at least not show the stale event)
       expect(screen.queryByText('sess_123')).toBeNull();
+    });
+
+    it('shows the service-tier badge only after the final update provides service_tier', async () => {
+      cleanup();
+      const partialEvent = {
+        event_id: 'evt_badges',
+        request_id: 'req_badges',
+        ts: 1718553120,
+        ts_ms: 1718553120000,
+        status: 0,
+        duration_ms: 0,
+        model: 'claude-3-5-sonnet',
+        thinking_budget_tokens: 18000,
+        _phase: 'partial',
+      } satisfies RequestEventWithPhase;
+
+      const { rerender } = render(
+        <RequestEventsTable
+          events={[partialEvent]}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+        />,
+      );
+
+      // No service_tier yet → no tier badge
+      expect(screen.queryByText('priority')).toBeNull();
+
+      // Rerender with final event that includes service_tier
+      const finalEvent = {
+        ...partialEvent,
+        status: 200,
+        duration_ms: 1500,
+        service_tier: 'priority',
+        thinking_tokens: 8200,
+        _phase: 'final',
+      } satisfies RequestEventWithPhase;
+
+      rerender(
+        <RequestEventsTable
+          events={[finalEvent]}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+        />,
+      );
+
+      // Tier badge appears; reasoning is never shown in the table
+      expect(screen.getByText('priority')).toBeDefined();
+      expect(screen.queryByText('high · 8.2k')).toBeNull();
     });
   });
 });

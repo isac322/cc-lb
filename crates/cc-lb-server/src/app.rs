@@ -14,10 +14,11 @@ use axum::Router;
 use axum::body::Body;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::State;
-use axum::http::header::HeaderValue;
-use axum::http::{HeaderName, Request, Response, StatusCode};
+use axum::http::header::{CONTENT_LENGTH, HeaderValue};
+use axum::http::{HeaderMap, HeaderName, Request, Response, StatusCode};
 use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
+use bytes::{Bytes, BytesMut};
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DownstreamAuthMode, EventBusTransport, TlsConfig};
 use cc_lb_engine::{
@@ -43,7 +44,7 @@ use cc_lb_storage_api::{
     UpstreamRecord,
 };
 use cc_lb_upstream::SignedRequest;
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::rt::TokioExecutor;
 use serde::Serialize;
@@ -95,6 +96,27 @@ const WASMTIME_POOL_METRICS_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy)]
 struct TowerTimeoutMarker;
 
+#[derive(Clone, Copy)]
+struct RequestBodyCaps {
+    messages: usize,
+    files: usize,
+}
+
+impl RequestBodyCaps {
+    fn for_path(self, path: &str) -> usize {
+        if path.starts_with("/v1/files") {
+            self.files
+        } else {
+            self.messages
+        }
+    }
+}
+
+enum RequestBodyReadError {
+    TooLarge,
+    Read(tower::BoxError),
+}
+
 struct PricingLimitCostEstimator {
     catalog: Arc<cc_lb_pricing::PriceCatalog>,
 }
@@ -106,10 +128,11 @@ impl cc_lb_engine::LimitCostEstimator for PricingLimitCostEstimator {
         max_input: u64,
         max_output: u64,
         upstream_kind: Option<&str>,
+        service_tier: Option<&str>,
     ) -> Option<i64> {
         let upstream_kind = upstream_kind.and_then(pricing_upstream_kind_from_label);
         self.catalog
-            .estimate_max(model, max_input, max_output, upstream_kind)
+            .estimate_max(model, max_input, max_output, upstream_kind, service_tier)
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
 }
@@ -277,9 +300,22 @@ impl App {
         };
 
         let drain_complete = signals.subscribe_drain_complete();
-        let proxy_result = tokio::select! {
-            result = &mut proxy => server_join_result(result),
-            _ = signal::wait_for_shutdown(drain_complete) => {
+        let proxy_finished = tokio::select! {
+            result = &mut proxy => Some(result),
+            _ = signal::wait_for_shutdown(drain_complete.clone()) => None,
+        };
+        // `proxy` can resolve before `drain_complete`, which only fires after
+        // `shutdown_hooks.run_all()` finishes; wait for it unconditionally
+        // whenever a shutdown actually started, so hooks (e.g. the capture
+        // writer's flush + WAL checkpoint) finish before teardown proceeds.
+        // The `signals.subscribe()` guard avoids waiting forever on a proxy
+        // failure that is unrelated to any shutdown.
+        if *signals.subscribe().borrow() {
+            signal::wait_for_shutdown(drain_complete).await;
+        }
+        let proxy_result = match proxy_finished {
+            Some(result) => server_join_result(result),
+            None => {
                 if !proxy.is_finished() {
                     proxy.abort();
                 }
@@ -884,9 +920,13 @@ async fn build_app_with_storage_inner(
     } else {
         (None, None, None)
     };
+    let body_caps = RequestBodyCaps {
+        messages: cap_to_usize(config.body.messages_cap_bytes),
+        files: cap_to_usize(config.body.files_cap_bytes),
+    };
     let lifecycle_config = LifecycleConfig {
-        messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
-        files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
+        messages_body_cap_bytes: body_caps.messages,
+        files_body_cap_bytes: body_caps.files,
         replica_identity: replica_identity.clone(),
         prompt_cache_shadow: config.prompt_cache_shadow.clone(),
     };
@@ -1093,6 +1133,9 @@ async fn build_app_with_storage_inner(
         } else {
             None
         };
+    #[cfg(feature = "capture")]
+    let capture_runtime =
+        crate::capture_bootstrap::start_capture_runtime(&config, &data_dir, &in_memory_bus).await;
     let (event_fanout_shutdown_tx, event_fanout_shutdown_rx) = watch::channel(false);
     let mut event_fanout_tasks = Vec::new();
     let mut internal_partials_state = None;
@@ -1357,6 +1400,11 @@ async fn build_app_with_storage_inner(
         lifecycle = lifecycle.with_subscription_metadata_hook(subscription_metadata_hook);
     }
     lifecycle = lifecycle.with_subscription_quota_cache(subscription_quota_cache.clone());
+    #[cfg(feature = "capture")]
+    {
+        lifecycle =
+            crate::capture_bootstrap::attach_capture_handle(lifecycle, capture_runtime.as_ref());
+    }
     let lifecycle = Arc::new(lifecycle);
     let dynamic_view = lifecycle.dynamic_view();
 
@@ -1580,6 +1628,8 @@ async fn build_app_with_storage_inner(
             }
         });
     }
+    #[cfg(feature = "capture")]
+    crate::capture_bootstrap::add_shutdown_hook(&signals, capture_runtime);
     let scheduler_cancel = CancellationToken::new();
     let scheduler_ctx = crate::scheduler_dispatch::build_scheduler_ctx(
         crate::scheduler_dispatch::SchedulerDispatchDeps {
@@ -1631,6 +1681,7 @@ async fn build_app_with_storage_inner(
     spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
     let state = ProxyState {
         lifecycle: lifecycle.clone(),
+        body_caps,
         server_state: server_state.clone(),
         start_time,
         drain_controller: drain_controller.clone(),
@@ -2100,6 +2151,7 @@ impl CurrentConfig for InMemoryCurrentConfig {
 #[derive(Clone)]
 struct ProxyState {
     lifecycle: Arc<Lifecycle>,
+    body_caps: RequestBodyCaps,
     server_state: Arc<ServerStateHandle>,
     start_time: std::time::Instant,
     drain_controller: DrainController,
@@ -2231,6 +2283,7 @@ fn claude_default_snapshot(clock: &dyn cc_lb_engine::Clock) -> cc_lb_pricing::Ca
                 model: (*name).to_owned(),
                 input_per_million_usd: UsdPerMillion::from_micros_usd(*input),
                 output_per_million_usd: UsdPerMillion::from_micros_usd(*output),
+                by_tier: Default::default(),
             },
         );
         cache_creation.insert(
@@ -2241,6 +2294,7 @@ fn claude_default_snapshot(clock: &dyn cc_lb_engine::Clock) -> cc_lb_pricing::Ca
     }
 
     CatalogSnapshot {
+        payload_hash: String::new(),
         fetched_at_ms: cc_lb_engine::clock::unix_millis(clock.now())
             .try_into()
             .unwrap_or(u64::MAX),
@@ -2248,6 +2302,8 @@ fn claude_default_snapshot(clock: &dyn cc_lb_engine::Clock) -> cc_lb_pricing::Ca
         raw_json: Vec::new(),
         cache_creation_per_million_usd: cache_creation,
         cache_read_per_million_usd: cache_read,
+        cache_creation_per_million_usd_by_tier: HashMap::new(),
+        cache_read_per_million_usd_by_tier: HashMap::new(),
         status: CatalogStatus::Ok,
     }
 }
@@ -2490,9 +2546,16 @@ async fn lifecycle_handler(
     request: Request<Body>,
 ) -> Response<Body> {
     let (parts, body) = request.into_parts();
-    let body = match body.collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(source) => {
+    let cap = state.body_caps.for_path(parts.uri.path());
+    let body = match read_request_body(&parts.headers, body, cap).await {
+        Ok(body) => body,
+        Err(RequestBodyReadError::TooLarge) => {
+            if let Some(observer) = parts.extensions.get::<cc_lb_engine::LifecycleContext>() {
+                observer.record_body_too_large_rejection(cap as u64);
+            }
+            return body_too_large_response();
+        }
+        Err(RequestBodyReadError::Read(source)) => {
             let mut response = Response::new(Body::from(format!("body read failed: {source}")));
             *response.status_mut() = StatusCode::BAD_REQUEST;
             return response;
@@ -2507,6 +2570,67 @@ async fn lifecycle_handler(
             response
         }
     }
+}
+
+async fn read_request_body(
+    headers: &HeaderMap,
+    body: Body,
+    cap: usize,
+) -> Result<Bytes, RequestBodyReadError> {
+    if content_length_exceeds_cap(headers, cap) {
+        return Err(RequestBodyReadError::TooLarge);
+    }
+    collect_limited_body(body, cap).await.map_err(|source| {
+        if source.is::<LengthLimitError>() {
+            RequestBodyReadError::TooLarge
+        } else {
+            RequestBodyReadError::Read(source)
+        }
+    })
+}
+
+fn content_length_exceeds_cap(headers: &HeaderMap, cap: usize) -> bool {
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| usize::try_from(length).map_or(true, |length| length > cap))
+}
+
+async fn collect_limited_body(body: Body, cap: usize) -> Result<Bytes, tower::BoxError> {
+    let mut body = Limited::new(body, cap);
+    let mut first: Option<Bytes> = None;
+    let mut combined: Option<BytesMut> = None;
+
+    while let Some(frame) = body.frame().await {
+        let frame = frame?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        if data.is_empty() {
+            continue;
+        }
+        if let Some(buffer) = combined.as_mut() {
+            buffer.extend_from_slice(&data);
+        } else if let Some(initial) = first.take() {
+            let mut buffer = BytesMut::with_capacity(initial.len().saturating_add(data.len()));
+            buffer.extend_from_slice(&initial);
+            buffer.extend_from_slice(&data);
+            combined = Some(buffer);
+        } else {
+            first = Some(data);
+        }
+    }
+
+    Ok(combined.map(BytesMut::freeze).or(first).unwrap_or_default())
+}
+
+fn body_too_large_response() -> Response<Body> {
+    anthropic_error_response(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "body_too_large",
+        "request body exceeds configured cap",
+    )
 }
 
 async fn oauth_usage_handler(
@@ -2764,13 +2888,148 @@ fn dispatcher(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::convert::Infallible;
+
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use futures_util::stream;
     use http_body_util::BodyExt;
     use serde_json::Value;
     use tower::ServiceExt;
 
     use super::*;
+
+    const TIER_PRICING_TEST_MODEL: &str = "tier-pricing-test-model";
+
+    fn pricing_limit_cost_estimator(
+        by_tier: BTreeMap<String, cc_lb_pricing::TierRate>,
+    ) -> PricingLimitCostEstimator {
+        let catalog = cc_lb_pricing::PriceCatalog::new_empty();
+        let mut snapshot = cc_lb_pricing::CatalogSnapshot::empty_cost_disabled();
+        snapshot.status = cc_lb_pricing::CatalogStatus::Ok;
+        snapshot.models.insert(
+            TIER_PRICING_TEST_MODEL.to_owned(),
+            cc_lb_pricing::Pricing {
+                model: TIER_PRICING_TEST_MODEL.to_owned(),
+                input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(2),
+                output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(8),
+                by_tier,
+            },
+        );
+        catalog.install_snapshot(snapshot);
+        PricingLimitCostEstimator { catalog }
+    }
+
+    async fn panic_when_polled() -> Result<Bytes, Infallible> {
+        panic!("request body must not be polled")
+    }
+
+    #[tokio::test]
+    async fn oversized_content_length_rejects_without_polling_body() {
+        // Given
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("6"));
+        let body = Body::from_stream(stream::once(panic_when_polled()));
+
+        // When
+        let result = read_request_body(&headers, body, 5).await;
+
+        // Then
+        assert!(matches!(result, Err(RequestBodyReadError::TooLarge)));
+    }
+
+    #[tokio::test]
+    async fn single_frame_body_remains_zero_copy_at_cap() {
+        // Given
+        let input = Bytes::from_static(b"single frame");
+        let input_ptr = input.as_ptr();
+
+        // When
+        let output = collect_limited_body(Body::from(input.clone()), input.len())
+            .await
+            .expect("body at cap should collect");
+
+        // Then
+        assert_eq!(output, input);
+        assert_eq!(output.as_ptr(), input_ptr);
+    }
+
+    #[tokio::test]
+    async fn multi_frame_body_collects_into_contiguous_bytes_at_cap() {
+        // Given
+        let body = Body::from_stream(stream::iter([
+            Ok::<_, Infallible>(Bytes::from_static(b"abc")),
+            Ok::<_, Infallible>(Bytes::from_static(b"def")),
+        ]));
+
+        // When
+        let output = collect_limited_body(body, 6)
+            .await
+            .expect("body at cap should collect");
+
+        // Then
+        assert_eq!(output, Bytes::from_static(b"abcdef"));
+    }
+
+    #[tokio::test]
+    async fn multi_frame_body_over_cap_maps_to_too_large() {
+        // Given
+        let headers = HeaderMap::new();
+        let body = Body::from_stream(stream::iter([
+            Ok::<_, Infallible>(Bytes::from_static(b"abc")),
+            Ok::<_, Infallible>(Bytes::from_static(b"def")),
+        ]));
+
+        // When
+        let result = read_request_body(&headers, body, 5).await;
+
+        // Then
+        assert!(matches!(result, Err(RequestBodyReadError::TooLarge)));
+    }
+
+    #[test]
+    fn request_body_caps_select_files_and_messages_independently() {
+        // Given
+        let caps = RequestBodyCaps {
+            messages: 3,
+            files: 7,
+        };
+
+        // When / Then
+        assert_eq!(caps.for_path("/v1/messages"), 3);
+        assert_eq!(caps.for_path("/v1/files"), 7);
+        assert_eq!(caps.for_path("/v1/files/id/content"), 7);
+        assert_eq!(caps.for_path("/v1/models"), 3);
+    }
+
+    #[tokio::test]
+    async fn body_too_large_response_reuses_anthropic_error_shape() {
+        // Given / When
+        let response = body_too_large_response();
+        let status = response.status();
+        let content_type = response.headers()[axum::http::header::CONTENT_TYPE].clone();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("error body should collect")
+            .to_bytes();
+
+        // Then
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(content_type, "application/json; charset=utf-8");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).expect("error body should be json"),
+            serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "body_too_large",
+                    "message": "request body exceeds configured cap",
+                },
+            })
+        );
+    }
 
     #[tokio::test]
     async fn admin_health_state_reports_current_state() {
@@ -2794,7 +3053,51 @@ mod tests {
         install_default_fallback_if_uninitialized(&catalog, &clock);
 
         assert!(matches!(catalog.status(), cc_lb_pricing::CatalogStatus::Ok));
-        assert!(catalog.lookup("claude-opus-4-5", None).is_some());
+        assert!(catalog.lookup("claude-opus-4-5", None, None).is_some());
+    }
+
+    #[test]
+    fn pricing_limit_cost_estimator_uses_requested_priority_tier() {
+        // Given an estimator with a distinct priority price.
+        let estimator = pricing_limit_cost_estimator(BTreeMap::from([(
+            "priority".to_owned(),
+            cc_lb_pricing::TierRate {
+                input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(3),
+                output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(12),
+            },
+        )]));
+
+        // When maximum cost is estimated for a priority request.
+        let estimate = cc_lb_engine::LimitCostEstimator::estimate_max(
+            &estimator,
+            TIER_PRICING_TEST_MODEL,
+            1_000_000,
+            1_000_000,
+            Some("anthropic_key"),
+            Some("priority"),
+        );
+
+        // Then the explicit priority rates are reserved.
+        assert_eq!(estimate, Some(15_000_000));
+    }
+
+    #[test]
+    fn pricing_limit_cost_estimator_uses_batch_fallback() {
+        // Given an estimator whose catalog has only base prices.
+        let estimator = pricing_limit_cost_estimator(BTreeMap::new());
+
+        // When maximum cost is estimated for a batch request.
+        let estimate = cc_lb_engine::LimitCostEstimator::estimate_max(
+            &estimator,
+            TIER_PRICING_TEST_MODEL,
+            1_000_000,
+            1_000_000,
+            Some("anthropic_key"),
+            Some("batch"),
+        );
+
+        // Then the catalog's exact-half batch fallback is reserved.
+        assert_eq!(estimate, Some(5_000_000));
     }
 
     #[test]
@@ -2805,7 +3108,7 @@ mod tests {
         install_default_fallback_if_uninitialized(&catalog, &clock);
 
         let pricing = catalog
-            .lookup("claude-fable-5", None)
+            .lookup("claude-fable-5", None, None)
             .expect("fable fallback pricing exists");
         assert_eq!(pricing.input_per_million_usd.as_micros_usd(), 10_000_000);
         assert_eq!(pricing.output_per_million_usd.as_micros_usd(), 50_000_000);
@@ -2846,22 +3149,26 @@ mod tests {
                 model: "operator-model-a".to_owned(),
                 input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(2),
                 output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(8),
+                by_tier: Default::default(),
             },
         );
         catalog.install_snapshot(cc_lb_pricing::CatalogSnapshot {
+            payload_hash: String::new(),
             fetched_at_ms: 0,
             models,
             raw_json: Vec::new(),
             cache_creation_per_million_usd: HashMap::new(),
             cache_read_per_million_usd: HashMap::new(),
+            cache_creation_per_million_usd_by_tier: HashMap::new(),
+            cache_read_per_million_usd_by_tier: HashMap::new(),
             status: cc_lb_pricing::CatalogStatus::Ok,
         });
 
         let clock = cc_lb_engine::SystemClock;
         install_default_fallback_if_uninitialized(&catalog, &clock);
 
-        assert!(catalog.lookup("operator-model-a", None).is_some());
-        assert!(catalog.lookup("claude-opus-4-5", None).is_none());
+        assert!(catalog.lookup("operator-model-a", None, None).is_some());
+        assert!(catalog.lookup("claude-opus-4-5", None, None).is_none());
     }
 
     #[test]

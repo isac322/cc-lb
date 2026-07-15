@@ -6,7 +6,8 @@ use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, MAX_WASM_BLOB_BYTES,
     PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
     PluginRegistryStore, PluginSlotKind, StorageError, StorageResult, WasmBlob, WasmBlobRecord,
-    WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
+    WasmRegistryCascadeDelete, WasmRegistryEntry, WasmRegistryEntryInput, WasmRegistryReference,
+    WasmRegistryReferenceFingerprint, WasmRegistryReferences, sparse_order, validate_identifier,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -15,7 +16,7 @@ use uuid::Uuid;
 
 use crate::{
     adapter::{
-        PostgresStorage, conflict, datetime_to_unix_secs, i64_to_u64, u64_to_i64,
+        PostgresStorage, conflict, datetime_to_unix_secs, i64_to_u64, retry, u64_to_i64,
         unix_secs_to_datetime,
     },
     error_map::map_sqlx_error,
@@ -132,7 +133,7 @@ impl PluginRegistryStore for PostgresStorage {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let rows = sqlx::query("SELECT r.*, COALESCE((SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id), 0)::BIGINT AS refcount FROM wasm_registry_v2 r WHERE ($1::uuid IS NULL OR r.id > $1) ORDER BY r.id ASC LIMIT $2")
+        let rows = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE ($1::uuid IS NULL OR r.id > $1) ORDER BY r.id ASC LIMIT $2")
             .bind(after).bind(u64_to_i64(limit as u64, "plugin_registry.limit")?).fetch_all(&self.pool).await.map_err(map_sqlx_error)?;
         rows.into_iter().map(registry_from_row).collect()
     }
@@ -141,15 +142,165 @@ impl PluginRegistryStore for PostgresStorage {
         &self,
         sha256: [u8; 32],
     ) -> StorageResult<Option<WasmRegistryEntry>> {
-        let row = sqlx::query("SELECT r.*, COALESCE((SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id), 0)::BIGINT AS refcount FROM wasm_registry_v2 r WHERE r.sha256 = $1")
+        let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE r.sha256 = $1")
             .bind(sha256.as_slice()).fetch_optional(&self.pool).await.map_err(map_sqlx_error)?;
         row.map(registry_from_row).transpose()
     }
 
+    async fn get_registry_entry_by_name(
+        &self,
+        name: &str,
+    ) -> StorageResult<Option<WasmRegistryEntry>> {
+        let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE r.name = $1")
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+        row.map(registry_from_row).transpose()
+    }
+
     async fn get_registry_entry_by_id(&self, id: Uuid) -> StorageResult<Option<WasmRegistryEntry>> {
-        let row = sqlx::query("SELECT r.*, COALESCE((SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id), 0)::BIGINT AS refcount FROM wasm_registry_v2 r WHERE r.id = $1")
+        let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE r.id = $1")
             .bind(id).fetch_optional(&self.pool).await.map_err(map_sqlx_error)?;
         row.map(registry_from_row).transpose()
+    }
+
+    async fn replace_wasm_entry(
+        &self,
+        blob: WasmBlob,
+        input: WasmRegistryEntryInput,
+        expected_revision: u64,
+    ) -> StorageResult<WasmRegistryEntry> {
+        validate_identifier("plugin.name", &input.name)?;
+        if blob.size_bytes > MAX_WASM_BLOB_BYTES || blob.bytes.len() as u64 > MAX_WASM_BLOB_BYTES {
+            return Err(StorageError::InvalidInput {
+                field: "wasm_blob.bytes".to_owned(),
+                reason: format!("blob exceeds 32 MiB: {} bytes", blob.size_bytes),
+            });
+        }
+
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let current = registry_by_name_in_tx(&mut tx, &input.name)
+            .await?
+            .ok_or_else(|| conflict("unknown plugin registry entry"))?;
+        if current.revision != expected_revision {
+            return Err(StorageError::StalePluginRegistryRevision {
+                current: current.revision,
+            });
+        }
+
+        insert_blob_in_tx(&mut tx, &blob).await?;
+        let supported_slots: Vec<String> = input
+            .supported_slots
+            .iter()
+            .map(|slot| slot.as_str().to_owned())
+            .collect();
+        let uploaded_at =
+            unix_secs_to_datetime(input.uploaded_at_unix_secs, "wasm_registry.uploaded_at")?;
+        let result = sqlx::query("UPDATE wasm_registry_v2 SET sha256 = $1, plugin_version = $2, original_filename = $3, uploaded_at = $4, uploaded_by_admin_id = $5, revision = revision + 1, description = $6, usage = $7, hook_metadata = $8, supported_slots = $9, schema_hash = $10 WHERE id = $11 AND revision = $12")
+            .bind(blob.sha256.as_slice())
+            .bind(&input.version)
+            .bind(&input.original_filename)
+            .bind(uploaded_at)
+            .bind(input.uploaded_by_admin_id)
+            .bind(&input.description)
+            .bind(&input.usage)
+            .bind(hook_metadata_to_json(&input.hook_metadata)?)
+            .bind(&supported_slots)
+            .bind(input.schema_hash.as_ref().map(|hash| hash.as_slice()))
+            .bind(current.id)
+            .bind(u64_to_i64(expected_revision, "wasm_registry.revision")?)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        if result.rows_affected() == 0 {
+            return Err(StorageError::StalePluginRegistryRevision {
+                current: current.revision,
+            });
+        }
+
+        sqlx::query("DELETE FROM wasm_blobs_v2 b WHERE b.sha256 = $1 AND NOT EXISTS (SELECT 1 FROM wasm_registry_v2 r WHERE r.sha256 = b.sha256)")
+            .bind(current.sha256.as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        let entry = registry_by_id_in_tx(&mut tx, current.id)
+            .await?
+            .ok_or_else(|| conflict("updated plugin registry row disappeared"))?;
+        sqlx::query("SELECT pg_notify('cclb_plugin_changed', $1)")
+            .bind(entry.id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(entry)
+    }
+
+    async fn list_registry_references(&self, id: Uuid) -> StorageResult<WasmRegistryReferences> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let references = registry_references_in_tx(&mut tx, id).await?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(references)
+    }
+
+    async fn cascade_delete_registry_entry(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+        expected_references: WasmRegistryReferenceFingerprint,
+    ) -> StorageResult<Option<WasmRegistryCascadeDelete>> {
+        let mut tx = begin_repeatable_read(&self.pool).await?;
+        let Some(entry) = registry_by_id_in_tx(&mut tx, id).await? else {
+            tx.commit().await.map_err(map_sqlx_error)?;
+            return Ok(None);
+        };
+        if entry.revision != expected_revision {
+            return Err(StorageError::StalePluginRegistryRevision {
+                current: entry.revision,
+            });
+        }
+        let references = registry_references_in_tx(&mut tx, id).await?;
+        if references.fingerprint != expected_references {
+            return Err(StorageError::StalePluginRegistryReferences);
+        }
+
+        sqlx::query("DELETE FROM plugin_chains_v2 WHERE wasm_registry_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        sqlx::query("UPDATE upstream_spec_v1 SET warmup_dialect_plugin = NULL, spec_revision = spec_revision + 1, updated_at = NOW() WHERE deleted_at IS NULL AND (warmup_dialect_plugin->>'wasm_registry_id')::uuid = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        let result = sqlx::query("DELETE FROM wasm_registry_v2 WHERE id = $1 AND revision = $2")
+            .bind(id)
+            .bind(u64_to_i64(expected_revision, "wasm_registry.revision")?)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        if result.rows_affected() == 0 {
+            return Err(StorageError::StalePluginRegistryRevision {
+                current: entry.revision,
+            });
+        }
+        sqlx::query("DELETE FROM wasm_blobs_v2 b WHERE b.sha256 = $1 AND NOT EXISTS (SELECT 1 FROM wasm_registry_v2 r WHERE r.sha256 = b.sha256)")
+            .bind(entry.sha256.as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        notify_cascade_reference_changes(&mut tx, &references.references).await?;
+        sqlx::query("SELECT pg_notify('cclb_plugin_changed', $1)")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(Some(WasmRegistryCascadeDelete {
+            entry,
+            references: references.references,
+        }))
     }
 
     async fn update_registry_label(
@@ -209,66 +360,10 @@ impl PluginRegistryStore for PostgresStorage {
         id: Uuid,
         expected_revision: u64,
     ) -> StorageResult<Option<WasmRegistryEntry>> {
-        let mut tx = begin_repeatable_read(&self.pool).await?;
-        let row = sqlx::query("SELECT r.*, COALESCE((SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id), 0)::BIGINT AS refcount FROM wasm_registry_v2 r WHERE r.id = $1 FOR UPDATE")
-            .bind(id).fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?;
-        let Some(row) = row else {
-            tx.commit().await.map_err(map_sqlx_error)?;
-            return Ok(None);
-        };
-        let entry = registry_from_row(row)?;
-        if entry.revision != expected_revision {
-            return Err(StorageError::StalePluginRegistryRevision {
-                current: entry.revision,
-            });
-        }
-        if let Some(chain_id) = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM plugin_chains_v2 WHERE wasm_registry_id = $1 LIMIT 1",
-        )
-        .bind(id)
-        .fetch_optional(&mut *tx)
+        retry::with_retry_serialization(&retry::RetryPolicy::default(), || {
+            delete_registry_entry_once(&self.pool, id, expected_revision)
+        })
         .await
-        .map_err(map_sqlx_error)?
-        {
-            return Err(StorageError::PluginRegistryReferenced {
-                id: chain_id.to_string(),
-            });
-        }
-        if let Some(upstream_id) = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM upstream_spec_v1 WHERE deleted_at IS NULL AND (warmup_dialect_plugin->>'wasm_registry_id')::uuid = $1 LIMIT 1",
-        )
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?
-        {
-            return Err(StorageError::PluginRegistryReferenced {
-                id: upstream_id.to_string(),
-            });
-        }
-        let result = sqlx::query("DELETE FROM wasm_registry_v2 WHERE id = $1 AND revision = $2")
-            .bind(id)
-            .bind(u64_to_i64(expected_revision, "wasm_registry.revision")?)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-        if result.rows_affected() == 0 {
-            return Err(StorageError::StalePluginRegistryRevision {
-                current: entry.revision,
-            });
-        }
-        sqlx::query("DELETE FROM wasm_blobs_v2 WHERE sha256 = $1")
-            .bind(entry.sha256.as_slice())
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-        sqlx::query("SELECT pg_notify('cclb_plugin_changed', $1)")
-            .bind(id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-        tx.commit().await.map_err(map_sqlx_error)?;
-        Ok(Some(entry))
     }
 
     async fn decrement_blob_refcount_or_delete(&self, sha256: [u8; 32]) -> StorageResult<bool> {
@@ -602,7 +697,7 @@ impl PostgresStorage {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         sha256: [u8; 32],
     ) -> StorageResult<Option<WasmRegistryEntry>> {
-        let row = sqlx::query("SELECT r.*, COALESCE((SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id), 0)::BIGINT AS refcount FROM wasm_registry_v2 r WHERE r.sha256 = $1 FOR UPDATE")
+        let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE r.sha256 = $1 FOR UPDATE")
             .bind(sha256.as_slice())
             .fetch_optional(&mut **tx)
             .await
@@ -624,6 +719,104 @@ impl PostgresStorage {
     }
 }
 
+async fn registry_by_name_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    name: &str,
+) -> StorageResult<Option<WasmRegistryEntry>> {
+    let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE r.name = $1 FOR UPDATE")
+        .bind(name)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    row.map(registry_from_row).transpose()
+}
+
+async fn registry_by_id_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+) -> StorageResult<Option<WasmRegistryEntry>> {
+    let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE r.id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    row.map(registry_from_row).transpose()
+}
+
+async fn registry_references_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    registry_id: Uuid,
+) -> StorageResult<WasmRegistryReferences> {
+    let chain_rows = sqlx::query("SELECT c.id AS chain_entry_id, c.principal_id, p.name AS principal_name, c.slot, c.revision FROM plugin_chains_v2 c JOIN principals_v1 p ON p.id = c.principal_id WHERE c.wasm_registry_id = $1 ORDER BY c.id ASC FOR UPDATE OF c")
+        .bind(registry_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    let mut references = Vec::with_capacity(chain_rows.len());
+    for row in chain_rows {
+        let slot = row.try_get::<String, _>("slot").map_err(map_sqlx_error)?;
+        references.push(WasmRegistryReference::PluginChain {
+            chain_entry_id: row.try_get("chain_entry_id").map_err(map_sqlx_error)?,
+            principal_id: row.try_get("principal_id").map_err(map_sqlx_error)?,
+            principal_name: row.try_get("principal_name").map_err(map_sqlx_error)?,
+            slot: PluginSlotKind::parse(&slot).ok_or_else(|| StorageError::Corrupted {
+                message: "invalid plugin slot".to_owned(),
+            })?,
+            revision: i64_to_u64(
+                row.try_get("revision").map_err(map_sqlx_error)?,
+                "plugin_chain.revision",
+            )?,
+        });
+    }
+
+    let upstream_rows = sqlx::query("SELECT id, name, spec_revision AS revision FROM upstream_spec_v1 WHERE deleted_at IS NULL AND (warmup_dialect_plugin->>'wasm_registry_id')::uuid = $1 ORDER BY id ASC FOR UPDATE")
+        .bind(registry_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    references.reserve(upstream_rows.len());
+    for row in upstream_rows {
+        references.push(WasmRegistryReference::UpstreamWarmupDialect {
+            upstream_id: row.try_get("id").map_err(map_sqlx_error)?,
+            upstream_name: row.try_get("name").map_err(map_sqlx_error)?,
+            revision: i64_to_u64(
+                row.try_get("revision").map_err(map_sqlx_error)?,
+                "upstream.spec_revision",
+            )?,
+        });
+    }
+    Ok(WasmRegistryReferences::from_references(references))
+}
+
+async fn notify_cascade_reference_changes(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    references: &[WasmRegistryReference],
+) -> StorageResult<()> {
+    let mut principals = HashSet::new();
+    for reference in references {
+        match reference {
+            WasmRegistryReference::PluginChain { principal_id, .. } => {
+                principals.insert(*principal_id);
+            }
+            WasmRegistryReference::UpstreamWarmupDialect { upstream_id, .. } => {
+                sqlx::query("SELECT pg_notify('cclb_upstream_changed', $1)")
+                    .bind(upstream_id.to_string())
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(map_sqlx_error)?;
+            }
+        }
+    }
+    for principal_id in principals {
+        sqlx::query("SELECT pg_notify('cclb_plugin_chain_changed', $1)")
+            .bind(principal_id.to_string())
+            .execute(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+    }
+    Ok(())
+}
+
 async fn insert_blob_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     blob: &WasmBlob,
@@ -632,7 +825,7 @@ async fn insert_blob_in_tx(
         blob.parse_validated_at_unix_secs,
         "wasm_blob.parse_validated_at",
     )?;
-    let inserted = sqlx::query_scalar::<_, Vec<u8>>("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, refcount, created_at) VALUES ($1, $2, $3, $4, 0, NOW()) ON CONFLICT (sha256) DO NOTHING RETURNING sha256")
+    let inserted = sqlx::query_scalar::<_, Vec<u8>>("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, created_at) VALUES ($1, $2, $3, $4, NOW()) ON CONFLICT (sha256) DO NOTHING RETURNING sha256")
         .bind(blob.sha256.as_slice())
         .bind(blob.bytes.as_slice())
         .bind(u64_to_i64(blob.size_bytes, "wasm_blob.size_bytes")?)
@@ -655,10 +848,11 @@ async fn insert_registry_in_tx(
         .iter()
         .map(|slot| slot.as_str().to_owned())
         .collect();
-    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, revision, description, usage, hook_metadata, supported_slots, schema_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10, $11, $12) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision, description, usage, hook_metadata, supported_slots, schema_hash")
+    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, plugin_version, original_filename, label, uploaded_at, uploaded_by_admin_id, revision, description, usage, hook_metadata, supported_slots, schema_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10, $11, $12, $13) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, plugin_version, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision, description, usage, hook_metadata, supported_slots, schema_hash")
         .bind(id)
         .bind(sha256.as_slice())
         .bind(&input.name)
+        .bind(&input.version)
         .bind(&input.original_filename)
         .bind(&input.label)
         .bind(uploaded_at)
@@ -672,6 +866,73 @@ async fn insert_registry_in_tx(
         .await
         .map_err(map_sqlx_error)?;
     row.map(registry_from_row).transpose()
+}
+
+async fn delete_registry_entry_once(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+    expected_revision: u64,
+) -> StorageResult<Option<WasmRegistryEntry>> {
+    let mut tx = begin_repeatable_read(pool).await?;
+    let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE r.id = $1 FOR UPDATE")
+        .bind(id).fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?;
+    let Some(row) = row else {
+        tx.commit().await.map_err(map_sqlx_error)?;
+        return Ok(None);
+    };
+    let entry = registry_from_row(row)?;
+    if entry.revision != expected_revision {
+        return Err(StorageError::StalePluginRegistryRevision {
+            current: entry.revision,
+        });
+    }
+    if let Some(chain_id) = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM plugin_chains_v2 WHERE wasm_registry_id = $1 LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?
+    {
+        return Err(StorageError::PluginRegistryReferenced {
+            id: chain_id.to_string(),
+        });
+    }
+    if let Some(upstream_id) = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM upstream_spec_v1 WHERE deleted_at IS NULL AND (warmup_dialect_plugin->>'wasm_registry_id')::uuid = $1 LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?
+    {
+        return Err(StorageError::PluginRegistryReferenced {
+            id: upstream_id.to_string(),
+        });
+    }
+    let result = sqlx::query("DELETE FROM wasm_registry_v2 WHERE id = $1 AND revision = $2")
+        .bind(id)
+        .bind(u64_to_i64(expected_revision, "wasm_registry.revision")?)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    if result.rows_affected() == 0 {
+        return Err(StorageError::StalePluginRegistryRevision {
+            current: entry.revision,
+        });
+    }
+    sqlx::query("DELETE FROM wasm_blobs_v2 b WHERE b.sha256 = $1 AND NOT EXISTS (SELECT 1 FROM wasm_registry_v2 r WHERE r.sha256 = b.sha256)")
+        .bind(entry.sha256.as_slice())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    sqlx::query("SELECT pg_notify('cclb_plugin_changed', $1)")
+        .bind(id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    tx.commit().await.map_err(map_sqlx_error)?;
+    Ok(Some(entry))
 }
 
 async fn begin_repeatable_read(
@@ -703,6 +964,7 @@ fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEn
                 .map_err(map_sqlx_error)?,
         )?,
         name: row.try_get("name").map_err(map_sqlx_error)?,
+        version: row.try_get("plugin_version").map_err(map_sqlx_error)?,
         original_filename: row.try_get("original_filename").map_err(map_sqlx_error)?,
         label: row.try_get("label").map_err(map_sqlx_error)?,
         uploaded_at_unix_secs: datetime_to_unix_secs(uploaded_at, "wasm_registry.uploaded_at")?,
@@ -743,11 +1005,13 @@ fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEn
         _ => true,
     };
     existing.name == input.name
+        && existing.version == input.version
         && existing.original_filename == input.original_filename
         && existing.label == input.label
         && existing.description == input.description
         && existing.usage == input.usage
         && existing.hook_metadata == input.hook_metadata
+        && existing.supported_slots == input.supported_slots
         && schema_hash_ok
 }
 

@@ -34,7 +34,17 @@ const DOCKER_HOST: &str = "tcp://localhost:2375";
 const ADMIN_TOKEN: &str = "test-token";
 const PRINCIPAL_ID: &str = "test-principal";
 const FAILURE_LATENCY_CEILING: Duration = Duration::from_millis(1_500);
-const READY_TIMEOUT: Duration = Duration::from_secs(30);
+// CI latency budget, not a correctness bound: postgres readiness normally takes
+// well under a second, but under llvm-cov plus a co-scheduled heavy build on the
+// shared runner it can overrun. Scale by CC_LB_TEST_READY_TIMEOUT_SECS (120 in
+// CI), the repo's convention, instead of a hardcoded ceiling.
+fn ready_timeout() -> Duration {
+    std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(30))
+}
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const CONNECT_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -157,7 +167,8 @@ async fn ensure_postgres_up(url: &str) -> TestResult<()> {
 }
 
 async fn wait_postgres_ready(url: &str) -> TestResult<()> {
-    let deadline = Instant::now() + READY_TIMEOUT;
+    let ready_timeout = ready_timeout();
+    let deadline = Instant::now() + ready_timeout;
 
     loop {
         let probe_error =
@@ -169,7 +180,7 @@ async fn wait_postgres_ready(url: &str) -> TestResult<()> {
 
         if Instant::now() >= deadline {
             return Err(error(format!(
-                "postgres did not become ready within {READY_TIMEOUT:?}: {probe_error}"
+                "postgres did not become ready within {ready_timeout:?}: {probe_error}"
             )));
         }
 

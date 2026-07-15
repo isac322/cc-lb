@@ -43,6 +43,7 @@ fn filter_request_round_trips() {
     let req = FilterRequest {
         request_id: Box::from("req-1"),
         thread_id: None,
+        service_tier: Some(Box::from("priority")),
         canonical_model_id: Box::from("claude-test"),
         cache_pricing: CachePricingSummary {
             status: Box::from("known"),
@@ -112,6 +113,7 @@ fn filter_request_ref_encodes_to_owned_wire() {
     let req_ref = FilterRequestRef {
         request_id: "req-1",
         thread_id: None,
+        service_tier: Some(QueryRef { value: "priority" }),
         canonical_model_id: "claude-test",
         cache_pricing: CachePricingSummaryRef {
             status: "known",
@@ -138,6 +140,8 @@ fn filter_request_ref_encodes_to_owned_wire() {
     assert_eq!(owned_body, b"{\"k\":1}");
     let owned_id: &str = &archived.request_id;
     assert_eq!(owned_id, "req-1");
+    let service_tier: Option<&str> = archived.service_tier.as_ref().map(|value| &**value);
+    assert_eq!(service_tier, Some("priority"));
     let model_id: &str = &archived.canonical_model_id;
     assert_eq!(model_id, "claude-test");
 }

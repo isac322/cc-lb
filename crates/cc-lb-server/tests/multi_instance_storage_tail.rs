@@ -23,7 +23,19 @@ use tower::ServiceExt;
 
 const ADMIN_TOKEN: &str = "test-token";
 const CLUSTER_TOKEN_ENV: &str = "CI_POSTGRES_URL";
-const STORAGE_TAIL_TIMEOUT: Duration = Duration::from_secs(5);
+const STORAGE_TAIL_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
+
+// Hang-guard ceiling for cross-instance SSE propagation. The read is
+// event-driven; under coverage on a contended CI runner it can exceed a few
+// seconds, so scale by CC_LB_TEST_READY_TIMEOUT_SECS (120 in CI) like the
+// sibling managed_key_multi_instance test. A hardcoded 5s here flaked.
+fn storage_tail_timeout() -> Duration {
+    std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(STORAGE_TAIL_TIMEOUT_DEFAULT)
+}
 
 static POSTGRES_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
@@ -61,7 +73,7 @@ async fn storage_tail_reaches_second_instance_over_pg_notify() -> TestResult<()>
     let cursor = instance_a.storage.append_request_event(&event).await?;
 
     let update = tokio::time::timeout(
-        STORAGE_TAIL_TIMEOUT,
+        storage_tail_timeout(),
         read_final_update(&mut body, &mut sse_buffer, &event_id),
     )
     .await

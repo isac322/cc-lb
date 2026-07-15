@@ -55,7 +55,9 @@ This is the static gate to run in CI whenever the plugin or host crates change.
 ## `run()`
 
 `run()` builds a live wasmtime runtime, registers the plugin, and exercises the
-hook boundary with canonical sample payloads.
+hook boundary with canonical sample payloads selected from the declared wire
+version. Filter plugins receive a V1 request whose `service_tier` is
+`Some("priority")`.
 
 It verifies allocator exports, hook exports, rkyv encode/decode round-trips,
 and observe variant handling. It does not verify plugin business semantics such

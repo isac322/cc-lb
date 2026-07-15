@@ -1,0 +1,51 @@
+{{- $isSqlite := eq .Values.config.storage.kind "sqlite" -}}
+cc-lb has been deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Backend: {{ .Values.config.storage.kind }}
+{{- if $isSqlite }}
+  NOTE: the sqlite backend is a single writer. Replicas are pinned to 1 and
+  autoscaling is ignored. Use the postgres backend to scale horizontally.
+{{- end }}
+
+Image: {{ include "cc-lb.image" . }}
+
+Listeners (in-cluster):
+  proxy   {{ include "cc-lb.fullname" . }}:{{ .Values.ports.proxy }}   (Anthropic-compatible API)
+  admin   {{ include "cc-lb.fullname" . }}:{{ .Values.ports.admin }}   (dashboard + admin API)
+  metrics {{ include "cc-lb.fullname" . }}:{{ .Values.ports.metrics }}   (Prometheus /metrics)
+
+Reach the proxy locally:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "cc-lb.fullname" . }} {{ .Values.ports.proxy }}:{{ .Values.ports.proxy }}
+  curl -s http://127.0.0.1:{{ .Values.ports.proxy }}/healthz
+
+Open the admin dashboard:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "cc-lb.fullname" . }} {{ .Values.ports.admin }}:{{ .Values.ports.admin }}
+  # then browse http://127.0.0.1:{{ .Values.ports.admin }}/
+{{- if .Values.ingress.enabled }}
+
+Ingress is enabled for the proxy on:
+{{- range .Values.ingress.hosts }}
+  - http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- end }}
+
+Readiness: the readiness probe targets {{ .Values.probes.readiness.path }} on the proxy port.
+  /readyz reports 503 until at least one principal AND one ready upstream exist,
+  so it is NOT the default. Configure upstreams via the admin API/dashboard, then
+  switch probes.readiness.path to /readyz for upstream-gated traffic admission.
+
+Secrets:
+{{- if .Values.secrets.existingSecret }}
+  Using existing secret "{{ .Values.secrets.existingSecret }}" for the master key{{ if .Values.secrets.keys.adminToken }} / tokens{{ end }}.
+{{- else }}
+  A Secret "{{ include "cc-lb.fullname" . }}" holds {{ .Values.config.aead.keyEnv }}
+  {{- if .Values.secrets.adminToken }} and {{ .Values.config.admin.tokenEnv }}{{ end }}.
+  Rotate it with `helm upgrade` and a new secrets.masterKey, or migrate to secrets.existingSecret.
+{{- end }}
+{{- if not $isSqlite }}
+{{- if not .Values.config.storage.postgres.url }}{{- if not .Values.config.storage.postgres.urlSecret.name }}
+
+  WARNING: storage.kind=postgres but no connection URL is configured. Set either
+  config.storage.postgres.url or config.storage.postgres.urlSecret.{name,key}.
+{{- end }}{{- end }}
+{{- end }}

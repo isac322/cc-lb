@@ -1,5 +1,3 @@
-mod common;
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -17,7 +15,7 @@ use http::{Method, Response, StatusCode};
 use serde_json::json;
 use uuid::Uuid;
 
-use common::{TestAuthn, TestRouter, TestState, lifecycle_with_parts, messages_request};
+use crate::common::{TestAuthn, TestRouter, TestState, lifecycle_with_parts, messages_request};
 
 type FilterOutcome = (String, Vec<PerCandidateReason>);
 

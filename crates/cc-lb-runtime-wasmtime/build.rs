@@ -28,6 +28,10 @@ const FIXTURE_CRATES: &[Fixture] = &[
         src_path: "../../plugins/test-fixtures/wasmtime-observe-noop/src/lib.rs",
     },
     Fixture {
+        crate_name: "wasmtime-filter-service-tier",
+        src_path: "../../plugins/test-fixtures/wasmtime-filter-service-tier/src/lib.rs",
+    },
+    Fixture {
         crate_name: "cache-aware-wasmtime",
         src_path: "../../plugins/router/cache-aware-wasmtime/src/lib.rs",
     },
@@ -55,6 +59,7 @@ fn main() {
 
     let mut args = vec![
         "build".to_string(),
+        "--locked".to_string(),
         "--target".to_string(),
         "wasm32-unknown-unknown".to_string(),
         "--release".to_string(),
@@ -80,7 +85,7 @@ fn main() {
     if !status.success() {
         panic!(
             "wasm fixture build failed (exit {:?}). \
-             Run `cargo build --target wasm32-unknown-unknown --release {}` \
+             Run `cargo build --locked --target wasm32-unknown-unknown --release {}` \
              from the workspace root to reproduce. \
              Set CC_LB_SKIP_WASM_FIXTURE_BUILD=1 to bypass when the \
              integration tests are not in scope (e.g. release builds of \

@@ -18,6 +18,14 @@ pub fn map_sqlx_error(error: sqlx::Error) -> StorageError {
                 reason: db_error.message().to_owned(),
             }
         }
+        sqlx::Error::Database(db_error)
+            if matches!(db_error.code().as_deref(), Some("40001") | Some("40P01")) =>
+        {
+            StorageError::Transient {
+                retryable: true,
+                source: Box::new(sqlx::Error::Database(db_error)),
+            }
+        }
         sqlx::Error::PoolTimedOut => StorageError::Unavailable {
             message: "postgres connection pool timed out".to_owned(),
         },

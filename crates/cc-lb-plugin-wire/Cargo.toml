@@ -1,6 +1,6 @@
 [package]
 name = "cc-lb-plugin-wire"
-version = "0.6.1"
+version = "0.8.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,11 @@ repository = "https://github.com/isac322/cc-lb"
 readme = "README.md"
 keywords = ["cc-lb", "plugin", "wasm", "wire", "rkyv"]
 categories = ["wasm", "api-bindings", "development-tools"]
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/all.rs"
 
 [lib]
 crate-type = ["rlib"]

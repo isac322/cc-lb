@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,13 +11,13 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 use tokio::time::{self, Instant};
 
-use cc_lb_storage_api::{PriceCatalogCache, PriceCatalogSnapshotRecord};
+use cc_lb_storage_api::{PriceCatalogCache, PriceCatalogSnapshotFetch};
 
-use crate::{CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion};
+use crate::catalog_parser::parse_litellm_json;
+use crate::loader_cache::{put_storage_snapshot, read_disk_cache, write_disk_cache};
+use crate::{CatalogStatus, PriceCatalog};
 
 type HttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
 
@@ -158,7 +156,7 @@ impl LiteLlmLoader {
         let snapshot = parse_litellm_json(&bytes, &*self.clock)?;
         Ok(FetchedCatalog {
             fetched_at_ms: snapshot.fetched_at_ms,
-            fingerprint: catalog_fingerprint(&bytes),
+            fingerprint: snapshot.payload_hash,
             bytes,
         })
     }
@@ -195,8 +193,15 @@ impl LiteLlmLoader {
     }
 
     pub async fn install_latest_local(&self) -> Result<bool, LoaderError> {
-        let storage_error = match get_storage_snapshot(self.storage.clone()).await {
-            Ok(Some(snapshot)) => {
+        let current = self.catalog.current();
+        let fetched = self
+            .storage
+            .get_price_snapshot_if_changed(&current.payload_hash)
+            .await
+            .map_err(|error| LoaderError::Storage(error.to_string()))?;
+
+        match fetched {
+            PriceCatalogSnapshotFetch::Changed(snapshot) => {
                 return install_cached_bytes(
                     &self.catalog,
                     snapshot.json_bytes,
@@ -204,18 +209,15 @@ impl LiteLlmLoader {
                     &*self.clock,
                 );
             }
-            Ok(None) => None,
-            Err(error) => Some(error),
-        };
+            PriceCatalogSnapshotFetch::Unchanged(_) => return Ok(false),
+            PriceCatalogSnapshotFetch::Missing => {}
+        }
 
         if let Some(bytes) = read_disk_cache(self.cache_path.clone()).await? {
             return install_cached_bytes(&self.catalog, bytes, None, &*self.clock);
         }
 
-        match storage_error {
-            Some(error) => Err(error),
-            None => Ok(false),
-        }
+        Ok(false)
     }
 
     fn record_success(&self) {
@@ -230,167 +232,6 @@ impl LiteLlmLoader {
             .ok()
             .and_then(|guard| guard.clone())
     }
-}
-
-fn parse_litellm_json(bytes: &[u8], clock: &dyn Clock) -> Result<CatalogSnapshot, LoaderError> {
-    let root: HashMap<String, Value> =
-        serde_json::from_slice(bytes).map_err(|error| LoaderError::Json(error.to_string()))?;
-    let mut models = HashMap::new();
-    let mut cache_creation_per_million_usd = HashMap::new();
-    let mut cache_read_per_million_usd = HashMap::new();
-
-    for (model, value) in root {
-        if model == "sample_spec" {
-            continue;
-        }
-
-        let Some(object) = value.as_object() else {
-            continue;
-        };
-        let Some(input_cost) = object.get("input_cost_per_token").and_then(Value::as_f64) else {
-            record_missing_catalog_field(&model, "input_cost_per_token");
-            continue;
-        };
-        let Some(output_cost) = object.get("output_cost_per_token").and_then(Value::as_f64) else {
-            record_missing_catalog_field(&model, "output_cost_per_token");
-            continue;
-        };
-
-        let input_per_million_usd =
-            usd_per_token_to_per_million(&model, "input_cost_per_token", input_cost)?;
-        let output_per_million_usd =
-            usd_per_token_to_per_million(&model, "output_cost_per_token", output_cost)?;
-
-        if let Some(cache_creation_cost) = object
-            .get("cache_creation_input_token_cost")
-            .and_then(Value::as_f64)
-        {
-            cache_creation_per_million_usd.insert(
-                model.clone(),
-                usd_per_token_to_per_million(
-                    &model,
-                    "cache_creation_input_token_cost",
-                    cache_creation_cost,
-                )?,
-            );
-        }
-
-        if let Some(cache_read_cost) = object
-            .get("cache_read_input_token_cost")
-            .and_then(Value::as_f64)
-        {
-            cache_read_per_million_usd.insert(
-                model.clone(),
-                usd_per_token_to_per_million(
-                    &model,
-                    "cache_read_input_token_cost",
-                    cache_read_cost,
-                )?,
-            );
-        }
-
-        models.insert(
-            model.clone(),
-            Pricing {
-                model,
-                input_per_million_usd,
-                output_per_million_usd,
-            },
-        );
-    }
-
-    if models.is_empty() {
-        return Err(LoaderError::Validation(
-            "litellm catalog contains no models with input_cost_per_token and output_cost_per_token"
-                .to_owned(),
-        ));
-    }
-
-    Ok(CatalogSnapshot {
-        fetched_at_ms: now_ms(clock),
-        models,
-        raw_json: bytes.to_vec(),
-        cache_creation_per_million_usd,
-        cache_read_per_million_usd,
-        status: CatalogStatus::Ok,
-    })
-}
-
-fn usd_per_token_to_per_million(
-    model: &str,
-    field: &str,
-    cost_per_token: f64,
-) -> Result<UsdPerMillion, LoaderError> {
-    if !cost_per_token.is_finite() || cost_per_token < 0.0 {
-        return Err(LoaderError::Validation(format!(
-            "invalid {field} for model {model}"
-        )));
-    }
-
-    let micros_per_million = cost_per_token * 1_000_000.0 * 1_000_000.0;
-    if micros_per_million > u64::MAX as f64 {
-        return Err(LoaderError::Validation(format!(
-            "{field} for model {model} exceeds u64 micros"
-        )));
-    }
-
-    Ok(UsdPerMillion(micros_per_million.round() as u64))
-}
-
-fn record_missing_catalog_field(model: &str, field: &'static str) {
-    metrics::counter!(
-        "cclb_price_catalog_missing_field_total",
-        "model" => model.to_owned(),
-        "field" => field
-    )
-    .increment(1);
-}
-
-async fn put_storage_snapshot(
-    storage: Arc<dyn PriceCatalogCache>,
-    bytes: Vec<u8>,
-    fetched_at_ms: u64,
-) -> Result<(), LoaderError> {
-    storage
-        .put_price_snapshot(&bytes, fetched_at_ms)
-        .await
-        .map_err(|error| LoaderError::Storage(error.to_string()))
-}
-
-async fn get_storage_snapshot(
-    storage: Arc<dyn PriceCatalogCache>,
-) -> Result<Option<PriceCatalogSnapshotRecord>, LoaderError> {
-    storage
-        .get_price_snapshot()
-        .await
-        .map_err(|error| LoaderError::Storage(error.to_string()))
-}
-
-async fn read_disk_cache(cache_path: PathBuf) -> Result<Option<Vec<u8>>, LoaderError> {
-    match tokio::fs::read(&cache_path).await {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(LoaderError::Storage(format!(
-            "read {}: {error}",
-            cache_path.display()
-        ))),
-    }
-}
-
-async fn write_disk_cache(cache_path: PathBuf, bytes: &[u8]) -> Result<(), LoaderError> {
-    if let Some(parent) = cache_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|error| LoaderError::Storage(error.to_string()))?;
-    }
-
-    let tmp_path = tmp_cache_path(&cache_path);
-    tokio::fs::write(&tmp_path, bytes)
-        .await
-        .map_err(|error| LoaderError::Storage(error.to_string()))?;
-    tokio::fs::rename(&tmp_path, &cache_path)
-        .await
-        .map_err(|error| LoaderError::Storage(error.to_string()))
 }
 
 fn install_cached_bytes(
@@ -409,20 +250,4 @@ fn install_cached_bytes(
     }
     catalog.install_snapshot(snapshot);
     Ok(true)
-}
-
-fn tmp_cache_path(cache_path: &Path) -> PathBuf {
-    let mut tmp = OsString::from(cache_path.as_os_str());
-    tmp.push(".tmp");
-    PathBuf::from(tmp)
-}
-
-fn now_ms(clock: &dyn Clock) -> u64 {
-    cc_lb_clock::unix_millis(clock.now())
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
-fn catalog_fingerprint(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
 }

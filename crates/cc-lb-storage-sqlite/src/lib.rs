@@ -28,6 +28,15 @@ impl SqliteStorage {
         begin_immediate(&self.pool).await
     }
 
+    pub(crate) fn record_pool_metrics(&self) {
+        let size = self.pool.size();
+        let idle = self.pool.num_idle() as u32;
+        metrics::gauge!("cc_lb_sqlx_pool_size", "store" => "sqlite").set(f64::from(size));
+        metrics::gauge!("cc_lb_sqlx_pool_idle", "store" => "sqlite").set(f64::from(idle));
+        metrics::gauge!("cc_lb_sqlx_pool_in_use", "store" => "sqlite")
+            .set(f64::from(size.saturating_sub(idle)));
+    }
+
     pub(crate) fn clock(&self) -> &dyn Clock {
         &*self.clock
     }
@@ -46,10 +55,22 @@ pub async fn open_sqlite(database_url: &str, clock: ClockHandle) -> StorageResul
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .foreign_keys(true)
-        .busy_timeout(Duration::from_secs(5));
+        .busy_timeout(Duration::from_secs(5))
+        // Perf pragmas apply per connection (so ×max_connections): negative
+        // cache_size is KiB, mmap_size is bytes, temp_store=MEMORY keeps
+        // sorts/temp b-trees off disk.
+        .pragma("cache_size", "-16384")
+        .pragma("mmap_size", "268435456")
+        .pragma("temp_store", "MEMORY");
 
+    // >1 connection lets request-path reads run concurrently with background
+    // writes via WAL instead of serializing on one shared connection. Safe only
+    // because every write txn uses BEGIN IMMEDIATE (`begin_immediate`): no
+    // deferred->write upgrades to deadlock; writers serialize via the write lock
+    // + busy_timeout.
     let pool = SqlitePoolOptions::new()
-        .max_connections(1)
+        .max_connections(8)
+        .min_connections(1)
         .connect_with(options)
         .await
         .map_err(map_sqlx_error)?;

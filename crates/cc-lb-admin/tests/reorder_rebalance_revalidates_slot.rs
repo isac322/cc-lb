@@ -1,4 +1,4 @@
-mod admin_test_common;
+use crate::admin_test_common;
 
 use axum::http::StatusCode;
 use cc_lb_storage_api::{
@@ -140,6 +140,7 @@ async fn seed_registry_with_slots(
             WasmRegistryEntryInput {
                 schema_hash: None,
                 name: name.to_owned(),
+                version: None,
                 original_filename: format!("{name}.wasm"),
                 label: None,
                 uploaded_at_unix_secs: 1_800_000_000,

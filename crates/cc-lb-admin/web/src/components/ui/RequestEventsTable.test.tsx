@@ -1,13 +1,38 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import {
+  cleanup,
+  type RenderOptions,
+  render as rtlRender,
+  screen,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it } from 'vitest';
+import type { ReactElement } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { RequestEventsTable } from './RequestEventsTable';
 import { Sparkline } from './Sparkline';
 
+function render(ui: ReactElement, options?: RenderOptions) {
+  const queryClient = new QueryClient();
+  return rtlRender(ui, {
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+    ...options,
+  });
+}
+
 describe('RequestEventsTable', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new Error('network disabled in test'))),
+    );
+  });
+
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
   });
 
   const principalNameMap = new Map<string, string>();
@@ -285,6 +310,200 @@ describe('RequestEventsTable', () => {
       const dashes = screen.getAllByText('—');
       // 5 rows + 1 total + 1 cell = 7 dashes
       expect(dashes.length).toBeGreaterThanOrEqual(7);
+    });
+  });
+
+  describe('Badges', () => {
+    it('does not render the reasoning badge in the table even when reasoning fields are set', () => {
+      const events: RequestEventWithPhase[] = [
+        {
+          event_id: 'evt_reasoning',
+          request_id: 'req_reasoning',
+          ts: 1718553120,
+          ts_ms: 1718553120000,
+          status: 200,
+          duration_ms: 100,
+          model: 'claude-3-5-sonnet',
+          reasoning_effort: 'max',
+          thinking_budget_tokens: 18000,
+          thinking_tokens: 8200,
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
+
+      render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+        />,
+      );
+
+      expect(screen.queryByText('max · 8.2k')).toBeNull();
+      expect(
+        screen.queryByText(/low ·|medium ·|high ·|xhigh ·|max ·/),
+      ).toBeNull();
+    });
+
+    it('renders no reasoning badge when thinking_budget_tokens, reasoning_effort, and thinking_tokens are omitted', () => {
+      const events: RequestEventWithPhase[] = [
+        {
+          event_id: 'evt_no_reasoning',
+          request_id: 'req_no_reasoning',
+          ts: 1718553120,
+          ts_ms: 1718553120000,
+          status: 200,
+          duration_ms: 100,
+          model: 'claude-3-5-sonnet',
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
+
+      render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+        />,
+      );
+
+      expect(
+        screen.queryByText(/low ·|medium ·|high ·|xhigh ·|max ·/),
+      ).toBeNull();
+    });
+
+    it('renders priority badge when service_tier is priority', () => {
+      const events: RequestEventWithPhase[] = [
+        {
+          event_id: 'evt_fast',
+          request_id: 'req_fast',
+          ts: 1718553120,
+          ts_ms: 1718553120000,
+          status: 200,
+          duration_ms: 100,
+          model: 'claude-3-5-sonnet',
+          service_tier: 'priority',
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
+
+      render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+        />,
+      );
+
+      expect(screen.getByText('priority')).toBeDefined();
+    });
+
+    it('renders no badge when service_tier is standard', () => {
+      const events: RequestEventWithPhase[] = [
+        {
+          event_id: 'evt_standard',
+          request_id: 'req_standard',
+          ts: 1718553120,
+          ts_ms: 1718553120000,
+          status: 200,
+          duration_ms: 100,
+          model: 'claude-3-5-sonnet',
+          service_tier: 'standard',
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
+
+      render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+        />,
+      );
+
+      expect(screen.queryByText('standard')).toBeNull();
+      expect(screen.queryByText('priority')).toBeNull();
+    });
+
+    it('renders batch badge when service_tier is batch', () => {
+      const events: RequestEventWithPhase[] = [
+        {
+          event_id: 'evt_batch',
+          request_id: 'req_batch',
+          ts: 1718553120,
+          ts_ms: 1718553120000,
+          status: 200,
+          duration_ms: 100,
+          model: 'claude-3-5-sonnet',
+          service_tier: 'batch',
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
+
+      render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+        />,
+      );
+
+      expect(screen.getByText('batch')).toBeDefined();
+      expect(screen.queryByText('priority')).toBeNull();
+    });
+
+    it('renders flex badge when service_tier is flex', () => {
+      const events: RequestEventWithPhase[] = [
+        {
+          event_id: 'evt_flex',
+          request_id: 'req_flex',
+          ts: 1718553120,
+          ts_ms: 1718553120000,
+          status: 200,
+          duration_ms: 100,
+          model: 'claude-3-5-sonnet',
+          service_tier: 'flex',
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
+
+      render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+        />,
+      );
+
+      expect(screen.getByText('flex')).toBeDefined();
+      expect(screen.queryByText('priority')).toBeNull();
+    });
+
+    it('renders no priority badge when service_tier is omitted', () => {
+      const events: RequestEventWithPhase[] = [
+        {
+          event_id: 'evt_no_tier',
+          request_id: 'req_no_tier',
+          ts: 1718553120,
+          ts_ms: 1718553120000,
+          status: 200,
+          duration_ms: 100,
+          model: 'claude-3-5-sonnet',
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
+
+      render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+        />,
+      );
+
+      expect(screen.queryByText('priority')).toBeNull();
+      expect(screen.queryByText('standard')).toBeNull();
+      expect(screen.queryByText('batch')).toBeNull();
     });
   });
 

@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-mod preflight_common;
+use crate::preflight_common;
 
 use cc_lb_server::preflight::{self, PreflightOptions};
 

@@ -7,8 +7,9 @@
 //! author actually re-types every time is header construction, a
 //! synthetic principal, and the six-variant observe sample.
 
+use cc_lb_plugin_wire::v1::FilterRequest;
 use cc_lb_plugin_wire::{
-    CachePricingSummary, FilterRequest, Header, ObserveEvent, Principal, ShapeRequest, SseEvent,
+    CachePricingSummary, Header, ObserveEvent, Principal, ShapeRequest, SseEvent,
     TransformResponseRequest, TransformSseEventRequest, Upstream,
 };
 
@@ -96,14 +97,9 @@ pub fn sample_filter_request() -> FilterRequest {
     FilterRequest {
         request_id: Box::from("conformance-req-1"),
         thread_id: None,
+        service_tier: Some(Box::from("priority")),
         canonical_model_id: Box::from("claude-3-haiku-20240307"),
-        cache_pricing: CachePricingSummary {
-            status: Box::from("unknown"),
-            input_micros_per_million: None,
-            cache_creation_5m_micros_per_million: None,
-            cache_creation_1h_micros_per_million: None,
-            cache_read_micros_per_million: None,
-        },
+        cache_pricing: sample_cache_pricing(),
         method: Box::from("POST"),
         path: Box::from("/v1/messages"),
         query: None,
@@ -111,6 +107,16 @@ pub fn sample_filter_request() -> FilterRequest {
         body: Box::from(&br#"{"model":"claude-3-haiku-20240307","messages":[]}"#[..]),
         principal: synth_principal(),
         candidates: Box::new([]),
+    }
+}
+
+fn sample_cache_pricing() -> CachePricingSummary {
+    CachePricingSummary {
+        status: Box::from("unknown"),
+        input_micros_per_million: None,
+        cache_creation_5m_micros_per_million: None,
+        cache_creation_1h_micros_per_million: None,
+        cache_read_micros_per_million: None,
     }
 }
 

@@ -1,5 +1,3 @@
-mod common;
-
 use cc_lb_config::{
     Config, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES,
     DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_SQLITE_PATH, StorageConfig,
@@ -7,7 +5,7 @@ use cc_lb_config::{
 
 #[test]
 fn load_minimal_toml_applies_plan_defaults() {
-    let (_dir, path) = common::temp_config("[listener]\n");
+    let (_dir, path) = crate::common::temp_config("[listener]\n");
 
     let config = Config::load(&path).unwrap();
 
@@ -31,4 +29,12 @@ fn load_minimal_toml_applies_plan_defaults() {
     assert_eq!(config.bulkhead.semaphore_per_upstream, 100);
     assert_eq!(config.dns.cache_ttl_floor_secs, 30);
     assert_eq!(config.dns.cache_ttl_ceiling_secs, 300);
+
+    assert!(!config.capture.enabled);
+    assert_eq!(
+        config.capture.path,
+        std::path::PathBuf::from("capture.sqlite")
+    );
+    assert_eq!(config.capture.channel_capacity, 1024);
+    assert_eq!(config.capture.retention_max_rows, 100_000);
 }
