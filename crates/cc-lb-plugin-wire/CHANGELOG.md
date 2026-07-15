@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Add filter wire V2 with requested `service_tier` while preserving the published V1 layout and fingerprint.
-
 ## [0.6.1](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-wire-v0.6.0...cc-lb-plugin-wire-v0.6.1) - 2026-07-12
 
 ### Other

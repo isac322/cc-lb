@@ -191,6 +191,7 @@ pub struct HeaderRef<'a> {
 pub struct FilterRequest {
     pub request_id: Box<str>,
     pub thread_id: Option<Box<str>>,
+    pub service_tier: Option<Box<str>>,
     pub canonical_model_id: Box<str>,
     pub cache_pricing: CachePricingSummary,
     pub method: Box<str>,
@@ -211,6 +212,7 @@ pub struct FilterRequestRef<'a> {
     #[rkyv(with = InlineAsBox)]
     pub request_id: &'a str,
     pub thread_id: Option<QueryRef<'a>>,
+    pub service_tier: Option<QueryRef<'a>>,
     #[rkyv(with = InlineAsBox)]
     pub canonical_model_id: &'a str,
     pub cache_pricing: CachePricingSummaryRef<'a>,

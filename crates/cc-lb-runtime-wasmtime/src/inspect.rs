@@ -373,9 +373,6 @@ pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> Opti
         (HookKind::Filter, WireVersion::V1) => {
             Some(<cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT)
         }
-        (HookKind::Filter, WireVersion::V2) => {
-            Some(<cc_lb_plugin_wire::v2::FilterRequest as WireSchema>::FINGERPRINT)
-        }
         (HookKind::Shape, WireVersion::V1) => {
             Some(<cc_lb_plugin_wire::v1::ShapeRequest as WireSchema>::FINGERPRINT)
         }
@@ -388,10 +385,6 @@ pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> Opti
         (HookKind::TransformSseEvent, WireVersion::V1) => {
             Some(<cc_lb_plugin_wire::v1::TransformSseEventRequest as WireSchema>::FINGERPRINT)
         }
-        (HookKind::Shape, WireVersion::V2)
-        | (HookKind::Observe, WireVersion::V2)
-        | (HookKind::TransformResponse, WireVersion::V2)
-        | (HookKind::TransformSseEvent, WireVersion::V2) => None,
     }
 }
 

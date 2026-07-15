@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Add owned and archived-view guest dispatch for filter wire V2.
-
 ## [0.1.1](https://github.com/isac322/cc-lb/compare/cc-lb-pdk-wasmtime-v0.1.0...cc-lb-pdk-wasmtime-v0.1.1) - 2026-07-09
 
 ### Added

@@ -11,9 +11,8 @@ the common PDK path.
 
 ## What This Crate Provides
 
-- Versioned hook wire types under `cc_lb_plugin_wire::v1` and filter V2 types
-  under `cc_lb_plugin_wire::v2`.
-- `WireVersion::V1` and `WireVersion::V2`.
+- Hook wire types under `cc_lb_plugin_wire::v1`.
+- `WireVersion::V1`.
 - `HookKind` for `filter`, `shape`, and `observe` hooks.
 - `WireSchema`, implemented by the PDK derive macro for layout fingerprints.
 - `PluginMetadata` and `HookMetadata` behind the `std` feature.
@@ -21,14 +20,8 @@ the common PDK path.
 
 ## WireVersion, HookKind, and WireSchema
 
-`WireVersion` identifies an incompatible wire layout line. Filter hooks support
-V1 and V2; shape, observe, and response-transform hooks remain on V1. Filter V2
-adds `FilterRequest::service_tier` while the published V1 layout and fingerprint
-remain unchanged.
-
-New filter plugins that need the requested service tier import
-`cc_lb_plugin_wire::v2::FilterRequest` and declare `wire = 2`. Existing V1
-plugins remain host-supported and continue receiving the V1 request layout.
+`WireVersion` identifies the wire layout line. All hooks use V1, including
+filter hooks that need `FilterRequest::service_tier`.
 
 `HookKind` names the three supported plugin hooks:
 

@@ -145,7 +145,7 @@ cc-lb supports three plugin slot kinds. A wasm artifact may implement one or mor
 
 | Slot | Export | Request type | Response type | Use |
 |---|---|---|---|---|
-| `filter` | `cc_lb_filter` | `v1::FilterRequest` or `v2::FilterRequest` | `FilterResponse` | Keep or reject upstream candidates. Filter V2 also exposes the requested service tier. |
+| `filter` | `cc_lb_filter` | `v1::FilterRequest` | `FilterResponse` | Keep or reject upstream candidates. The V1 request exposes the requested service tier. |
 | `shape` | `cc_lb_shape`<br>`cc_lb_transform_response`<br>`cc_lb_transform_sse_event` | `ShapeRequest`<br>`TransformResponseRequest`<br>`TransformSseEventRequest` | `ShapeResponse`<br>`TransformResponseResult`<br>`TransformSseEventResult` | Unified slot that produces the upstream-bound request and transforms downstream responses (both buffered and SSE). |
 | `observe` | `cc_lb_observe` | `ObserveEvent` | none | Receive lifecycle events for side effects. |
 
@@ -260,7 +260,7 @@ pub fn observe(event: ObserveEvent) {
 ```
 
 Each handler declares its own `wire = N`. The published PDK supports `wire = 1`
-for every hook and `wire = 2` for filter hooks only.
+for every hook.
 
 ## Metadata Contract
 
@@ -294,8 +294,7 @@ Upload rejection names relevant to plugin authors include:
 
 ## Wire Versioning
 
-Wire versions are independent per hook. A future host can support filter v1 and
-v2 while shape and observe remain on v1. The plugin declares the version on each
+Wire versions are independent per hook. The plugin declares the version on each
 handler:
 
 ```rust
@@ -311,16 +310,14 @@ pub fn filter(req: FilterRequest) -> FilterResponse {
 }
 ```
 
-Filter V1 remains supported and preserves its published layout. It does not
-expose a service tier. Filter plugins that need the requested tier migrate only
-their filter handler to V2:
+Filter plugins receive the requested tier on the V1 filter request:
 
 ```rust
-use cc_lb_plugin_wire::v2::{FilterRequest, FilterResponse};
+use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse};
 
 #[handler(
     filter,
-    wire = 2,
+    wire = 1,
     description = "Filters candidates using the requested service tier.",
     usage = "Attach to router filter chains that distinguish service tiers.",
 )]
@@ -363,9 +360,8 @@ the requested hook and wire version. Mismatches are rejected as `invalid_wasm`.
 
 Static metadata and fingerprints do not catch every integration bug. The host
 therefore runs `admit_wasm` for uploads, which compiles the module and executes
-a canonical sample payload for each declared hook and wire version. Filter V2
-probes use a V2 request with `service_tier = Some("priority")`; Filter V1 probes
-continue using the unchanged V1 layout.
+a canonical sample payload for each declared hook and wire version. Filter
+probes use a V1 request with `service_tier = Some("priority")`.
 
 The runtime probe catches issues such as:
 
@@ -491,11 +487,10 @@ fn plugin_passes_boundary_smoke() {
 current host can inspect, compile, fingerprint-check, and probe the plugin.
 
 `run()` builds a live runtime session and performs ABI round-trips using the
-canonical payload for each hook's declared wire version. A Filter V2 plugin
-receives the V2 request with `service_tier = Some("priority")`; a Filter V1
-plugin continues receiving the V1 request. It proves the boundary works; it
-does not replace semantic tests for your plugin's routing, shaping, or
-observability behavior.
+canonical payload for each hook's declared wire version. A filter plugin
+receives the V1 request with `service_tier = Some("priority")`. It proves the
+boundary works; it does not replace semantic tests for your plugin's routing,
+shaping, or observability behavior.
 
 ## Wire Version Bump Policy
 
@@ -503,21 +498,6 @@ Bump a hook's wire version when the hook request or response layout changes
 incompatibly. Examples include adding fields, removing fields, renaming fields,
 reordering fields, changing field types, or changing enum variants.
 
-Host-side migration policy:
-
-1. Add new v2 wire types for the changed hook.
-2. Add `WireVersion::V2`.
-3. Add v2 to that hook's supported-version list.
-4. Keep v1 in the list while existing plugins are still supported.
-5. Update admission, probe fixtures, and conformance coverage for v2.
-
-Plugin author migration policy:
-
-1. Update `cc-lb-plugin-wire` and `cc-lb-pdk-wasmtime`.
-2. Change only the affected handler to `wire = 2`.
-3. Update handler signatures and response construction for the new types.
-4. Run conformance tests against the target host version.
-5. Upload the rebuilt wasm and rebind chains after admission succeeds.
-
-Because versions are per-hook, a multi-hook plugin can migrate one hook at a
-time. For example, `filter` can move to v2 while `observe` remains on v1.
+When a future public plugin boundary needs a new incompatible layout, update the
+affected hook's version, supported-version list, admission fingerprints, probe
+fixtures, and conformance coverage together.

@@ -12,9 +12,8 @@
 pub use crate::{
     ConformanceSuite, PluginSession, conformance_engine_config,
     fixtures::{
-        hdr, observe_event_samples, sample_filter_request, sample_filter_request_v2,
-        sample_shape_request, sample_transform_response_request,
-        sample_transform_sse_event_request, synth_principal,
+        hdr, observe_event_samples, sample_filter_request, sample_shape_request,
+        sample_transform_response_request, sample_transform_sse_event_request, synth_principal,
     },
 };
 pub use cc_lb_plugin_wire::{

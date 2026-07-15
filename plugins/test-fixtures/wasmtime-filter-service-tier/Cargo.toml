@@ -1,11 +1,11 @@
 [package]
-name = "wasmtime-filter-v2"
+name = "wasmtime-filter-service-tier"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Filter V2 service-tier fixture for cc-lb runtime integration tests."
+description = "Filter service-tier fixture for cc-lb runtime integration tests."
 
 [lib]
 crate-type = ["cdylib", "rlib"]
