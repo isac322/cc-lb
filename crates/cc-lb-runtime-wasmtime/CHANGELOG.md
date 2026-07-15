@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.1.3...cc-lb-runtime-wasmtime-v0.1.4) - 2026-07-15
+
+### Added
+
+- add service-tier pricing and filter wire v2 ([#455](https://github.com/isac322/cc-lb/pull/455))
+
+### Other
+
+- fold filter service tier into wire v1 ([#475](https://github.com/isac322/cc-lb/pull/475))
+- Add slot-agnostic Plugins dashboard ([#468](https://github.com/isac322/cc-lb/pull/468))
+- *(storage)* optimize request event and quota queries ([#466](https://github.com/isac322/cc-lb/pull/466))
+- harden reproducible build inputs ([#464](https://github.com/isac322/cc-lb/pull/464))
+- *(wasm)* cache compiled modules by content hash to stop redundant cranelift recompilation ([#448](https://github.com/isac322/cc-lb/pull/448))
+- reduce allocator churn across quota, prompt-cache, wasmtime, price-catalog, and HTTP paths ([#423](https://github.com/isac322/cc-lb/pull/423))
+- consolidate integration-test targets into per-crate harnesses ([#427](https://github.com/isac322/cc-lb/pull/427))
+
 ### Added
 
 - Add wire-version-aware runtime probes for Filter V1 and V2, including requested service-tier delivery in the V2 sample.
