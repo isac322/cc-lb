@@ -83,6 +83,7 @@ fn request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRequest {
     FilterRequest {
         request_id: Box::from("req"),
         thread_id: None,
+        service_tier: None,
         canonical_model_id: Box::from("claude-test"),
         cache_pricing: CachePricingSummary {
             status: Box::from("unknown"),

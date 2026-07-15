@@ -4,10 +4,10 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 
-use cc_lb_pdk_wasmtime::types::v2::{FilterRequest, FilterResponse, PerCandidateReason};
+use cc_lb_pdk_wasmtime::types::v1::{FilterRequest, FilterResponse, PerCandidateReason};
 
 #[cc_lb_pdk_wasmtime::plugin(
-    name = "wasmtime-filter-v2",
+    name = "wasmtime-filter-service-tier",
     version = "0.1.0",
     description = "Test fixture that echoes the requested service tier",
     usage = "Testing only"
@@ -17,7 +17,7 @@ mod fixture {
 
     #[cc_lb_pdk_wasmtime::handler(
         filter,
-        wire = 2,
+        wire = 1,
         description = "Returns the requested service tier as its reason",
         usage = "Testing only"
     )]

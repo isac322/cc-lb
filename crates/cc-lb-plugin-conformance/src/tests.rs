@@ -13,10 +13,10 @@ fn wasm_fixture_path(file_name: &str) -> PathBuf {
 }
 
 #[test]
-fn run_sends_priority_service_tier_when_filter_declares_v2() {
+fn run_sends_priority_service_tier_to_filter() {
     // Given
-    let wasm = std::fs::read(wasm_fixture_path("wasmtime_filter_v2.wasm"))
-        .expect("runtime build script produces filter V2 fixture");
+    let wasm = std::fs::read(wasm_fixture_path("wasmtime_filter_service_tier.wasm"))
+        .expect("runtime build script produces filter service-tier fixture");
     let suite = ConformanceSuite::for_filter(&wasm);
 
     // When / Then
@@ -24,10 +24,10 @@ fn run_sends_priority_service_tier_when_filter_declares_v2() {
 }
 
 #[test]
-fn run_keeps_v1_request_when_filter_declares_v1() {
+fn run_exercises_cache_aware_filter() {
     // Given
     let wasm = std::fs::read(wasm_fixture_path("cache_aware_wasmtime.wasm"))
-        .expect("runtime build script produces filter V1 fixture");
+        .expect("runtime build script produces cache-aware filter fixture");
     let suite = ConformanceSuite::for_filter(&wasm);
 
     // When / Then

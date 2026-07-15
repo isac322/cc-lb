@@ -44,6 +44,7 @@ fn tiny_filter_request() -> FilterRequest {
     FilterRequest {
         request_id: Box::from("evict-probe"),
         thread_id: None,
+        service_tier: None,
         canonical_model_id: Box::from("claude-test"),
         cache_pricing: CachePricingSummary {
             status: Box::from("unknown"),

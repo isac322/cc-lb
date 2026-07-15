@@ -10,8 +10,6 @@ pub(super) use scratch::{access_archived_scoped_or_copy, serialize_with_input_sc
 pub use shape::WasmtimeUpstreamDialect;
 
 #[cfg(test)]
-mod filter_v2_tests;
-#[cfg(test)]
 mod tests {
     use std::mem::align_of;
 
