@@ -43,6 +43,27 @@ jobs:
       - name: Integration-test consolidation guard
         run: bash scripts/check-integration-test-consolidation.sh
 
+  guard-crate-versions:
+    name: guard crate versions
+    # Versions under crates/ are owned by release-plz. Block manual bumps in
+    # feature PRs (they desync release-plz's baseline and make its release PR
+    # conflict forever). release-plz's own PRs bump versions and are exempt.
+    if: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reject manual crate version bumps under crates/
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+          python3 scripts/check-crate-versions.py --base "$RUNNER_TEMP/base" --head .
+          git worktree remove --force "$RUNNER_TEMP/base"
+
   clippy:
     runs-on: oracle4-cc-lb
     strategy:
