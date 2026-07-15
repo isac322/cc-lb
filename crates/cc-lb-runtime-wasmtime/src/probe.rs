@@ -21,7 +21,7 @@ use crate::error::WasmtimeRuntimeError;
 
 mod filter;
 
-use filter::{probe_filter_v1, probe_filter_v2};
+use filter::probe_filter_v1;
 
 pub(crate) fn probe_hook_dispatch(
     instance_pre: Arc<InstancePre<HostState>>,
@@ -52,18 +52,10 @@ pub(crate) fn probe_hook_dispatch(
     });
     match (hook, wire_version) {
         (HookKind::Filter, WireVersion::V1) => probe_filter_v1(&cell),
-        (HookKind::Filter, WireVersion::V2) => probe_filter_v2(&cell),
         (HookKind::Shape, WireVersion::V1) => probe_shape_v1(&cell),
         (HookKind::Observe, WireVersion::V1) => probe_observe_v1(&cell),
         (HookKind::TransformResponse, WireVersion::V1) => probe_transform_response_v1(&cell),
         (HookKind::TransformSseEvent, WireVersion::V1) => probe_transform_sse_event_v1(&cell),
-        (HookKind::Shape, WireVersion::V2)
-        | (HookKind::Observe, WireVersion::V2)
-        | (HookKind::TransformResponse, WireVersion::V2)
-        | (HookKind::TransformSseEvent, WireVersion::V2) => Err(probe_failed(
-            hook,
-            format!("unsupported wire version {}", wire_version.as_u8()),
-        )),
     }
 }
 

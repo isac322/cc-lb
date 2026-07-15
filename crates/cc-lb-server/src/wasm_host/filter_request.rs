@@ -2,10 +2,9 @@ use cc_lb_domain::{Principal, PrincipalKind, UpstreamCandidate};
 use cc_lb_plugin_wire::{
     schema::WireVersion,
     v1::{
-        CachePricingSummaryRef, ClaimRef, FilterRequestRef as FilterRequestRefV1, HeaderRef,
-        PrincipalRef, QueryRef, UpstreamCandidateRef,
+        CachePricingSummaryRef, ClaimRef, FilterRequestRef, HeaderRef, PrincipalRef, QueryRef,
+        UpstreamCandidateRef,
     },
-    v2::FilterRequestRef as FilterRequestRefV2,
 };
 use cc_lb_routing::RoutingContext;
 use rkyv::rancor::Error as RkyvError;
@@ -115,32 +114,17 @@ impl FilterWireRequest<'_> {
             cache_read_micros_per_million: self.ctx.cache_pricing.cache_read_micros_per_million,
         };
 
+        let service_tier = self
+            .ctx
+            .requested_service_tier
+            .as_deref()
+            .map(|value| QueryRef { value });
         match self.wire_version {
             WireVersion::V1 => serialize_with_input_scratch(
-                &FilterRequestRefV1 {
+                &FilterRequestRef {
                     request_id: self.ctx.request_id.as_str(),
                     thread_id,
-                    canonical_model_id: self.ctx.canonical_model_id.as_str(),
-                    cache_pricing: cache_pricing(),
-                    method: self.ctx.method.as_str(),
-                    path: self.ctx.path.as_str(),
-                    query,
-                    headers: &headers,
-                    body: self.ctx.body_bytes.as_ref(),
-                    principal: principal(),
-                    candidates: &candidates,
-                },
-                with_bytes,
-            ),
-            WireVersion::V2 => serialize_with_input_scratch(
-                &FilterRequestRefV2 {
-                    request_id: self.ctx.request_id.as_str(),
-                    thread_id,
-                    service_tier: self
-                        .ctx
-                        .requested_service_tier
-                        .as_deref()
-                        .map(|value| QueryRef { value }),
+                    service_tier,
                     canonical_model_id: self.ctx.canonical_model_id.as_str(),
                     cache_pricing: cache_pricing(),
                     method: self.ctx.method.as_str(),

@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
-use cc_lb_plugin_wire::v1::ArchivedFilterResponse;
-use cc_lb_plugin_wire::v2::{CachePricingSummary, FilterRequest, FilterResponse, Principal};
+use cc_lb_plugin_wire::v1::{
+    ArchivedFilterResponse, CachePricingSummary, FilterRequest, FilterResponse, Principal,
+};
 use cc_lb_plugin_wire::{HookKind, WireVersion};
 use cc_lb_runtime_wasmtime::{RuntimeSlotKey, WasmtimeRuntime};
 use rkyv::rancor::Error as RkyvError;
@@ -13,27 +14,28 @@ fn wasm_path() -> PathBuf {
         .expect("crates directory")
         .parent()
         .expect("workspace root")
-        .join("target/wasm32-unknown-unknown/release/wasmtime_filter_v2.wasm")
+        .join("target/wasm32-unknown-unknown/release/wasmtime_filter_service_tier.wasm")
 }
 
 #[test]
-fn filter_v2_plugin_admits_and_receives_service_tier() {
-    let wasm = std::fs::read(wasm_path()).expect("build script produces filter V2 fixture");
+fn filter_plugin_admits_and_receives_service_tier() {
+    let wasm =
+        std::fs::read(wasm_path()).expect("build script produces filter service-tier fixture");
     let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
     let inspection = runtime
         .admit_wasm(HookKind::Filter, &wasm)
-        .expect("filter V2 admission and probe");
+        .expect("filter admission and probe");
     assert_eq!(
         inspection.hook_versions.get(&HookKind::Filter),
-        Some(&WireVersion::V2)
+        Some(&WireVersion::V1)
     );
 
-    let slot = RuntimeSlotKey::global("filter-v2-service-tier");
+    let slot = RuntimeSlotKey::global("filter-service-tier");
     runtime
-        .register_filter(slot.clone(), "wasmtime-filter-v2", &wasm)
-        .expect("register filter V2");
+        .register_filter(slot.clone(), "wasmtime-filter-service-tier", &wasm)
+        .expect("register filter service-tier");
     let request = FilterRequest {
-        request_id: Box::from("req-v2"),
+        request_id: Box::from("req-service-tier"),
         thread_id: None,
         service_tier: Some(Box::from("priority")),
         canonical_model_id: Box::from("claude-test"),
@@ -56,10 +58,10 @@ fn filter_v2_plugin_admits_and_receives_service_tier() {
         },
         candidates: Box::new([]),
     };
-    let input = rkyv::to_bytes::<RkyvError>(&request).expect("encode filter V2 request");
+    let input = rkyv::to_bytes::<RkyvError>(&request).expect("encode filter request");
     let output = runtime
         .call_filter(&slot, input.as_slice())
-        .expect("dispatch filter V2");
+        .expect("dispatch filter");
     let mut aligned = AlignedVec::<16>::with_capacity(output.len());
     aligned.extend_from_slice(&output);
     let archived = rkyv::access::<ArchivedFilterResponse, RkyvError>(&aligned)

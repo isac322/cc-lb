@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_plugin_wire::v1::{
-    ArchivedFilterResponse, CachePricingSummary, FilterRequest as FilterRequestV1,
-};
-use cc_lb_plugin_wire::v2::FilterRequest as FilterRequestV2;
+use cc_lb_plugin_wire::v1::{ArchivedFilterResponse, CachePricingSummary, FilterRequest};
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 
@@ -16,10 +13,6 @@ use cc_lb_plugin_wire::schema::HookKind;
 
 pub(super) fn probe_filter_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRuntimeError> {
     probe_filter(cell, &sample_filter_request_v1())
-}
-
-pub(super) fn probe_filter_v2(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRuntimeError> {
-    probe_filter(cell, &sample_filter_request_v2())
 }
 
 fn probe_filter<T>(cell: &Arc<PluginCell>, request: &T) -> Result<(), WasmtimeRuntimeError>
@@ -45,24 +38,8 @@ where
     Ok(())
 }
 
-fn sample_filter_request_v1() -> FilterRequestV1 {
-    FilterRequestV1 {
-        request_id: Box::from("probe-req-1"),
-        thread_id: None,
-        canonical_model_id: Box::from("claude-3-haiku-20240307"),
-        cache_pricing: cache_pricing(),
-        method: Box::from("POST"),
-        path: Box::from("/v1/messages"),
-        query: None,
-        headers: Box::new([hdr("content-type", "application/json")]),
-        body: Box::from(&br#"{"model":"claude-3-haiku-20240307","messages":[]}"#[..]),
-        principal: synth_principal(),
-        candidates: Box::new([]),
-    }
-}
-
-fn sample_filter_request_v2() -> FilterRequestV2 {
-    FilterRequestV2 {
+fn sample_filter_request_v1() -> FilterRequest {
+    FilterRequest {
         request_id: Box::from("probe-req-1"),
         thread_id: None,
         service_tier: Some(Box::from("priority")),

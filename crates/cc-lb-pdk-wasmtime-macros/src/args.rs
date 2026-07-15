@@ -116,7 +116,7 @@ impl Parse for HandlerArgs {
                 other => {
                     return Err(Error::new_spanned(
                         other,
-                        "expected `<kind>`, `wire = 1|2`, `description = \"...\"`, `usage = \"...\"`, `mode = \"active\"|\"noop\"`, or `view`",
+                        "expected `<kind>`, `wire = 1`, `description = \"...\"`, `usage = \"...\"`, `mode = \"active\"|\"noop\"`, or `view`",
                     ));
                 }
             }
@@ -135,7 +135,7 @@ impl Parse for HandlerArgs {
         if !kind.supports_wire_version(wire_version) {
             return Err(Error::new(
                 Span::call_site(),
-                "this hook does not support the requested wire version; filter accepts 1 or 2 and all other hooks require 1",
+                "this hook does not support the requested wire version; all hooks require 1",
             ));
         }
         Ok(Self {
@@ -216,7 +216,7 @@ impl HandlerKind {
 
     pub(crate) const fn supports_wire_version(self, wire_version: u8) -> bool {
         match self {
-            Self::Filter => matches!(wire_version, 1 | 2),
+            Self::Filter => wire_version == 1,
             Self::Shape | Self::Observe | Self::TransformResponse | Self::TransformSseEvent => {
                 wire_version == 1
             }
@@ -237,8 +237,6 @@ impl HandlerKind {
         match (self, wire_version, view) {
             (Self::Filter, 1, false) => Some("run_filter"),
             (Self::Filter, 1, true) => Some("run_filter_view"),
-            (Self::Filter, 2, false) => Some("run_filter_v2"),
-            (Self::Filter, 2, true) => Some("run_filter_v2_view"),
             (Self::Shape, 1, false) => Some("run_shape"),
             (Self::Shape, 1, true) => Some("run_shape_view"),
             (Self::Observe, 1, false) => Some("run_observe"),
@@ -262,7 +260,6 @@ impl HandlerKind {
     pub(crate) fn fingerprint_type(self, wire_version: u8) -> Option<TokenStream2> {
         match (self, wire_version) {
             (Self::Filter, 1) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::FilterRequest }),
-            (Self::Filter, 2) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v2::FilterRequest }),
             (Self::Shape, 1) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::ShapeRequest }),
             (Self::Observe, 1) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::ObserveEvent }),
             (Self::TransformResponse, 1) => {
