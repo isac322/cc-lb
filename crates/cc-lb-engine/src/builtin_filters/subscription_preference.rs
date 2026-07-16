@@ -28,8 +28,11 @@
 //!
 //! ## Reset semantics
 //!
-//! - Fresh + `resets_at` in the future: window contributes to urgency.
-//! - Fresh without `resets_at`: window excluded from urgency (Q4).
+//! - `7d_fable` uses the same `classify_base_snapshot` tier classification as
+//!   `7d`.
+//! - Its use-it-or-lose-it urgency contribution is zero unless the snapshot is
+//!   fresh, has finite utilization, and has a future `resets_at`; the
+//!   pressure-side reset gate enforces this independently of tier membership.
 //! - Stale + `rejected` + future reset: hard negative (rejection still live).
 //! - Stale + `rejected` + past reset: unknown (rejection expired).
 
@@ -394,11 +397,7 @@ fn assess_candidate<'a>(
     let mut fable_weekly_pressure = 0.0f64;
     for &window in base_windows {
         let snapshot = find_snapshot(candidate, window);
-        let signal = if window == WINDOW_SEVEN_DAY_FABLE {
-            classify_fable_base_snapshot(snapshot, now_secs, config)
-        } else {
-            classify_base_snapshot(snapshot, now_secs, config)
-        };
+        let signal = classify_base_snapshot(snapshot, now_secs, config);
         match signal {
             BaseSignal::CurrentPositive => {
                 positive_count += 1;
@@ -626,26 +625,6 @@ fn classify_base_snapshot(
             }
         }
     }
-}
-
-fn classify_fable_base_snapshot(
-    snapshot: Option<&SubscriptionQuotaCandidateSnapshot>,
-    now_secs: u64,
-    config: &FilterConfig,
-) -> BaseSignal {
-    let Some(snapshot) = snapshot else {
-        return BaseSignal::Unknown;
-    };
-    if snapshot.state != SubscriptionQuotaDataState::Fresh {
-        return BaseSignal::Unknown;
-    }
-    if !matches!(snapshot.utilization, Some(value) if value.is_finite()) {
-        return BaseSignal::Unknown;
-    }
-    if !matches!(snapshot.resets_at_unix_secs, Some(value) if value > now_secs) {
-        return BaseSignal::Unknown;
-    }
-    classify_base_snapshot(Some(snapshot), now_secs, config)
 }
 
 fn utilization_signal(util: Option<f64>) -> BaseSignal {
