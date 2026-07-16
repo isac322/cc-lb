@@ -191,7 +191,7 @@ dependencies = [
  "cron 0.16.0",
  "futures-util",
  "serde",
- "ulid 1.2.1",
+ "ulid",
 ]
 
 [[package]]
@@ -210,7 +210,7 @@ dependencies = [
  "sqlx 0.8.6",
  "thiserror 2.0.18",
  "tokio",
- "ulid 1.2.1",
+ "ulid",
 ]
 
 [[package]]
@@ -243,7 +243,7 @@ dependencies = [
  "sqlx 0.8.6",
  "thiserror 2.0.18",
  "tokio",
- "ulid 1.2.1",
+ "ulid",
 ]
 
 [[package]]
@@ -845,7 +845,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "ulid 3.0.0",
+ "ulid",
  "uuid",
 ]
 
@@ -932,7 +932,7 @@ dependencies = [
  "tower",
  "tower-service",
  "tracing",
- "ulid 3.0.0",
+ "ulid",
  "url",
  "uuid",
  "zstd",
@@ -1183,6 +1183,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sqlx 0.8.6",
  "sqlx 0.9.0",
  "tempfile",
  "testcontainers-modules",
@@ -1193,7 +1194,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "ulid 3.0.0",
+ "ulid",
  "url",
  "uuid",
 ]
@@ -6642,16 +6643,6 @@ checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
 dependencies = [
  "rand 0.9.5",
  "serde",
- "web-time",
-]
-
-[[package]]
-name = "ulid"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "947dde63b6d514cc5e044edad4e0ca7261afd1099d16c83d942cb2b2f348689c"
-dependencies = [
- "rand 0.10.2",
  "web-time",
 ]
 

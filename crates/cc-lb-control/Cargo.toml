@@ -43,7 +43,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tokio-util.workspace = true
 tracing.workspace = true
-ulid = "3"
+ulid = "1"
 uuid.workspace = true
 
 [dev-dependencies]
