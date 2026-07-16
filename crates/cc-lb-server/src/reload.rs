@@ -363,45 +363,7 @@ pub fn summarize_restart_required(
     summarize_wasmtime_restart_required(&mut changes, current, new_config);
     summarize_oauth_restart_required(&mut changes, current, new_config);
     summarize_lifecycle_subscriber_restart_required(&mut changes, current, new_config);
-    summarize_capture_restart_required(&mut changes, current, new_config);
     changes
-}
-
-fn summarize_capture_restart_required(
-    changes: &mut Vec<RestartRequiredField>,
-    current: &Config,
-    new_config: &Config,
-) {
-    let current = &current.capture;
-    let new_config = &new_config.capture;
-    push_changed(
-        changes,
-        "capture.enabled",
-        current.enabled.to_string(),
-        new_config.enabled.to_string(),
-        "capture wiring is bound at startup; toggling requires a process restart",
-    );
-    push_changed(
-        changes,
-        "capture.path",
-        current.path.display().to_string(),
-        new_config.path.display().to_string(),
-        "capture store path changes require a process restart",
-    );
-    push_changed(
-        changes,
-        "capture.channel_capacity",
-        current.channel_capacity.to_string(),
-        new_config.channel_capacity.to_string(),
-        "capture channel capacity changes require a process restart",
-    );
-    push_changed(
-        changes,
-        "capture.retention_max_rows",
-        current.retention_max_rows.to_string(),
-        new_config.retention_max_rows.to_string(),
-        "capture retention changes require a process restart",
-    );
 }
 
 fn summarize_wasmtime_restart_required(

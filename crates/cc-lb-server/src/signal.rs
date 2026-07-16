@@ -86,6 +86,7 @@ async fn run_shutdown(
 ) {
     drain.trigger();
     let _ = shutdown.send(true);
+    shutdown_hooks.run_all().await;
 
     let timed_out = drain.await_drained(drain_timeout).await;
     if timed_out {
@@ -95,8 +96,6 @@ async fn run_shutdown(
             "graceful drain deadline elapsed with proxy request handlers still in flight"
         );
     }
-
-    shutdown_hooks.run_all().await;
 
     let _ = drain_complete.send(true);
 }

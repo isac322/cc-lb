@@ -107,7 +107,7 @@ pub struct MetricDefinition {
     pub description: &'static str,
 }
 
-const METRIC_DEFINITIONS: [MetricDefinition; 51] = [
+const METRIC_DEFINITIONS: [MetricDefinition; 47] = [
     MetricDefinition {
         name: "cc_lb_requests_total",
         kind: MetricKind::Counter,
@@ -267,10 +267,6 @@ const METRIC_DEFINITIONS: [MetricDefinition; 51] = [
     PROMETHEUS14_METRIC_DEFINITIONS[16],
     PROMETHEUS14_METRIC_DEFINITIONS[17],
     PROMETHEUS14_METRIC_DEFINITIONS[18],
-    PROMETHEUS14_METRIC_DEFINITIONS[19],
-    PROMETHEUS14_METRIC_DEFINITIONS[20],
-    PROMETHEUS14_METRIC_DEFINITIONS[21],
-    PROMETHEUS14_METRIC_DEFINITIONS[22],
 ];
 
 pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {

@@ -14,7 +14,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::common;
-use crate::prompt_cache_routing_support;
+mod prompt_cache_routing_support;
 
 use common::{TestAuthn, TestRouter, TestState};
 use prompt_cache_routing_support::{

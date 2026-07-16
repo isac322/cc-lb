@@ -18,9 +18,6 @@ mod cache_hit_metric;
 mod cache_keepalive_proxy_path;
 #[path = "cache_ttl_floor_respected.rs"]
 mod cache_ttl_floor_respected;
-#[cfg(feature = "capture")]
-#[path = "capture_routing_parity.rs"]
-mod capture_routing_parity;
 #[path = "case_insensitive.rs"]
 mod case_insensitive;
 #[path = "circuit_breaker_isolation.rs"]
@@ -53,9 +50,6 @@ mod lifecycle_cache_keepalive_durable_cancel;
 mod lifecycle_cache_keepalive_noop;
 #[path = "lifecycle_candidate_builder.rs"]
 mod lifecycle_candidate_builder;
-#[cfg(feature = "capture")]
-#[path = "lifecycle_capture_input.rs"]
-mod lifecycle_capture_input;
 #[path = "lifecycle_client_disconnect.rs"]
 mod lifecycle_client_disconnect;
 #[path = "lifecycle_filter_pipeline.rs"]
@@ -122,7 +116,6 @@ mod principal_view_smoke;
 mod prompt_cache_byte_oracle;
 #[path = "prompt_cache_routing_component.rs"]
 mod prompt_cache_routing_component;
-mod prompt_cache_routing_support;
 #[path = "prompt_cache_structural_properties.rs"]
 mod prompt_cache_structural_properties;
 #[path = "queue_full_returns_503.rs"]

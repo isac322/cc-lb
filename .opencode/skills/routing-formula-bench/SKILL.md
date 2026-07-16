@@ -42,7 +42,7 @@ Replay every usable captured request in order. Maintain cache and quota state in
 
 ## Capture Handling
 
-Obtain a `capture_v1` SQLite database from cc-lb's feature-gated local formula capture. The proxy capture records per-request routing traces, candidates, quota snapshots, cache breakpoints, and observed usage. Pass it with `--source <path>`.
+The in-proxy capture feature has been removed. Supply an existing external `capture_v1` SQLite database, such as one captured previously, with `--source <path>`.
 
 Captured traffic is sensitive. Never commit it, copy it into this skill, attach it to a report, or place it under a tracked directory. Run the harness from a gitignored evidence workdir such as `.omo/evidence/...`; keep all benchmark artifacts alongside that evidence workdir. The bundled harness contains only code and self-test fixtures.
 
