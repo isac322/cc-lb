@@ -31,7 +31,7 @@ jobs:
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.100.0
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: rustfmt
       - uses: taiki-e/install-action@v2
@@ -50,7 +50,7 @@ jobs:
         features: [sqlite, postgres]
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.100.0
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: clippy
       - name: Install wasm target for conformance fixtures
@@ -70,7 +70,7 @@ jobs:
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.100.0
+      - uses: dtolnay/rust-toolchain@1.97.0
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
@@ -164,7 +164,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.100.0
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: llvm-tools-preview
       - name: Install wasm targets for pinned toolchain
@@ -245,7 +245,7 @@ jobs:
         with:
           path: target/test-bins
           key: real-client-test-bins-${{ runner.os }}-${{ hashFiles('tests/real-client/install.sh') }}
-      - uses: dtolnay/rust-toolchain@1.100.0
+      - uses: dtolnay/rust-toolchain@1.97.0
       - uses: ./.github/actions/setup-rust-cache
       - name: Install pinned real clients
         run: tests/real-client/install.sh
