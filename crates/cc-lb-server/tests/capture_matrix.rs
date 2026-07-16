@@ -301,7 +301,6 @@ async fn replay_consistency_matches_deterministic_trace() {
         original_trace.kept_upstream_id,
         replay_trace.kept_upstream_id
     );
-    assert_eq!();
     assert_eq!(original_trace.formula_version, replay_trace.formula_version);
 
     assert_eq!(
@@ -315,7 +314,10 @@ async fn replay_consistency_matches_deterministic_trace() {
     {
         assert_eq!(orig_c.upstream_id, replay_c.upstream_id);
         assert_eq!(orig_c.tier, replay_c.tier);
-        assert_eq!(orig_c.urgency, replay_c.urgency);
+        assert_eq!(
+            orig_c.estimated_input_cost_micros,
+            replay_c.estimated_input_cost_micros
+        );
         assert_eq!(orig_c.quota_urgency, replay_c.quota_urgency);
     }
 
@@ -325,7 +327,7 @@ async fn replay_consistency_matches_deterministic_trace() {
         .expect("filter");
     let mutated_trace = output_mutated.subscription_preference.as_ref().unwrap();
     assert_ne!(
-        original_trace.candidates[0].urgency,
-        mutated_trace.candidates[0].urgency
+        original_trace.candidates[0].quota_urgency,
+        mutated_trace.candidates[0].quota_urgency
     );
 }
