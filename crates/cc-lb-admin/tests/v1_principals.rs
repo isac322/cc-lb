@@ -1,6 +1,6 @@
 use crate::admin_test_common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::http::{StatusCode, header};
 use cc_lb_storage_api::{
@@ -304,23 +304,28 @@ async fn enable_disable_persists_and_audits() {
     assert_eq!(body["enabled"], true);
     assert!(body["revision"].as_u64().unwrap() > 0);
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut saw_enabled_audit = false;
-    while Instant::now() < deadline {
+    let mut audit_flushed = server.audit_flushed.clone();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let saw_enabled_audit = loop {
         let entries = server
             .storage
             .query_audit(Some(&id), 0, u64::MAX, 20)
             .await
             .unwrap();
-        saw_enabled_audit = entries
+        let seen = entries
             .iter()
             .filter_map(|entry| entry.admin_action.as_deref())
             .any(|action| action.contains("principal_update") && action.contains("enabled"));
-        if saw_enabled_audit {
-            break;
+        if seen {
+            break true;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+        if tokio::time::timeout_at(deadline, audit_flushed.changed())
+            .await
+            .is_err()
+        {
+            break false;
+        }
+    };
     assert!(saw_enabled_audit);
 }
 

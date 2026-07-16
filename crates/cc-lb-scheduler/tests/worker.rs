@@ -1,10 +1,11 @@
 #![cfg(all(feature = "sqlite", not(feature = "postgres")))]
 
+use std::collections::BTreeSet;
 use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::Duration;
 
-use apalis::prelude::{IntervalStrategy, Status, StrategyBuilder, TaskSink};
+use apalis::prelude::{IntervalStrategy, StrategyBuilder, TaskSink, WorkerError};
 use cc_lb_clock::SystemClock;
 use cc_lb_config::SchedulerConfig;
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
@@ -20,10 +21,16 @@ use cc_lb_scheduler::worker::{
 use cc_lb_storage_api::CacheTtl;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tempfile::TempDir;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+const COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[cfg(feature = "sqlite")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
 -> Result<(), Box<dyn std::error::Error>> {
     let db = sqlite_test_db().await?;
@@ -42,22 +49,37 @@ async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
         pool.clone(),
         Arc::new(SystemClock),
     ));
-    let worker = build_adaptive_worker(&backend, done_scheduler_ctx())?;
-    worker.run_for(Duration::from_secs(5)).await?;
+    let (dispatch_tx, mut dispatch_rx) = mpsc::channel::<&'static str>(8);
+    let worker = build_adaptive_worker(&backend, dispatching_scheduler_ctx(dispatch_tx))?;
+    let cancel = CancellationToken::new();
+    let handle: JoinHandle<Result<(), WorkerError>> =
+        tokio::spawn(worker.run_until_cancelled(cancel.clone()));
 
-    let done_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE job_type = ? AND status = ?")
-            .bind(queue)
-            .bind(Status::Done.to_string())
-            .fetch_one(&pool)
-            .await?;
-    let statuses: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT status, COUNT(*) FROM Jobs WHERE job_type = ? GROUP BY status ORDER BY status",
-    )
-    .bind(queue)
-    .fetch_all(&pool)
-    .await?;
-    assert_eq!(done_count, 4, "statuses: {statuses:?}");
+    // Completion-driven teardown (issue #267): wait until the worker has driven each
+    // distinct entity job to Ok(JobOutcome::Done), then stop it. The former run_for(5s)
+    // wall-clock budget raced job completion and flaked under load.
+    let mut dispatched = BTreeSet::new();
+    while dispatched.len() < 4 {
+        let kind = timeout(COMPLETION_TIMEOUT, dispatch_rx.recv())
+            .await
+            .map_err(|_| format!("timed out waiting for entity-job dispatch; saw {dispatched:?}"))?
+            .ok_or("dispatch channel closed before all four entity jobs ran")?;
+        dispatched.insert(kind);
+    }
+    cancel.cancel();
+    handle.abort();
+    let _ = handle.await;
+
+    assert_eq!(
+        dispatched,
+        BTreeSet::from([
+            "cache_keepalive",
+            "metadata_refresh",
+            "oauth_refresh",
+            "warmup"
+        ]),
+        "worker must run one of each entity job to Ok(JobOutcome::Done)",
+    );
     Ok(())
 }
 
@@ -253,10 +275,25 @@ fn keepalive_job(upstream_id: Uuid) -> CacheKeepaliveJob {
     }
 }
 
-fn done_scheduler_ctx() -> SchedulerCtx {
+fn dispatching_scheduler_ctx(dispatch_tx: mpsc::Sender<&'static str>) -> SchedulerCtx {
     SchedulerCtx::new(
         SchedulerConfig::default(),
-        Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        Arc::new(move |job| {
+            let dispatch_tx = dispatch_tx.clone();
+            Box::pin(async move {
+                let kind = match job {
+                    AdaptiveJob::Warmup(_) => "warmup",
+                    AdaptiveJob::OAuthRefresh(_) => "oauth_refresh",
+                    AdaptiveJob::MetadataRefresh(_) => "metadata_refresh",
+                    AdaptiveJob::CacheKeepalive(_) => "cache_keepalive",
+                };
+                dispatch_tx
+                    .send(kind)
+                    .await
+                    .expect("dispatch receiver remains open while worker runs");
+                Ok(JobOutcome::Done)
+            })
+        }),
         Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
         Arc::new(SystemClock),
     )
