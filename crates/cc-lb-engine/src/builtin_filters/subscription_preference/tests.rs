@@ -24,6 +24,8 @@ use super::*;
 
 mod cost_first;
 mod fable_pressure;
+mod fable_resetless;
+mod fable_uniform_classification;
 
 const SONNET_MODEL: &str = "claude-sonnet-4-5-20250929";
 const OPUS_MODEL: &str = "claude-opus-4-8-20250514";
