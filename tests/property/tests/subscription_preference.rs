@@ -1,7 +1,5 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
-
 use bytes::Bytes;
 use cc_lb_domain::{
     Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
@@ -13,13 +11,10 @@ use http::Method;
 use proptest::prelude::*;
 
 const STRUCTURAL_CASES: u32 = 256;
-const STATISTICAL_CASES: u32 = 1;
-const SAMPLE_COUNT: u32 = 1024;
 const MODEL_AGNOSTIC: &str = "claude-3-5-haiku-default";
 const WINDOW_FIVE_HOUR: &str = "5h";
 const WINDOW_SEVEN_DAY: &str = "7d";
 const T0_SECS: u64 = 1_700_000_000;
-const REQUEST_ID_SEED: u64 = 0x9f7b_d241_a17c_38e9;
 const MAX_WEIGHT: f64 = 100.0;
 
 proptest! {
@@ -65,10 +60,10 @@ proptest! {
 }
 
 proptest! {
-    #![proptest_config(statistical_config())]
+    #![proptest_config(structural_config())]
 
     #[test]
-    fn uniform_fallback_when_total_urgency_is_zero(seed in Just(REQUEST_ID_SEED)) {
+    fn zero_urgency_uses_upstream_id_tiebreak(request_id in request_id_strategy()) {
         let filter = SubscriptionPreferenceFilter::new();
         let candidates = vec![
             missing_candidate("a", 1),
@@ -76,21 +71,7 @@ proptest! {
             missing_candidate("c", 3),
             missing_candidate("d", 4),
         ];
-        let mut state = seed;
-        let mut winners = BTreeSet::new();
-
-        for _ in 0..SAMPLE_COUNT {
-            let request_id = next_request_id(&mut state);
-            winners.insert(winner_bytes(&filter, &request_id, &candidates));
-        }
-
-        for candidate in &candidates {
-            prop_assert!(
-                winners.contains(&candidate.upstream_id.into_bytes()),
-                "candidate {} was never selected",
-                candidate.name,
-            );
-        }
+        prop_assert_eq!(winner_bytes(&filter, &request_id, &candidates), candidates[0].upstream_id.into_bytes());
     }
 }
 
@@ -115,10 +96,10 @@ proptest! {
 }
 
 proptest! {
-    #![proptest_config(statistical_config())]
+    #![proptest_config(structural_config())]
 
     #[test]
-    fn weight_proportional_distribution_at_1024_samples(
+    fn request_id_does_not_change_cost_first_selection(
         first_weight in 1u32..=100,
         second_weight in 1u32..=100,
     ) {
@@ -127,43 +108,8 @@ proptest! {
             candidate_with_headroom("a", 1, weight_headroom(first_weight)),
             candidate_with_headroom("b", 2, weight_headroom(second_weight)),
         ];
-        let target = candidates[0].upstream_id.into_bytes();
-        let trace = filter
-            .filter(
-                &make_context("effective-weight-probe", MODEL_AGNOSTIC),
-                &make_principal(),
-                &candidates,
-            )
-            .expect("builtin filter cannot fail")
-            .subscription_preference
-            .expect("OAuth candidates must emit a subscription-preference trace");
-        let total_effective_weight: f64 = trace
-            .candidates
-            .iter()
-            .map(|candidate| candidate.effective_weight)
-            .sum();
-        let first_effective_weight = trace
-            .candidates
-            .iter()
-            .find(|candidate| candidate.upstream_id.into_bytes() == target)
-            .expect("trace contains the first candidate")
-            .effective_weight;
-        let mut state = REQUEST_ID_SEED;
-        let mut wins = 0u32;
-
-        for _ in 0..SAMPLE_COUNT {
-            let request_id = next_request_id(&mut state);
-            if winner_bytes(&filter, &request_id, &candidates) == target {
-                wins += 1;
-            }
-        }
-
-        let actual_share = f64::from(wins) / f64::from(SAMPLE_COUNT);
-        let expected_share = first_effective_weight / total_effective_weight;
-        prop_assert!(
-            (actual_share - expected_share).abs() <= 0.10,
-            "expected share {expected_share}, got {actual_share} for weights {first_weight}:{second_weight}",
-        );
+        let first = winner_bytes(&filter, "cost-first-one", &candidates);
+        prop_assert_eq!(winner_bytes(&filter, "cost-first-two", &candidates), first);
     }
 }
 
@@ -200,14 +146,6 @@ fn request_id_strategy() -> impl Strategy<Value = String> {
 fn structural_config() -> ProptestConfig {
     ProptestConfig {
         cases: STRUCTURAL_CASES,
-        failure_persistence: None,
-        ..ProptestConfig::default()
-    }
-}
-
-fn statistical_config() -> ProptestConfig {
-    ProptestConfig {
-        cases: STATISTICAL_CASES,
         failure_persistence: None,
         ..ProptestConfig::default()
     }
@@ -379,15 +317,4 @@ fn make_principal() -> Principal {
         kind: PrincipalKind::InternalKey,
         claims: Default::default(),
     }
-}
-
-fn next_request_id(state: &mut u64) -> String {
-    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    format!("wrh-{:016x}", splitmix64(*state))
-}
-
-fn splitmix64(mut value: u64) -> u64 {
-    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    value ^ (value >> 31)
 }

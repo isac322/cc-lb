@@ -1,7 +1,7 @@
 use cc_lb_domain::{
     CacheAffinityCandidate, CacheAffinityTrace, CandidateUrgency, InternalError, InternalErrorKind,
     InternalErrorStage, RoutingTrace, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
-    TerminalDecision, TerminalStrategy, WrhKeySource,
+    TerminalDecision, TerminalStrategy,
 };
 use cc_lb_observability::{
     REDACTED, ROUTING_REASON_MAX_BYTES, ROUTING_TRACE_SIZE_CAP_BYTES, enforce_routing_trace_caps,
@@ -131,29 +131,21 @@ fn routing_trace_cap_respects_extended_stage_payloads() {
                 .map(|c| {
                     let quota = 0.123_456_789 * (c as f64 + 1.0);
                     let cache_ratio = c as f64 / 7.0;
-                    let cache_weight_multiplier = (9.574_063_128_362_267_f64 * cache_ratio).exp();
-                    let quota_weight_factor = 1.0 + quota;
-                    let effective_weight = quota_weight_factor * cache_weight_multiplier;
                     CandidateUrgency {
                         upstream_id: seeded(100 + c),
                         tier: SubscriptionTier::KnownBase,
-                        urgency: effective_weight,
                         quota_urgency: quota,
                         quota_urgency_5h: Some(quota),
                         quota_urgency_7d: Some(0.0),
                         quota_urgency_combined: Some(quota),
-                        quota_weight_factor,
-                        quota_uniform_fallback: false,
                         predicted_cache_read_tokens: u32::from(c) * 30_000,
                         predicted_cache_creation_tokens_5m: u32::from(c) * 10_000,
                         predicted_cache_creation_tokens_1h: 0,
                         predicted_uncached_input_tokens: u32::from(c) * 1_000,
                         cache_ratio,
-                        cache_weight_multiplier,
                         warning_multiplier: 1.0,
                         cache_savings_ratio: cache_ratio,
                         estimated_input_cost_micros: u64::from(c) * 1_000,
-                        effective_weight,
                         cache_value_micros: Some(i64::from(c) * 1_000),
                         matched_v3_cache_key: Some(format!("cache-key-{c}")),
                         matched_content_block_index: Some(u32::from(c)),
@@ -163,9 +155,8 @@ fn routing_trace_cap_respects_extended_stage_payloads() {
                     }
                 })
                 .collect(),
-            wrh_key_source: WrhKeySource::RequestId,
             previous_tier: Some(SubscriptionTier::PartialBase),
-            rendezvous_salt_version: Some("v7".to_owned()),
+            formula_version: Some("cost-first-v1".to_owned()),
             cache_cost_basis_version: Some("v1".to_owned()),
             formula_winner_upstream_id: Some(seeded(index)),
             kept_upstream_id: Some(seeded(index)),
@@ -234,23 +225,18 @@ fn subscription_preference_all_fields_survive_serde_roundtrip() {
         candidates: vec![CandidateUrgency {
             upstream_id: Uuid::from_bytes([1; 16]),
             tier: SubscriptionTier::KnownBase,
-            urgency: 3.75,
             quota_urgency: 0.25,
             quota_urgency_5h: Some(0.20),
             quota_urgency_7d: Some(0.15),
             quota_urgency_combined: Some(0.25),
-            quota_weight_factor: 1.25,
-            quota_uniform_fallback: false,
             predicted_cache_read_tokens: 100_000,
             predicted_cache_creation_tokens_5m: 25_000,
             predicted_cache_creation_tokens_1h: 0,
             predicted_uncached_input_tokens: 10_000,
             cache_ratio: 0.4,
-            cache_weight_multiplier: 3.0,
             warning_multiplier: 1.0,
             cache_savings_ratio: 0.4,
             estimated_input_cost_micros: 123_456,
-            effective_weight: 3.75,
             cache_value_micros: Some(42_000),
             matched_v3_cache_key: Some("cache-key".to_owned()),
             matched_content_block_index: Some(10),
@@ -258,9 +244,8 @@ fn subscription_preference_all_fields_survive_serde_roundtrip() {
             lookback_distance: Some(1),
             token_estimate_source: Some("local_tiktoken_v1".to_owned()),
         }],
-        wrh_key_source: WrhKeySource::RequestId,
         previous_tier: Some(SubscriptionTier::KnownBase),
-        rendezvous_salt_version: Some("v11".to_owned()),
+        formula_version: Some("cost-first-v1".to_owned()),
         cache_cost_basis_version: Some("v1".to_owned()),
         formula_winner_upstream_id: Some(Uuid::from_bytes([1; 16])),
         kept_upstream_id: Some(Uuid::from_bytes([1; 16])),
@@ -275,18 +260,13 @@ fn subscription_preference_all_fields_survive_serde_roundtrip() {
     let json = serde_json::to_string(&trace).unwrap();
     let decoded: SubscriptionPreferenceTrace = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded, trace);
-    assert!(json.contains("\"wrh_key_source\":\"request_id\""));
     assert!(json.contains("\"previous_tier\":\"known_base\""));
-    assert!(json.contains("\"rendezvous_salt_version\":\"v11\""));
+    assert!(json.contains("\"formula_version\":\"cost-first-v1\""));
     assert!(json.contains("\"quota_urgency\":"));
     assert!(json.contains("\"quota_urgency_5h\":0.2"));
     assert!(json.contains("\"quota_urgency_7d\":0.15"));
     assert!(json.contains("\"quota_urgency_combined\":0.25"));
-    assert!(json.contains("\"quota_weight_factor\":1.25"));
-    assert!(json.contains("\"quota_uniform_fallback\":false"));
     assert!(json.contains("\"predicted_cache_read_tokens\":100000"));
-    assert!(json.contains("\"cache_weight_multiplier\":"));
-    assert!(json.contains("\"effective_weight\":"));
     assert!(json.contains("\"bucket_v3_cache_affinity_key\":\"cache-key\""));
     assert!(json.contains("\"lineage_would_have_predicted_read_tokens\":50000"));
 }

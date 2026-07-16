@@ -1,6 +1,6 @@
 # ADR 0004 — Cache-weighted subscription-preference (exponential cache boost, salt v7)
 
-- Status: Proposed
+- Status: Superseded by ADR 0010
 - Date: 2026-07-06
 - Ships with: PR #350 (rewrite)
 - Supersedes: ADR 0003's within-tier WRH signature; the tier ordering and quota-urgency computation from ADR 0003 stay unchanged.

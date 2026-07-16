@@ -188,9 +188,9 @@ and on(tier) (
 When `RoutingUpstreamFunneling` fires:
 
 1. Query `sum by (tier, upstream) (rate(cc_lb_routing_tier_selections_total[15m]))` in Prometheus to confirm the funneling upstream and the tier.
-2. Compare against the shadow-eval baseline distribution captured during PR #312 development (Example Org ~55%, example-peer ~16%, example-secondary-max ~15%, example-org ~13%). Deviation from this shape is the signal.
+2. Compare against the approved baseline distribution for the deployment. Deviation from that shape is the signal; do not use private operator or account names in the runbook.
 3. Query `/admin/v1/subscription-quotas/latest` for the tier's upstreams; look for stale, zero-remaining, or `disabled_reason`-set windows that could distort the urgency computation.
-4. Use `POST /admin/v1/router/preview` with a known `request_id` to inspect the `SubscriptionPreferenceTrace` on `RoutingTrace.stages[..]`. The `candidate_assessments[].urgency` numbers show WHY the WRH placed weight there.
+4. Use `POST /admin/v1/router/preview` with a known `request_id` to inspect the `SubscriptionPreferenceTrace` on `RoutingTrace.stages[..]`. The `candidate_assessments[].quota_urgency` and `estimated_input_cost_micros` numbers show WHY cost-first selected that upstream (cheapest near-cost tier, urgency tiebreak).
 5. Common causes: (a) a single upstream is the only one with fresh quota snapshots and everyone else is stale, (b) a plan-capacity change made one upstream saturate the cap while others fell below, (c) the collector stopped ingesting subscription-quota headers from N-1 of the N upstreams.
 
 False positives: sustained low traffic that clears the `> 2 req/s` floor after the alert has already latched. If confirmed low-volume, no action; alert will self-clear.

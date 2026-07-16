@@ -319,11 +319,7 @@ export const RequestEventPartialSchema = z.looseObject({
   quota_urgency_5h: z.number().nullable().optional(),
   quota_urgency_7d: z.number().nullable().optional(),
   quota_urgency_combined: z.number().nullable().optional(),
-  quota_weight_factor: z.number().nullable().optional(),
-  quota_cache_multiplier: z.number().nullable().optional(),
   quota_warning_multiplier: z.number().nullable().optional(),
-  quota_effective_weight: z.number().nullable().optional(),
-  quota_uniform_fallback: z.boolean().nullable().optional(),
   auth_ms: z.number().nullable().optional(),
   route_ms: z.number().nullable().optional(),
   limit_reserve_ms: z.number().nullable().optional(),
@@ -459,11 +455,7 @@ export interface RequestEvent {
   readonly quota_urgency_5h?: number | null;
   readonly quota_urgency_7d?: number | null;
   readonly quota_urgency_combined?: number | null;
-  readonly quota_weight_factor?: number | null;
-  readonly quota_cache_multiplier?: number | null;
   readonly quota_warning_multiplier?: number | null;
-  readonly quota_effective_weight?: number | null;
-  readonly quota_uniform_fallback?: boolean | null;
   cost_usd_micros?: number;
   cost_input_micros?: number;
   cost_output_micros?: number;
