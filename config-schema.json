@@ -41,15 +41,6 @@
         "semaphore_per_upstream": 100
       }
     },
-    "capture": {
-      "$ref": "#/$defs/CaptureConfig",
-      "default": {
-        "channel_capacity": 1024,
-        "enabled": false,
-        "path": "capture.sqlite",
-        "retention_max_rows": 100000
-      }
-    },
     "circuit_breaker": {
       "$ref": "#/$defs/CircuitBreakerConfig",
       "default": {
@@ -457,33 +448,6 @@
           "type": "integer",
           "format": "uint32",
           "default": 100,
-          "minimum": 0
-        }
-      }
-    },
-    "CaptureConfig": {
-      "description": "Configuration for request/response capture.",
-      "type": "object",
-      "properties": {
-        "channel_capacity": {
-          "type": "integer",
-          "format": "uint",
-          "default": 1024,
-          "minimum": 0
-        },
-        "enabled": {
-          "type": "boolean",
-          "default": false
-        },
-        "path": {
-          "type": "string",
-          "default": "capture.sqlite"
-        },
-        "retention_max_rows": {
-          "description": "The maximum number of rows to retain in the capture database.",
-          "type": "integer",
-          "format": "uint64",
-          "default": 100000,
           "minimum": 0
         }
       }

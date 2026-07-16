@@ -7,13 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.2.3...cc-lb-plugin-conformance-v0.2.4) - 2026-07-15
+
 ### Added
 
-- Add a Filter V2 conformance sample carrying the requested `priority` service tier.
+- add service-tier pricing support ([#455](https://github.com/isac322/cc-lb/pull/455))
 
-### Fixed
+### Other
 
-- Select the `ConformanceSuite::run()` filter payload from the plugin's declared wire version while preserving Filter V1 behavior.
+- fold filter service tier into wire v1 ([#475](https://github.com/isac322/cc-lb/pull/475))
 
 ## [0.2.3](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.2.2...cc-lb-plugin-conformance-v0.2.3) - 2026-07-12
 

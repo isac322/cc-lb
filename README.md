@@ -23,7 +23,7 @@ Plugins are wasm modules authored with the published `cc-lb-pdk-wasmtime`; bundl
 
 The slots a plugin may target:
 
-- **filter**: return a `FilterResponse` deciding which upstream candidates to keep. Filter V2 exposes the requested `service_tier`; Filter V1 remains supported with its published layout.
+- **filter**: return a `FilterResponse` deciding which upstream candidates to keep. The V1 filter request exposes the requested `service_tier`.
 - **shape**: unified slot that transforms the incoming request into an upstream-bound `ShapedRequest`, and transforms downstream responses (both buffered and SSE). A shape plugin must implement request shaping, buffered response transform, and SSE event transform, with explicit no-op handlers for unneeded response hooks.
 - **observe**: receive lifecycle events; side-effect only.
 

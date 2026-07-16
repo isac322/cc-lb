@@ -203,14 +203,7 @@ impl Partial {
                 )
             })
             .unwrap_or((None, None, None));
-        let (
-            upstream_id,
-            upstream_name,
-            upstream,
-            route_ms,
-            route_matched_v3_cache_key,
-            route_wrh_key_source,
-        ) = self
+        let (upstream_id, upstream_name, upstream, route_ms, route_matched_v3_cache_key) = self
             .route
             .as_ref()
             .map(|route| {
@@ -220,10 +213,9 @@ impl Partial {
                     Some(RequestEventUpstream::AnthropicDirect),
                     route.route_ms,
                     route.matched_v3_cache_key.clone(),
-                    route.wrh_key_source.clone(),
                 )
             })
-            .unwrap_or((None, None, None, None, None, None));
+            .unwrap_or((None, None, None, None, None));
         let cost = self.cost_options();
         let ts_ms = self.ts_ms;
 
@@ -291,33 +283,16 @@ impl Partial {
                     .as_ref()
                     .and_then(|parse| parse.matched_v3_cache_key.clone())
             }),
-            wrh_key_source: route_wrh_key_source,
             quota_urgency_5h: self.route.as_ref().and_then(|route| route.quota_urgency_5h),
             quota_urgency_7d: self.route.as_ref().and_then(|route| route.quota_urgency_7d),
             quota_urgency_combined: self
                 .route
                 .as_ref()
                 .and_then(|route| route.quota_urgency_combined),
-            quota_weight_factor: self
-                .route
-                .as_ref()
-                .and_then(|route| route.quota_weight_factor),
-            quota_cache_multiplier: self
-                .route
-                .as_ref()
-                .and_then(|route| route.quota_cache_multiplier),
             quota_warning_multiplier: self
                 .route
                 .as_ref()
                 .and_then(|route| route.quota_warning_multiplier),
-            quota_effective_weight: self
-                .route
-                .as_ref()
-                .and_then(|route| route.quota_effective_weight),
-            quota_uniform_fallback: self
-                .route
-                .as_ref()
-                .and_then(|route| route.quota_uniform_fallback),
             auth_ms: self.auth.as_ref().and_then(|auth| auth.auth_ms),
             route_ms,
             limit_reserve_ms: self.limit_reserve_ms,
@@ -984,7 +959,6 @@ fn finalize_base(
         cache_value_micros,
         formula_winner_upstream_id,
         kept_upstream_id,
-        wrh_key_source,
         lineage_would_have_predicted_read_tokens,
         lineage_would_have_picked_upstream_id,
     ) = partial
@@ -1009,14 +983,13 @@ fn finalize_base(
                 r.cache_value_micros,
                 r.formula_winner_upstream_id,
                 r.kept_upstream_id,
-                r.wrh_key_source.clone(),
                 r.lineage_would_have_predicted_read_tokens.map(u64::from),
                 r.lineage_would_have_picked_upstream_id,
             )
         })
         .unwrap_or((
             None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None,
+            None, None, None, None, None,
         ));
     let model = route_model.or_else(|| partial.parse.as_ref().and_then(|p| p.model.clone()));
     let auth_ms = partial.auth.as_ref().and_then(|a| a.auth_ms);
@@ -1099,27 +1072,10 @@ fn finalize_base(
             .route
             .as_ref()
             .and_then(|route| route.quota_urgency_combined),
-        quota_weight_factor: partial
-            .route
-            .as_ref()
-            .and_then(|route| route.quota_weight_factor),
-        quota_cache_multiplier: partial
-            .route
-            .as_ref()
-            .and_then(|route| route.quota_cache_multiplier),
         quota_warning_multiplier: partial
             .route
             .as_ref()
             .and_then(|route| route.quota_warning_multiplier),
-        quota_effective_weight: partial
-            .route
-            .as_ref()
-            .and_then(|route| route.quota_effective_weight),
-        quota_uniform_fallback: partial
-            .route
-            .as_ref()
-            .and_then(|route| route.quota_uniform_fallback),
-        wrh_key_source,
         lineage_would_have_predicted_read_tokens,
         lineage_would_have_picked_upstream_id,
         cost_usd_micros: cost.total,
@@ -1213,7 +1169,7 @@ mod tests {
     use cc_lb_control::BusReceiver;
     use cc_lb_domain::{
         CandidateUrgency, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
-        TerminalDecision, TerminalStrategy, WrhKeySource,
+        TerminalDecision, TerminalStrategy,
     };
     use cc_lb_lifecycle::{
         AuthFailure, ParseFailure, RouteInfo, StreamError, StreamSuccess, UsageSource,
@@ -1784,12 +1740,7 @@ mod tests {
                 quota_urgency_5h: None,
                 quota_urgency_7d: None,
                 quota_urgency_combined: None,
-                quota_weight_factor: None,
-                quota_cache_multiplier: None,
                 quota_warning_multiplier: None,
-                quota_effective_weight: None,
-                quota_uniform_fallback: None,
-                wrh_key_source: None,
                 lineage_would_have_predicted_read_tokens: None,
                 lineage_would_have_picked_upstream_id: None,
             }),
@@ -2022,12 +1973,7 @@ mod tests {
                 quota_urgency_5h: None,
                 quota_urgency_7d: None,
                 quota_urgency_combined: None,
-                quota_weight_factor: None,
-                quota_cache_multiplier: None,
                 quota_warning_multiplier: None,
-                quota_effective_weight: None,
-                quota_uniform_fallback: None,
-                wrh_key_source: None,
                 lineage_would_have_predicted_read_tokens: None,
                 lineage_would_have_picked_upstream_id: None,
             }),
@@ -2307,12 +2253,7 @@ mod tests {
                 quota_urgency_5h: None,
                 quota_urgency_7d: None,
                 quota_urgency_combined: None,
-                quota_weight_factor: None,
-                quota_cache_multiplier: None,
                 quota_warning_multiplier: None,
-                quota_effective_weight: None,
-                quota_uniform_fallback: None,
-                wrh_key_source: None,
                 lineage_would_have_predicted_read_tokens: None,
                 lineage_would_have_picked_upstream_id: None,
             }),

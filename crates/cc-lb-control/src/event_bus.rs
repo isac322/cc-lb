@@ -79,10 +79,6 @@ pub const DEFAULT_LIFECYCLE_ROUTING_TIER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_PROMPT_CACHE_DRIFT_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY: usize = 4096;
 
-/// Default capacity for the capture mpsc channel.
-#[cfg(feature = "capture")]
-pub const DEFAULT_LIFECYCLE_CAPTURE_CAPACITY: usize = 4096;
-
 /// Errors surfaced by [`RequestEventBus`] implementations.
 #[derive(Debug, thiserror::Error)]
 pub enum BusError {
@@ -154,8 +150,6 @@ struct InMemoryBusInner {
     lifecycle_routing_tier_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_prompt_cache_drift_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_prompt_cache_observation_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
-    #[cfg(feature = "capture")]
-    lifecycle_capture_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
 }
 
 impl InMemoryBus {
@@ -187,8 +181,6 @@ impl InMemoryBus {
                 lifecycle_routing_tier_tx: Mutex::new(None),
                 lifecycle_prompt_cache_drift_tx: Mutex::new(None),
                 lifecycle_prompt_cache_observation_tx: Mutex::new(None),
-                #[cfg(feature = "capture")]
-                lifecycle_capture_tx: Mutex::new(None),
             }),
         }
     }
@@ -376,20 +368,6 @@ impl InMemoryBus {
         *guard = Some(tx);
         rx
     }
-
-    /// Attach the capture consumer. Only one may be attached; subsequent calls
-    /// replace the previous sender.
-    #[cfg(feature = "capture")]
-    pub fn attach_lifecycle_capture(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        let mut guard = self
-            .inner
-            .lifecycle_capture_tx
-            .lock()
-            .expect("event bus lifecycle capture mutex poisoned");
-        *guard = Some(tx);
-        rx
-    }
 }
 
 impl Default for InMemoryBus {
@@ -549,15 +527,6 @@ impl RequestEventBus for InMemoryBus {
                 .lifecycle_prompt_cache_observation_tx
                 .lock()
                 .expect("event bus lifecycle prompt cache observation mutex poisoned");
-            guard.clone()
-        };
-        #[cfg(feature = "capture")]
-        let lifecycle_capture_tx = {
-            let guard = self
-                .inner
-                .lifecycle_capture_tx
-                .lock()
-                .expect("event bus lifecycle capture mutex poisoned");
             guard.clone()
         };
         if let Some(tx) = writer_tx {
@@ -770,23 +739,6 @@ impl RequestEventBus for InMemoryBus {
                 }
             }
         }
-        #[cfg(feature = "capture")]
-        if let Some(tx) = lifecycle_capture_tx {
-            match tx.try_send(event.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    record_dropped_events_by("lifecycle_capture_full", 1);
-                    tracing::warn!(
-                        kind = dropped.kind(),
-                        event_id = %dropped.event_id(),
-                        "lifecycle capture subscriber mpsc full; dropping event",
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!("lifecycle capture subscriber mpsc closed");
-                }
-            }
-        }
         if let Some(tx) = prompt_cache_drift_tx {
             match tx.try_send(event) {
                 Ok(()) => {}
@@ -969,17 +921,5 @@ mod tests {
         let _rx = bus.attach_lifecycle_writer(1);
         bus.publish_lifecycle(sample_lifecycle_event("a"));
         bus.publish_lifecycle(sample_lifecycle_event("b"));
-    }
-
-    #[cfg(feature = "capture")]
-    #[tokio::test]
-    async fn publish_lifecycle_fans_out_to_capture() {
-        let bus = InMemoryBus::new();
-        let mut rx_capture = bus.attach_lifecycle_capture(8);
-
-        bus.publish_lifecycle(sample_lifecycle_event("req-1"));
-
-        let cap_a = rx_capture.recv().await.expect("capture a");
-        assert_eq!(cap_a.event_id(), "evt-req-1");
     }
 }

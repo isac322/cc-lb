@@ -15,7 +15,7 @@ use cc_lb_storage_api::{
     UpstreamRecord, UpstreamStore, UpstreamUpdate,
 };
 use cc_lb_storage_sqlite::{SqliteStorage as Storage, open_sqlite};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -394,12 +394,10 @@ async fn cancel_during_rebuild_graceful() {
 
 #[tokio::test]
 async fn rebuild_failure_does_not_swap_view() {
-    let handle = PrometheusBuilder::new()
-        .install_recorder()
-        .expect("prometheus recorder installs");
+    let handle = crate::common::install_prometheus();
     let fixture = fixture().await;
     let start = fixture.holder.generation();
-    let before = labeled_counter_value(&handle, "cclb_rebind_total", "outcome", "error");
+    let before = labeled_counter_value(handle, "cclb_rebind_total", "outcome", "error");
     let notifier = Arc::new(MockNotifier::new());
     let cancel = CancellationToken::new();
     let stores = Arc::new(Stores {
@@ -419,7 +417,7 @@ async fn rebuild_failure_does_not_swap_view() {
 
     notifier.send(ChangeChannel::Upstream);
     for _ in 0..100 {
-        let after = labeled_counter_value(&handle, "cclb_rebind_total", "outcome", "error");
+        let after = labeled_counter_value(handle, "cclb_rebind_total", "outcome", "error");
         if after >= before + 1.0 {
             break;
         }
@@ -428,7 +426,7 @@ async fn rebuild_failure_does_not_swap_view() {
 
     assert_eq!(fixture.holder.generation(), start);
     assert_eq!(
-        labeled_counter_value(&handle, "cclb_rebind_total", "outcome", "error"),
+        labeled_counter_value(handle, "cclb_rebind_total", "outcome", "error"),
         before + 1.0
     );
     cancel.cancel();

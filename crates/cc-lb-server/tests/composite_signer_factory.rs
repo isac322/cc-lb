@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method};
@@ -16,20 +16,9 @@ use cc_lb_upstream::{
     SignerFactory, UpstreamDialect, shape_request, sign_request,
 };
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tokio::net::TcpListener;
 use url::Url;
 use uuid::Uuid;
-
-static PROMETHEUS: OnceLock<PrometheusHandle> = OnceLock::new();
-
-fn prometheus() -> &'static PrometheusHandle {
-    PROMETHEUS.get_or_init(|| {
-        PrometheusBuilder::new()
-            .install_recorder()
-            .expect("prometheus recorder")
-    })
-}
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -163,7 +152,7 @@ impl Fixture {
 
 #[tokio::test]
 async fn oauth_upstream_routes_to_oauth_signer() {
-    let _ = prometheus();
+    let _ = crate::common::install_prometheus();
     let fixture = Fixture::new().await;
     let _upstream_id = fixture.create_oauth_upstream("oauth-test").await;
 
@@ -225,7 +214,7 @@ async fn apikey_upstream_routes_to_key_signer() {
 
 #[tokio::test]
 async fn router_choice_selects_matching_oauth_upstream() {
-    let _ = prometheus();
+    let _ = crate::common::install_prometheus();
     let fixture = Fixture::new().await;
     fixture
         .create_oauth_upstream_with_access_token("oauth-alice", "sk-ant-oat01-alice-token")

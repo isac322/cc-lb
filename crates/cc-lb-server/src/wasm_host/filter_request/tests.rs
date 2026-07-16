@@ -35,7 +35,7 @@ fn context() -> RoutingContext {
 }
 
 #[test]
-fn v1_encoding_keeps_legacy_layout() {
+fn v1_encoding_includes_requested_service_tier() {
     let principal = principal();
     let context = context();
     FilterWireRequest {
@@ -52,27 +52,8 @@ fn v1_encoding_keeps_legacy_layout() {
         assert_eq!(archived.headers.len(), 1);
         let header_name: &str = &archived.headers[0].name;
         assert_eq!(header_name, "content-type");
-    })
-    .expect("encode V1");
-}
-
-#[test]
-fn v2_encoding_includes_requested_service_tier() {
-    let principal = principal();
-    let context = context();
-    FilterWireRequest {
-        wire_version: WireVersion::V2,
-        ctx: &context,
-        principal: &principal,
-        candidates: &[],
-        cookie_redaction: false,
-    }
-    .encode(|bytes| {
-        let archived =
-            rkyv::access::<cc_lb_plugin_wire::v2::ArchivedFilterRequest, RkyvError>(bytes)
-                .expect("archived V2");
         let tier: Option<&str> = archived.service_tier.as_ref().map(|value| &**value);
         assert_eq!(tier, Some("priority"));
     })
-    .expect("encode V2");
+    .expect("encode V1");
 }

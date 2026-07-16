@@ -72,36 +72,3 @@ fn accepts_published_filter_v1_fingerprint() {
         Some(&WireVersion::V1)
     );
 }
-
-#[test]
-fn accepts_filter_v2_fingerprint() {
-    let fingerprint = <cc_lb_plugin_wire::v2::FilterRequest as WireSchema>::FINGERPRINT;
-    let wasm = wasm_with_filter_schema(WireVersion::V2, WireVersion::V2, &fingerprint);
-
-    let inspection = inspect_wasm(HookKind::Filter, &wasm).expect("V2 accepted");
-
-    assert_eq!(
-        inspection.hook_versions.get(&HookKind::Filter),
-        Some(&WireVersion::V2)
-    );
-}
-
-#[test]
-fn rejects_filter_v2_with_stale_v1_fingerprint() {
-    let stale_fingerprint = <cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT;
-    let wasm = wasm_with_filter_schema(WireVersion::V2, WireVersion::V2, &stale_fingerprint);
-
-    let error = inspect_wasm(HookKind::Filter, &wasm).expect_err("stale hash rejected");
-
-    assert!(error.to_string().contains("hash mismatch"));
-}
-
-#[test]
-fn rejects_filter_v2_with_only_v1_schema_section() {
-    let v2_fingerprint = <cc_lb_plugin_wire::v2::FilterRequest as WireSchema>::FINGERPRINT;
-    let wasm = wasm_with_filter_schema(WireVersion::V2, WireVersion::V1, &v2_fingerprint);
-
-    let error = inspect_wasm(HookKind::Filter, &wasm).expect_err("wrong section rejected");
-
-    assert!(error.to_string().contains("cc_lb.schema.filter.v2"));
-}

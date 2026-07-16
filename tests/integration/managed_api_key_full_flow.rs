@@ -47,7 +47,6 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     unsafe {
         std::env::set_var(MASTER_KEY_ENV, MASTER_KEY_HEX);
-        std::env::set_var("CC_LB_ADMIN_TOKEN", ADMIN_TOKEN);
     }
 
     let client = TestClient::new(Duration::from_secs(10));
@@ -487,7 +486,11 @@ impl StartedServer {
 
     async fn wait_ready(&self) -> Result<(), Box<dyn std::error::Error>> {
         let client = TestClient::new(Duration::from_secs(1));
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let ready_secs = std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(60);
+        let deadline = Instant::now() + Duration::from_secs(ready_secs);
         loop {
             let proxy_ok = client
                 .get_status(&format!("{}/healthz", self.proxy_url))
@@ -743,6 +746,7 @@ fn base_config(
     config.downstream_auth.mode = mode;
     config.downstream_auth.none_mode = none_mode;
     config.storage = StorageConfig::Sqlite { path: sqlite_path };
+    config.admin.token = Some(ADMIN_TOKEN.to_owned());
     config.aead.key_env = MASTER_KEY_ENV.to_owned();
     config.api_keys.price_catalog.url = format!("{litellm_url}/prices");
     config.api_keys.price_catalog.refresh_interval = Duration::from_secs(60 * 60);

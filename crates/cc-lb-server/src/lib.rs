@@ -13,8 +13,6 @@ pub mod bootstrap;
 pub mod build_meta;
 pub mod builtins;
 pub(crate) mod cache_keepalive_enqueuer;
-#[cfg(feature = "capture")]
-pub(crate) mod capture_bootstrap;
 pub mod chaos;
 pub mod cli;
 pub mod doctor;

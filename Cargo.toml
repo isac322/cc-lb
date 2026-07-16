@@ -7,7 +7,7 @@ members = [
     "plugins/router/cache-aware-wasmtime",
     "plugins/test-fixtures/wasmtime-shape-passthrough",
     "plugins/test-fixtures/wasmtime-observe-noop",
-    "plugins/test-fixtures/wasmtime-filter-v2",
+    "plugins/test-fixtures/wasmtime-filter-service-tier",
     "tests/fixtures/fake-anthropic",
     "tests/fixtures/mock-anthropic-oauth-server",
     "tests/load",
@@ -39,8 +39,8 @@ cc-lb-upstream = { path = "crates/cc-lb-upstream", version = "0.1.0" }
 # Internal, unpublished — RFC-0002 lifecycle transport.
 cc-lb-control = { path = "crates/cc-lb-control", version = "0.1.0" }
 
-cc-lb-runtime-wasmtime    = { path = "crates/cc-lb-runtime-wasmtime", version = "0.1.3" }
-cc-lb-plugin-wire = { version = "0.7", path = "crates/cc-lb-plugin-wire" }
+cc-lb-runtime-wasmtime    = { path = "crates/cc-lb-runtime-wasmtime", version = "0.1.4" }
+cc-lb-plugin-wire = { version = "0.8", path = "crates/cc-lb-plugin-wire" }
 cc-lb-pdk-wasmtime = { version = "0.1", path = "crates/cc-lb-pdk-wasmtime" }
 cc-lb-pdk-wasmtime-macros = { version = "0.1", path = "crates/cc-lb-pdk-wasmtime-macros" }
 cc-lb-plugin-conformance = { version = "0.2", path = "crates/cc-lb-plugin-conformance" }

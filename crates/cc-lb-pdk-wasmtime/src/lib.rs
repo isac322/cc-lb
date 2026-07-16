@@ -41,8 +41,6 @@
 
 extern crate alloc;
 
-mod filter_v2;
-
 #[cfg(target_arch = "wasm32")]
 mod wasm32_glue {
     //! wasm32-unknown-unknown has no std → no global allocator, no
@@ -90,8 +88,6 @@ pub mod __private {
         TransformResponseResult, TransformSseEventRequest, TransformSseEventResult, pack_ret,
     };
     use rkyv::rancor::Error;
-
-    pub use crate::filter_v2::{run_filter_v2, run_filter_v2_view};
 
     /// Default archive alignment for the rkyv 0.8 root types in
     /// [`cc_lb_plugin_wire`]. The host always passes this value to
