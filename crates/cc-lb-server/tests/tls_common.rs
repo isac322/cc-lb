@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cc_lb_observability::{ObservabilityConfig, TracingGuard};
+use metrics_exporter_prometheus::PrometheusHandle;
 use tempfile::TempDir;
 
 pub fn fixture(name: &str) -> PathBuf {
@@ -26,22 +26,11 @@ pub fn overwrite_pair(cert_path: &Path, key_path: &Path, cert_name: &str, key_na
     std::fs::copy(fixture(key_name), key_path).unwrap();
 }
 
-pub fn init_metrics() -> TracingGuard {
-    cc_lb_observability::init(&ObservabilityConfig {
-        tracing_level: "info".to_owned(),
-        otlp_endpoint: None,
-        prometheus_endpoint: None,
-        log_redaction: true,
-        user_prompt_redaction: false,
-        hook_channel_capacity: cc_lb_observability::DEFAULT_HOOK_CHANNEL_CAPACITY,
-    })
-    .unwrap()
+pub fn init_metrics() -> &'static PrometheusHandle {
+    crate::common::install_prometheus()
 }
 
-pub fn tls_reload_counter(guard: &TracingGuard, outcome: &str) -> f64 {
-    let Some(handle) = guard.prometheus_handle() else {
-        return 0.0;
-    };
+pub fn tls_reload_counter(handle: &PrometheusHandle, outcome: &str) -> f64 {
     let needle = format!("cc_lb_tls_reload_total{{outcome=\"{outcome}\"}}");
     handle
         .render()

@@ -2,20 +2,10 @@ macro_rules! define_request_event_quota_postgres_tests {
     () => {
         use cc_lb_storage_api::RequestEventStore as _;
 
-        type PostgresQuotaRow = (
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<bool>,
-        );
+        type PostgresQuotaRow = (Option<f64>, Option<f64>, Option<f64>, Option<f64>);
 
         const POSTGRES_QUOTA_SELECT: &str = "SELECT quota_urgency_5h, quota_urgency_7d, \
-            quota_urgency_combined, quota_weight_factor, quota_cache_multiplier, \
-            quota_warning_multiplier, quota_effective_weight, quota_uniform_fallback \
+            quota_urgency_combined, quota_warning_multiplier \
             FROM request_events_v1 WHERE event_id = $1";
 
         #[test]
@@ -37,9 +27,7 @@ macro_rules! define_request_event_quota_postgres_tests {
                     let read_back = storage.query_request_events(0, u64::MAX, 10).await?;
                     assert_eq!(read_back.len(), 1);
                     request_event_quota_support::assert_populated_event(&read_back[0]);
-                    let recent = storage
-                        .query_recent_request_events(0, u64::MAX, 10)
-                        .await?;
+                    let recent = storage.query_recent_request_events(0, u64::MAX, 10).await?;
                     assert_eq!(recent.len(), 1);
                     request_event_quota_support::assert_populated_event(&recent[0]);
 
@@ -54,11 +42,7 @@ macro_rules! define_request_event_quota_postgres_tests {
                             Some(quota.urgency_5h),
                             Some(quota.urgency_7d),
                             Some(quota.urgency_combined),
-                            Some(quota.weight_factor),
-                            Some(quota.cache_multiplier),
                             Some(quota.warning_multiplier),
-                            Some(quota.effective_weight),
-                            Some(quota.uniform_fallback),
                         )
                     );
 
@@ -136,29 +120,20 @@ macro_rules! define_request_event_quota_postgres_tests {
                     .await?;
 
                     // When both rows are read directly after the migration.
-                    let mismatch_row =
-                        sqlx::query_as::<_, PostgresQuotaRow>(POSTGRES_QUOTA_SELECT)
-                            .bind(request_event_quota_support::MISMATCH_EVENT_ID)
-                            .fetch_one(&fixture.pool)
-                            .await?;
+                    let mismatch_row = sqlx::query_as::<_, PostgresQuotaRow>(POSTGRES_QUOTA_SELECT)
+                        .bind(request_event_quota_support::MISMATCH_EVENT_ID)
+                        .fetch_one(&fixture.pool)
+                        .await?;
                     let historical_row =
                         sqlx::query_as::<_, PostgresQuotaRow>(POSTGRES_QUOTA_SELECT)
                             .bind(request_event_quota_support::HISTORICAL_EVENT_ID)
                             .fetch_one(&fixture.pool)
                             .await?;
 
-                    // Then all eight columns stay NULL, while malformed booleans are rejected.
-                    let null_row: PostgresQuotaRow =
-                        (None, None, None, None, None, None, None, None);
+                    // Then all dedicated quota columns stay NULL.
+                    let null_row: PostgresQuotaRow = (None, None, None, None);
                     assert_eq!(mismatch_row, null_row);
                     assert_eq!(historical_row, null_row);
-                    let malformed = sqlx::query(
-                        "UPDATE request_events_v1 SET quota_uniform_fallback = 2 WHERE event_id = $1",
-                    )
-                    .bind(request_event_quota_support::HISTORICAL_EVENT_ID)
-                    .execute(&fixture.pool)
-                    .await;
-                    assert!(malformed.is_err());
 
                     drop(storage);
                     backend.teardown(fixture).await

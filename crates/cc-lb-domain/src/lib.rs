@@ -27,7 +27,7 @@ pub use quota::{
 pub use routing::{
     CacheAffinityCandidate, CacheAffinityTrace, CandidateUrgency, MAX_ERROR_MESSAGE_LEN,
     MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN, RoutingTrace, StageDecision,
-    SubscriptionPreferenceTrace, TerminalDecision, TerminalStrategy, WrhKeySource,
+    SubscriptionPreferenceTrace, TerminalDecision, TerminalStrategy,
 };
 pub use upstream::{
     ANTHROPIC_IDENTITY_HEADERS, BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME,

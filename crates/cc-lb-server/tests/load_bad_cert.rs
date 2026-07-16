@@ -7,6 +7,7 @@ use cc_lb_server::tls::{TlsState, load_certs};
 #[test]
 fn load_bad_cert_keeps_current_snapshot() {
     let guard = tls_common::init_metrics();
+    let before_failure_count = tls_common::tls_reload_counter(guard, "failure");
     let dir = tempfile::tempdir().unwrap();
     let (cert_path, key_path) = tls_common::copy_pair(&dir, "cert-a.pem", "key-a.pem");
     let state = TlsState::from_paths(&cert_path, &key_path).unwrap();
@@ -19,8 +20,8 @@ fn load_bad_cert_keeps_current_snapshot() {
     let after = state.current();
     let unchanged = Arc::ptr_eq(&before, &after);
     assert!(unchanged);
-    let failure_count = tls_common::tls_reload_counter(&guard, "failure");
-    assert_eq!(failure_count, 1.0);
+    let failure_count = tls_common::tls_reload_counter(guard, "failure");
+    assert_eq!(failure_count - before_failure_count, 1.0);
 
     println!(
         "load_bad_cert PASSED: original ServerConfig pointer unchanged={unchanged}; cc_lb_tls_reload_total failure={failure_count}"

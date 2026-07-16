@@ -1,6 +1,6 @@
 # ADR 0003 — Weighted Rendezvous Hash for subscription-preference within-tier selection
 
-- Status: Accepted
+- Status: Superseded by ADR 0010
 - Date: 2026-07-04
 - Ships with: PR #312
 - Superseded in part by: ADR 0005, which limits relevant base windows to `5h` and `7d` and ignores `7d_sonnet`/`7d_opus` for routing.

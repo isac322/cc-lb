@@ -6,7 +6,7 @@ use cc_lb_domain::{
     CacheAffinityCandidate, CacheAffinityTrace, CandidateUrgency, InternalError,
     MAX_ERROR_MESSAGE_LEN, MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN, RoutingTrace,
     StageDecision, SubscriptionPreferenceTrace, SubscriptionTier, TerminalDecision,
-    TerminalStrategy, WrhKeySource,
+    TerminalStrategy,
 };
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex, RegexSet};
@@ -509,12 +509,11 @@ fn subscription_preference_json_len(trace: &SubscriptionPreferenceTrace) -> usiz
         len += candidate_urgency_json_len(candidate);
     }
     len += "]".len();
-    len += ",\"wrh_key_source\":".len() + wrh_key_source_json_len(trace.wrh_key_source);
     if let Some(previous_tier) = trace.previous_tier {
         len += ",\"previous_tier\":".len() + tier_json_len(previous_tier);
     }
-    if let Some(salt_version) = &trace.rendezvous_salt_version {
-        len += ",\"rendezvous_salt_version\":".len() + json_string_len(salt_version);
+    if let Some(formula_version) = &trace.formula_version {
+        len += ",\"formula_version\":".len() + json_string_len(formula_version);
     }
     if let Some(cache_cost_basis_version) = &trace.cache_cost_basis_version {
         len += ",\"cache_cost_basis_version\":".len() + json_string_len(cache_cost_basis_version);
@@ -577,8 +576,6 @@ fn candidate_urgency_json_len(candidate: &CandidateUrgency) -> usize {
         + json_string_len(&candidate.upstream_id.to_string())
         + ",\"tier\":".len()
         + tier_json_len(candidate.tier)
-        + ",\"urgency\":".len()
-        + f64_json_len(candidate.urgency)
         + ",\"quota_urgency\":".len()
         + f64_json_len(candidate.quota_urgency)
         + ",\"quota_urgency_5h\":".len()
@@ -587,14 +584,6 @@ fn candidate_urgency_json_len(candidate: &CandidateUrgency) -> usize {
         + option_f64_json_len(candidate.quota_urgency_7d)
         + ",\"quota_urgency_combined\":".len()
         + option_f64_json_len(candidate.quota_urgency_combined)
-        + ",\"quota_weight_factor\":".len()
-        + f64_json_len(candidate.quota_weight_factor)
-        + ",\"quota_uniform_fallback\":".len()
-        + if candidate.quota_uniform_fallback {
-            "true".len()
-        } else {
-            "false".len()
-        }
         + ",\"predicted_cache_read_tokens\":".len()
         + candidate.predicted_cache_read_tokens.to_string().len()
         + ",\"predicted_cache_creation_tokens_5m\":".len()
@@ -611,16 +600,12 @@ fn candidate_urgency_json_len(candidate: &CandidateUrgency) -> usize {
         + candidate.predicted_uncached_input_tokens.to_string().len()
         + ",\"cache_ratio\":".len()
         + f64_json_len(candidate.cache_ratio)
-        + ",\"cache_weight_multiplier\":".len()
-        + f64_json_len(candidate.cache_weight_multiplier)
         + ",\"warning_multiplier\":".len()
         + f64_json_len(candidate.warning_multiplier)
         + ",\"cache_savings_ratio\":".len()
         + f64_json_len(candidate.cache_savings_ratio)
         + ",\"estimated_input_cost_micros\":".len()
         + candidate.estimated_input_cost_micros.to_string().len()
-        + ",\"effective_weight\":".len()
-        + f64_json_len(candidate.effective_weight)
         + "}".len()
 }
 
@@ -630,13 +615,6 @@ fn tier_json_len(tier: SubscriptionTier) -> usize {
         SubscriptionTier::PartialBase => "\"partial_base\"".len(),
         SubscriptionTier::Overage => "\"overage\"".len(),
         SubscriptionTier::UnknownProbe => "\"unknown_probe\"".len(),
-    }
-}
-
-fn wrh_key_source_json_len(source: WrhKeySource) -> usize {
-    match source {
-        WrhKeySource::CacheHash => "\"cache_hash\"".len(),
-        WrhKeySource::RequestId => "\"request_id\"".len(),
     }
 }
 

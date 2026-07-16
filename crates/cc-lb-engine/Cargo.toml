@@ -12,13 +12,11 @@ name = "integration"
 path = "tests/all.rs"
 
 [features]
-capture = ["dep:cc-lb-capture"]
 sqlite = []
 postgres = []
 
 [dependencies]
 cc-lb-clock = { path = "../cc-lb-clock" }
-cc-lb-capture = { path = "../cc-lb-capture", optional = true }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-control = { path = "../cc-lb-control" }
 cc-lb-domain.workspace = true

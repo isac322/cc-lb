@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use cc_lb_domain::{
     PrincipalKindLite, RoutingTrace, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
-    WrhKeySource,
 };
 use cc_lb_lifecycle::{EventId, LifecycleEvent, RouteFailure, RouteInfo, TerminationReason};
 use cc_lb_observability::NoopMetricsHook;
@@ -33,9 +32,8 @@ fn stage(tier: Option<SubscriptionTier>) -> StageDecision {
         subscription_preference: tier.map(|chosen_tier| SubscriptionPreferenceTrace {
             chosen_tier,
             candidates: Vec::new(),
-            wrh_key_source: WrhKeySource::RequestId,
             previous_tier: None,
-            rendezvous_salt_version: None,
+            formula_version: None,
             cache_cost_basis_version: None,
             formula_winner_upstream_id: None,
             kept_upstream_id: None,
@@ -75,12 +73,7 @@ fn route_completed(event_id: &str, tier: Option<SubscriptionTier>) -> LifecycleE
             quota_urgency_5h: None,
             quota_urgency_7d: None,
             quota_urgency_combined: None,
-            quota_weight_factor: None,
-            quota_cache_multiplier: None,
             quota_warning_multiplier: None,
-            quota_effective_weight: None,
-            quota_uniform_fallback: None,
-            wrh_key_source: None,
             lineage_would_have_predicted_read_tokens: None,
             lineage_would_have_picked_upstream_id: None,
         }),

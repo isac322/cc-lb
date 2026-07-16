@@ -17,7 +17,7 @@ use cc_lb_engine::{
 use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_postgres::PostgresStorage;
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::PrometheusHandle;
 use secrecy::SecretString;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::net::TcpListener;
@@ -49,8 +49,6 @@ fn warmup_timeout() -> Duration {
 const WARMUP_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
 static POSTGRES_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-static METRICS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
-
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 struct TestRetainedPartialPort {
@@ -198,11 +196,7 @@ fn postgres_test_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 fn metrics_handle() -> &'static PrometheusHandle {
-    METRICS_HANDLE.get_or_init(|| {
-        PrometheusBuilder::new()
-            .install_recorder()
-            .expect("prometheus recorder installs")
-    })
+    crate::common::install_prometheus()
 }
 
 async fn reset_request_event_tables(database_url: &str) -> TestResult<()> {

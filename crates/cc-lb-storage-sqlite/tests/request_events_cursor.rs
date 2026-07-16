@@ -271,7 +271,6 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
         cache_value_micros: Some(123_456),
         formula_winner_upstream_id: Some(upstream_id),
         kept_upstream_id: Some(upstream_id),
-        wrh_key_source: Some("cache_hash".to_owned()),
         lineage_would_have_predicted_read_tokens: Some(15_000),
         lineage_would_have_picked_upstream_id: Some(upstream_id),
         status: 200,
@@ -315,7 +314,12 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
     assert_eq!(matching[0].1.request_id, "req-cursor-1");
 
     let row = sqlx::query(
-        "SELECT matched_v3_cache_key, breakpoint_content_block_index, matched_content_block_index, lookback_distance, predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, predicted_cache_creation_tokens_1h, token_estimate_source, cache_value_micros, formula_winner_upstream_id, kept_upstream_id, wrh_key_source, lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id FROM request_events_v1 WHERE event_id = ?",
+        "SELECT matched_v3_cache_key, breakpoint_content_block_index, matched_content_block_index, \
+                lookback_distance, predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, \
+                predicted_cache_creation_tokens_1h, token_estimate_source, cache_value_micros, \
+                formula_winner_upstream_id, kept_upstream_id, \
+                lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id \
+         FROM request_events_v1 WHERE event_id = ?",
     )
     .bind(event.event_id.as_deref())
     .fetch_one(storage.pool())
@@ -347,7 +351,6 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
         row.get::<String, _>("kept_upstream_id"),
         upstream_id.to_string()
     );
-    assert_eq!(row.get::<String, _>("wrh_key_source"), "cache_hash");
     assert_eq!(
         row.get::<i64, _>("lineage_would_have_predicted_read_tokens"),
         15_000

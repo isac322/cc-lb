@@ -2,7 +2,7 @@ use bytes::Bytes;
 use cc_lb_domain::{
     CachePricingSummary, CacheScore, CandidateUrgency, Principal, PrincipalKind,
     SubscriptionPreferenceTrace, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
-    SubscriptionTier, UpstreamCandidate, UpstreamKind, WrhKeySource,
+    SubscriptionTier, UpstreamCandidate, UpstreamKind,
 };
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_routing::{FilterPlugin, RoutingContext};
@@ -31,7 +31,6 @@ fn cache_positive_hash_affinity_keeps_single_winner_across_request_ids() {
 
     for result in [first, second] {
         assert_eq!(result.kept_upstream_id, owner.upstream_id);
-        assert_eq!(result.trace.wrh_key_source, WrhKeySource::CacheHash);
         assert_eq!(
             result.trace.bucket_v3_cache_affinity_key.as_deref(),
             Some(SHARED_V3_KEY)
@@ -52,7 +51,6 @@ fn non_positive_cache_value_uses_request_id_despite_matched_key() {
 
     let result = route("req-creation-only", &[first, second]);
 
-    assert_eq!(result.trace.wrh_key_source, WrhKeySource::RequestId);
     assert_eq!(result.trace.bucket_v3_cache_affinity_key, None);
 }
 
@@ -65,14 +63,10 @@ fn reset_recent_has_lower_urgency_when_only_reset_time_differs() {
     let fresh = trace_candidate(&result.trace, fresh_reset.upstream_id);
     let soon = trace_candidate(&result.trace, soon_reset.upstream_id);
 
-    assert_eq!(result.trace.wrh_key_source, WrhKeySource::RequestId);
-    assert_eq!(fresh.cache_weight_multiplier, 1.0);
-    assert_eq!(soon.cache_weight_multiplier, 1.0);
     assert!(
         fresh.quota_urgency < soon.quota_urgency,
         "a just-reset 5h window must not gain priority from reset time alone"
     );
-    assert!(fresh.effective_weight < soon.effective_weight);
 }
 
 #[test]
@@ -108,15 +102,15 @@ fn v11_trace_contains_distinct_winner_and_loser_pressure() {
     let overage = trace_candidate(&result.trace, overage.upstream_id);
     let unknown = trace_candidate(&result.trace, unknown.upstream_id);
 
-    assert_eq!(result.trace.rendezvous_salt_version.as_deref(), Some("v11"));
+    assert_eq!(
+        result.trace.formula_version.as_deref(),
+        Some("cost-first-v1")
+    );
     assert_ne!(winner.quota_urgency_combined, loser.quota_urgency_combined);
     for base in [winner, loser, partial] {
         assert!(base.quota_urgency_5h.is_some());
         assert!(base.quota_urgency_7d.is_some());
         assert_eq!(base.quota_urgency_combined, Some(base.quota_urgency));
-        assert_eq!(base.quota_weight_factor, 1.0 + base.quota_urgency);
-        assert!(!base.quota_uniform_fallback);
-        assert_eq!(base.urgency, base.effective_weight);
     }
     assert_eq!(partial.tier, SubscriptionTier::PartialBase);
     assert_eq!(partial.quota_urgency_7d, Some(0.0));
@@ -124,16 +118,10 @@ fn v11_trace_contains_distinct_winner_and_loser_pressure() {
     assert_eq!(overage.quota_urgency_7d, None);
     assert_eq!(overage.quota_urgency_combined, None);
     assert!(overage.quota_urgency > 0.0);
-    assert_eq!(overage.quota_weight_factor, overage.quota_urgency);
-    assert!(!overage.quota_uniform_fallback);
-    assert_eq!(overage.urgency, overage.effective_weight);
     assert_eq!(unknown.quota_urgency_5h, None);
     assert_eq!(unknown.quota_urgency_7d, None);
     assert_eq!(unknown.quota_urgency_combined, None);
     assert_eq!(unknown.quota_urgency, 0.0);
-    assert_eq!(unknown.quota_weight_factor, 1.0);
-    assert!(unknown.quota_uniform_fallback);
-    assert_eq!(unknown.urgency, unknown.effective_weight);
 }
 
 struct RouteResult {

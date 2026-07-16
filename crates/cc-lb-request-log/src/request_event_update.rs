@@ -104,23 +104,13 @@ pub struct RequestEventPartial {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched_v3_cache_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wrh_key_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_urgency_5h: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_urgency_7d: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_urgency_combined: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_weight_factor: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_cache_multiplier: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_warning_multiplier: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_effective_weight: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_uniform_fallback: Option<bool>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_ms: Option<u64>,
