@@ -2379,21 +2379,8 @@ impl Lifecycle {
                         .and_then(|candidate| candidate.quota_urgency_7d),
                     quota_urgency_combined: selected_quota_candidate
                         .and_then(|candidate| candidate.quota_urgency_combined),
-                    quota_weight_factor: selected_quota_candidate
-                        .map(|candidate| candidate.quota_weight_factor),
-                    quota_cache_multiplier: selected_quota_candidate
-                        .map(|candidate| candidate.cache_weight_multiplier),
                     quota_warning_multiplier: selected_quota_candidate
                         .map(|candidate| candidate.warning_multiplier),
-                    quota_effective_weight: selected_quota_candidate
-                        .map(|candidate| candidate.effective_weight),
-                    quota_uniform_fallback: selected_quota_candidate
-                        .map(|candidate| candidate.quota_uniform_fallback),
-                    wrh_key_source: subscription_trace.map(|trace| match trace.wrh_key_source {
-                        cc_lb_domain::WrhKeySource::CacheHash => "cache_hash".to_owned(),
-                        cc_lb_domain::WrhKeySource::RequestId => "request_id".to_owned(),
-                        cc_lb_domain::WrhKeySource::CostFirst => "cost_first".to_owned(),
-                    }),
                     lineage_would_have_predicted_read_tokens: subscription_trace
                         .and_then(|trace| trace.lineage_would_have_predicted_read_tokens)
                         .or(lineage_counterfactual.map(|counterfactual| counterfactual.0)),

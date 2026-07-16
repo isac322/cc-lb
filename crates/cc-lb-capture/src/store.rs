@@ -92,8 +92,8 @@ impl CaptureStore {
                 event_id, request_id, ts_unix_ms, canonical_model, chosen_upstream_id,
                 disposition, attempt_num, cache_read_input_tokens, cache_creation_5m,
                 cache_creation_1h, input_tokens, output_tokens, client_status, upstream_status,
-                schema_version, salt_version, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                schema_version, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&record.input.event_id)
         .bind(&record.input.request_id)
@@ -110,7 +110,6 @@ impl CaptureStore {
         .bind(record.response.client_status)
         .bind(record.response.upstream_status)
         .bind(record.input.capture_schema_version)
-        .bind(&record.input.salt_version)
         .bind(payload_json)
         .execute(&mut **transaction)
         .await?;
@@ -197,7 +196,6 @@ mod tests {
                     terminal_decision: None,
                 },
                 captured_at_unix_ms: 1_700_000_000_123,
-                salt_version: "v11".to_owned(),
                 cache_cost_basis_version: "v1".to_owned(),
                 capture_schema_version: 1,
                 build_version: "test".to_owned(),

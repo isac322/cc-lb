@@ -36,8 +36,19 @@ unknown, all candidates remain. Select the maximum lexicographic key:
 This makes a cheap warm owner deterministic, while cold requests tie on cost
 and fall through to the use-it-or-lose-it urgency key at zero cost penalty.
 Quota-exhausted upstreams remain excluded by existing tier and hard
-negative rules. The trace records `wrh_key_source = cost_first`, no rendezvous
-salt, and `formula_version = cost-first-v1`.
+negative rules. The trace records `formula_version = cost-first-v1` as the
+selection identity.
+
+## Interface cleanup
+
+Because this project has not deployed the WRH-era trace and request-event
+interfaces, ADR 0010 removes the dead compatibility surface instead of carrying
+optional legacy fields. Removed fields are `WrhKeySource`, `wrh_key_source`,
+`rendezvous_salt_version`, capture `salt_version`, `urgency`,
+`quota_weight_factor`, `quota_uniform_fallback`, `cache_weight_multiplier`,
+`effective_weight`, request-event `quota_cache_multiplier`, and request-event
+`quota_effective_weight`. SQLite and Postgres request-event migrations drop the
+dead persisted columns.
 
 ## Evidence
 

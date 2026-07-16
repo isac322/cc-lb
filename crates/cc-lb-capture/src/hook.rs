@@ -74,7 +74,6 @@ mod tests {
                 terminal_decision: None,
             },
             captured_at_unix_ms: 0,
-            salt_version: "v11".to_owned(),
             cache_cost_basis_version: "v1".to_owned(),
             capture_schema_version: 1,
             build_version: "test".to_owned(),

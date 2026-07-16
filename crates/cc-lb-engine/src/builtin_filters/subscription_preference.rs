@@ -36,7 +36,7 @@
 use cc_lb_domain::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, CachePricingSummary,
     Principal, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, UpstreamCandidate,
-    UpstreamKind, WrhKeySource,
+    UpstreamKind,
 };
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RoutingContext};
 use std::cmp::Ordering;
@@ -86,14 +86,6 @@ pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
 pub(crate) const CACHE_COST_BASIS_VERSION: &str = "v1";
 const WARNING_MULTIPLIER: f64 = 0.20;
 
-/// Exponent coefficient on the retained cache-weight observability multiplier:
-/// `cache_weight_multiplier = exp(CACHE_LOG_BOOST * cache_ratio)`.
-///
-/// The retained ADR 0004 calibration is `ln(8100) / 0.94`, so cache ratios
-/// `1.0` and `0.06` differ by a multiplier of exactly 8100. ADR 0008 composes
-/// this independently with the current quota factor and warning multiplier;
-/// plan capacity and the deleted v10 base-headroom formula are not inputs.
-pub const CACHE_LOG_BOOST: f64 = 9.574_063_128_362_267;
 const COST_FIRST_FORMULA_VERSION: &str = "cost-first-v1";
 
 // -- Config knobs (compiled defaults today; expose per-principal later). ----
@@ -187,20 +179,13 @@ fn evaluate(
         .flat_map(|bucket| {
             let max_cache_value_micros =
                 max_positive_cache_value_micros(bucket, &ctx.cache_pricing);
-            let total_urgency_in_bucket: f64 = bucket.iter().map(Assessment::tier_urgency).sum();
             bucket.iter().map(move |a| {
                 let cache_tokens = candidate_cache_read_tokens(a);
                 let cache_value_micros =
                     candidate_cache_value_micros(a.candidate, &ctx.cache_pricing);
                 let cache_ratio =
                     cache_value_ratio_within_bucket(cache_value_micros, max_cache_value_micros);
-                let cache_weight_multiplier = cache_weight_multiplier(cache_ratio);
                 let tier_urgency = a.tier_urgency();
-                let quota_weight =
-                    quota_weight_factor(a.tier, tier_urgency, total_urgency_in_bucket);
-                let quota_uniform_fallback = total_urgency_in_bucket < EPSILON;
-                let effective_weight =
-                    quota_weight * cache_weight_multiplier * a.warning_multiplier;
                 let estimated_input_cost_micros =
                     estimate_candidate_input_cost_micros(a.candidate, &ctx.cache_pricing)
                         .unwrap_or(0);
@@ -208,7 +193,6 @@ fn evaluate(
                 cc_lb_domain::CandidateUrgency {
                     upstream_id: a.candidate.upstream_id,
                     tier: tier_to_plugin_api(a.tier),
-                    urgency: effective_weight,
                     quota_urgency: tier_urgency,
                     quota_urgency_5h: matches!(a.tier, Tier::KnownBase | Tier::PartialBase)
                         .then_some(a.quota_urgency_5h),
@@ -216,18 +200,14 @@ fn evaluate(
                         .then_some(a.quota_urgency_7d),
                     quota_urgency_combined: matches!(a.tier, Tier::KnownBase | Tier::PartialBase)
                         .then_some(a.quota_urgency_combined),
-                    quota_weight_factor: quota_weight,
-                    quota_uniform_fallback,
                     predicted_cache_read_tokens: cache_tokens,
                     predicted_cache_creation_tokens_5m: candidate_cache_creation_tokens_5m(a),
                     predicted_cache_creation_tokens_1h: candidate_cache_creation_tokens_1h(a),
                     predicted_uncached_input_tokens: candidate_uncached_input_tokens(a),
                     cache_ratio,
-                    cache_weight_multiplier,
                     warning_multiplier: a.warning_multiplier,
                     cache_savings_ratio,
                     estimated_input_cost_micros,
-                    effective_weight,
                     cache_value_micros,
                     matched_v3_cache_key: a
                         .candidate
@@ -272,9 +252,7 @@ fn evaluate(
         let trace = cc_lb_domain::SubscriptionPreferenceTrace {
             chosen_tier,
             candidates: all_assessments,
-            wrh_key_source: WrhKeySource::CostFirst,
             previous_tier: None,
-            rendezvous_salt_version: None,
             formula_version: Some(COST_FIRST_FORMULA_VERSION.to_owned()),
             cache_cost_basis_version: Some(CACHE_COST_BASIS_VERSION.to_owned()),
             formula_winner_upstream_id: Some(formula_winner.candidate.upstream_id),
@@ -347,26 +325,6 @@ fn tier_to_plugin_api(tier: Tier) -> cc_lb_domain::SubscriptionTier {
         Tier::PartialBase => cc_lb_domain::SubscriptionTier::PartialBase,
         Tier::Overage => cc_lb_domain::SubscriptionTier::Overage,
         Tier::UnknownProbe => cc_lb_domain::SubscriptionTier::UnknownProbe,
-    }
-}
-
-const fn quota_weight_factor(tier: Tier, urgency: f64, bucket_total_urgency: f64) -> f64 {
-    match tier {
-        Tier::KnownBase | Tier::PartialBase => {
-            if bucket_total_urgency < EPSILON {
-                1.0
-            } else {
-                1.0 + urgency
-            }
-        }
-        Tier::Overage => {
-            if bucket_total_urgency < EPSILON {
-                1.0
-            } else {
-                urgency
-            }
-        }
-        Tier::UnknownProbe => 1.0,
     }
 }
 
@@ -967,10 +925,6 @@ fn cache_value_ratio_within_bucket(
     } else {
         ((value as f64) / (max_cache_value as f64)).clamp(-1.0, 1.0)
     }
-}
-
-fn cache_weight_multiplier(cache_value_ratio: f64) -> f64 {
-    (CACHE_LOG_BOOST * cache_value_ratio).exp()
 }
 
 fn estimate_candidate_input_cost_micros(

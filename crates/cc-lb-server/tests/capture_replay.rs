@@ -32,7 +32,6 @@ async fn captured_subscription_preference_input_replays_to_identical_trace() {
     let record = capture_record(&pool, "capture-replay").await;
 
     // When: only the exact candidate subset seen by v11 is replayed through its public filter API.
-    assert_eq!(record.input.salt_version, "none");
     let captured_trace = captured_subscription_trace(&record.input.routing_trace);
     let candidates = replay_candidates(
         &record.input.candidates,

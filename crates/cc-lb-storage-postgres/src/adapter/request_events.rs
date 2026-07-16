@@ -36,11 +36,10 @@ impl RequestEventStore for PostgresStorage {
                   matched_v3_cache_key, breakpoint_content_block_index, matched_content_block_index, lookback_distance, \
                   predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, predicted_cache_creation_tokens_1h, \
                    token_estimate_source, cache_value_micros, formula_winner_upstream_id, kept_upstream_id, \
-                   quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, quota_weight_factor, \
-                   quota_cache_multiplier, quota_warning_multiplier, quota_effective_weight, quota_uniform_fallback, \
-                   wrh_key_source, lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, \
+                   quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, quota_warning_multiplier, \
+                   lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, \
                    thinking_budget_tokens, reasoning_effort, payload, created_at) \
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,NOW()) \
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,NOW()) \
               ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
               RETURNING seq",
         )
@@ -177,12 +176,7 @@ impl RequestEventStore for PostgresStorage {
         .bind(event.quota_urgency_5h)
         .bind(event.quota_urgency_7d)
         .bind(event.quota_urgency_combined)
-        .bind(event.quota_weight_factor)
-        .bind(event.quota_cache_multiplier)
         .bind(event.quota_warning_multiplier)
-        .bind(event.quota_effective_weight)
-        .bind(event.quota_uniform_fallback)
-        .bind(event.wrh_key_source.as_deref())
         .bind(
             event
                 .lineage_would_have_predicted_read_tokens

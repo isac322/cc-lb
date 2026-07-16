@@ -28,7 +28,6 @@ fn input(event_id: &str) -> CapturedRequestInput {
             terminal_decision: None,
         },
         captured_at_unix_ms: 1_700_000_000_123,
-        salt_version: "v11".to_owned(),
         cache_cost_basis_version: "v1".to_owned(),
         capture_schema_version: 1,
         build_version: "test".to_owned(),

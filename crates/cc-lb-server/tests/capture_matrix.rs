@@ -250,8 +250,6 @@ async fn replay_consistency_matches_deterministic_trace() {
     let record = capture_matrix_support::capture_record(&pool, "capture-replay").await;
     let input = &record.input;
 
-    assert_eq!(input.salt_version, "none");
-
     let mut candidates = input.candidates.clone();
     candidates.retain(|c| {
         input
@@ -303,11 +301,7 @@ async fn replay_consistency_matches_deterministic_trace() {
         original_trace.kept_upstream_id,
         replay_trace.kept_upstream_id
     );
-    assert_eq!(original_trace.wrh_key_source, replay_trace.wrh_key_source);
-    assert_eq!(
-        original_trace.rendezvous_salt_version,
-        replay_trace.rendezvous_salt_version
-    );
+    assert_eq!();
     assert_eq!(original_trace.formula_version, replay_trace.formula_version);
 
     assert_eq!(

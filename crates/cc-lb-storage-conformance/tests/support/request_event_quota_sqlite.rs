@@ -7,15 +7,10 @@ macro_rules! define_request_event_quota_sqlite_tests {
             Option<f64>,
             Option<f64>,
             Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<i64>,
         );
 
         const SQLITE_QUOTA_SELECT: &str = "SELECT quota_urgency_5h, quota_urgency_7d, \
-            quota_urgency_combined, quota_weight_factor, quota_cache_multiplier, \
-            quota_warning_multiplier, quota_effective_weight, quota_uniform_fallback \
+            quota_urgency_combined, quota_warning_multiplier \
             FROM request_events_v1 WHERE event_id = ?";
 
         #[test]
@@ -65,11 +60,7 @@ macro_rules! define_request_event_quota_sqlite_tests {
                             Some(quota.urgency_5h),
                             Some(quota.urgency_7d),
                             Some(quota.urgency_combined),
-                            Some(quota.weight_factor),
-                            Some(quota.cache_multiplier),
                             Some(quota.warning_multiplier),
-                            Some(quota.effective_weight),
-                            Some(i64::from(quota.uniform_fallback)),
                         )
                     );
 
@@ -115,18 +106,10 @@ macro_rules! define_request_event_quota_sqlite_tests {
                         .fetch_one(storage.pool())
                         .await?;
 
-                    // Then all eight columns stay NULL, while malformed booleans are rejected.
-                    let null_row: SqliteQuotaRow =
-                        (None, None, None, None, None, None, None, None);
+                    // Then all dedicated quota columns stay NULL.
+                    let null_row: SqliteQuotaRow = (None, None, None, None);
                     assert_eq!(mismatch_row, null_row);
                     assert_eq!(historical_row, null_row);
-                    let malformed = sqlx::query(
-                        "UPDATE request_events_v1 SET quota_uniform_fallback = 2 WHERE event_id = ?",
-                    )
-                    .bind(request_event_quota_support::HISTORICAL_EVENT_ID)
-                    .execute(storage.pool())
-                    .await;
-                    assert!(malformed.is_err());
 
                     drop(storage);
                     backend.teardown(fixture).await

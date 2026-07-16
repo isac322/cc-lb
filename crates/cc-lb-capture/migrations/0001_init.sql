@@ -14,7 +14,6 @@ CREATE TABLE capture_v1 (
     client_status INTEGER,
     upstream_status INTEGER,
     schema_version INTEGER NOT NULL,
-    salt_version TEXT,
     payload_json TEXT NOT NULL
 );
 

@@ -174,7 +174,7 @@ fn candidate_with_fable(
 }
 
 #[test]
-fn fable_pressure_changes_effective_weight_and_distribution() {
+fn fable_pressure_changes_quota_urgency_and_selection() {
     let candidate = |name, seed, fable_util| {
         oauth_at_t0(
             name,
@@ -200,7 +200,6 @@ fn fable_pressure_changes_effective_weight_and_distribution() {
     let selected = filter_for_model(&[pressured.clone(), on_pace.clone()], FABLE_MODEL);
 
     assert!(pressured_trace.quota_urgency > on_pace_trace.quota_urgency);
-    assert!(pressured_trace.effective_weight > on_pace_trace.effective_weight);
     assert_eq!(selected.kept_upstream_ids, vec![pressured.upstream_id]);
 }
 
@@ -226,12 +225,6 @@ fn fable_warning_pressure_keeps_warning_multiplier() {
 
     assert!(candidate_trace.quota_urgency_7d.expect("weekly pressure") > 0.0);
     assert_eq!(candidate_trace.warning_multiplier, WARNING_MULTIPLIER);
-    assert!(
-        (candidate_trace.effective_weight
-            - candidate_trace.quota_weight_factor * WARNING_MULTIPLIER)
-            .abs()
-            <= 1e-12
-    );
 }
 
 #[test]

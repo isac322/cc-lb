@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use cc_lb_domain::{TtlClass, UpstreamCandidate, WarmCacheEntry, WrhKeySource};
+use cc_lb_domain::{TtlClass, UpstreamCandidate, WarmCacheEntry};
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_engine::{
@@ -89,17 +89,22 @@ fn built_candidate_cache_score_drives_subscription_preference_component_route() 
     let trace = output
         .subscription_preference
         .expect("subscription preference trace present");
-    let owner_weight = trace_row_weight(&trace.candidates, owner_id, "owner");
-    let peer_weight = trace_row_weight(&trace.candidates, quota_peer_id, "quota peer");
+    let owner_row = trace_row(&trace.candidates, owner_id, "owner");
+    let peer_row = trace_row(&trace.candidates, quota_peer_id, "quota peer");
 
-    assert_eq!(trace.wrh_key_source, WrhKeySource::CostFirst);
     assert_eq!(
         trace.bucket_v3_cache_affinity_key.as_deref(),
         Some(owner_prefix.as_str())
     );
-    assert!(
-        owner_weight > peer_weight * 1000.0,
-        "generated thread cache score must dominate moderate quota advantage: owner={owner_weight}, peer={peer_weight}"
+    assert_eq!(
+        owner_row.matched_v3_cache_key.as_deref(),
+        Some(owner_prefix.as_str())
+    );
+    assert!(owner_row.predicted_cache_read_tokens > peer_row.predicted_cache_read_tokens);
+    assert_eq!(
+        trace.formula_winner_upstream_id,
+        Some(owner_id),
+        "generated thread cache score must dominate moderate quota advantage"
     );
     assert_eq!(output.kept_upstream_ids, vec![owner_id]);
 }
@@ -196,7 +201,6 @@ fn moved_cache_control_keeps_warm_upstream_routed_by_cache_hash() {
         .subscription_preference
         .expect("subscription preference trace present");
 
-    assert_eq!(trace.wrh_key_source, WrhKeySource::CostFirst);
     assert_eq!(
         trace.bucket_v3_cache_affinity_key.as_deref(),
         Some(deep_prefix.as_str())
@@ -267,13 +271,12 @@ fn candidate<'a>(
         .unwrap_or_else(|| panic!("{label} candidate present"))
 }
 
-fn trace_row_weight(
-    rows: &[cc_lb_domain::CandidateUrgency],
+fn trace_row<'a>(
+    rows: &'a [cc_lb_domain::CandidateUrgency],
     upstream_id: Uuid,
     label: &str,
-) -> f64 {
+) -> &'a cc_lb_domain::CandidateUrgency {
     rows.iter()
         .find(|row| row.upstream_id == upstream_id)
         .unwrap_or_else(|| panic!("{label} urgency present"))
-        .effective_weight
 }

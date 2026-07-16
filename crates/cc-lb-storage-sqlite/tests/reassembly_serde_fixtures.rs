@@ -3,7 +3,7 @@ use std::{fs, path::Path, sync::Arc};
 use cc_lb_domain::{
     CacheAffinityCandidate, CacheAffinityTrace, InternalError, InternalErrorKind,
     InternalErrorStage, RoutingTrace, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
-    TerminalDecision, TerminalStrategy, WrhKeySource,
+    TerminalDecision, TerminalStrategy,
 };
 use cc_lb_storage_api::{
     BackendKind, KeyStatus, MetaStore, PluginSlotKind, RequestEvent, RequestEventStore,
@@ -141,9 +141,7 @@ async fn generate_fixtures(output_dir: &Path) {
                 subscription_preference: Some(SubscriptionPreferenceTrace {
                     chosen_tier: SubscriptionTier::KnownBase,
                     candidates: Vec::new(),
-                    wrh_key_source: WrhKeySource::CacheHash,
                     previous_tier: Some(SubscriptionTier::PartialBase),
-                    rendezvous_salt_version: Some("v1".to_owned()),
                     formula_version: None,
                     cache_cost_basis_version: Some("v1".to_owned()),
                     formula_winner_upstream_id: Some(upstream_id),

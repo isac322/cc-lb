@@ -41,9 +41,6 @@ impl PendingCapturedRequestInput {
         routing_trace: RoutingTrace,
     ) -> CapturedRequestInput {
         let subscription_trace = subscription_preference_trace(&routing_trace);
-        let salt_version = subscription_trace
-            .and_then(|trace| trace.rendezvous_salt_version.clone())
-            .unwrap_or_else(|| "none".to_owned());
         let cache_cost_basis_version = subscription_trace
             .and_then(|trace| trace.cache_cost_basis_version.clone())
             .unwrap_or_else(|| CACHE_COST_BASIS_VERSION.to_owned());
@@ -58,7 +55,6 @@ impl PendingCapturedRequestInput {
             subscription_preference_input_upstream_ids,
             routing_trace,
             captured_at_unix_ms: self.captured_at_unix_ms,
-            salt_version,
             cache_cost_basis_version,
             capture_schema_version: 1,
             build_version: env!("CARGO_PKG_VERSION").to_owned(),
