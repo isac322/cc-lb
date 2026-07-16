@@ -4,7 +4,7 @@ use std::io::Read;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle as ThreadJoinHandle;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -24,6 +24,7 @@ use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_sqlite::open_sqlite;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -32,6 +33,15 @@ use tokio::task::JoinHandle;
 use url::Url;
 
 pub const PRIOR_FILTER_CAPTURE_BODY: &str = r#"{"model":"claude-sonnet-4-5-20250929","system":[{"type":"text","text":"stable prior-filter prefix","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"capture prior filter"}],"max_tokens":10}"#;
+
+pub fn install_prometheus() -> &'static PrometheusHandle {
+    static PROMETHEUS: OnceLock<PrometheusHandle> = OnceLock::new();
+    PROMETHEUS.get_or_init(|| {
+        PrometheusBuilder::new()
+            .install_recorder()
+            .expect("prometheus recorder")
+    })
+}
 
 pub struct TestProcess {
     child: Child,

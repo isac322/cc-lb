@@ -15,7 +15,7 @@ use cc_lb_engine::{
 use cc_lb_observability::ObservabilityHook;
 use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_upstream::SignerFactory;
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::PrometheusHandle;
 use tracing_subscriber::fmt::MakeWriter;
 
 pub const ROUTER_WASM: &[u8] = &[
@@ -144,7 +144,7 @@ pub fn evidence_path(name: &str) -> PathBuf {
 }
 
 pub fn install_prometheus() -> PrometheusHandle {
-    PrometheusBuilder::new().install_recorder().unwrap()
+    crate::common::install_prometheus().clone()
 }
 
 pub fn counter_value(handle: &PrometheusHandle, name: &str) -> f64 {
