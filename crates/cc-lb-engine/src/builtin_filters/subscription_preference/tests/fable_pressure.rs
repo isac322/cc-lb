@@ -197,11 +197,11 @@ fn fable_pressure_changes_effective_weight_and_distribution() {
     let trace = output.subscription_preference.expect("trace present");
     let pressured_trace = candidate_urgency_for(&trace, pressured.upstream_id);
     let on_pace_trace = candidate_urgency_for(&trace, on_pace.upstream_id);
-    let distribution = wrh_distribution(&[pressured.clone(), on_pace.clone()], FABLE_MODEL, 2_000);
+    let selected = filter_for_model(&[pressured.clone(), on_pace.clone()], FABLE_MODEL);
 
     assert!(pressured_trace.quota_urgency > on_pace_trace.quota_urgency);
     assert!(pressured_trace.effective_weight > on_pace_trace.effective_weight);
-    assert!(distribution[&pressured.upstream_id] > distribution[&on_pace.upstream_id]);
+    assert_eq!(selected.kept_upstream_ids, vec![pressured.upstream_id]);
 }
 
 #[test]

@@ -166,6 +166,7 @@ fn routing_trace_cap_respects_extended_stage_payloads() {
             wrh_key_source: WrhKeySource::RequestId,
             previous_tier: Some(SubscriptionTier::PartialBase),
             rendezvous_salt_version: Some("v7".to_owned()),
+            formula_version: Some("cost-first-v1".to_owned()),
             cache_cost_basis_version: Some("v1".to_owned()),
             formula_winner_upstream_id: Some(seeded(index)),
             kept_upstream_id: Some(seeded(index)),
@@ -261,6 +262,7 @@ fn subscription_preference_all_fields_survive_serde_roundtrip() {
         wrh_key_source: WrhKeySource::RequestId,
         previous_tier: Some(SubscriptionTier::KnownBase),
         rendezvous_salt_version: Some("v11".to_owned()),
+        formula_version: Some("cost-first-v1".to_owned()),
         cache_cost_basis_version: Some("v1".to_owned()),
         formula_winner_upstream_id: Some(Uuid::from_bytes([1; 16])),
         kept_upstream_id: Some(Uuid::from_bytes([1; 16])),
@@ -278,6 +280,7 @@ fn subscription_preference_all_fields_survive_serde_roundtrip() {
     assert!(json.contains("\"wrh_key_source\":\"request_id\""));
     assert!(json.contains("\"previous_tier\":\"known_base\""));
     assert!(json.contains("\"rendezvous_salt_version\":\"v11\""));
+    assert!(json.contains("\"formula_version\":\"cost-first-v1\""));
     assert!(json.contains("\"quota_urgency\":"));
     assert!(json.contains("\"quota_urgency_5h\":0.2"));
     assert!(json.contains("\"quota_urgency_7d\":0.15"));

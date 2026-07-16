@@ -5,14 +5,9 @@
 //! 1. A strict tier ordering (KnownBase > PartialBase > Overage > UnknownProbe)
 //!    that keeps the Anthropic base plan strictly higher priority than the
 //!    overage bucket.
-//! 2. Within the winning tier, a Weighted Rendezvous Hash (WRH, Vilkonis) using
-//!    a tier-specific quota factor multiplied by cache and warning factors.
-//!    Base pressure is the weighted smoothmax of 5h and effective weekly
-//!    use-it-or-lose-it pressure. For exact Fable, effective weekly pressure is
-//!    the smoothmax of shared `7d` and `7d_fable`. Overage urgency retains its
-//!    fixed nominal 30-day denominator.
-//! 3. A deterministic tiebreak if two candidates produce numerically identical
-//!    WRH scores (rendezvous_hash DESC, upstream_id ASC).
+//! 2. Within the winning tier, deterministic cost-first-v1 selection. Candidates
+//!    within five percent of the lowest known input cost use urgency, warning,
+//!    upstream ID, and original position as stable tiebreaks.
 //!
 //! ## Design rationale
 //!
@@ -20,7 +15,7 @@
 //! the time remaining before reset. Positive pressure raises the base quota
 //! factor above its neutral `1.0`; on-pace buckets use `1.0` uniformly. The
 //! candidate `plan_capacity_ratio` remains available as metadata for analytics
-//! but does not affect pressure, tiering, WRH weight, or distribution.
+//! but does not affect pressure, tiering, or winner selection.
 //!
 //! ## Windows
 //!
@@ -77,8 +72,7 @@ const SEVEN_DAY_TARGET_FLOOR: f64 = 0.01;
 const SMOOTHMAX_P: f64 = 6.0;
 const SEVEN_DAY_SMOOTHMAX_WEIGHT: f64 = 1.0;
 
-/// Guard below which the aggregate WRH weight is treated as zero and the
-/// filter falls back to a uniform distribution.
+/// Guard below which aggregate urgency uses its neutral quota factor.
 pub(crate) const EPSILON: f64 = 1e-12;
 
 /// Nominal remaining-seconds denominator for overage-tier urgency. Anthropic
@@ -86,88 +80,13 @@ pub(crate) const EPSILON: f64 = 1e-12;
 /// the monthly boundary, so we use a fixed 30-day nominal.
 pub(crate) const OVERAGE_REMAINING_NOMINAL_SECS: u64 = 30 * 86_400;
 
-/// Baseline WRH weight for overage candidates whose utilization we cannot
-/// read.
+/// Baseline overage urgency for candidates whose utilization we cannot read.
 pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
-
-/// Short version tag identifying the WRH salt/algorithm shape. Embedded in
-/// [`RENDEZVOUS_SALT`] and surfaced on `SubscriptionPreferenceTrace.rendezvous_salt_version`
-/// so trace queries can distinguish upstream-mix shifts caused by an
-/// algorithm/salt change from those caused by upstream or quota state
-/// changes. Bumped in lockstep with `RENDEZVOUS_SALT` — a `debug_assert`
-/// in `tests::rendezvous_salt_embeds_version` guards the invariant.
-pub const SALT_VERSION: &str = "v11";
-pub(crate) const FABLE_SALT_VERSION: &str = "v11-fable";
-
-/// v11 salt for base and unknown-probe weighted-rendezvous selection. The
-/// overage tier deliberately retains its v10 salt so ADR 0008 does not move
-/// overage winners; traces still report the current v11 semantic era.
-///
-/// v11-fable (2026-07-11): exact `claude-fable-5` uses scoped weekly pressure,
-/// salt, and trace version without remapping non-Fable or overage traffic.
-///
-/// v11 (2026-07-10): exposes use-it-or-lose-it base pressure components and the
-/// tier-specific quota factor in all-candidate traces.
-///
-/// v10 (2026-07-07): removes hidden threaded owner memory and cache-loss switch
-/// gates. Cache influence is folded into each candidate's WRH weight as
-/// `read_savings - missing_incremental_create_cost`, normalized within the
-/// selected tier. Thread IDs are used as the WRH key only when the current tier
-/// has a positive priced cache value; all-cold routing falls back to request ID.
-///
-/// v9 (2026-07-06): warning-positive base windows remain KnownBase with a
-/// same-tier multiplier, and threaded owner handoff is additionally gated by
-/// estimated in-memory cache re-prime cost derived from plugin-visible pricing
-/// and cache-score inputs.
-///
-/// v8 (2026-07-06): WRH is keyed on non-empty `thread_id`, falling back to
-/// `request_id` only for stateless requests. Fresh base windows with
-/// `allowed_warning`, or with `allowed` plus finite utilization at/above a
-/// finite `surpassed_threshold`, remain selectable but demote the candidate
-/// from KnownBase to PartialBase. Threaded requests keep a per-thread owner and
-/// require a converged challenger before non-forced handoff. See
-/// docs/adr/0005-thread-keyed-subscription-preference-with-warning-demotion.md.
-///
-/// v7 (2026-07-06): WRH is keyed on `request_id` and the per-candidate
-/// weight is `quota_urgency * exp(CACHE_LOG_BOOST * cache_ratio)`, where
-/// `cache_ratio` is `predicted_cache_read_tokens / max_in_tier_bucket`.
-/// The exponential multiplier makes a deeply cached upstream keep winning
-/// through ~95% utilisation and hand off probabilistically around 99%
-/// (`CACHE_LOG_BOOST` is calibrated for a 99% crossover in the observed
-/// bear-max/Runbear scenario). This replaces the v6 cache_affinity
-/// max-ranker filter, which dropped every non-max cache candidate before
-/// subscription-preference could see it — when the max-cache upstream
-/// became tier-blocked (util ≥ 1.0), there was no fallback candidate left
-/// to route to and the request hit 429. v7 keeps every candidate in the
-/// bucket and lets tier assessment plus the cache-weighted WRH handle both
-/// warm-session pinning and hard tier-eviction spill. See
-/// docs/adr/0004-cache-weighted-subscription-preference.md and
-/// docs/rfc/0003-cache-weighted-subscription-preference.md.
-///
-/// v6 (2026-07-06): WRH keyed on `request_id`, cache handling delegated to
-/// a separate cache_affinity max-ranker filter. Rejected once the
-/// tier-eviction spill bug was found: dropping non-max candidates before
-/// subscription's tier assessment meant a saturated cache-holder had no
-/// peer left to spill to.
-///
-/// v5 (rejected, never deployed): would have made subscription-preference
-/// inspect candidate `cache_score` to switch between thread-id and
-/// request-id keying. Rejected for violating filter separation.
-///
-/// v4 (2026-07-05): keyed WRH on `thread_id` so multi-turn sessions pinned
-/// while the prompt cache stayed warm. Deployed by PR #322 after the
-/// 2026-07-05 06:24 UTC scatter incident.
-const RENDEZVOUS_SALT: &str =
-    "cc-lb:subscription-preference:v11:use-it-or-lose-it-quota-pressure:2026-07-10";
-const FABLE_RENDEZVOUS_SALT: &str =
-    "cc-lb:subscription-preference:v11-fable:use-it-or-lose-it-fable-quota-pressure:2026-07-11";
-const OVERAGE_RENDEZVOUS_SALT: &str =
-    "cc-lb:subscription-preference:v10:symmetric-cache-value:2026-07-07";
 
 pub(crate) const CACHE_COST_BASIS_VERSION: &str = "v1";
 const WARNING_MULTIPLIER: f64 = 0.20;
 
-/// Exponent coefficient on the cache-weighted WRH multiplier:
+/// Exponent coefficient on the retained cache-weight observability multiplier:
 /// `cache_weight_multiplier = exp(CACHE_LOG_BOOST * cache_ratio)`.
 ///
 /// The retained ADR 0004 calibration is `ln(8100) / 0.94`, so cache ratios
@@ -175,6 +94,7 @@ const WARNING_MULTIPLIER: f64 = 0.20;
 /// this independently with the current quota factor and warning multiplier;
 /// plan capacity and the deleted v10 base-headroom formula are not inputs.
 pub const CACHE_LOG_BOOST: f64 = 9.574_063_128_362_267;
+const COST_FIRST_FORMULA_VERSION: &str = "cost-first-v1";
 
 // -- Config knobs (compiled defaults today; expose per-principal later). ----
 
@@ -182,7 +102,6 @@ struct FilterConfig {
     unknown_probe_enabled: bool,
     stale_rejected_without_reset_blocks: bool,
     hard_overage_block_wins: bool,
-    rendezvous_hash_salt: &'static str,
 }
 
 impl Default for FilterConfig {
@@ -191,7 +110,6 @@ impl Default for FilterConfig {
             unknown_probe_enabled: true,
             stale_rejected_without_reset_blocks: true,
             hard_overage_block_wins: true,
-            rendezvous_hash_salt: RENDEZVOUS_SALT,
         }
     }
 }
@@ -214,10 +132,7 @@ impl FilterPlugin for SubscriptionPreferenceFilter {
         _principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
-        let mut config = FilterConfig::default();
-        if ctx.canonical_model_id == FABLE_MODEL {
-            config.rendezvous_hash_salt = FABLE_RENDEZVOUS_SALT;
-        }
+        let config = FilterConfig::default();
         Ok(evaluate(ctx, candidates, &config))
     }
 
@@ -348,17 +263,8 @@ fn evaluate(
         if bucket.is_empty() {
             continue;
         }
-        let max_cache_value_micros = max_positive_cache_value_micros(bucket, &ctx.cache_pricing);
         let bucket_v3_cache_affinity_key = bucket_v3_cache_affinity_key(bucket, &ctx.cache_pricing);
-        let (routing_key, wrh_key_source) =
-            routing_key_for_bucket(ctx.request_id.as_str(), bucket_v3_cache_affinity_key);
-        let selection = pick_within_tier(
-            bucket,
-            routing_key,
-            config,
-            &ctx.cache_pricing,
-            max_cache_value_micros,
-        );
+        let selection = pick_within_tier(bucket, &ctx.cache_pricing);
         let formula_winner = selection.winner;
         let chosen_tier = tier_to_plugin_api(formula_winner.tier);
         let kept_upstream_id = formula_winner.candidate.upstream_id;
@@ -366,16 +272,10 @@ fn evaluate(
         let trace = cc_lb_domain::SubscriptionPreferenceTrace {
             chosen_tier,
             candidates: all_assessments,
-            wrh_key_source,
+            wrh_key_source: WrhKeySource::CostFirst,
             previous_tier: None,
-            rendezvous_salt_version: Some(
-                if canonical_model == FABLE_MODEL {
-                    FABLE_SALT_VERSION
-                } else {
-                    SALT_VERSION
-                }
-                .to_owned(),
-            ),
+            rendezvous_salt_version: None,
+            formula_version: Some(COST_FIRST_FORMULA_VERSION.to_owned()),
             cache_cost_basis_version: Some(CACHE_COST_BASIS_VERSION.to_owned()),
             formula_winner_upstream_id: Some(formula_winner.candidate.upstream_id),
             kept_upstream_id: Some(kept_upstream_id),
@@ -423,17 +323,6 @@ fn relevant_base_windows(canonical_model: &str) -> Vec<&'static str> {
     windows
 }
 
-fn routing_key_for_bucket<'a>(
-    request_id: &'a str,
-    bucket_v3_cache_affinity_key: Option<&'a str>,
-) -> (&'a str, WrhKeySource) {
-    if let Some(cache_key) = bucket_v3_cache_affinity_key {
-        (cache_key, WrhKeySource::CacheHash)
-    } else {
-        (request_id, WrhKeySource::RequestId)
-    }
-}
-
 fn collect_kind(candidates: &[UpstreamCandidate], kind: UpstreamKind) -> Vec<Uuid> {
     candidates
         .iter()
@@ -450,13 +339,6 @@ enum Tier {
     PartialBase = 1,
     Overage = 2,
     UnknownProbe = 3,
-}
-
-const fn rendezvous_salt_for_tier(tier: Tier, current_salt: &'static str) -> &'static str {
-    match tier {
-        Tier::KnownBase | Tier::PartialBase | Tier::UnknownProbe => current_salt,
-        Tier::Overage => OVERAGE_RENDEZVOUS_SALT,
-    }
 }
 
 fn tier_to_plugin_api(tier: Tier) -> cc_lb_domain::SubscriptionTier {
@@ -922,7 +804,7 @@ fn candidate_estimated_now(candidate: &UpstreamCandidate) -> u64 {
     candidate.observed_at_unix_secs.max(snap_max)
 }
 
-// -- Weighted-rendezvous selection. -----------------------------------------
+// -- Cost-first selection. ---------------------------------------------------
 
 struct TierSelection<'a, 'b> {
     winner: &'b Assessment<'a>,
@@ -930,43 +812,67 @@ struct TierSelection<'a, 'b> {
 
 fn pick_within_tier<'a, 'b>(
     bucket: &'b [Assessment<'a>],
-    routing_key: &str,
-    config: &FilterConfig,
     pricing: &CachePricingSummary,
-    max_cache_value_micros: i64,
 ) -> TierSelection<'a, 'b> {
     debug_assert!(!bucket.is_empty());
-    let total_urgency: f64 = bucket.iter().map(Assessment::tier_urgency).sum();
 
     if bucket.len() == 1 {
         return TierSelection { winner: &bucket[0] };
     }
 
-    let mut best_index = 0usize;
-    let mut best_key = wrh_key(
-        &bucket[0],
-        routing_key,
-        config,
-        total_urgency,
-        pricing,
-        max_cache_value_micros,
-    );
-    for (i, assessment) in bucket.iter().enumerate().skip(1) {
-        let key = wrh_key(
-            assessment,
-            routing_key,
-            config,
-            total_urgency,
-            pricing,
-            max_cache_value_micros,
-        );
-        if compare_wrh_key(&key, &best_key) == Ordering::Less {
-            best_index = i;
-            best_key = key;
+    let min_cost = bucket
+        .iter()
+        .filter_map(|assessment| {
+            estimate_candidate_input_cost_micros(assessment.candidate, pricing)
+        })
+        .min();
+
+    let mut winner = CostFirstCandidate {
+        assessment: &bucket[0],
+        cost: None,
+    };
+
+    match min_cost {
+        Some(min_cost) => {
+            let mut found_near_cost_candidate = false;
+            for assessment in bucket {
+                let Some(cost) =
+                    estimate_candidate_input_cost_micros(assessment.candidate, pricing)
+                else {
+                    continue;
+                };
+                if u128::from(cost) * 100 > u128::from(min_cost) * 105 {
+                    continue;
+                }
+
+                let candidate = CostFirstCandidate {
+                    assessment,
+                    cost: Some(cost),
+                };
+                if !found_near_cost_candidate
+                    || candidate.compare_for_winner(winner) == Ordering::Greater
+                {
+                    winner = candidate;
+                    found_near_cost_candidate = true;
+                }
+            }
+            debug_assert!(found_near_cost_candidate);
+        }
+        None => {
+            for assessment in &bucket[1..] {
+                let candidate = CostFirstCandidate {
+                    assessment,
+                    cost: None,
+                };
+                if candidate.compare_for_winner(winner) == Ordering::Greater {
+                    winner = candidate;
+                }
+            }
         }
     }
+
     TierSelection {
-        winner: &bucket[best_index],
+        winner: winner.assessment,
     }
 }
 
@@ -1151,107 +1057,45 @@ fn micros_for_tokens(tokens: u32, micros_per_million: u64) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-struct WrhKey {
-    /// `-ln(u) / weight`. Lower key wins.
-    score: f64,
-    /// Negated raw hash so that higher hash wins during score ties.
-    rendezvous_neg: u64,
-    upstream_id: Uuid,
-    original_index: usize,
+#[derive(Clone, Copy)]
+struct CostFirstCandidate<'candidate, 'assessment> {
+    assessment: &'assessment Assessment<'candidate>,
+    cost: Option<u64>,
 }
 
-fn wrh_key(
-    assessment: &Assessment<'_>,
-    routing_key: &str,
-    config: &FilterConfig,
-    bucket_total_urgency: f64,
-    pricing: &CachePricingSummary,
-    max_cache_value_micros: i64,
-) -> WrhKey {
-    let hash = rendezvous_hash(
-        rendezvous_salt_for_tier(assessment.tier, config.rendezvous_hash_salt),
-        routing_key,
-        assessment.candidate.upstream_id,
-    );
-    let quota_weight = quota_weight_factor(
-        assessment.tier,
-        assessment.tier_urgency(),
-        bucket_total_urgency,
-    );
-    let cache_ratio = cache_value_ratio_within_bucket(
-        candidate_cache_value_micros(assessment.candidate, pricing),
-        max_cache_value_micros,
-    );
-    let effective_weight =
-        quota_weight * cache_weight_multiplier(cache_ratio) * assessment.warning_multiplier;
-    let u = hash_to_open_unit(hash);
-    let score = if effective_weight <= 0.0 {
-        f64::INFINITY
-    } else {
-        -u.ln() / effective_weight
-    };
-    WrhKey {
-        score,
-        rendezvous_neg: u64::MAX - hash,
-        upstream_id: assessment.candidate.upstream_id,
-        original_index: assessment.original_index,
+impl CostFirstCandidate<'_, '_> {
+    fn compare_for_winner(self, other: Self) -> Ordering {
+        // Cheapest warm owners are selected deterministically; only near-cost peers use urgency.
+        let effective_urgency = self.assessment.tier_urgency() * self.assessment.warning_multiplier;
+        let other_effective_urgency =
+            other.assessment.tier_urgency() * other.assessment.warning_multiplier;
+        effective_urgency
+            .total_cmp(&other_effective_urgency)
+            .then_with(|| {
+                self.assessment
+                    .warning_multiplier
+                    .total_cmp(&other.assessment.warning_multiplier)
+            })
+            .then_with(|| match (self.cost, other.cost) {
+                (Some(cost), Some(other_cost)) => other_cost.cmp(&cost),
+                (None, None) => Ordering::Equal,
+                (Some(_), None) => Ordering::Greater,
+                (None, Some(_)) => Ordering::Less,
+            })
+            .then_with(|| {
+                other
+                    .assessment
+                    .candidate
+                    .upstream_id
+                    .cmp(&self.assessment.candidate.upstream_id)
+            })
+            .then_with(|| {
+                other
+                    .assessment
+                    .original_index
+                    .cmp(&self.assessment.original_index)
+            })
     }
-}
-
-fn compare_wrh_key(a: &WrhKey, b: &WrhKey) -> Ordering {
-    a.score
-        .total_cmp(&b.score)
-        .then_with(|| a.rendezvous_neg.cmp(&b.rendezvous_neg))
-        .then_with(|| a.upstream_id.cmp(&b.upstream_id))
-        .then_with(|| a.original_index.cmp(&b.original_index))
-}
-
-/// Map a 64-bit hash to `u ∈ (0, 1)` using the top 53 bits so the division
-/// is exact in f64. Guarantees `-ln(u)` is a finite positive number so WRH
-/// scoring is numerically well-defined.
-fn hash_to_open_unit(hash: u64) -> f64 {
-    let top53 = hash >> 11;
-    ((top53 as f64) + 0.5) / ((1u64 << 53) as f64)
-}
-
-// -- Rendezvous hash (FNV-1a 64 over salt || routing key || upstream_id,
-// with a Murmur3 fmix64 avalanche finalizer). ------------------------------
-//
-// FNV-1a alone has weak avalanche: two inputs differing in one trailing byte
-// produce hash values that differ by only a small fixed delta * fnv_prime.
-// That is fatal for WRH — near-identical `u` values across candidates cause
-// the highest-weight candidate to win every request. The Murmur3 fmix64
-// step spreads any local input change across all 64 output bits, restoring
-// the "independent uniforms per candidate" property WRH requires.
-
-fn rendezvous_hash(salt: &str, routing_key: &str, upstream_id: Uuid) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let fnv_prime: u64 = 0x100_0000_01b3;
-    let mix = |h: &mut u64, byte: u8| {
-        *h ^= byte as u64;
-        *h = h.wrapping_mul(fnv_prime);
-    };
-    for &b in salt.as_bytes() {
-        mix(&mut h, b);
-    }
-    mix(&mut h, 0);
-    for &b in routing_key.as_bytes() {
-        mix(&mut h, b);
-    }
-    mix(&mut h, 0);
-    for &b in upstream_id.as_bytes() {
-        mix(&mut h, b);
-    }
-    fmix64(h)
-}
-
-fn fmix64(mut h: u64) -> u64 {
-    h ^= h >> 33;
-    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
-    h ^= h >> 33;
-    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-    h ^= h >> 33;
-    h
 }
 
 #[cfg(test)]

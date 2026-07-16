@@ -2392,6 +2392,7 @@ impl Lifecycle {
                     wrh_key_source: subscription_trace.map(|trace| match trace.wrh_key_source {
                         cc_lb_domain::WrhKeySource::CacheHash => "cache_hash".to_owned(),
                         cc_lb_domain::WrhKeySource::RequestId => "request_id".to_owned(),
+                        cc_lb_domain::WrhKeySource::CostFirst => "cost_first".to_owned(),
                     }),
                     lineage_would_have_predicted_read_tokens: subscription_trace
                         .and_then(|trace| trace.lineage_would_have_predicted_read_tokens)

@@ -205,6 +205,7 @@ mod tests {
                             wrh_key_source: WrhKeySource::CacheHash,
                             previous_tier: Some(SubscriptionTier::PartialBase),
                             rendezvous_salt_version: Some("v11".to_owned()),
+                            formula_version: None,
                             cache_cost_basis_version: Some("v1".to_owned()),
                             formula_winner_upstream_id: Some(first_upstream_id),
                             kept_upstream_id: Some(first_upstream_id),

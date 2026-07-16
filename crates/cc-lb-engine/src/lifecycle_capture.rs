@@ -2,7 +2,7 @@ use cc_lb_capture::schema::CapturedRequestInput;
 use cc_lb_domain::{CacheBreakpoint, CachePricingSummary, RoutingTrace, UpstreamCandidate};
 use uuid::Uuid;
 
-use crate::builtin_filters::subscription_preference::{CACHE_COST_BASIS_VERSION, SALT_VERSION};
+use crate::builtin_filters::subscription_preference::CACHE_COST_BASIS_VERSION;
 use crate::lifecycle::subscription_preference_trace;
 use crate::request_context::RequestContext;
 
@@ -43,7 +43,7 @@ impl PendingCapturedRequestInput {
         let subscription_trace = subscription_preference_trace(&routing_trace);
         let salt_version = subscription_trace
             .and_then(|trace| trace.rendezvous_salt_version.clone())
-            .unwrap_or_else(|| SALT_VERSION.to_owned());
+            .unwrap_or_else(|| "none".to_owned());
         let cache_cost_basis_version = subscription_trace
             .and_then(|trace| trace.cache_cost_basis_version.clone())
             .unwrap_or_else(|| CACHE_COST_BASIS_VERSION.to_owned());

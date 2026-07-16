@@ -225,9 +225,7 @@ async fn client_disconnect_captures_partial_row() {
 #[tokio::test]
 async fn replay_consistency_matches_deterministic_trace() {
     use bytes::Bytes;
-    use cc_lb_engine::builtin_filters::subscription_preference::{
-        SALT_VERSION, SubscriptionPreferenceFilter,
-    };
+    use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
     use cc_lb_routing::{FilterPlugin, RoutingContext};
     use http::{HeaderMap, Method};
 
@@ -252,7 +250,7 @@ async fn replay_consistency_matches_deterministic_trace() {
     let record = capture_matrix_support::capture_record(&pool, "capture-replay").await;
     let input = &record.input;
 
-    assert_eq!(input.salt_version, SALT_VERSION);
+    assert_eq!(input.salt_version, "none");
 
     let mut candidates = input.candidates.clone();
     candidates.retain(|c| {
@@ -310,6 +308,7 @@ async fn replay_consistency_matches_deterministic_trace() {
         original_trace.rendezvous_salt_version,
         replay_trace.rendezvous_salt_version
     );
+    assert_eq!(original_trace.formula_version, replay_trace.formula_version);
 
     assert_eq!(
         original_trace.candidates.len(),

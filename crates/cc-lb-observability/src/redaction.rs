@@ -516,6 +516,9 @@ fn subscription_preference_json_len(trace: &SubscriptionPreferenceTrace) -> usiz
     if let Some(salt_version) = &trace.rendezvous_salt_version {
         len += ",\"rendezvous_salt_version\":".len() + json_string_len(salt_version);
     }
+    if let Some(formula_version) = &trace.formula_version {
+        len += ",\"formula_version\":".len() + json_string_len(formula_version);
+    }
     if let Some(cache_cost_basis_version) = &trace.cache_cost_basis_version {
         len += ",\"cache_cost_basis_version\":".len() + json_string_len(cache_cost_basis_version);
     }
@@ -637,6 +640,7 @@ fn wrh_key_source_json_len(source: WrhKeySource) -> usize {
     match source {
         WrhKeySource::CacheHash => "\"cache_hash\"".len(),
         WrhKeySource::RequestId => "\"request_id\"".len(),
+        WrhKeySource::CostFirst => "\"cost_first\"".len(),
     }
 }
 

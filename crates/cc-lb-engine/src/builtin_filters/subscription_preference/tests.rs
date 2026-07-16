@@ -22,6 +22,7 @@ use std::collections::HashMap;
 
 use super::*;
 
+mod cost_first;
 mod fable_pressure;
 mod fable_salt;
 
@@ -34,10 +35,6 @@ const UNKNOWN_MODEL: &str = "claude-unknown-model";
 const MODEL_AGNOSTIC: &str = "claude-3-5-haiku-default";
 const WINDOW_SEVEN_DAY_SONNET: &str = "7d_sonnet";
 const WINDOW_SEVEN_DAY_OPUS: &str = "7d_opus";
-const V10_RENDEZVOUS_SALT_ORACLE: &str =
-    "cc-lb:subscription-preference:v10:symmetric-cache-value:2026-07-07";
-const V11_RENDEZVOUS_SALT_ORACLE: &str =
-    "cc-lb:subscription-preference:v11:use-it-or-lose-it-quota-pressure:2026-07-10";
 
 const T0_SECS: u64 = 1_700_000_000;
 
@@ -824,10 +821,7 @@ fn short_reset_underuse_has_greater_pressure_and_share() {
     let runbear_pressure = candidate_urgency_for(&trace, runbear.upstream_id).quota_urgency;
     let bear_pressure = candidate_urgency_for(&trace, bear.upstream_id).quota_urgency;
     assert!(runbear_pressure > bear_pressure);
-    assert!(
-        (0.65..=0.78).contains(&runbear_share),
-        "ADR 0008 neutral factors should give Runbear a majority without starving bear; got share={runbear_share}"
-    );
+    assert_eq!(runbear_share, 1.0);
 }
 
 #[test]
@@ -875,10 +869,7 @@ fn combined_pressure_is_dominated_by_tight_window() {
     let trace = output.subscription_preference.expect("trace present");
     let tight_pressure = candidate_urgency_for(&trace, tight_5h.upstream_id).quota_urgency;
     assert!(tight_pressure > 0.0);
-    assert!(
-        (0.75..=0.90).contains(&tight_share),
-        "the neutral baseline keeps the loose peer selectable while tight 5h pressure dominates; got share={tight_share}"
-    );
+    assert_eq!(tight_share, 1.0);
 }
 
 #[test]
@@ -925,10 +916,7 @@ fn resets_at_missing_window_excluded_from_urgency() {
     assert!(with_reset_weight.quota_urgency > 0.0);
     assert_eq!(no_reset_weight.quota_urgency, 0.0);
     assert_eq!(no_reset_weight.effective_weight, 1.0);
-    assert!(
-        (0.58..=0.72).contains(&with_reset_share),
-        "with-reset pressure should bias WRH without zeroing the no-reset peer; got share={with_reset_share}"
-    );
+    assert_eq!(with_reset_share, 1.0);
 }
 
 #[test]
@@ -980,10 +968,7 @@ fn high_util_short_remaining_has_greater_pressure_and_share() {
     let low_pressure = candidate_urgency_for(&trace, low_util_long.upstream_id).quota_urgency;
     let high_pressure = candidate_urgency_for(&trace, high_util_short.upstream_id).quota_urgency;
     assert!(high_pressure > low_pressure);
-    assert!(
-        (0.22..=0.36).contains(&low_share),
-        "ADR 0008 should favor the short-reset candidate while the neutral baseline keeps both selectable; got share={low_share}"
-    );
+    assert_eq!(low_share, 0.0);
 }
 
 // =============================================================================
@@ -1400,12 +1385,10 @@ fn overage_non_uniform_weight_matches_v10() {
             fresh(WINDOW_OVERAGE).util(0.75).status("allowed").build(),
         ],
     );
-    let request_id = "overage-v10-non-uniform";
-
     // When: the filter scores the overage bucket.
     let output = SubscriptionPreferenceFilter::new()
         .filter(
-            &ctx_with_request_id(MODEL_AGNOSTIC, request_id),
+            &ctx_with_request_id(MODEL_AGNOSTIC, "overage-cost-first"),
             &principal(),
             &[low_util.clone(), high_util.clone()],
         )
@@ -1413,29 +1396,13 @@ fn overage_non_uniform_weight_matches_v10() {
     let trace = output.subscription_preference.expect("trace present");
     let low_expected = 0.5625 / 2_592_000.0;
     let high_expected = 0.0625 / 2_592_000.0;
-    let low_score = -hash_to_open_unit(rendezvous_hash(
-        V10_RENDEZVOUS_SALT_ORACLE,
-        request_id,
-        low_util.upstream_id,
-    ))
-    .ln()
-        / low_expected;
-    let high_score = -hash_to_open_unit(rendezvous_hash(
-        V10_RENDEZVOUS_SALT_ORACLE,
-        request_id,
-        high_util.upstream_id,
-    ))
-    .ln()
-        / high_expected;
-
-    // Then: weights and winner are byte-for-byte v10 raw-urgency behavior.
+    // Then: the trace keeps urgency observability while cost-first ranks it deterministically.
     let low_trace = candidate_urgency_for(&trace, low_util.upstream_id);
     let high_trace = candidate_urgency_for(&trace, high_util.upstream_id);
     assert_eq!(low_trace.quota_weight_factor, low_expected);
     assert_eq!(low_trace.effective_weight, low_expected);
     assert_eq!(high_trace.quota_weight_factor, high_expected);
     assert_eq!(high_trace.effective_weight, high_expected);
-    assert!(low_score < high_score, "v10 salt must select UUID seed 1");
     assert_eq!(output.kept_upstream_ids, vec![upstream_id(1)]);
 }
 
@@ -1464,42 +1431,25 @@ fn overage_uniform_fallback_matches_v10() {
                 .build(),
         ],
     );
-    let request_id = "overage-v10-uniform";
-
     // When: the filter scores the overage bucket.
     let output = SubscriptionPreferenceFilter::new()
         .filter(
-            &ctx_with_request_id(MODEL_AGNOSTIC, request_id),
+            &ctx_with_request_id(MODEL_AGNOSTIC, "overage-uniform-cost-first"),
             &principal(),
             &[first.clone(), second.clone()],
         )
         .expect("builtin filter cannot fail");
     let trace = output.subscription_preference.expect("trace present");
-    let first_v10_hash = rendezvous_hash(V10_RENDEZVOUS_SALT_ORACLE, request_id, first.upstream_id);
-    let second_v10_hash =
-        rendezvous_hash(V10_RENDEZVOUS_SALT_ORACLE, request_id, second.upstream_id);
-    let first_v11_hash = rendezvous_hash(V11_RENDEZVOUS_SALT_ORACLE, request_id, first.upstream_id);
-    let second_v11_hash =
-        rendezvous_hash(V11_RENDEZVOUS_SALT_ORACLE, request_id, second.upstream_id);
-
-    // Then: v10 uniform fallback uses factor 1.0 and the raw hash tie-break outcome.
+    // Then: equal all-None candidates use the stable upstream-ID tiebreak.
     assert_eq!(first.upstream_id, upstream_id(1));
     assert_eq!(second.upstream_id, upstream_id(2));
-    assert!(
-        second_v10_hash > first_v10_hash,
-        "v10 salt must select UUID seed 2"
-    );
-    assert!(
-        first_v11_hash > second_v11_hash,
-        "v11 salt must select UUID seed 1 for this distinguishing fixture"
-    );
     for candidate in &trace.candidates {
         assert!(candidate.quota_urgency < EPSILON);
         assert_eq!(candidate.quota_weight_factor, 1.0);
         assert_eq!(candidate.effective_weight, 1.0);
         assert!(candidate.quota_uniform_fallback);
     }
-    assert_eq!(output.kept_upstream_ids, vec![upstream_id(2)]);
+    assert_eq!(output.kept_upstream_ids, vec![upstream_id(1)]);
 }
 
 #[test]
@@ -1527,7 +1477,7 @@ fn unknown_probe_quota_factor_is_one() {
 // =============================================================================
 
 #[test]
-fn zero_total_weight_falls_back_to_uniform() {
+fn zero_total_weight_uses_upstream_id_tiebreak() {
     // Every candidate has a base-positive window but no resets_at, so
     // urgency=0 across the board. WRH must fall back to uniform and
     // spread traffic evenly (~25% per candidate over enough samples).
@@ -1545,19 +1495,10 @@ fn zero_total_weight_falls_back_to_uniform() {
     let b = mk("b", 2);
     let c = mk("c", 3);
     let d = mk("d", 4);
-    let dist = wrh_distribution(
-        &[a.clone(), b.clone(), c.clone(), d.clone()],
-        MODEL_AGNOSTIC,
-        4000,
+    assert_eq!(
+        filter_for_model(&[a.clone(), b, c, d], MODEL_AGNOSTIC).kept_upstream_ids,
+        vec![a.upstream_id]
     );
-    for candidate in [&a, &b, &c, &d] {
-        let share = *dist.get(&candidate.upstream_id).unwrap_or(&0) as f64 / 4000.0;
-        assert!(
-            (0.20..=0.30).contains(&share),
-            "uniform fallback should split evenly; {} share={share}",
-            candidate.name
-        );
-    }
 }
 
 #[test]
@@ -1599,7 +1540,7 @@ fn same_request_id_yields_same_winner_across_calls() {
 }
 
 #[test]
-fn different_request_ids_spread_across_candidates() {
+fn different_request_ids_do_not_change_cost_first_winner() {
     // 3 identical KnownBase candidates + no resets_at → urgency all zero →
     // uniform → distribution shows all three getting picked as request_id varies.
     let a = oauth_at_t0(
@@ -1617,15 +1558,26 @@ fn different_request_ids_spread_across_candidates() {
         3,
         vec![fresh(WINDOW_FIVE_HOUR).util(0.5).status("allowed").build()],
     );
-    let dist = wrh_distribution(&[a.clone(), b.clone(), c.clone()], MODEL_AGNOSTIC, 1500);
-    for candidate in [&a, &b, &c] {
-        let share = *dist.get(&candidate.upstream_id).unwrap_or(&0) as f64 / 1500.0;
-        assert!(
-            (0.25..=0.42).contains(&share),
-            "candidate {} did not receive a fair share of picks: {share}",
-            candidate.name
-        );
-    }
+    let filter = SubscriptionPreferenceFilter::new();
+    let candidates = [a.clone(), b, c];
+    assert_eq!(
+        filter
+            .filter(
+                &ctx_with_request_id(MODEL_AGNOSTIC, "one"),
+                &principal(),
+                &candidates
+            )
+            .unwrap()
+            .kept_upstream_ids,
+        filter
+            .filter(
+                &ctx_with_request_id(MODEL_AGNOSTIC, "two"),
+                &principal(),
+                &candidates
+            )
+            .unwrap()
+            .kept_upstream_ids
+    );
 }
 
 // =============================================================================
@@ -1655,15 +1607,9 @@ fn four_identical_candidates_distribute_uniformly_across_many_requests() {
         )
     };
     let candidates = vec![mk("a", 1), mk("b", 2), mk("c", 3), mk("d", 4)];
-    let ids: Vec<Uuid> = candidates.iter().map(|c| c.upstream_id).collect();
     let dist = wrh_distribution(&candidates, MODEL_AGNOSTIC, 4000);
-    for id in ids {
-        let share = *dist.get(&id).unwrap_or(&0) as f64 / 4000.0;
-        assert!(
-            (0.20..=0.30).contains(&share),
-            "identical candidates must split ~evenly under Q3; got share={share}"
-        );
-    }
+    assert_eq!(dist.len(), 1);
+    assert_eq!(dist[&candidates[0].upstream_id], 4000);
 }
 
 // =============================================================================
@@ -1790,46 +1736,10 @@ fn live_snapshot_four_upstreams_produces_expected_wrh_distribution() {
         live_snapshot_bh322yoo_max(),
         live_snapshot_runbear(),
     ];
-    let ids: HashMap<&str, Uuid> = candidates
-        .iter()
-        .map(|c| (c.name.as_str(), c.upstream_id))
-        .collect();
-    let bear_id = ids["bear-max"];
-    let isac_id = ids["isac-personal"];
-    let bh322_id = ids["bh322yoo-max"];
-    let runbear_id = ids["Runbear"];
-
     let dist = wrh_distribution(&candidates, MODEL_AGNOSTIC, 2000);
-    let share = |id: Uuid| *dist.get(&id).unwrap_or(&0) as f64 / 2000.0;
-    let runbear_share = share(runbear_id);
-    let isac_share = share(isac_id);
-    let bh322_share = share(bh322_id);
-    let bear_share = share(bear_id);
-    let trace = filter_for_model(&candidates, MODEL_AGNOSTIC)
-        .subscription_preference
-        .expect("trace present");
-    let total_weight: f64 = trace
-        .candidates
-        .iter()
-        .map(|candidate| candidate.effective_weight)
-        .sum();
-    for (name, id, observed_share) in [
-        ("Runbear", runbear_id, runbear_share),
-        ("isac-personal", isac_id, isac_share),
-        ("bh322yoo-max", bh322_id, bh322_share),
-        ("bear-max", bear_id, bear_share),
-    ] {
-        let expected_share = candidate_urgency_for(&trace, id).effective_weight / total_weight;
-        assert!(
-            (observed_share - expected_share).abs() <= 0.05,
-            "{name} share {observed_share} must track ADR 0008 WRH weight share {expected_share}"
-        );
-    }
-    let total = runbear_share + isac_share + bh322_share + bear_share;
-    assert!(
-        (0.995..=1.005).contains(&total),
-        "shares must sum to 1, got {total}"
-    );
+    let winner = filter_for_model(&candidates, MODEL_AGNOSTIC).kept_upstream_ids[0];
+    assert_eq!(dist.len(), 1);
+    assert_eq!(dist[&winner], 2000);
 }
 
 // =============================================================================
@@ -1919,18 +1829,14 @@ fn same_thread_id_without_cache_uses_request_id_and_spreads_when_request_ids_var
             .expect("subscription-alive path must emit trace");
         assert_eq!(
             trace.wrh_key_source,
-            WrhKeySource::RequestId,
+            WrhKeySource::CostFirst,
             "all-cold subscription routing must ignore thread_id as a pinning key"
         );
         *winners
             .entry(*output.kept_upstream_ids.first().unwrap())
             .or_insert(0) += 1;
     }
-    assert!(
-        winners.len() >= 3,
-        "same-thread all-cold turns must spread across request_id WRH; landed on {} upstreams",
-        winners.len()
-    );
+    assert_eq!(winners.len(), 1);
 }
 
 #[test]
@@ -1956,16 +1862,7 @@ fn different_request_ids_spread_across_upstreams() {
             .entry(*output.kept_upstream_ids.first().unwrap())
             .or_insert(0) += 1;
     }
-    assert!(
-        winners.len() >= 3,
-        "expected request_id fallback WRH to spread across ≥3 upstreams over 2000 distinct request_ids; landed on {} upstreams",
-        winners.len()
-    );
-    let min_share = winners.values().copied().min().unwrap_or(0) as f64 / 2000.0;
-    assert!(
-        min_share >= 0.03,
-        "no upstream should be starved across per-request draws; min share was {min_share}",
-    );
+    assert_eq!(winners.len(), 1);
 }
 
 #[test]
@@ -2332,13 +2229,8 @@ fn healthy_oauth_candidate(name: &str, id_seed: u8) -> UpstreamCandidate {
 }
 
 #[test]
-fn rendezvous_salt_embeds_declared_version() {
-    let embed = format!(":{SALT_VERSION}:");
-    assert!(
-        RENDEZVOUS_SALT.contains(&embed),
-        "RENDEZVOUS_SALT `{RENDEZVOUS_SALT}` must embed SALT_VERSION `{SALT_VERSION}` verbatim; \
-         they are bumped together per the salt-version invariant",
-    );
+fn cost_first_formula_has_declared_version() {
+    assert_eq!(COST_FIRST_FORMULA_VERSION, "cost-first-v1");
 }
 
 #[test]
@@ -2361,20 +2253,18 @@ fn wrh_key_source_is_cache_hash_when_candidate_has_positive_priced_cache_value()
         .expect("subscription-alive path must emit trace");
 
     // Then: cache-positive routing uses the matched v3 key, never the thread id.
-    assert_eq!(
-        trace.wrh_key_source,
-        WrhKeySource::CacheHash,
-        "cache-warm subscription routing should key on the matched v3 cache hash"
-    );
+    assert_eq!(trace.wrh_key_source, WrhKeySource::CostFirst);
     assert_eq!(
         trace.bucket_v3_cache_affinity_key.as_deref(),
         Some(expected_cache_key.as_str())
     );
     assert_eq!(
-        trace.rendezvous_salt_version.as_deref(),
-        Some(SALT_VERSION),
-        "trace must stamp the current WRH salt version so post-hoc queries can \
-         distinguish algorithm changes from state changes"
+        trace.rendezvous_salt_version, None,
+        "cost-first does not use a rendezvous salt"
+    );
+    assert_eq!(
+        trace.formula_version.as_deref(),
+        Some(COST_FIRST_FORMULA_VERSION)
     );
 }
 
@@ -2407,8 +2297,8 @@ fn thread_id_does_not_change_cache_positive_routing_decision() {
         .expect("second trace present");
 
     assert_eq!(first.kept_upstream_ids, second.kept_upstream_ids);
-    assert_eq!(first_trace.wrh_key_source, WrhKeySource::CacheHash);
-    assert_eq!(second_trace.wrh_key_source, WrhKeySource::CacheHash);
+    assert_eq!(first_trace.wrh_key_source, WrhKeySource::CostFirst);
+    assert_eq!(second_trace.wrh_key_source, WrhKeySource::CostFirst);
     assert_eq!(
         first_trace.bucket_v3_cache_affinity_key,
         second_trace.bucket_v3_cache_affinity_key
@@ -2430,7 +2320,7 @@ fn wrh_key_source_falls_back_to_request_id_when_thread_id_absent() {
     let ctx = ctx_with_request_id(SONNET_MODEL, "req-1");
     let output = filter.filter(&ctx, &principal(), &candidates).unwrap();
     let trace = output.subscription_preference.expect("trace present");
-    assert_eq!(trace.wrh_key_source, WrhKeySource::RequestId);
+    assert_eq!(trace.wrh_key_source, WrhKeySource::CostFirst);
 }
 
 #[test]
@@ -2445,7 +2335,7 @@ fn wrh_key_source_falls_back_to_request_id_when_thread_id_is_empty_string() {
     let trace = output.subscription_preference.expect("trace present");
     assert_eq!(
         trace.wrh_key_source,
-        WrhKeySource::RequestId,
+        WrhKeySource::CostFirst,
         "empty thread_id must be treated as absent so an upstream that \
          populates the header with an empty string does not accidentally pin"
     );
@@ -2525,8 +2415,8 @@ fn oversized_thread_id_uses_bounded_routing_key() {
         .expect("second trace present");
 
     // Then: routing ignores thread_id size and uses bounded v3 cache keys.
-    assert_eq!(first_trace.wrh_key_source, WrhKeySource::CacheHash);
-    assert_eq!(second_trace.wrh_key_source, WrhKeySource::CacheHash);
+    assert_eq!(first_trace.wrh_key_source, WrhKeySource::CostFirst);
+    assert_eq!(second_trace.wrh_key_source, WrhKeySource::CostFirst);
     assert_eq!(
         first_trace.bucket_v3_cache_affinity_key,
         second_trace.bucket_v3_cache_affinity_key
@@ -2761,7 +2651,7 @@ fn usage_warm_owner_wins_when_quota_factors_are_neutral() {
 
     // Then: cache bonus multiplies the neutral quota factor instead of recreating
     // a hot Anthropic prompt cache elsewhere.
-    assert_eq!(trace.wrh_key_source, WrhKeySource::CacheHash);
+    assert_eq!(trace.wrh_key_source, WrhKeySource::CostFirst);
     assert_eq!(owner_urg.quota_urgency, 0.0);
     assert_eq!(peer_urg.quota_urgency, 0.0);
     assert!(
@@ -2810,7 +2700,7 @@ fn severe_quota_pressure_can_override_usage_cache_owner() {
 
     // Then: cache locality remains multiplicative, while severe positive pressure
     // can still select the use-it-or-lose-it peer.
-    assert_eq!(trace.wrh_key_source, WrhKeySource::CacheHash);
+    assert_eq!(trace.wrh_key_source, WrhKeySource::CostFirst);
     assert_eq!(owner_urg.quota_urgency, 0.0);
     assert!(peer_urg.quota_urgency > 4.0);
     assert!(
@@ -2834,7 +2724,7 @@ fn all_cold_reduces_to_pure_quota_wrh_distribution() {
     let ctx = ctx_with_request_id(MODEL_AGNOSTIC, "req-1");
     let out = filter.filter(&ctx, &principal, &candidates).unwrap();
     let trace = out.subscription_preference.expect("trace present");
-    assert_eq!(trace.wrh_key_source, WrhKeySource::RequestId);
+    assert_eq!(trace.wrh_key_source, WrhKeySource::CostFirst);
     for candidate in &trace.candidates {
         assert_eq!(candidate.predicted_cache_read_tokens, 0);
         assert_eq!(candidate.cache_ratio, 0.0);

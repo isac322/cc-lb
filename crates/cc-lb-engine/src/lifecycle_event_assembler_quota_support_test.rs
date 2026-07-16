@@ -68,6 +68,7 @@ fn quota_trace(
                 wrh_key_source: WrhKeySource::RequestId,
                 previous_tier: None,
                 rendezvous_salt_version: Some("v11".to_owned()),
+                formula_version: None,
                 cache_cost_basis_version: None,
                 formula_winner_upstream_id: Some(formula_winner_upstream_id),
                 kept_upstream_id: Some(resolved_upstream_id),

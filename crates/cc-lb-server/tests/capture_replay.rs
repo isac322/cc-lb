@@ -5,9 +5,7 @@ use crate::{capture_matrix_support, common};
 use bytes::Bytes;
 use capture_matrix_support::{MESSAGE_BODY, capture_config, capture_record, open_capture_pool};
 use cc_lb_domain::{Principal, PrincipalKind, SubscriptionPreferenceTrace, UpstreamCandidate};
-use cc_lb_engine::builtin_filters::subscription_preference::{
-    SALT_VERSION, SubscriptionPreferenceFilter,
-};
+use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_routing::{FilterPlugin, RoutingContext};
 use fake_anthropic::AppConfig;
 use http::{HeaderMap, Method};
@@ -34,7 +32,7 @@ async fn captured_subscription_preference_input_replays_to_identical_trace() {
     let record = capture_record(&pool, "capture-replay").await;
 
     // When: only the exact candidate subset seen by v11 is replayed through its public filter API.
-    assert_eq!(SALT_VERSION, record.input.salt_version);
+    assert_eq!(record.input.salt_version, "none");
     let captured_trace = captured_subscription_trace(&record.input.routing_trace);
     let candidates = replay_candidates(
         &record.input.candidates,

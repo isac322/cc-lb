@@ -129,7 +129,7 @@ impl PartialEq for CandidateUrgency {
 
 impl Eq for CandidateUrgency {}
 
-/// Source of the per-session hash key used to break routing ties.
+/// Selection rule used for the subscription-preference winner.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WrhKeySource {
@@ -139,6 +139,8 @@ pub enum WrhKeySource {
     #[default]
     #[serde(alias = "thread_id")]
     RequestId,
+    /// Deterministic cost-first-v1 ranking without a routing key.
+    CostFirst,
 }
 
 /// Structured trace emitted by the subscription-preference filter.
@@ -148,12 +150,15 @@ pub struct SubscriptionPreferenceTrace {
     pub chosen_tier: SubscriptionTier,
     /// Candidates that participated in tier assessment.
     pub candidates: Vec<CandidateUrgency>,
-    /// Field used as the WRH key.
+    /// Legacy selection-key field, retaining the winner-selection rule for trace compatibility.
     pub wrh_key_source: WrhKeySource,
     /// Previous tier for the same thread, when known.
     pub previous_tier: Option<SubscriptionTier>,
     /// Version of the WRH salt and algorithm.
     pub rendezvous_salt_version: Option<String>,
+    /// Version of the deterministic winner-selection formula.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula_version: Option<String>,
     /// Version label for cache-cost fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_cost_basis_version: Option<String>,

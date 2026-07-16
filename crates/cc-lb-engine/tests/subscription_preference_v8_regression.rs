@@ -314,7 +314,11 @@ fn same_thread_recomputes_without_successor_convergence() {
             &[owner_a.clone(), owner_b.clone()],
         )
         .expect("filter succeeds");
-    assert_eq!(first.kept_upstream_ids, vec![owner_a.upstream_id]);
+    let first_trace = first.subscription_preference.expect("first trace present");
+    assert_eq!(
+        first.kept_upstream_ids,
+        vec![first_trace.formula_winner_upstream_id.unwrap()]
+    );
 
     let challenger_a = with_live_cache(clean_known_base("owner-a", 1), 15_000);
     let challenger_b = with_live_cache(clean_known_base("owner-b", 2), 250_000);

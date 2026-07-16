@@ -31,7 +31,7 @@ fn cache_positive_hash_affinity_keeps_single_winner_across_request_ids() {
 
     for result in [first, second] {
         assert_eq!(result.kept_upstream_id, owner.upstream_id);
-        assert_eq!(result.trace.wrh_key_source, WrhKeySource::CacheHash);
+        assert_eq!(result.trace.wrh_key_source, WrhKeySource::CostFirst);
         assert_eq!(
             result.trace.bucket_v3_cache_affinity_key.as_deref(),
             Some(SHARED_V3_KEY)
@@ -52,7 +52,7 @@ fn non_positive_cache_value_uses_request_id_despite_matched_key() {
 
     let result = route("req-creation-only", &[first, second]);
 
-    assert_eq!(result.trace.wrh_key_source, WrhKeySource::RequestId);
+    assert_eq!(result.trace.wrh_key_source, WrhKeySource::CostFirst);
     assert_eq!(result.trace.bucket_v3_cache_affinity_key, None);
 }
 
@@ -65,7 +65,7 @@ fn reset_recent_has_lower_urgency_when_only_reset_time_differs() {
     let fresh = trace_candidate(&result.trace, fresh_reset.upstream_id);
     let soon = trace_candidate(&result.trace, soon_reset.upstream_id);
 
-    assert_eq!(result.trace.wrh_key_source, WrhKeySource::RequestId);
+    assert_eq!(result.trace.wrh_key_source, WrhKeySource::CostFirst);
     assert_eq!(fresh.cache_weight_multiplier, 1.0);
     assert_eq!(soon.cache_weight_multiplier, 1.0);
     assert!(
@@ -108,7 +108,11 @@ fn v11_trace_contains_distinct_winner_and_loser_pressure() {
     let overage = trace_candidate(&result.trace, overage.upstream_id);
     let unknown = trace_candidate(&result.trace, unknown.upstream_id);
 
-    assert_eq!(result.trace.rendezvous_salt_version.as_deref(), Some("v11"));
+    assert_eq!(result.trace.rendezvous_salt_version, None);
+    assert_eq!(
+        result.trace.formula_version.as_deref(),
+        Some("cost-first-v1")
+    );
     assert_ne!(winner.quota_urgency_combined, loser.quota_urgency_combined);
     for base in [winner, loser, partial] {
         assert!(base.quota_urgency_5h.is_some());
