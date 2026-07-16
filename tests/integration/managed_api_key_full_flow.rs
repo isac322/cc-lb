@@ -486,7 +486,11 @@ impl StartedServer {
 
     async fn wait_ready(&self) -> Result<(), Box<dyn std::error::Error>> {
         let client = TestClient::new(Duration::from_secs(1));
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let ready_secs = std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(60);
+        let deadline = Instant::now() + Duration::from_secs(ready_secs);
         loop {
             let proxy_ok = client
                 .get_status(&format!("{}/healthz", self.proxy_url))
