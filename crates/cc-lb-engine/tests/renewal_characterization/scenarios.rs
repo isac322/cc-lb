@@ -50,7 +50,7 @@ async fn cache_hit_reschedules_current_generation_without_accounting_event() {
     assert!(matches!(
         outcome,
         DispatchOutcome::CacheHit {
-            cache_anchor_age
+            cache_anchor_age, ..
         } if cache_anchor_age < Duration::from_secs(1)
     ));
     assert_eq!(fixture.http.calls(), 1);
@@ -95,7 +95,7 @@ async fn cache_miss_terminalizes_current_generation_without_accounting_event() {
         .expect("renewal session exists");
 
     // Then
-    assert!(matches!(outcome, DispatchOutcome::CacheMiss));
+    assert!(matches!(outcome, DispatchOutcome::CacheMiss { .. }));
     assert_eq!(fixture.http.calls(), 1);
     assert!(terminalized);
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);

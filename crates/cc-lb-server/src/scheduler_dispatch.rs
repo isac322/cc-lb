@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, Config};
+use cc_lb_contract::RequestEventBus;
 use cc_lb_control::api_keys::key_store::KeyStore;
 use cc_lb_control::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::DynamicViewHolder;
@@ -56,6 +57,7 @@ pub(crate) struct SchedulerDispatchDeps {
     pub limit_engine: Arc<LimitEngine>,
     pub dynamic_view: Arc<DynamicViewHolder>,
     pub keepalive_dispatcher: Arc<dyn KeepaliveDispatcher>,
+    pub event_bus: Arc<dyn RequestEventBus>,
     pub clock: ClockHandle,
 }
 
@@ -81,6 +83,7 @@ pub(super) struct SchedulerDispatch {
     pub(super) http: JsonHttpClient,
     pub(super) dynamic_view: Arc<DynamicViewHolder>,
     pub(super) keepalive_dispatcher: Arc<dyn KeepaliveDispatcher>,
+    pub(super) event_bus: Arc<dyn RequestEventBus>,
     pub(super) clock: ClockHandle,
 }
 
@@ -117,6 +120,7 @@ impl SchedulerDispatch {
             http: json_http_client(),
             dynamic_view: deps.dynamic_view,
             keepalive_dispatcher: deps.keepalive_dispatcher,
+            event_bus: deps.event_bus,
             clock: deps.clock,
         }
     }

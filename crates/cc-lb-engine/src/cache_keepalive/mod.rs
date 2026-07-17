@@ -31,6 +31,7 @@ pub use metrics::CancelReason;
 pub(crate) use metrics::record_cancelled;
 pub use request_snapshot::{PersistedRequestSnapshot, RequestSnapshot, SnapshotError};
 pub use scheduler::{
-    DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher, ScheduleParams,
+    DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher, RenewalFinalization,
+    RenewalUsage, ScheduleParams,
 };
 pub use session_key::SessionKey;

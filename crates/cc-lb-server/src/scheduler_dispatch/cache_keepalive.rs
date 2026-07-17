@@ -15,6 +15,11 @@ use cc_lb_storage_api::{
 
 use super::{SchedulerDispatch, cache_keepalive_payload_aad};
 
+#[path = "cache_keepalive/finalizer.rs"]
+mod finalizer;
+#[path = "cache_keepalive/lifecycle.rs"]
+mod lifecycle;
+
 impl SchedulerDispatch {
     pub(super) async fn dispatch_cache_keepalive(
         &self,
@@ -113,11 +118,30 @@ impl SchedulerDispatch {
             )
             .await
         {
-            DispatchOutcome::CacheHit { cache_anchor_age } => {
+            DispatchOutcome::CacheHit {
+                cache_anchor_age,
+                finalization,
+            } => {
+                self.finalize_cache_keepalive_renewal(
+                    &job,
+                    &record,
+                    &snapshot,
+                    finalization,
+                    "hit",
+                )
+                .await?;
                 self.reschedule_cache_keepalive_hit(job, record, snapshot, cache_anchor_age)
                     .await
             }
-            DispatchOutcome::CacheMiss => {
+            DispatchOutcome::CacheMiss { finalization } => {
+                self.finalize_cache_keepalive_renewal(
+                    &job,
+                    &record,
+                    &snapshot,
+                    finalization,
+                    "miss",
+                )
+                .await?;
                 self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::CacheMiss)
                     .await?;
                 Ok(JobOutcome::Done)

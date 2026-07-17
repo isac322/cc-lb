@@ -17,11 +17,14 @@ use http_body_util::BodyExt;
 use serde::Deserialize;
 use url::Url;
 
-use crate::attempt_rail::{AttemptIntent, Signed};
+use crate::attempt_rail::{AttemptIntent, ResponseAccountingGuard, Signed};
 use crate::lifecycle::UpstreamDispatch;
 
 use super::request_snapshot::RequestSnapshot;
-use super::scheduler::{DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher};
+use super::scheduler::{
+    DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher, RenewalFinalization,
+    RenewalUsage,
+};
 
 const DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
 const ERROR_BODY_PREFIX_BYTES: usize = 512;
@@ -128,14 +131,18 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
             Err(error) => return DispatchOutcome::Error(error),
         };
 
-        let dispatch_result = match context.into_reservation() {
+        let dispatch_started = Instant::now();
+        let (dispatch_result, accounting_guard) = match context.into_reservation() {
             Some(reservation) => {
                 let reserved = AttemptIntent::from_reservation(reservation).into_reserved();
                 let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await {
                     Ok(signed) => signed,
                     Err(error) => return DispatchOutcome::Error(error.to_string()),
                 };
-                tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await
+                (
+                    tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await,
+                    reserved.into_response_accounting_guard(),
+                )
             }
             None => {
                 let reserved = AttemptIntent::observe_only().into_reserved();
@@ -143,14 +150,20 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
                     Ok(signed) => signed,
                     Err(error) => return DispatchOutcome::Error(error.to_string()),
                 };
-                tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await
+                (
+                    tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await,
+                    reserved.into_response_accounting_guard(),
+                )
             }
         };
 
         match dispatch_result {
-            Ok(Ok((StatusCode::OK, body, cache_anchor_age))) => {
-                classify_success_body(&body, cache_anchor_age)
-            }
+            Ok(Ok((StatusCode::OK, body, cache_anchor_age))) => classify_success_body(
+                &body,
+                cache_anchor_age,
+                dispatch_started.elapsed(),
+                accounting_guard,
+            ),
             Ok(Ok((status, body, _))) => {
                 DispatchOutcome::Error(format!("status={} body={}", status, body_prefix(&body)))
             }
@@ -260,8 +273,18 @@ fn downstream_api_key(headers: &HeaderMap) -> String {
         .unwrap_or_default()
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct KeepaliveResponseUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens_5m: u64,
+    #[serde(default)]
+    cache_creation_input_tokens_1h: u64,
     #[serde(default)]
     cache_read_input_tokens: u64,
 }
@@ -271,17 +294,37 @@ struct KeepaliveResponseBody {
     usage: Option<KeepaliveResponseUsage>,
 }
 
-fn classify_success_body(body: &[u8], cache_anchor_age: Duration) -> DispatchOutcome {
+fn classify_success_body(
+    body: &[u8],
+    cache_anchor_age: Duration,
+    duration: Duration,
+    accounting_guard: ResponseAccountingGuard,
+) -> DispatchOutcome {
     match sonic_rs::from_slice::<KeepaliveResponseBody>(body) {
-        Ok(parsed)
-            if parsed
-                .usage
-                .as_ref()
-                .is_some_and(|usage| usage.cache_read_input_tokens > 0) =>
-        {
-            DispatchOutcome::CacheHit { cache_anchor_age }
+        Ok(parsed) => {
+            let usage = parsed.usage.unwrap_or_default();
+            let finalization = RenewalFinalization {
+                usage: RenewalUsage {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                    cache_creation_input_tokens_5m: usage.cache_creation_input_tokens_5m,
+                    cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
+                    cache_read_input_tokens: usage.cache_read_input_tokens,
+                },
+                status: StatusCode::OK.as_u16(),
+                duration,
+                accounting_guard,
+            };
+            if finalization.usage.cache_read_input_tokens > 0 {
+                DispatchOutcome::CacheHit {
+                    cache_anchor_age,
+                    finalization,
+                }
+            } else {
+                DispatchOutcome::CacheMiss { finalization }
+            }
         }
-        Ok(_) => DispatchOutcome::CacheMiss,
         Err(source) => DispatchOutcome::Error(source.to_string()),
     }
 }

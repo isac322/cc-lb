@@ -47,6 +47,19 @@ impl RecordingHttp {
         }));
     }
 
+    pub(in crate::scheduler_dispatch::tests) fn return_cache_hit_usage(
+        &self,
+        input: u64,
+        output: u64,
+        cache_read: u64,
+    ) {
+        *self.response.lock().expect("response lock") = RecordingHttpResponse::Json(json!({
+            "content": [],
+            "stop_reason": "max_tokens",
+            "usage": {"cache_read_input_tokens": cache_read, "input_tokens": input, "output_tokens": output}
+        }));
+    }
+
     pub(in crate::scheduler_dispatch::tests) fn return_status(
         &self,
         status: StatusCode,

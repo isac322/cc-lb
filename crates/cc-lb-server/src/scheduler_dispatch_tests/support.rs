@@ -11,9 +11,12 @@ use std::time::Duration;
 use ::http::{HeaderMap, HeaderValue, Method};
 use bytes::Bytes;
 use cc_lb_config::{SchedulerConfig, StorageConfig};
+use cc_lb_contract::RequestEventBus;
+use cc_lb_control::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::cache_keepalive::{
-    AnthropicKeepaliveDispatcher, CacheKeepaliveEnqueueRequest, RequestSnapshot, ScheduleParams,
+    AnthropicKeepaliveDispatcher, CacheKeepaliveEnqueueRequest, KeepaliveDispatcher,
+    RequestSnapshot, ScheduleParams,
 };
 use cc_lb_engine::{DynamicViewBuilder, SystemClock};
 use cc_lb_runtime_wasmtime::HotEngineConfig;
@@ -44,7 +47,8 @@ pub(super) struct Fixture {
     dynamic_view: Arc<DynamicViewHolder>,
     pub(super) http: Arc<RecordingHttp>,
     pub(super) signer_calls: Arc<Mutex<Vec<String>>>,
-    upstream_id: Uuid,
+    pub(super) upstream_id: Uuid,
+    event_bus: Arc<cc_lb_control::InMemoryBus>,
     data_dir: std::path::PathBuf,
 }
 
@@ -108,6 +112,7 @@ impl Fixture {
                 .build(),
         ));
         let storage_dyn: Arc<dyn Storage> = storage.clone();
+        let event_bus = Arc::new(cc_lb_control::InMemoryBus::new());
         Self {
             data_dir: dir.path().to_path_buf(),
             _dir: dir,
@@ -119,6 +124,7 @@ impl Fixture {
             http: Arc::new(RecordingHttp::default()),
             signer_calls,
             upstream_id: upstream.id,
+            event_bus,
         }
     }
 
@@ -182,7 +188,50 @@ impl Fixture {
         })
     }
 
+    pub(super) fn event_bus(&self) -> Arc<cc_lb_control::InMemoryBus> {
+        self.event_bus.clone()
+    }
+
+    pub(super) fn dynamic_view(&self) -> Arc<DynamicViewHolder> {
+        self.dynamic_view.clone()
+    }
+
     pub(super) fn dispatch(&self, pusher: Arc<dyn CacheKeepaliveTaskPusher>) -> SchedulerDispatch {
+        self.dispatch_with_limit_engine(
+            pusher,
+            cc_lb_control::api_keys::limit_engine::LimitEngine::new(
+                Arc::new(cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
+                Arc::new(SystemClock),
+            ),
+        )
+    }
+
+    pub(super) fn dispatch_with_limit_engine(
+        &self,
+        pusher: Arc<dyn CacheKeepaliveTaskPusher>,
+        limit_engine: Arc<LimitEngine>,
+    ) -> SchedulerDispatch {
+        let keepalive_dispatcher = Arc::new(
+            AnthropicKeepaliveDispatcher::new(
+                self.dynamic_view.clone(),
+                self.storage_dyn.clone(),
+                self.http.clone(),
+            )
+            .with_timeout(Duration::from_secs(1)),
+        );
+        self.dispatch_with_limit_engine_and_keepalive_dispatcher(
+            pusher,
+            limit_engine,
+            keepalive_dispatcher,
+        )
+    }
+
+    pub(super) fn dispatch_with_limit_engine_and_keepalive_dispatcher(
+        &self,
+        pusher: Arc<dyn CacheKeepaliveTaskPusher>,
+        limit_engine: Arc<LimitEngine>,
+        keepalive_dispatcher: Arc<dyn KeepaliveDispatcher>,
+    ) -> SchedulerDispatch {
         let stores = Arc::new(Stores {
             upstreams: self.storage_dyn.clone(),
             principals: self.storage_dyn.clone(),
@@ -196,14 +245,6 @@ impl Fixture {
             anthropic_compatibility_kv: self.storage_dyn.clone(),
             audit: Some(self.storage_dyn.clone()),
         });
-        let keepalive_dispatcher = Arc::new(
-            AnthropicKeepaliveDispatcher::new(
-                self.dynamic_view.clone(),
-                self.storage_dyn.clone(),
-                self.http.clone(),
-            )
-            .with_timeout(Duration::from_secs(1)),
-        );
         SchedulerDispatch::new(SchedulerDispatchDeps {
             backend: self.backend.backend.clone(),
             cache_keepalive_pusher: pusher,
@@ -225,12 +266,10 @@ impl Fixture {
             key_store: Arc::new(cc_lb_control::api_keys::key_store::KeyStore::new(
                 self.storage.clone(),
             )),
-            limit_engine: cc_lb_control::api_keys::limit_engine::LimitEngine::new(
-                Arc::new(cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
-                Arc::new(SystemClock),
-            ),
+            limit_engine,
             dynamic_view: self.dynamic_view.clone(),
             keepalive_dispatcher,
+            event_bus: self.event_bus.clone() as Arc<dyn RequestEventBus>,
             clock: Arc::new(SystemClock),
         })
     }

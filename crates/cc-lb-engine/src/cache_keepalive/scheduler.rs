@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{CacheKeepaliveConfig, CacheTtl};
 
 use crate::api_keys::limit_engine::Reservation;
+use crate::attempt_rail::ResponseAccountingGuard;
 
 use super::request_snapshot::RequestSnapshot;
 
@@ -65,10 +66,32 @@ impl KeepaliveDispatchContext {
 }
 
 pub enum DispatchOutcome {
-    CacheHit { cache_anchor_age: Duration },
-    CacheMiss,
+    CacheHit {
+        cache_anchor_age: Duration,
+        finalization: RenewalFinalization,
+    },
+    CacheMiss {
+        finalization: RenewalFinalization,
+    },
     UnsupportedProvider(String),
     Error(String),
+}
+
+pub struct RenewalFinalization {
+    pub usage: RenewalUsage,
+    pub status: u16,
+    pub duration: Duration,
+    pub accounting_guard: ResponseAccountingGuard,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RenewalUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_creation_input_tokens_5m: u64,
+    pub cache_creation_input_tokens_1h: u64,
+    pub cache_read_input_tokens: u64,
 }
 
 #[cfg(test)]

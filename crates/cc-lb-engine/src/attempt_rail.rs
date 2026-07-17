@@ -121,6 +121,12 @@ pub struct ResponseAccountingGuard {
 }
 
 impl ResponseAccountingGuard {
+    pub fn reservation_id(&self) -> Option<&str> {
+        self.reservation
+            .as_ref()
+            .map(|reservation| reservation.id())
+    }
+
     /// Suppresses the RAII refund after a successful response is handed to reconciliation.
     pub fn forget(self) {
         if let Some(reservation) = self.reservation {

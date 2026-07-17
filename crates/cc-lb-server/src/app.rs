@@ -1630,6 +1630,7 @@ async fn build_app_with_storage_inner(
             limit_engine: limit_engine.clone(),
             dynamic_view: dynamic_view_holder.clone(),
             keepalive_dispatcher,
+            event_bus: event_bus.clone(),
             clock: clock.clone(),
         },
     );
