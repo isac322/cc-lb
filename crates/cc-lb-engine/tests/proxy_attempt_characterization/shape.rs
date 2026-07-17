@@ -13,7 +13,7 @@ use crate::support::{
     lifecycle_with_failing_dialect, limit_engine_and_record, reservation_ids, tokens_remaining,
 };
 
-const HOT_PATH_SAMPLE_COUNT: usize = 32;
+const HOT_PATH_SAMPLE_COUNT: usize = 101;
 const HOT_PATH_P50_BUDGET: Duration = Duration::from_millis(10);
 const HOT_PATH_P99_BUDGET: Duration = Duration::from_millis(25);
 const HOT_PATH_SYNTHETIC_SLOW_SAMPLE: Duration = Duration::from_millis(50);
@@ -39,6 +39,20 @@ struct ShapeFallbackOutcome {
     captured_bodies: Vec<Bytes>,
     event_kinds: Vec<&'static str>,
     latency: Duration,
+}
+
+#[test]
+fn proxy_attempt_characterization_shape_fallback_latency_guard_tolerates_one_outlier() {
+    let normal_sample = Duration::from_micros(100);
+    let mut samples = vec![normal_sample; HOT_PATH_SAMPLE_COUNT];
+    samples[0] = HOT_PATH_SYNTHETIC_SLOW_SAMPLE;
+
+    let report = latency_report(samples);
+
+    assert!(
+        latency_within_budget(&report),
+        "one scheduling outlier should remain outside p99: {report:?}"
+    );
 }
 
 #[tokio::test]
