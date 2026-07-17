@@ -83,6 +83,7 @@ proptest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true, features = ["util"] }
+trybuild = "1"
 
 [target.'cfg(loom)'.dependencies]
 arc-swap.workspace = true

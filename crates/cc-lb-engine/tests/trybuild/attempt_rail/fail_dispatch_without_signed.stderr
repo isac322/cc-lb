@@ -1,0 +1,5 @@
+error[E0599]: no method named `dispatch` found for struct `Scoped<'reservation>` in the current scope
+ --> tests/trybuild/attempt_rail/fail_dispatch_without_signed.rs:5:28
+  |
+5 |     let _dispatch = scoped.dispatch(dispatcher);
+  |                            ^^^^^^^^ method not found in `Scoped<'_>`
