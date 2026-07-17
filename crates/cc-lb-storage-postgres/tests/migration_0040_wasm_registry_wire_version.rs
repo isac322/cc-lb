@@ -6,7 +6,6 @@ use sqlx::{
 };
 use uuid::Uuid;
 
-const BUILTIN_CACHE_AFFINITY_ID: &str = "00000000-0000-0000-0000-000000000001";
 const MIGRATION_0040: &str = include_str!("../migrations/0040_wasm_registry_wire_version.sql");
 const MIGRATIONS_TO_0039: &[&str] = &[
     include_str!("../migrations/0001_meta.sql"),
@@ -113,13 +112,10 @@ async fn assert_wire_version_absent_after_0039(pool: &PgPool) -> TestResult {
         "wire_version should not exist before migration 0040"
     );
 
-    let error = sqlx::query_scalar::<_, Option<i16>>(
-        "SELECT wire_version FROM wasm_registry_v2 WHERE id = $1::uuid",
-    )
-    .bind(BUILTIN_CACHE_AFFINITY_ID)
-    .fetch_optional(pool)
-    .await
-    .expect_err("selecting wasm_registry_v2.wire_version before 0040 should fail");
+    let error = sqlx::query_scalar::<_, Option<i16>>("SELECT wire_version FROM wasm_registry_v2")
+        .fetch_optional(pool)
+        .await
+        .expect_err("selecting wasm_registry_v2.wire_version before 0040 should fail");
     assert_missing_column(error);
 
     Ok(())
@@ -133,16 +129,12 @@ async fn assert_wire_version_present_after_0040(pool: &PgPool) -> TestResult {
         "wire_version should exist after migration 0040"
     );
 
-    let wire_version = sqlx::query_scalar::<_, Option<i16>>(
-        "SELECT wire_version FROM wasm_registry_v2 WHERE id = $1::uuid",
-    )
-    .bind(BUILTIN_CACHE_AFFINITY_ID)
-    .fetch_one(pool)
-    .await?;
+    let registry_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM wasm_registry_v2")
+        .fetch_one(pool)
+        .await?;
     assert_eq!(
-        wire_version,
-        Some(3),
-        "cache-affinity builtin row should use wire_version 3"
+        registry_count, 0,
+        "migration preserves existing registry rows"
     );
 
     Ok(())

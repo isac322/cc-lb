@@ -514,7 +514,6 @@ fn batch_b_wire_snapshots_are_stable() {
                 reason: Some("selected".to_owned()),
                 duration_us: 321,
                 subscription_preference: None,
-                cache_affinity: None,
             }],
             terminal_decision: Some(TerminalDecision {
                 upstream_id: Some(Uuid::from_u128(0x33333333333333333333333333333333)),

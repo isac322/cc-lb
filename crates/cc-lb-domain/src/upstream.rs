@@ -84,10 +84,6 @@ pub enum CredentialStrategy {
     InternalForwarded,
 }
 
-/// Stable registry id for the built-in cache-affinity router filter.
-pub const BUILTIN_CACHE_AFFINITY_ID: Uuid = Uuid::from_u128(1);
-/// Stable registry name for the built-in cache-affinity router filter.
-pub const BUILTIN_CACHE_AFFINITY_NAME: &str = "cache-affinity";
 /// Stable registry id for the built-in subscription-preference router filter.
 pub const BUILTIN_SUBSCRIPTION_PREFERENCE_ID: Uuid = Uuid::from_u128(2);
 /// Stable registry name for the built-in subscription-preference router filter.

@@ -3,8 +3,8 @@ use crate::config_admin_common;
 use axum::http::StatusCode;
 use cc_lb_config::Config;
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind,
-    PrincipalStore, WasmBlob, WasmRegistryEntryInput,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginRegistryStore, PluginSlotKind, PrincipalCreate,
+    PrincipalKind, PrincipalStore, WasmBlob, WasmRegistryEntryInput,
 };
 use config_admin_common::{app, authed_json, temp_storage, test_state};
 use serde_json::json;
@@ -83,7 +83,7 @@ async fn insert_chain_accepts_unspecified_metadata() {
 }
 
 #[tokio::test]
-async fn insert_chain_accepts_builtin_cache_affinity() {
+async fn insert_chain_accepts_builtin_subscription_preference() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-wire-builtin").await;
     let app = app(test_state(Config::default(), Some(storage)));
@@ -94,7 +94,7 @@ async fn insert_chain_accepts_builtin_cache_affinity() {
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
             "slot": "Router",
-            "wasm_registry_id": BUILTIN_CACHE_AFFINITY_ID
+            "wasm_registry_id": BUILTIN_SUBSCRIPTION_PREFERENCE_ID
         })),
     )
     .await;
@@ -102,7 +102,7 @@ async fn insert_chain_accepts_builtin_cache_affinity() {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
         body["wasm_registry_id"],
-        BUILTIN_CACHE_AFFINITY_ID.to_string()
+        BUILTIN_SUBSCRIPTION_PREFERENCE_ID.to_string()
     );
 }
 

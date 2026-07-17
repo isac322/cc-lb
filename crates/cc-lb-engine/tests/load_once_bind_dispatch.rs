@@ -278,7 +278,6 @@ impl FilterPlugin for RecordingFilter {
             reason: format!("{} rejected all candidates", self.name),
             per_candidate_reasons: vec![],
             subscription_preference: None,
-            cache_affinity: None,
         })
     }
 

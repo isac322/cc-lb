@@ -10,14 +10,13 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, PromptCacheShadowConfig};
 use cc_lb_dialect_anthropic::AnthropicDirectDialect;
 use cc_lb_domain::{
-    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, Principal, RateLimitObservation,
-    Upstream, UpstreamCandidate,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, Principal, RateLimitObservation, Upstream,
+    UpstreamCandidate,
 };
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
     RouterPipelineCache, ShapePluginCache,
 };
-use cc_lb_engine::builtin_filters::cache_affinity::CacheAffinityFilter;
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_engine::clock::{unix_millis, unix_secs};
 use cc_lb_engine::plan_capacity::{
@@ -899,12 +898,8 @@ async fn build_router_pipeline(
             })));
         };
         if registry_entry.is_builtin {
-            match registry_entry.id {
-                BUILTIN_CACHE_AFFINITY_ID => filters.push(Arc::new(CacheAffinityFilter::new())),
-                BUILTIN_SUBSCRIPTION_PREFERENCE_ID => {
-                    filters.push(Arc::new(SubscriptionPreferenceFilter::new()));
-                }
-                _ => {}
+            if registry_entry.id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
+                filters.push(Arc::new(SubscriptionPreferenceFilter::new()));
             }
             continue;
         }

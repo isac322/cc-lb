@@ -1,4 +1,4 @@
-use cc_lb_domain::{CacheAffinityTrace, Principal, SubscriptionPreferenceTrace, UpstreamCandidate};
+use cc_lb_domain::{Principal, SubscriptionPreferenceTrace, UpstreamCandidate};
 use uuid::Uuid;
 
 use crate::{PerCandidateReason, RouteDecision, RouteError, RoutingContext};
@@ -14,8 +14,6 @@ pub struct FilterOutput {
     pub per_candidate_reasons: Vec<PerCandidateReason>,
     /// Optional structured subscription-preference trace payload.
     pub subscription_preference: Option<SubscriptionPreferenceTrace>,
-    /// Optional structured cache-affinity trace payload.
-    pub cache_affinity: Option<CacheAffinityTrace>,
 }
 
 /// Filter plugin errors returned by [`FilterPlugin`].

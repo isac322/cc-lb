@@ -278,7 +278,6 @@ impl FilterPlugin for IndexKeepingFilter {
             reason,
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
-            cache_affinity: None,
         })
     }
 

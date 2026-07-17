@@ -41,11 +41,10 @@ fn stage(tier: Option<SubscriptionTier>) -> StageDecision {
             estimated_switch_cache_loss_micros: None,
             cache_loss_status: None,
             switch_gate_reason: None,
-            bucket_v3_cache_affinity_key: None,
+            bucket_v3_cache_key: None,
             lineage_would_have_predicted_read_tokens: None,
             lineage_would_have_picked_upstream_id: None,
         }),
-        cache_affinity: None,
     }
 }
 
