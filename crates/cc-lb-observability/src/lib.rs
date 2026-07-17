@@ -10,6 +10,7 @@ mod host;
 mod init;
 pub mod lifecycle_metrics;
 mod panic_hook;
+mod propagation;
 mod redaction;
 mod trace_layer;
 
@@ -25,12 +26,13 @@ pub use init::{
     metric_definitions, panic_total, register_metrics,
 };
 pub use panic_hook::install_panic_hook;
+pub use propagation::{inject_current_trace_context, parent_context_from_headers};
 pub use redaction::{
     REDACTED, ROUTING_REASON_MAX_BYTES, ROUTING_TRACE_SIZE_CAP_BYTES, RedactingMakeWriter,
     RedactionLayer, RedactionPolicy, enforce_routing_trace_caps, redact_internal_errors,
     redact_routing_trace, truncate_reason,
 };
-pub use trace_layer::{ObservabilityTraceLayer, trace_layer};
+pub use trace_layer::{ObservabilityTraceLayer, ProxyMakeSpan, RouteTemplateFn, trace_layer};
 
 pub mod cache_observation_dropped_reason {
     // Keep this enum-like set bounded: queue_full, below_threshold, status_4xx, abort.

@@ -2,15 +2,16 @@ use std::time::Duration;
 
 use http::{Request, Response};
 use tower_http::trace::{
-    DefaultMakeSpan, HttpMakeClassifier, OnBodyChunk, OnRequest, OnResponse, TraceLayer,
+    HttpMakeClassifier, MakeSpan, OnBodyChunk, OnRequest, OnResponse, TraceLayer,
 };
 use tracing::Span;
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use crate::{ObservabilityHook, ObserveEvent};
 
 pub type ObservabilityTraceLayer<H> = TraceLayer<
     HttpMakeClassifier,
-    DefaultMakeSpan,
+    ProxyMakeSpan,
     ObserveOnRequest<H>,
     ObserveOnResponse<H>,
     ObserveOnBodyChunk<H>,
@@ -21,12 +22,63 @@ where
     H: ObservabilityHook + Clone,
 {
     TraceLayer::new_for_http()
+        .make_span_with(ProxyMakeSpan::default())
         .on_request(ObserveOnRequest { hook: hook.clone() })
         .on_response(ObserveOnResponse { hook: hook.clone() })
         .on_body_chunk(ObserveOnBodyChunk {
             hook,
             next_batch_index: 0,
         })
+}
+
+pub type RouteTemplateFn = fn(&str) -> Option<&'static str>;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProxyMakeSpan {
+    route_template: Option<RouteTemplateFn>,
+}
+
+impl ProxyMakeSpan {
+    pub fn with_route_template(route_template: RouteTemplateFn) -> Self {
+        Self {
+            route_template: Some(route_template),
+        }
+    }
+}
+
+impl<B> MakeSpan<B> for ProxyMakeSpan {
+    fn make_span(&mut self, request: &Request<B>) -> Span {
+        let span = tracing::info_span!(
+            "proxy.request",
+            otel.name = tracing::field::Empty,
+            otel.kind = "server",
+            http.request.method = %request.method(),
+            http.route = tracing::field::Empty,
+            url.path = request.uri().path(),
+            http.response.status_code = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+            cc_lb.request.id = tracing::field::Empty,
+        );
+        match self
+            .route_template
+            .and_then(|template| template(request.uri().path()))
+        {
+            Some(route) => {
+                span.record("http.route", route);
+                span.record(
+                    "otel.name",
+                    format!("{} {route}", request.method()).as_str(),
+                );
+            }
+            None => {
+                span.record("otel.name", request.method().as_str());
+            }
+        }
+        if let Some(parent) = crate::parent_context_from_headers(request.headers()) {
+            let _ = span.set_parent(parent);
+        }
+        span
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -38,11 +90,14 @@ impl<H, B> OnRequest<B> for ObserveOnRequest<H>
 where
     H: ObservabilityHook,
 {
-    fn on_request(&mut self, request: &Request<B>, _span: &Span) {
+    fn on_request(&mut self, request: &Request<B>, span: &Span) {
         let request_id = header_value(request, "request-id")
             .or_else(|| header_value(request, "x-request-id"))
             .unwrap_or_default();
         let user_agent = header_value(request, "user-agent");
+        if !request_id.is_empty() {
+            span.record("cc_lb.request.id", request_id.as_str());
+        }
 
         tracing::info!(
             target: "cc_lb_observability::http",
@@ -70,8 +125,12 @@ impl<H, B> OnResponse<B> for ObserveOnResponse<H>
 where
     H: ObservabilityHook,
 {
-    fn on_response(self, response: &Response<B>, latency: Duration, _span: &Span) {
+    fn on_response(self, response: &Response<B>, latency: Duration, span: &Span) {
         let status = response.status();
+        span.record("http.response.status_code", u64::from(status.as_u16()));
+        if status.is_server_error() {
+            span.record("otel.status_code", "ERROR");
+        }
         let duration_seconds = latency.as_secs_f64();
         let status_label = status.as_u16().to_string();
 

@@ -28,10 +28,13 @@ drain_secs = 60
 oauth_aead_key_env = "CC_LB_MASTER_KEY"
 
 # Tracing and metrics. The server binds Prometheus to listener.metrics_addr at startup.
+# Set otlp_endpoint to export traces to an OTLP gRPC collector such as the
+# Tempo service in compose.yaml (`docker compose up -d tempo`).
 [observability]
 tracing_level = "info"
 log_redaction = true
 user_prompt_redaction = false
+# otlp_endpoint = "http://127.0.0.1:4317"
 
 # Default quota policy surfaced to built-in authn and storage-backed quota manager when enabled.
 [quotas]

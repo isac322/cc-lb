@@ -43,6 +43,7 @@ use rand::{RngExt, SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracing::Instrument as _;
 use url::Url;
 use uuid::Uuid;
 
@@ -1560,32 +1561,7 @@ impl Default for HyperDispatcher {
 #[async_trait]
 impl UpstreamDispatch for HyperDispatcher {
     async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
-        let (url, method, headers, body) = request.into_parts();
-        let uri =
-            url.as_str()
-                .parse::<http::Uri>()
-                .map_err(|source| DispatchError::InvalidUri {
-                    reason: source.to_string(),
-                })?;
-
-        let mut builder = Request::builder().method(method).uri(uri);
-        copy_headers(headers, builder.headers_mut());
-        let request =
-            builder
-                .body(Full::new(body))
-                .map_err(|source| DispatchError::RequestBuild {
-                    reason: source.to_string(),
-                })?;
-
-        let response =
-            self.client
-                .request(request)
-                .await
-                .map_err(|source| DispatchError::Transport {
-                    reason: source.to_string(),
-                })?;
-        let (parts, body) = response.into_parts();
-        Ok(Response::from_parts(parts, Body::new(body)))
+        crate::bulkhead::dispatch_with_client(&self.client, request).await
     }
 }
 
@@ -1904,6 +1880,20 @@ impl Lifecycle {
     }
 
     #[allow(clippy::explicit_auto_deref)]
+    #[tracing::instrument(
+        name = "proxy.handle",
+        skip_all,
+        fields(
+            cc_lb.request.id = tracing::field::Empty,
+            http.request.method = tracing::field::Empty,
+            url.path = tracing::field::Empty,
+            gen_ai.request.model = tracing::field::Empty,
+            gen_ai.request.stream = tracing::field::Empty,
+            cc_lb.principal.id = tracing::field::Empty,
+            cc_lb.upstream.name = tracing::field::Empty,
+            cc_lb.upstream.id = tracing::field::Empty,
+        )
+    )]
     pub async fn handle(&self, req: Request<Bytes>) -> Result<Response<Body>, ProxyError> {
         let view = self.dynamic_view.load();
         let principal_view = Arc::clone(&view.principal_view);
@@ -1911,6 +1901,16 @@ impl Lifecycle {
         let observer_from_ext = req.extensions().get::<LifecycleContext>().cloned();
         let (mut ctx, body_too_large) = self.parse(req);
         let body_view = RequestBodyView::new(&ctx.body_bytes);
+        let handle_span = tracing::Span::current();
+        handle_span.record("cc_lb.request.id", ctx.request_id.as_str());
+        handle_span.record("http.request.method", ctx.method.as_str());
+        handle_span.record("url.path", ctx.path.as_str());
+        if let Some(model) = body_view.model() {
+            handle_span.record("gen_ai.request.model", model.as_str());
+        }
+        if body_view.stream() {
+            handle_span.record("gen_ai.request.stream", true);
+        }
         let observer: Option<LifecycleContext> = observer_from_ext.or_else(|| {
             self.event_bus
                 .as_ref()
@@ -2002,6 +2002,10 @@ impl Lifecycle {
         let success = if let Some(success) = self
             .authn
             .authenticate_none_mode(&ctx.downstream_headers)
+            .instrument(tracing::info_span!(
+                "proxy.authenticate",
+                cc_lb.auth.mode = "none"
+            ))
             .await
         {
             success
@@ -2009,6 +2013,10 @@ impl Lifecycle {
             match self
                 .authn
                 .authenticate(&ctx.downstream_headers, &principal_view)
+                .instrument(tracing::info_span!(
+                    "proxy.authenticate",
+                    cc_lb.auth.mode = "api_key"
+                ))
                 .await
             {
                 Ok(success) => success,
@@ -2048,6 +2056,7 @@ impl Lifecycle {
         };
         let auth_ms = duration_to_ms(auth_start.elapsed());
         let principal_id = success.principal_id.clone();
+        handle_span.record("cc_lb.principal.id", principal_id.as_str());
         if let Some(o) = observer.as_ref() {
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
                 event_id: o.event_id().to_owned(),
@@ -2133,6 +2142,9 @@ impl Lifecycle {
         }
 
         let route_start = Instant::now();
+        // Synchronous routing region: no .await is permitted while `route_guard` is held.
+        let route_span = tracing::info_span!("proxy.route");
+        let route_guard = route_span.enter();
         let (candidates, selected_cache_matches) = build_candidates_with_matches(
             &view,
             &principal.id,
@@ -2213,6 +2225,11 @@ impl Lifecycle {
             return Ok(response);
         };
         let router_chosen_upstream_name = resolved_record.name.clone();
+        handle_span.record("cc_lb.upstream.name", router_chosen_upstream_name.as_str());
+        handle_span.record(
+            "cc_lb.upstream.id",
+            tracing::field::display(resolved_upstream_id),
+        );
         let raw_passthrough_base_url = resolved_record.base_url.clone();
         let route_dialect: Arc<dyn UpstreamDialect> = Arc::new(RawPassthroughDialect {
             base_url: raw_passthrough_base_url
@@ -2248,6 +2265,7 @@ impl Lifecycle {
             upstream: route_upstream,
             dialect,
         };
+        drop(route_guard);
         let route_ms = duration_to_ms(route_start.elapsed());
         let routing_trace_value = pipeline_result.routing_trace(terminal_decision.clone());
         let selected_quota_candidate =
@@ -2399,7 +2417,11 @@ impl Lifecycle {
             success.api_key.clone().unwrap_or_default(),
             router_chosen_upstream_name.clone(),
         );
-        let signer = match signer_factory.build(&route.upstream).await {
+        let signer = match signer_factory
+            .build(&route.upstream)
+            .instrument(tracing::info_span!("proxy.prepare_signer"))
+            .await
+        {
             Ok(signer) => signer,
             Err(source) => {
                 if let Some(o) = observer.as_ref() {
@@ -2483,12 +2505,18 @@ impl Lifecycle {
         };
 
         if response.status() == StatusCode::UNAUTHORIZED {
-            let unauthorized = collect_error_response(response).await;
+            let unauthorized = collect_error_response(response)
+                .instrument(tracing::info_span!("proxy.collect_upstream_error_body"))
+                .await;
             let err = UpstreamError::Unauthorized {
                 status: StatusCode::UNAUTHORIZED,
                 body: Some(unauthorized.body.clone()),
             };
-            if let RetryDecision::Refresh { new_signer } = signer.on_unauthorized(&err).await {
+            if let RetryDecision::Refresh { new_signer } = signer
+                .on_unauthorized(&err)
+                .instrument(tracing::info_span!("proxy.refresh_signer"))
+                .await
+            {
                 attempt_timings.reset_attempt_stages();
                 if let Some(o) = observer.as_ref() {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt {
@@ -2607,6 +2635,7 @@ impl Lifecycle {
     }
 
     #[allow(clippy::result_large_err)]
+    #[tracing::instrument(name = "proxy.reserve_limit", skip_all)]
     async fn reserve_limit(
         &self,
         view: &PrincipalView,
@@ -2693,6 +2722,11 @@ impl Lifecycle {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(
+        name = "proxy.finish_response",
+        skip_all,
+        fields(http.response.status_code = u64::from(status.as_u16()))
+    )]
     async fn finish_success_response(
         &self,
         response: Response<Body>,
@@ -3087,6 +3121,15 @@ impl Lifecycle {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(
+        name = "proxy.upstream_attempt",
+        skip_all,
+        fields(
+            cc_lb.upstream.id = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        )
+    )]
     async fn attempt(
         &self,
         dispatcher: &dyn UpstreamDispatch,
@@ -3100,14 +3143,22 @@ impl Lifecycle {
         internal_errors: &mut Vec<InternalError>,
         shaped_body_out: &mut Option<Bytes>,
     ) -> Result<Response<Body>, Box<Response<Body>>> {
+        if let Some(upstream_id) = route.upstream_id {
+            tracing::Span::current()
+                .record("cc_lb.upstream.id", tracing::field::display(upstream_id));
+        }
         let shape_start = Instant::now();
         *shaped_body_out = None;
         let shape_context = ctx.dialect_shape_context();
-        let (shaped, capture_shaped_body) = match shape_request(
-            route.dialect.as_ref(),
-            &shape_context,
-            &route.upstream,
-            principal,
+        let (shaped, capture_shaped_body) = match tracing::info_span!("proxy.shape").in_scope(
+            || {
+                shape_request(
+                    route.dialect.as_ref(),
+                    &shape_context,
+                    &route.upstream,
+                    principal,
+                )
+            },
         ) {
             Ok(shaped) => (shaped, true),
             Err(source) => {
@@ -3130,6 +3181,7 @@ impl Lifecycle {
 
         let sign_start = Instant::now();
         let signed = sign_request(signer.as_ref(), shaped)
+            .instrument(tracing::info_span!("proxy.sign"))
             .await
             .map_err(|source| {
                 tracing::error!(%source, "sign_request failed");
@@ -3173,6 +3225,17 @@ impl Lifecycle {
         timings.connect_ms = connection_snapshot.connect_ms;
         timings.connection_reused = connection_snapshot.connection_reused;
         let response = dispatch_result.map_err(|source| {
+            let attempt_span = tracing::Span::current();
+            attempt_span.record("otel.status_code", "ERROR");
+            attempt_span.record(
+                "error.type",
+                match &source {
+                    DispatchError::BulkheadFull { .. } => "bulkhead_full",
+                    DispatchError::InvalidUri { .. } => "invalid_uri",
+                    DispatchError::RequestBuild { .. } => "request_build",
+                    DispatchError::Transport { .. } => "transport",
+                },
+            );
             if let Some(o) = observer {
                 o.emit_provider_error("upstream_dispatch_error", &source.to_string(), "dispatch");
             }
@@ -4224,18 +4287,6 @@ fn response_from_collected(collected: CollectedResponse) -> Response<Body> {
     *response.status_mut() = collected.status;
     *response.headers_mut() = collected.headers;
     response
-}
-
-fn copy_headers(source: HeaderMap, target: Option<&mut HeaderMap>) {
-    let Some(target) = target else {
-        return;
-    };
-
-    for (name, value) in source {
-        if let Some(name) = name {
-            target.append(name, value);
-        }
-    }
 }
 
 fn push_shape_internal_error(internal_errors: &mut Vec<InternalError>, message: &str) {
