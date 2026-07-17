@@ -14,10 +14,6 @@ pub struct RequestContext {
     /// from `x-claude-code-session-id` and friends. `None` for stateless
     /// requests that do not carry a session header.
     ///
-    /// Filters that need cache-affinity (e.g. subscription routing) MUST
-    /// prefer this over `request_id` as their per-session hash input so that
-    /// all requests belonging to the same conversation land on the same
-    /// upstream and reuse the Anthropic prompt cache.
     pub thread_id: Option<String>,
     /// Raw service tier requested in the downstream request body.
     pub requested_service_tier: Option<String>,

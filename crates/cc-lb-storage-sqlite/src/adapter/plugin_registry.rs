@@ -3,13 +3,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use async_trait::async_trait;
 use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_SHA256, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
-    BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256, MAX_WASM_BLOB_BYTES, PluginBlobRepo,
-    PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
-    PluginRegistryStore, PluginSlotKind, RepoError, StorageError, StorageResult, WasmBlob,
-    WasmBlobRecord, WasmRegistryCascadeDelete, WasmRegistryEntry, WasmRegistryEntryInput,
-    WasmRegistryReference, WasmRegistryReferenceFingerprint, WasmRegistryReferences, sparse_order,
-    validate_identifier,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256,
+    MAX_WASM_BLOB_BYTES, PluginBlobRepo, PluginChainConflictReason, PluginChainEntry,
+    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlotKind, RepoError,
+    StorageError, StorageResult, WasmBlob, WasmBlobRecord, WasmRegistryCascadeDelete,
+    WasmRegistryEntry, WasmRegistryEntryInput, WasmRegistryReference,
+    WasmRegistryReferenceFingerprint, WasmRegistryReferences, sparse_order, validate_identifier,
 };
 use serde_json::Value;
 use sqlx::{QueryBuilder, Row, Sqlite, Transaction, sqlite::SqliteRow};
@@ -819,9 +818,6 @@ fn registry_from_row(row: SqliteRow) -> StorageResult<WasmRegistryEntry> {
         &row.try_get::<String, _>("id").map_err(map_sqlx_error)?,
         "wasm_registry.id",
     )?;
-    if id == BUILTIN_CACHE_AFFINITY_ID || sha256 == BUILTIN_CACHE_AFFINITY_SHA256 {
-        return Ok(WasmRegistryEntry::builtin_cache_affinity(refcount));
-    }
     if id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID || sha256 == BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256
     {
         return Ok(WasmRegistryEntry::builtin_subscription_preference(refcount));
@@ -926,9 +922,6 @@ async fn sha_for_registry_id_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     id: Uuid,
 ) -> StorageResult<Option<[u8; 32]>> {
-    if id == BUILTIN_CACHE_AFFINITY_ID {
-        return Ok(Some(BUILTIN_CACHE_AFFINITY_SHA256));
-    }
     if id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
         return Ok(Some(BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256));
     }

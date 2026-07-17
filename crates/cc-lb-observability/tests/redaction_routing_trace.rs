@@ -1,7 +1,7 @@
 use cc_lb_domain::{
-    CacheAffinityCandidate, CacheAffinityTrace, CandidateUrgency, InternalError, InternalErrorKind,
-    InternalErrorStage, RoutingTrace, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
-    TerminalDecision, TerminalStrategy,
+    CandidateUrgency, InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace,
+    StageDecision, SubscriptionPreferenceTrace, SubscriptionTier, TerminalDecision,
+    TerminalStrategy,
 };
 use cc_lb_observability::{
     REDACTED, ROUTING_REASON_MAX_BYTES, ROUTING_TRACE_SIZE_CAP_BYTES, enforce_routing_trace_caps,
@@ -18,7 +18,6 @@ fn routing_trace_reason_secrets_are_redacted() {
             reason: Some("selected after token=plain-secret and sk-ant-oat01-deadbeef".to_owned()),
             duration_us: 0,
             subscription_preference: None,
-            cache_affinity: None,
         }],
         terminal_decision: Some(TerminalDecision {
             upstream_id: None,
@@ -88,7 +87,6 @@ fn routing_trace_cap_removes_tail_stages_and_adds_marker() {
                 reason: Some(format!("decision-{index}-{}", "x".repeat(350))),
                 duration_us: 0,
                 subscription_preference: None,
-                cache_affinity: None,
             })
             .collect(),
         terminal_decision: Some(TerminalDecision {
@@ -164,33 +162,14 @@ fn routing_trace_cap_respects_extended_stage_payloads() {
             estimated_switch_cache_loss_micros: Some(u64::from(index) * 1_000),
             cache_loss_status: Some("known".to_owned()),
             switch_gate_reason: Some("formula_winner".to_owned()),
-            bucket_v3_cache_affinity_key: Some(format!("bucket-cache-key-{index}")),
+            bucket_v3_cache_key: Some(format!("bucket-cache-key-{index}")),
             lineage_would_have_predicted_read_tokens: None,
             lineage_would_have_picked_upstream_id: None,
-        }),
-        cache_affinity: None,
-    };
-    let build_cache_stage = |index: u8| StageDecision {
-        stage_name: format!("cache-affinity-{index}"),
-        upstream_id: Some(seeded(index)),
-        reason: Some("cache-hit-keep".to_owned()),
-        duration_us: 5,
-        subscription_preference: None,
-        cache_affinity: Some(CacheAffinityTrace {
-            candidates: (0..8u8)
-                .map(|c| CacheAffinityCandidate {
-                    upstream_id: seeded(200 + c),
-                    kept: c % 2 == 0,
-                    predicted_cache_read_tokens: Some(u32::from(c) * 1000),
-                    predicted_expires_at_unix_secs: Some(1_700_000_000 + u64::from(c) * 60),
-                })
-                .collect(),
         }),
     };
     let mut stages = Vec::new();
     for i in 0..30u8 {
         stages.push(build_subscription_stage(i));
-        stages.push(build_cache_stage(i));
     }
     let trace = RoutingTrace {
         stages,
@@ -205,7 +184,7 @@ fn routing_trace_cap_respects_extended_stage_payloads() {
 
     assert!(
         encoded.len() <= ROUTING_TRACE_SIZE_CAP_BYTES,
-        "capped trace with subscription_preference + cache_affinity payloads must fit \
+        "capped trace with subscription_preference payloads must fit \
          inside ROUTING_TRACE_SIZE_CAP_BYTES ({} bytes), got {}. If this fails the \
          json_len helpers in redaction.rs are under-counting one of the new fields.",
         ROUTING_TRACE_SIZE_CAP_BYTES,
@@ -253,7 +232,7 @@ fn subscription_preference_all_fields_survive_serde_roundtrip() {
         estimated_switch_cache_loss_micros: Some(42_000),
         cache_loss_status: Some("known".to_owned()),
         switch_gate_reason: Some("formula_winner".to_owned()),
-        bucket_v3_cache_affinity_key: Some("cache-key".to_owned()),
+        bucket_v3_cache_key: Some("cache-key".to_owned()),
         lineage_would_have_predicted_read_tokens: Some(50_000),
         lineage_would_have_picked_upstream_id: Some(Uuid::from_bytes([2; 16])),
     };
@@ -267,32 +246,6 @@ fn subscription_preference_all_fields_survive_serde_roundtrip() {
     assert!(json.contains("\"quota_urgency_7d\":0.15"));
     assert!(json.contains("\"quota_urgency_combined\":0.25"));
     assert!(json.contains("\"predicted_cache_read_tokens\":100000"));
-    assert!(json.contains("\"bucket_v3_cache_affinity_key\":\"cache-key\""));
+    assert!(json.contains("\"bucket_v3_cache_key\":\"cache-key\""));
     assert!(json.contains("\"lineage_would_have_predicted_read_tokens\":50000"));
-}
-
-#[test]
-fn cache_affinity_trace_survives_serde_roundtrip() {
-    let trace = CacheAffinityTrace {
-        candidates: vec![
-            CacheAffinityCandidate {
-                upstream_id: Uuid::from_bytes([2; 16]),
-                kept: true,
-                predicted_cache_read_tokens: Some(1234),
-                predicted_expires_at_unix_secs: Some(1_700_000_500),
-            },
-            CacheAffinityCandidate {
-                upstream_id: Uuid::from_bytes([3; 16]),
-                kept: false,
-                predicted_cache_read_tokens: None,
-                predicted_expires_at_unix_secs: None,
-            },
-        ],
-    };
-    let json = serde_json::to_string(&trace).unwrap();
-    let decoded: CacheAffinityTrace = serde_json::from_str(&json).unwrap();
-    assert_eq!(decoded, trace);
-    assert!(json.contains("\"kept\":true"));
-    assert!(json.contains("\"kept\":false"));
-    assert!(json.contains("\"predicted_cache_read_tokens\":1234"));
 }

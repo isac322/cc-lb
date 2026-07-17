@@ -1,6 +1,5 @@
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginMetadata, PluginSlotKind,
-    WasmRegistryEntry,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginMetadata, PluginSlotKind, WasmRegistryEntry,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -50,38 +49,6 @@ fn wasm_registry_entry_defaults_missing_metadata_to_none() {
 }
 
 #[test]
-fn builtin_cache_affinity_entry_synthesizes_metadata() {
-    let entry = WasmRegistryEntry::builtin_cache_affinity(2);
-    let metadata = entry.metadata.expect("builtin metadata is present");
-
-    assert_eq!(entry.id, BUILTIN_CACHE_AFFINITY_ID);
-    assert_eq!(
-        metadata.purpose,
-        "Prefer upstreams whose prompt cache is already warm for this request."
-    );
-    assert_eq!(
-        metadata.keeps,
-        "Candidates with a positive prefill_cache_score (the upstream has already cached the prefix)."
-    );
-    assert_eq!(
-        metadata.drops,
-        "Candidates with zero cache score — only when at least one candidate is a cache hit; otherwise nothing is dropped."
-    );
-    assert_eq!(
-        metadata.empty_behavior,
-        "Never drops everything. Falls back to passing all candidates through when no cache hit exists."
-    );
-    assert_eq!(
-        metadata.examples,
-        vec![
-            "5 candidates, 2 with positive cache score → keep the 2 hits.",
-            "5 candidates, all with zero cache score → pass all 5 through.",
-            "Exactly 1 candidate → no change.",
-        ]
-    );
-}
-
-#[test]
 fn legacy_wasm_registry_entry_defaults_supported_slots_to_empty() {
     let sha: [u8; 32] = [1; 32];
     let value = json!({
@@ -112,12 +79,6 @@ fn wasm_registry_entry_round_trips_with_supported_slots() {
     let roundtripped: WasmRegistryEntry = serde_json::from_value(serialized).unwrap();
 
     assert_eq!(roundtripped, entry);
-}
-
-#[test]
-fn builtin_cache_affinity_entry_advertises_router_slot() {
-    let entry = WasmRegistryEntry::builtin_cache_affinity(0);
-    assert_eq!(entry.supported_slots, vec![PluginSlotKind::Router]);
 }
 
 #[test]

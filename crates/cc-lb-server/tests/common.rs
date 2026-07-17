@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle as ThreadJoinHandle;
 
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore,
-    PluginSlotKind, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BackendKind, MetaStore, PluginChainEntryInput,
+    PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind, PrincipalStore,
+    UpstreamCreate, UpstreamStore,
     principal::Limit,
     types::{PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
 };
@@ -158,7 +159,7 @@ pub async fn spawn_test_server_with_two_upstreams(
         fake_config,
         AuthConfig::NoneMode,
         Vec::new(),
-        TestTopology::CacheAffinityPair,
+        TestTopology::SubscriptionPreferencePair,
     )
     .await
 }
@@ -186,21 +187,21 @@ enum AuthConfig {
 #[derive(Clone, Copy)]
 enum TestTopology {
     Single,
-    CacheAffinityPair,
+    SubscriptionPreferencePair,
 }
 
 impl TestTopology {
     fn upstream_names(self) -> &'static [&'static str] {
         match self {
             Self::Single => &["fake_anthropic"],
-            Self::CacheAffinityPair => &["fake_anthropic", "fake_anthropic_secondary"],
+            Self::SubscriptionPreferencePair => &["fake_anthropic", "fake_anthropic_secondary"],
         }
     }
 
     fn messages_cap_bytes(self) -> u64 {
         match self {
             Self::Single => 256,
-            Self::CacheAffinityPair => 131_072,
+            Self::SubscriptionPreferencePair => 131_072,
         }
     }
 }
@@ -499,14 +500,14 @@ async fn seed_storage(
     )
     .await
     .expect("seed principal");
-    if matches!(topology, TestTopology::CacheAffinityPair) {
+    if matches!(topology, TestTopology::SubscriptionPreferencePair) {
         PluginRegistryStore::insert_chain_entry(
             storage.as_ref(),
             PluginChainEntryInput {
                 principal_id: principal.id,
                 slot: PluginSlotKind::Router,
                 order: 1_000,
-                wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID,
+                wasm_registry_id: BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
                 config: serde_json::json!({}),
                 sse_per_event: false,
                 batched_events_per_flush: 1,
@@ -514,7 +515,7 @@ async fn seed_storage(
             },
         )
         .await
-        .expect("seed cache-affinity router filter");
+        .expect("seed subscription preference router filter");
     }
     match auth_config {
         AuthConfig::NoneMode => None,

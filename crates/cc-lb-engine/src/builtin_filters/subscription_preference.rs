@@ -163,7 +163,6 @@ fn evaluate(
             reason: NO_SUBSCRIPTION_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
-            cache_affinity: None,
         };
     }
 
@@ -246,7 +245,7 @@ fn evaluate(
         if bucket.is_empty() {
             continue;
         }
-        let bucket_v3_cache_affinity_key = bucket_v3_cache_affinity_key(bucket, &ctx.cache_pricing);
+        let bucket_v3_cache_key = bucket_v3_cache_key(bucket, &ctx.cache_pricing);
         let selection = pick_within_tier(bucket, &ctx.cache_pricing);
         let formula_winner = selection.winner;
         let chosen_tier = tier_to_plugin_api(formula_winner.tier);
@@ -264,7 +263,7 @@ fn evaluate(
             estimated_switch_cache_loss_micros: None,
             cache_loss_status: None,
             switch_gate_reason: Some("formula_winner".to_owned()),
-            bucket_v3_cache_affinity_key: bucket_v3_cache_affinity_key.map(str::to_owned),
+            bucket_v3_cache_key: bucket_v3_cache_key.map(str::to_owned),
             lineage_would_have_predicted_read_tokens: None,
             lineage_would_have_picked_upstream_id: None,
         };
@@ -273,7 +272,6 @@ fn evaluate(
             reason: SUBSCRIPTION_ALIVE_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: Some(trace),
-            cache_affinity: None,
         };
     }
 
@@ -283,7 +281,6 @@ fn evaluate(
             reason: API_KEY_FALLBACK_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
-            cache_affinity: None,
         }
     } else {
         FilterOutput {
@@ -291,7 +288,6 @@ fn evaluate(
             reason: NO_API_KEY_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
-            cache_affinity: None,
         }
     }
 }
@@ -861,7 +857,7 @@ fn max_positive_cache_value_micros(
         .unwrap_or(0)
 }
 
-fn bucket_v3_cache_affinity_key<'a>(
+fn bucket_v3_cache_key<'a>(
     bucket: &'a [Assessment<'_>],
     pricing: &CachePricingSummary,
 ) -> Option<&'a str> {

@@ -129,7 +129,6 @@ impl FilterPlugin for RecordingFilter {
             reason: "keep-fixture".to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
-            cache_affinity: None,
         };
         self.state
             .filter_outcomes

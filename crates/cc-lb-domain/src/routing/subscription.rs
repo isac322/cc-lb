@@ -132,9 +132,9 @@ pub struct SubscriptionPreferenceTrace {
     /// Machine-readable switch-gate outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switch_gate_reason: Option<String>,
-    /// Bucket-level v3 cache-affinity key.
+    /// Bucket-level v3 cache key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bucket_v3_cache_affinity_key: Option<String>,
+    pub bucket_v3_cache_key: Option<String>,
     /// Analysis-only predicted cache reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage_would_have_predicted_read_tokens: Option<u32>,

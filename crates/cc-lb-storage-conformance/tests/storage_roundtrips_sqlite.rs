@@ -364,12 +364,12 @@ macro_rules! plugin_registry_sqlite_test {
 }
 
 plugin_registry_sqlite_test!(
-    plugin_registry_registry_by_id_returns_seeded_builtin_cache_affinity_sqlite,
-    registry_by_id_returns_seeded_builtin_cache_affinity
+    plugin_registry_registry_by_id_returns_seeded_builtin_subscription_preference_sqlite,
+    registry_by_id_returns_seeded_builtin_subscription_preference
 );
 plugin_registry_sqlite_test!(
-    plugin_registry_insert_chain_entry_with_builtin_cache_affinity_succeeds_sqlite,
-    insert_chain_entry_with_builtin_cache_affinity_succeeds
+    plugin_registry_insert_chain_entry_with_builtin_subscription_preference_succeeds_sqlite,
+    insert_chain_entry_with_builtin_subscription_preference_succeeds
 );
 plugin_registry_sqlite_test!(
     plugin_registry_list_orphan_blobs_returns_blobs_without_registry_sqlite,

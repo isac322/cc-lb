@@ -7,9 +7,9 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use cc_lb_config::Config;
 use cc_lb_control::spawn_audit_writer;
 use cc_lb_storage_api::{
-    AuditStore, BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
-    PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind,
-    PrincipalStore, WasmBlob, WasmRegistryEntryInput, sparse_order,
+    AuditStore, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainEntryInput, PluginRegistryStore,
+    PluginSlotKind, PrincipalCreate, PrincipalKind, PrincipalStore, WasmBlob,
+    WasmRegistryEntryInput, sparse_order,
 };
 use config_admin_common::{TOKEN, app, authed_json, temp_storage, test_state};
 use http_body_util::BodyExt;
@@ -28,12 +28,12 @@ async fn registry_list_paginates() {
         request_json(app, "GET", "/admin/v1/plugins/registry?limit=1", None, None).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(headers.get("x-total-count").unwrap(), "4");
+    assert_eq!(headers.get("x-total-count").unwrap(), "3");
     assert_eq!(body["entries"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn registry_list_exposes_builtin_cache_affinity() {
+async fn registry_list_exposes_builtin_subscription_preference() {
     let (_dir, storage) = temp_storage().await;
     let uploaded = seed_registry(&storage, 24, "plugin-metadata-null").await;
     let app = app(test_state(Config::default(), Some(storage)));
@@ -42,40 +42,6 @@ async fn registry_list_exposes_builtin_cache_affinity() {
         request_json(app, "GET", "/admin/v1/plugins/registry", None, None).await;
 
     assert_eq!(status, StatusCode::OK);
-    let builtin = body["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["id"] == BUILTIN_CACHE_AFFINITY_ID.to_string())
-        .expect("builtin cache-affinity entry is listed");
-    assert_eq!(builtin["name"], "cache-affinity");
-    assert_eq!(builtin["kind"], "filter");
-    assert!(builtin.get("wire_version").is_none_or(Value::is_null));
-    assert_eq!(builtin["is_builtin"], true);
-    assert_eq!(
-        builtin["metadata"]["purpose"],
-        "Prefer upstreams whose prompt cache is already warm for this request."
-    );
-    assert_eq!(
-        builtin["metadata"]["keeps"],
-        "Candidates with a positive prefill_cache_score (the upstream has already cached the prefix)."
-    );
-    assert_eq!(
-        builtin["metadata"]["drops"],
-        "Candidates with zero cache score — only when at least one candidate is a cache hit; otherwise nothing is dropped."
-    );
-    assert_eq!(
-        builtin["metadata"]["empty_behavior"],
-        "Never drops everything. Falls back to passing all candidates through when no cache hit exists."
-    );
-    assert_eq!(
-        builtin["metadata"]["examples"],
-        json!([
-            "5 candidates, 2 with positive cache score → keep the 2 hits.",
-            "5 candidates, all with zero cache score → pass all 5 through.",
-            "Exactly 1 candidate → no change."
-        ])
-    );
     let subscription_preference = body["entries"]
         .as_array()
         .unwrap()
@@ -107,7 +73,7 @@ async fn builtin_registry_update_and_delete_return_409() {
     let (patch_status, _, patch_body) = request_json(
         app.clone(),
         "PATCH",
-        &format!("/admin/v1/plugins/registry/{BUILTIN_CACHE_AFFINITY_ID}"),
+        &format!("/admin/v1/plugins/registry/{BUILTIN_SUBSCRIPTION_PREFERENCE_ID}"),
         Some(json!({ "label": "nope" })),
         Some("W/\"0\""),
     )
@@ -115,7 +81,7 @@ async fn builtin_registry_update_and_delete_return_409() {
     let (delete_status, _, delete_body) = request_json(
         app,
         "DELETE",
-        &format!("/admin/v1/plugins/registry/{BUILTIN_CACHE_AFFINITY_ID}"),
+        &format!("/admin/v1/plugins/registry/{BUILTIN_SUBSCRIPTION_PREFERENCE_ID}"),
         None,
         Some("W/\"0\""),
     )
@@ -458,48 +424,6 @@ async fn chain_insert_position_first_uses_min_minus_step() {
     .await;
 
     assert_eq!(inserted["order"], 1000);
-}
-
-#[tokio::test]
-async fn chain_insert_accepts_builtin_cache_affinity_registry_id() {
-    let (_dir, storage) = temp_storage().await;
-    let principal_id = seed_principal(&storage, "principal-builtin-cache-affinity").await;
-    let app = app(test_state(Config::default(), Some(storage)));
-
-    let (status, _, body, _) = authed_json(
-        app.clone(),
-        "POST",
-        &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
-        Some(json!({
-            "slot": "Router",
-            "wasm_registry_id": BUILTIN_CACHE_AFFINITY_ID
-        })),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(body["slot"], "router");
-    assert_eq!(
-        body["wasm_registry_id"],
-        BUILTIN_CACHE_AFFINITY_ID.to_string()
-    );
-    assert!(body.get("wire_version").is_none_or(Value::is_null));
-
-    let (status, _, chain, _) = authed_json(
-        app,
-        "GET",
-        &format!("/admin/v1/principals/{principal_id}/plugin-chain?slot=Router"),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let entries = chain["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["id"], body["id"]);
-    assert_eq!(
-        entries[0]["wasm_registry_id"],
-        BUILTIN_CACHE_AFFINITY_ID.to_string()
-    );
 }
 
 #[tokio::test]

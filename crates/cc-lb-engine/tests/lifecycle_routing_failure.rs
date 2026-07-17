@@ -254,7 +254,6 @@ impl FilterPlugin for KeepFilter {
             reason: "drop-all removed every candidate".to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
-            cache_affinity: None,
         })
     }
 

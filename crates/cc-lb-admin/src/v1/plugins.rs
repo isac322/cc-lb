@@ -10,10 +10,10 @@ use axum::{
 use cc_lb_control::{AuditEntry, AuditPayload};
 use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainConflictReason,
-    PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginMetadata,
-    PluginSlotKind, PrincipalStore, Storage, StorageError, WasmRegistryEntry,
-    WasmRegistryReference, WasmRegistryReferenceFingerprint, sparse_order,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainConflictReason, PluginChainEntry,
+    PluginChainEntryInput, PluginChainEntryUpdate, PluginMetadata, PluginSlotKind, PrincipalStore,
+    Storage, StorageError, WasmRegistryEntry, WasmRegistryReference,
+    WasmRegistryReferenceFingerprint, sparse_order,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -206,12 +206,6 @@ async fn list_registry(
     let mut all = storage_entries;
     if !all
         .iter()
-        .any(|entry| entry.id == BUILTIN_CACHE_AFFINITY_ID)
-    {
-        all.push(WasmRegistryEntry::builtin_cache_affinity(0));
-    }
-    if !all
-        .iter()
         .any(|entry| entry.id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
     {
         all.push(WasmRegistryEntry::builtin_subscription_preference(0));
@@ -266,7 +260,7 @@ async fn patch_registry(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
-    if id == BUILTIN_CACHE_AFFINITY_ID || id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
+    if id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
         return builtin_plugin_immutable();
     }
     match storage
@@ -324,7 +318,7 @@ async fn delete_registry(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
-    if id == BUILTIN_CACHE_AFFINITY_ID || id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
+    if id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
         return builtin_plugin_immutable();
     }
     if query.cascade.as_deref() == Some("references") {

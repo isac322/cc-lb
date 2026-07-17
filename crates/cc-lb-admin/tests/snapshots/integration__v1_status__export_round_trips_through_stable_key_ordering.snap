@@ -29,17 +29,6 @@ expression: body
     },
     "registry": [
       {
-        "label": "Built-in cache affinity filter",
-        "name": "cache-affinity",
-        "original_filename": "builtin://cache-affinity",
-        "refcount": 0,
-        "sha256_hex": "0000000000000000000000000000000000000000000000000000000000000000",
-        "size_bytes": 0,
-        "supported_slots": [
-          "router"
-        ]
-      },
-      {
         "label": "fixture",
         "name": "plugin-alpha",
         "original_filename": "plugin-alpha.wasm",

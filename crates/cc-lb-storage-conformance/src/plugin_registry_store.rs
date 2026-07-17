@@ -4,10 +4,11 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_CACHE_AFFINITY_SHA256,
-    PluginChainConflictReason, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
-    PluginSlotKind, PrincipalStore, StorageError, UpstreamCreate, UpstreamStore,
-    UpstreamWarmupDialectPlugin, WasmBlob, WasmRegistryEntryInput, default_wire_version,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256, PluginChainConflictReason, PluginChainEntryInput,
+    PluginChainEntryUpdate, PluginRegistryStore, PluginSlotKind, PrincipalStore, StorageError,
+    UpstreamCreate, UpstreamStore, UpstreamWarmupDialectPlugin, WasmBlob, WasmRegistryEntryInput,
+    default_wire_version,
     principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind},
     sparse_order,
 };
@@ -52,8 +53,8 @@ where
     list_registry_references_returns_chain_and_warmup_on_storage(storage).await?;
     cascade_delete_registry_entry_removes_chain_warmup_and_blob_on_storage(storage).await?;
     cascade_delete_registry_entry_rejects_changed_fingerprint_on_storage(storage).await?;
-    registry_by_id_returns_seeded_builtin_cache_affinity_on_storage(storage).await?;
-    insert_chain_entry_with_builtin_cache_affinity_succeeds_on_storage(storage).await?;
+    registry_by_id_returns_seeded_builtin_subscription_preference_on_storage(storage).await?;
+    insert_chain_entry_with_builtin_subscription_preference_succeeds_on_storage(storage).await?;
     registry_label_update_with_correct_revision_bumps_and_persists(storage).await?;
     registry_label_update_with_stale_revision_conflicts(storage).await?;
     chain_insert_preserves_sparse_order(storage).await?;
@@ -581,30 +582,33 @@ async fn cascade_delete_registry_entry_rejects_changed_fingerprint_on_storage<
 }
 
 plugin_registry_scenario!(
-    registry_by_id_returns_seeded_builtin_cache_affinity,
-    registry_by_id_returns_seeded_builtin_cache_affinity_on_storage
+    registry_by_id_returns_seeded_builtin_subscription_preference,
+    registry_by_id_returns_seeded_builtin_subscription_preference_on_storage
 );
 
-pub async fn registry_by_id_returns_seeded_builtin_cache_affinity_on_storage<
+pub async fn registry_by_id_returns_seeded_builtin_subscription_preference_on_storage<
     S: PluginRegistryStore,
 >(
     storage: &S,
 ) -> Result<()> {
     let entry = storage
-        .get_registry_entry_by_id(BUILTIN_CACHE_AFFINITY_ID)
+        .get_registry_entry_by_id(BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
         .await?
-        .expect("builtin cache-affinity registry row is seeded");
-    ensure!(entry.id == BUILTIN_CACHE_AFFINITY_ID, "builtin id matches");
+        .expect("builtin subscription-preference registry row is seeded");
     ensure!(
-        entry.sha256 == BUILTIN_CACHE_AFFINITY_SHA256,
+        entry.id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+        "builtin id matches"
+    );
+    ensure!(
+        entry.sha256 == BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256,
         "builtin sha matches"
     );
     ensure!(
-        entry.name == BUILTIN_CACHE_AFFINITY_NAME,
+        entry.name == BUILTIN_SUBSCRIPTION_PREFERENCE_NAME,
         "builtin name matches"
     );
     ensure!(
-        entry.original_filename == "builtin://cache-affinity",
+        entry.original_filename == "builtin://subscription-preference",
         "builtin filename matches"
     );
     ensure!(
@@ -622,7 +626,7 @@ pub async fn registry_by_id_returns_seeded_builtin_cache_affinity_on_storage<
     ensure!(entry.metadata.is_some(), "builtin metadata is persisted");
     ensure!(
         storage
-            .get_blob_bytes(BUILTIN_CACHE_AFFINITY_SHA256)
+            .get_blob_bytes(BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256)
             .await?
             .is_some_and(|bytes| bytes.is_empty()),
         "builtin zero-hash blob row is seeded"
@@ -631,11 +635,11 @@ pub async fn registry_by_id_returns_seeded_builtin_cache_affinity_on_storage<
 }
 
 plugin_registry_scenario!(
-    insert_chain_entry_with_builtin_cache_affinity_succeeds,
-    insert_chain_entry_with_builtin_cache_affinity_succeeds_on_storage
+    insert_chain_entry_with_builtin_subscription_preference_succeeds,
+    insert_chain_entry_with_builtin_subscription_preference_succeeds_on_storage
 );
 
-pub async fn insert_chain_entry_with_builtin_cache_affinity_succeeds_on_storage<
+pub async fn insert_chain_entry_with_builtin_subscription_preference_succeeds_on_storage<
     S: PluginRegistryStore + PrincipalStore,
 >(
     storage: &S,
@@ -646,7 +650,7 @@ pub async fn insert_chain_entry_with_builtin_cache_affinity_succeeds_on_storage<
             principal_id: principal.id,
             slot: PluginSlotKind::Router,
             order: sparse_order::STEP,
-            wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID,
+            wasm_registry_id: BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
             config: json!({}),
             sse_per_event: false,
             batched_events_per_flush: 1,
@@ -655,8 +659,8 @@ pub async fn insert_chain_entry_with_builtin_cache_affinity_succeeds_on_storage<
         .await?;
 
     ensure!(
-        inserted.wasm_registry_id == BUILTIN_CACHE_AFFINITY_ID,
-        "chain entry references builtin cache-affinity"
+        inserted.wasm_registry_id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+        "chain entry references builtin subscription-preference"
     );
     let listed = storage
         .list_chain_for_principal(principal.id, PluginSlotKind::Router)
@@ -667,7 +671,7 @@ pub async fn insert_chain_entry_with_builtin_cache_affinity_succeeds_on_storage<
         "listed chain is the inserted row"
     );
     let registry = storage
-        .get_registry_entry_by_id(BUILTIN_CACHE_AFFINITY_ID)
+        .get_registry_entry_by_id(BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
         .await?
         .expect("builtin remains registered after chain insert");
     ensure!(registry.refcount == 1, "builtin refcount increments");

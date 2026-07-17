@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use async_trait::async_trait;
 use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, MAX_WASM_BLOB_BYTES,
-    PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
-    PluginRegistryStore, PluginSlotKind, StorageError, StorageResult, WasmBlob, WasmBlobRecord,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, MAX_WASM_BLOB_BYTES, PluginChainConflictReason,
+    PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
+    PluginSlotKind, StorageError, StorageResult, WasmBlob, WasmBlobRecord,
     WasmRegistryCascadeDelete, WasmRegistryEntry, WasmRegistryEntryInput, WasmRegistryReference,
     WasmRegistryReferenceFingerprint, WasmRegistryReferences, sparse_order, validate_identifier,
 };
@@ -949,9 +949,6 @@ async fn begin_repeatable_read(
 fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEntry> {
     let id = row.try_get("id").map_err(map_sqlx_error)?;
     let refcount = row.try_get("refcount").map_err(map_sqlx_error)?;
-    if id == BUILTIN_CACHE_AFFINITY_ID {
-        return Ok(WasmRegistryEntry::builtin_cache_affinity(refcount));
-    }
     if id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
         return Ok(WasmRegistryEntry::builtin_subscription_preference(refcount));
     }

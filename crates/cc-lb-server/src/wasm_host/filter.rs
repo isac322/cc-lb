@@ -136,7 +136,6 @@ fn wire_to_host_output(
         reason: reasons.join("; "),
         per_candidate_reasons,
         subscription_preference: None,
-        cache_affinity: None,
     })
 }
 
