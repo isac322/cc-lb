@@ -8,6 +8,8 @@
 //! Enabled per principal via `PrincipalRecord::cache_keepalive`. See
 //! `cc_lb_storage_api::CacheKeepaliveConfig`.
 
+#[cfg(test)]
+mod aead_compat;
 mod classifier;
 mod dispatcher;
 mod lifecycle_glue;
