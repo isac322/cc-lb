@@ -113,6 +113,7 @@ async fn lifecycle_enqueues_durable_keepalive_through_current_proxy_path() {
     assert_eq!(enqueuer.cancelled_count(), 0);
     let enqueue = &enqueued[0];
     assert!(!enqueue.session_key_hash.is_empty());
+    assert_eq!(enqueue.accounting_key_id.as_deref(), Some("none-mode"));
     let snapshot = &enqueue.snapshot;
     assert_eq!(snapshot.upstream_id, upstream_id);
     assert_eq!(snapshot.ttl, CacheTtl::Ttl5m);

@@ -27,6 +27,7 @@ impl CacheKeepaliveSessionStatus {
 pub enum CacheKeepaliveEnqueueState {
     Pending,
     Enqueued,
+    Running,
 }
 
 impl CacheKeepaliveEnqueueState {
@@ -34,6 +35,7 @@ impl CacheKeepaliveEnqueueState {
         match self {
             Self::Pending => "pending",
             Self::Enqueued => "enqueued",
+            Self::Running => "running",
         }
     }
 }
@@ -72,6 +74,7 @@ impl CacheKeepaliveTerminalReason {
 pub struct CacheKeepaliveSessionRecord {
     pub session_key_hash: String,
     pub principal_id: String,
+    pub accounting_key_id: Option<String>,
     pub upstream_id: Uuid,
     pub generation: u64,
     pub refresh_count: u32,
@@ -81,6 +84,7 @@ pub struct CacheKeepaliveSessionRecord {
     pub ttl: CacheTtl,
     pub status: CacheKeepaliveSessionStatus,
     pub enqueue_state: CacheKeepaliveEnqueueState,
+    pub running_since_unix_secs: Option<u64>,
     pub current_job_key: String,
     pub encrypted_payload: Vec<u8>,
     pub terminal_reason: Option<CacheKeepaliveTerminalReason>,
@@ -94,6 +98,7 @@ impl fmt::Debug for CacheKeepaliveSessionRecord {
         f.debug_struct("CacheKeepaliveSessionRecord")
             .field("session_key_hash", &self.session_key_hash)
             .field("principal_id", &self.principal_id)
+            .field("accounting_key_id", &self.accounting_key_id)
             .field("upstream_id", &self.upstream_id)
             .field("generation", &self.generation)
             .field("refresh_count", &self.refresh_count)
@@ -106,6 +111,7 @@ impl fmt::Debug for CacheKeepaliveSessionRecord {
             .field("ttl", &self.ttl)
             .field("status", &self.status)
             .field("enqueue_state", &self.enqueue_state)
+            .field("running_since_unix_secs", &self.running_since_unix_secs)
             .field("current_job_key", &self.current_job_key)
             .field(
                 "encrypted_payload",
@@ -123,6 +129,7 @@ impl fmt::Debug for CacheKeepaliveSessionRecord {
 pub struct CacheKeepaliveReplaceRequest {
     pub session_key_hash: String,
     pub principal_id: String,
+    pub accounting_key_id: Option<String>,
     pub upstream_id: Uuid,
     pub cache_anchor_at_unix_secs: u64,
     pub ttl: CacheTtl,
@@ -137,6 +144,7 @@ impl fmt::Debug for CacheKeepaliveReplaceRequest {
         f.debug_struct("CacheKeepaliveReplaceRequest")
             .field("session_key_hash", &self.session_key_hash)
             .field("principal_id", &self.principal_id)
+            .field("accounting_key_id", &self.accounting_key_id)
             .field("upstream_id", &self.upstream_id)
             .field("cache_anchor_at_unix_secs", &self.cache_anchor_at_unix_secs)
             .field("ttl", &self.ttl)
@@ -205,6 +213,13 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         now_unix_secs: u64,
     ) -> StorageResult<bool>;
 
+    async fn claim_cache_keepalive_turn(
+        &self,
+        session_key_hash: &str,
+        generation: u64,
+        now_unix_secs: u64,
+    ) -> StorageResult<bool>;
+
     async fn update_cache_keepalive_payload(
         &self,
         session_key_hash: &str,
@@ -264,6 +279,7 @@ mod tests {
     fn durable_status_values_are_sqlite_compatible_text() {
         assert_eq!(CacheKeepaliveSessionStatus::Active.as_str(), "active");
         assert_eq!(CacheKeepaliveEnqueueState::Pending.as_str(), "pending");
+        assert_eq!(CacheKeepaliveEnqueueState::Running.as_str(), "running");
         assert_eq!(
             CacheKeepaliveTerminalReason::DecryptFailed.as_str(),
             "decrypt_failed"
@@ -275,6 +291,7 @@ mod tests {
         let record = CacheKeepaliveSessionRecord {
             session_key_hash: "session".to_owned(),
             principal_id: "principal".to_owned(),
+            accounting_key_id: Some("key-id".to_owned()),
             upstream_id: Uuid::from_u128(7),
             generation: 1,
             refresh_count: 0,
@@ -284,6 +301,7 @@ mod tests {
             ttl: CacheTtl::Ttl5m,
             status: CacheKeepaliveSessionStatus::Active,
             enqueue_state: CacheKeepaliveEnqueueState::Pending,
+            running_since_unix_secs: None,
             current_job_key: cache_keepalive_job_key("session", 1),
             encrypted_payload: b"ciphertext-bytes".to_vec(),
             terminal_reason: None,

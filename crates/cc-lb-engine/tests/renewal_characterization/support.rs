@@ -115,6 +115,7 @@ impl RenewalFixture {
             .replace_from_real_request(&CacheKeepaliveReplaceRequest {
                 session_key_hash: "renewal-session".to_owned(),
                 principal_id: "renewal-principal".to_owned(),
+                accounting_key_id: None,
                 upstream_id: self.upstream_id,
                 cache_anchor_at_unix_secs: now,
                 ttl: CacheTtl::Ttl5m,

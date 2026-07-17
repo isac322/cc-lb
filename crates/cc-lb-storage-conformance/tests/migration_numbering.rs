@@ -17,10 +17,10 @@ fn storage_migrations_keep_the_expected_numbering() {
     let sqlite = migration_versions(&crates_directory.join("cc-lb-storage-sqlite/migrations"));
     let postgres = migration_versions(&crates_directory.join("cc-lb-storage-postgres/migrations"));
 
-    assert_eq!(sqlite, (1..=52).collect::<Vec<_>>());
+    assert_eq!(sqlite, (1..=53).collect::<Vec<_>>());
     assert_eq!(
         postgres,
-        (1..=82)
+        (1..=83)
             .filter(|version| *version != 43)
             .collect::<Vec<_>>()
     );
@@ -39,5 +39,29 @@ fn storage_migrations_keep_the_expected_numbering() {
     assert!(
         include_str!("../../cc-lb-storage-postgres/migrations/0082_request_events_source_kind.sql")
             .contains("source_ref_id")
+    );
+    assert!(
+        include_str!(
+            "../../cc-lb-storage-sqlite/migrations/0053_cache_keepalive_running_lease.sql"
+        )
+        .contains("accounting_key_id")
+    );
+    assert!(
+        include_str!(
+            "../../cc-lb-storage-sqlite/migrations/0053_cache_keepalive_running_lease.sql"
+        )
+        .contains("running_since_unix_secs")
+    );
+    assert!(
+        include_str!(
+            "../../cc-lb-storage-postgres/migrations/0083_cache_keepalive_running_lease.sql"
+        )
+        .contains("accounting_key_id")
+    );
+    assert!(
+        include_str!(
+            "../../cc-lb-storage-postgres/migrations/0083_cache_keepalive_running_lease.sql"
+        )
+        .contains("running_since_unix_secs")
     );
 }

@@ -22,6 +22,7 @@ use super::{CancelReason, HeuristicClassifier, RequestSnapshot, SessionKey};
 pub struct CacheKeepaliveEnqueueRequest {
     pub session_key_hash: String,
     pub principal_id: String,
+    pub accounting_key_id: Option<String>,
     pub cache_anchor_age: Duration,
     pub params: super::ScheduleParams,
     pub snapshot: RequestSnapshot,
@@ -38,6 +39,7 @@ impl fmt::Debug for CacheKeepaliveEnqueueRequest {
         f.debug_struct("CacheKeepaliveEnqueueRequest")
             .field("session_key_hash", &self.session_key_hash)
             .field("principal_id", &self.principal_id)
+            .field("accounting_key_id", &self.accounting_key_id)
             .field("cache_anchor_age", &self.cache_anchor_age)
             .field("params", &self.params)
             .field("snapshot", &"<redacted>")
@@ -65,6 +67,7 @@ pub trait CacheKeepaliveEnqueuer: Send + Sync {
 #[derive(Clone)]
 pub(crate) struct LifecycleKeepaliveContext {
     pub(crate) principal: Principal,
+    pub(crate) accounting_key_id: String,
     pub(crate) cache_metadata: RequestCacheMetadata,
     pub(crate) upstream_id: Uuid,
     pub(crate) shaped_body: Bytes,
@@ -98,6 +101,7 @@ impl LifecycleKeepalive {
         &self,
         response_body_json: &serde_json::Value,
         principal: &Principal,
+        accounting_key_id: String,
         cache_metadata: &RequestCacheMetadata,
         upstream_id: uuid::Uuid,
         shaped_body: Bytes,
@@ -130,6 +134,7 @@ impl LifecycleKeepalive {
             this.persist_completion(
                 &response_body_json,
                 &principal,
+                accounting_key_id,
                 &cache_metadata,
                 upstream_id,
                 shaped_body,
@@ -145,6 +150,7 @@ impl LifecycleKeepalive {
         &self,
         response_body_json: &serde_json::Value,
         principal: &Principal,
+        accounting_key_id: String,
         cache_metadata: &RequestCacheMetadata,
         upstream_id: uuid::Uuid,
         shaped_body: Bytes,
@@ -214,6 +220,7 @@ impl LifecycleKeepalive {
                     .enqueue_cache_keepalive(CacheKeepaliveEnqueueRequest {
                         session_key_hash: session_key.to_string(),
                         principal_id: principal.id.clone(),
+                        accounting_key_id: Some(accounting_key_id),
                         cache_anchor_age,
                         params,
                         snapshot,

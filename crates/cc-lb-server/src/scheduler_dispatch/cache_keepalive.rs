@@ -32,10 +32,23 @@ impl SchedulerDispatch {
             return Ok(JobOutcome::Noop);
         }
 
-        if unix_secs(self.clock.now()) >= record.expires_at_unix_secs {
+        let now = unix_secs(self.clock.now());
+        if now >= record.expires_at_unix_secs {
             self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::Expired)
                 .await?;
             return Ok(JobOutcome::Done);
+        }
+
+        let claimed = CacheKeepaliveSessionStore::claim_cache_keepalive_turn(
+            self.storage.as_ref(),
+            &job.session_key_hash,
+            job.generation,
+            now,
+        )
+        .await
+        .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?;
+        if !claimed {
+            return Ok(JobOutcome::Noop);
         }
 
         if !self.cache_keepalive_still_authorized(&record) {

@@ -28,6 +28,7 @@ fn replace_request(payload: &[u8], now: u64) -> CacheKeepaliveReplaceRequest {
     CacheKeepaliveReplaceRequest {
         session_key_hash: "session-hash".to_owned(),
         principal_id: "principal".to_owned(),
+        accounting_key_id: None,
         upstream_id: Uuid::from_u128(7),
         cache_anchor_at_unix_secs: now,
         ttl: CacheTtl::Ttl5m,
@@ -62,6 +63,84 @@ async fn replace_from_real_request_bumps_generation_and_resets_counters() {
         cache_keepalive_job_key("session-hash", 2)
     );
     assert_eq!(second.encrypted_payload, b"ciphertext-two");
+}
+
+#[tokio::test]
+async fn replace_roundtrips_optional_accounting_key_id() {
+    let (_dir, storage) = storage().await;
+    let with_key = CacheKeepaliveReplaceRequest {
+        accounting_key_id: Some("key-live-123".to_owned()),
+        ..replace_request(b"ciphertext-with-key", 100)
+    };
+    let mut without_key = replace_request(b"ciphertext-without-key", 110);
+    without_key.session_key_hash = "session-without-key".to_owned();
+
+    let with_key = storage
+        .replace_from_real_request(&with_key)
+        .await
+        .expect("insert keyed session");
+    let without_key = storage
+        .replace_from_real_request(&without_key)
+        .await
+        .expect("insert unkeyed session");
+
+    assert_eq!(with_key.accounting_key_id.as_deref(), Some("key-live-123"));
+    assert_eq!(without_key.accounting_key_id, None);
+}
+
+#[tokio::test]
+async fn concurrent_claim_allows_exactly_one_enqueued_generation_winner() {
+    let (_dir, storage) = storage().await;
+    let storage = Arc::new(storage);
+    let record = storage
+        .replace_from_real_request(&replace_request(b"ciphertext", 100))
+        .await
+        .expect("insert session");
+    assert!(
+        storage
+            .mark_cache_keepalive_enqueued("session-hash", record.generation, 101)
+            .await
+            .expect("mark enqueued")
+    );
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+    let first = tokio::spawn({
+        let storage = Arc::clone(&storage);
+        let barrier = Arc::clone(&barrier);
+        async move {
+            barrier.wait().await;
+            storage
+                .claim_cache_keepalive_turn("session-hash", record.generation, 200)
+                .await
+        }
+    });
+    let second = tokio::spawn({
+        let storage = Arc::clone(&storage);
+        let barrier = Arc::clone(&barrier);
+        async move {
+            barrier.wait().await;
+            storage
+                .claim_cache_keepalive_turn("session-hash", record.generation, 200)
+                .await
+        }
+    });
+
+    let (first, second) = tokio::join!(first, second);
+    let first = first
+        .expect("first task joins")
+        .expect("first claim succeeds");
+    let second = second
+        .expect("second task joins")
+        .expect("second claim succeeds");
+
+    assert_eq!(u8::from(first) + u8::from(second), 1);
+    let claimed = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load claimed session")
+        .expect("session exists");
+    assert_eq!(claimed.enqueue_state, CacheKeepaliveEnqueueState::Running);
+    assert_eq!(claimed.running_since_unix_secs, Some(200));
 }
 
 #[tokio::test]

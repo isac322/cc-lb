@@ -44,6 +44,7 @@ async fn enqueue_persists_session_payload_and_apalis_job() {
         .expect("session exists");
     assert_eq!(record.generation, 1);
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(record.accounting_key_id.as_deref(), Some("key-live-123"));
     assert!(!record.encrypted_payload.is_empty());
     assert!(!String::from_utf8_lossy(&record.encrypted_payload).contains("cached prompt"));
 
@@ -194,6 +195,7 @@ fn enqueue_request() -> CacheKeepaliveEnqueueRequest {
     CacheKeepaliveEnqueueRequest {
         session_key_hash: "session-hash".to_owned(),
         principal_id: "principal".to_owned(),
+        accounting_key_id: Some("key-live-123".to_owned()),
         cache_anchor_age: std::time::Duration::from_secs(30),
         params: ScheduleParams {
             delay: std::time::Duration::from_secs(240),

@@ -2611,6 +2611,7 @@ impl Lifecycle {
         let keepalive_completion = keepalive_shaped_body.take().map(|shaped_body| {
             crate::cache_keepalive::LifecycleKeepaliveContext {
                 principal: principal.clone(),
+                accounting_key_id: success.key_id.clone(),
                 cache_metadata: cache_metadata.clone(),
                 upstream_id: resolved_upstream_id,
                 shaped_body,
@@ -2924,6 +2925,7 @@ impl Lifecycle {
             .on_response_completed(
                 response_json,
                 &context.principal,
+                context.accounting_key_id,
                 &context.cache_metadata,
                 context.upstream_id,
                 context.shaped_body,
@@ -3875,6 +3877,7 @@ impl Lifecycle {
                 keepalive.on_response_completed(
                     &response_json,
                     &context.principal,
+                    context.accounting_key_id,
                     &context.cache_metadata,
                     context.upstream_id,
                     context.shaped_body,

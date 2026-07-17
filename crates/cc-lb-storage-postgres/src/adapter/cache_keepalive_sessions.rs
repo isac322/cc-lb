@@ -20,12 +20,13 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
     ) -> StorageResult<CacheKeepaliveSessionRecord> {
         let row = sqlx::query(
             "INSERT INTO cache_keepalive_sessions
-             (session_key_hash, principal_id, upstream_id, generation, refresh_count,
-              first_scheduled_at, cache_anchor_at, run_at, ttl, status, enqueue_state, current_job_key,
-              encrypted_payload, terminal_reason, expires_at, created_at, updated_at)
-             VALUES ($1, $2, $3, 1, 0, $4, $5, $6, $7, 'active', 'pending', $8, $9, NULL, $10, $11, $12)
+             (session_key_hash, principal_id, accounting_key_id, upstream_id, generation, refresh_count,
+              first_scheduled_at, cache_anchor_at, run_at, ttl, status, enqueue_state, running_since_unix_secs,
+              current_job_key, encrypted_payload, terminal_reason, expires_at, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, 1, 0, $5, $6, $7, $8, 'active', 'pending', NULL, $9, $10, NULL, $11, $12, $13)
              ON CONFLICT(session_key_hash) DO UPDATE SET
               principal_id = EXCLUDED.principal_id,
+              accounting_key_id = EXCLUDED.accounting_key_id,
               upstream_id = EXCLUDED.upstream_id,
               generation = cache_keepalive_sessions.generation + 1,
               refresh_count = 0,
@@ -35,6 +36,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
               ttl = EXCLUDED.ttl,
               status = 'active',
               enqueue_state = 'pending',
+              running_since_unix_secs = NULL,
               current_job_key = 'cache_keepalive:' || EXCLUDED.session_key_hash || ':' || (cache_keepalive_sessions.generation + 1),
               encrypted_payload = EXCLUDED.encrypted_payload,
               terminal_reason = NULL,
@@ -44,6 +46,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         )
         .bind(&request.session_key_hash)
         .bind(&request.principal_id)
+        .bind(&request.accounting_key_id)
         .bind(request.upstream_id)
         .bind(u64_to_i64(request.cache_anchor_at_unix_secs, "cache keepalive first_scheduled_at")?)
         .bind(u64_to_i64(request.cache_anchor_at_unix_secs, "cache keepalive cache_anchor_at")?)
@@ -79,10 +82,31 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         now_unix_secs: u64,
     ) -> StorageResult<bool> {
         let result = sqlx::query(
-            "UPDATE cache_keepalive_sessions SET enqueue_state = 'enqueued', updated_at = $1
+            "UPDATE cache_keepalive_sessions SET enqueue_state = 'enqueued', running_since_unix_secs = NULL, updated_at = $1
              WHERE session_key_hash = $2 AND generation = $3 AND status = 'active' AND enqueue_state = 'pending'",
         )
         .bind(u64_to_i64(now_unix_secs, "cache keepalive updated_at")?)
+        .bind(session_key_hash)
+        .bind(u64_to_i64(generation, "cache keepalive generation")?)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn claim_cache_keepalive_turn(
+        &self,
+        session_key_hash: &str,
+        generation: u64,
+        now_unix_secs: u64,
+    ) -> StorageResult<bool> {
+        let now_unix_secs = u64_to_i64(now_unix_secs, "cache keepalive running_since_unix_secs")?;
+        let result = sqlx::query(
+            "UPDATE cache_keepalive_sessions
+             SET enqueue_state = 'running', running_since_unix_secs = $1, updated_at = $1
+             WHERE session_key_hash = $2 AND generation = $3 AND status = 'active' AND enqueue_state = 'enqueued'",
+        )
+        .bind(now_unix_secs)
         .bind(session_key_hash)
         .bind(u64_to_i64(generation, "cache keepalive generation")?)
         .execute(&self.pool)
@@ -137,8 +161,8 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                 })?;
         let result = sqlx::query(
 	            "UPDATE cache_keepalive_sessions SET generation = $1, refresh_count = refresh_count + 1,
-	              cache_anchor_at = $2, run_at = $3, status = 'active', enqueue_state = 'pending', current_job_key = $4,
-	              encrypted_payload = $5, terminal_reason = NULL, expires_at = $6, updated_at = $7
+              cache_anchor_at = $2, run_at = $3, status = 'active', enqueue_state = 'pending', running_since_unix_secs = NULL,
+              current_job_key = $4, encrypted_payload = $5, terminal_reason = NULL, expires_at = $6, updated_at = $7
 	             WHERE session_key_hash = $8 AND generation = $9 AND status = 'active'",
 	        )
 	        .bind(u64_to_i64(next_generation, "cache keepalive generation")?)
@@ -168,7 +192,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         now_unix_secs: u64,
     ) -> StorageResult<bool> {
         let result = sqlx::query(
-            "UPDATE cache_keepalive_sessions SET status = 'terminal', terminal_reason = $1, updated_at = $2
+            "UPDATE cache_keepalive_sessions SET status = 'terminal', terminal_reason = $1, running_since_unix_secs = NULL, updated_at = $2
              WHERE session_key_hash = $3 AND generation = $4 AND status = 'active'",
         )
         .bind(reason.as_str())
@@ -188,7 +212,7 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         now_unix_secs: u64,
     ) -> StorageResult<bool> {
         let result = sqlx::query(
-            "UPDATE cache_keepalive_sessions SET status = 'terminal', terminal_reason = $1, updated_at = $2
+            "UPDATE cache_keepalive_sessions SET status = 'terminal', terminal_reason = $1, running_since_unix_secs = NULL, updated_at = $2
              WHERE session_key_hash = $3 AND status = 'active'",
         )
         .bind(reason.as_str())
@@ -250,6 +274,7 @@ fn row_to_record(row: PgRow) -> StorageResult<CacheKeepaliveSessionRecord> {
     Ok(CacheKeepaliveSessionRecord {
         session_key_hash: row.try_get("session_key_hash").map_err(map_sqlx_error)?,
         principal_id: row.try_get("principal_id").map_err(map_sqlx_error)?,
+        accounting_key_id: row.try_get("accounting_key_id").map_err(map_sqlx_error)?,
         upstream_id: row.try_get("upstream_id").map_err(map_sqlx_error)?,
         generation: i64_to_u64(
             row.try_get("generation").map_err(map_sqlx_error)?,
@@ -277,6 +302,11 @@ fn row_to_record(row: PgRow) -> StorageResult<CacheKeepaliveSessionRecord> {
             &row.try_get::<String, _>("enqueue_state")
                 .map_err(map_sqlx_error)?,
         )?,
+        running_since_unix_secs: row
+            .try_get::<Option<i64>, _>("running_since_unix_secs")
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, "cache keepalive running_since_unix_secs"))
+            .transpose()?,
         current_job_key: row.try_get("current_job_key").map_err(map_sqlx_error)?,
         encrypted_payload: row.try_get("encrypted_payload").map_err(map_sqlx_error)?,
         terminal_reason: row
@@ -331,6 +361,7 @@ fn enqueue_state_from_db(value: &str) -> StorageResult<CacheKeepaliveEnqueueStat
     match value {
         "pending" => Ok(CacheKeepaliveEnqueueState::Pending),
         "enqueued" => Ok(CacheKeepaliveEnqueueState::Enqueued),
+        "running" => Ok(CacheKeepaliveEnqueueState::Running),
         value => Err(StorageError::Corrupted {
             message: format!("invalid cache keepalive enqueue_state {value}"),
         }),

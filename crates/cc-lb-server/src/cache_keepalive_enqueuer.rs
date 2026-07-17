@@ -75,6 +75,7 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
             &CacheKeepaliveReplaceRequest {
                 session_key_hash: request.session_key_hash.clone(),
                 principal_id: request.principal_id.clone(),
+                accounting_key_id: request.accounting_key_id.clone(),
                 upstream_id: request.snapshot.upstream_id,
                 cache_anchor_at_unix_secs,
                 ttl: request.snapshot.ttl,
