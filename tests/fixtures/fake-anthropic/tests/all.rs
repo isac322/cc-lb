@@ -10,5 +10,7 @@ mod ok_path;
 mod slow_mode;
 #[path = "unknown_event.rs"]
 mod unknown_event;
+#[path = "weather.rs"]
+mod weather;
 #[path = "whitelist_headers.rs"]
 mod whitelist_headers;

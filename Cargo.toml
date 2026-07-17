@@ -13,6 +13,7 @@ members = [
     "tests/load",
     "tests/loom",
     "tests/property",
+    "tests/stress-suite",
     "tests/tls",
     "tests/integration",
     "tests/multi-replica",
@@ -92,6 +93,7 @@ opentelemetry = "0.32"
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "trace"] }
 opentelemetry_sdk = { version = "0.32", features = ["trace"] }
 proptest = "1"
+rand = "0.10"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 ring = "0.17"
