@@ -22,14 +22,16 @@ impl RequestEventStore for SqliteStorage {
         let event_id = storage_event_id(event);
         let inserted_id = sqlx::query_scalar::<_, i64>(
             "INSERT INTO request_events_v1 \
-             (request_id, ts, event_type, upstream_id, principal_id, created_at, key_id, model, upstream_name, cache_state, thread_id, message_id, message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, event_id, error_code, upstream_error_type, upstream_error_message, thinking_tokens, web_search_requests, web_fetch_requests, service_tier, inference_geo, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, matched_v3_cache_key, breakpoint_content_block_index, matched_content_block_index, lookback_distance, predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, predicted_cache_creation_tokens_1h, token_estimate_source, cache_value_micros, formula_winner_upstream_id, kept_upstream_id, quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, quota_warning_multiplier, lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, thinking_budget_tokens, reasoning_effort, payload, list_ts_ms, list_event_key, list_upstream, list_status, list_duration_ms, list_auth_ms, list_route_ms, list_limit_reserve_ms, list_bulkhead_wait_ms, list_dns_ms, list_connect_ms, list_connection_reused, list_limit_reconcile_ms, list_observability_post_ms, list_proxy_setup_ms, list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, list_upstream_body_ms, list_stream_first_content_delta_ms, list_stream_last_content_delta_ms, list_inter_token_avg_ms, list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             (request_id, ts, event_type, source_kind, source_ref_id, upstream_id, principal_id, created_at, key_id, model, upstream_name, cache_state, thread_id, message_id, message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, event_id, error_code, upstream_error_type, upstream_error_message, thinking_tokens, web_search_requests, web_fetch_requests, service_tier, inference_geo, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, matched_v3_cache_key, breakpoint_content_block_index, matched_content_block_index, lookback_distance, predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, predicted_cache_creation_tokens_1h, token_estimate_source, cache_value_micros, formula_winner_upstream_id, kept_upstream_id, quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, quota_warning_multiplier, lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, thinking_budget_tokens, reasoning_effort, payload, list_ts_ms, list_event_key, list_upstream, list_status, list_duration_ms, list_auth_ms, list_route_ms, list_limit_reserve_ms, list_bulkhead_wait_ms, list_dns_ms, list_connect_ms, list_connection_reused, list_limit_reconcile_ms, list_observability_post_ms, list_proxy_setup_ms, list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, list_upstream_body_ms, list_stream_first_content_delta_ms, list_stream_last_content_delta_ms, list_inter_token_avg_ms, list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
              RETURNING id",
         )
         .bind(&event.request_id)
         .bind(u64_to_i64(event_ts_secs(event), "request event ts")?)
         .bind("request")
+        .bind(event.source_kind.as_deref())
+        .bind(event.source_ref_id.as_deref())
         .bind(event.upstream_id.map(|id| id.to_string()))
         .bind(event.principal_id.as_deref())
         .bind(u64_to_i64(event_ts_secs(event), "request event created_at")?)
@@ -264,8 +266,8 @@ impl RequestEventStore for SqliteStorage {
             return Ok(Vec::new());
         }
 
-        let rows = sqlx::query_as::<_, (i64, String)>(
-            "SELECT id, payload FROM request_events_v1 \
+        let rows = sqlx::query_as::<_, (i64, Option<String>, Option<String>, String)>(
+            "SELECT id, source_kind, source_ref_id, payload FROM request_events_v1 \
              WHERE id > ? AND id <= ? \
              ORDER BY id ASC LIMIT ?",
         )
@@ -277,9 +279,9 @@ impl RequestEventStore for SqliteStorage {
         .map_err(map_sqlx_error)?;
 
         rows.into_iter()
-            .map(|(id, payload)| {
+            .map(|(id, source_kind, source_ref_id, payload)| {
                 let cursor = i64_to_u64(id, "request event cursor")?;
-                let event = serde_json::from_str::<RequestEvent>(&payload)?;
+                let event = request_event_from_storage(&payload, source_kind, source_ref_id)?;
                 Ok((cursor, event))
             })
             .filter(|result| match result {
@@ -479,11 +481,11 @@ async fn query_request_events(
     }
 
     let sql = format!(
-        "SELECT payload FROM request_events_v1 \
+        "SELECT source_kind, source_ref_id, payload FROM request_events_v1 \
          WHERE ts >= ? AND ts <= ? \
          ORDER BY id {direction} LIMIT ?"
     );
-    let rows = sqlx::query_scalar::<_, String>(AssertSqlSafe(sql))
+    let rows = sqlx::query_as::<_, (Option<String>, Option<String>, String)>(AssertSqlSafe(sql))
         .bind(u64_to_i64(since, "request event since")?)
         .bind(u64_to_i64_upper(until))
         .bind(usize_to_i64(limit, "request event limit")?)
@@ -492,8 +494,25 @@ async fn query_request_events(
         .map_err(map_sqlx_error)?;
 
     rows.into_iter()
-        .map(|payload| serde_json::from_str(&payload).map_err(Into::into))
+        .map(|(source_kind, source_ref_id, payload)| {
+            request_event_from_storage(&payload, source_kind, source_ref_id)
+        })
         .collect()
+}
+
+fn request_event_from_storage(
+    payload: &str,
+    source_kind: Option<String>,
+    source_ref_id: Option<String>,
+) -> StorageResult<RequestEvent> {
+    let mut event = serde_json::from_str::<RequestEvent>(payload)?;
+    if source_kind.is_some() {
+        event.source_kind = source_kind;
+    }
+    if source_ref_id.is_some() {
+        event.source_ref_id = source_ref_id;
+    }
+    Ok(event)
 }
 
 fn event_ts_secs(event: &RequestEvent) -> u64 {

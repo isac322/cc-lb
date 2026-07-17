@@ -363,6 +363,8 @@ fn request_events() -> Vec<RequestEvent> {
             ts: 1_800_300_100,
             request_id: "roundtrip-event-001".to_owned(),
             event_id: Some("0193a7b8-9c5d-7e2f-9012-aabbccddeeff".to_owned()),
+            source_kind: Some("proxy".to_owned()),
+            source_ref_id: Some("roundtrip-source-ref-a".to_owned()),
             ts_ms: Some(1_800_300_100_123),
             principal_id: Some("roundtrip-principal-a".to_owned()),
             key_id: Some("key-a".to_owned()),

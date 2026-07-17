@@ -26,7 +26,7 @@ impl RequestEventStore for PostgresStorage {
         let event_id = storage_event_id(event);
         let inserted_seq = sqlx::query_scalar::<_, i64>(
             "INSERT INTO request_events_v1 \
-              (ts, principal_id, upstream_id, key_id, model, upstream_name, cache_state, thread_id, message_id, \
+              (ts, source_kind, source_ref_id, principal_id, upstream_id, key_id, model, upstream_name, cache_state, thread_id, message_id, \
                message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, \
                 input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, \
                  event_id, error_code, upstream_error_type, upstream_error_message, \
@@ -39,11 +39,13 @@ impl RequestEventStore for PostgresStorage {
                    quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, quota_warning_multiplier, \
                    lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, \
                    thinking_budget_tokens, reasoning_effort, payload, created_at) \
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,NOW()) \
-              ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
-              RETURNING seq",
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,NOW()) \
+               ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
+               RETURNING seq",
         )
         .bind(unix_secs_to_datetime(event.ts, "request event ts")?)
+        .bind(event.source_kind.as_deref())
+        .bind(event.source_ref_id.as_deref())
         .bind(event.principal_id.as_deref())
         .bind(event.upstream_id)
         .bind(event.key_id.as_deref())
@@ -217,8 +219,8 @@ impl RequestEventStore for PostgresStorage {
         };
         let until = unix_secs_to_datetime_upper(until, "request event until")?;
 
-        let rows = sqlx::query_scalar::<_, Vec<u8>>(
-            "SELECT payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              ORDER BY seq ASC LIMIT $3",
+        let rows = sqlx::query_as::<_, (Option<String>, Option<String>, Vec<u8>)>(
+            "SELECT source_kind, source_ref_id, payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              ORDER BY seq ASC LIMIT $3",
         )
         .bind(since)
         .bind(until)
@@ -228,7 +230,9 @@ impl RequestEventStore for PostgresStorage {
         .map_err(map_sqlx_error)?;
 
         rows.into_iter()
-            .map(|payload| serde_json::from_slice(&payload).map_err(Into::into))
+            .map(|(source_kind, source_ref_id, payload)| {
+                request_event_from_storage(&payload, source_kind, source_ref_id)
+            })
             .collect()
     }
 
@@ -246,8 +250,8 @@ impl RequestEventStore for PostgresStorage {
         };
         let until = unix_secs_to_datetime_upper(until, "request event until")?;
 
-        let rows = sqlx::query_scalar::<_, Vec<u8>>(
-            "SELECT payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              ORDER BY seq DESC LIMIT $3",
+        let rows = sqlx::query_as::<_, (Option<String>, Option<String>, Vec<u8>)>(
+            "SELECT source_kind, source_ref_id, payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              ORDER BY seq DESC LIMIT $3",
         )
         .bind(since)
         .bind(until)
@@ -257,7 +261,9 @@ impl RequestEventStore for PostgresStorage {
         .map_err(map_sqlx_error)?;
 
         rows.into_iter()
-            .map(|payload| serde_json::from_slice(&payload).map_err(Into::into))
+            .map(|(source_kind, source_ref_id, payload)| {
+                request_event_from_storage(&payload, source_kind, source_ref_id)
+            })
             .collect()
     }
 
@@ -329,8 +335,8 @@ impl RequestEventStore for PostgresStorage {
             return Ok(Vec::new());
         }
 
-        let rows = sqlx::query_as::<_, (i64, Vec<u8>)>(
-            "SELECT seq, payload FROM request_events_v1 \
+        let rows = sqlx::query_as::<_, (i64, Option<String>, Option<String>, Vec<u8>)>(
+            "SELECT seq, source_kind, source_ref_id, payload FROM request_events_v1 \
              WHERE seq > $1 AND seq <= $2 \
                AND COALESCE(tx_id, '0'::xid8) < pg_snapshot_xmin(pg_current_snapshot()) \
              ORDER BY seq ASC LIMIT $3",
@@ -346,9 +352,9 @@ impl RequestEventStore for PostgresStorage {
         .map_err(map_sqlx_error)?;
 
         rows.into_iter()
-            .map(|(seq, payload)| {
+            .map(|(seq, source_kind, source_ref_id, payload)| {
                 let cursor = i64_to_u64(seq, "request event cursor")?;
-                let event = serde_json::from_slice::<RequestEvent>(&payload)?;
+                let event = request_event_from_storage(&payload, source_kind, source_ref_id)?;
                 Ok((cursor, event))
             })
             .filter(|result| match result {
@@ -496,6 +502,21 @@ async fn request_event_key_usage(
     }
 
     Ok(buckets)
+}
+
+fn request_event_from_storage(
+    payload: &[u8],
+    source_kind: Option<String>,
+    source_ref_id: Option<String>,
+) -> StorageResult<RequestEvent> {
+    let mut event = serde_json::from_slice::<RequestEvent>(payload)?;
+    if source_kind.is_some() {
+        event.source_kind = source_kind;
+    }
+    if source_ref_id.is_some() {
+        event.source_ref_id = source_ref_id;
+    }
+    Ok(event)
 }
 
 async fn select_existing_event_id(storage: &PostgresStorage, event_id: &str) -> StorageResult<i64> {
