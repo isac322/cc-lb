@@ -2,7 +2,8 @@ use async_trait::async_trait;
 
 use crate::{
     BackendKind, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket,
-    RequestEventKeyUsageQuery, RuntimeChangeNotifier, StorageError, StorageResult,
+    RequestEventKeyUsageQuery, RequestEventProjections, RuntimeChangeNotifier, StorageError,
+    StorageResult,
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
     cache_keepalive_sessions::CacheKeepaliveSessionStore,
     organization_metadata::OrganizationMetadataStore,
@@ -56,6 +57,15 @@ pub trait AuditStore: Send + Sync {
 pub trait RequestEventStore: Send + Sync {
     /// Idempotent insert. On duplicate `event_id`, returns the existing row's cursor via a SELECT fallback. This is load-bearing for retry semantics.
     async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<u64>;
+
+    async fn append_request_event_with_projections(
+        &self,
+        event: &RequestEvent,
+        projections: &RequestEventProjections,
+    ) -> StorageResult<u64> {
+        let _ = projections;
+        self.append_request_event(event).await
+    }
 
     async fn query_request_events(
         &self,
