@@ -16,10 +16,11 @@ use cc_lb_control::{
 };
 use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_observability::ObservabilityHook;
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_api::{AuditEntry, AuditStore, BackendKind, MetaStore, StorageResult};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
+use tokio::sync::watch;
 use tower::ServiceExt;
 
 pub fn limit_engine() -> Arc<LimitEngine> {
@@ -93,12 +94,60 @@ impl RouterPlugin for NoopRouter {
     }
 }
 
+struct ObservedAuditStore {
+    inner: Arc<dyn AuditStore>,
+    flushed: watch::Sender<u64>,
+}
+
+#[async_trait]
+impl AuditStore for ObservedAuditStore {
+    async fn append_audit(&self, entry: &AuditEntry) -> StorageResult<()> {
+        self.inner.append_audit(entry).await?;
+        self.flushed.send_modify(|count| *count += 1);
+        Ok(())
+    }
+
+    async fn append_audit_entries(&self, entries: &[AuditEntry]) -> StorageResult<()> {
+        self.inner.append_audit_entries(entries).await?;
+        self.flushed
+            .send_modify(|count| *count += entries.len() as u64);
+        Ok(())
+    }
+
+    async fn query_audit(
+        &self,
+        principal_id: Option<&str>,
+        since: u64,
+        until: u64,
+        limit: usize,
+    ) -> StorageResult<Vec<AuditEntry>> {
+        self.inner
+            .query_audit(principal_id, since, until, limit)
+            .await
+    }
+
+    async fn prune_audit(&self, older_than: u64) -> StorageResult<u64> {
+        self.inner.prune_audit(older_than).await
+    }
+
+    async fn prune_audit_before(
+        &self,
+        cutoff_ts_x_1m: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        self.inner
+            .prune_audit_before(cutoff_ts_x_1m, batch_size)
+            .await
+    }
+}
+
 pub struct SpawnedAdminServer {
     pub _dir: tempfile::TempDir,
     pub storage: Arc<SqliteStorage>,
     pub dynamic_view: Arc<DynamicViewHolder>,
     pub client: AdminClient,
     pub _audit_task: tokio::task::JoinHandle<()>,
+    pub audit_flushed: watch::Receiver<u64>,
 }
 
 #[derive(Clone)]
@@ -114,7 +163,13 @@ pub async fn spawn_admin_server() -> SpawnedAdminServer {
 pub async fn spawn_admin_server_with_clock(clock: ClockHandle) -> SpawnedAdminServer {
     let dir = tempfile::tempdir().expect("temp admin server dir");
     let storage = sqlite_storage_with_clock(dir.path(), "admin.sqlite", clock.clone()).await;
-    let (audit_sink, audit_task) = spawn_audit_writer(storage.clone(), 128);
+    let (audit_flushed_tx, audit_flushed) = watch::channel(0u64);
+    let audit_inner: Arc<dyn AuditStore> = storage.clone();
+    let observed_audit = Arc::new(ObservedAuditStore {
+        inner: audit_inner,
+        flushed: audit_flushed_tx,
+    });
+    let (audit_sink, audit_task) = spawn_audit_writer(observed_audit, 128);
     let config = Config::default();
     let dynamic_view = dynamic_view_holder(&config);
     let state = cc_lb_admin::AdminState {
@@ -147,6 +202,7 @@ pub async fn spawn_admin_server_with_clock(clock: ClockHandle) -> SpawnedAdminSe
             token: "test-token".to_owned(),
         },
         _audit_task: audit_task,
+        audit_flushed,
     }
 }
 
