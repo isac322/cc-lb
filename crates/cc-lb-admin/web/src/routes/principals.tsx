@@ -39,7 +39,7 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import { z } from 'zod';
+import * as z from 'zod';
 import {
   Badge,
   Button,
@@ -1012,22 +1012,23 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
     [chain.data],
   );
 
-  const cacheAffinityPlugin = registry.data?.entries.find(
-    (e) => e.name === 'cache-affinity',
+  const subscriptionPreferencePlugin = registry.data?.entries.find(
+    (e) => e.name === 'subscription-preference',
   );
-  const cacheAffinityEntry = entries.find(
-    (e) => e.wasm_registry_id === cacheAffinityPlugin?.id,
+  const subscriptionPreferenceEntry = entries.find(
+    (e) => e.wasm_registry_id === subscriptionPreferencePlugin?.id,
   );
 
   const isComplex = useMemo(() => {
-    if (!cacheAffinityPlugin) return false;
+    if (!subscriptionPreferencePlugin) return false;
     const hasOther = entries.some(
-      (e) => e.wasm_registry_id !== cacheAffinityPlugin.id,
+      (e) => e.wasm_registry_id !== subscriptionPreferencePlugin.id,
     );
-    const cacheNotFirst =
-      cacheAffinityEntry && entries[0]?.id !== cacheAffinityEntry.id;
-    return hasOther || cacheNotFirst;
-  }, [entries, cacheAffinityPlugin, cacheAffinityEntry]);
+    const smartRoutingNotFirst =
+      subscriptionPreferenceEntry &&
+      entries[0]?.id !== subscriptionPreferenceEntry.id;
+    return hasOther || smartRoutingNotFirst;
+  }, [entries, subscriptionPreferencePlugin, subscriptionPreferenceEntry]);
 
   const [detailPlugin, setDetailPlugin] = useState<PluginEntry | null>(null);
   const [activeTab, setActiveTab] = useState<'basic' | 'advanced'>(
@@ -1041,15 +1042,15 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
     }
   }, [isComplex, activeTab]);
 
-  const isSticky = !!cacheAffinityEntry;
+  const isSmartRouting = !!subscriptionPreferenceEntry;
 
-  const toggleSticky = () => {
-    if (!cacheAffinityPlugin) return;
-    if (isSticky) {
-      if (cacheAffinityEntry) {
+  const toggleSmartRouting = () => {
+    if (!subscriptionPreferencePlugin) return;
+    if (isSmartRouting) {
+      if (subscriptionPreferenceEntry) {
         del.mutate({
-          id: cacheAffinityEntry.id,
-          revision: cacheAffinityEntry.revision,
+          id: subscriptionPreferenceEntry.id,
+          revision: subscriptionPreferenceEntry.revision,
         });
       }
     } else {
@@ -1057,7 +1058,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
         pid: principalId,
         body: {
           slot,
-          wasm_registry_id: cacheAffinityPlugin.id,
+          wasm_registry_id: subscriptionPreferencePlugin.id,
           order: 0,
         },
       });
@@ -1219,19 +1220,21 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                 </div>
               </div>
               <BaseSwitch.Root
-                checked={isSticky}
+                checked={isSmartRouting}
                 className="group inline-flex items-center gap-2 h-7 px-2 rounded-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-overlay-3"
                 nativeButton
-                onCheckedChange={() => toggleSticky()}
+                onCheckedChange={() => toggleSmartRouting()}
                 render={<button type="button" />}
                 disabled={
-                  !cacheAffinityPlugin || insert.isPending || del.isPending
+                  !subscriptionPreferencePlugin ||
+                  insert.isPending ||
+                  del.isPending
                 }
               >
                 <div
                   className={cx(
                     'relative inline-flex h-4 w-8 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out border',
-                    isSticky
+                    isSmartRouting
                       ? 'bg-emerald-500 border-emerald-500'
                       : 'bg-overlay-5 border-subtle-strong group-hover:border-text-muted',
                   )}
@@ -1239,7 +1242,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                   <BaseSwitch.Thumb
                     className={cx(
                       'pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
-                      isSticky ? 'translate-x-4' : 'translate-x-0.5',
+                      isSmartRouting ? 'translate-x-4' : 'translate-x-0.5',
                     )}
                   />
                 </div>
@@ -1357,8 +1360,10 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                   const reg = registry.data?.entries.find(
                     (r) => r.id === e.wasm_registry_id,
                   );
-                  const isPinnedCache =
-                    !isComplex && isSticky && reg?.name === 'cache-affinity';
+                  const isBasicManaged =
+                    !isComplex &&
+                    isSmartRouting &&
+                    reg?.name === 'subscription-preference';
 
                   return (
                     <React.Fragment key={e.id}>
@@ -1394,10 +1399,10 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                           </div>
                         </div>
                         <div className="flex items-center gap-1 shrink-0">
-                          {isPinnedCache ? (
+                          {isBasicManaged ? (
                             <div
                               className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint"
-                              title="Pinned by Basic settings"
+                              title="Managed by Basic settings"
                             >
                               <Lock className="w-4 h-4" />
                             </div>
@@ -1578,9 +1583,11 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                         const inChain = entries.some(
                           (e) => e.wasm_registry_id === p.id,
                         );
-                        const isPinnedCache =
-                          !isComplex && isSticky && p.name === 'cache-affinity';
-                        const disabled = inChain || isPinnedCache;
+                        const isBasicManaged =
+                          !isComplex &&
+                          isSmartRouting &&
+                          p.name === 'subscription-preference';
+                        const disabled = inChain || isBasicManaged;
 
                         return (
                           <button
@@ -1600,8 +1607,8 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                               </span>
                               {disabled ? (
                                 <span className="text-[10px] text-text-faint">
-                                  {isPinnedCache
-                                    ? 'Pinned by Sticky'
+                                  {isBasicManaged
+                                    ? 'Managed by Basic'
                                     : 'Already in chain'}
                                 </span>
                               ) : null}

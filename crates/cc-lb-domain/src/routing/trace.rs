@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{CacheAffinityTrace, SubscriptionPreferenceTrace};
+use super::SubscriptionPreferenceTrace;
 
 /// Strategy for selecting a terminal upstream.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -31,9 +31,6 @@ pub struct StageDecision {
     /// Optional subscription-preference trace payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription_preference: Option<SubscriptionPreferenceTrace>,
-    /// Optional cache-affinity trace payload.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_affinity: Option<CacheAffinityTrace>,
 }
 
 const fn is_zero_u64(value: &u64) -> bool {

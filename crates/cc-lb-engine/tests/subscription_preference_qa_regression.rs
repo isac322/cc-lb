@@ -32,7 +32,7 @@ fn cache_positive_hash_affinity_keeps_single_winner_across_request_ids() {
     for result in [first, second] {
         assert_eq!(result.kept_upstream_id, owner.upstream_id);
         assert_eq!(
-            result.trace.bucket_v3_cache_affinity_key.as_deref(),
+            result.trace.bucket_v3_cache_key.as_deref(),
             Some(SHARED_V3_KEY)
         );
     }
@@ -51,7 +51,7 @@ fn non_positive_cache_value_uses_request_id_despite_matched_key() {
 
     let result = route("req-creation-only", &[first, second]);
 
-    assert_eq!(result.trace.bucket_v3_cache_affinity_key, None);
+    assert_eq!(result.trace.bucket_v3_cache_key, None);
 }
 
 #[test]

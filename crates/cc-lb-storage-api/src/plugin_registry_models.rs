@@ -7,18 +7,14 @@ use uuid::Uuid;
 
 use crate::PluginSlotKind;
 
-pub use cc_lb_domain::{
-    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
-    BUILTIN_SUBSCRIPTION_PREFERENCE_NAME,
-};
+pub use cc_lb_domain::{BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME};
 
 pub const BUILTIN_PLUGIN_KIND_FILTER: &str = "filter";
-pub const BUILTIN_CACHE_AFFINITY_SHA256: [u8; 32] = [0; 32];
 /// Pseudo-SHA for the built-in `subscription-preference` filter.
 ///
 /// Encoded as ASCII `b"subscription-preference"` followed by NUL padding so it
 /// never collides with the `[seed; 32]` uniform patterns that conformance and
-/// fixture tests use (cache-affinity already reserves `[0; 32]`).
+/// fixture tests use.
 pub const BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256: [u8; 32] = [
     0x73, 0x75, 0x62, 0x73, 0x63, 0x72, 0x69, 0x70, 0x74, 0x69, 0x6F, 0x6E, 0x2D, 0x70, 0x72, 0x65,
     0x66, 0x65, 0x72, 0x65, 0x6E, 0x63, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -111,35 +107,6 @@ pub struct WasmRegistryEntry {
 }
 
 impl WasmRegistryEntry {
-    pub fn builtin_cache_affinity(refcount: i64) -> Self {
-        Self {
-            id: BUILTIN_CACHE_AFFINITY_ID,
-            sha256: BUILTIN_CACHE_AFFINITY_SHA256,
-            name: BUILTIN_CACHE_AFFINITY_NAME.to_owned(),
-            version: None,
-            original_filename: "builtin://cache-affinity".to_owned(),
-            label: Some("Built-in cache affinity filter".to_owned()),
-            uploaded_at_unix_secs: 0,
-            uploaded_by_admin_id: Uuid::nil(),
-            refcount,
-            revision: 0,
-            kind: BUILTIN_PLUGIN_KIND_FILTER.to_owned(),
-            description: "Prefer upstreams whose prompt cache is already warm for this request."
-                .to_owned(),
-            usage: "Attach to router chains to bias routing toward warm-cache upstreams."
-                .to_owned(),
-            hook_metadata: builtin_filter_hook_metadata(),
-            is_builtin: true,
-            metadata: Some(builtin_metadata_for_cache_affinity()),
-            supported_slots: vec![PluginSlotKind::Router],
-            schema_hash: None,
-        }
-    }
-
-    pub fn is_cache_affinity_builtin(&self) -> bool {
-        self.id == BUILTIN_CACHE_AFFINITY_ID
-    }
-
     pub fn builtin_subscription_preference(refcount: i64) -> Self {
         Self {
             id: BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
@@ -183,20 +150,6 @@ fn builtin_filter_hook_metadata() -> BTreeMap<String, HookMetadata> {
             mode: Default::default(),
         },
     )])
-}
-
-fn builtin_metadata_for_cache_affinity() -> PluginMetadata {
-    PluginMetadata {
-        purpose: "Prefer upstreams whose prompt cache is already warm for this request.".to_owned(),
-        keeps: "Candidates with a positive prefill_cache_score (the upstream has already cached the prefix).".to_owned(),
-        drops: "Candidates with zero cache score — only when at least one candidate is a cache hit; otherwise nothing is dropped.".to_owned(),
-        empty_behavior: "Never drops everything. Falls back to passing all candidates through when no cache hit exists.".to_owned(),
-        examples: vec![
-            "5 candidates, 2 with positive cache score → keep the 2 hits.".to_owned(),
-            "5 candidates, all with zero cache score → pass all 5 through.".to_owned(),
-            "Exactly 1 candidate → no change.".to_owned(),
-        ],
-    }
 }
 
 fn builtin_metadata_for_subscription_preference() -> PluginMetadata {

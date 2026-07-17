@@ -1,9 +1,8 @@
 use std::{fs, path::Path, sync::Arc};
 
 use cc_lb_domain::{
-    CacheAffinityCandidate, CacheAffinityTrace, InternalError, InternalErrorKind,
-    InternalErrorStage, RoutingTrace, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
-    TerminalDecision, TerminalStrategy,
+    InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace, StageDecision,
+    SubscriptionPreferenceTrace, SubscriptionTier, TerminalDecision, TerminalStrategy,
 };
 use cc_lb_storage_api::{
     BackendKind, KeyStatus, MetaStore, PluginSlotKind, RequestEvent, RequestEventStore,
@@ -63,12 +62,6 @@ async fn golden_serde_bytes_match_current_types_and_storage_path() {
             .stages
             .iter()
             .any(|stage| stage.subscription_preference.is_some())
-    );
-    assert!(
-        trace
-            .stages
-            .iter()
-            .any(|stage| stage.cache_affinity.is_some())
     );
     assert!(trace.terminal_decision.is_some());
     assert!(!request.internal_errors.is_empty());
@@ -150,17 +143,9 @@ async fn generate_fixtures(output_dir: &Path) {
                     estimated_switch_cache_loss_micros: Some(900),
                     cache_loss_status: Some("estimated".to_owned()),
                     switch_gate_reason: Some("incumbent_is_formula_winner".to_owned()),
-                    bucket_v3_cache_affinity_key: Some("v3:golden".to_owned()),
+                    bucket_v3_cache_key: Some("v3:golden".to_owned()),
                     lineage_would_have_predicted_read_tokens: Some(768),
                     lineage_would_have_picked_upstream_id: Some(upstream_id),
-                }),
-                cache_affinity: Some(CacheAffinityTrace {
-                    candidates: vec![CacheAffinityCandidate {
-                        upstream_id,
-                        kept: true,
-                        predicted_cache_read_tokens: Some(768),
-                        predicted_expires_at_unix_secs: Some(1_720_003_600),
-                    }],
                 }),
             }],
             terminal_decision: Some(TerminalDecision {

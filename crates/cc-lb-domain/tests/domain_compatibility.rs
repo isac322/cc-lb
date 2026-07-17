@@ -1,7 +1,6 @@
 use cc_lb_domain::{
-    ANTHROPIC_IDENTITY_HEADERS, BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME,
-    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, BreakpointOrigin,
-    CacheAffinityCandidate, CacheAffinityTrace, CacheBreakpoint, CacheBreakpointSource,
+    ANTHROPIC_IDENTITY_HEADERS, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource,
     CacheLookbackPrefix, CachePricingSummary, CacheScore, CandidateUrgency, CredentialStrategy,
     GLOBAL_PRINCIPAL, InternalError, InternalErrorKind, InternalErrorStage, MAX_ERROR_MESSAGE_LEN,
     MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN, PlanInfo, Principal, PrincipalKind,
@@ -110,8 +109,6 @@ fn t1_public_value_api_exists_when_domain_is_built() {
         TerminalStrategy,
         SubscriptionPreferenceTrace,
         CandidateUrgency,
-        CacheAffinityTrace,
-        CacheAffinityCandidate,
         InternalError,
         InternalErrorKind,
         InternalErrorStage,
@@ -121,8 +118,6 @@ fn t1_public_value_api_exists_when_domain_is_built() {
 
     // Then: the stable constants retain their established values.
     assert_eq!(GLOBAL_PRINCIPAL, "__global__");
-    assert_eq!(BUILTIN_CACHE_AFFINITY_ID, Uuid::from_u128(1));
-    assert_eq!(BUILTIN_CACHE_AFFINITY_NAME, "cache-affinity");
     assert_eq!(BUILTIN_SUBSCRIPTION_PREFERENCE_ID, Uuid::from_u128(2));
     assert_eq!(
         BUILTIN_SUBSCRIPTION_PREFERENCE_NAME,

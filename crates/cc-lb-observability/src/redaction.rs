@@ -3,10 +3,9 @@ use std::fmt;
 use std::io::{self, Write};
 
 use cc_lb_domain::{
-    CacheAffinityCandidate, CacheAffinityTrace, CandidateUrgency, InternalError,
-    MAX_ERROR_MESSAGE_LEN, MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN, RoutingTrace,
-    StageDecision, SubscriptionPreferenceTrace, SubscriptionTier, TerminalDecision,
-    TerminalStrategy,
+    CandidateUrgency, InternalError, MAX_ERROR_MESSAGE_LEN, MAX_ROUTING_TRACE_STAGES,
+    MAX_STAGE_NAME_LEN, RoutingTrace, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
+    TerminalDecision, TerminalStrategy,
 };
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex, RegexSet};
@@ -423,7 +422,6 @@ fn upsert_truncation_marker(trace: &mut RoutingTrace, removed_stages: usize) {
         )),
         duration_us: 0,
         subscription_preference: None,
-        cache_affinity: None,
     };
 
     if trace
@@ -492,10 +490,6 @@ fn stage_json_len(stage: &StageDecision) -> usize {
         len += ",\"subscription_preference\":".len()
             + subscription_preference_json_len(subscription_preference);
     }
-    if let Some(cache_affinity) = &stage.cache_affinity {
-        len += ",\"cache_affinity\":".len() + cache_affinity_json_len(cache_affinity);
-    }
-
     len + "}".len()
 }
 
@@ -538,35 +532,6 @@ fn subscription_preference_json_len(trace: &SubscriptionPreferenceTrace) -> usiz
     }
     if let Some(switch_gate_reason) = &trace.switch_gate_reason {
         len += ",\"switch_gate_reason\":".len() + json_string_len(switch_gate_reason);
-    }
-    len + "}".len()
-}
-
-fn cache_affinity_json_len(trace: &CacheAffinityTrace) -> usize {
-    let mut len = "{\"candidates\":[".len();
-    for (index, candidate) in trace.candidates.iter().enumerate() {
-        if index > 0 {
-            len += 1;
-        }
-        len += cache_affinity_candidate_json_len(candidate);
-    }
-    len + "]}".len()
-}
-
-fn cache_affinity_candidate_json_len(candidate: &CacheAffinityCandidate) -> usize {
-    let mut len = "{\"upstream_id\":".len()
-        + json_string_len(&candidate.upstream_id.to_string())
-        + ",\"kept\":".len()
-        + if candidate.kept {
-            "true".len()
-        } else {
-            "false".len()
-        };
-    if let Some(tokens) = candidate.predicted_cache_read_tokens {
-        len += ",\"predicted_cache_read_tokens\":".len() + tokens.to_string().len();
-    }
-    if let Some(expires_at) = candidate.predicted_expires_at_unix_secs {
-        len += ",\"predicted_expires_at_unix_secs\":".len() + expires_at.to_string().len();
     }
     len + "}".len()
 }

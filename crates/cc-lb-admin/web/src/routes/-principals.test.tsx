@@ -72,8 +72,8 @@ test('renders ordered list with locked terminal row', () => {
           sha256_hex: '',
         },
         {
-          id: 'cache-affinity-id',
-          name: 'cache-affinity',
+          id: 'subscription-preference-id',
+          name: 'subscription-preference',
           metadata: null,
           sha256_hex: '',
         },
@@ -100,7 +100,6 @@ test('renders ordered list with locked terminal row', () => {
 
   renderWithProviders(<RouterSlotEditor principalId="p-1" />);
 
-  // It should default to Advanced tab because it's a complex chain (no cache-affinity)
   expect(screen.getByText('My Plugin')).toBeDefined();
   expect(screen.getByText('Terminal step')).toBeDefined();
 });
@@ -205,8 +204,8 @@ test('complex chain forces Advanced and disables Basic with tooltip', () => {
           sha256_hex: '',
         },
         {
-          id: 'cache-affinity-id',
-          name: 'cache-affinity',
+          id: 'subscription-preference-id',
+          name: 'subscription-preference',
           metadata: null,
           sha256_hex: '',
         },
@@ -245,7 +244,7 @@ test('complex chain forces Advanced and disables Basic with tooltip', () => {
   ).toBeDefined();
 });
 
-test('Sticky toggle inserts cache-affinity at order 0 then removes it', async () => {
+test('Smart routing toggle inserts subscription-preference at order 0 then removes it', async () => {
   const insertMock = vi.fn();
   const deleteMock = vi.fn();
 
@@ -256,8 +255,8 @@ test('Sticky toggle inserts cache-affinity at order 0 then removes it', async ()
     data: {
       entries: [
         {
-          id: 'cache-affinity-id',
-          name: 'cache-affinity',
+          id: 'subscription-preference-id',
+          name: 'subscription-preference',
           metadata: null,
           sha256_hex: '',
         },
@@ -298,7 +297,7 @@ test('Sticky toggle inserts cache-affinity at order 0 then removes it', async ()
       pid: 'p-1',
       body: {
         slot: 'router',
-        wasm_registry_id: 'cache-affinity-id',
+        wasm_registry_id: 'subscription-preference-id',
         order: 0,
       },
     });
@@ -311,7 +310,7 @@ test('Sticky toggle inserts cache-affinity at order 0 then removes it', async ()
         {
           id: 'entry-cache',
           order: 0,
-          wasm_registry_id: 'cache-affinity-id',
+          wasm_registry_id: 'subscription-preference-id',
           revision: 2,
         },
       ],
@@ -337,14 +336,14 @@ test('Sticky toggle inserts cache-affinity at order 0 then removes it', async ()
   });
 });
 
-test('picker disables already-in-chain entries and pinned cache-affinity', () => {
+test('picker disables already-in-chain entries and Basic-managed subscription-preference', () => {
   vi.mocked(queries.usePluginChain).mockReturnValue({
     data: {
       entries: [
         {
           id: 'entry-cache',
           order: 0,
-          wasm_registry_id: 'cache-affinity-id',
+          wasm_registry_id: 'subscription-preference-id',
           revision: 1,
         },
       ],
@@ -354,16 +353,18 @@ test('picker disables already-in-chain entries and pinned cache-affinity', () =>
     data: {
       entries: [
         {
-          id: 'cache-affinity-id',
-          name: 'cache-affinity',
+          id: 'subscription-preference-id',
+          name: 'subscription-preference',
           metadata: null,
           sha256_hex: '',
+          supported_slots: ['router'],
         },
         {
           id: 'other-id',
           name: 'other-plugin',
           metadata: null,
           sha256_hex: '',
+          supported_slots: ['router'],
         },
       ],
     },
@@ -394,9 +395,11 @@ test('picker disables already-in-chain entries and pinned cache-affinity', () =>
   // Open picker
   fireEvent.click(screen.getByText('Add filter'));
 
-  const cacheBtn = screen.getAllByRole('button', { name: /cache-affinity/ })[1]; // The one in the picker
-  expect(cacheBtn.hasAttribute('disabled')).toBe(true);
-  expect(screen.getByText('Pinned by Sticky')).toBeDefined();
+  const preferenceBtn = screen.getAllByRole('button', {
+    name: /subscription-preference/,
+  })[1];
+  expect(preferenceBtn.hasAttribute('disabled')).toBe(true);
+  expect(screen.getByText('Managed by Basic')).toBeDefined();
 
   const otherBtn = screen.getByRole('button', { name: /other-plugin/ });
   expect(otherBtn.hasAttribute('disabled')).toBe(false);
@@ -410,7 +413,7 @@ test('addFilter no-ops when entry is disabled', () => {
         {
           id: 'entry-cache',
           order: 0,
-          wasm_registry_id: 'cache-affinity-id',
+          wasm_registry_id: 'subscription-preference-id',
           revision: 1,
         },
       ],
@@ -420,10 +423,11 @@ test('addFilter no-ops when entry is disabled', () => {
     data: {
       entries: [
         {
-          id: 'cache-affinity-id',
-          name: 'cache-affinity',
+          id: 'subscription-preference-id',
+          name: 'subscription-preference',
           metadata: null,
           sha256_hex: '',
+          supported_slots: ['router'],
         },
       ],
     },
@@ -455,8 +459,10 @@ test('addFilter no-ops when entry is disabled', () => {
   // Open picker
   fireEvent.click(screen.getByText('Add filter'));
 
-  const cacheBtn = screen.getAllByRole('button', { name: /cache-affinity/ })[1];
-  fireEvent.click(cacheBtn);
+  const preferenceBtn = screen.getAllByRole('button', {
+    name: /subscription-preference/,
+  })[1];
+  fireEvent.click(preferenceBtn);
 
   expect(insertMock).not.toHaveBeenCalled();
 });

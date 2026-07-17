@@ -359,7 +359,6 @@ impl FilterPlugin for KeepIdsFilter {
             reason: "candidate-builder pipeline kept survivors".to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
-            cache_affinity: None,
         })
     }
 

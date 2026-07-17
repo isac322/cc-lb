@@ -244,18 +244,18 @@ fn plugin_registry_cascade_delete_registry_entry_rejects_changed_fingerprint_pos
 }
 
 #[test]
-fn plugin_registry_registry_by_id_returns_seeded_builtin_cache_affinity_postgres() {
+fn plugin_registry_registry_by_id_returns_seeded_builtin_subscription_preference_postgres() {
     run_postgres_scenario(
-        "registry_by_id_returns_seeded_builtin_cache_affinity",
-        plugin_registry_store::registry_by_id_returns_seeded_builtin_cache_affinity,
+        "registry_by_id_returns_seeded_builtin_subscription_preference",
+        plugin_registry_store::registry_by_id_returns_seeded_builtin_subscription_preference,
     );
 }
 
 #[test]
-fn plugin_registry_insert_chain_entry_with_builtin_cache_affinity_succeeds_postgres() {
+fn plugin_registry_insert_chain_entry_with_builtin_subscription_preference_succeeds_postgres() {
     run_postgres_scenario(
-        "insert_chain_entry_with_builtin_cache_affinity_succeeds",
-        plugin_registry_store::insert_chain_entry_with_builtin_cache_affinity_succeeds,
+        "insert_chain_entry_with_builtin_subscription_preference_succeeds",
+        plugin_registry_store::insert_chain_entry_with_builtin_subscription_preference_succeeds,
     );
 }
 

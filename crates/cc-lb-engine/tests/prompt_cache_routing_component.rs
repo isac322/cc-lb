@@ -93,7 +93,7 @@ fn built_candidate_cache_score_drives_subscription_preference_component_route() 
     let peer_row = trace_row(&trace.candidates, quota_peer_id, "quota peer");
 
     assert_eq!(
-        trace.bucket_v3_cache_affinity_key.as_deref(),
+        trace.bucket_v3_cache_key.as_deref(),
         Some(owner_prefix.as_str())
     );
     assert_eq!(
@@ -202,7 +202,7 @@ fn moved_cache_control_keeps_warm_upstream_routed_by_cache_hash() {
         .expect("subscription preference trace present");
 
     assert_eq!(
-        trace.bucket_v3_cache_affinity_key.as_deref(),
+        trace.bucket_v3_cache_key.as_deref(),
         Some(deep_prefix.as_str())
     );
     assert_eq!(output.kept_upstream_ids, vec![owner_id]);

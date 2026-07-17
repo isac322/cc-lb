@@ -417,7 +417,6 @@ impl FilterPlugin for KeepFilter {
             reason: "kept terminal candidates".to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
-            cache_affinity: None,
         })
     }
 

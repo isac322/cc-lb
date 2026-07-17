@@ -1,8 +1,6 @@
-mod cache_affinity;
 mod subscription;
 mod trace;
 
-pub use cache_affinity::{CacheAffinityCandidate, CacheAffinityTrace};
 pub use subscription::{CandidateUrgency, SubscriptionPreferenceTrace};
 pub use trace::{RoutingTrace, StageDecision, TerminalDecision, TerminalStrategy};
 

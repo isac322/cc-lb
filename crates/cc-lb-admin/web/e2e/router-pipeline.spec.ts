@@ -67,7 +67,7 @@ test.describe('Router Pipeline', () => {
     
     await page.screenshot({ path: path.join(evidenceDir, 'task-31-step5.png') });
 
-    const infoButton = pluginList.locator('li').filter({ hasText: 'cache-affinity' }).first().locator('button.hover\\:underline');
+    const infoButton = pluginList.locator('li').filter({ hasText: 'subscription-preference' }).first().locator('button.hover\\:underline');
     await infoButton.click();
     
     const drawer = page.locator('[role="dialog"]');
