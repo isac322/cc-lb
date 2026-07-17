@@ -3,8 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use metrics::Unit;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
+use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use thiserror::Error;
 use tracing_subscriber::filter::ParseError;
@@ -58,7 +60,7 @@ impl Default for ObservabilityConfig {
 #[derive(Debug)]
 pub struct TracingGuard {
     prometheus_handle: Option<PrometheusHandle>,
-    _tracer_provider: Option<SdkTracerProvider>,
+    tracer_provider: Option<SdkTracerProvider>,
 }
 
 impl TracingGuard {
@@ -69,6 +71,14 @@ impl TracingGuard {
     pub fn flush_metrics(&self) {
         if let Some(handle) = &self.prometheus_handle {
             let _ = handle.render();
+        }
+    }
+}
+
+impl Drop for TracingGuard {
+    fn drop(&mut self) {
+        if let Some(provider) = self.tracer_provider.take() {
+            let _ = provider.shutdown();
         }
     }
 }
@@ -303,6 +313,12 @@ pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
                 message: source.to_string(),
             })?;
         let provider = SdkTracerProvider::builder()
+            .with_resource(
+                Resource::builder()
+                    .with_service_name("cc-lb")
+                    .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
+                    .build(),
+            )
             .with_batch_exporter(exporter)
             .build();
         let tracer = provider.tracer("cc-lb");
@@ -317,7 +333,7 @@ pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
 
     Ok(TracingGuard {
         prometheus_handle,
-        _tracer_provider: tracer_provider,
+        tracer_provider,
     })
 }
 

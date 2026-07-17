@@ -22,5 +22,30 @@ services:
       timeout: 3s
       retries: 10
 
+  # Trace collection backend. Point `[observability] otlp_endpoint` at
+  # http://127.0.0.1:4317 to export proxy spans here.
+  tempo:
+    image: grafana/tempo:3.0.0
+    container_name: cc-lb-tempo
+    restart: unless-stopped
+    # Local-dev only: root lets the container read the bind-mounted config
+    # under restrictive home permissions and write the local storage volume,
+    # mirroring Grafana's own local-storage compose examples.
+    user: root
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:3200:3200"
+    configs:
+      - source: tempo-config
+        target: /etc/tempo/tempo.yaml
+    volumes:
+      - cc-lb-tempo-data:/var/tempo
+
 volumes:
   cc-lb-postgres-data:
+  cc-lb-tempo-data:
+
+configs:
+  tempo-config:
+    file: ./deploy/tempo/tempo.yaml

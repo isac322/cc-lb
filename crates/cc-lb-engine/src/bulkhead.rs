@@ -333,35 +333,73 @@ where
     builder.build(connector)
 }
 
-async fn dispatch_with_client<C>(
+fn sanitized_url(url: &url::Url) -> String {
+    let mut url = url.clone();
+    url.set_query(None);
+    url.set_fragment(None);
+    url.into()
+}
+
+fn record_dispatch_failure(span: &tracing::Span, error_type: &str) {
+    span.record("otel.status_code", "ERROR");
+    span.record("error.type", error_type);
+}
+
+#[tracing::instrument(
+    name = "proxy.dispatch",
+    skip_all,
+    fields(
+        otel.kind = "client",
+        otel.name = %request.method(),
+        otel.status_code = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+        http.request.method = %request.method(),
+        http.response.status_code = tracing::field::Empty,
+        server.address = request.url().host_str().unwrap_or_default(),
+        server.port = request.url().port_or_known_default().unwrap_or_default(),
+        url.full = %sanitized_url(request.url()),
+        url.path = request.url().path(),
+    )
+)]
+pub(crate) async fn dispatch_with_client<C>(
     client: &Client<C, Full<Bytes>>,
     request: SignedRequest,
 ) -> Result<Response<Body>, DispatchError>
 where
     C: Connect + Clone + Send + Sync + 'static,
 {
+    let span = tracing::Span::current();
     let (url, method, headers, body) = request.into_parts();
-    let uri = url
-        .as_str()
-        .parse::<http::Uri>()
-        .map_err(|source| DispatchError::InvalidUri {
+    let uri = url.as_str().parse::<http::Uri>().map_err(|source| {
+        record_dispatch_failure(&span, "invalid_uri");
+        DispatchError::InvalidUri {
             reason: source.to_string(),
-        })?;
+        }
+    })?;
 
     let mut builder = Request::builder().method(method).uri(uri);
     copy_headers(headers, builder.headers_mut());
-    let request = builder
-        .body(Full::new(body))
-        .map_err(|source| DispatchError::RequestBuild {
+    if let Some(headers) = builder.headers_mut() {
+        cc_lb_observability::inject_current_trace_context(headers);
+    }
+    let request = builder.body(Full::new(body)).map_err(|source| {
+        record_dispatch_failure(&span, "request_build");
+        DispatchError::RequestBuild {
             reason: source.to_string(),
-        })?;
+        }
+    })?;
 
-    let response = client
-        .request(request)
-        .await
-        .map_err(|source| DispatchError::Transport {
+    let response = client.request(request).await.map_err(|source| {
+        record_dispatch_failure(&span, "transport");
+        DispatchError::Transport {
             reason: source.to_string(),
-        })?;
+        }
+    })?;
+    let status = response.status();
+    span.record("http.response.status_code", u64::from(status.as_u16()));
+    if status.is_client_error() || status.is_server_error() {
+        record_dispatch_failure(&span, status.as_str());
+    }
     let (parts, body) = response.into_parts();
     Ok(Response::from_parts(parts, Body::new(body)))
 }

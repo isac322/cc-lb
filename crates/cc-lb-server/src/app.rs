@@ -54,6 +54,7 @@ use tokio::sync::watch;
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
+use tracing::Instrument as _;
 
 #[cfg(feature = "postgres")]
 use crate::admin_ports::ServerRetainedPartialPort;
@@ -2347,6 +2348,23 @@ fn health_router(state: ProxyState) -> Router {
         .with_state(state)
 }
 
+fn proxy_route_template(path: &str) -> Option<&'static str> {
+    match path {
+        "/v1/messages" => Some("/v1/messages"),
+        "/v1/messages/count_tokens" => Some("/v1/messages/count_tokens"),
+        "/v1/models" => Some("/v1/models"),
+        "/v1/files" => Some("/v1/files"),
+        _ if path.starts_with("/v1/models/") => Some("/v1/models/{id}"),
+        _ if path.starts_with("/v1/files/") && path.ends_with("/content") => {
+            Some("/v1/files/{id}/content")
+        }
+        _ if path.starts_with("/v1/files/") => Some("/v1/files/{id}"),
+        _ if path.starts_with("/api/") => Some("/api/{*path}"),
+        _ if path.starts_with("/v1/") => Some("/v1/{*path}"),
+        _ => None,
+    }
+}
+
 fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
     let request_ids = RequestIdState::default();
     let drain_controller = state.drain_controller.clone();
@@ -2356,7 +2374,11 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             crate::drain::proxy_drain_middleware,
         ))
         .layer(HopByHopStripLayer::new())
-        .layer(cc_lb_observability::trace_layer(NoopObservabilityHook))
+        .layer(
+            cc_lb_observability::trace_layer(NoopObservabilityHook).make_span_with(
+                cc_lb_observability::ProxyMakeSpan::with_route_template(proxy_route_template),
+            ),
+        )
         .layer(middleware::from_fn_with_state(
             request_ids,
             request_id_middleware,
@@ -2524,7 +2546,10 @@ async fn lifecycle_handler(
 ) -> Response<Body> {
     let (parts, body) = request.into_parts();
     let cap = state.body_caps.for_path(parts.uri.path());
-    let body = match read_request_body(&parts.headers, body, cap).await {
+    let body = match read_request_body(&parts.headers, body, cap)
+        .instrument(tracing::info_span!("proxy.read_request_body"))
+        .await
+    {
         Ok(body) => body,
         Err(RequestBodyReadError::TooLarge) => {
             if let Some(observer) = parts.extensions.get::<cc_lb_engine::LifecycleContext>() {
