@@ -34,6 +34,7 @@ pub struct RecentEventsParams {
     pub upstream_id: Option<Uuid>,
     pub upstream: Option<RequestEventUpstream>,
     pub status_class: Option<StatusClass>,
+    pub source_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -43,6 +44,7 @@ pub struct StreamFilters {
     pub upstream: Option<RequestEventUpstream>,
     pub upstream_id: Option<Uuid>,
     pub status_class: Option<StatusClass>,
+    pub source_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +137,7 @@ pub fn parse_recent_params(
         upstream_id: filters.upstream_id,
         upstream: filters.upstream,
         status_class: filters.status_class,
+        source_kind: filters.source_kind,
     })
 }
 
@@ -193,7 +196,8 @@ pub async fn build_delta_events_payload(
         .map(|(cursor, _)| *cursor)
         .unwrap_or(query.since_cursor);
     let exhausted = rows.len() < query.limit;
-    let events = rows.into_iter().map(|(_, event)| event).collect();
+    let mut events: Vec<_> = rows.into_iter().map(|(_, event)| event).collect();
+    events.retain(|event| apply_filters_to_event(event, &query.filters));
     Ok(EventsDeltaPayload {
         events,
         next_cursor,
@@ -219,6 +223,7 @@ pub fn parse_stream_filters(map: &HashMap<String, String>) -> Result<StreamFilte
             Some(value) => Some(parse_status_class(value)?),
             None => None,
         },
+        source_kind: map.get("source_kind").cloned(),
     })
 }
 
@@ -246,6 +251,13 @@ pub fn apply_filters_to_event(event: &RequestEvent, filters: &StreamFilters) -> 
     if let Some(status_class) = filters.status_class
         && !status_class.matches(event.status)
     {
+        return false;
+    }
+    if let Some(source_kind) = filters.source_kind.as_deref() {
+        if source_kind != "all" && event.source_kind.as_deref() != Some(source_kind) {
+            return false;
+        }
+    } else if event.source_kind.as_deref() == Some("renewal") {
         return false;
     }
     true
@@ -281,6 +293,7 @@ impl RecentEventsParams {
             upstream: self.upstream,
             upstream_id: self.upstream_id,
             status_class: self.status_class,
+            source_kind: self.source_kind.clone(),
         }
     }
 

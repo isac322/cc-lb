@@ -12,8 +12,8 @@ use config_admin_common::{app, authed_json, temp_storage, test_state};
 use events_request_log_contracts_support::{
     BROAD_REQUEST_ID, CANCELED_REQUEST_ID, DROPPED_REQUEST_ID, EVENT_ID, MODEL,
     STRUCTURED_REQUEST_ID, THREAD_ID, UPSTREAM_ID, UPSTREAM_NAME, event_bus, publish_enriched,
-    publish_recent_contracts, read_message_updates_through_final_window, stream_response,
-    wait_for_initial_cursor,
+    publish_recent_contracts, publish_source_kind_contracts,
+    read_message_updates_through_final_window, stream_response, wait_for_initial_cursor,
 };
 
 #[tokio::test]
@@ -138,6 +138,50 @@ async fn events_recent_returns_structured_429_and_distinct_499_without_control_f
         .await
         .expect("all request-log contract rows persist");
     assert_eq!(rows.len(), 4);
+}
+
+#[tokio::test]
+async fn events_recent_excludes_renewal_by_default_and_includes_when_requested() {
+    let (_dir, storage) = temp_storage().await;
+    publish_source_kind_contracts(storage.as_ref()).await;
+    let state = test_state(Config::default(), Some(Arc::clone(&storage)));
+
+    let (status, _, default_resp, _) = authed_json(
+        app(state.clone()),
+        "GET",
+        "/admin/events/recent?since_unix_secs=1700000000&until_unix_secs=1900000000&limit=10",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let events = default_resp["events"].as_array().expect("events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["request_id"], "req-normal");
+
+    let (status, _, all_resp, _) = authed_json(
+        app(state.clone()),
+        "GET",
+        "/admin/events/recent?since_unix_secs=1700000000&until_unix_secs=1900000000&limit=10&source_kind=all",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let events = all_resp["events"].as_array().expect("events");
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().any(|e| e["request_id"] == "req-normal"));
+    assert!(events.iter().any(|e| e["request_id"] == "req-renewal"));
+
+    let (status, _, renewal_resp, _) = authed_json(
+        app(state),
+        "GET",
+        "/admin/events/recent?since_unix_secs=1700000000&until_unix_secs=1900000000&limit=10&source_kind=renewal",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let events = renewal_resp["events"].as_array().expect("events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["request_id"], "req-renewal");
 }
 
 fn event_by_request_id<'a>(
