@@ -23,6 +23,10 @@ use crate::{RequestEvent, RequestEventUpstream};
 pub struct RequestEventPartial {
     pub event_id: String,
     pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref_id: Option<String>,
     pub ts: u64,
     pub ts_ms: u64,
     /// Millisecond timestamp of the most recent lifecycle event merged into
@@ -193,5 +197,52 @@ impl RequestEventUpdate {
                 event.event_id.as_deref().unwrap_or("")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RequestEventPartial;
+
+    #[test]
+    fn request_event_partial_source_metadata_roundtrips() {
+        let partial = RequestEventPartial {
+            event_id: "event-req-source".to_owned(),
+            request_id: "req-source".to_owned(),
+            source_kind: Some("proxy".to_owned()),
+            source_ref_id: Some("ingress-123".to_owned()),
+            ..RequestEventPartial::default()
+        };
+
+        let json = serde_json::to_string(&partial).expect("serialize partial");
+        let restored: RequestEventPartial =
+            serde_json::from_str(&json).expect("deserialize partial");
+
+        assert_eq!(partial, restored);
+    }
+
+    #[test]
+    fn request_event_partial_source_metadata_defaults_without_legacy_json_fields() {
+        let legacy_partial = r#"{
+            "event_id":"event-req-legacy",
+            "request_id":"req-legacy",
+            "ts":1700000000,
+            "ts_ms":1700000000000,
+            "last_update_ms":1700000000010,
+            "elapsed_ms":10,
+            "stream":false
+        }"#;
+        let partial: RequestEventPartial =
+            serde_json::from_str(legacy_partial).expect("deserialize legacy partial");
+
+        assert_eq!(partial.source_kind, None);
+        assert_eq!(partial.source_ref_id, None);
+
+        let partial_json = serde_json::to_value(&partial).expect("serialize legacy partial");
+        let partial_object = partial_json
+            .as_object()
+            .expect("request event partial serializes to object");
+        assert!(!partial_object.contains_key("source_kind"));
+        assert!(!partial_object.contains_key("source_ref_id"));
     }
 }

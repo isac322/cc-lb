@@ -99,6 +99,8 @@ struct Partial {
     event_id: EventId,
     inserted_at: Option<Instant>,
     request_id: Option<String>,
+    source_kind: Option<String>,
+    source_ref_id: Option<String>,
     ts_ms: u64,
     last_partial_emit_ts: Option<Instant>,
     stream: bool,
@@ -225,6 +227,8 @@ impl Partial {
                 .request_id
                 .clone()
                 .unwrap_or_else(|| "req_unknown_shadow".to_owned()),
+            source_kind: self.source_kind.clone(),
+            source_ref_id: self.source_ref_id.clone(),
             ts: ts_ms / 1_000,
             ts_ms,
             last_update_ms: now_ms,
@@ -783,11 +787,15 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             request_id,
             ts_ms,
             stream,
+            source_kind,
+            source_ref_id,
             ..
         } => {
             partial.request_id = Some(request_id);
             partial.ts_ms = ts_ms;
             partial.stream = stream;
+            partial.source_kind = source_kind;
+            partial.source_ref_id = source_ref_id;
         }
         LifecycleEvent::ParseCompleted {
             result: Ok(info), ..
@@ -1014,6 +1022,8 @@ fn finalize_base(
         ts: ts_ms / 1_000,
         ts_ms: Some(ts_ms),
         request_id,
+        source_kind: partial.source_kind.clone(),
+        source_ref_id: partial.source_ref_id.clone(),
         principal_id,
         key_id,
         principal_kind,
@@ -1344,6 +1354,8 @@ mod tests {
             request_id: "req-1".into(),
             ts_ms: 1_730_000_000_000,
             stream: false,
+            source_kind: None,
+            source_ref_id: None,
         })
         .await
         .unwrap();
@@ -1385,6 +1397,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn source_metadata_from_request_started_propagates_to_final_event() {
+        let (tx, rx) = mpsc::channel(4);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let event_id = eid("source-metadata");
+
+        tx.send(LifecycleEvent::RequestStarted {
+            event_id: event_id.clone(),
+            request_id: "req-source-metadata".to_owned(),
+            ts_ms: 1_730_000_000_000,
+            stream: false,
+            source_kind: Some("proxy".to_owned()),
+            source_ref_id: Some("ingress-123".to_owned()),
+        })
+        .await
+        .expect("send request started");
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id,
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 42,
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+        })
+        .await
+        .expect("send request terminated");
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source_kind.as_deref(), Some("proxy"));
+        assert_eq!(rows[0].source_ref_id.as_deref(), Some("ingress-123"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn stream_error_terminated_carries_error_type_and_message() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
@@ -1395,6 +1447,8 @@ mod tests {
             request_id: "req-2".into(),
             ts_ms: 1_730_000_000_000,
             stream: true,
+            source_kind: None,
+            source_ref_id: None,
         })
         .await
         .unwrap();
@@ -1445,6 +1499,8 @@ mod tests {
             request_id: "req-private-error".into(),
             ts_ms: 1_730_000_000_000,
             stream: false,
+            source_kind: None,
+            source_ref_id: None,
         })
         .await
         .unwrap();
@@ -1493,6 +1549,8 @@ mod tests {
             request_id: "req-3".into(),
             ts_ms: 1_730_000_000_000,
             stream: false,
+            source_kind: None,
+            source_ref_id: None,
         })
         .await
         .unwrap();
@@ -1593,6 +1651,8 @@ mod tests {
             request_id: "late-start-should-not-reclassify".into(),
             ts_ms: 1_730_000_000_000,
             stream: false,
+            source_kind: None,
+            source_ref_id: None,
         })
         .await
         .unwrap();
@@ -1651,6 +1711,8 @@ mod tests {
             request_id: "req-sse-1".into(),
             ts_ms: 1_730_000_000_000,
             stream: false,
+            source_kind: None,
+            source_ref_id: None,
         })
         .await
         .unwrap();
@@ -1714,6 +1776,8 @@ mod tests {
             request_id: "req-baseline".into(),
             ts_ms: 1_730_000_000_000,
             stream: true,
+            source_kind: None,
+            source_ref_id: None,
         })
         .await
         .unwrap();
@@ -1922,6 +1986,8 @@ mod tests {
             request_id: "req-live-1".into(),
             ts_ms: 1_730_000_000_000,
             stream: true,
+            source_kind: None,
+            source_ref_id: None,
         })
         .await
         .unwrap();
@@ -2141,6 +2207,8 @@ mod tests {
             request_id: "req-failure-control".to_owned(),
             ts_ms: 1_730_000_000_000,
             stream: false,
+            source_kind: None,
+            source_ref_id: None,
         })
         .await
         .unwrap();
@@ -2229,6 +2297,8 @@ mod tests {
             request_id: "req-inline-pricing-delay".into(),
             ts_ms: 1_730_000_000_000,
             stream: false,
+            source_kind: None,
+            source_ref_id: None,
         });
         bus.publish_lifecycle(LifecycleEvent::RouteCompleted {
             event_id: event_id.clone(),

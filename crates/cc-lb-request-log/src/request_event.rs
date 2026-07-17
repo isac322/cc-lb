@@ -11,6 +11,10 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ts_ms: Option<u64>,
     pub principal_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -181,4 +185,39 @@ pub struct RequestEvent {
     pub upstream_error_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iterations: Option<JsonValue>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RequestEvent;
+
+    #[test]
+    fn request_event_source_metadata_roundtrips() {
+        let event = RequestEvent {
+            source_kind: Some("proxy".to_owned()),
+            source_ref_id: Some("ingress-123".to_owned()),
+            ..RequestEvent::default()
+        };
+
+        let json = serde_json::to_string(&event).expect("serialize request event");
+        let restored: RequestEvent = serde_json::from_str(&json).expect("deserialize request event");
+
+        assert_eq!(event, restored);
+    }
+
+    #[test]
+    fn request_event_source_metadata_defaults_without_legacy_json_fields() {
+        let legacy_event = r#"{"status":200,"duration_ms":0}"#;
+        let event: RequestEvent = serde_json::from_str(legacy_event).expect("deserialize legacy");
+
+        assert_eq!(event.source_kind, None);
+        assert_eq!(event.source_ref_id, None);
+
+        let event_json = serde_json::to_value(&event).expect("serialize legacy");
+        let event_object = event_json
+            .as_object()
+            .expect("request event serializes to object");
+        assert!(!event_object.contains_key("source_kind"));
+        assert!(!event_object.contains_key("source_ref_id"));
+    }
 }

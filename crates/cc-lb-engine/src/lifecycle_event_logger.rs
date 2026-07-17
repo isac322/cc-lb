@@ -74,6 +74,8 @@ mod tests {
             request_id: request_id.to_owned(),
             ts_ms: 0,
             stream: false,
+            source_kind: None,
+            source_ref_id: None,
         }
     }
 
