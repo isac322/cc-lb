@@ -1,0 +1,5 @@
+event: message_start
+data: {"type":"message_start"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","delta":{"text":"cut off"}}

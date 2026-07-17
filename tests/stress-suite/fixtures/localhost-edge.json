@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "profile": "fixture",
+  "seed": 1,
+  "edges": [
+    {
+      "edge_id": "client-to-replica-localhost",
+      "kind": "data",
+      "sender": "client",
+      "receiver": "replica",
+      "direction": "egress",
+      "transport": "localhost",
+      "impairment_id": "client-replica-delay",
+      "impairment": {
+        "kind": "delay",
+        "delay_ms": 40
+      },
+      "sender_netns": "ccstress_fixture_client",
+      "destination_ipv4": "127.0.0.1",
+      "classid": "1:10"
+    }
+  ]
+}
