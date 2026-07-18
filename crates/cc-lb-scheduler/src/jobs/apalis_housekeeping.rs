@@ -368,7 +368,7 @@ impl ApalisHousekeepingJobHandler<Postgres> {
         };
         sqlx::query(
             "UPDATE apalis.jobs
-             SET status = 'Killed', done_at = $1, lock_by = NULL, lock_at = NULL, last_result = $3
+             SET status = 'Killed', done_at = $1, lock_by = NULL, lock_at = NULL, last_result = $3::jsonb
              WHERE status = 'Running'
                AND lock_at IS NOT NULL
                AND idempotency_key LIKE $4
@@ -452,7 +452,7 @@ impl ApalisHousekeepingJobHandler<Postgres> {
                  lock_by = NULL,
                  lock_at = NULL,
                  attempts = attempts + 1,
-                 last_result = $4
+                 last_result = $4::jsonb
              WHERE status = 'Running'
                AND lock_at IS NOT NULL
                AND COALESCE(idempotency_key, '') NOT LIKE $3
