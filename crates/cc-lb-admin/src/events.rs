@@ -305,6 +305,7 @@ impl RecentEventsParams {
             until_event_id: self.until_event_id.clone(),
             limit: self.limit,
             filters: self.stream_filters().storage_filters(),
+            source_kind: self.source_kind.clone(),
         }
     }
 }

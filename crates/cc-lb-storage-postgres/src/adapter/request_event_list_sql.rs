@@ -89,6 +89,11 @@ FROM ( \
       AND ($3::text IS NULL OR r.principal_id = $3) \
       AND ($4::text IS NULL OR r.model = $4) \
       AND ($5::uuid IS NULL OR r.upstream_id = $5) \
+      AND ( \
+            $12::int = 1 \
+         OR ($13::text IS NOT NULL AND r.source_kind = $13) \
+         OR ($13::text IS NULL AND (r.source_kind IS NULL OR r.source_kind <> 'renewal')) \
+      ) \
 ) matched \
 WHERE ($6::text IS NULL OR (payload_jsonb ->> 'upstream') = $6) \
   AND ($7::int IS NULL OR (payload_jsonb ->> 'status')::int BETWEEN $7 AND $8) \
@@ -174,6 +179,7 @@ pub(super) async fn list_request_events(
         .status_class
         .map(status_class_range)
         .map_or((None, None), |(min, max)| (Some(min), Some(max)));
+    let (source_kind_all, source_kind_exact) = source_kind_filter(query.source_kind.as_deref());
 
     let rows = sqlx::query_as::<_, ListRow>(LIST_REQUEST_EVENTS_SQL)
         .bind(since)
@@ -192,6 +198,8 @@ pub(super) async fn list_request_events(
         )
         .bind(query.until_event_id.as_deref())
         .bind(u64_to_i64(query.limit as u64, "request event list limit")?)
+        .bind(i32::from(source_kind_all))
+        .bind(source_kind_exact)
         .fetch_all(&storage.pool)
         .await
         .map_err(map_sqlx_error)?;
@@ -228,5 +236,13 @@ fn status_class_range(class: StatusClass) -> (i32, i32) {
         StatusClass::ThreeXx => (300, 399),
         StatusClass::FourXx => (400, 499),
         StatusClass::FiveXx => (500, 599),
+    }
+}
+
+fn source_kind_filter(source_kind: Option<&str>) -> (bool, Option<&str>) {
+    match source_kind {
+        Some("all") => (true, None),
+        Some(kind) => (false, Some(kind)),
+        None => (false, None),
     }
 }

@@ -78,6 +78,11 @@ pub struct RequestEventListQuery {
     pub until_event_id: Option<String>,
     pub limit: usize,
     pub filters: RequestEventStreamFilters,
+    /// Source-kind filter for the list view:
+    /// - `None` excludes `renewal` rows (the default admin request-log view)
+    /// - `Some("all")` includes every source kind
+    /// - `Some(kind)` returns only rows whose `source_kind` equals `kind`
+    pub source_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
