@@ -222,6 +222,13 @@ impl Fixture {
             cancel: CancellationToken::new(),
             replica_id: None,
             price_catalog: cc_lb_pricing::global_catalog().clone(),
+            key_store: Arc::new(cc_lb_control::api_keys::key_store::KeyStore::new(
+                self.storage.clone(),
+            )),
+            limit_engine: cc_lb_control::api_keys::limit_engine::LimitEngine::new(
+                Arc::new(cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
+                Arc::new(SystemClock),
+            ),
             dynamic_view: self.dynamic_view.clone(),
             keepalive_dispatcher,
             clock: Arc::new(SystemClock),

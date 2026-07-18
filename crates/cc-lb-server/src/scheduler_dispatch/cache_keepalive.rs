@@ -1,5 +1,8 @@
+use cc_lb_control::api_keys::limit_engine::Reservation;
 use cc_lb_control::api_keys::principal_view::PrincipalStatus;
-use cc_lb_engine::cache_keepalive::{DispatchOutcome, PersistedRequestSnapshot, RequestSnapshot};
+use cc_lb_engine::cache_keepalive::{
+    DispatchOutcome, KeepaliveDispatchContext, PersistedRequestSnapshot, RequestSnapshot,
+};
 use cc_lb_engine::clock::unix_secs;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
@@ -89,7 +92,27 @@ impl SchedulerDispatch {
             }
         };
 
-        match self.keepalive_dispatcher.dispatch(&snapshot).await {
+        let reservation = match self.reserve_cache_keepalive(&record, &snapshot).await {
+            Ok(reservation) => reservation,
+            Err(_) => {
+                self.mark_cache_keepalive_terminal(
+                    &job,
+                    CacheKeepaliveTerminalReason::DispatchError,
+                )
+                .await?;
+                return Ok(JobOutcome::Done);
+            }
+        };
+        let source_ref_id = format!("{}:{}", job.session_key_hash, job.generation);
+
+        match self
+            .keepalive_dispatcher
+            .dispatch(
+                &snapshot,
+                KeepaliveDispatchContext::new(reservation, source_ref_id),
+            )
+            .await
+        {
             DispatchOutcome::CacheHit { cache_anchor_age } => {
                 self.reschedule_cache_keepalive_hit(job, record, snapshot, cache_anchor_age)
                     .await
@@ -127,6 +150,61 @@ impl SchedulerDispatch {
             Some(allowed) if !allowed.is_empty() => allowed.contains(&record.upstream_id),
             _ => true,
         }
+    }
+
+    async fn reserve_cache_keepalive(
+        &self,
+        record: &CacheKeepaliveSessionRecord,
+        snapshot: &RequestSnapshot,
+    ) -> SchedulerResult<Option<Reservation>> {
+        let Some(accounting_key_id) = record.accounting_key_id.as_deref() else {
+            return Ok(None);
+        };
+        let Some(key_record) = self
+            .key_store
+            .get(&record.principal_id, accounting_key_id)
+            .await
+            .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?
+        else {
+            return Err(cc_lb_scheduler::error::SchedulerError::Job(
+                "cache keepalive accounting key is unavailable".to_owned(),
+            ));
+        };
+        let keepalive_body = snapshot
+            .build_keepalive_body()
+            .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?;
+        let value: serde_json::Value = sonic_rs::from_slice(&keepalive_body)
+            .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?;
+        let model = value
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let max_tokens = value
+            .get("max_tokens")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let cost_estimate_micros = self
+            .price_catalog
+            .estimate_max(
+                model,
+                4_000,
+                u64::try_from(max_tokens.max(0)).unwrap_or(0),
+                None,
+            )
+            .map(|cost| i64::try_from(cost).unwrap_or(i64::MAX));
+        let view = self.dynamic_view.load();
+        self.limit_engine
+            .reserve(
+                view.principal_view.as_ref(),
+                &key_record,
+                &record.principal_id,
+                model,
+                max_tokens,
+                4_000,
+                cost_estimate_micros,
+            )
+            .map(Some)
+            .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(format!("{error:?}")))
     }
 
     async fn reschedule_cache_keepalive_hit(

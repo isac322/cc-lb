@@ -1626,6 +1626,8 @@ async fn build_app_with_storage_inner(
             cancel: scheduler_cancel.clone(),
             replica_id: scheduler_replica_id,
             price_catalog: price_catalog.clone(),
+            key_store: key_store.clone(),
+            limit_engine: limit_engine.clone(),
             dynamic_view: dynamic_view_holder.clone(),
             keepalive_dispatcher,
             clock: clock.clone(),

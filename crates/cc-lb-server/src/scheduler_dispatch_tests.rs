@@ -4,6 +4,8 @@ use super::*;
 mod support;
 
 use ::http::StatusCode;
+use cc_lb_contract::{Limit, LimitKind};
+use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_engine::cache_keepalive::CacheKeepaliveEnqueuer;
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -53,6 +55,206 @@ async fn durable_cache_keepalive_job_decrypts_resigns_dispatches_and_reschedules
     assert!(body.get("stream").is_none());
     let signer_calls = fixture.signer_calls.lock().expect("signer calls lock");
     assert_eq!(signer_calls.as_slice(), &["fake-upstream:"]);
+}
+
+#[tokio::test]
+async fn cache_keepalive_missing_accounting_key_terminalizes_without_dispatch() {
+    let fixture = Fixture::new().await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    sqlx::query(
+        "UPDATE cache_keepalive_sessions SET accounting_key_id = ? WHERE session_key_hash = ?",
+    )
+    .bind("missing-accounting-key")
+    .bind("session-hash")
+    .execute(fixture.storage.pool())
+    .await
+    .expect("set missing accounting key");
+    let dispatch = fixture.dispatch(pusher);
+
+    let outcome = dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("dispatch cache keepalive job");
+
+    assert!(matches!(outcome, JobOutcome::Done));
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        record.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::DispatchError)
+    );
+    assert!(
+        fixture
+            .http
+            .requests
+            .lock()
+            .expect("requests lock")
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .signer_calls
+            .lock()
+            .expect("signer calls lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn cache_keepalive_accounting_key_uses_real_reserve_before_dispatch() {
+    let fixture = Fixture::new().await;
+    let key_store = KeyStore::new(fixture.storage.clone());
+    let (record, _) = key_store
+        .create(
+            "principal",
+            CreateParams {
+                upstream_kind: cc_lb_storage_api::types::UpstreamKind::AnthropicKey,
+                label: "renewal accounting".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: vec![Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 0,
+                }],
+                principal_kind: cc_lb_contract::PrincipalKindLite::Machine,
+            },
+        )
+        .await
+        .expect("create accounting key");
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    let mut request = fixture.enqueue_request();
+    request.accounting_key_id = Some(record.key_hash_b64);
+    enqueuer
+        .enqueue_cache_keepalive(request)
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    let dispatch = fixture.dispatch(pusher);
+
+    let outcome = dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("dispatch cache keepalive job");
+
+    assert!(matches!(outcome, JobOutcome::Done));
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        record.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::DispatchError)
+    );
+    assert!(
+        fixture
+            .http
+            .requests
+            .lock()
+            .expect("requests lock")
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .signer_calls
+            .lock()
+            .expect("signer calls lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn cache_keepalive_redelivered_job_dispatches_once() {
+    let fixture = Fixture::new().await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    let dispatch = fixture.dispatch(pusher);
+
+    let first = dispatch
+        .dispatch_cache_keepalive(job.clone())
+        .await
+        .expect("dispatch first delivery");
+    let redelivery = dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("dispatch redelivery");
+
+    assert!(matches!(first, JobOutcome::Done));
+    assert!(matches!(redelivery, JobOutcome::Noop));
+    assert_eq!(
+        fixture.http.requests.lock().expect("requests lock").len(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .signer_calls
+            .lock()
+            .expect("signer calls lock")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cache_keepalive_running_turn_does_not_redispatch() {
+    let fixture = Fixture::new().await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    sqlx::query(
+        "UPDATE cache_keepalive_sessions SET enqueue_state = 'running', running_since_unix_secs = 1 WHERE session_key_hash = ?",
+    )
+    .bind("session-hash")
+    .execute(fixture.storage.pool())
+    .await
+    .expect("mark turn running");
+    let dispatch = fixture.dispatch(pusher);
+
+    let outcome = dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("dispatch running turn");
+
+    assert!(matches!(outcome, JobOutcome::Noop));
+    assert!(
+        fixture
+            .http
+            .requests
+            .lock()
+            .expect("requests lock")
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .signer_calls
+            .lock()
+            .expect("signer calls lock")
+            .is_empty()
+    );
 }
 
 #[tokio::test]

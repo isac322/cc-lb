@@ -30,5 +30,7 @@ pub(crate) use lifecycle_glue::{
 pub use metrics::CancelReason;
 pub(crate) use metrics::record_cancelled;
 pub use request_snapshot::{PersistedRequestSnapshot, RequestSnapshot, SnapshotError};
-pub use scheduler::{DispatchOutcome, KeepaliveDispatcher, ScheduleParams};
+pub use scheduler::{
+    DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher, ScheduleParams,
+};
 pub use session_key::SessionKey;

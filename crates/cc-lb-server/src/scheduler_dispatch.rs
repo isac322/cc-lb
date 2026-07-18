@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, Config};
+use cc_lb_control::api_keys::key_store::KeyStore;
+use cc_lb_control::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::DynamicViewHolder;
 use cc_lb_engine::cache_keepalive::KeepaliveDispatcher;
 use cc_lb_engine::clock::ClockHandle;
@@ -50,6 +52,8 @@ pub(crate) struct SchedulerDispatchDeps {
     pub cancel: CancellationToken,
     pub replica_id: Option<Uuid>,
     pub price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
+    pub key_store: Arc<KeyStore>,
+    pub limit_engine: Arc<LimitEngine>,
     pub dynamic_view: Arc<DynamicViewHolder>,
     pub keepalive_dispatcher: Arc<dyn KeepaliveDispatcher>,
     pub clock: ClockHandle,
@@ -72,6 +76,8 @@ pub(super) struct SchedulerDispatch {
     pub(super) cancel: CancellationToken,
     pub(super) replica_id: Option<Uuid>,
     pub(super) price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
+    pub(super) key_store: Arc<KeyStore>,
+    pub(super) limit_engine: Arc<LimitEngine>,
     pub(super) http: JsonHttpClient,
     pub(super) dynamic_view: Arc<DynamicViewHolder>,
     pub(super) keepalive_dispatcher: Arc<dyn KeepaliveDispatcher>,
@@ -106,6 +112,8 @@ impl SchedulerDispatch {
             cancel: deps.cancel,
             replica_id: deps.replica_id,
             price_catalog: deps.price_catalog,
+            key_store: deps.key_store,
+            limit_engine: deps.limit_engine,
             http: json_http_client(),
             dynamic_view: deps.dynamic_view,
             keepalive_dispatcher: deps.keepalive_dispatcher,

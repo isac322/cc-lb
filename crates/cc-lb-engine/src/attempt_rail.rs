@@ -11,19 +11,25 @@ use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
 
 /// Input to a proxy attempt before its reservation becomes lifecycle-owned.
 pub struct AttemptIntent {
-    reservation: Reservation,
+    reservation: Option<Reservation>,
 }
 
 impl AttemptIntent {
     /// Creates an intent carrying a required reservation.
     pub fn from_reservation(reservation: Reservation) -> Self {
-        Self { reservation }
+        Self {
+            reservation: Some(reservation),
+        }
+    }
+
+    pub(crate) fn observe_only() -> Self {
+        Self { reservation: None }
     }
 
     /// Moves the reservation into the state that survives all retry attempts.
     pub fn into_reserved(self) -> Reserved {
         Reserved {
-            reservation: Some(self.reservation),
+            reservation: self.reservation,
         }
     }
 }

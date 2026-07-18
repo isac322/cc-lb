@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use cc_lb_engine::cache_keepalive::{DispatchOutcome, KeepaliveDispatcher};
+use cc_lb_engine::cache_keepalive::{
+    DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher,
+};
 use cc_lb_engine::clock::{Clock, unix_secs};
 use cc_lb_storage_api::{
     CacheKeepaliveEnqueueState, CacheKeepaliveHitRefreshRequest, CacheKeepaliveSessionStatus,
@@ -16,7 +18,13 @@ async fn cache_hit_reschedules_current_generation_without_accounting_event() {
     let session = fixture.schedule_session().await;
 
     // When
-    let outcome = fixture.dispatcher.dispatch(&fixture.snapshot).await;
+    let outcome = fixture
+        .dispatcher
+        .dispatch(
+            &fixture.snapshot,
+            KeepaliveDispatchContext::new(None, "renewal-session:1".to_owned()),
+        )
+        .await;
     let now = unix_secs(fixture.clock.now());
     let refreshed = fixture
         .storage
@@ -62,7 +70,13 @@ async fn cache_miss_terminalizes_current_generation_without_accounting_event() {
     let session = fixture.schedule_session().await;
 
     // When
-    let outcome = fixture.dispatcher.dispatch(&fixture.snapshot).await;
+    let outcome = fixture
+        .dispatcher
+        .dispatch(
+            &fixture.snapshot,
+            KeepaliveDispatchContext::new(None, "renewal-session:1".to_owned()),
+        )
+        .await;
     let terminalized = fixture
         .storage
         .mark_cache_keepalive_terminal(

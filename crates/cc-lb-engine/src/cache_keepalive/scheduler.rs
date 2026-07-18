@@ -4,6 +4,8 @@ use async_trait::async_trait;
 
 use cc_lb_storage_api::{CacheKeepaliveConfig, CacheTtl};
 
+use crate::api_keys::limit_engine::Reservation;
+
 use super::request_snapshot::RequestSnapshot;
 
 #[derive(Clone, Debug)]
@@ -33,7 +35,33 @@ impl ScheduleParams {
 
 #[async_trait]
 pub trait KeepaliveDispatcher: Send + Sync + 'static {
-    async fn dispatch(&self, snapshot: &RequestSnapshot) -> DispatchOutcome;
+    async fn dispatch(
+        &self,
+        snapshot: &RequestSnapshot,
+        context: KeepaliveDispatchContext,
+    ) -> DispatchOutcome;
+}
+
+pub struct KeepaliveDispatchContext {
+    reservation: Option<Reservation>,
+    source_ref_id: String,
+}
+
+impl KeepaliveDispatchContext {
+    pub fn new(reservation: Option<Reservation>, source_ref_id: String) -> Self {
+        Self {
+            reservation,
+            source_ref_id,
+        }
+    }
+
+    pub fn source_ref_id(&self) -> &str {
+        &self.source_ref_id
+    }
+
+    pub(crate) fn into_reservation(self) -> Option<Reservation> {
+        self.reservation
+    }
 }
 
 pub enum DispatchOutcome {
