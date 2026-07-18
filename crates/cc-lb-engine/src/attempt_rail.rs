@@ -137,7 +137,7 @@ impl ResponseAccountingGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::Reserved;
+    use super::{AttemptIntent, Reserved};
 
     #[test]
     fn reserved_begins_multiple_scoped_attempts_before_finalization() {
@@ -164,5 +164,20 @@ mod tests {
         accounting_guard.forget();
 
         // Then the move into forget makes a second handoff impossible.
+    }
+
+    #[test]
+    fn warmup_intent_contract_observe_only_rail_flow() {
+        // Given: an AttemptIntent constructed via observe_only (no reservation)
+        let intent = AttemptIntent::observe_only();
+
+        // When: the intent moves through the full rail
+        let reserved = intent.into_reserved();
+        let _scoped = reserved.begin_attempt();
+        let accounting_guard = reserved.into_response_accounting_guard();
+
+        // Then: the accounting guard has no reservation to forget
+        assert_eq!(accounting_guard.reservation_id(), None);
+        accounting_guard.forget();
     }
 }
