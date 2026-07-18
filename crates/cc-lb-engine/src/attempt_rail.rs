@@ -146,11 +146,11 @@ mod tests {
 
         // When
         let first_attempt = reserved.begin_attempt();
-        drop(first_attempt);
+        let _ = first_attempt;
         let retry_attempt = reserved.begin_attempt();
 
         // Then
-        drop(retry_attempt);
+        let _ = retry_attempt;
         let accounting_guard = reserved.into_response_accounting_guard();
         accounting_guard.forget();
     }
