@@ -84,6 +84,21 @@ async fn replace_roundtrips_optional_accounting_key_id(storage: &PostgresStorage
 
     assert_eq!(with_key.accounting_key_id.as_deref(), Some("key-live-123"));
     assert_eq!(without_key.accounting_key_id, None);
+
+    // This conformance suite shares one schema across steps. Terminalize these
+    // sessions so they do not linger as active+pending rows and inflate the
+    // global count asserted by purge_stale_pending_keeps_enqueued_work.
+    for session_key_hash in ["keyed-session", "unkeyed-session"] {
+        assert!(
+            storage
+                .mark_latest_cache_keepalive_terminal(
+                    session_key_hash,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    120,
+                )
+                .await?
+        );
+    }
     Ok(())
 }
 
