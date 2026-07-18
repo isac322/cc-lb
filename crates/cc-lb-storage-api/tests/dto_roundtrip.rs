@@ -340,6 +340,7 @@ backend = 'sqlite'"
     assert_json_roundtrip(CacheKeepaliveSessionRecord {
         session_key_hash: "session-hash".to_owned(),
         principal_id: "principal_a".to_owned(),
+        accounting_key_id: Some("key_a".to_owned()),
         upstream_id: Uuid::from_u128(0x77777777777777777777777777777777),
         generation: 4,
         refresh_count: 2,
@@ -349,6 +350,7 @@ backend = 'sqlite'"
         ttl: CacheTtl::Ttl5m,
         status: CacheKeepaliveSessionStatus::Terminal,
         enqueue_state: CacheKeepaliveEnqueueState::Enqueued,
+        running_since_unix_secs: Some(1_716_000_250),
         current_job_key: "cache_keepalive:session-hash:4".to_owned(),
         encrypted_payload: vec![1, 2, 3, 4],
         terminal_reason: Some(CacheKeepaliveTerminalReason::CacheMiss),
@@ -414,6 +416,8 @@ fn batch_b_wire_snapshots_are_stable() {
     let request_event = RequestEvent {
         ts: 1_700_000_000,
         request_id: "req_batch_b".to_owned(),
+        source_kind: Some("renewal".to_owned()),
+        source_ref_id: Some("session-hash:4".to_owned()),
         ts_ms: Some(1_700_000_000_123),
         principal_id: Some("principal_batch_b".to_owned()),
         key_id: Some("key_batch_b".to_owned()),
@@ -540,6 +544,8 @@ fn batch_b_wire_snapshots_are_stable() {
     let request_event_json = json!({
         "ts": 1_700_000_000u64,
         "request_id": "req_batch_b",
+        "source_kind": "renewal",
+        "source_ref_id": "session-hash:4",
         "ts_ms": 1_700_000_000_123u64,
         "principal_id": "principal_batch_b",
         "key_id": "key_batch_b",
