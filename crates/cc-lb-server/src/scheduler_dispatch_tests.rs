@@ -230,9 +230,11 @@ async fn renewal_reconcile_false_errors_before_forget_and_lifecycle_publish() {
 }
 
 #[tokio::test]
-async fn observe_only_renewal_writes_durable_cost_without_limit_decision() {
+async fn observe_only_renewal_writes_priced_durable_row_and_projection_without_limit_decision() {
     // Given
+    install_test_pricing();
     let fixture = Fixture::new().await;
+    fixture.http.return_cache_hit_usage(10, 40, 10);
     let bus = fixture.event_bus();
     let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = bus.subscribe_lifecycle() else {
         panic!("expected in-memory lifecycle receiver");
@@ -261,12 +263,184 @@ async fn observe_only_renewal_writes_durable_cost_without_limit_decision() {
         .await
         .expect("query renewal events");
     assert_eq!(events[0].key_id, None);
-    assert_eq!(events[0].cost_usd_micros, Some(0));
+    assert_eq!(events[0].cost_usd_micros, Some(140));
+    let projection_key_id: Option<String> = sqlx::query_scalar(
+        "SELECT accounting_key_id FROM cache_keepalive_turns WHERE source_ref_id = ?",
+    )
+    .bind("session-hash:1")
+    .fetch_one(fixture.storage.pool())
+    .await
+    .expect("load observe-only turn projection key");
+    let projection_cost_micros: i64 =
+        sqlx::query_scalar("SELECT cost_micros FROM cache_keepalive_turns WHERE source_ref_id = ?")
+            .bind("session-hash:1")
+            .fetch_one(fixture.storage.pool())
+            .await
+            .expect("load observe-only turn projection cost");
+    assert_eq!(projection_key_id, None);
+    assert_eq!(projection_cost_micros, 140);
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load rescheduled observe-only session")
+        .expect("observe-only session exists");
+    assert_eq!(record.accounting_key_id, None);
     let mut saw_limit_decision = false;
     while let Ok(event) = lifecycle_rx.try_recv() {
         saw_limit_decision |= matches!(event, LifecycleEvent::LimitDecision { .. });
     }
     assert!(!saw_limit_decision);
+}
+
+#[tokio::test]
+async fn repeated_null_key_renewals_remain_observe_only() {
+    // Given
+    install_test_pricing();
+    let fixture = Fixture::new().await;
+    fixture.http.return_cache_hit_usage(10, 40, 10);
+    let bus = fixture.event_bus();
+    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = bus.subscribe_lifecycle() else {
+        panic!("expected in-memory lifecycle receiver");
+    };
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue initial observe-only keepalive");
+    let dispatch = fixture.dispatch(Arc::clone(&pusher));
+
+    // When
+    let first_outcome = dispatch
+        .dispatch_cache_keepalive(fixture.pending_keepalive_job(1).await)
+        .await
+        .expect("dispatch first observe-only renewal");
+    let second_outcome = dispatch
+        .dispatch_cache_keepalive(fixture.pending_keepalive_job(2).await)
+        .await
+        .expect("dispatch repeated observe-only renewal");
+
+    // Then
+    assert!(matches!(first_outcome, JobOutcome::Done));
+    assert!(matches!(second_outcome, JobOutcome::Done));
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load twice-rescheduled session")
+        .expect("observe-only session exists");
+    assert_eq!(record.generation, 3);
+    assert_eq!(record.accounting_key_id, None);
+    let projections: Vec<(Option<String>, i64)> = sqlx::query_as(
+        "SELECT accounting_key_id, cost_micros FROM cache_keepalive_turns ORDER BY source_ref_id",
+    )
+    .fetch_all(fixture.storage.pool())
+    .await
+    .expect("load observe-only renewal projections");
+    assert_eq!(projections, vec![(None, 140), (None, 140)]);
+    let events = fixture
+        .storage
+        .query_request_events(0, u64::MAX, 10)
+        .await
+        .expect("query repeated observe-only renewal events");
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event.key_id.is_none()));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.cost_usd_micros == Some(140))
+    );
+    let mut saw_limit_decision = false;
+    while let Ok(event) = lifecycle_rx.try_recv() {
+        saw_limit_decision |= matches!(event, LifecycleEvent::LimitDecision { .. });
+    }
+    assert!(!saw_limit_decision);
+}
+
+#[tokio::test]
+async fn real_request_reseeds_observe_only_session_without_double_reserve() {
+    // Given
+    let fixture = Fixture::new().await;
+    fixture.http.return_cache_hit_usage(100, 0, 10);
+    let key_id = create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue initial observe-only keepalive");
+    let limit_engine = LimitEngine::new(
+        Arc::new(KeyConcurrencyManager::new()),
+        Arc::new(SystemClock),
+    );
+    let dispatch = fixture.dispatch_with_limit_engine(Arc::clone(&pusher), limit_engine.clone());
+    dispatch
+        .dispatch_cache_keepalive(fixture.pending_keepalive_job(1).await)
+        .await
+        .expect("dispatch initial observe-only renewal");
+    let stale_observe_only_job = fixture.pending_keepalive_job(2).await;
+    let mut real_request = fixture.enqueue_request();
+    real_request.accounting_key_id = Some(key_id.clone());
+
+    // When
+    enqueuer
+        .enqueue_cache_keepalive(real_request)
+        .await
+        .expect("reseed keepalive from real request");
+    let stale_outcome = dispatch
+        .dispatch_cache_keepalive(stale_observe_only_job)
+        .await
+        .expect("dispatch stale observe-only renewal");
+    let reseeded_outcome = dispatch
+        .dispatch_cache_keepalive(fixture.pending_keepalive_job(3).await)
+        .await
+        .expect("dispatch reseeded renewal");
+
+    // Then
+    assert!(matches!(stale_outcome, JobOutcome::Noop));
+    assert!(matches!(reseeded_outcome, JobOutcome::Done));
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load reseeded session")
+        .expect("reseeded session exists");
+    assert_eq!(record.accounting_key_id.as_deref(), Some(key_id.as_str()));
+    assert_eq!(request_event_count(&fixture).await, 2);
+    let key_store = KeyStore::new(fixture.storage.clone());
+    let key = key_store
+        .get("principal", &key_id)
+        .await
+        .expect("load reseeded accounting key")
+        .expect("reseeded accounting key exists");
+    let view = fixture.dynamic_view().load();
+    let verifier = limit_engine
+        .reserve(
+            view.principal_view.as_ref(),
+            &key,
+            "principal",
+            "claude-test",
+            0,
+            3_900,
+            None,
+        )
+        .expect("one real renewal reconcile leaves 3900 input tokens available");
+    assert!(
+        limit_engine
+            .reserve(
+                view.principal_view.as_ref(),
+                &key,
+                "principal",
+                "claude-test",
+                0,
+                1,
+                None,
+            )
+            .is_err(),
+        "a stale observe-only turn must not reserve and a reseeded turn must reconcile exactly once"
+    );
+    drop(verifier);
 }
 
 #[tokio::test]
