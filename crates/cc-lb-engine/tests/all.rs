@@ -122,6 +122,8 @@ mod prompt_cache_structural_properties;
 mod queue_full_returns_503;
 #[path = "quota_header_surface_baseline.rs"]
 mod quota_header_surface_baseline;
+#[path = "renewal_accounting_e2e.rs"]
+mod renewal_accounting_e2e;
 #[path = "request_context.rs"]
 mod request_context;
 #[path = "request_context_proxy_parity.rs"]

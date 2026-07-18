@@ -895,6 +895,7 @@ dependencies = [
  "cc-lb-request-log",
  "cc-lb-routing",
  "cc-lb-storage-api",
+ "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
  "cc-lb-upstream",
  "chrono",

@@ -76,6 +76,7 @@ tower.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 insta.workspace = true
 metrics-exporter-prometheus.workspace = true

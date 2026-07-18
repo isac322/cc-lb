@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::cache_keepalive::{AnthropicKeepaliveDispatcher, RequestSnapshot};
 use cc_lb_engine::clock::{Clock, TestClock, unix_secs};
@@ -10,15 +11,15 @@ use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder,
     UpstreamDispatch,
 };
-use cc_lb_plugin_api::{
-    Principal, RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin,
-    ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
-    UpstreamCandidate,
-};
+use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
 use cc_lb_storage_api::{
     BackendKind, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionRecord,
     CacheKeepaliveSessionStore, CacheTtl, MetaStore, UpstreamStore,
+};
+use cc_lb_upstream::{
+    RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+    SigningCapability, UpstreamError,
 };
 use http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
 use tempfile::TempDir;
@@ -170,7 +171,7 @@ impl Signer for RenewalSigner {
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
-    async fn on_unauthorized(&self, _err: &cc_lb_plugin_api::UpstreamError) -> RetryDecision {
+    async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
         RetryDecision::Fail
     }
 }
@@ -180,7 +181,7 @@ struct NoRouteRouter;
 impl RouterPlugin for NoRouteRouter {
     fn route(
         &self,
-        _ctx: &RequestContext,
+        _ctx: &RoutingContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
@@ -210,10 +211,7 @@ impl RecordingRenewalHttp {
 
 #[async_trait]
 impl UpstreamDispatch for RecordingRenewalHttp {
-    async fn dispatch(
-        &self,
-        _request: cc_lb_plugin_api::SignedRequest,
-    ) -> Result<Response<Body>, DispatchError> {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
         *self.calls.lock().expect("renewal HTTP call lock") += 1;
         let body = serde_json::json!({
             "content": [],
