@@ -118,9 +118,10 @@ pub async fn dispatch_warmup_attempt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_plugin_api::{
-        CachePricingSummary, Principal, PrincipalKind, RequestContext, ShapedRequest,
-        ShapedRequestBuilder, Upstream, UpstreamDialect, shape_request,
+    use cc_lb_domain::{Principal, PrincipalKind, Upstream};
+    use cc_lb_upstream::{
+        DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
+        shape_request,
     };
     use http_body_util::BodyExt;
 
@@ -156,11 +157,11 @@ mod tests {
     impl UpstreamDialect for WarmupRequestDialect {
         fn shape(
             &self,
-            _ctx: &RequestContext,
+            _ctx: &DialectShapeContext,
             _upstream: &Upstream,
             _principal: &Principal,
             builder: &mut ShapedRequestBuilder,
-        ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
+        ) -> Result<ShapedRequest, DialectError> {
             Ok(builder.shaped_request(
                 self.url.clone(),
                 self.method.clone(),
@@ -210,17 +211,13 @@ mod tests {
             headers: parts.headers,
             body: body.clone(),
         };
-        let request_context = RequestContext {
+        let request_context = DialectShapeContext {
             request_id: "warmup-intent-contract".to_owned(),
-            thread_id: None,
             downstream_headers: http::HeaderMap::new(),
             method: Method::POST,
             path: "/v1/messages".to_owned(),
             query: None,
             body_bytes: Bytes::new(),
-            cache_breakpoints: Vec::new(),
-            canonical_model_id: WARMUP_MODEL.to_owned(),
-            cache_pricing: CachePricingSummary::default(),
         };
         let principal = Principal {
             id: "warmup".to_owned(),

@@ -1,4 +1,3 @@
-use cc_lb_contract::{RequestEvent, RequestEventUpstream};
 use cc_lb_engine::cache_keepalive::{RenewalFinalization, RenewalUsage, RequestSnapshot};
 use cc_lb_engine::clock::unix_secs;
 use cc_lb_pricing::{UpstreamKind as PricingUpstreamKind, virtual_cost_micros_full};
@@ -6,8 +5,8 @@ use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{
-    CacheKeepaliveDecisionRow, CacheKeepaliveSessionRecord, CacheKeepaliveTurnRow,
-    RequestEventProjections, RequestEventStore, UpstreamStore,
+    CacheKeepaliveDecisionRow, CacheKeepaliveSessionRecord, CacheKeepaliveTurnRow, RequestEvent,
+    RequestEventProjections, RequestEventStore, RequestEventUpstream, UpstreamStore,
 };
 
 use super::lifecycle::{RenewalLifecycleInput, publish_renewal_lifecycle};
@@ -41,6 +40,7 @@ impl SchedulerDispatch {
             finalization.usage.cache_creation_input_tokens_1h,
             finalization.usage.cache_read_input_tokens,
             pricing_upstream_kind(upstream.kind),
+            None,
         );
         let ts = unix_secs(self.clock.now());
         let duration_ms = duration_ms(finalization.duration);

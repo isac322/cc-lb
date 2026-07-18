@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-use cc_lb_plugin_api::{ShapedRequest, SignedRequest, Signer, SignerError, sign_request};
+use cc_lb_upstream::{ShapedRequest, SignedRequest, Signer, SignerError, sign_request};
 use http::{HeaderMap, Method, Response};
 use url::Url;
 

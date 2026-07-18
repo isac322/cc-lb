@@ -1222,6 +1222,7 @@ dependencies = [
  "cc-lb-dialect-anthropic",
  "cc-lb-domain",
  "cc-lb-engine",
+ "cc-lb-lifecycle",
  "cc-lb-oauth-protocol",
  "cc-lb-observability",
  "cc-lb-plugin-wire",
@@ -6675,7 +6676,7 @@ dependencies = [
  "serde_json",
  "target-triple",
  "termcolor",
- "toml 1.1.2+spec-1.1.0",
+ "toml 1.1.3+spec-1.1.0",
 ]
 
 [[package]]

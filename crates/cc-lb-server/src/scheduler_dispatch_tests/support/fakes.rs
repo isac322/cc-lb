@@ -21,6 +21,7 @@ use crate::cache_keepalive_enqueuer::CacheKeepaliveTaskPusher;
 pub(in crate::scheduler_dispatch::tests) struct RecordingHttp {
     pub(in crate::scheduler_dispatch::tests) requests: Mutex<Vec<CapturedRequest>>,
     response: Mutex<RecordingHttpResponse>,
+    on_next_dispatch: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 enum RecordingHttpResponse {
@@ -39,6 +40,16 @@ impl Default for RecordingHttpResponse {
 }
 
 impl RecordingHttp {
+    pub(in crate::scheduler_dispatch::tests) fn run_on_next_dispatch(
+        &self,
+        hook: Arc<dyn Fn() + Send + Sync>,
+    ) {
+        *self
+            .on_next_dispatch
+            .lock()
+            .expect("on-next-dispatch hook lock") = Some(hook);
+    }
+
     pub(in crate::scheduler_dispatch::tests) fn return_cache_miss(&self) {
         *self.response.lock().expect("response lock") = RecordingHttpResponse::Json(json!({
             "content": [],
@@ -90,6 +101,14 @@ impl UpstreamDispatch for RecordingHttp {
                 headers: request.headers().clone(),
                 body: request.body().clone(),
             });
+        if let Some(hook) = self
+            .on_next_dispatch
+            .lock()
+            .expect("on-next-dispatch hook lock")
+            .take()
+        {
+            hook();
+        }
         match &*self.response.lock().expect("response lock") {
             RecordingHttpResponse::Json(body) => Ok(json_response(StatusCode::OK, body.clone())),
             RecordingHttpResponse::Status(status, body) => Ok(json_response(*status, body.clone())),

@@ -8,8 +8,8 @@ use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_upstream::{
-    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
-    shape_request,
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, Signer,
+    UpstreamDialect, shape_request,
 };
 use http::header::AUTHORIZATION;
 use http::{HeaderMap, StatusCode};

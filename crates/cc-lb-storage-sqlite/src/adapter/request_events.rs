@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, RequestEvent, RequestEventProjections,
-    RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket,
-    RequestEventKeyUsageQuery, RequestEventListItem, RequestEventListQuery, RequestEventStore,
+    CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, RequestEvent, RequestEventKeyLastUsed,
+    RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket, RequestEventKeyUsageQuery,
+    RequestEventListItem, RequestEventListQuery, RequestEventProjections, RequestEventStore,
     RequestEventStreamFilters, StorageError, StorageResult,
 };
 use sqlx::AssertSqlSafe;
@@ -495,107 +495,172 @@ async fn insert_request_event_in_tx(
     let payload = serde_json::to_string(event)?;
     let cache_breakpoints = serde_json::to_string(&event.cache_breakpoints)?;
     sqlx::query_scalar::<_, i64>(
-        "INSERT INTO request_events_v1 \
-         (request_id, ts, event_type, source_kind, source_ref_id, upstream_id, principal_id, created_at, key_id, model, upstream_name, cache_state, thread_id, message_id, message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, event_id, error_code, upstream_error_type, upstream_error_message, thinking_tokens, web_search_requests, web_fetch_requests, service_tier, inference_geo, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, matched_v3_cache_key, breakpoint_content_block_index, matched_content_block_index, lookback_distance, predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, predicted_cache_creation_tokens_1h, token_estimate_source, cache_value_micros, formula_winner_upstream_id, kept_upstream_id, quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, quota_weight_factor, quota_cache_multiplier, quota_warning_multiplier, quota_effective_weight, quota_uniform_fallback, wrh_key_source, lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, payload) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
-         RETURNING id",
-    )
-    .bind(&event.request_id)
-    .bind(u64_to_i64(event_ts_secs(event), "request event ts")?)
-    .bind("request")
-    .bind(event.source_kind.as_deref())
-    .bind(event.source_ref_id.as_deref())
-    .bind(event.upstream_id.map(|id| id.to_string()))
-    .bind(event.principal_id.as_deref())
-    .bind(u64_to_i64(event_ts_secs(event), "request event created_at")?)
-    .bind(event.key_id.as_deref())
-    .bind(event.model.as_deref())
-    .bind(event.upstream_name.as_deref())
-    .bind(event.cache_state.map(|state| state.as_str()))
-    .bind(event.thread_id.as_deref())
-    .bind(event.message_id.as_deref())
-    .bind(option_u64_to_i64(event.message_index, "request event message_index")?)
-    .bind(option_u64_to_i64(event.message_count, "request event message_count")?)
-    .bind(option_u64_to_i64(
-        event.cache_control_block_count,
-        "request event cache_control_block_count",
-    )?)
-    .bind(cache_breakpoints)
-    .bind(event.cache_prefix_hash.as_deref())
-    .bind(option_u64_to_i64(event.input_tokens, "request event input_tokens")?)
-    .bind(option_u64_to_i64(event.output_tokens, "request event output_tokens")?)
-    .bind(option_u64_to_i64(
-        event.cache_creation_input_tokens,
-        "request event cache_creation_input_tokens",
-    )?)
-    .bind(option_u64_to_i64(
-        event.cache_read_input_tokens,
-        "request event cache_read_input_tokens",
-    )?)
-    .bind(event_id)
-    .bind(event.error_code.as_deref())
-    .bind(event.upstream_error_type.as_deref())
-    .bind(event.upstream_error_message.as_deref())
-    .bind(option_u64_to_i64(event.thinking_tokens, "request event thinking_tokens")?)
-    .bind(option_u64_to_i64(event.web_search_requests, "request event web_search_requests")?)
-    .bind(option_u64_to_i64(event.web_fetch_requests, "request event web_fetch_requests")?)
-    .bind(event.service_tier.as_deref())
-    .bind(event.inference_geo.as_deref())
-    .bind(option_u64_to_i64(
-        event.cache_creation_input_tokens_5m,
-        "request event cache_creation_input_tokens_5m",
-    )?)
-    .bind(option_u64_to_i64(
-        event.cache_creation_input_tokens_1h,
-        "request event cache_creation_input_tokens_1h",
-    )?)
-    .bind(event.matched_v3_cache_key.as_deref())
-    .bind(option_u64_to_i64(
-        event.breakpoint_content_block_index,
-        "request event breakpoint_content_block_index",
-    )?)
-    .bind(option_u64_to_i64(
-        event.matched_content_block_index,
-        "request event matched_content_block_index",
-    )?)
-    .bind(option_u64_to_i64(event.lookback_distance, "request event lookback_distance")?)
-    .bind(option_u64_to_i64(
-        event.predicted_cache_read_tokens,
-        "request event predicted_cache_read_tokens",
-    )?)
-    .bind(option_u64_to_i64(
-        event.predicted_cache_creation_tokens_5m,
-        "request event predicted_cache_creation_tokens_5m",
-    )?)
-    .bind(option_u64_to_i64(
-        event.predicted_cache_creation_tokens_1h,
-        "request event predicted_cache_creation_tokens_1h",
-    )?)
-    .bind(event.token_estimate_source.as_deref())
-    .bind(event.cache_value_micros)
-    .bind(event.formula_winner_upstream_id.map(|id| id.to_string()))
-    .bind(event.kept_upstream_id.map(|id| id.to_string()))
-    .bind(event.quota_urgency_5h)
-    .bind(event.quota_urgency_7d)
-    .bind(event.quota_urgency_combined)
-    .bind(event.quota_weight_factor)
-    .bind(event.quota_cache_multiplier)
-    .bind(event.quota_warning_multiplier)
-    .bind(event.quota_effective_weight)
-    .bind(event.quota_uniform_fallback)
-    .bind(event.wrh_key_source.as_deref())
-    .bind(option_u64_to_i64(
-        event.lineage_would_have_predicted_read_tokens,
-        "request event lineage_would_have_predicted_read_tokens",
-    )?)
-    .bind(event.lineage_would_have_picked_upstream_id.map(|id| id.to_string()))
-    .bind(payload)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(map_sqlx_error)
+            "INSERT INTO request_events_v1 \
+             (request_id, ts, event_type, source_kind, source_ref_id, upstream_id, principal_id, created_at, key_id, model, upstream_name, cache_state, thread_id, message_id, message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, event_id, error_code, upstream_error_type, upstream_error_message, thinking_tokens, web_search_requests, web_fetch_requests, service_tier, inference_geo, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, matched_v3_cache_key, breakpoint_content_block_index, matched_content_block_index, lookback_distance, predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, predicted_cache_creation_tokens_1h, token_estimate_source, cache_value_micros, formula_winner_upstream_id, kept_upstream_id, quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, quota_warning_multiplier, lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, thinking_budget_tokens, reasoning_effort, payload, list_ts_ms, list_event_key, list_upstream, list_status, list_duration_ms, list_auth_ms, list_route_ms, list_limit_reserve_ms, list_bulkhead_wait_ms, list_dns_ms, list_connect_ms, list_connection_reused, list_limit_reconcile_ms, list_observability_post_ms, list_proxy_setup_ms, list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, list_upstream_body_ms, list_stream_first_content_delta_ms, list_stream_last_content_delta_ms, list_inter_token_avg_ms, list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
+             RETURNING id",
+        )
+        .bind(&event.request_id)
+        .bind(u64_to_i64(event_ts_secs(event), "request event ts")?)
+        .bind("request")
+        .bind(event.source_kind.as_deref())
+        .bind(event.source_ref_id.as_deref())
+        .bind(event.upstream_id.map(|id| id.to_string()))
+        .bind(event.principal_id.as_deref())
+        .bind(u64_to_i64(event_ts_secs(event), "request event created_at")?)
+        .bind(event.key_id.as_deref())
+        .bind(event.model.as_deref())
+        .bind(event.upstream_name.as_deref())
+        .bind(event.cache_state.map(|state| state.as_str()))
+        .bind(event.thread_id.as_deref())
+        .bind(event.message_id.as_deref())
+        .bind(option_u64_to_i64(event.message_index, "request event message_index")?)
+        .bind(option_u64_to_i64(event.message_count, "request event message_count")?)
+        .bind(option_u64_to_i64(
+            event.cache_control_block_count,
+            "request event cache_control_block_count",
+        )?)
+        .bind(cache_breakpoints)
+        .bind(event.cache_prefix_hash.as_deref())
+        .bind(option_u64_to_i64(event.input_tokens, "request event input_tokens")?)
+        .bind(option_u64_to_i64(event.output_tokens, "request event output_tokens")?)
+        .bind(option_u64_to_i64(
+            event.cache_creation_input_tokens,
+            "request event cache_creation_input_tokens",
+        )?)
+        .bind(option_u64_to_i64(
+            event.cache_read_input_tokens,
+            "request event cache_read_input_tokens",
+        )?)
+        .bind(event_id)
+        .bind(event.error_code.as_deref())
+        .bind(event.upstream_error_type.as_deref())
+        .bind(event.upstream_error_message.as_deref())
+        .bind(option_u64_to_i64(event.thinking_tokens, "request event thinking_tokens")?)
+        .bind(option_u64_to_i64(event.web_search_requests, "request event web_search_requests")?)
+        .bind(option_u64_to_i64(event.web_fetch_requests, "request event web_fetch_requests")?)
+        .bind(event.service_tier.as_deref())
+        .bind(event.inference_geo.as_deref())
+        .bind(option_u64_to_i64(
+            event.cache_creation_input_tokens_5m,
+            "request event cache_creation_input_tokens_5m",
+        )?)
+        .bind(option_u64_to_i64(
+            event.cache_creation_input_tokens_1h,
+            "request event cache_creation_input_tokens_1h",
+        )?)
+        .bind(event.matched_v3_cache_key.as_deref())
+        .bind(option_u64_to_i64(
+            event.breakpoint_content_block_index,
+            "request event breakpoint_content_block_index",
+        )?)
+        .bind(option_u64_to_i64(
+            event.matched_content_block_index,
+            "request event matched_content_block_index",
+        )?)
+        .bind(option_u64_to_i64(
+            event.lookback_distance,
+            "request event lookback_distance",
+        )?)
+        .bind(option_u64_to_i64(
+            event.predicted_cache_read_tokens,
+            "request event predicted_cache_read_tokens",
+        )?)
+        .bind(option_u64_to_i64(
+            event.predicted_cache_creation_tokens_5m,
+            "request event predicted_cache_creation_tokens_5m",
+        )?)
+        .bind(option_u64_to_i64(
+            event.predicted_cache_creation_tokens_1h,
+            "request event predicted_cache_creation_tokens_1h",
+        )?)
+        .bind(event.token_estimate_source.as_deref())
+        .bind(event.cache_value_micros)
+        .bind(event.formula_winner_upstream_id.map(|id| id.to_string()))
+        .bind(event.kept_upstream_id.map(|id| id.to_string()))
+        .bind(event.quota_urgency_5h)
+        .bind(event.quota_urgency_7d)
+        .bind(event.quota_urgency_combined)
+        .bind(event.quota_warning_multiplier)
+        .bind(option_u64_to_i64(
+            event.lineage_would_have_predicted_read_tokens,
+            "request event lineage_would_have_predicted_read_tokens",
+        )?)
+        .bind(event.lineage_would_have_picked_upstream_id.map(|id| id.to_string()))
+        .bind(option_u64_to_i64(event.thinking_budget_tokens, "thinking_budget_tokens")?)
+        .bind(event.reasoning_effort.as_deref())
+        .bind(payload)
+        .bind(u64_to_i64(
+            event.ts_ms.unwrap_or_else(|| event_ts_secs(event).saturating_mul(1_000)),
+            "request event list_ts_ms",
+        )?)
+        .bind(event.event_id.as_deref().unwrap_or(&event.request_id))
+        .bind(event.upstream.map(|upstream| match upstream {
+            cc_lb_storage_api::RequestEventUpstream::AnthropicDirect => "anthropic_direct",
+        }))
+        .bind(i64::from(event.status))
+        .bind(u64_to_i64(event.duration_ms, "request event list_duration_ms")?)
+        .bind(option_u64_to_i64(event.auth_ms, "request event list_auth_ms")?)
+        .bind(option_u64_to_i64(event.route_ms, "request event list_route_ms")?)
+        .bind(option_u64_to_i64(
+            event.limit_reserve_ms,
+            "request event list_limit_reserve_ms",
+        )?)
+        .bind(option_u64_to_i64(
+            event.bulkhead_wait_ms,
+            "request event list_bulkhead_wait_ms",
+        )?)
+        .bind(option_u64_to_i64(event.dns_ms, "request event list_dns_ms")?)
+        .bind(option_u64_to_i64(
+            event.connect_ms,
+            "request event list_connect_ms",
+        )?)
+        .bind(event.connection_reused.map(i64::from))
+        .bind(option_u64_to_i64(
+            event.limit_reconcile_ms,
+            "request event list_limit_reconcile_ms",
+        )?)
+        .bind(option_u64_to_i64(
+            event.observability_post_ms,
+            "request event list_observability_post_ms",
+        )?)
+        .bind(option_u64_to_i64(
+            event.proxy_setup_ms,
+            "request event list_proxy_setup_ms",
+        )?)
+        .bind(option_u64_to_i64(event.shape_ms, "request event list_shape_ms")?)
+        .bind(option_u64_to_i64(event.sign_ms, "request event list_sign_ms")?)
+        .bind(option_u64_to_i64(
+            event.upstream_ttfb_ms,
+            "request event list_upstream_ttfb_ms",
+        )?)
+        .bind(option_u64_to_i64(
+            event.upstream_body_ms,
+            "request event list_upstream_body_ms",
+        )?)
+        .bind(option_u64_to_i64(
+            event.stream_first_content_delta_ms,
+            "request event list_stream_first_content_delta_ms",
+        )?)
+        .bind(option_u64_to_i64(
+            event.stream_last_content_delta_ms,
+            "request event list_stream_last_content_delta_ms",
+        )?)
+        .bind(option_u64_to_i64(
+            event.inter_token_avg_ms,
+            "request event list_inter_token_avg_ms",
+        )?)
+        .bind(event.cost_usd_micros)
+        .bind(event.cost_input_micros)
+        .bind(event.cost_output_micros)
+        .bind(event.cost_cache_creation_5m_micros)
+        .bind(event.cost_cache_creation_1h_micros)
+        .bind(event.cost_cache_read_micros)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)
 }
-
 async fn select_existing_event_id_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     event_id: &str,

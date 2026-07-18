@@ -200,7 +200,8 @@ mod tests {
         };
 
         let json = serde_json::to_string(&event).expect("serialize request event");
-        let restored: RequestEvent = serde_json::from_str(&json).expect("deserialize request event");
+        let restored: RequestEvent =
+            serde_json::from_str(&json).expect("deserialize request event");
 
         assert_eq!(event, restored);
     }

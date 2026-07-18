@@ -5,22 +5,23 @@ mod support;
 
 use ::http::StatusCode;
 use async_trait::async_trait;
-use cc_lb_contract::{LifecycleBusReceiver, LifecycleEvent, Limit, LimitKind, RequestEventBus};
 use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_control::api_keys::limit_engine::LimitEngine;
+use cc_lb_control::{LifecycleBusReceiver, RequestEventBus};
 use cc_lb_engine::attempt_rail::AttemptIntent;
 use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveEnqueuer, DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher,
     RenewalFinalization, RenewalUsage, RequestSnapshot,
 };
 use cc_lb_engine::clock::SystemClock;
+use cc_lb_lifecycle::LifecycleEvent;
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion, global_catalog};
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
-    RequestEventStore,
+    CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, Limit,
+    LimitKind, PrincipalKindLite, RequestEventStore,
 };
 use serde_json::Value;
 use std::sync::Mutex;
@@ -567,7 +568,7 @@ async fn renewal_response_persists_one_attributed_event_and_projection_set() {
                     window_secs: 60,
                     cap_micros: 10,
                 }],
-                principal_kind: cc_lb_contract::PrincipalKindLite::Machine,
+                principal_kind: PrincipalKindLite::Machine,
             },
         )
         .await
@@ -624,6 +625,86 @@ async fn renewal_response_persists_one_attributed_event_and_projection_set() {
     assert_eq!(decision_count, 1);
 }
 
+#[tokio::test]
+async fn cache_keepalive_disable_mid_cycle_drops_open_reservation_without_finalizing() {
+    // Given
+    let fixture = Fixture::new().await;
+    let key_id = create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    let mut request = fixture.enqueue_request();
+    request.accounting_key_id = Some(key_id.clone());
+    enqueuer
+        .enqueue_cache_keepalive(request)
+        .await
+        .expect("enqueue keepalive with an accounting key");
+    let job = fixture.pending_keepalive_job(1).await;
+    let limit_engine = LimitEngine::new(
+        Arc::new(KeyConcurrencyManager::new()),
+        Arc::new(SystemClock),
+    );
+    fixture.disable_cache_keepalive_on_next_http_dispatch();
+    let dispatch = fixture.dispatch_with_limit_engine(pusher, limit_engine.clone());
+
+    // When
+    let outcome = dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("disable after dispatch starts stops the renewal cleanly");
+
+    // Then
+    assert!(matches!(outcome, JobOutcome::Done));
+    assert_eq!(
+        fixture.http.requests.lock().expect("requests lock").len(),
+        1,
+        "the disable hook must run after the reservation-backed upstream dispatch"
+    );
+    assert_eq!(request_event_count(&fixture).await, 0);
+    let session = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load disabled keepalive session")
+        .expect("keepalive session exists");
+    assert_eq!(session.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        session.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::Cancelled)
+    );
+    let key = KeyStore::new(fixture.storage.clone())
+        .get("principal", &key_id)
+        .await
+        .expect("load accounting key")
+        .expect("accounting key exists");
+    let view = fixture.dynamic_view().load();
+    let verifier = limit_engine
+        .reserve(
+            view.principal_view.as_ref(),
+            &key,
+            "principal",
+            "claude-test",
+            0,
+            4_000,
+            None,
+        )
+        .expect("dropped reservation refunds the full renewal amount before the TTL sweep");
+    assert!(
+        limit_engine
+            .reserve(
+                view.principal_view.as_ref(),
+                &key,
+                "principal",
+                "claude-test",
+                0,
+                1,
+                None,
+            )
+            .is_err(),
+        "the verifier proves the original reservation refunded exactly once"
+    );
+    drop(verifier);
+}
+
 fn api_key_id(secret: &str) -> String {
     secret
         .strip_prefix("sk-cclb-")
@@ -647,7 +728,7 @@ async fn create_accounting_key(fixture: &Fixture, kind: LimitKind, cap_micros: i
                     window_secs: 60,
                     cap_micros,
                 }],
-                principal_kind: cc_lb_contract::PrincipalKindLite::Machine,
+                principal_kind: PrincipalKindLite::Machine,
             },
         )
         .await
@@ -670,14 +751,18 @@ fn install_test_pricing() {
             model: "claude-test".to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(2),
             output_per_million_usd: UsdPerMillion::from_whole_usd(3),
+            by_tier: std::collections::BTreeMap::new(),
         },
     );
     global_catalog().install_snapshot(CatalogSnapshot {
+        payload_hash: String::new(),
         fetched_at_ms: 0,
         models,
         raw_json: Vec::new(),
         cache_creation_per_million_usd: std::collections::HashMap::new(),
         cache_read_per_million_usd: std::collections::HashMap::new(),
+        cache_creation_per_million_usd_by_tier: std::collections::HashMap::new(),
+        cache_read_per_million_usd_by_tier: std::collections::HashMap::new(),
         status: CatalogStatus::Ok,
     });
 }
@@ -811,7 +896,7 @@ async fn cache_keepalive_accounting_key_uses_real_reserve_before_dispatch() {
                     window_secs: 60,
                     cap_micros: 0,
                 }],
-                principal_kind: cc_lb_contract::PrincipalKindLite::Machine,
+                principal_kind: PrincipalKindLite::Machine,
             },
         )
         .await

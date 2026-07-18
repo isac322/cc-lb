@@ -1,8 +1,10 @@
-use cc_lb_contract::{
-    AuthInfo, HeaderSnapshot, LifecycleEvent, LimitDecisionKind, ParseInfo, RequestEventBus,
-    RouteInfo, StreamSuccess, TerminationReason, UsageSnapshot, UsageSource,
-};
+use cc_lb_control::RequestEventBus;
 use cc_lb_engine::cache_keepalive::RenewalUsage;
+use cc_lb_lifecycle::{
+    AuthInfo, LifecycleEvent, LimitDecisionKind, ParseInfo, RouteInfo, StreamSuccess,
+    TerminationReason, UsageSnapshot, UsageSource,
+};
+use cc_lb_request_log::HeaderSnapshot;
 use cc_lb_storage_api::CacheKeepaliveSessionRecord;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 
@@ -49,6 +51,8 @@ pub(super) fn publish_renewal_lifecycle(
             message_index: None,
             message_count: None,
             cache_control_message_indices: Vec::new(),
+            thinking_budget_tokens: None,
+            reasoning_effort: None,
         }),
     });
     event_bus.publish_lifecycle(LifecycleEvent::AuthCompleted {
@@ -172,12 +176,7 @@ fn route_info(upstream: &UpstreamRecord, model: &str) -> RouteInfo {
         quota_urgency_5h: None,
         quota_urgency_7d: None,
         quota_urgency_combined: None,
-        quota_weight_factor: None,
-        quota_cache_multiplier: None,
         quota_warning_multiplier: None,
-        quota_effective_weight: None,
-        quota_uniform_fallback: None,
-        wrh_key_source: None,
         lineage_would_have_predicted_read_tokens: None,
         lineage_would_have_picked_upstream_id: None,
     }

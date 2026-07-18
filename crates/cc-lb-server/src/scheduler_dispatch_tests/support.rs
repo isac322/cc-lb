@@ -11,7 +11,7 @@ use std::time::Duration;
 use ::http::{HeaderMap, HeaderValue, Method};
 use bytes::Bytes;
 use cc_lb_config::{SchedulerConfig, StorageConfig};
-use cc_lb_contract::RequestEventBus;
+use cc_lb_control::RequestEventBus;
 use cc_lb_control::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::cache_keepalive::{
@@ -174,6 +174,26 @@ impl Fixture {
             )))
             .build();
         self.dynamic_view.store(view);
+    }
+
+    pub(super) fn disable_cache_keepalive_on_next_http_dispatch(&self) {
+        let dynamic_view = Arc::clone(&self.dynamic_view);
+        self.http.run_on_next_dispatch(Arc::new(move || {
+            let current = dynamic_view.load();
+            let mut disabled = principal_record_with_id("principal");
+            disabled
+                .cache_keepalive
+                .as_mut()
+                .expect("fixture principal has cache keepalive")
+                .enabled = false;
+            let view = DynamicViewBuilder::from_view(&current)
+                .principal_view(Arc::new(PrincipalView::from_db(
+                    &[disabled],
+                    std::collections::HashMap::new(),
+                )))
+                .build();
+            dynamic_view.store(view);
+        }));
     }
 
     pub(super) fn enqueuer(

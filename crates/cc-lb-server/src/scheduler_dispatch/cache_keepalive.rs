@@ -110,14 +110,20 @@ impl SchedulerDispatch {
         };
         let source_ref_id = format!("{}:{}", job.session_key_hash, job.generation);
 
-        match self
+        let outcome = self
             .keepalive_dispatcher
             .dispatch(
                 &snapshot,
                 KeepaliveDispatchContext::new(reservation, source_ref_id),
             )
-            .await
-        {
+            .await;
+        if !self.cache_keepalive_still_authorized(&record) {
+            self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::Cancelled)
+                .await?;
+            return Ok(JobOutcome::Done);
+        }
+
+        match outcome {
             DispatchOutcome::CacheHit {
                 cache_anchor_age,
                 finalization,
@@ -170,9 +176,17 @@ impl SchedulerDispatch {
         if view.principal_view.principal_status(&record.principal_id) != PrincipalStatus::Active {
             return false;
         }
-        match view.principal_view.allowed_upstreams(&record.principal_id) {
-            Some(allowed) if !allowed.is_empty() => allowed.contains(&record.upstream_id),
-            _ => true,
+        let Some(principal) = view.principal_view.get(&record.principal_id) else {
+            return false;
+        };
+        if principal.cache_keepalive().is_none() {
+            return false;
+        }
+        let allowed = principal.allowed_upstreams();
+        if allowed.is_empty() {
+            true
+        } else {
+            allowed.contains(&record.upstream_id)
         }
     }
 
@@ -213,6 +227,7 @@ impl SchedulerDispatch {
                 model,
                 4_000,
                 u64::try_from(max_tokens.max(0)).unwrap_or(0),
+                None,
                 None,
             )
             .map(|cost| i64::try_from(cost).unwrap_or(i64::MAX));

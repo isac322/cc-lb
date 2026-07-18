@@ -501,7 +501,16 @@ async fn assembler_loop(
                 _ = finalization_tick.tick() => {
                     flush_expired_terminations(&*storage, bus.as_deref(), metrics.as_ref(), &mut partials).await;
                 }
-            _ = sweeper.tick() => sweep_orphans(&mut partials, ttl),
+            _ = sweeper.tick() => {
+                flush_expired_orphans(
+                    &*storage,
+                    bus.as_deref(),
+                    metrics.as_ref(),
+                    &mut partials,
+                    ttl,
+                )
+                .await;
+            }
             _ = &mut shutdown => break,
         }
     }
@@ -1142,17 +1151,38 @@ fn finalize_base(
     }
 }
 
-fn sweep_orphans(partials: &mut HashMap<EventId, Partial>, ttl: Duration) {
+async fn flush_expired_orphans(
+    storage: &dyn RequestEventStore,
+    bus: Option<&dyn RequestEventBus>,
+    metrics: &dyn EngineMetricsHook,
+    partials: &mut HashMap<EventId, Partial>,
+    ttl: Duration,
+) {
     let now = Instant::now();
-    let before = partials.len();
-    partials.retain(|_, p| p.inserted_at.is_none_or(|t| now.duration_since(t) < ttl));
-    let removed = before.saturating_sub(partials.len());
-    if removed > 0 {
-        metrics::counter!(
-            "cc_lb_lifecycle_assembler_rows_total",
-            "outcome" => "orphan_ttl_evicted"
-        )
-        .increment(removed as u64);
+    let expired: Vec<EventId> = partials
+        .iter()
+        .filter_map(|(event_id, partial)| {
+            partial
+                .inserted_at
+                .filter(|inserted_at| now.duration_since(*inserted_at) >= ttl)
+                .map(|_| event_id.clone())
+        })
+        .collect();
+    for event_id in expired {
+        if let Some(partial) = partials.remove(&event_id) {
+            write_finalized_rows(
+                storage,
+                bus,
+                metrics,
+                &event_id,
+                &partial,
+                &TerminationReason::Dropped,
+                499,
+                0,
+                true,
+            )
+            .await;
+        }
     }
 }
 
@@ -1676,6 +1706,80 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn renewal_orphan_flush_waits_for_full_renewal_window_then_finalizes() {
+        // Given
+        let store = CapturingStore::default();
+        let metrics = noop_metrics();
+        let event_id = eid("renewal:orphan-session:1");
+        let mut partials = HashMap::new();
+        handle_event(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut partials,
+            DEFAULT_ASSEMBLER_MAP_CAP,
+            LifecycleEvent::RequestStarted {
+                event_id: event_id.clone(),
+                request_id: "renewal-orphan-request".to_owned(),
+                ts_ms: 1_730_000_000_000,
+                stream: false,
+                source_kind: Some("renewal".to_owned()),
+                source_ref_id: Some("orphan-session:1".to_owned()),
+            },
+        )
+        .await;
+        assert_eq!(DEFAULT_ASSEMBLER_TTL, Duration::from_secs(300));
+
+        // When
+        partials
+            .get_mut(&event_id)
+            .expect("renewal partial is present")
+            .inserted_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(30))
+                .expect("monotonic clock has advanced past 30 seconds"),
+        );
+        flush_expired_orphans(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut partials,
+            DEFAULT_ASSEMBLER_TTL,
+        )
+        .await;
+
+        // Then
+        assert!(store.rows.lock().expect("capturing store lock").is_empty());
+
+        partials
+            .get_mut(&event_id)
+            .expect("renewal partial remains before the renewal threshold")
+            .inserted_at = Some(
+            Instant::now()
+                .checked_sub(DEFAULT_ASSEMBLER_TTL)
+                .expect("monotonic clock has advanced past the renewal threshold"),
+        );
+        flush_expired_orphans(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut partials,
+            DEFAULT_ASSEMBLER_TTL,
+        )
+        .await;
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id.as_deref(), Some(event_id.as_str()));
+        assert_eq!(rows[0].source_kind.as_deref(), Some("renewal"));
+        assert_eq!(rows[0].source_ref_id.as_deref(), Some("orphan-session:1"));
+        assert_eq!(rows[0].status, 499);
+        assert_eq!(
+            rows[0].error_code.as_deref(),
+            Some("terminal_without_partial")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn ignores_unused_auth_failure_variant() {
         let _ = AuthFailure::AuthenticationFailed {
             http_status: 401,
@@ -1886,6 +1990,8 @@ mod tests {
             tx.send(LifecycleEvent::RequestStarted {
                 event_id: event_id.clone(),
                 request_id: format!("req-{event_id}"),
+                source_kind: None,
+                source_ref_id: None,
                 ts_ms: 1_730_000_000_000,
                 stream: false,
             })
