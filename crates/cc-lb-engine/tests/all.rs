@@ -4,6 +4,8 @@ mod sse_relay_support;
 
 #[path = "assembler_partial_property.rs"]
 mod assembler_partial_property;
+#[path = "attempt_rail_trybuild.rs"]
+mod attempt_rail_trybuild;
 #[path = "audit_writer_smoke.rs"]
 mod audit_writer_smoke;
 #[path = "batched_observation_count.rs"]

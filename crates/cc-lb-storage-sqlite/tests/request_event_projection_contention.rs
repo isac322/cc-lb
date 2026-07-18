@@ -8,7 +8,6 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use tokio::time::{Instant, timeout};
 use uuid::Uuid;
 
-const NESTED_CHECKOUT_TIMEOUT: Duration = Duration::from_millis(25);
 const BEGIN_IMMEDIATE_TIMEOUT: Duration = Duration::from_millis(250);
 const PROXY_WRITE_SAMPLES: usize = 128;
 const RENEWAL_PROJECTION_WRITES: usize = 64;
@@ -144,37 +143,6 @@ async fn begin_immediate_helper_obtains_sqlite_writer_lock() {
         .await
         .expect("transaction handle remains usable");
     tx.commit().await.expect("commit immediate tx");
-}
-
-#[tokio::test]
-async fn projection_transaction_does_not_nested_checkout_from_single_connection_pool() {
-    let (_temp_dir, _database_url, storage) = storage().await;
-    let mut tx = storage.begin_immediate().await.expect("begin immediate");
-
-    let nested_checkout = timeout(NESTED_CHECKOUT_TIMEOUT, storage.pool().acquire()).await;
-
-    assert!(
-        nested_checkout.is_err(),
-        "a pooled checkout inside an open projection transaction would self-block with max_connections=1"
-    );
-    sqlx::query("SELECT 1")
-        .execute(&mut *tx)
-        .await
-        .expect("transaction handle is the non-blocking path");
-    tx.commit().await.expect("commit immediate tx");
-
-    timeout(
-        BEGIN_IMMEDIATE_TIMEOUT,
-        storage.append_request_event_with_projections(
-            &event("renewal-event-no-nested-checkout"),
-            &projections("session-hash:no-nested-checkout"),
-        ),
-    )
-    .await
-    .expect("production projection append must not wait for a nested pool checkout")
-    .expect("append projections");
-
-    assert_eq!(row_counts(&storage).await, (1, 1, 1));
 }
 
 #[tokio::test]

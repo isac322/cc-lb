@@ -8,6 +8,8 @@ mod prompt_cache_observation;
 mod quota_aggregate;
 #[path = "reassembly_serde_fixtures.rs"]
 mod reassembly_serde_fixtures;
+#[path = "request_event_projection_contention.rs"]
+mod request_event_projection_contention;
 #[path = "request_event_projections.rs"]
 mod request_event_projections;
 #[path = "request_events_cursor.rs"]

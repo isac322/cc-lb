@@ -1,6 +1,6 @@
 use cc_lb_engine::UpstreamDispatch;
 use cc_lb_engine::attempt_rail::AttemptIntent;
-use cc_lb_plugin_api::{ShapedRequest, Signer};
+use cc_lb_upstream::{ShapedRequest, Signer};
 
 async fn valid_flow(
     intent: AttemptIntent,

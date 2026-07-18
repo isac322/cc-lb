@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use cc_lb_contract::{
-    BusReceiver, LifecycleBusReceiver, LifecycleEvent, ParseInfo, RequestEventBus,
-    RequestEventUpdate, RouteInfo, TerminationReason, UsageSnapshot, UsageSource,
+use cc_lb_control::{BusReceiver, LifecycleBusReceiver, RequestEventBus};
+use cc_lb_lifecycle::{
+    LifecycleEvent, ParseInfo, RouteInfo, TerminationReason, UsageSnapshot, UsageSource,
 };
 use cc_lb_pricing::{
     CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion, global_catalog,
     spawn_lifecycle_pricing_subscriber,
 };
+use cc_lb_request_log::RequestEventUpdate;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
@@ -101,14 +102,18 @@ fn install_renewal_pricing() {
             model: "claude-renewal".to_owned(),
             input_per_million_usd: UsdPerMillion::from_whole_usd(2),
             output_per_million_usd: UsdPerMillion::from_whole_usd(3),
+            by_tier: Default::default(),
         },
     );
     global_catalog().install_snapshot(CatalogSnapshot {
+        payload_hash: String::new(),
         fetched_at_ms: 0,
         models,
         raw_json: Vec::new(),
         cache_creation_per_million_usd: HashMap::new(),
         cache_read_per_million_usd: HashMap::new(),
+        cache_creation_per_million_usd_by_tier: HashMap::new(),
+        cache_read_per_million_usd_by_tier: HashMap::new(),
         status: CatalogStatus::Ok,
     });
 }
@@ -156,12 +161,7 @@ async fn send_renewal_pricing_inputs(tx: &mpsc::Sender<LifecycleEvent>, event_id
             quota_urgency_5h: None,
             quota_urgency_7d: None,
             quota_urgency_combined: None,
-            quota_weight_factor: None,
-            quota_cache_multiplier: None,
             quota_warning_multiplier: None,
-            quota_effective_weight: None,
-            quota_uniform_fallback: None,
-            wrh_key_source: None,
             lineage_would_have_predicted_read_tokens: None,
             lineage_would_have_picked_upstream_id: None,
         }),
