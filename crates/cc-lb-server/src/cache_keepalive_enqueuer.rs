@@ -4,14 +4,16 @@ use async_trait::async_trait;
 use cc_lb_aead::AeadService;
 use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
-    CacheKeepaliveEnqueuer, CancelReason,
+    CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest, CancelReason,
 };
 use cc_lb_engine::{ClockHandle, clock::unix_secs};
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_storage_api::{
-    CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, Storage,
+    CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveReplaceRequest,
+    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, Storage,
 };
+use uuid::Uuid;
 
 use crate::scheduler_dispatch::cache_keepalive_payload_aad;
 
@@ -75,12 +77,15 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
             &CacheKeepaliveReplaceRequest {
                 session_key_hash: request.session_key_hash.clone(),
                 principal_id: request.principal_id.clone(),
+                accounting_key_id: request.accounting_key_id.clone(),
                 upstream_id: request.snapshot.upstream_id,
                 cache_anchor_at_unix_secs,
                 ttl: request.snapshot.ttl,
                 run_at_unix_secs,
                 expires_at_unix_secs,
                 encrypted_payload: Vec::new(),
+                display_reason: request.display_reason,
+                config_snapshot: request.config_snapshot,
                 now_unix_secs,
             },
         )
@@ -170,6 +175,34 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
             &request.session_key_hash,
             terminal_reason_from_cancel(request.reason),
             unix_secs(self.clock.now()),
+        )
+        .await
+        .map_err(cache_keepalive_enqueue_error)?;
+        Ok(())
+    }
+
+    async fn record_cache_keepalive_not_tracked(
+        &self,
+        request: CacheKeepaliveNotTrackedRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        let now_unix_secs = unix_secs(self.clock.now());
+        let source_ref_id = format!("not-tracked:{}", Uuid::now_v7());
+        CacheKeepaliveProjectionStore::append_cache_keepalive_decision(
+            self.storage.as_ref(),
+            &CacheKeepaliveDecisionRow {
+                source_ref_id,
+                principal_id: request.principal_id,
+                session_key_hash: Some(request.session_key_hash),
+                upstream_id: request.upstream_id,
+                decision: "not_tracked".to_owned(),
+                reason: request.reason,
+                error: None,
+                generation: 0,
+                ttl: request.ttl,
+                config_snapshot: Some(request.config_snapshot),
+                last_message_at_ms: now_unix_secs.saturating_mul(1_000),
+                ts: now_unix_secs,
+            },
         )
         .await
         .map_err(cache_keepalive_enqueue_error)?;

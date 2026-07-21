@@ -9,6 +9,8 @@ pub mod anthropic_compat {
 pub mod anthropic_metadata {
     pub use cc_lb_control::anthropic_metadata::*;
 }
+#[cfg(not(loom))]
+pub mod attempt_rail;
 pub mod api_keys {
     pub use cc_lb_control::api_keys::*;
 }

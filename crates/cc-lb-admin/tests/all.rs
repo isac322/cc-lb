@@ -6,6 +6,8 @@ mod admin_warmup_endpoints;
 mod audit_pagination;
 #[path = "auth_required.rs"]
 mod auth_required;
+#[path = "cache_keepalive_contracts.rs"]
+mod cache_keepalive_contracts;
 #[path = "config_admin_common/mod.rs"]
 mod config_admin_common;
 #[path = "config_apply.rs"]

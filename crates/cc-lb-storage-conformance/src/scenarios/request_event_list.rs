@@ -32,6 +32,7 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
                     principal_id: Some("principal-a".to_owned()),
                     ..Default::default()
                 },
+                source_kind: None,
             })
             .await?;
 

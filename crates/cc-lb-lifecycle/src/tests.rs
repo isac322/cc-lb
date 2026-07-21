@@ -15,10 +15,41 @@ fn request_started_roundtrip() {
         request_id: "req-123".to_owned(),
         ts_ms: 1_730_000_000_000,
         stream: true,
+        source_kind: Some("proxy".to_owned()),
+        source_ref_id: Some("ingress-123".to_owned()),
     };
     let json = serde_json::to_string(&event).expect("serialize");
     let restored: LifecycleEvent = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(event, restored);
+}
+
+#[test]
+fn request_started_source_metadata_defaults_without_legacy_json_fields() {
+    let legacy_started = r#"{
+        "kind":"request_started",
+        "event_id":"01978c00-0000-7000-8000-000000000000",
+        "request_id":"req-legacy",
+        "ts_ms":1730000000000,
+        "stream":false
+    }"#;
+
+    let started: LifecycleEvent =
+        serde_json::from_str(legacy_started).expect("deserialize legacy request started");
+
+    assert!(matches!(
+        &started,
+        LifecycleEvent::RequestStarted {
+            source_kind: None,
+            source_ref_id: None,
+            ..
+        }
+    ));
+    let started_json = serde_json::to_value(&started).expect("serialize legacy request started");
+    let started_object = started_json
+        .as_object()
+        .expect("request started serializes to object");
+    assert!(!started_object.contains_key("source_kind"));
+    assert!(!started_object.contains_key("source_ref_id"));
 }
 
 #[test]
@@ -32,6 +63,8 @@ fn kind_labels_cover_every_variant() {
             request_id: "r".into(),
             ts_ms: 0,
             stream: false,
+            source_kind: None,
+            source_ref_id: None,
         }
         .kind(),
         LifecycleEvent::ParseCompleted {

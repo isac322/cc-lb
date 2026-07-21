@@ -4,6 +4,8 @@ mod sse_relay_support;
 
 #[path = "assembler_partial_property.rs"]
 mod assembler_partial_property;
+#[path = "attempt_rail_trybuild.rs"]
+mod attempt_rail_trybuild;
 #[path = "audit_writer_smoke.rs"]
 mod audit_writer_smoke;
 #[path = "batched_observation_count.rs"]
@@ -122,6 +124,8 @@ mod prompt_cache_structural_properties;
 mod queue_full_returns_503;
 #[path = "quota_header_surface_baseline.rs"]
 mod quota_header_surface_baseline;
+#[path = "renewal_accounting_e2e.rs"]
+mod renewal_accounting_e2e;
 #[path = "request_context.rs"]
 mod request_context;
 #[path = "request_context_proxy_parity.rs"]

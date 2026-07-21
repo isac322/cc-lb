@@ -181,6 +181,8 @@ impl LifecycleContext {
                 request_id,
                 ts_ms: self.inner.started_unix_ms,
                 stream,
+                source_kind: Some("proxy".to_owned()),
+                source_ref_id: None,
             });
     }
 
@@ -295,6 +297,30 @@ mod tests {
             } => (event_id, reason, client_status),
             other => panic!("expected RequestTerminated, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn request_started_marks_proxy_source() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_proxy_source".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+
+        observer.emit_request_started(false);
+
+        let event = rx.recv().await.expect("request started delivered");
+        assert!(matches!(
+            event,
+            LifecycleEvent::RequestStarted {
+                source_kind: Some(ref source_kind),
+                source_ref_id: None,
+                ..
+            } if source_kind == "proxy"
+        ));
     }
 
     #[tokio::test]

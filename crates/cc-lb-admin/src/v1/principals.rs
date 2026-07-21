@@ -45,6 +45,7 @@ pub fn router() -> Router<AdminState> {
             "/admin/v1/principals/{id}/allowed_models",
             get(get_allowed_models).put(update_allowed_models),
         )
+        .merge(super::principal_cache_keepalive::router())
 }
 
 #[derive(Debug, Deserialize)]

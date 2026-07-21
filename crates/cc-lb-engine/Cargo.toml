@@ -76,6 +76,7 @@ tower.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 insta.workspace = true
 metrics-exporter-prometheus.workspace = true
@@ -83,6 +84,7 @@ proptest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true, features = ["util"] }
+trybuild = "1"
 
 [target.'cfg(loom)'.dependencies]
 arc-swap.workspace = true

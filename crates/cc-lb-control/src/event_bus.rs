@@ -861,6 +861,8 @@ mod tests {
             request_id: request_id.to_owned(),
             ts_ms: 1_700_000_000_000,
             stream: false,
+            source_kind: None,
+            source_ref_id: None,
         }
     }
 

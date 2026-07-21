@@ -35,6 +35,7 @@ async fn run_conformance(url: &str) -> Result<()> {
     storage.initialize(BackendKind::Postgres).await?;
 
     replace_from_real_request_bumps_generation_and_resets_counters(&storage).await?;
+    replace_roundtrips_optional_accounting_key_id(&storage).await?;
     update_payload_only_mutates_matching_pending_generation(&storage).await?;
     cache_hit_reschedule_preserves_duration_anchor_and_rejects_stale_generation(&storage).await?;
     conditional_enqueue_terminal_and_purge_are_generation_safe(&storage).await?;
@@ -42,6 +43,7 @@ async fn run_conformance(url: &str) -> Result<()> {
     purge_stale_pending_keeps_enqueued_work(&storage).await?;
     concurrent_replace_from_real_request_bumps_each_generation(&storage).await?;
     concurrent_hit_reschedule_allows_only_one_generation_cas(&storage).await?;
+    concurrent_claim_allows_exactly_one_enqueued_generation_winner(&storage).await?;
 
     fixture.drop_schema().await
 }
@@ -67,6 +69,36 @@ async fn replace_from_real_request_bumps_generation_and_resets_counters(
         cache_keepalive_job_key("replace-session", 2)
     );
     assert_eq!(second.encrypted_payload, b"ciphertext-two");
+    Ok(())
+}
+
+async fn replace_roundtrips_optional_accounting_key_id(storage: &PostgresStorage) -> Result<()> {
+    let with_key = CacheKeepaliveReplaceRequest {
+        accounting_key_id: Some("key-live-123".to_owned()),
+        ..replace_request("keyed-session", b"ciphertext-with-key", 100)
+    };
+    let without_key = replace_request("unkeyed-session", b"ciphertext-without-key", 110);
+
+    let with_key = storage.replace_from_real_request(&with_key).await?;
+    let without_key = storage.replace_from_real_request(&without_key).await?;
+
+    assert_eq!(with_key.accounting_key_id.as_deref(), Some("key-live-123"));
+    assert_eq!(without_key.accounting_key_id, None);
+
+    // This conformance suite shares one schema across steps. Terminalize these
+    // sessions so they do not linger as active+pending rows and inflate the
+    // global count asserted by purge_stale_pending_keeps_enqueued_work.
+    for session_key_hash in ["keyed-session", "unkeyed-session"] {
+        assert!(
+            storage
+                .mark_latest_cache_keepalive_terminal(
+                    session_key_hash,
+                    CacheKeepaliveTerminalReason::Cancelled,
+                    120,
+                )
+                .await?
+        );
+    }
     Ok(())
 }
 
@@ -386,6 +418,55 @@ async fn concurrent_hit_reschedule_allows_only_one_generation_cas(
     Ok(())
 }
 
+async fn concurrent_claim_allows_exactly_one_enqueued_generation_winner(
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let session_key_hash = "concurrent-claim-cas";
+    let record = storage
+        .replace_from_real_request(&replace_request(session_key_hash, b"init", 100))
+        .await?;
+    assert!(
+        storage
+            .mark_cache_keepalive_enqueued(session_key_hash, record.generation, 101)
+            .await?
+    );
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+    let first = tokio::spawn({
+        let storage = storage.clone();
+        let barrier = Arc::clone(&barrier);
+        async move {
+            barrier.wait().await;
+            storage
+                .claim_cache_keepalive_turn(session_key_hash, record.generation, 200)
+                .await
+        }
+    });
+    let second = tokio::spawn({
+        let storage = storage.clone();
+        let barrier = Arc::clone(&barrier);
+        async move {
+            barrier.wait().await;
+            storage
+                .claim_cache_keepalive_turn(session_key_hash, record.generation, 200)
+                .await
+        }
+    });
+
+    let (first, second) = tokio::try_join!(first, second)?;
+    let first = first?;
+    let second = second?;
+    assert_eq!(u8::from(first) + u8::from(second), 1);
+
+    let claimed = storage
+        .get_cache_keepalive_session(session_key_hash)
+        .await?
+        .expect("session exists");
+    assert_eq!(claimed.enqueue_state, CacheKeepaliveEnqueueState::Running);
+    assert_eq!(claimed.running_since_unix_secs, Some(200));
+    Ok(())
+}
+
 fn replace_request(
     session_key_hash: &str,
     payload: &[u8],
@@ -400,6 +481,15 @@ fn replace_request(
         run_at_unix_secs: now + 270,
         expires_at_unix_secs: now + 300,
         encrypted_payload: payload.to_vec(),
+        accounting_key_id: None,
+        display_reason: "agent-in-turn".to_owned(),
+        config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
+            refresh_lead_time_5m_secs: 30,
+            refresh_lead_time_1h_secs: 300,
+            max_refreshes_per_session: 12,
+            max_total_duration_secs: 14_400,
+            snapshot_max_bytes: 524_288,
+        },
         now_unix_secs: now,
     }
 }

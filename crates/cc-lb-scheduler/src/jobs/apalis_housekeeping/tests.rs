@@ -13,7 +13,7 @@ mod sqlite {
 
     use super::{
         ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler,
-        ApalisHousekeepingJobResult, NOW_SECS, cache_keepalive_jobs, expected_job_ids,
+        ApalisHousekeepingJobResult, DAY_SECS, NOW_SECS, cache_keepalive_jobs, expected_job_ids,
         expected_result, jobs, sessions, workers,
     };
 
@@ -96,6 +96,57 @@ mod sqlite {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn terminalizes_stale_running_keepalive_sessions_without_reenqueuing_jobs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = SqlitePool::connect(":memory:").await?;
+        SqliteStorage::setup(&pool).await?;
+        create_cache_keepalive_sessions_table(&pool).await?;
+        seed_running_keepalive_sessions(&pool).await?;
+
+        let result = ApalisHousekeepingJobHandler::new(
+            pool.clone(),
+            ApalisHousekeepingConfig::new(30).with_stale_lock_threshold_secs(120),
+        )
+        .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+        .await;
+
+        match result {
+            ApalisHousekeepingJobResult::Done {
+                cache_keepalive_sessions_removed,
+                ..
+            } => assert_eq!(cache_keepalive_sessions_removed, 1),
+            other => panic!("expected completed housekeeping, got {other:?}"),
+        }
+        let stale: (String, Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT status, terminal_reason, running_since_unix_secs
+             FROM cache_keepalive_sessions WHERE session_key_hash = 'stale-running'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(stale.0, "terminal");
+        assert_eq!(stale.1.as_deref(), Some("stale"));
+        assert_eq!(stale.2, None);
+        let fresh: (String, Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT status, terminal_reason, running_since_unix_secs
+             FROM cache_keepalive_sessions WHERE session_key_hash = 'fresh-running'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(fresh.0, "active");
+        assert_eq!(fresh.1, None);
+        assert_eq!(fresh.2, Some(i64::try_from(NOW_SECS - 10)?));
+        let (job_status, lock_by, lock_at): (String, Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT status, lock_by, lock_at FROM Jobs WHERE id = 'stale-keepalive-job'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(job_status, "Killed");
+        assert!(lock_by.is_none());
+        assert!(lock_at.is_none());
+        Ok(())
+    }
+
     async fn seed_sqlite(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         for (id, last_seen) in workers() {
             sqlx::query("INSERT INTO Workers (id, worker_type, storage_name, layers, last_seen, started_at) VALUES (?1, 'housekeeping', 'default', '', ?2, ?2)")
@@ -124,7 +175,9 @@ mod sqlite {
                 status TEXT NOT NULL,
                 enqueue_state TEXT NOT NULL,
                 expires_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                terminal_reason TEXT,
+                running_since_unix_secs INTEGER
             )",
         )
         .execute(pool)
@@ -185,6 +238,41 @@ mod sqlite {
         Ok(())
     }
 
+    async fn seed_running_keepalive_sessions(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO Workers (id, worker_type, storage_name, layers, last_seen, started_at)
+             VALUES ('worker-live', 'cron', 'default', '', ?1, ?1)",
+        )
+        .bind(i64::try_from(NOW_SECS).expect("test timestamp fits i64"))
+        .execute(pool)
+        .await?;
+        for (session_key_hash, running_since_unix_secs) in [
+            ("stale-running", NOW_SECS - 300),
+            ("fresh-running", NOW_SECS - 10),
+        ] {
+            sqlx::query(
+                "INSERT INTO cache_keepalive_sessions
+                 (session_key_hash, status, enqueue_state, expires_at, updated_at, terminal_reason, running_since_unix_secs)
+                 VALUES (?1, 'active', 'running', ?2, ?2, NULL, ?3)",
+            )
+            .bind(session_key_hash)
+            .bind(i64::try_from(NOW_SECS + DAY_SECS).expect("test timestamp fits i64"))
+            .bind(i64::try_from(running_since_unix_secs).expect("test timestamp fits i64"))
+            .execute(pool)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO Jobs (job, id, job_type, status, run_at, lock_by, lock_at, idempotency_key)
+             VALUES (?1, 'stale-keepalive-job', 'adaptive', 'Running', ?2, 'worker-live', ?3, 'cache_keepalive:stale-running:1')",
+        )
+        .bind(Vec::<u8>::new())
+        .bind(i64::try_from(NOW_SECS).expect("test timestamp fits i64"))
+        .bind(i64::try_from(NOW_SECS - 300).expect("test timestamp fits i64"))
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     async fn ids(pool: &SqlitePool, table: &str) -> Result<Vec<String>, sqlx::Error> {
         sqlx::query_scalar::<_, String>(&format!("SELECT id FROM {table} ORDER BY id"))
             .fetch_all(pool)
@@ -213,8 +301,8 @@ mod postgres {
     use uuid::Uuid;
 
     use super::{
-        ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler, NOW_SECS,
-        cache_keepalive_jobs, expected_job_ids, expected_result, jobs, sessions, workers,
+        ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler, DAY_SECS,
+        NOW_SECS, cache_keepalive_jobs, expected_job_ids, expected_result, jobs, sessions, workers,
     };
 
     #[tokio::test]
@@ -275,6 +363,78 @@ mod postgres {
             session_hashes(pool).await?,
             vec!["live-enqueued", "live-pending"]
         );
+        assert_postgres_stale_running_keepalive_recovery(pool).await?;
+        Ok(())
+    }
+
+    async fn assert_postgres_stale_running_keepalive_recovery(
+        pool: &PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (session_key_hash, running_since_unix_secs) in [
+            ("stale-running", NOW_SECS - 300),
+            ("fresh-running", NOW_SECS - 10),
+        ] {
+            sqlx::query(
+                "INSERT INTO cache_keepalive_sessions
+                 (session_key_hash, status, enqueue_state, expires_at, updated_at, terminal_reason, running_since_unix_secs)
+                 VALUES ($1, 'active', 'running', $2, $2, NULL, $3)",
+            )
+            .bind(session_key_hash)
+            .bind(i64::try_from(NOW_SECS + DAY_SECS)?)
+            .bind(i64::try_from(running_since_unix_secs)?)
+            .execute(pool)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO apalis.jobs (job, id, job_type, status, run_at, lock_by, lock_at, idempotency_key)
+             VALUES ($1, 'stale-keepalive-job', 'adaptive', 'Running', $2, 'worker-live', $3, 'cache_keepalive:stale-running:1')",
+        )
+        .bind(Vec::<u8>::new())
+        .bind(ts(NOW_SECS))
+        .bind(ts(NOW_SECS - 300))
+        .execute(pool)
+        .await?;
+
+        let result = ApalisHousekeepingJobHandler::new(
+            pool.clone(),
+            ApalisHousekeepingConfig::new(30).with_stale_lock_threshold_secs(120),
+        )
+        .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+        .await;
+        match result {
+            super::ApalisHousekeepingJobResult::Done {
+                cache_keepalive_sessions_removed,
+                ..
+            } => assert_eq!(cache_keepalive_sessions_removed, 1),
+            other => panic!("expected completed housekeeping, got {other:?}"),
+        }
+        let stale: (String, Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT status, terminal_reason, running_since_unix_secs
+             FROM cache_keepalive_sessions WHERE session_key_hash = 'stale-running'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(stale.0, "terminal");
+        assert_eq!(stale.1.as_deref(), Some("stale"));
+        assert_eq!(stale.2, None);
+        let fresh: (String, Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT status, terminal_reason, running_since_unix_secs
+             FROM cache_keepalive_sessions WHERE session_key_hash = 'fresh-running'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(fresh.0, "active");
+        assert_eq!(fresh.1, None);
+        assert_eq!(fresh.2, Some(i64::try_from(NOW_SECS - 10)?));
+        let (job_status, lock_by, lock_at): (String, Option<String>, Option<DateTime<Utc>>) =
+            sqlx::query_as(
+                "SELECT status, lock_by, lock_at FROM apalis.jobs WHERE id = 'stale-keepalive-job'",
+            )
+            .fetch_one(pool)
+            .await?;
+        assert_eq!(job_status, "Killed");
+        assert!(lock_by.is_none());
+        assert!(lock_at.is_none());
         Ok(())
     }
 
@@ -306,7 +466,9 @@ mod postgres {
                 status TEXT NOT NULL,
                 enqueue_state TEXT NOT NULL,
                 expires_at BIGINT NOT NULL,
-                updated_at BIGINT NOT NULL
+                updated_at BIGINT NOT NULL,
+                terminal_reason TEXT,
+                running_since_unix_secs BIGINT
             )",
         )
         .execute(pool)

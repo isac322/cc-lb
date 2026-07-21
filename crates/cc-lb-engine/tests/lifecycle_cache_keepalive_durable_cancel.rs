@@ -9,7 +9,7 @@ use bytes::Bytes;
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
-    CacheKeepaliveEnqueuer,
+    CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest,
 };
 use cc_lb_engine::{DispatchError, LifecycleConfig, UpstreamDispatch};
 use cc_lb_storage_api::principal::{Limit, PrincipalKind, PrincipalRecord};
@@ -111,6 +111,13 @@ impl CacheKeepaliveEnqueuer for RecordingCancelEnqueuer {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
+
+    async fn record_cache_keepalive_not_tracked(
+        &self,
+        _request: CacheKeepaliveNotTrackedRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -130,6 +137,13 @@ impl CacheKeepaliveEnqueuer for FailingCancelEnqueuer {
         Err(CacheKeepaliveEnqueueError(
             "forced cancellation failure".to_owned(),
         ))
+    }
+
+    async fn record_cache_keepalive_not_tracked(
+        &self,
+        _request: CacheKeepaliveNotTrackedRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        Ok(())
     }
 }
 

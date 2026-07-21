@@ -11,9 +11,12 @@ use std::time::Duration;
 use ::http::{HeaderMap, HeaderValue, Method};
 use bytes::Bytes;
 use cc_lb_config::{SchedulerConfig, StorageConfig};
+use cc_lb_control::RequestEventBus;
+use cc_lb_control::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::cache_keepalive::{
-    AnthropicKeepaliveDispatcher, CacheKeepaliveEnqueueRequest, RequestSnapshot, ScheduleParams,
+    AnthropicKeepaliveDispatcher, CacheKeepaliveEnqueueRequest, KeepaliveDispatcher,
+    RequestSnapshot, ScheduleParams,
 };
 use cc_lb_engine::{DynamicViewBuilder, SystemClock};
 use cc_lb_runtime_wasmtime::HotEngineConfig;
@@ -44,7 +47,8 @@ pub(super) struct Fixture {
     dynamic_view: Arc<DynamicViewHolder>,
     pub(super) http: Arc<RecordingHttp>,
     pub(super) signer_calls: Arc<Mutex<Vec<String>>>,
-    upstream_id: Uuid,
+    pub(super) upstream_id: Uuid,
+    event_bus: Arc<cc_lb_control::InMemoryBus>,
     data_dir: std::path::PathBuf,
 }
 
@@ -108,6 +112,7 @@ impl Fixture {
                 .build(),
         ));
         let storage_dyn: Arc<dyn Storage> = storage.clone();
+        let event_bus = Arc::new(cc_lb_control::InMemoryBus::new());
         Self {
             data_dir: dir.path().to_path_buf(),
             _dir: dir,
@@ -119,6 +124,7 @@ impl Fixture {
             http: Arc::new(RecordingHttp::default()),
             signer_calls,
             upstream_id: upstream.id,
+            event_bus,
         }
     }
 
@@ -170,6 +176,26 @@ impl Fixture {
         self.dynamic_view.store(view);
     }
 
+    pub(super) fn disable_cache_keepalive_on_next_http_dispatch(&self) {
+        let dynamic_view = Arc::clone(&self.dynamic_view);
+        self.http.run_on_next_dispatch(Arc::new(move || {
+            let current = dynamic_view.load();
+            let mut disabled = principal_record_with_id("principal");
+            disabled
+                .cache_keepalive
+                .as_mut()
+                .expect("fixture principal has cache keepalive")
+                .enabled = false;
+            let view = DynamicViewBuilder::from_view(&current)
+                .principal_view(Arc::new(PrincipalView::from_db(
+                    &[disabled],
+                    std::collections::HashMap::new(),
+                )))
+                .build();
+            dynamic_view.store(view);
+        }));
+    }
+
     pub(super) fn enqueuer(
         &self,
         pusher: Arc<dyn CacheKeepaliveTaskPusher>,
@@ -182,7 +208,50 @@ impl Fixture {
         })
     }
 
+    pub(super) fn event_bus(&self) -> Arc<cc_lb_control::InMemoryBus> {
+        self.event_bus.clone()
+    }
+
+    pub(super) fn dynamic_view(&self) -> Arc<DynamicViewHolder> {
+        self.dynamic_view.clone()
+    }
+
     pub(super) fn dispatch(&self, pusher: Arc<dyn CacheKeepaliveTaskPusher>) -> SchedulerDispatch {
+        self.dispatch_with_limit_engine(
+            pusher,
+            cc_lb_control::api_keys::limit_engine::LimitEngine::new(
+                Arc::new(cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
+                Arc::new(SystemClock),
+            ),
+        )
+    }
+
+    pub(super) fn dispatch_with_limit_engine(
+        &self,
+        pusher: Arc<dyn CacheKeepaliveTaskPusher>,
+        limit_engine: Arc<LimitEngine>,
+    ) -> SchedulerDispatch {
+        let keepalive_dispatcher = Arc::new(
+            AnthropicKeepaliveDispatcher::new(
+                self.dynamic_view.clone(),
+                self.storage_dyn.clone(),
+                self.http.clone(),
+            )
+            .with_timeout(Duration::from_secs(1)),
+        );
+        self.dispatch_with_limit_engine_and_keepalive_dispatcher(
+            pusher,
+            limit_engine,
+            keepalive_dispatcher,
+        )
+    }
+
+    pub(super) fn dispatch_with_limit_engine_and_keepalive_dispatcher(
+        &self,
+        pusher: Arc<dyn CacheKeepaliveTaskPusher>,
+        limit_engine: Arc<LimitEngine>,
+        keepalive_dispatcher: Arc<dyn KeepaliveDispatcher>,
+    ) -> SchedulerDispatch {
         let stores = Arc::new(Stores {
             upstreams: self.storage_dyn.clone(),
             principals: self.storage_dyn.clone(),
@@ -196,14 +265,6 @@ impl Fixture {
             anthropic_compatibility_kv: self.storage_dyn.clone(),
             audit: Some(self.storage_dyn.clone()),
         });
-        let keepalive_dispatcher = Arc::new(
-            AnthropicKeepaliveDispatcher::new(
-                self.dynamic_view.clone(),
-                self.storage_dyn.clone(),
-                self.http.clone(),
-            )
-            .with_timeout(Duration::from_secs(1)),
-        );
         SchedulerDispatch::new(SchedulerDispatchDeps {
             backend: self.backend.backend.clone(),
             cache_keepalive_pusher: pusher,
@@ -222,8 +283,13 @@ impl Fixture {
             cancel: CancellationToken::new(),
             replica_id: None,
             price_catalog: cc_lb_pricing::global_catalog().clone(),
+            key_store: Arc::new(cc_lb_control::api_keys::key_store::KeyStore::new(
+                self.storage.clone(),
+            )),
+            limit_engine,
             dynamic_view: self.dynamic_view.clone(),
             keepalive_dispatcher,
+            event_bus: self.event_bus.clone() as Arc<dyn RequestEventBus>,
             clock: Arc::new(SystemClock),
         })
     }
@@ -234,11 +300,20 @@ impl Fixture {
         CacheKeepaliveEnqueueRequest {
             session_key_hash: "session-hash".to_owned(),
             principal_id: "principal".to_owned(),
+            accounting_key_id: None,
             cache_anchor_age: Duration::ZERO,
             params: ScheduleParams {
                 delay: Duration::from_secs(1),
                 max_refreshes: 3,
                 max_total_duration_secs: 600,
+            },
+            display_reason: "agent-in-turn — first renewal in 1s".to_owned(),
+            config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session: 3,
+                max_total_duration_secs: 600,
+                snapshot_max_bytes: 524_288,
             },
             snapshot: RequestSnapshot::capture(
                 Url::parse("https://api.anthropic.com/v1/messages").expect("url parses"),
