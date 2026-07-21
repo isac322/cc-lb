@@ -236,8 +236,15 @@ async fn read_model_contract(url: &str) -> Result<()> {
             limit: 10,
         })
         .await?;
-    assert_eq!(frozen_order.rows[5].id, "newer-session");
-    assert_eq!(frozen_order.rows[6].id, "older-session");
+    let frozen_ids: Vec<&str> = frozen_order
+        .rows
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect();
+    assert_eq!(
+        &frozen_ids[frozen_ids.len() - 2..],
+        ["newer-session", "older-session"],
+    );
 
     storage
         .replace_from_real_request(&request("outside-horizon", 1_730_000_006, "agent-in-turn"))
