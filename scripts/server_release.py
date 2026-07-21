@@ -165,7 +165,7 @@ def stamp_chart(chart_yaml: Path, revision: str) -> None:
     if text.count(SOURCE_PLACEHOLDER) != 1:
         raise ReleaseError("Chart.yaml must contain exactly one source-revision placeholder")
     chart_yaml.write_text(
-        text.replace(SOURCE_PLACEHOLDER, f"cc-lb.io/source-revision: {revision}"),
+        text.replace(SOURCE_PLACEHOLDER, f'cc-lb.io/source-revision: "{revision}"'),
         encoding="utf-8",
     )
 

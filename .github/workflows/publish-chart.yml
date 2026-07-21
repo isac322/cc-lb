@@ -1,23 +1,29 @@
 name: publish-chart
 
 on:
-  release:
-    types: [published]
   workflow_call:
     inputs:
       version:
-        description: 'Semver to publish, without a leading v (e.g. 1.2.3 or 1.2.3-rc.1)'
+        description: 'Semver to publish without a leading v'
+        required: true
+        type: string
+      source_ref:
+        description: 'Immutable cc-lb source tag to package'
         required: true
         type: string
   workflow_dispatch:
     inputs:
       version:
-        description: 'Semver to publish, without a leading v (e.g. 1.2.3 or 1.2.3-rc.1)'
+        description: 'Semver to publish without a leading v'
+        required: true
+        type: string
+      source_ref:
+        description: 'Immutable cc-lb source tag to package'
         required: true
         type: string
 
 concurrency:
-  group: publish-chart-${{ github.ref }}
+  group: publish-chart-${{ inputs.version }}
   cancel-in-progress: false
 
 permissions: {}
@@ -25,7 +31,6 @@ permissions: {}
 jobs:
   publish:
     name: package & push chart
-    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -35,26 +40,27 @@ jobs:
       LINT_MASTER_KEY: ci-lint-placeholder
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Determine version
-        id: version
+      - name: Resolve source revision
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Validate version and source ref
         env:
-          INPUT_VERSION: ${{ inputs.version }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          VERSION: ${{ inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            VERSION="${RELEASE_TAG#v}"
-          else
-            VERSION="$INPUT_VERSION"
+          set -euo pipefail
+          if ! printf '%s' "$VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$VERSION' must be SemVer without build metadata"
+            exit 1
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Validate version
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
-            echo "::error::'$VERSION' is not valid semver (expected X.Y.Z[-prerelease][+build])"
+          if [ "$SOURCE_REF" != "cc-lb-v$VERSION" ]; then
+            echo "::error::source_ref '$SOURCE_REF' must equal cc-lb-v$VERSION"
             exit 1
           fi
 
@@ -62,20 +68,76 @@ jobs:
         with:
           version: v3.16.4
 
-      - name: Helm lint
-        run: helm lint "$CHART" --set secrets.masterKey="$LINT_MASTER_KEY"
-
       - name: Log in to ghcr.io
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$GITHUB_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Package chart
+      - name: Inspect existing chart
+        id: existing
         env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: helm package "$CHART" --version "$VERSION" --app-version "$VERSION" --destination .
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          existing_dir="$RUNNER_TEMP/existing-chart"
+          mkdir -p "$existing_dir"
+          error_file="$RUNNER_TEMP/chart-pull-error"
+          if helm pull oci://ghcr.io/isac322/charts/cc-lb \
+              --version "$VERSION" \
+              --destination "$existing_dir" \
+              2>"$error_file"; then
+            tar -xzf "$existing_dir/cc-lb-$VERSION.tgz" -C "$existing_dir"
+            python3 scripts/server_release.py verify-chart \
+              --chart "$existing_dir/cc-lb/Chart.yaml" \
+              --version "$VERSION" \
+              --revision "$SOURCE_SHA"
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+          elif grep -qiE 'not found|manifest unknown' "$error_file"; then
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+          else
+            command cat "$error_file" >&2
+            echo "::error::could not determine whether chart $VERSION exists"
+            exit 1
+          fi
+
+      - name: Prepare chart
+        if: steps.existing.outputs.already_published != 'true'
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          command cp -R "$CHART" "$RUNNER_TEMP/cc-lb-chart"
+          python3 scripts/server_release.py stamp-chart \
+            --chart "$RUNNER_TEMP/cc-lb-chart/Chart.yaml" \
+            --revision "$SOURCE_SHA"
+          helm lint "$RUNNER_TEMP/cc-lb-chart" \
+            --set secrets.masterKey="$LINT_MASTER_KEY"
+          helm package "$RUNNER_TEMP/cc-lb-chart" \
+            --version "$VERSION" \
+            --app-version "$VERSION" \
+            --destination "$RUNNER_TEMP"
 
       - name: Push chart
+        if: steps.existing.outputs.already_published != 'true'
         env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: helm push "cc-lb-${VERSION}.tgz" oci://ghcr.io/isac322/charts
+          VERSION: ${{ inputs.version }}
+        run: helm push "$RUNNER_TEMP/cc-lb-$VERSION.tgz" oci://ghcr.io/isac322/charts
+
+      - name: Verify published chart
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          verify_dir="$RUNNER_TEMP/verify-chart"
+          mkdir -p "$verify_dir"
+          helm pull oci://ghcr.io/isac322/charts/cc-lb \
+            --version "$VERSION" \
+            --destination "$verify_dir"
+          tar -xzf "$verify_dir/cc-lb-$VERSION.tgz" -C "$verify_dir"
+          python3 scripts/server_release.py verify-chart \
+            --chart "$verify_dir/cc-lb/Chart.yaml" \
+            --version "$VERSION" \
+            --revision "$SOURCE_SHA"

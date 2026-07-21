@@ -19,3 +19,5 @@ keywords:
 maintainers:
   - name: isac322
     url: https://github.com/isac322
+annotations:
+  cc-lb.io/source-revision: __SOURCE_REVISION__

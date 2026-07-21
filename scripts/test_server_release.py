@@ -176,6 +176,22 @@ class ChartMetadataTests(unittest.TestCase):
                 server_release.verify_chart(chart, "0.1.1", "deadbeef")
             with self.assertRaisesRegex(server_release.ReleaseError, "metadata mismatch"):
                 server_release.verify_chart(chart, "0.1.1", "cafebabe")
+    def test_stamp_quotes_numeric_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            chart = Path(temp) / "Chart.yaml"
+            chart.write_text(
+                "apiVersion: v2\nname: cc-lb\nversion: 0.1.1\n"
+                "appVersion: \"0.1.1\"\nannotations:\n"
+                "  cc-lb.io/source-revision: __SOURCE_REVISION__\n",
+                encoding="utf-8",
+            )
+            revision = "0" * 40
+            server_release.stamp_chart(chart, revision)
+            self.assertIn(
+                f'cc-lb.io/source-revision: "{revision}"',
+                chart.read_text(encoding="utf-8"),
+            )
+
 
 
 if __name__ == "__main__":
