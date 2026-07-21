@@ -1,0 +1,226 @@
+name: release-server
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'Cargo.toml'
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Start a missed release or resume an existing draft'
+        required: true
+        type: choice
+        options: [start, resume]
+      version:
+        description: 'Cargo server SemVer without a tag prefix'
+        required: true
+        type: string
+      target_sha:
+        description: 'Reviewed release PR merge commit or existing release tag commit'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-server
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: inspect and prepare release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      action: ${{ steps.decision.outputs.action }}
+      version: ${{ steps.target.outputs.version }}
+      tag: ${{ steps.target.outputs.tag }}
+      target_sha: ${{ steps.target.outputs.target_sha }}
+      prerelease: ${{ steps.target.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Select release target
+        id: selected
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_OPERATION: ${{ inputs.operation }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            operation=auto
+            target_sha=$GITHUB_SHA
+            expected_version=
+          else
+            operation=$INPUT_OPERATION
+            target_sha=$INPUT_TARGET_SHA
+            expected_version=$INPUT_VERSION
+          fi
+          printf 'operation=%s\ntarget_sha=%s\nexpected_version=%s\n' \
+            "$operation" "$target_sha" "$expected_version" >> "$GITHUB_OUTPUT"
+
+      - name: Verify target is on master
+        env:
+          TARGET_SHA: ${{ steps.selected.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin master --tags
+          git merge-base --is-ancestor "$TARGET_SHA" origin/master
+
+      - name: Inspect release target
+        id: target
+        env:
+          EXPECTED_VERSION: ${{ steps.selected.outputs.expected_version }}
+          TARGET_SHA: ${{ steps.selected.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          args=(
+            inspect
+            --repo .
+            --target "$TARGET_SHA"
+            --github-output "$GITHUB_OUTPUT"
+          )
+          if [ -n "$EXPECTED_VERSION" ]; then
+            args+=(--expected-version "$EXPECTED_VERSION")
+          fi
+          python3 scripts/server_release.py "${args[@]}"
+
+      - name: Inspect tag and Release state
+        id: remote
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.target.outputs.tag }}
+        run: |
+          set -euo pipefail
+          tag_error="$RUNNER_TEMP/tag-fetch-error"
+          if git fetch origin "refs/tags/$TAG:refs/tags/$TAG" 2>"$tag_error"; then
+            tag_sha=$(git rev-parse "refs/tags/$TAG^{commit}")
+          elif grep -qiE "couldn't find remote ref|not our ref" "$tag_error"; then
+            tag_sha=""
+          else
+            command cat "$tag_error" >&2
+            exit 1
+          fi
+          echo "tag_sha=$tag_sha" >> "$GITHUB_OUTPUT"
+
+          error_file="$RUNNER_TEMP/release-api-error"
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+              > "$RUNNER_TEMP/release.json" 2>"$error_file"; then
+            if jq -e '.draft == true' "$RUNNER_TEMP/release.json" > /dev/null; then
+              echo "release_state=draft" >> "$GITHUB_OUTPUT"
+            else
+              echo "release_state=published" >> "$GITHUB_OUTPUT"
+            fi
+          elif grep -q 'HTTP 404' "$error_file"; then
+            echo "release_state=absent" >> "$GITHUB_OUTPUT"
+          else
+            command cat "$error_file" >&2
+            exit 1
+          fi
+
+      - name: Decide release action
+        id: decision
+        env:
+          OPERATION: ${{ steps.selected.outputs.operation }}
+          RELEASE_STATE: ${{ steps.remote.outputs.release_state }}
+          TAG_SHA: ${{ steps.remote.outputs.tag_sha }}
+          TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+          VERSION_CHANGED: ${{ steps.target.outputs.version_changed }}
+        run: |
+          python3 scripts/server_release.py decide \
+            --operation "$OPERATION" \
+            --release-state "$RELEASE_STATE" \
+            --tag-sha "$TAG_SHA" \
+            --target-sha "$TARGET_SHA" \
+            --version-changed "$VERSION_CHANGED" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Create source tag
+        if: steps.decision.outputs.action == 'start'
+        env:
+          TAG: ${{ steps.target.outputs.tag }}
+          TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+          VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git tag -a "$TAG" "$TARGET_SHA" -m "cc-lb $VERSION"
+          git push origin "refs/tags/$TAG"
+
+      - name: Create draft GitHub Release
+        if: steps.decision.outputs.action == 'start'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ steps.target.outputs.prerelease }}
+          TAG: ${{ steps.target.outputs.tag }}
+          TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+          VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          set -euo pipefail
+          notes=$(cat <<EOF
+          ## Artifacts
+
+          - Docker: \`ghcr.io/isac322/cc-lb:$VERSION\`
+          - Helm: \`oci://ghcr.io/isac322/charts/cc-lb --version $VERSION\`
+          - Source commit: \`$TARGET_SHA\`
+          EOF
+          )
+          args=(
+            "$TAG"
+            --verify-tag
+            --draft
+            --generate-notes
+            --title "cc-lb $VERSION"
+            --notes "$notes"
+          )
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
+
+  publish-docker:
+    name: publish docker image
+    needs: prepare
+    if: needs.prepare.outputs.action == 'start' || needs.prepare.outputs.action == 'resume'
+    uses: ./.github/workflows/cd.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      source_ref: ${{ needs.prepare.outputs.tag }}
+    secrets: inherit
+
+  publish-chart:
+    name: publish helm chart
+    needs: [prepare, publish-docker]
+    if: needs.prepare.outputs.action == 'start' || needs.prepare.outputs.action == 'resume'
+    uses: ./.github/workflows/publish-chart.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      source_ref: ${{ needs.prepare.outputs.tag }}
+    secrets: inherit
+
+  publish-release:
+    name: publish GitHub Release
+    needs: [prepare, publish-docker, publish-chart]
+    if: needs.prepare.outputs.action == 'start' || needs.prepare.outputs.action == 'resume'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release edit "$TAG" --draft=false

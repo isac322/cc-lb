@@ -117,11 +117,17 @@ class DecideReleaseTests(unittest.TestCase):
             "resume",
         )
 
-    def test_inconsistent_or_moved_tag_fails(self) -> None:
-        with self.assertRaises(server_release.ReleaseError):
-            server_release.decide_release("resume", "abc", "def", "draft", True)
-        with self.assertRaises(server_release.ReleaseError):
-            server_release.decide_release("start", "abc", "abc", "absent", True)
+    def test_draft_resume_rejects_moved_tag(self) -> None:
+        with self.assertRaisesRegex(server_release.ReleaseError, "immutable tag"):
+            server_release.decide_release(
+                "resume", "release-sha", "other-sha", "draft", True
+            )
+
+    def test_start_rejects_tag_without_release(self) -> None:
+        with self.assertRaisesRegex(server_release.ReleaseError, "tag exists"):
+            server_release.decide_release(
+                "start", "release-sha", "release-sha", "absent", True
+            )
 
 
 class ReleaseAliasTests(unittest.TestCase):
