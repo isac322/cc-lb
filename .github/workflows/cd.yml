@@ -1,28 +1,33 @@
 name: publish-docker
 
-# Image tags are strict semver with no `latest`: 1.2.3 publishes 1, 1.2, 1.2.3,
-# while a prerelease (1.2.3-rc.1) publishes only 1.2.3-rc.1 and never moves the
-# 1 / 1.2 tags. The build cross-compiles from the runner's native arch, so no
-# QEMU is needed for the four target platforms.
+# Publish the immutable exact version first. Stable moving aliases are updated
+# only when this version is the newest published stable server Release for the
+# alias prefix. Prereleases never move aliases, and `latest` is never published.
 
 on:
-  release:
-    types: [published]
   workflow_call:
     inputs:
       version:
-        description: 'Semver to publish, without a leading v (e.g. 1.2.3 or 1.2.3-rc.1)'
+        description: 'Semver to publish without a leading v'
+        required: true
+        type: string
+      source_ref:
+        description: 'Immutable cc-lb source tag to build'
         required: true
         type: string
   workflow_dispatch:
     inputs:
       version:
-        description: 'Semver to publish, without a leading v (e.g. 1.2.3 or 1.2.3-rc.1)'
+        description: 'Semver to publish without a leading v'
+        required: true
+        type: string
+      source_ref:
+        description: 'Immutable cc-lb source tag to build'
         required: true
         type: string
 
 concurrency:
-  group: publish-docker-${{ github.ref }}
+  group: publish-docker-${{ inputs.version }}
   cancel-in-progress: false
 
 permissions: {}
@@ -30,7 +35,6 @@ permissions: {}
 jobs:
   publish:
     name: build & push image
-    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     # Runs on the self-hosted oracle4-cc-lb runner: it is arm64 (required — from
     # an x86_64/musl host the build host's triple equals the x86_64-musl target,
     # so .cargo/config.toml's static-musl linker leaks into host proc-macro
@@ -43,39 +47,32 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Derive reproducible build timestamp
-        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
-
-      - name: Determine version
-        id: version
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+      - name: Resolve source revision
+        id: source
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            VERSION="${RELEASE_TAG#v}"
-          else
-            VERSION="$INPUT_VERSION"
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
-      # Reject non-semver before it can reach the registry (otherwise
-      # metadata-action emits no tags and the push is a confusing no-op).
-      - name: Validate version
+      - name: Validate version and source ref
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_REF: ${{ inputs.source_ref }}
         run: |
-          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
-            echo "::error::'$VERSION' is not valid semver (expected X.Y.Z[-prerelease][+build])"
+          set -euo pipefail
+          if ! printf '%s' "$VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$VERSION' must be SemVer without build metadata"
             exit 1
           fi
-
-      # network=host lets the build reach the in-cluster garage sccache endpoint.
-      - uses: docker/setup-buildx-action@v4
-        with:
-          driver-opts: network=host
-          buildkitd-flags: --allow-insecure-entitlement network.host
+          if [ "$SOURCE_REF" != "cc-lb-v$VERSION" ]; then
+            echo "::error::source_ref '$SOURCE_REF' must equal cc-lb-v$VERSION"
+            exit 1
+          fi
 
       - name: Log in to ghcr.io
         uses: docker/login-action@v4
@@ -84,18 +81,53 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Derive tags
+      - name: Inspect existing exact image
+        id: existing
+        env:
+          IMAGE: ghcr.io/isac322/cc-lb
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          error_file="$RUNNER_TEMP/image-inspect-error"
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" > /dev/null 2>"$error_file"; then
+            docker pull "$IMAGE:$VERSION"
+            revision=$(docker image inspect \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+              "$IMAGE:$VERSION")
+            if [ "$revision" != "$SOURCE_SHA" ]; then
+              echo "::error::existing $IMAGE:$VERSION points to revision '$revision', expected '$SOURCE_SHA'"
+              exit 1
+            fi
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+          elif grep -qiE 'not found|manifest unknown' "$error_file"; then
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+          else
+            command cat "$error_file" >&2
+            echo "::error::could not determine whether $IMAGE:$VERSION exists"
+            exit 1
+          fi
+
+      - name: Derive exact tag and labels
         id: meta
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/isac322/cc-lb
           flavor: latest=false
           tags: |
-            type=semver,pattern={{version}},value=${{ steps.version.outputs.version }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version }}
-            type=semver,pattern={{major}},value=${{ steps.version.outputs.version }}
+            type=semver,pattern={{version}},value=${{ inputs.version }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
 
-      - name: Build and push
+      # network=host lets the build reach the in-cluster garage sccache endpoint.
+      - uses: docker/setup-buildx-action@v4
+        if: steps.existing.outputs.already_published != 'true'
+        with:
+          driver-opts: network=host
+          buildkitd-flags: --allow-insecure-entitlement network.host
+
+      - name: Build and push exact image
+        if: steps.existing.outputs.already_published != 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -107,7 +139,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            GIT_SHA=${{ github.sha }}
+            GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
             SCCACHE_BUCKET=sccache
             SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
@@ -117,8 +149,60 @@ jobs:
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
 
-      # Pull the freshly pushed amd64 image back and confirm the binary runs.
-      - name: Smoke test published image (amd64)
+      - name: Select moving aliases
+        id: aliases
         env:
-          IMAGE_VERSION: ${{ steps.meta.outputs.version }}
-        run: docker run --rm "ghcr.io/isac322/cc-lb:${IMAGE_VERSION}" --version
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          args=(aliases --version "$VERSION" --github-output "$GITHUB_OUTPUT")
+          while IFS= read -r tag; do
+            args+=(--published-tag "$tag")
+          done < <(
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name'
+          )
+          python3 scripts/server_release.py "${args[@]}"
+
+      - name: Reconcile moving aliases
+        if: steps.aliases.outputs.aliases != ''
+        env:
+          ALIASES: ${{ steps.aliases.outputs.aliases }}
+          IMAGE: ghcr.io/isac322/cc-lb
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          args=()
+          for alias in $ALIASES; do
+            args+=(--tag "$IMAGE:$alias")
+          done
+          docker buildx imagetools create "${args[@]}" "$IMAGE:$VERSION"
+
+      - name: Verify published image tags
+        env:
+          ALIASES: ${{ steps.aliases.outputs.aliases }}
+          IMAGE: ghcr.io/isac322/cc-lb
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          tags=("$VERSION")
+          for alias in $ALIASES; do
+            tags+=("$alias")
+          done
+          for tag in "${tags[@]}"; do
+            docker pull "$IMAGE:$tag"
+            revision=$(docker image inspect \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+              "$IMAGE:$tag")
+            if [ "$revision" != "$SOURCE_SHA" ]; then
+              echo "::error::$IMAGE:$tag revision '$revision' does not match '$SOURCE_SHA'"
+              exit 1
+            fi
+          done
+          output=$(docker run --rm "$IMAGE:$VERSION" --version)
+          if ! printf '%s\n' "$output" | grep -Fq "$VERSION"; then
+            echo "::error::binary version output '$output' does not contain '$VERSION'"
+            exit 1
+          fi
