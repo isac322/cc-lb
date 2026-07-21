@@ -1,8 +1,8 @@
 name: release-plz
 
-# Single source of truth for releases. Runs only on master pushes (post-merge),
-# never on PRs. Local execution of release-plz is prohibited — see
-# release-plz.toml policy header.
+# Single source of truth for crates.io package releases. Runs only on master
+# pushes (post-merge), never on PRs. Local execution of release-plz is
+# prohibited — see release-plz.toml policy header.
 #
 # Flow:
 #   1. `preflight` job re-runs the publish-check gate (cargo semver-checks
@@ -14,13 +14,11 @@ name: release-plz
 #      resolves the workspace dep constraint against crates.io. If this
 #      job fails no publish is attempted, so partial crates.io publishes
 #      cannot happen.
-#   2. `release` job runs after preflight succeeds. It detects new versions
-#      in Cargo.toml, creates git tags + GitHub releases, and publishes the
-#      crates managed in release-plz.toml (currently 5: cc-lb-plugin-wire,
-#      cc-lb-pdk-wasmtime, cc-lb-pdk-wasmtime-macros,
-#      cc-lb-plugin-conformance, cc-lb-runtime-wasmtime) to crates.io via
-#      trusted publishing (OIDC). Host / storage / internal crates carry
-#      `publish = false` and are skipped.
+#   2. `release` job runs after preflight succeeds. It detects new versions,
+#      creates package git tags + GitHub Releases, and publishes the five crates
+#      managed in release-plz.toml to crates.io via trusted publishing (OIDC).
+#      Host, storage, server, and other internal crates carry `publish = false`
+#      and are skipped.
 #   3. `release-pr` job runs in parallel with preflight/release. It opens
 #      or updates a "chore: release" PR with version bumps and CHANGELOG
 #      entries for any crate touched since the last release.
@@ -75,8 +73,6 @@ jobs:
     name: release-plz release
     needs: preflight
     runs-on: ubuntu-latest
-    outputs:
-      cc_lb_server_version: ${{ steps.cc-lb-server-release.outputs.version }}
     permissions:
       contents: write
       pull-requests: write
@@ -110,37 +106,6 @@ jobs:
           # exact escape hatch (see crates/cc-lb-runtime-wasmtime/build.rs).
           CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
 
-      - name: Extract cc-lb-server release
-        id: cc-lb-server-release
-        env:
-          RELEASES: ${{ steps.release-plz.outputs.releases }}
-        run: |
-          VERSION=$(printf '%s' "${RELEASES:-[]}" | jq -r 'map(select(.package_name == "cc-lb-server"))[0].version // ""')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-  publish-docker:
-    name: publish docker image
-    needs: release
-    if: needs.release.outputs.cc_lb_server_version != ''
-    uses: ./.github/workflows/cd.yml
-    permissions:
-      contents: read
-      packages: write
-    with:
-      version: ${{ needs.release.outputs.cc_lb_server_version }}
-    secrets: inherit
-
-  publish-chart:
-    name: publish helm chart
-    needs: release
-    if: needs.release.outputs.cc_lb_server_version != ''
-    uses: ./.github/workflows/publish-chart.yml
-    permissions:
-      contents: read
-      packages: write
-    with:
-      version: ${{ needs.release.outputs.cc_lb_server_version }}
-    secrets: inherit
 
   release-pr:
     name: release-plz release-pr
