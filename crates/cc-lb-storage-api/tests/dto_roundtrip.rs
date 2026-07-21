@@ -10,14 +10,14 @@ use cc_lb_storage_api::types::UpstreamKind;
 use cc_lb_storage_api::types::{Limit as TypesLimit, LimitKind as TypesLimitKind};
 use cc_lb_storage_api::{
     AnthropicApiKeyCredential, ApiKeyRecord, AuditEntry, BackendKind, BucketKind,
-    CacheKeepaliveConfig, CacheKeepaliveEnqueueState, CacheKeepaliveSessionRecord,
-    CacheKeepaliveSessionStatus, CacheKeepaliveTerminalReason, CacheTtl, ClassifierConfig,
-    ConfigDraftState, HistoryEntry, HistorySummary, IssuedKey, JudgeResponseFormat, KeyStatus,
-    LlmJudgeConfig, OAuthCredentials, PrincipalCreate, PrincipalKind, PrincipalKindLite,
-    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, RequestCacheBreakpoint,
-    RequestCacheBreakpointSource, RequestCacheState, RequestEvent, RequestEventUpstream,
-    StorageError, StoredApiKeyRecord, StoredHistoryEntry, UsageRollup, UsageRollupKey,
-    UsageRollupResolution, UsageRollupRun,
+    CacheKeepaliveConfig, CacheKeepaliveConfigSnapshot, CacheKeepaliveEnqueueState,
+    CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus, CacheKeepaliveTerminalReason,
+    CacheTtl, ClassifierConfig, ConfigDraftState, HistoryEntry, HistorySummary, IssuedKey,
+    JudgeResponseFormat, KeyStatus, LlmJudgeConfig, OAuthCredentials, PrincipalCreate,
+    PrincipalKind, PrincipalKindLite, PrincipalLimitIdentityKind, PrincipalLimitKind,
+    PrincipalLimitState, RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState,
+    RequestEvent, RequestEventUpstream, StorageError, StoredApiKeyRecord, StoredHistoryEntry,
+    UsageRollup, UsageRollupKey, UsageRollupResolution, UsageRollupRun,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -357,6 +357,15 @@ backend = 'sqlite'"
         expires_at_unix_secs: 1_716_000_500,
         created_at_unix_secs: 1_716_000_100,
         updated_at_unix_secs: 1_716_000_300,
+        display_reason: "agent-in-turn".to_owned(),
+        error: Some("cache miss before follow-up".to_owned()),
+        config_snapshot: Some(CacheKeepaliveConfigSnapshot {
+            refresh_lead_time_5m_secs: 30,
+            refresh_lead_time_1h_secs: 300,
+            max_refreshes_per_session: 12,
+            max_total_duration_secs: 14_400,
+            snapshot_max_bytes: 524_288,
+        }),
     });
     assert_json_roundtrip(CacheKeepaliveTerminalReason::UnsupportedProvider);
     assert_json_roundtrip(CacheTtl::Ttl1h);
