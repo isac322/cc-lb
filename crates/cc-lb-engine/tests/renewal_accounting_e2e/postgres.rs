@@ -1,9 +1,9 @@
 use std::{str::FromStr, sync::Arc};
 
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveDecisionRow, CacheKeepaliveReplaceRequest,
-    CacheKeepaliveSessionStore, CacheKeepaliveTurnRow, CacheTtl, MetaStore, RequestEvent,
-    RequestEventProjections, RequestEventStore,
+    BackendKind, CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow,
+    CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStore, CacheKeepaliveTurnRow, CacheTtl,
+    MetaStore, RequestEvent, RequestEventProjections, RequestEventStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
@@ -29,6 +29,14 @@ async fn postgres_renewal_storage_paths_require_live_dsn() {
             run_at_unix_secs: 1_010,
             expires_at_unix_secs: 1_300,
             encrypted_payload: vec![1],
+            display_reason: "agent-in-turn".to_owned(),
+            config_snapshot: CacheKeepaliveConfigSnapshot {
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session: 12,
+                max_total_duration_secs: 14_400,
+                snapshot_max_bytes: 524_288,
+            },
             now_unix_secs: 1_000,
         })
         .await
@@ -112,7 +120,7 @@ fn renewal_event() -> RequestEvent {
 
 fn renewal_projections() -> RequestEventProjections {
     RequestEventProjections {
-        turn: CacheKeepaliveTurnRow {
+        turn: Some(CacheKeepaliveTurnRow {
             source_ref_id: "postgres-renewal-session:1".to_owned(),
             session_key_hash: "postgres-renewal-session".to_owned(),
             principal_id: "postgres-renewal-principal".to_owned(),
@@ -128,12 +136,19 @@ fn renewal_projections() -> RequestEventProjections {
             cost_micros: 10,
             hit_miss: "hit".to_owned(),
             ts: 1_003,
-        },
+        }),
         decision: CacheKeepaliveDecisionRow {
             source_ref_id: "postgres-renewal-session:1".to_owned(),
+            principal_id: "postgres-renewal-principal".to_owned(),
+            session_key_hash: Some("postgres-renewal-session".to_owned()),
+            upstream_id: Uuid::from_u128(7),
             decision: "reschedule".to_owned(),
             reason: "cache_hit".to_owned(),
+            error: None,
             generation: 1,
+            ttl: CacheTtl::Ttl5m,
+            config_snapshot: None,
+            last_message_at_ms: 1_003_000,
             ts: 1_003,
         },
     }
