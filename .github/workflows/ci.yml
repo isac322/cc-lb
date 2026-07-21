@@ -45,9 +45,9 @@ jobs:
 
   guard-crate-versions:
     name: guard crate versions
-    # Versions under crates/ are owned by release-plz. Block manual bumps in
-    # feature PRs (they desync release-plz's baseline and make its release PR
-    # conflict forever). release-plz's own PRs bump versions and are exempt.
+    # release-plz owns literal crate versions. A dedicated release PR may bump
+    # the shared workspace version for cc-lb-server after strict validation.
+    # release-plz's own PRs remain exempt.
     if: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-') }}
     runs-on: ubuntu-latest
     steps:
@@ -55,14 +55,34 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Reject manual crate version bumps under crates/
+      - name: Validate managed crate version changes
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
-          git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
-          python3 scripts/check-crate-versions.py --base "$RUNNER_TEMP/base" --head .
-          git worktree remove --force "$RUNNER_TEMP/base"
+          base_tree="$RUNNER_TEMP/base"
+          cleanup() {
+            git worktree remove --force "$base_tree" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          git worktree add --detach "$base_tree" "$BASE_SHA"
+
+          args=(
+            --base "$base_tree"
+            --head .
+            --pr-title "$PR_TITLE"
+          )
+          while IFS= read -r path; do
+            args+=(--changed-file "$path")
+          done < <(git diff --name-only "$BASE_SHA"...HEAD)
+          while IFS= read -r tag; do
+            args+=(--existing-tag "$tag")
+          done < <(git tag --list 'cc-lb-v*')
+
+          python3 scripts/check-crate-versions.py "${args[@]}"
+      - name: Test managed version validator
+        run: python3 scripts/test_check_crate_versions.py -v
 
   clippy:
     runs-on: oracle4-cc-lb
