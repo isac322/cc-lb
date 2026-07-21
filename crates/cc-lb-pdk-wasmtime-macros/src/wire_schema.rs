@@ -182,8 +182,7 @@ mod tests {
 
     #[test]
     fn canonical_parenthesized_arguments_preserve_types() {
-        let bound: syn::TypeParamBound =
-            syn::parse_quote!(Fn(Request, Context) -> Response);
+        let bound: syn::TypeParamBound = syn::parse_quote!(Fn(Request, Context) -> Response);
         let syn::TypeParamBound::Trait(bound) = bound else {
             panic!("expected trait bound");
         };
