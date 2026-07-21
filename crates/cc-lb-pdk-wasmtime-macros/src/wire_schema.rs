@@ -134,7 +134,7 @@ fn canonical_path(path: &syn::Path) -> String {
             let inputs = args
                 .inputs
                 .iter()
-                .map(canonical_type)
+                .map(|arg| canonical_type(&arg.ty))
                 .collect::<Vec<_>>()
                 .join(",");
             match &args.output {
@@ -178,5 +178,16 @@ mod tests {
             descriptor_for(&input).expect("descriptor"),
             "Event[Unit,Named{value:&[u8]},Tuple(Box<str>)]"
         );
+    }
+
+    #[test]
+    fn canonical_parenthesized_arguments_preserve_types() {
+        let bound: syn::TypeParamBound =
+            syn::parse_quote!(Fn(Request, Context) -> Response);
+        let syn::TypeParamBound::Trait(bound) = bound else {
+            panic!("expected trait bound");
+        };
+
+        assert_eq!(canonical_path(&bound.path), "Fn(Request,Context)->Response");
     }
 }

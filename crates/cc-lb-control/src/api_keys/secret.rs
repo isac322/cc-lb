@@ -53,7 +53,7 @@ pub fn generate_new() -> NewKeyOutput {
     let mut salt = [0_u8; SALT_BYTES_LEN];
     rand::fill(&mut salt[..]);
 
-    let key_id = Ulid::new().to_string();
+    let key_id = Ulid::generate().to_string();
     let secret_b64 = URL_SAFE_NO_PAD.encode(secret_bytes);
     let plaintext = format!("{PREFIX}{key_id}_{secret_b64}");
     let index_hash = compute_index_hash(secret_b64.as_bytes());
