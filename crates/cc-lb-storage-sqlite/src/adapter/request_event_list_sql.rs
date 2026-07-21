@@ -68,6 +68,11 @@ WHERE ts >= ?1 AND ts <= ?2 \
   AND (?6 IS NULL OR list_upstream = ?6) \
   AND (?7 IS NULL OR list_status BETWEEN ?7 AND ?8) \
   AND ( \
+        ?12 = 1 \
+     OR (?13 IS NOT NULL AND source_kind = ?13) \
+     OR (?13 IS NULL AND (source_kind IS NULL OR source_kind <> 'renewal')) \
+  ) \
+  AND ( \
         ?9 IS NULL \
      OR list_ts_ms < ?9 \
      OR (list_ts_ms = ?9 \
@@ -143,6 +148,7 @@ pub(super) async fn list_request_events(
         .status_class
         .map(status_class_range)
         .map_or((None, None), |(min, max)| (Some(min), Some(max)));
+    let (source_kind_all, source_kind_exact) = source_kind_filter(query.source_kind.as_deref());
 
     let rows = sqlx::query_as::<_, ListRow>(LIST_REQUEST_EVENTS_SQL)
         .bind(u64_to_i64(
@@ -164,6 +170,8 @@ pub(super) async fn list_request_events(
         )
         .bind(query.until_event_id.as_deref())
         .bind(usize_to_i64(query.limit, "request event list limit")?)
+        .bind(i64::from(source_kind_all))
+        .bind(source_kind_exact)
         .fetch_all(storage.pool())
         .await
         .map_err(map_sqlx_error)?;
@@ -199,5 +207,13 @@ fn status_class_range(class: StatusClass) -> (i64, i64) {
         StatusClass::ThreeXx => (300, 399),
         StatusClass::FourXx => (400, 499),
         StatusClass::FiveXx => (500, 599),
+    }
+}
+
+fn source_kind_filter(source_kind: Option<&str>) -> (bool, Option<&str>) {
+    match source_kind {
+        Some("all") => (true, None),
+        Some(kind) => (false, Some(kind)),
+        None => (false, None),
     }
 }

@@ -1,0 +1,7 @@
+error: cannot construct `Signed<'_>` with struct literal syntax due to private fields
+ --> tests/trybuild/attempt_rail/fail_signed_without_scoped.rs:5:19
+  |
+5 |     let _signed = Signed { signed_request };
+  |                   ^^^^^^   -------------- private field
+  |
+  = note: ...and other private field `_reserved` that was not provided

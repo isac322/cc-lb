@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/trybuild/attempt_rail/fail_reserved_direct_construction.rs:4:51
+  |
+4 |     let _intent = AttemptIntent::from_reservation(None);
+  |                   ------------------------------- ^^^^ expected `Reservation`, found `Option<_>`
+  |                   |
+  |                   arguments to this function are incorrect
+  |
+  = note: expected struct `Reservation`
+               found enum `Option<_>`
+note: associated function defined here
+ --> src/attempt_rail.rs
+  |
+  |     pub fn from_reservation(reservation: Reservation) -> Self {
+  |            ^^^^^^^^^^^^^^^^

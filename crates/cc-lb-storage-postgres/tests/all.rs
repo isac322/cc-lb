@@ -1,3 +1,5 @@
+#[path = "cache_keepalive_session_reads.rs"]
+mod cache_keepalive_session_reads;
 #[path = "cache_keepalive_sessions.rs"]
 mod cache_keepalive_sessions;
 #[path = "crash_recovery.rs"]
@@ -16,6 +18,8 @@ mod principal_terminal_strategy;
 mod prompt_cache_observation;
 #[path = "quota_aggregates.rs"]
 mod quota_aggregates;
+#[path = "request_event_projections.rs"]
+mod request_event_projections;
 #[path = "request_events_reasoning_effort.rs"]
 mod request_events_reasoning_effort;
 #[path = "request_events_thinking_budget_tokens.rs"]

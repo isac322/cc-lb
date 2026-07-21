@@ -66,6 +66,7 @@ pub async fn publish_recent_contracts(storage: &SqliteStorage) {
             error_code: "upstream_4xx",
             upstream_error_type: Some("rate_limit_error"),
             upstream_error_message: Some("bounded provider message"),
+            source_kind: None,
         }),
         request_event(RequestEventFixture {
             request_id: CANCELED_REQUEST_ID,
@@ -74,6 +75,7 @@ pub async fn publish_recent_contracts(storage: &SqliteStorage) {
             error_code: "client_closed_request",
             upstream_error_type: None,
             upstream_error_message: None,
+            source_kind: None,
         }),
         request_event(RequestEventFixture {
             request_id: BROAD_REQUEST_ID,
@@ -82,6 +84,7 @@ pub async fn publish_recent_contracts(storage: &SqliteStorage) {
             error_code: "upstream_4xx",
             upstream_error_type: None,
             upstream_error_message: None,
+            source_kind: None,
         }),
         request_event(RequestEventFixture {
             request_id: DROPPED_REQUEST_ID,
@@ -90,12 +93,41 @@ pub async fn publish_recent_contracts(storage: &SqliteStorage) {
             error_code: "terminal_dropped",
             upstream_error_type: None,
             upstream_error_message: None,
+            source_kind: None,
         }),
     ] {
         storage
             .append_request_event(&event)
             .await
             .expect("persist request event");
+    }
+}
+
+pub async fn publish_source_kind_contracts(storage: &SqliteStorage) {
+    for event in [
+        request_event(RequestEventFixture {
+            request_id: "req-normal",
+            ts: 1_800_000_005,
+            status: 200,
+            error_code: "success",
+            upstream_error_type: None,
+            upstream_error_message: None,
+            source_kind: None,
+        }),
+        request_event(RequestEventFixture {
+            request_id: "req-renewal",
+            ts: 1_800_000_006,
+            status: 200,
+            error_code: "success",
+            upstream_error_type: None,
+            upstream_error_message: None,
+            source_kind: Some("renewal"),
+        }),
+    ] {
+        storage
+            .append_request_event(&event)
+            .await
+            .expect("persist source-kind request event");
     }
 }
 
@@ -192,6 +224,7 @@ struct RequestEventFixture {
     error_code: &'static str,
     upstream_error_type: Option<&'static str>,
     upstream_error_message: Option<&'static str>,
+    source_kind: Option<&'static str>,
 }
 
 fn request_event(fixture: RequestEventFixture) -> RequestEvent {
@@ -204,6 +237,7 @@ fn request_event(fixture: RequestEventFixture) -> RequestEvent {
         error_code: Some(fixture.error_code.to_owned()),
         upstream_error_type: fixture.upstream_error_type.map(str::to_owned),
         upstream_error_message: fixture.upstream_error_message.map(str::to_owned),
+        source_kind: fixture.source_kind.map(str::to_owned),
         event_id: Some(format!("event-{}", fixture.request_id)),
         ..RequestEvent::default()
     }

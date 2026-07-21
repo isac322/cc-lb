@@ -8,6 +8,8 @@ use sqlx::PgPool;
 pub mod anthropic_compatibility_kv;
 pub mod api_keys;
 pub mod audit;
+mod cache_keepalive_session_read_row;
+pub mod cache_keepalive_session_reads;
 pub mod cache_keepalive_sessions;
 pub mod config_store;
 pub mod managed_keys;

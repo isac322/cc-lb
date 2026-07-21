@@ -9,7 +9,7 @@ use bytes::Bytes;
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
-    CacheKeepaliveEnqueuer,
+    CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest,
 };
 use cc_lb_engine::{DispatchError, LifecycleConfig, UpstreamDispatch};
 use cc_lb_storage_api::principal::{Limit, PrincipalKind, PrincipalRecord};
@@ -133,6 +133,13 @@ impl CacheKeepaliveEnqueuer for FailingEnqueuer {
     async fn cancel_cache_keepalive(
         &self,
         _request: CacheKeepaliveCancelRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
+        Ok(())
+    }
+
+    async fn record_cache_keepalive_not_tracked(
+        &self,
+        _request: CacheKeepaliveNotTrackedRequest,
     ) -> Result<(), CacheKeepaliveEnqueueError> {
         Ok(())
     }

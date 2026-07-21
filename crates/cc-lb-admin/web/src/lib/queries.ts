@@ -48,7 +48,13 @@ import {
   type UpstreamOAuthStatusResponse,
 } from './api';
 
+import {
+  type CacheKeepaliveSessionsFilters,
+  getCacheKeepaliveSessionDetail,
+  getCacheKeepaliveSessions,
+} from './cacheKeepaliveApi';
 import { usePolledData } from './usePolledData';
+import { useVisibility } from './visibilityManager';
 
 export const POLLING_INTERVALS = {
   SUMMARY_MS: 5_000,
@@ -64,6 +70,9 @@ export const POLLING_INTERVALS = {
   WARMUP_SUMMARY_MS: 30_000,
   UPSTREAM_SUB_META_MS: 30_000,
   RECENT_EVENTS_MS: 10_000,
+  CACHE_KEEPALIVE_SESSIONS_MS: 5_000,
+  CACHE_KEEPALIVE_SUMMARY_MS: 5_000,
+  CACHE_KEEPALIVE_DETAIL_MS: 5_000,
 };
 
 export interface UpstreamStatus {
@@ -117,6 +126,19 @@ export interface Principal {
   allowed_models: string[];
   allowed_upstreams: string[];
   default_limits: PrincipalDefaultLimit[];
+  cache_keepalive?: {
+    enabled: boolean;
+    refresh_lead_time_5m_secs: number;
+    refresh_lead_time_1h_secs: number;
+    max_refreshes_per_session: number;
+    max_total_duration_secs: number;
+    snapshot_max_bytes: number;
+    classifier: {
+      extra_wait_for_user_tools: string[];
+      treat_end_turn_as_ambiguous: boolean;
+      llm_judge?: unknown;
+    };
+  } | null;
 }
 interface PrincipalListResp {
   principals: Principal[];
@@ -262,6 +284,14 @@ export const qk = {
     ['subscription-quota', 'aggregate', params] as const,
   subscriptionQuotaPoolHistory: (params: Record<string, any>) =>
     ['subscription-quota', 'pool-history', params] as const,
+  cacheKeepaliveSessions: (
+    principalId: string,
+    filters: CacheKeepaliveSessionsFilters,
+  ) => ['cache-keepalive', 'sessions', principalId, filters] as const,
+  cacheKeepaliveSummary: (principalId: string) =>
+    ['cache-keepalive', 'summary', principalId] as const,
+  cacheKeepaliveSessionDetail: (principalId: string, sessionId: string) =>
+    ['cache-keepalive', 'detail', principalId, sessionId] as const,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1072,6 +1102,30 @@ export function useUpdatePrincipalDefaultLimits() {
     },
   });
 }
+
+export function useUpdatePrincipalCacheKeepalive() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      cache_keepalive,
+      expected_revision,
+    }: {
+      id: string;
+      cache_keepalive: Principal['cache_keepalive'];
+      expected_revision: number;
+    }) =>
+      patchJson<Principal, { cache_keepalive: Principal['cache_keepalive'] }>(
+        `/admin/v1/principals/${id}`,
+        { cache_keepalive },
+        { ifMatch: expected_revision },
+      ),
+    onSuccess: (_d, vars) => {
+      qc.invalidateQueries({ queryKey: qk.principal(vars.id) });
+      qc.invalidateQueries({ queryKey: qk.principals });
+    },
+  });
+}
 export function useIssueKey() {
   const qc = useQueryClient();
   return useMutation({
@@ -1526,4 +1580,54 @@ export function useWarmupAttempts(
     },
     getNextPageParam: (last) => last.next_cursor ?? undefined,
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache keepalive sessions (Principal detail card + drawers)
+
+export function useCacheKeepaliveSessions(
+  principalId: string,
+  filters: CacheKeepaliveSessionsFilters = {},
+) {
+  const visibility = useVisibility();
+  const isHidden = visibility.gracePeriodElapsed || !visibility.visible;
+
+  return useInfiniteQuery({
+    queryKey: qk.cacheKeepaliveSessions(principalId, filters),
+    enabled: Boolean(principalId),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) =>
+      getCacheKeepaliveSessions(principalId, { ...filters, cursor: pageParam }),
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+    refetchInterval: isHidden
+      ? false
+      : POLLING_INTERVALS.CACHE_KEEPALIVE_SESSIONS_MS,
+  });
+}
+
+export function useCacheKeepaliveSummary(principalId: string) {
+  return usePolledData(
+    {
+      queryKey: qk.cacheKeepaliveSummary(principalId),
+      enabled: Boolean(principalId),
+      queryFn: () => getCacheKeepaliveSessions(principalId, { limit: 0 }),
+      select: (response) => response.summary,
+    },
+    POLLING_INTERVALS.CACHE_KEEPALIVE_SUMMARY_MS,
+  );
+}
+
+export function useCacheKeepaliveSessionDetail(
+  principalId: string,
+  sessionId: string | null,
+) {
+  return usePolledData(
+    {
+      queryKey: qk.cacheKeepaliveSessionDetail(principalId, sessionId ?? ''),
+      enabled: Boolean(principalId) && Boolean(sessionId),
+      queryFn: () =>
+        getCacheKeepaliveSessionDetail(principalId, sessionId ?? ''),
+    },
+    POLLING_INTERVALS.CACHE_KEEPALIVE_DETAIL_MS,
+  );
 }

@@ -8,8 +8,11 @@
 //! Enabled per principal via `PrincipalRecord::cache_keepalive`. See
 //! `cc_lb_storage_api::CacheKeepaliveConfig`.
 
+#[cfg(test)]
+mod aead_compat;
 mod classifier;
 mod dispatcher;
+mod display_reason;
 mod lifecycle_glue;
 mod metrics;
 mod request_snapshot;
@@ -20,7 +23,7 @@ pub use classifier::{HeuristicClassifier, TurnDecision};
 pub use dispatcher::AnthropicKeepaliveDispatcher;
 pub use lifecycle_glue::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
-    CacheKeepaliveEnqueuer,
+    CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest,
 };
 pub(crate) use lifecycle_glue::{
     LifecycleKeepalive, LifecycleKeepaliveContext, StreamingKeepaliveResponse,
@@ -28,5 +31,8 @@ pub(crate) use lifecycle_glue::{
 pub use metrics::CancelReason;
 pub(crate) use metrics::record_cancelled;
 pub use request_snapshot::{PersistedRequestSnapshot, RequestSnapshot, SnapshotError};
-pub use scheduler::{DispatchOutcome, KeepaliveDispatcher, ScheduleParams};
+pub use scheduler::{
+    DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher, RenewalFinalization,
+    RenewalUsage, ScheduleParams,
+};
 pub use session_key::SessionKey;

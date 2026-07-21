@@ -305,6 +305,8 @@ mod tests {
             request_id: "req-a".into(),
             ts_ms: 0,
             stream: false,
+            source_kind: None,
+            source_ref_id: None,
         })
         .await
         .unwrap();
@@ -411,6 +413,8 @@ mod tests {
             request_id: "req-c".into(),
             ts_ms: 0,
             stream: true,
+            source_kind: None,
+            source_ref_id: None,
         })
         .await
         .unwrap();

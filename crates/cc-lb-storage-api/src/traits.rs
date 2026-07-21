@@ -1,10 +1,11 @@
 use async_trait::async_trait;
 
 use crate::{
-    BackendKind, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket,
-    RequestEventKeyUsageQuery, RuntimeChangeNotifier, StorageError, StorageResult,
+    BackendKind, CacheKeepaliveDecisionRow, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
+    RequestEventKeyUsageBucket, RequestEventKeyUsageQuery, RequestEventProjections,
+    RuntimeChangeNotifier, StorageError, StorageResult,
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
-    cache_keepalive_sessions::CacheKeepaliveSessionStore,
+    cache_keepalive_sessions::{CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore},
     organization_metadata::OrganizationMetadataStore,
     prompt_cache_observation::PromptCacheObservationStore,
     types::*,
@@ -56,6 +57,15 @@ pub trait AuditStore: Send + Sync {
 pub trait RequestEventStore: Send + Sync {
     /// Idempotent insert. On duplicate `event_id`, returns the existing row's cursor via a SELECT fallback. This is load-bearing for retry semantics.
     async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<u64>;
+
+    async fn append_request_event_with_projections(
+        &self,
+        event: &RequestEvent,
+        projections: &RequestEventProjections,
+    ) -> StorageResult<u64> {
+        let _ = projections;
+        self.append_request_event(event).await
+    }
 
     async fn query_request_events(
         &self,
@@ -160,6 +170,14 @@ pub trait RequestEventStore: Send + Sync {
             message: "get_request_event is not implemented for this storage backend".to_owned(),
         })
     }
+}
+
+#[async_trait]
+pub trait CacheKeepaliveProjectionStore: Send + Sync {
+    async fn append_cache_keepalive_decision(
+        &self,
+        decision: &CacheKeepaliveDecisionRow,
+    ) -> StorageResult<()>;
 }
 
 #[async_trait]
@@ -374,6 +392,7 @@ pub trait Storage:
     + crate::principal::PrincipalStore
     + crate::upstream::UpstreamStore
     + RequestEventStore
+    + CacheKeepaliveProjectionStore
     + UpstreamRateLimitStateStore
     + UpstreamSubscriptionQuotaStore
     + UpstreamSubscriptionQuotaAggregateStore
@@ -383,6 +402,7 @@ pub trait Storage:
     + OrganizationMetadataStore
     + AnthropicCompatibilityKvStore
     + CacheKeepaliveSessionStore
+    + CacheKeepaliveSessionReadStore
     + UsageRollupStore
     + UsageTokenIntervalStore
     + OAuthCredentialStore
@@ -406,6 +426,7 @@ impl<T> Storage for T where
         + crate::principal::PrincipalStore
         + crate::upstream::UpstreamStore
         + RequestEventStore
+        + CacheKeepaliveProjectionStore
         + UpstreamRateLimitStateStore
         + UpstreamSubscriptionQuotaStore
         + UpstreamSubscriptionQuotaAggregateStore
@@ -415,6 +436,7 @@ impl<T> Storage for T where
         + OrganizationMetadataStore
         + AnthropicCompatibilityKvStore
         + CacheKeepaliveSessionStore
+        + CacheKeepaliveSessionReadStore
         + UsageRollupStore
         + UsageTokenIntervalStore
         + OAuthCredentialStore

@@ -8,8 +8,8 @@ use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_upstream::{
-    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignedRequest,
-    UpstreamDialect, shape_request, sign_request,
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, Signer,
+    UpstreamDialect, shape_request,
 };
 use http::header::AUTHORIZATION;
 use http::{HeaderMap, StatusCode};
@@ -17,10 +17,14 @@ use http_body_util::BodyExt;
 use serde::Deserialize;
 use url::Url;
 
+use crate::attempt_rail::{AttemptIntent, ResponseAccountingGuard, Signed};
 use crate::lifecycle::UpstreamDispatch;
 
 use super::request_snapshot::RequestSnapshot;
-use super::scheduler::{DispatchOutcome, KeepaliveDispatcher};
+use super::scheduler::{
+    DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher, RenewalFinalization,
+    RenewalUsage,
+};
 
 const DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
 const ERROR_BODY_PREFIX_BYTES: usize = 512;
@@ -51,11 +55,12 @@ impl AnthropicKeepaliveDispatcher {
         self
     }
 
-    async fn signed_keepalive_request(
+    async fn keepalive_signing_input(
         &self,
         snapshot: &RequestSnapshot,
         upstream: &UpstreamRecord,
-    ) -> Result<SignedRequest, String> {
+        source_ref_id: &str,
+    ) -> Result<(Arc<dyn Signer>, ShapedRequest), String> {
         let upstream_api = direct_anthropic_upstream(upstream)?;
         let signer_factory = self
             .dynamic_view
@@ -70,20 +75,22 @@ impl AnthropicKeepaliveDispatcher {
             .build_keepalive_body()
             .map_err(|source| source.to_string())?;
         let target_url = resolve_keepalive_url(snapshot, upstream)?;
-        let shaped =
-            shaped_request_from_snapshot(snapshot, keepalive_body, &upstream_api, target_url)?;
-        sign_request(signer.as_ref(), shaped)
-            .await
-            .map_err(|source| source.to_string())
+        let shaped = shaped_request_from_snapshot(
+            snapshot,
+            keepalive_body,
+            &upstream_api,
+            target_url,
+            source_ref_id,
+        )?;
+        Ok((signer, shaped))
     }
 
     async fn dispatch_signed(
         &self,
-        signed: SignedRequest,
+        signed: Signed<'_>,
     ) -> Result<(StatusCode, Bytes, Duration), String> {
-        let response = self
-            .http_client
-            .dispatch(signed)
+        let response = signed
+            .dispatch(self.http_client.as_ref())
             .await
             .map_err(|source| source.to_string())?;
         let cache_anchor_at = Instant::now();
@@ -100,7 +107,11 @@ impl AnthropicKeepaliveDispatcher {
 
 #[async_trait]
 impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
-    async fn dispatch(&self, snapshot: &RequestSnapshot) -> DispatchOutcome {
+    async fn dispatch(
+        &self,
+        snapshot: &RequestSnapshot,
+        context: KeepaliveDispatchContext,
+    ) -> DispatchOutcome {
         let upstream = match self.upstream_store.get_by_id(snapshot.upstream_id).await {
             Ok(Some(upstream)) if upstream.deleted_at_unix_secs.is_none() && upstream.enabled => {
                 upstream
@@ -112,15 +123,47 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
             return DispatchOutcome::UnsupportedProvider(error);
         }
 
-        let signed = match self.signed_keepalive_request(snapshot, &upstream).await {
-            Ok(signed) => signed,
+        let (signer, shaped) = match self
+            .keepalive_signing_input(snapshot, &upstream, context.source_ref_id())
+            .await
+        {
+            Ok(input) => input,
             Err(error) => return DispatchOutcome::Error(error),
         };
 
-        match tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await {
-            Ok(Ok((StatusCode::OK, body, cache_anchor_age))) => {
-                classify_success_body(&body, cache_anchor_age)
+        let dispatch_started = Instant::now();
+        let (dispatch_result, accounting_guard) = match context.into_reservation() {
+            Some(reservation) => {
+                let reserved = AttemptIntent::from_reservation(reservation).into_reserved();
+                let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await {
+                    Ok(signed) => signed,
+                    Err(error) => return DispatchOutcome::Error(error.to_string()),
+                };
+                (
+                    tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await,
+                    reserved.into_response_accounting_guard(),
+                )
             }
+            None => {
+                let reserved = AttemptIntent::observe_only().into_reserved();
+                let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await {
+                    Ok(signed) => signed,
+                    Err(error) => return DispatchOutcome::Error(error.to_string()),
+                };
+                (
+                    tokio::time::timeout(self.timeout, self.dispatch_signed(signed)).await,
+                    reserved.into_response_accounting_guard(),
+                )
+            }
+        };
+
+        match dispatch_result {
+            Ok(Ok((StatusCode::OK, body, cache_anchor_age))) => classify_success_body(
+                &body,
+                cache_anchor_age,
+                dispatch_started.elapsed(),
+                accounting_guard,
+            ),
             Ok(Ok((status, body, _))) => {
                 DispatchOutcome::Error(format!("status={} body={}", status, body_prefix(&body)))
             }
@@ -168,12 +211,13 @@ fn shaped_request_from_snapshot(
     body: Bytes,
     upstream: &Upstream,
     target_url: Url,
+    source_ref_id: &str,
 ) -> Result<ShapedRequest, String> {
     let dialect = SnapshotDialect {
         url: target_url.clone(),
     };
     let context = DialectShapeContext {
-        request_id: format!("cache-keepalive-{}", snapshot.upstream_id),
+        request_id: source_ref_id.to_owned(),
         downstream_headers: snapshot.headers.clone(),
         method: snapshot.method.clone(),
         path: target_url.path().to_owned(),
@@ -229,8 +273,18 @@ fn downstream_api_key(headers: &HeaderMap) -> String {
         .unwrap_or_default()
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct KeepaliveResponseUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens_5m: u64,
+    #[serde(default)]
+    cache_creation_input_tokens_1h: u64,
     #[serde(default)]
     cache_read_input_tokens: u64,
 }
@@ -240,17 +294,37 @@ struct KeepaliveResponseBody {
     usage: Option<KeepaliveResponseUsage>,
 }
 
-fn classify_success_body(body: &[u8], cache_anchor_age: Duration) -> DispatchOutcome {
+fn classify_success_body(
+    body: &[u8],
+    cache_anchor_age: Duration,
+    duration: Duration,
+    accounting_guard: ResponseAccountingGuard,
+) -> DispatchOutcome {
     match sonic_rs::from_slice::<KeepaliveResponseBody>(body) {
-        Ok(parsed)
-            if parsed
-                .usage
-                .as_ref()
-                .is_some_and(|usage| usage.cache_read_input_tokens > 0) =>
-        {
-            DispatchOutcome::CacheHit { cache_anchor_age }
+        Ok(parsed) => {
+            let usage = parsed.usage.unwrap_or_default();
+            let finalization = RenewalFinalization {
+                usage: RenewalUsage {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                    cache_creation_input_tokens_5m: usage.cache_creation_input_tokens_5m,
+                    cache_creation_input_tokens_1h: usage.cache_creation_input_tokens_1h,
+                    cache_read_input_tokens: usage.cache_read_input_tokens,
+                },
+                status: StatusCode::OK.as_u16(),
+                duration,
+                accounting_guard,
+            };
+            if finalization.usage.cache_read_input_tokens > 0 {
+                DispatchOutcome::CacheHit {
+                    cache_anchor_age,
+                    finalization,
+                }
+            } else {
+                DispatchOutcome::CacheMiss { finalization }
+            }
         }
-        Ok(_) => DispatchOutcome::CacheMiss,
         Err(source) => DispatchOutcome::Error(source.to_string()),
     }
 }

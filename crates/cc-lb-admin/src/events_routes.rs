@@ -153,6 +153,10 @@ pub async fn handle_events_stream(
                 record_sse_backfill(rows.len());
                 let reached_page_cap = rows.len() >= BACKFILL_MAX_EVENTS;
                 for (cursor, event) in rows {
+                    if !apply_filters_to_event(&event, &filters) {
+                        stream_state.advance_bookmark(cursor);
+                        continue;
+                    }
                     if let Some(sse) = stream_state.storage_final_event(&event, cursor) {
                         yield Ok::<Event, Infallible>(sse);
                     }
@@ -410,6 +414,13 @@ fn apply_filters_to_partial(partial: &RequestEventPartial, filters: &StreamFilte
     if let Some(upstream_id) = filters.upstream_id
         && partial.upstream_id != Some(upstream_id)
     {
+        return false;
+    }
+    if let Some(source_kind) = filters.source_kind.as_deref() {
+        if source_kind != "all" && partial.source_kind.as_deref() != Some(source_kind) {
+            return false;
+        }
+    } else if partial.source_kind.as_deref() == Some("renewal") {
         return false;
     }
     true

@@ -151,6 +151,8 @@ async fn assemble_route(
         request_id: format!("req-{event_id}"),
         ts_ms: 1_730_000_000_000,
         stream: false,
+        source_kind: None,
+        source_ref_id: None,
     })
     .await
     .unwrap();

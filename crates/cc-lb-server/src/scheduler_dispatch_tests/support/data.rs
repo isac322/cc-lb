@@ -8,15 +8,7 @@ pub(super) fn principal_with_keepalive() -> cc_lb_storage_api::PrincipalCreate {
         allowed_models: Vec::new(),
         allowed_upstreams: Vec::new(),
         default_limits: Vec::<Limit>::new(),
-        cache_keepalive: Some(CacheKeepaliveConfig {
-            enabled: true,
-            refresh_lead_time_5m_secs: 30,
-            refresh_lead_time_1h_secs: 300,
-            max_refreshes_per_session: 3,
-            max_total_duration_secs: 600,
-            snapshot_max_bytes: 524_288,
-            classifier: ClassifierConfig::default(),
-        }),
+        cache_keepalive: Some(keepalive_config()),
     }
 }
 
@@ -36,6 +28,18 @@ pub(super) fn principal_record_with_id(id: &str) -> PrincipalRecord {
         created_at_unix_secs: 0,
         updated_at_unix_secs: 0,
         router_terminal_strategy: Default::default(),
-        cache_keepalive: None,
+        cache_keepalive: Some(keepalive_config()),
+    }
+}
+
+fn keepalive_config() -> CacheKeepaliveConfig {
+    CacheKeepaliveConfig {
+        enabled: true,
+        refresh_lead_time_5m_secs: 30,
+        refresh_lead_time_1h_secs: 300,
+        max_refreshes_per_session: 3,
+        max_total_duration_secs: 600,
+        snapshot_max_bytes: 524_288,
+        classifier: ClassifierConfig::default(),
     }
 }

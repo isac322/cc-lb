@@ -60,6 +60,7 @@ export const logsSearchSchema = z
     session: z.string().optional(),
     model: z.string().optional(),
     status: z.enum(LOG_STATUS_CLASSES).optional(),
+    source_kind: z.enum(['all', 'renewal']).optional(),
     time_range: z.enum(['all', '1h', '6h', '24h', '7d', 'custom']).optional(),
     since_unix_secs: unixSecondsSearchParam,
     until_unix_secs: unixSecondsSearchParam,
@@ -111,6 +112,7 @@ export function buildLiveFilters(filters: z.infer<typeof logsSearchSchema>) {
   if (filters.upstream) base.upstream = filters.upstream;
   if (filters.model) base.model = filters.model;
   if (filters.status) base.status_class = filters.status;
+  if (filters.source_kind) base.source_kind = filters.source_kind;
   return base;
 }
 
@@ -167,6 +169,7 @@ function LogsPage() {
     filters.session,
     filters.model,
     filters.status,
+    filters.source_kind,
     filters.time_range,
     filters.since_unix_secs,
     filters.until_unix_secs,
@@ -334,6 +337,17 @@ function LogsPage() {
     [],
   );
 
+  const sourceKindSelectOptions = useMemo<FilterOption[]>(
+    () => [
+      { value: 'all', label: <span className="font-mono">All events</span> },
+      {
+        value: 'renewal',
+        label: <span className="font-mono">Renewals only</span>,
+      },
+    ],
+    [],
+  );
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: same rationale — live.version is the mutation counter for the stable eventsMap ref.
   const recentLiveIds = useMemo(
     () =>
@@ -487,6 +501,15 @@ function LogsPage() {
                 widthClass="w-32"
               />
             </Field>
+            <Field label="Kind">
+              <LogSelect
+                value={filters.source_kind ?? ''}
+                options={sourceKindSelectOptions}
+                onChange={(v) => setFilter('source_kind', v)}
+                allLabel="Exclude renewals"
+                widthClass="w-40"
+              />
+            </Field>
             <TimeRangeSelect
               value={{
                 mode: filters.time_range ?? 'all',
@@ -509,6 +532,7 @@ function LogsPage() {
             filters.session ||
             filters.model ||
             filters.status ||
+            filters.source_kind ||
             filters.time_range ? (
               <Button
                 iconLeft={<X className="w-3 h-3" />}

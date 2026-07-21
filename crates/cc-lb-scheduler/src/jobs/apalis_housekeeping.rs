@@ -157,7 +157,43 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
         now_unix_secs: u64,
         stale_pending_cutoff: u64,
     ) -> Result<u64> {
-        let result = sqlx::query(
+        let stale_running_cutoff =
+            now_unix_secs.saturating_sub(self.config.stale_lock_threshold_secs);
+        let recovered = sqlx::query(
+            "UPDATE cache_keepalive_sessions
+             SET status = 'terminal', terminal_reason = 'stale', running_since_unix_secs = NULL, updated_at = ?1
+             WHERE status = 'active'
+               AND enqueue_state = 'running'
+               AND running_since_unix_secs IS NOT NULL
+               AND running_since_unix_secs < ?2",
+        )
+        .bind(unix_i64(now_unix_secs, "now_unix_secs")?)
+        .bind(unix_i64(stale_running_cutoff, "stale_running_cutoff")?)
+        .execute(&self.pool)
+        .await;
+        let recovered = match recovered {
+            Ok(result) => result.rows_affected(),
+            Err(error) if is_missing_cache_keepalive_table(&error) => return Ok(0),
+            Err(error) => return Err(error.into()),
+        };
+        sqlx::query(
+            "UPDATE Jobs
+             SET status = 'Killed', done_at = ?1, lock_by = NULL, lock_at = NULL, last_result = ?3
+             WHERE status = 'Running'
+               AND lock_at IS NOT NULL
+               AND idempotency_key LIKE ?4
+               AND (?1 - lock_at) > ?2",
+        )
+        .bind(unix_i64(now_unix_secs, "now_unix_secs")?)
+        .bind(unix_i64(
+            self.config.stale_lock_threshold_secs,
+            "stale_lock_threshold_secs",
+        )?)
+        .bind(STALE_LOCK_LAST_RESULT)
+        .bind(CACHE_KEEPALIVE_IDEMPOTENCY_PREFIX)
+        .execute(&self.pool)
+        .await?;
+        let removed = sqlx::query(
             "DELETE FROM cache_keepalive_sessions
              WHERE expires_at < ?1
                 OR (status = 'active' AND enqueue_state = 'pending' AND updated_at < ?2)",
@@ -166,8 +202,8 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
         .bind(unix_i64(stale_pending_cutoff, "stale_pending_cutoff")?)
         .execute(&self.pool)
         .await;
-        match result {
-            Ok(result) => Ok(result.rows_affected()),
+        match removed {
+            Ok(result) => Ok(recovered.saturating_add(result.rows_affected())),
             Err(error) if is_missing_cache_keepalive_table(&error) => Ok(0),
             Err(error) => Err(error.into()),
         }
@@ -205,10 +241,12 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
              FROM Jobs
              WHERE status = 'Running'
                AND lock_at IS NOT NULL
+               AND COALESCE(idempotency_key, '') NOT LIKE ?3
                AND (?1 - lock_at) > ?2",
         )
         .bind(now_i64)
         .bind(threshold_i64)
+        .bind(CACHE_KEEPALIVE_IDEMPOTENCY_PREFIX)
         .fetch_all(&mut *tx)
         .await?;
         if rows.is_empty() {
@@ -222,13 +260,15 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
                  lock_by = NULL,
                  lock_at = NULL,
                  attempts = attempts + 1,
-                 last_result = ?3
+                 last_result = ?4
              WHERE status = 'Running'
                AND lock_at IS NOT NULL
+               AND COALESCE(idempotency_key, '') NOT LIKE ?3
                AND (?1 - lock_at) > ?2",
         )
         .bind(now_i64)
         .bind(threshold_i64)
+        .bind(CACHE_KEEPALIVE_IDEMPOTENCY_PREFIX)
         .bind(STALE_LOCK_LAST_RESULT)
         .execute(&mut *tx)
         .await?;
@@ -307,7 +347,43 @@ impl ApalisHousekeepingJobHandler<Postgres> {
         now_unix_secs: u64,
         stale_pending_cutoff: u64,
     ) -> Result<u64> {
-        let result = sqlx::query(
+        let stale_running_cutoff =
+            now_unix_secs.saturating_sub(self.config.stale_lock_threshold_secs);
+        let recovered = sqlx::query(
+            "UPDATE cache_keepalive_sessions
+             SET status = 'terminal', terminal_reason = 'stale', running_since_unix_secs = NULL, updated_at = $1
+             WHERE status = 'active'
+               AND enqueue_state = 'running'
+               AND running_since_unix_secs IS NOT NULL
+               AND running_since_unix_secs < $2",
+        )
+        .bind(unix_i64(now_unix_secs, "now_unix_secs")?)
+        .bind(unix_i64(stale_running_cutoff, "stale_running_cutoff")?)
+        .execute(&self.pool)
+        .await;
+        let recovered = match recovered {
+            Ok(result) => result.rows_affected(),
+            Err(error) if is_missing_cache_keepalive_table(&error) => return Ok(0),
+            Err(error) => return Err(error.into()),
+        };
+        sqlx::query(
+            "UPDATE apalis.jobs
+             SET status = 'Killed', done_at = $1, lock_by = NULL, lock_at = NULL, last_result = $3::jsonb
+             WHERE status = 'Running'
+               AND lock_at IS NOT NULL
+               AND idempotency_key LIKE $4
+               AND EXTRACT(EPOCH FROM ($1::timestamptz - lock_at))::BIGINT > $2",
+        )
+        .bind(utc_timestamp(now_unix_secs, "now_unix_secs")?)
+        .bind(unix_i64(
+            self.config.stale_lock_threshold_secs,
+            "stale_lock_threshold_secs",
+        )?)
+        .bind(STALE_LOCK_LAST_RESULT)
+        .bind(CACHE_KEEPALIVE_IDEMPOTENCY_PREFIX)
+        .execute(&self.pool)
+        .await?;
+        let removed = sqlx::query(
             "DELETE FROM cache_keepalive_sessions
              WHERE expires_at < $1
                 OR (status = 'active' AND enqueue_state = 'pending' AND updated_at < $2)",
@@ -316,8 +392,8 @@ impl ApalisHousekeepingJobHandler<Postgres> {
         .bind(unix_i64(stale_pending_cutoff, "stale_pending_cutoff")?)
         .execute(&self.pool)
         .await;
-        match result {
-            Ok(result) => Ok(result.rows_affected()),
+        match removed {
+            Ok(result) => Ok(recovered.saturating_add(result.rows_affected())),
             Err(error) if is_missing_cache_keepalive_table(&error) => Ok(0),
             Err(error) => Err(error.into()),
         }
@@ -357,10 +433,12 @@ impl ApalisHousekeepingJobHandler<Postgres> {
              FROM apalis.jobs
              WHERE status = 'Running'
                AND lock_at IS NOT NULL
+               AND COALESCE(idempotency_key, '') NOT LIKE $3
                AND EXTRACT(EPOCH FROM ($1::timestamptz - lock_at))::BIGINT > $2",
             )
             .bind(now_ts)
             .bind(threshold_i64)
+            .bind(CACHE_KEEPALIVE_IDEMPOTENCY_PREFIX)
             .fetch_all(&mut *tx)
             .await?;
         if rows.is_empty() {
@@ -374,13 +452,15 @@ impl ApalisHousekeepingJobHandler<Postgres> {
                  lock_by = NULL,
                  lock_at = NULL,
                  attempts = attempts + 1,
-                 last_result = $3
+                 last_result = $4::jsonb
              WHERE status = 'Running'
                AND lock_at IS NOT NULL
+               AND COALESCE(idempotency_key, '') NOT LIKE $3
                AND EXTRACT(EPOCH FROM ($1::timestamptz - lock_at))::BIGINT > $2",
         )
         .bind(now_ts)
         .bind(threshold_i64)
+        .bind(CACHE_KEEPALIVE_IDEMPOTENCY_PREFIX)
         .bind(STALE_LOCK_LAST_RESULT)
         .execute(&mut *tx)
         .await?;

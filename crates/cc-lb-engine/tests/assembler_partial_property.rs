@@ -221,6 +221,8 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             request_id: profile.request_id().to_owned(),
             ts_ms: profile.ts_ms(),
             stream: true,
+            source_kind: None,
+            source_ref_id: None,
         },
         EventOp::Parse => LifecycleEvent::ParseCompleted {
             event_id,

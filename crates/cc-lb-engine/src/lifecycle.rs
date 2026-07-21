@@ -29,7 +29,7 @@ use cc_lb_storage_api::{
 use cc_lb_upstream::{
     ApiKeyAwareSignerFactory, DialectError, DialectShapeContext, ResponseTransformError,
     RetryDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer,
-    TransformResponseRequest, UpstreamDialect, UpstreamError, shape_request, sign_request,
+    TransformResponseRequest, UpstreamDialect, UpstreamError, shape_request,
 };
 #[cfg(test)]
 use cc_lb_upstream::{SignerError, SignerFactory};
@@ -51,6 +51,7 @@ use crate::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuth
 use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as LimitReservation};
 use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
+use crate::attempt_rail::{AttemptIntent, ResponseAccountingGuard, Scoped};
 use crate::clock::{Clock, ClockHandle, unix_millis};
 use crate::downstream_stream_drop_guard::DownstreamStreamDropGuard;
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
@@ -2412,6 +2413,10 @@ impl Lifecycle {
                 decision,
             });
         }
+        let reserved = active_limit
+            .as_mut()
+            .and_then(|active_limit| active_limit.reservation.take())
+            .map(|reservation| AttemptIntent::from_reservation(reservation).into_reserved());
 
         let signer_factory = view.signer_factory.with_router_choice(
             success.api_key.clone().unwrap_or_default(),
@@ -2455,9 +2460,14 @@ impl Lifecycle {
                 upstream_id: resolved_upstream_id,
             });
         }
+        let first_attempt_scope = match reserved.as_ref() {
+            Some(reserved) => reserved.begin_attempt(),
+            None => Scoped::unreserved_for_lifecycle(),
+        };
         let mut response = match self
             .attempt(
                 self.dispatcher.as_ref(),
+                first_attempt_scope,
                 &ctx,
                 &principal,
                 &route,
@@ -2525,9 +2535,14 @@ impl Lifecycle {
                         upstream_id: resolved_upstream_id,
                     });
                 }
+                let retry_attempt_scope = match reserved.as_ref() {
+                    Some(reserved) => reserved.begin_attempt(),
+                    None => Scoped::unreserved_for_lifecycle(),
+                };
                 response = match self
                     .attempt(
                         self.dispatcher.as_ref(),
+                        retry_attempt_scope,
                         &ctx,
                         &principal,
                         &route,
@@ -2596,6 +2611,7 @@ impl Lifecycle {
         let keepalive_completion = keepalive_shaped_body.take().map(|shaped_body| {
             crate::cache_keepalive::LifecycleKeepaliveContext {
                 principal: principal.clone(),
+                accounting_key_id: success.key_id.clone(),
                 cache_metadata: cache_metadata.clone(),
                 upstream_id: resolved_upstream_id,
                 shaped_body,
@@ -2606,6 +2622,7 @@ impl Lifecycle {
             .finish_success_response(
                 response,
                 active_limit.take(),
+                reserved.map(|reserved| reserved.into_response_accounting_guard()),
                 started.elapsed(),
                 status,
                 stream_hooks,
@@ -2731,6 +2748,7 @@ impl Lifecycle {
         &self,
         response: Response<Body>,
         active_limit: Option<ActiveLimit>,
+        response_accounting_guard: Option<ResponseAccountingGuard>,
         duration: Duration,
         status: StatusCode,
         stream_hooks: StreamHooks,
@@ -2742,7 +2760,7 @@ impl Lifecycle {
         dispatch_started: Instant,
         dispatch_unix_secs: u64,
     ) -> Response<Body> {
-        let mut active_limit = active_limit;
+        let active_limit = active_limit;
         if active_limit
             .as_ref()
             .is_some_and(|active_limit| active_limit.request.stream)
@@ -2753,7 +2771,7 @@ impl Lifecycle {
                 response,
                 response_status,
                 stream_hooks,
-                active_limit.take(),
+                response_accounting_guard,
                 event_ctx.clone(),
                 transform_ctx,
                 prompt_cache_observation_context,
@@ -2907,6 +2925,7 @@ impl Lifecycle {
             .on_response_completed(
                 response_json,
                 &context.principal,
+                context.accounting_key_id,
                 &context.cache_metadata,
                 context.upstream_id,
                 context.shaped_body,
@@ -2929,11 +2948,12 @@ impl Lifecycle {
             );
             emit_prompt_cache_observations_produced(o, context, &decode, 0);
         }
-        if let (Some(limit_engine), Some(active_limit)) =
-            (self.limit_engine.as_ref(), active_limit.as_mut())
-            && active_limit.reservation.is_some()
-        {
-            active_limit.hand_off_reservation_to_reconcile_subscriber();
+        if let (Some(limit_engine), Some(active_limit), Some(response_accounting_guard)) = (
+            self.limit_engine.as_ref(),
+            active_limit.as_ref(),
+            response_accounting_guard,
+        ) {
+            response_accounting_guard.forget();
             attach_limit_headers_from_engine(
                 &mut parts.headers,
                 limit_engine.as_ref(),
@@ -3133,6 +3153,7 @@ impl Lifecycle {
     async fn attempt(
         &self,
         dispatcher: &dyn UpstreamDispatch,
+        attempt_scope: Scoped<'_>,
         ctx: &RequestContext,
         principal: &Principal,
         route: &RouteDecision,
@@ -3180,7 +3201,8 @@ impl Lifecycle {
         }
 
         let sign_start = Instant::now();
-        let signed = sign_request(signer.as_ref(), shaped)
+        let signed = attempt_scope
+            .sign(signer.as_ref(), shaped)
             .instrument(tracing::info_span!("proxy.sign"))
             .await
             .map_err(|source| {
@@ -3206,7 +3228,7 @@ impl Lifecycle {
             method = %signed.method(),
             header_count = signed.headers().len(),
             headers = ?signed_header_names,
-            body_bytes = signed.body().len(),
+            body_bytes = signed.body_len(),
             "about to dispatch signed request"
         );
 
@@ -3214,7 +3236,7 @@ impl Lifecycle {
         let stage_timings_carrier = Arc::new(Mutex::new(RequestStageTimings::default()));
         let dispatch_result = REQUEST_STAGE_TIMINGS
             .scope(stage_timings_carrier.clone(), async {
-                let result = dispatcher.dispatch(signed).await;
+                let result = signed.dispatch(dispatcher).await;
                 finalize_connection_reused_if_unset();
                 result
             })
@@ -3268,7 +3290,7 @@ impl Lifecycle {
         response: Response<Body>,
         status: StatusCode,
         hooks: StreamHooks,
-        active_limit: Option<ActiveLimit>,
+        response_accounting_guard: Option<ResponseAccountingGuard>,
         event_ctx: RequestEventContext,
         transform_ctx: ResponseTransformContext,
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
@@ -3300,7 +3322,6 @@ impl Lifecycle {
             );
         }
         let relay_start = Instant::now();
-        let limit_engine = self.limit_engine.clone();
         let prompt_cache_shadow_enabled = self.config.prompt_cache_shadow.enabled;
         let keepalive = crate::cache_keepalive::LifecycleKeepalive::new(
             self.cache_keepalive_enqueuer.clone(),
@@ -3856,6 +3877,7 @@ impl Lifecycle {
                 keepalive.on_response_completed(
                     &response_json,
                     &context.principal,
+                    context.accounting_key_id,
                     &context.cache_metadata,
                     context.upstream_id,
                     context.shaped_body,
@@ -3891,11 +3913,8 @@ impl Lifecycle {
                 total_bytes = total_bytes,
                 "stream latency breakdown"
             );
-            if let Some(mut active_limit) = active_limit
-                && limit_engine.is_some()
-                && active_limit.reservation.is_some()
-            {
-                active_limit.hand_off_reservation_to_reconcile_subscriber();
+            if let Some(response_accounting_guard) = response_accounting_guard {
+                response_accounting_guard.forget();
             }
             if let Some(o) = observer.as_ref() {
                 if status == StatusCode::OK
@@ -4500,14 +4519,6 @@ struct ActiveLimit {
     subject: AuthLimitSubject,
     request: LimitRequest,
     reservation: Option<LimitReservation>,
-}
-
-impl ActiveLimit {
-    fn hand_off_reservation_to_reconcile_subscriber(&mut self) {
-        if let Some(reservation) = self.reservation.take() {
-            reservation.forget();
-        }
-    }
 }
 
 #[derive(Clone)]
