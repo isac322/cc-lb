@@ -67,17 +67,20 @@ describe('selectLogsPageRows', () => {
     [createRows(120), 10, undefined, 20, 'row-100', 'row-119', 'overflow page'],
     [createRows(100), -3, undefined, 50, 'row-0', 'row-49', 'negative page'],
     [createRows(25), 1, 10, 10, 'row-10', 'row-19', 'custom page size'],
-  ])('%s', (rows, page, pageSize, expectedLength, expectedFirst, expectedLast, _desc) => {
-    // Given: rows, page, and optional pageSize
-    // When: selecting rows for the page
-    const result = selectLogsPageRows(rows, page, pageSize);
-    // Then: expected slice is returned
-    expect(result).toHaveLength(expectedLength);
-    if (expectedLength > 0) {
-      expect(result[0]).toBe(expectedFirst);
-      expect(result[expectedLength - 1]).toBe(expectedLast);
-    }
-  });
+  ])(
+    '%s',
+    (rows, page, pageSize, expectedLength, expectedFirst, expectedLast, _desc) => {
+      // Given: rows, page, and optional pageSize
+      // When: selecting rows for the page
+      const result = selectLogsPageRows(rows, page, pageSize);
+      // Then: expected slice is returned
+      expect(result).toHaveLength(expectedLength);
+      if (expectedLength > 0) {
+        expect(result[0]).toBe(expectedFirst);
+        expect(result[expectedLength - 1]).toBe(expectedLast);
+      }
+    },
+  );
 });
 
 describe('isLastLogsPage', () => {

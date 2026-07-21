@@ -138,23 +138,26 @@ describe('useFireNowUpstreamWarmup', () => {
     [502, makeFireNowError('auth_failed')],
     [503, makeFireNowError('seven_day_quota_exhausted')],
     [503, makeFireNowError('dialect_plugin_transient')],
-  ])('returns %i error body and still invalidates queries after fire-now attempt', async (status, response) => {
-    stubFetchOnce(response, { status });
-    const client = makeClient();
-    const invalidateSpy = vi.spyOn(client, 'invalidateQueries');
-    const { result } = renderHook(() => useFireNowUpstreamWarmup(), {
-      wrapper: makeWrapper(client),
-    });
+  ])(
+    'returns %i error body and still invalidates queries after fire-now attempt',
+    async (status, response) => {
+      stubFetchOnce(response, { status });
+      const client = makeClient();
+      const invalidateSpy = vi.spyOn(client, 'invalidateQueries');
+      const { result } = renderHook(() => useFireNowUpstreamWarmup(), {
+        wrapper: makeWrapper(client),
+      });
 
-    await expect(result.current.mutateAsync(UPSTREAM_ID)).resolves.toEqual(
-      response,
-    );
+      await expect(result.current.mutateAsync(UPSTREAM_ID)).resolves.toEqual(
+        response,
+      );
 
-    expect(invalidateSpy.mock.calls.map(([arg]) => arg?.queryKey)).toEqual([
-      qk.upstream(UPSTREAM_ID),
-      qk.upstreams,
-    ]);
-  });
+      expect(invalidateSpy.mock.calls.map(([arg]) => arg?.queryKey)).toEqual([
+        qk.upstream(UPSTREAM_ID),
+        qk.upstreams,
+      ]);
+    },
+  );
 });
 
 describe('useClearUpstreamWarmupDialectPlugin', () => {
