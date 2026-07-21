@@ -1,6 +1,6 @@
 # cc-lb server release
 
-The root Cargo workspace version is the `cc-lb-server` release version. The five public crates use literal package versions and remain under release-plz.
+The root Cargo workspace version is the `cc-lb-server` release version. The five public crates use literal package versions with `release-plz.toml`; the server uses the git-only `release-plz-server.toml`.
 
 Server source tags use `cc-lb-vX.Y.Z`. Docker and Helm use the plain `X.Y.Z` version. The workflows never publish a `latest` image tag.
 
@@ -20,7 +20,7 @@ Server source tags use `cc-lb-vX.Y.Z`. Docker and Helm use the plain `X.Y.Z` ver
 
 The release PR's `verify server release artifacts` check reuses the Garage-backed Buildx cache, smoke-tests the production image, packages and verifies the source-stamped chart, and actionlints the release workflows before merge.
 
-The merge commit becomes immutable tag `cc-lb-vX.Y.Z`. The `release-server` workflow creates a draft GitHub Release, publishes and verifies Docker first, publishes and verifies Helm second, then publishes the GitHub Release.
+After merge, `release-server` verifies that the workspace version changed and invokes release-plz. Release-plz creates immutable tag `cc-lb-vX.Y.Z` and a draft GitHub Release. Separate GHA jobs then publish and verify Docker first, publish and verify Helm second, and finally publish the Release.
 
 Stable versions publish immutable Docker tag `X.Y.Z`. Moving tags `X.Y` and `X` update only if this is the newest published stable server release for that prefix. Prereleases publish only their exact tag.
 
@@ -52,7 +52,7 @@ helm pull oci://ghcr.io/isac322/charts/cc-lb \
   --version "$VERSION" \
   --destination "$tmp_chart"
 tar -xzf "$tmp_chart/cc-lb-$VERSION.tgz" -C "$tmp_chart"
-python3 scripts/server_release.py verify-chart \
+python3 scripts/chart_metadata.py verify \
   --chart "$tmp_chart/cc-lb/Chart.yaml" \
   --version "$VERSION" \
   --revision "$REVISION"
@@ -98,7 +98,7 @@ gh workflow run release-server.yml \
   -f target_sha="$TARGET_SHA"
 ```
 
-The target must be reachable from `master`. Its root workspace version must equal `VERSION` and must differ from its first parent's workspace version.
+The target must be reachable from `master`. Its root workspace version must equal `VERSION` and must differ from its first parent's workspace version. The `start` operation invokes the same git-only release-plz command as the automatic path.
 
 ## Source defect after tagging
 

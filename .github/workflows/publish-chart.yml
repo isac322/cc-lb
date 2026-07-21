@@ -59,11 +59,11 @@ jobs:
             echo "::error::source_ref '$SOURCE_REF' must equal cc-lb-v$VERSION"
             exit 1
           fi
-          python3 scripts/server_release.py inspect \
-            --repo . \
-            --target HEAD \
-            --expected-version "$VERSION" \
-            --github-output "$RUNNER_TEMP/source-validation"
+          actual_version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          if [ "$actual_version" != "$VERSION" ]; then
+            echo "::error::checked-out server version '$actual_version' does not match '$VERSION'"
+            exit 1
+          fi
 
       - uses: azure/setup-helm@v5.0.1
         with:
@@ -89,7 +89,7 @@ jobs:
               --destination "$existing_dir" \
               2>"$error_file"; then
             tar -xzf "$existing_dir/cc-lb-$VERSION.tgz" -C "$existing_dir"
-            python3 scripts/server_release.py verify-chart \
+            python3 scripts/chart_metadata.py verify \
               --chart "$existing_dir/cc-lb/Chart.yaml" \
               --version "$VERSION" \
               --revision "$SOURCE_SHA"
@@ -110,7 +110,7 @@ jobs:
         run: |
           set -euo pipefail
           command cp -R "$CHART" "$RUNNER_TEMP/cc-lb-chart"
-          python3 scripts/server_release.py stamp-chart \
+          python3 scripts/chart_metadata.py stamp \
             --chart "$RUNNER_TEMP/cc-lb-chart/Chart.yaml" \
             --revision "$SOURCE_SHA"
           helm lint "$RUNNER_TEMP/cc-lb-chart" \
@@ -138,7 +138,7 @@ jobs:
             --version "$VERSION" \
             --destination "$verify_dir"
           tar -xzf "$verify_dir/cc-lb-$VERSION.tgz" -C "$verify_dir"
-          python3 scripts/server_release.py verify-chart \
+          python3 scripts/chart_metadata.py verify \
             --chart "$verify_dir/cc-lb/Chart.yaml" \
             --version "$VERSION" \
             --revision "$SOURCE_SHA"

@@ -1,8 +1,8 @@
 name: release-plz
 
-# Single source of truth for crates.io package releases. Runs only on master
-# pushes (post-merge), never on PRs. Local execution of release-plz is
-# prohibited — see release-plz.toml policy header.
+# Single source of truth for crates.io package releases. The server has a
+# separate git-only release-plz config and artifact workflow. Runs only on
+# master pushes (post-merge), never on PRs.
 #
 # Flow:
 #   1. `preflight` job re-runs the publish-check gate (cargo semver-checks
@@ -17,8 +17,8 @@ name: release-plz
 #   2. `release` job runs after preflight succeeds. It detects new versions,
 #      creates package git tags + GitHub Releases, and publishes the five crates
 #      managed in release-plz.toml to crates.io via trusted publishing (OIDC).
-#      Host, storage, server, and other internal crates carry `publish = false`
-#      and are skipped.
+#      Server tags and draft Releases are created by release-plz through
+#      release-plz-server.toml in release-server.yml.
 #   3. `release-pr` job runs in parallel with preflight/release. It opens
 #      or updates a "chore: release" PR with version bumps and CHANGELOG
 #      entries for any crate touched since the last release.

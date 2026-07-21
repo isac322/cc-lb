@@ -1,11 +1,13 @@
 # release-plz config — https://release-plz.dev/docs/config
 #
-# CI-only: releases run exclusively via .github/workflows/release-plz.yml.
-# Do NOT run `release-plz release` or `release-plz release-pr` locally.
+# CI-only: public crate releases run via .github/workflows/release-plz.yml.
+# Server tags and draft Releases use release-plz-server.toml from
+# .github/workflows/release-server.yml. Do not run either release command
+# locally.
+#
 # Published contract crates (crates.io): cc-lb-plugin-wire,
 # cc-lb-pdk-wasmtime-macros, cc-lb-pdk-wasmtime, cc-lb-plugin-conformance,
-# and cc-lb-runtime-wasmtime. Server releases are owned separately by
-# .github/workflows/release-server.yml.
+# and cc-lb-runtime-wasmtime.
 
 [workspace]
 release = false

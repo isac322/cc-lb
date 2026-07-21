@@ -69,11 +69,12 @@ jobs:
             echo "::error::source_ref '$SOURCE_REF' must equal cc-lb-v$VERSION"
             exit 1
           fi
-          python3 scripts/server_release.py inspect \
-            --repo . \
-            --target HEAD \
-            --expected-version "$VERSION" \
-            --github-output "$RUNNER_TEMP/source-validation"
+          actual_version=$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "cc-lb-server") | .version')
+          if [ "$actual_version" != "$VERSION" ]; then
+            echo "::error::checked-out server version '$actual_version' does not match '$VERSION'"
+            exit 1
+          fi
 
       - name: Log in to ghcr.io
         uses: docker/login-action@v4
@@ -150,12 +151,19 @@ jobs:
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
 
-      - name: List published stable server releases
-        id: releases
+      - name: Select moving aliases
+        id: aliases
         uses: actions/github-script@v9
+        env:
+          VERSION: ${{ inputs.version }}
         with:
-          result-encoding: string
           script: |
+            const { pathToFileURL } = require('node:url');
+            const moduleUrl = pathToFileURL(
+              `${process.env.GITHUB_WORKSPACE}/scripts/release_aliases.mjs`,
+            );
+            const { releaseAliases } = await import(moduleUrl.href);
+
             const releases = await github.paginate(
               github.rest.repos.listReleases,
               {
@@ -164,25 +172,13 @@ jobs:
                 per_page: 100,
               },
             );
-            return releases
+            const publishedTags = releases
               .filter((release) => !release.draft && !release.prerelease)
-              .map((release) => release.tag_name)
-              .join('\n');
-
-      - name: Select moving aliases
-        id: aliases
-        env:
-          PUBLISHED_TAGS: ${{ steps.releases.outputs.result }}
-          VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          args=(aliases --version "$VERSION" --github-output "$GITHUB_OUTPUT")
-          while IFS= read -r tag; do
-            if [ -n "$tag" ]; then
-              args+=(--published-tag "$tag")
-            fi
-          done <<< "$PUBLISHED_TAGS"
-          python3 scripts/server_release.py "${args[@]}"
+              .map((release) => release.tag_name);
+            core.setOutput(
+              'aliases',
+              releaseAliases(process.env.VERSION, publishedTags).join(' '),
+            );
 
       - name: Reconcile moving aliases
         if: steps.aliases.outputs.aliases != ''

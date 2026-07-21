@@ -83,8 +83,10 @@ jobs:
           python3 scripts/check-crate-versions.py "${args[@]}"
       - name: Test managed version validator
         run: python3 scripts/test_check_crate_versions.py -v
-      - name: Test server release helper
-        run: python3 scripts/test_server_release.py -v
+      - name: Test chart metadata helper
+        run: python3 scripts/test_chart_metadata.py -v
+      - name: Test Docker release alias selection
+        run: node --test scripts/test_release_aliases.mjs
 
   release-pr-artifacts:
     name: verify server release artifacts
@@ -119,11 +121,65 @@ jobs:
       - name: Inspect release target
         id: release
         run: |
-          python3 scripts/server_release.py inspect \
-            --repo . \
-            --target HEAD \
-            --github-output "$GITHUB_OUTPUT"
-          echo "source_date_epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "cc-lb-server") | .version')
+          printf 'version=%s\ntarget_sha=%s\nsource_date_epoch=%s\n' \
+            "$version" "$(git rev-parse HEAD)" "$(git show -s --format=%ct HEAD)" \
+            >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@1.97.0
+
+      # release-plz 0.3.160 supports git-only releases, but its release command
+      # still filters out manifest-private packages before applying that mode.
+      - name: Expose private server package to release-plz
+        run: |
+          set -euo pipefail
+          manifest=crates/cc-lb-server/Cargo.toml
+          backup="$RUNNER_TEMP/cc-lb-server-Cargo.toml"
+          cp "$manifest" "$backup"
+          if [ "$(grep -cx 'publish = false' "$manifest")" != "1" ]; then
+            echo "::error::cc-lb-server publish=false marker not found exactly once"
+            exit 1
+          fi
+          sed -i '/^publish = false$/d' "$manifest"
+
+
+      - name: Install and dry-run release-plz server release
+        uses: MarcoIeni/release-plz-action@v0.5.131
+        with:
+          command: release
+          config: release-plz-server.toml
+          version: 0.3.160
+          dry_run: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Git-only dry-runs intentionally return releases=[].
+      - name: Verify release-plz server selection
+        env:
+          EXPECTED_VERSION: ${{ steps.release.outputs.version }}
+          GIT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          output=$(release-plz release \
+            --dry-run \
+            --config release-plz-server.toml \
+            --repo-url "https://github.com/$GITHUB_REPOSITORY" \
+            --forge github \
+            -v 2>&1)
+          printf '%s\n' "$output"
+          grep -F "cc-lb-server $EXPECTED_VERSION:" <<< "$output"
+          grep -F "creation of tag 'cc-lb-v$EXPECTED_VERSION'" <<< "$output"
+          grep -F "creation of git release" <<< "$output"
+
+      - name: Restore private server manifest
+        if: always()
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/cc-lb-server-Cargo.toml" crates/cc-lb-server/Cargo.toml
+          git diff --exit-code -- crates/cc-lb-server/Cargo.toml
+
 
       - name: Build production image
         uses: docker/build-push-action@v7
@@ -167,7 +223,7 @@ jobs:
           command rm -rf "$chart_dir" "$package_dir"
           command cp -R deploy/helm/cc-lb "$chart_dir"
           mkdir -p "$package_dir/unpacked"
-          python3 scripts/server_release.py stamp-chart \
+          python3 scripts/chart_metadata.py stamp \
             --chart "$chart_dir/Chart.yaml" \
             --revision "$SOURCE_SHA"
           helm lint "$chart_dir" --set secrets.masterKey=ci-lint-placeholder
@@ -177,7 +233,7 @@ jobs:
             --destination "$package_dir"
           tar -xzf "$package_dir/cc-lb-$VERSION.tgz" \
             -C "$package_dir/unpacked"
-          python3 scripts/server_release.py verify-chart \
+          python3 scripts/chart_metadata.py verify \
             --chart "$package_dir/unpacked/cc-lb/Chart.yaml" \
             --version "$VERSION" \
             --revision "$SOURCE_SHA"
