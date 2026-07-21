@@ -307,6 +307,14 @@ impl Fixture {
                 max_refreshes: 3,
                 max_total_duration_secs: 600,
             },
+            display_reason: "agent-in-turn — first renewal in 1s".to_owned(),
+            config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session: 3,
+                max_total_duration_secs: 600,
+                snapshot_max_bytes: 524_288,
+            },
             snapshot: RequestSnapshot::capture(
                 Url::parse("https://api.anthropic.com/v1/messages").expect("url parses"),
                 Method::POST,

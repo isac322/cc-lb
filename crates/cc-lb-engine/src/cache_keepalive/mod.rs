@@ -12,6 +12,7 @@
 mod aead_compat;
 mod classifier;
 mod dispatcher;
+mod display_reason;
 mod lifecycle_glue;
 mod metrics;
 mod request_snapshot;
@@ -22,7 +23,7 @@ pub use classifier::{HeuristicClassifier, TurnDecision};
 pub use dispatcher::AnthropicKeepaliveDispatcher;
 pub use lifecycle_glue::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
-    CacheKeepaliveEnqueuer,
+    CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest,
 };
 pub(crate) use lifecycle_glue::{
     LifecycleKeepalive, LifecycleKeepaliveContext, StreamingKeepaliveResponse,

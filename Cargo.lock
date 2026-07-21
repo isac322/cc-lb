@@ -722,6 +722,7 @@ dependencies = [
  "cc-lb-oauth-protocol",
  "cc-lb-observability",
  "cc-lb-plugin-wire",
+ "cc-lb-pricing",
  "cc-lb-quota",
  "cc-lb-request-log",
  "cc-lb-runtime-wasmtime",

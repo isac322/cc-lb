@@ -54,8 +54,9 @@ pub use request_event_projections::*;
 pub use runtime_change_notifier::*;
 pub use traits::UsageTokenIntervalStore;
 pub use traits::{
-    ApiKeyStore, AuditStore, CURRENT_CONTRACT_VERSION, ConfigStore, ManagedKeyStore, MetaStore,
-    OAuthCredentialStore, PriceCatalogCache, RequestEventStore, Storage, UsageRollupStore,
+    ApiKeyStore, AuditStore, CURRENT_CONTRACT_VERSION, CacheKeepaliveProjectionStore, ConfigStore,
+    ManagedKeyStore, MetaStore, OAuthCredentialStore, PriceCatalogCache, RequestEventStore,
+    Storage, UsageRollupStore,
 };
 pub use types::*;
 pub use upstream::*;

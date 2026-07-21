@@ -12,10 +12,11 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 
-use cc_lb_storage_api::CacheTtl;
+use cc_lb_storage_api::{CacheKeepaliveConfigSnapshot, CacheTtl};
 
 use crate::lifecycle::RequestCacheMetadata;
 
+use super::display_reason::CacheKeepaliveDisplayReason;
 use super::{CancelReason, HeuristicClassifier, RequestSnapshot, SessionKey};
 
 #[derive(Clone)]
@@ -25,6 +26,8 @@ pub struct CacheKeepaliveEnqueueRequest {
     pub accounting_key_id: Option<String>,
     pub cache_anchor_age: Duration,
     pub params: super::ScheduleParams,
+    pub display_reason: String,
+    pub config_snapshot: CacheKeepaliveConfigSnapshot,
     pub snapshot: RequestSnapshot,
 }
 
@@ -32,6 +35,16 @@ pub struct CacheKeepaliveEnqueueRequest {
 pub struct CacheKeepaliveCancelRequest {
     pub session_key_hash: String,
     pub reason: CancelReason,
+}
+
+#[derive(Clone)]
+pub struct CacheKeepaliveNotTrackedRequest {
+    pub session_key_hash: String,
+    pub principal_id: String,
+    pub upstream_id: Uuid,
+    pub ttl: CacheTtl,
+    pub config_snapshot: CacheKeepaliveConfigSnapshot,
+    pub reason: String,
 }
 
 impl fmt::Debug for CacheKeepaliveEnqueueRequest {
@@ -42,6 +55,7 @@ impl fmt::Debug for CacheKeepaliveEnqueueRequest {
             .field("accounting_key_id", &self.accounting_key_id)
             .field("cache_anchor_age", &self.cache_anchor_age)
             .field("params", &self.params)
+            .field("display_reason", &self.display_reason)
             .field("snapshot", &"<redacted>")
             .finish()
     }
@@ -61,6 +75,11 @@ pub trait CacheKeepaliveEnqueuer: Send + Sync {
     async fn cancel_cache_keepalive(
         &self,
         request: CacheKeepaliveCancelRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError>;
+
+    async fn record_cache_keepalive_not_tracked(
+        &self,
+        request: CacheKeepaliveNotTrackedRequest,
     ) -> Result<(), CacheKeepaliveEnqueueError>;
 }
 
@@ -198,6 +217,15 @@ impl LifecycleKeepalive {
                     max,
                     "skipping cache keep-alive snapshot: shaped body exceeds cap"
                 );
+                self.record_not_tracked(
+                    &session_key,
+                    principal,
+                    upstream_id,
+                    ttl,
+                    config,
+                    &CacheKeepaliveDisplayReason::SnapshotTooLarge.to_string(),
+                )
+                .await;
                 super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
                 return;
             }
@@ -216,6 +244,9 @@ impl LifecycleKeepalive {
             super::TurnDecision::AgentInTurn => {
                 let params =
                     super::ScheduleParams::from_cache_anchor_age(config, ttl, cache_anchor_age);
+                let display_reason =
+                    CacheKeepaliveDisplayReason::agent_in_turn(response_body_json, params.delay)
+                        .to_string();
                 if let Err(error) = enqueuer
                     .enqueue_cache_keepalive(CacheKeepaliveEnqueueRequest {
                         session_key_hash: session_key.to_string(),
@@ -223,6 +254,14 @@ impl LifecycleKeepalive {
                         accounting_key_id: Some(accounting_key_id),
                         cache_anchor_age,
                         params,
+                        display_reason,
+                        config_snapshot: CacheKeepaliveConfigSnapshot {
+                            refresh_lead_time_5m_secs: config.refresh_lead_time_5m_secs,
+                            refresh_lead_time_1h_secs: config.refresh_lead_time_1h_secs,
+                            max_refreshes_per_session: config.max_refreshes_per_session,
+                            max_total_duration_secs: config.max_total_duration_secs,
+                            snapshot_max_bytes: config.snapshot_max_bytes,
+                        },
                         snapshot,
                     })
                     .await
@@ -236,6 +275,15 @@ impl LifecycleKeepalive {
                 }
             }
             super::TurnDecision::UserTurn => {
+                self.record_not_tracked(
+                    &session_key,
+                    principal,
+                    upstream_id,
+                    ttl,
+                    config,
+                    &CacheKeepaliveDisplayReason::user_turn(response_body_json).to_string(),
+                )
+                .await;
                 self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
                     .await;
             }
@@ -245,10 +293,28 @@ impl LifecycleKeepalive {
                     principal_id = principal.id.as_str(),
                     "cache keep-alive llm_judge is configured but unsupported in this release; treating ambiguous response as user turn"
                 );
+                self.record_not_tracked(
+                    &session_key,
+                    principal,
+                    upstream_id,
+                    ttl,
+                    config,
+                    &CacheKeepaliveDisplayReason::AmbiguousTurn.to_string(),
+                )
+                .await;
                 self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
                     .await;
             }
             super::TurnDecision::Ambiguous => {
+                self.record_not_tracked(
+                    &session_key,
+                    principal,
+                    upstream_id,
+                    ttl,
+                    config,
+                    &CacheKeepaliveDisplayReason::AmbiguousTurn.to_string(),
+                )
+                .await;
                 self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
                     .await;
             }
@@ -275,6 +341,44 @@ impl LifecycleKeepalive {
                 reason = reason.as_str(),
                 %error,
                 "durable cache keep-alive cancellation failed"
+            );
+        }
+    }
+
+    async fn record_not_tracked(
+        &self,
+        session_key: &SessionKey,
+        principal: &Principal,
+        upstream_id: Uuid,
+        ttl: CacheTtl,
+        config: &cc_lb_storage_api::CacheKeepaliveConfig,
+        reason: &str,
+    ) {
+        let Some(enqueuer) = self.enqueuer.as_ref() else {
+            return;
+        };
+        if let Err(error) = enqueuer
+            .record_cache_keepalive_not_tracked(CacheKeepaliveNotTrackedRequest {
+                session_key_hash: session_key.to_string(),
+                principal_id: principal.id.clone(),
+                upstream_id,
+                ttl,
+                config_snapshot: CacheKeepaliveConfigSnapshot {
+                    refresh_lead_time_5m_secs: config.refresh_lead_time_5m_secs,
+                    refresh_lead_time_1h_secs: config.refresh_lead_time_1h_secs,
+                    max_refreshes_per_session: config.max_refreshes_per_session,
+                    max_total_duration_secs: config.max_total_duration_secs,
+                    snapshot_max_bytes: config.snapshot_max_bytes,
+                },
+                reason: reason.to_owned(),
+            })
+            .await
+        {
+            tracing::warn!(
+                target: "cache_keepalive",
+                principal_id = principal.id.as_str(),
+                %error,
+                "cache keep-alive not-tracked projection failed"
             );
         }
     }

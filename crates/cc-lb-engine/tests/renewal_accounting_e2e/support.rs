@@ -17,8 +17,8 @@ use cc_lb_engine::{
     },
 };
 use cc_lb_storage_api::{
-    CacheKeepaliveReplaceRequest, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStore,
-    CacheKeepaliveTerminalReason, CacheTtl,
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionRecord,
+    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, CacheTtl,
     types::{KeyStatus, Limit as StoredLimit, LimitKind, StoredApiKeyRecord},
 };
 
@@ -90,6 +90,14 @@ impl RenewalAccountingScenario {
                 run_at_unix_secs: now + 10,
                 expires_at_unix_secs: now + 300,
                 encrypted_payload: vec![1],
+                display_reason: "agent-in-turn".to_owned(),
+                config_snapshot: CacheKeepaliveConfigSnapshot {
+                    refresh_lead_time_5m_secs: 30,
+                    refresh_lead_time_1h_secs: 300,
+                    max_refreshes_per_session: 12,
+                    max_total_duration_secs: 14_400,
+                    snapshot_max_bytes: 524_288,
+                },
                 now_unix_secs: now,
             })
             .await

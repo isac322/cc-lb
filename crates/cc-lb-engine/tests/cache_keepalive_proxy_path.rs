@@ -9,7 +9,7 @@ use bytes::Bytes;
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
-    CacheKeepaliveEnqueuer,
+    CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest,
 };
 use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, LifecycleConfig};
 use cc_lb_storage_api::CacheTtl;
@@ -54,6 +54,13 @@ impl CacheKeepaliveEnqueuer for RecordingEnqueuer {
         request: CacheKeepaliveCancelRequest,
     ) -> Result<(), CacheKeepaliveEnqueueError> {
         self.cancelled.lock().expect("cancelled lock").push(request);
+        Ok(())
+    }
+
+    async fn record_cache_keepalive_not_tracked(
+        &self,
+        _request: CacheKeepaliveNotTrackedRequest,
+    ) -> Result<(), CacheKeepaliveEnqueueError> {
         Ok(())
     }
 }

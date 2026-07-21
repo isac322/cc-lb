@@ -6,6 +6,10 @@ use uuid::Uuid;
 
 use crate::{CacheTtl, StorageResult};
 
+mod reads;
+
+pub use reads::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheKeepaliveSessionStatus {
@@ -68,6 +72,20 @@ impl CacheKeepaliveTerminalReason {
             Self::Stale => "stale",
         }
     }
+
+    pub const fn display_reason(self) -> &'static str {
+        match self {
+            Self::MaxRefreshes => "max renewals reached",
+            Self::MaxDuration => "max duration reached (4h)",
+            Self::Expired => "TTL expired before follow-up",
+            Self::DispatchError => "renewal dispatch unavailable",
+            Self::Cancelled => "session cancelled",
+            Self::CacheMiss => "cache expired before follow-up",
+            Self::DecryptFailed => "renewal payload could not be decrypted",
+            Self::UnsupportedProvider => "renewal provider is unsupported",
+            Self::Stale => "renewal session is stale",
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +105,9 @@ pub struct CacheKeepaliveSessionRecord {
     pub running_since_unix_secs: Option<u64>,
     pub current_job_key: String,
     pub encrypted_payload: Vec<u8>,
+    pub display_reason: String,
+    pub error: Option<String>,
+    pub config_snapshot: Option<CacheKeepaliveConfigSnapshot>,
     pub terminal_reason: Option<CacheKeepaliveTerminalReason>,
     pub expires_at_unix_secs: u64,
     pub created_at_unix_secs: u64,
@@ -117,6 +138,9 @@ impl fmt::Debug for CacheKeepaliveSessionRecord {
                 "encrypted_payload",
                 &format_args!("<{} bytes redacted>", self.encrypted_payload.len()),
             )
+            .field("display_reason", &self.display_reason)
+            .field("error", &self.error)
+            .field("config_snapshot", &self.config_snapshot)
             .field("terminal_reason", &self.terminal_reason)
             .field("expires_at_unix_secs", &self.expires_at_unix_secs)
             .field("created_at_unix_secs", &self.created_at_unix_secs)
@@ -136,6 +160,8 @@ pub struct CacheKeepaliveReplaceRequest {
     pub run_at_unix_secs: u64,
     pub expires_at_unix_secs: u64,
     pub encrypted_payload: Vec<u8>,
+    pub display_reason: String,
+    pub config_snapshot: CacheKeepaliveConfigSnapshot,
     pub now_unix_secs: u64,
 }
 
@@ -154,6 +180,8 @@ impl fmt::Debug for CacheKeepaliveReplaceRequest {
                 "encrypted_payload",
                 &format_args!("<{} bytes redacted>", self.encrypted_payload.len()),
             )
+            .field("display_reason", &self.display_reason)
+            .field("config_snapshot", &self.config_snapshot)
             .field("now_unix_secs", &self.now_unix_secs)
             .finish()
     }
@@ -304,6 +332,9 @@ mod tests {
             running_since_unix_secs: None,
             current_job_key: cache_keepalive_job_key("session", 1),
             encrypted_payload: b"ciphertext-bytes".to_vec(),
+            display_reason: "agent-in-turn".to_owned(),
+            error: None,
+            config_snapshot: None,
             terminal_reason: None,
             expires_at_unix_secs: 310,
             created_at_unix_secs: 10,

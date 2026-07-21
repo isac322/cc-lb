@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 
 use crate::{
-    BackendKind, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket,
-    RequestEventKeyUsageQuery, RequestEventProjections, RuntimeChangeNotifier, StorageError,
-    StorageResult,
+    BackendKind, CacheKeepaliveDecisionRow, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
+    RequestEventKeyUsageBucket, RequestEventKeyUsageQuery, RequestEventProjections,
+    RuntimeChangeNotifier, StorageError, StorageResult,
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
-    cache_keepalive_sessions::CacheKeepaliveSessionStore,
+    cache_keepalive_sessions::{CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore},
     organization_metadata::OrganizationMetadataStore,
     prompt_cache_observation::PromptCacheObservationStore,
     types::*,
@@ -170,6 +170,14 @@ pub trait RequestEventStore: Send + Sync {
             message: "get_request_event is not implemented for this storage backend".to_owned(),
         })
     }
+}
+
+#[async_trait]
+pub trait CacheKeepaliveProjectionStore: Send + Sync {
+    async fn append_cache_keepalive_decision(
+        &self,
+        decision: &CacheKeepaliveDecisionRow,
+    ) -> StorageResult<()>;
 }
 
 #[async_trait]
@@ -384,6 +392,7 @@ pub trait Storage:
     + crate::principal::PrincipalStore
     + crate::upstream::UpstreamStore
     + RequestEventStore
+    + CacheKeepaliveProjectionStore
     + UpstreamRateLimitStateStore
     + UpstreamSubscriptionQuotaStore
     + UpstreamSubscriptionQuotaAggregateStore
@@ -393,6 +402,7 @@ pub trait Storage:
     + OrganizationMetadataStore
     + AnthropicCompatibilityKvStore
     + CacheKeepaliveSessionStore
+    + CacheKeepaliveSessionReadStore
     + UsageRollupStore
     + UsageTokenIntervalStore
     + OAuthCredentialStore
@@ -416,6 +426,7 @@ impl<T> Storage for T where
         + crate::principal::PrincipalStore
         + crate::upstream::UpstreamStore
         + RequestEventStore
+        + CacheKeepaliveProjectionStore
         + UpstreamRateLimitStateStore
         + UpstreamSubscriptionQuotaStore
         + UpstreamSubscriptionQuotaAggregateStore
@@ -425,6 +436,7 @@ impl<T> Storage for T where
         + OrganizationMetadataStore
         + AnthropicCompatibilityKvStore
         + CacheKeepaliveSessionStore
+        + CacheKeepaliveSessionReadStore
         + UsageRollupStore
         + UsageTokenIntervalStore
         + OAuthCredentialStore

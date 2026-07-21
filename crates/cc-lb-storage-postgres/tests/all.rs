@@ -1,3 +1,5 @@
+#[path = "cache_keepalive_session_reads.rs"]
+mod cache_keepalive_session_reads;
 #[path = "cache_keepalive_sessions.rs"]
 mod cache_keepalive_sessions;
 #[path = "crash_recovery.rs"]

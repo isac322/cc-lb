@@ -304,6 +304,12 @@
 }
 .flash-in { animation: flash-in 1.2s ease-out; }
 
+@keyframes flash-text {
+  0%   { color: var(--color-accent); }
+  100% { color: var(--color-text); }
+}
+.flash-text-active { animation: flash-text 1s ease-out; }
+
 /* ── Skeleton shimmer ── */
 @keyframes shimmer {
   0%   { background-position: -800px 0; }

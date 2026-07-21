@@ -194,7 +194,7 @@ fn renewal_request_event(input: RenewalRequestEventInput<'_>) -> RequestEvent {
 
 fn renewal_projections(input: RenewalProjectionInput<'_>) -> RequestEventProjections {
     RequestEventProjections {
-        turn: CacheKeepaliveTurnRow {
+        turn: Some(CacheKeepaliveTurnRow {
             source_ref_id: input.source_ref_id.to_owned(),
             session_key_hash: input.record.session_key_hash.clone(),
             principal_id: input.record.principal_id.clone(),
@@ -210,18 +210,50 @@ fn renewal_projections(input: RenewalProjectionInput<'_>) -> RequestEventProject
             cost_micros: input.cost_micros,
             hit_miss: input.hit_miss.to_owned(),
             ts: input.ts,
-        },
+        }),
         decision: CacheKeepaliveDecisionRow {
             source_ref_id: input.source_ref_id.to_owned(),
+            principal_id: input.record.principal_id.clone(),
+            session_key_hash: Some(input.record.session_key_hash.clone()),
+            upstream_id: input.record.upstream_id,
             decision: if input.hit_miss == "hit" {
                 "reschedule"
             } else {
                 "terminal"
             }
             .to_owned(),
-            reason: format!("cache_{}", input.hit_miss),
+            reason: cache_keepalive_renewal_reason(input.hit_miss),
+            error: None,
             generation: input.generation,
+            ttl: input.record.ttl,
+            config_snapshot: input.record.config_snapshot.clone(),
+            last_message_at_ms: input.ts.saturating_mul(1_000),
             ts: input.ts,
         },
+    }
+}
+
+fn cache_keepalive_renewal_reason(hit_miss: &str) -> String {
+    match hit_miss {
+        "hit" => "cache hit".to_owned(),
+        "miss" => "cache miss".to_owned(),
+        outcome => format!("cache {outcome}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cache_keepalive_renewal_reason;
+
+    #[test]
+    fn cache_hit_reason_is_human_readable() {
+        // Given: a successful cache keep-alive renewal.
+        let hit_miss = "hit";
+
+        // When: its display reason is rendered.
+        let reason = cache_keepalive_renewal_reason(hit_miss);
+
+        // Then: it is not the generic storage token.
+        assert_eq!(reason, "cache hit");
     }
 }

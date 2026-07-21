@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, RequestEvent, RequestEventKeyLastUsed,
-    RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket, RequestEventKeyUsageQuery,
-    RequestEventListItem, RequestEventListQuery, RequestEventProjections, RequestEventStore,
-    RequestEventStreamFilters, StorageError, StorageResult,
+    CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent,
+    RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket,
+    RequestEventKeyUsageQuery, RequestEventListItem, RequestEventListQuery,
+    RequestEventProjections, RequestEventStore, RequestEventStreamFilters, StorageError,
+    StorageResult,
 };
 use chrono::{DateTime, Utc};
 
@@ -17,6 +18,18 @@ use crate::{
 };
 
 const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
+
+#[async_trait]
+impl CacheKeepaliveProjectionStore for PostgresStorage {
+    async fn append_cache_keepalive_decision(
+        &self,
+        decision: &CacheKeepaliveDecisionRow,
+    ) -> StorageResult<()> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        insert_keepalive_decision_in_tx(&mut tx, decision).await?;
+        tx.commit().await.map_err(map_sqlx_error)
+    }
+}
 
 #[async_trait]
 impl RequestEventStore for PostgresStorage {
@@ -217,7 +230,9 @@ impl RequestEventStore for PostgresStorage {
             Some(seq) => seq,
             None => select_existing_event_id_in_tx(&mut tx, &event_id).await?,
         };
-        insert_keepalive_turn_in_tx(&mut tx, &projections.turn).await?;
+        if let Some(turn) = projections.turn.as_ref() {
+            insert_keepalive_turn_in_tx(&mut tx, turn).await?;
+        }
         insert_keepalive_decision_in_tx(&mut tx, &projections.decision).await?;
         tx.commit().await.map_err(map_sqlx_error)?;
         i64_to_u64(seq, "request event cursor")
@@ -772,21 +787,43 @@ async fn insert_keepalive_decision_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     row: &CacheKeepaliveDecisionRow,
 ) -> StorageResult<()> {
+    let config_snapshot = row
+        .config_snapshot
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     sqlx::query(
         "INSERT INTO cache_keepalive_decisions \
-         (source_ref_id, decision, reason, generation, ts) \
-         VALUES ($1, $2, $3, $4, $5) \
+         (source_ref_id, principal_id, session_key_hash, upstream_id, decision, reason, error, generation, ttl, config_snapshot, last_message_at_ms, ts) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
          ON CONFLICT(source_ref_id) DO NOTHING",
     )
     .bind(&row.source_ref_id)
+    .bind(&row.principal_id)
+    .bind(row.session_key_hash.as_deref())
+    .bind(row.upstream_id)
     .bind(&row.decision)
     .bind(&row.reason)
+    .bind(row.error.as_deref())
     .bind(u64_to_i64(row.generation, "cache keepalive generation")?)
+    .bind(cache_keepalive_ttl_to_db(row.ttl))
+    .bind(config_snapshot)
+    .bind(u64_to_i64(
+        row.last_message_at_ms,
+        "cache keepalive decision last_message_at_ms",
+    )?)
     .bind(u64_to_i64(row.ts, "cache keepalive decision ts")?)
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
     Ok(())
+}
+
+fn cache_keepalive_ttl_to_db(ttl: cc_lb_storage_api::CacheTtl) -> &'static str {
+    match ttl {
+        cc_lb_storage_api::CacheTtl::Ttl5m => "5m",
+        cc_lb_storage_api::CacheTtl::Ttl1h => "1h",
+    }
 }
 
 fn storage_event_id(event: &RequestEvent) -> String {

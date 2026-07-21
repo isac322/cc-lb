@@ -74,14 +74,17 @@ pub(crate) async fn persist_finalization(input: FinalizeInput<'_>) -> Completion
             ts_ms: 1_003_000,
             stream: false,
             source_kind: Some("renewal".to_owned()),
-            source_ref_id: Some(projections.turn.source_ref_id.clone()),
+            source_ref_id: Some(source_ref_id.to_owned()),
         });
     }
 
     Completion {
         reservation_id,
         event_key_id: event.key_id,
-        projection_key_id: projections.turn.accounting_key_id,
+        projection_key_id: projections
+            .turn
+            .as_ref()
+            .and_then(|turn| turn.accounting_key_id.clone()),
     }
 }
 
@@ -144,7 +147,7 @@ fn renewal_projections(
     cost_micros: i64,
 ) -> RequestEventProjections {
     RequestEventProjections {
-        turn: CacheKeepaliveTurnRow {
+        turn: Some(CacheKeepaliveTurnRow {
             source_ref_id: source_ref_id.to_owned(),
             session_key_hash: input.session.session_key_hash.clone(),
             principal_id: input.session.principal_id.clone(),
@@ -160,12 +163,19 @@ fn renewal_projections(
             cost_micros,
             hit_miss: "hit".to_owned(),
             ts: 1_003,
-        },
+        }),
         decision: CacheKeepaliveDecisionRow {
             source_ref_id: source_ref_id.to_owned(),
+            principal_id: input.session.principal_id.clone(),
+            session_key_hash: Some(input.session.session_key_hash.clone()),
+            upstream_id: input.session.upstream_id,
             decision: "reschedule".to_owned(),
             reason: "cache_hit".to_owned(),
+            error: None,
             generation: input.session.generation,
+            ttl: input.session.ttl,
+            config_snapshot: input.session.config_snapshot.clone(),
+            last_message_at_ms: 1_003_000,
             ts: 1_003,
         },
     }

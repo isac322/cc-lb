@@ -1,3 +1,5 @@
+#[path = "cache_keepalive_session_reads.rs"]
+mod cache_keepalive_session_reads;
 #[path = "price_catalog_retention.rs"]
 mod price_catalog_retention;
 #[path = "principal_terminal_strategy.rs"]

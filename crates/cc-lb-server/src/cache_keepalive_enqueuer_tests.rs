@@ -3,10 +3,15 @@ use super::*;
 use bytes::Bytes;
 use cc_lb_config::{SchedulerConfig, StorageConfig};
 use cc_lb_engine::SystemClock;
-use cc_lb_engine::cache_keepalive::{CacheKeepaliveCancelRequest, RequestSnapshot, ScheduleParams};
+use cc_lb_engine::cache_keepalive::{
+    CacheKeepaliveCancelRequest, CacheKeepaliveNotTrackedRequest, RequestSnapshot, ScheduleParams,
+};
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::worker::{Filter, TaskStatus};
-use cc_lb_storage_api::{BackendKind, CacheKeepaliveSessionStatus, CacheTtl, MetaStore};
+use cc_lb_storage_api::{
+    BackendKind, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery,
+    CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStatus, CacheTtl, MetaStore,
+};
 use http::{HeaderMap, Method};
 use tempfile::TempDir;
 use url::Url;
@@ -147,6 +152,70 @@ async fn cancel_terminalizes_active_session_without_deleting_pending_job() {
     assert_eq!(jobs.len(), 1);
 }
 
+#[tokio::test]
+async fn not_tracked_writes_a_decision_projection_without_a_renewal_turn() {
+    let fixture = Fixture::new().await;
+    let enqueuer = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
+        storage: fixture.storage.clone(),
+        pusher: Arc::new(FailingPusher),
+        aead: fixture.aead.clone(),
+        clock: Arc::new(SystemClock),
+    });
+    let request = enqueue_request();
+
+    assert!(
+        enqueuer
+            .enqueue_cache_keepalive(request.clone())
+            .await
+            .is_err()
+    );
+
+    enqueuer
+        .record_cache_keepalive_not_tracked(CacheKeepaliveNotTrackedRequest {
+            session_key_hash: request.session_key_hash,
+            principal_id: request.principal_id,
+            upstream_id: Uuid::from_u128(42),
+            ttl: CacheTtl::Ttl5m,
+            config_snapshot: request.config_snapshot,
+            reason: "user turn (stop_reason=end_turn)".to_owned(),
+        })
+        .await
+        .expect("write not-tracked projection");
+
+    let page = fixture
+        .storage
+        .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+            principal_id: "principal".to_owned(),
+            horizon_start_ms: None,
+            filter: CacheKeepaliveSessionFilter::NotTracked,
+            cursor: None,
+            limit: 10,
+        })
+        .await
+        .expect("read not-tracked projection");
+    assert_eq!(page.rows.len(), 1);
+    assert!(page.rows[0].is_decision());
+    assert_eq!(page.rows[0].reason, "user turn (stop_reason=end_turn)");
+    let turns = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM cache_keepalive_turns")
+        .fetch_one(fixture.storage.pool())
+        .await
+        .expect("count renewal turns");
+    assert_eq!(turns, 0);
+    let request_events = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM request_events_v1")
+        .fetch_one(fixture.storage.pool())
+        .await
+        .expect("count request events");
+    assert_eq!(request_events, 0);
+    if let Ok(qa_database_path) = std::env::var("CC_LB_CACHE_KEEPALIVE_QA_DATABASE") {
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(fixture.storage.pool())
+            .await
+            .expect("checkpoint QA database");
+        std::fs::copy(&fixture.sqlite_path, &qa_database_path).expect("copy QA database");
+        eprintln!("cache keepalive QA database: {qa_database_path}");
+    }
+}
+
 struct Fixture {
     _dir: TempDir,
     sqlite_path: std::path::PathBuf,
@@ -201,6 +270,14 @@ fn enqueue_request() -> CacheKeepaliveEnqueueRequest {
             delay: std::time::Duration::from_secs(240),
             max_refreshes: 3,
             max_total_duration_secs: 600,
+        },
+        display_reason: "agent-in-turn — first renewal in 4m".to_owned(),
+        config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
+            refresh_lead_time_5m_secs: 30,
+            refresh_lead_time_1h_secs: 300,
+            max_refreshes_per_session: 3,
+            max_total_duration_secs: 600,
+            snapshot_max_bytes: 524_288,
         },
         snapshot: RequestSnapshot::capture(
             Url::parse("http://upstream.local/v1/messages").expect("url parses"),

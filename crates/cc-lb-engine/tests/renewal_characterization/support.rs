@@ -14,8 +14,8 @@ use cc_lb_engine::{
 use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionRecord,
-    CacheKeepaliveSessionStore, CacheTtl, MetaStore, UpstreamStore,
+    BackendKind, CacheKeepaliveConfigSnapshot, CacheKeepaliveReplaceRequest,
+    CacheKeepaliveSessionRecord, CacheKeepaliveSessionStore, CacheTtl, MetaStore, UpstreamStore,
 };
 use cc_lb_upstream::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
@@ -123,6 +123,14 @@ impl RenewalFixture {
                 run_at_unix_secs: now + 10,
                 expires_at_unix_secs: now + 300,
                 encrypted_payload: vec![1],
+                display_reason: "agent-in-turn".to_owned(),
+                config_snapshot: CacheKeepaliveConfigSnapshot {
+                    refresh_lead_time_5m_secs: 30,
+                    refresh_lead_time_1h_secs: 300,
+                    max_refreshes_per_session: 12,
+                    max_total_duration_secs: 14_400,
+                    snapshot_max_bytes: 524_288,
+                },
                 now_unix_secs: now,
             })
             .await

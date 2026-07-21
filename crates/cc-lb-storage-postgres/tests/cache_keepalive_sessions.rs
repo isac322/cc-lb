@@ -482,6 +482,14 @@ fn replace_request(
         expires_at_unix_secs: now + 300,
         encrypted_payload: payload.to_vec(),
         accounting_key_id: None,
+        display_reason: "agent-in-turn".to_owned(),
+        config_snapshot: cc_lb_storage_api::CacheKeepaliveConfigSnapshot {
+            refresh_lead_time_5m_secs: 30,
+            refresh_lead_time_1h_secs: 300,
+            max_refreshes_per_session: 12,
+            max_total_duration_secs: 14_400,
+            snapshot_max_bytes: 524_288,
+        },
         now_unix_secs: now,
     }
 }

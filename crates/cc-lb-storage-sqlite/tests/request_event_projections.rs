@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, MetaStore, RequestEvent,
-    RequestEventProjections, RequestEventStore,
+    BackendKind, CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, CacheTtl, MetaStore,
+    RequestEvent, RequestEventProjections, RequestEventStore,
 };
 use uuid::Uuid;
 
@@ -44,7 +44,7 @@ fn event(event_id: &str) -> RequestEvent {
 
 fn projections(source_ref_id: &str) -> RequestEventProjections {
     RequestEventProjections {
-        turn: CacheKeepaliveTurnRow {
+        turn: Some(CacheKeepaliveTurnRow {
             source_ref_id: source_ref_id.to_owned(),
             session_key_hash: "session-hash".to_owned(),
             principal_id: "principal-a".to_owned(),
@@ -60,12 +60,19 @@ fn projections(source_ref_id: &str) -> RequestEventProjections {
             cost_micros: 123_456,
             hit_miss: "hit".to_owned(),
             ts: 1_800_000_000,
-        },
+        }),
         decision: CacheKeepaliveDecisionRow {
             source_ref_id: source_ref_id.to_owned(),
+            principal_id: "principal-a".to_owned(),
+            session_key_hash: Some("session-hash".to_owned()),
+            upstream_id: Uuid::from_u128(7),
             decision: "reschedule".to_owned(),
             reason: "cache_hit".to_owned(),
+            error: None,
             generation: 7,
+            ttl: CacheTtl::Ttl5m,
+            config_snapshot: None,
+            last_message_at_ms: 1_800_000_000_000,
             ts: 1_800_000_000,
         },
     }

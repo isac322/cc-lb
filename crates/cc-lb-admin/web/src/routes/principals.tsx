@@ -40,6 +40,7 @@ import {
 import React, { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import * as z from 'zod';
+import { CacheKeepaliveCard } from '../components/principals/cache-keepalive/CacheKeepaliveCard';
 import {
   Badge,
   Button,
@@ -357,6 +358,7 @@ function PrincipalDetail({
       />
 
       <div className="flex-1 overflow-y-auto p-4 md:p-6 pb-8 md:pb-12 space-y-6">
+        <CacheKeepaliveCard principal={principal} />
         <AllowedModelsCard principal={principal} />
         <DefaultLimitsCard principal={principal} />
         <RecentRequestsCard principal={principal} />
