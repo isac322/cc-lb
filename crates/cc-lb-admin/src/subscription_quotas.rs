@@ -449,6 +449,12 @@ async fn handle_pool_history(
     }
 }
 
+pub const POOLED_HISTORY_WINDOWS: &[SubscriptionQuotaWindow] = &[
+    SubscriptionQuotaWindow::FiveHour,
+    SubscriptionQuotaWindow::SevenDay,
+    SubscriptionQuotaWindow::SevenDayFable,
+];
+
 #[derive(Debug, Serialize, Deserialize)]
 struct PoolHistoryQuery {
     windows: Option<String>,
@@ -552,13 +558,10 @@ fn parse_pool_history_windows(raw: Option<&str>) -> Result<Vec<SubscriptionQuota
             )
                 .into_response()
         })?;
-        if !matches!(
-            window,
-            SubscriptionQuotaWindow::FiveHour | SubscriptionQuotaWindow::SevenDay
-        ) {
+        if !POOLED_HISTORY_WINDOWS.contains(&window) {
             return Err((
                 axum::http::StatusCode::BAD_REQUEST,
-                format!("pool history only supports 5h and 7d, got {token}"),
+                format!("pool history only supports 5h, 7d, and 7d_fable, got {token}"),
             )
                 .into_response());
         }
@@ -1155,10 +1158,7 @@ pub fn pool_quota_snapshots_from_aggregate(
         .iter()
         .filter_map(|window_response| {
             let window = SubscriptionQuotaWindow::from_str(window_response.window.as_str())?;
-            if !matches!(
-                window,
-                SubscriptionQuotaWindow::FiveHour | SubscriptionQuotaWindow::SevenDay
-            ) {
+            if !POOLED_HISTORY_WINDOWS.contains(&window) {
                 return None;
             }
             let contributing = window_response
@@ -2644,6 +2644,25 @@ mod tests {
         assert_eq!(response.confidence, "plan_weighted");
         assert_eq!(response.contributing_upstreams, 2);
         assert!(response.caveats.iter().any(|c| c.contains("plan ratios")));
+    }
+
+    #[test]
+    fn pool_quota_snapshots_from_aggregate_includes_fable() {
+        let aggregate = AggregateResponse {
+            now_unix_secs: 1_800_000_000,
+            window_anchor_unix_secs: 0,
+            max_staleness_secs: 300,
+            upstream_count: 1,
+            windows: vec![aggregate_window("7d_fable", 1_800_604_800, 28.0)],
+            caveats: Vec::new(),
+        };
+
+        let records =
+            pool_quota_snapshots_from_aggregate(&aggregate, 1_800_000_000, 1_800_000_000_000);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].window, SubscriptionQuotaWindow::SevenDayFable);
+        assert_eq!(records[0].utilization, Some(0.28));
     }
 
     #[test]
