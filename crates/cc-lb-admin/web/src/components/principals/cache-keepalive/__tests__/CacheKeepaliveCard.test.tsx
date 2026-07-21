@@ -68,28 +68,45 @@ describe('CacheKeepaliveCard', () => {
   });
 
   it('renders exact card labels, subcaptions, caption, and tooltip text', async () => {
+    vi.spyOn(queries, 'useCacheKeepaliveSummary').mockReturnValue({
+      data: {
+        renewing_now: 1000,
+        sessions_last_5m: 2000,
+        renewals_fired: 3182,
+        cost_saved: 4.56,
+      },
+    } as unknown as ReturnType<typeof queries.useCacheKeepaliveSummary>);
+
     renderWithProviders(<CacheKeepaliveCard principal={mockPrincipal} />);
 
     expect(screen.getByText('Cache keepalive')).toBeDefined();
-    expect(
-      screen.getByText('Renews the prompt-cache TTL during idle gaps.'),
-    ).toBeDefined();
+
+    const caption = screen.getByText(
+      'Renews the prompt-cache TTL during idle gaps.',
+    );
+    expect(caption.className).toContain('text-[11px]');
+    expect(caption.className).toContain('text-text-muted');
+    expect(caption.closest('header')).toBeNull();
 
     expect(screen.getByText('Renewing now')).toBeDefined();
     expect(screen.getByText('scheduled or mid-renewal')).toBeDefined();
-    expect(screen.getByText('1')).toBeDefined();
+    expect(screen.getByText('1,000')).toBeDefined();
 
     expect(screen.getByText('Sessions (last 5m)')).toBeDefined();
     expect(screen.getByText('seen in last 5 min')).toBeDefined();
-    expect(screen.getByText('2')).toBeDefined();
+    expect(screen.getByText('2,000')).toBeDefined();
 
     expect(screen.getByText('Renewals fired')).toBeDefined();
     expect(screen.getByText('all-time')).toBeDefined();
-    expect(screen.getByText('3')).toBeDefined();
+    expect(screen.getByText('3,182')).toBeDefined();
 
     expect(screen.getByText('Cost saved')).toBeDefined();
     expect(screen.getByText('net, after renewal spend')).toBeDefined();
-    expect(screen.getByText('$4.56')).toBeDefined();
+
+    const costSaved = screen.getByText('$4.56');
+    expect(costSaved.className).toContain('text-green-400');
+    expect(costSaved.className).toContain('text-lg');
+    expect(costSaved.className).toContain('tabular-nums');
 
     const help = screen.getByLabelText('Cache keepalive help');
     expect(help).toBeDefined();
@@ -123,13 +140,24 @@ describe('CacheKeepaliveCard', () => {
   it('Sessions and Settings buttons open separate drawers', () => {
     renderWithProviders(<CacheKeepaliveCard principal={mockPrincipal} />);
 
-    const sessionsBtn = screen.getByText('Sessions');
-    const settingsBtn = screen.getByText('Settings');
+    const sessionsBtn = screen.getByText('Sessions').closest('button');
+    expect(sessionsBtn?.className).toContain('w-full');
+    expect(sessionsBtn?.querySelector('.lucide-history')).toBeDefined();
 
-    fireEvent.click(sessionsBtn);
+    const settingsBtn = screen.getByText('Settings').closest('button');
+    expect(settingsBtn?.className).toContain('w-full');
+    expect(
+      settingsBtn?.querySelector('.lucide-sliders-horizontal'),
+    ).toBeDefined();
+
+    const footer = sessionsBtn?.parentElement;
+    expect(footer?.className).toContain('grid');
+    expect(footer?.className).toContain('grid-cols-2');
+
+    fireEvent.click(sessionsBtn!);
     expect(screen.getByTestId('cache-keepalive-sessions-drawer')).toBeDefined();
 
-    fireEvent.click(settingsBtn);
+    fireEvent.click(settingsBtn!);
     expect(screen.getByTestId('cache-keepalive-settings-drawer')).toBeDefined();
   });
 
@@ -166,7 +194,7 @@ describe('CacheKeepaliveCard', () => {
       `flash-text ${cacheKeepaliveAnimationContract.metricFlash}`,
     );
 
-    const sessions = screen.getByText('2', { selector: '.text-sm' });
+    const sessions = screen.getByText('2', { selector: '.text-lg' });
     expect(sessions.className).not.toContain('flash-text-active');
   });
 

@@ -305,8 +305,8 @@
 .flash-in { animation: flash-in 1.2s ease-out; }
 
 @keyframes flash-text {
-  0%   { color: var(--color-accent); }
-  100% { color: var(--color-text); }
+  0%   { opacity: 0.55; text-shadow: 0 0 8px var(--color-accent); }
+  100% { opacity: 1; text-shadow: none; }
 }
 .flash-text-active { animation: flash-text 1s ease-out; }
 
