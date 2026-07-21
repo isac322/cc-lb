@@ -130,6 +130,45 @@ class DecideReleaseTests(unittest.TestCase):
             )
 
 
+
+class ReleaseStateTests(unittest.TestCase):
+    def test_draft_release_is_detected_from_paginated_list(self) -> None:
+        self.assertEqual(
+            server_release.release_state(
+                [[{"tag_name": "cc-lb-v1.2.3", "draft": True}]],
+                "cc-lb-v1.2.3",
+            ),
+            "draft",
+        )
+
+    def test_published_release_is_detected_from_paginated_list(self) -> None:
+        self.assertEqual(
+            server_release.release_state(
+                [[{"tag_name": "cc-lb-v1.2.3", "draft": False}]],
+                "cc-lb-v1.2.3",
+            ),
+            "published",
+        )
+
+    def test_missing_release_is_absent(self) -> None:
+        self.assertEqual(
+            server_release.release_state(
+                [[{"tag_name": "cc-lb-v1.2.2", "draft": False}]],
+                "cc-lb-v1.2.3",
+            ),
+            "absent",
+        )
+
+    def test_duplicate_release_tags_are_rejected(self) -> None:
+        with self.assertRaisesRegex(server_release.ReleaseError, "multiple releases"):
+            server_release.release_state(
+                [
+                    [{"tag_name": "cc-lb-v1.2.3", "draft": True}],
+                    [{"tag_name": "cc-lb-v1.2.3", "draft": False}],
+                ],
+                "cc-lb-v1.2.3",
+            )
+
 class ReleaseAliasTests(unittest.TestCase):
     def test_old_patch_resume_does_not_regress_aliases(self) -> None:
         self.assertEqual(

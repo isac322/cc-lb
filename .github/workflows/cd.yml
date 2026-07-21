@@ -65,14 +65,15 @@ jobs:
           SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
-            echo "::error::'$VERSION' must be SemVer without build metadata"
-            exit 1
-          fi
           if [ "$SOURCE_REF" != "cc-lb-v$VERSION" ]; then
             echo "::error::source_ref '$SOURCE_REF' must equal cc-lb-v$VERSION"
             exit 1
           fi
+          python3 scripts/server_release.py inspect \
+            --repo . \
+            --target HEAD \
+            --expected-version "$VERSION" \
+            --github-output "$RUNNER_TEMP/source-validation"
 
       - name: Log in to ghcr.io
         uses: docker/login-action@v4
@@ -80,6 +81,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # network=host lets the build reach the in-cluster garage sccache endpoint.
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: network=host
+          buildkitd-flags: --allow-insecure-entitlement network.host
 
       - name: Inspect existing exact image
         id: existing
@@ -119,12 +126,6 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
 
-      # network=host lets the build reach the in-cluster garage sccache endpoint.
-      - uses: docker/setup-buildx-action@v4
-        if: steps.existing.outputs.already_published != 'true'
-        with:
-          driver-opts: network=host
-          buildkitd-flags: --allow-insecure-entitlement network.host
 
       - name: Build and push exact image
         if: steps.existing.outputs.already_published != 'true'
@@ -149,20 +150,38 @@ jobs:
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
 
+      - name: List published stable server releases
+        id: releases
+        uses: actions/github-script@v9
+        with:
+          result-encoding: string
+          script: |
+            const releases = await github.paginate(
+              github.rest.repos.listReleases,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100,
+              },
+            );
+            return releases
+              .filter((release) => !release.draft && !release.prerelease)
+              .map((release) => release.tag_name)
+              .join('\n');
+
       - name: Select moving aliases
         id: aliases
         env:
-          GH_TOKEN: ${{ github.token }}
+          PUBLISHED_TAGS: ${{ steps.releases.outputs.result }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           args=(aliases --version "$VERSION" --github-output "$GITHUB_OUTPUT")
           while IFS= read -r tag; do
-            args+=(--published-tag "$tag")
-          done < <(
-            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name'
-          )
+            if [ -n "$tag" ]; then
+              args+=(--published-tag "$tag")
+            fi
+          done <<< "$PUBLISHED_TAGS"
           python3 scripts/server_release.py "${args[@]}"
 
       - name: Reconcile moving aliases

@@ -83,6 +83,117 @@ jobs:
           python3 scripts/check-crate-versions.py "${args[@]}"
       - name: Test managed version validator
         run: python3 scripts/test_check_crate_versions.py -v
+      - name: Test server release helper
+        run: python3 scripts/test_server_release.py -v
+
+  release-pr-artifacts:
+    name: verify server release artifacts
+    needs: guard-crate-versions
+    if: >-
+      github.event_name == 'pull_request' &&
+      startsWith(github.event.pull_request.title, 'chore: release cc-lb v')
+    runs-on: oracle4-cc-lb
+    permissions:
+      contents: read
+    env:
+      IMAGE: cc-lb:release-pr-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: network=host
+          buildkitd-flags: --allow-insecure-entitlement network.host
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: actionlint
+
+      - uses: azure/setup-helm@v5.0.1
+        with:
+          version: v3.16.4
+
+      - name: Inspect release target
+        id: release
+        run: |
+          python3 scripts/server_release.py inspect \
+            --repo . \
+            --target HEAD \
+            --github-output "$GITHUB_OUTPUT"
+          echo "source_date_epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build production image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE }}
+          network: host
+          allow: network.host
+          build-args: |
+            GIT_SHA=${{ steps.release.outputs.target_sha }}
+            SOURCE_DATE_EPOCH=${{ steps.release.outputs.source_date_epoch }}
+            SCCACHE_BUCKET=sccache
+            SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
+            SCCACHE_REGION=garage
+            SCCACHE_S3_USE_SSL=false
+          secret-envs: |
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+
+      - name: Smoke-test production image
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          output=$(docker run --rm "$IMAGE" --version)
+          printf '%s\n' "$output"
+          if ! printf '%s' "$output" | grep -Fq "cc-lb $VERSION ("; then
+            echo "::error::binary version output '$output' does not contain '$VERSION'"
+            exit 1
+          fi
+
+      - name: Lint and verify release chart
+        env:
+          SOURCE_SHA: ${{ steps.release.outputs.target_sha }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          chart_dir="$RUNNER_TEMP/cc-lb-release-chart"
+          package_dir="$RUNNER_TEMP/cc-lb-release-package"
+          command rm -rf "$chart_dir" "$package_dir"
+          command cp -R deploy/helm/cc-lb "$chart_dir"
+          mkdir -p "$package_dir/unpacked"
+          python3 scripts/server_release.py stamp-chart \
+            --chart "$chart_dir/Chart.yaml" \
+            --revision "$SOURCE_SHA"
+          helm lint "$chart_dir" --set secrets.masterKey=ci-lint-placeholder
+          helm package "$chart_dir" \
+            --version "$VERSION" \
+            --app-version "$VERSION" \
+            --destination "$package_dir"
+          tar -xzf "$package_dir/cc-lb-$VERSION.tgz" \
+            -C "$package_dir/unpacked"
+          python3 scripts/server_release.py verify-chart \
+            --chart "$package_dir/unpacked/cc-lb/Chart.yaml" \
+            --version "$VERSION" \
+            --revision "$SOURCE_SHA"
+
+      - name: Lint release workflows
+        run: >-
+          actionlint
+          .github/workflows/ci.yml
+          .github/workflows/cd.yml
+          .github/workflows/publish-chart.yml
+          .github/workflows/release-server.yml
+          .github/workflows/release-plz.yml
+
+      - name: Clean release image
+        if: always()
+        run: docker image rm -f "$IMAGE" || true
 
   clippy:
     runs-on: oracle4-cc-lb

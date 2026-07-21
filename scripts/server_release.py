@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -135,6 +136,30 @@ def decide_release(
     return "resume"
 
 
+def release_state(release_pages: object, tag: str) -> str:
+    if not isinstance(release_pages, list):
+        raise ReleaseError("GitHub releases response is not a list of pages")
+
+    matches: list[dict[str, object]] = []
+    for page in release_pages:
+        if not isinstance(page, list):
+            raise ReleaseError("GitHub releases response contains a non-list page")
+        for release in page:
+            if not isinstance(release, dict):
+                raise ReleaseError("GitHub releases response contains a non-object release")
+            if release.get("tag_name") == tag:
+                matches.append(release)
+
+    if not matches:
+        return "absent"
+    if len(matches) > 1:
+        raise ReleaseError(f"multiple releases found for tag {tag}")
+    draft = matches[0].get("draft")
+    if not isinstance(draft, bool):
+        raise ReleaseError(f"release for tag {tag} has no boolean draft state")
+    return "draft" if draft else "published"
+
+
 def release_aliases(version: str, published_tags: list[str]) -> tuple[str, ...]:
     major, minor, patch, prerelease = parse_server_semver(version)
     if prerelease:
@@ -209,6 +234,11 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("--expected-version")
     inspect.add_argument("--github-output", required=True, type=Path)
 
+    state = commands.add_parser("release-state")
+    state.add_argument("--releases-json", required=True, type=Path)
+    state.add_argument("--tag", required=True)
+    state.add_argument("--github-output", required=True, type=Path)
+
     decide = commands.add_parser("decide")
     decide.add_argument("--operation", choices=("auto", "start", "resume"), required=True)
     decide.add_argument("--target-sha", required=True)
@@ -250,6 +280,12 @@ def main() -> int:
                     "prerelease": target.prerelease,
                     "version_changed": target.version_changed,
                 },
+            )
+        elif args.command == "release-state":
+            pages = json.loads(args.releases_json.read_text(encoding="utf-8"))
+            write_outputs(
+                args.github_output,
+                {"release_state": release_state(pages, args.tag)},
             )
         elif args.command == "decide":
             action = decide_release(

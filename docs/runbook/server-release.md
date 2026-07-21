@@ -18,6 +18,8 @@ Server source tags use `cc-lb-vX.Y.Z`. Docker and Helm use the plain `X.Y.Z` ver
 5. Open the pull request with the exact title `chore: release cc-lb vX.Y.Z`.
 6. Merge only after every required check passes.
 
+The release PR's `verify server release artifacts` check reuses the Garage-backed Buildx cache, smoke-tests the production image, packages and verifies the source-stamped chart, and actionlints the release workflows before merge.
+
 The merge commit becomes immutable tag `cc-lb-vX.Y.Z`. The `release-server` workflow creates a draft GitHub Release, publishes and verifies Docker first, publishes and verifies Helm second, then publishes the GitHub Release.
 
 Stable versions publish immutable Docker tag `X.Y.Z`. Moving tags `X.Y` and `X` update only if this is the newest published stable server release for that prefix. Prereleases publish only their exact tag.

@@ -55,14 +55,15 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
-            echo "::error::'$VERSION' must be SemVer without build metadata"
-            exit 1
-          fi
           if [ "$SOURCE_REF" != "cc-lb-v$VERSION" ]; then
             echo "::error::source_ref '$SOURCE_REF' must equal cc-lb-v$VERSION"
             exit 1
           fi
+          python3 scripts/server_release.py inspect \
+            --repo . \
+            --target HEAD \
+            --expected-version "$VERSION" \
+            --github-output "$RUNNER_TEMP/source-validation"
 
       - uses: azure/setup-helm@v5.0.1
         with:

@@ -32,7 +32,7 @@
 - `scripts/test_check_crate_versions.py`: deterministic unit tests for release-title, changed-file, SemVer, inheritance, and existing-tag rules.
 - `scripts/server_release.py`: inspect an immutable Git target, decide start/resume/no-op/error state, and stamp/verify chart source metadata.
 - `scripts/test_server_release.py`: temporary-Git-repository tests for commit-local version detection and pure release-state tests.
-- `.github/workflows/ci.yml`: pass PR metadata and changed files to the version validator; run its unit tests.
+- `.github/workflows/ci.yml`: validate release PR metadata, run both release helper test suites, and prove the production image and stamped chart before merge.
 - `.github/workflows/cd.yml`: ref-aware, version-keyed, idempotent Docker publisher with source-revision verification.
 - `deploy/helm/cc-lb/Chart.yaml`: declare the source-revision annotation key with a development placeholder.
 - `.github/workflows/publish-chart.yml`: ref-aware, version-keyed, idempotent Helm publisher with pull-back verification.
@@ -432,9 +432,14 @@ Update `.github/workflows/ci.yml` so `guard-crate-versions` still exempts `relea
 
       - name: Test managed version validator
         run: python3 scripts/test_check_crate_versions.py -v
+
+      - name: Test server release helper
+        run: python3 scripts/test_server_release.py -v
 ```
 
 Preserve `fetch-depth: 0` so the validator sees the base commit and tags.
+
+Add a `release-pr-artifacts` job that runs only for validated `chore: release cc-lb vX.Y.Z` pull requests. It must reuse the existing Buildx `network=host` and Garage sccache configuration, load and smoke-test the production image, lint/package/verify the stamped chart, and actionlint all release workflows before merge.
 
 - [ ] **Step 6: Verify CI YAML and script behavior**
 
@@ -442,6 +447,7 @@ Run:
 
 ```bash
 python3 scripts/test_check_crate_versions.py -v
+python3 scripts/test_server_release.py -v
 actionlint .github/workflows/ci.yml
 ```
 
@@ -1107,20 +1113,38 @@ Keep the existing login and BuildKit secret behavior.
 Publish the immutable exact tag first. Compute moving aliases from already published stable `cc-lb-v*` Releases so resuming an older draft can never move `:X` or `:X.Y` backward:
 
 ```yaml
+      - name: List published stable server releases
+        id: releases
+        uses: actions/github-script@v9
+        with:
+          result-encoding: string
+          script: |
+            const releases = await github.paginate(
+              github.rest.repos.listReleases,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100,
+              },
+            );
+            return releases
+              .filter((release) => !release.draft && !release.prerelease)
+              .map((release) => release.tag_name)
+              .join('\n');
+
       - name: Select moving aliases
         id: aliases
         env:
-          GH_TOKEN: ${{ github.token }}
+          PUBLISHED_TAGS: ${{ steps.releases.outputs.result }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           args=(aliases --version "$VERSION" --github-output "$GITHUB_OUTPUT")
           while IFS= read -r tag; do
-            args+=(--published-tag "$tag")
-          done < <(
-            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name'
-          )
+            if [ -n "$tag" ]; then
+              args+=(--published-tag "$tag")
+            fi
+          done <<< "$PUBLISHED_TAGS"
           python3 scripts/server_release.py "${args[@]}"
 
       - name: Reconcile moving aliases
@@ -1572,20 +1596,13 @@ Collect tag and Release state without converting registry/API failures into abse
           fi
           echo "tag_sha=$tag_sha" >> "$GITHUB_OUTPUT"
 
-          error_file="$RUNNER_TEMP/release-api-error"
-          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
-              > "$RUNNER_TEMP/release.json" 2>"$error_file"; then
-            if jq -e '.draft == true' "$RUNNER_TEMP/release.json" > /dev/null; then
-              echo "release_state=draft" >> "$GITHUB_OUTPUT"
-            else
-              echo "release_state=published" >> "$GITHUB_OUTPUT"
-            fi
-          elif grep -q 'HTTP 404' "$error_file"; then
-            echo "release_state=absent" >> "$GITHUB_OUTPUT"
-          else
-            command cat "$error_file" >&2
-            exit 1
-          fi
+          releases_json="$RUNNER_TEMP/releases.json"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases_json"
+          python3 scripts/server_release.py release-state \
+            --releases-json "$releases_json" \
+            --tag "$TAG" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Decide release action
         id: decision
@@ -1703,6 +1720,7 @@ Add:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.prepare.outputs.tag }}
         run: gh release edit "$TAG" --draft=false
 ```
