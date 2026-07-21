@@ -166,11 +166,11 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
             </dd>
 
             <dt className="text-text-faint">
-              {session.state === 'expired' ||
-              session.state === 'capped' ||
-              session.state === 'not_tracked'
-                ? 'Expired'
-                : 'Expires'}
+              {session.state === 'not_tracked'
+                ? 'Last seen'
+                : session.state === 'expired' || session.state === 'capped'
+                  ? 'Expired'
+                  : 'Expires'}
             </dt>
             <dd className="text-text">
               <RelativeTime ts={session.last_message_at_ms} />

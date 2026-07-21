@@ -26,6 +26,10 @@ declare global {
   }
 }
 
+if (typeof window !== 'undefined' && window.PAUSE_ANIMATIONS === undefined) {
+  window.PAUSE_ANIMATIONS = false;
+}
+
 function HelpIcon({
   label,
   text,

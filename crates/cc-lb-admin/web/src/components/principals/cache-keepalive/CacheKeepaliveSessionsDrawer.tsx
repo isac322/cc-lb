@@ -155,7 +155,8 @@ function SessionListRow({
           isSelected
             ? 'bg-accent/10 border-accent/40'
             : 'bg-overlay-1 border-subtle hover:bg-overlay-3',
-          isError && !isSelected && 'border-l-2 border-l-red-500 bg-red-500/5',
+          isError && 'border-l-2 border-l-red-500',
+          isError && !isSelected && 'bg-red-500/5',
         )}
       >
         <div className="flex items-center justify-between gap-2 flex-wrap leading-tight">
@@ -244,12 +245,25 @@ function useFlipReorder(
         if (deltaY !== 0) {
           child.style.transform = `translateY(${deltaY}px)`;
           child.style.transition = 'none';
+          child.style.position = 'relative';
+          child.style.zIndex = '10';
+          child.style.backgroundColor = '#161616';
+          child.style.boxShadow = '0 6px 16px rgba(0, 0, 0, 0.45)';
 
           requestAnimationFrame(() => {
             child.style.transform = '';
             child.style.transition =
               cacheKeepaliveAnimationContract.riseTransition;
           });
+
+          const clearLift = () => {
+            child.style.position = '';
+            child.style.zIndex = '';
+            child.style.backgroundColor = '';
+            child.style.boxShadow = '';
+            child.removeEventListener('transitionend', clearLift);
+          };
+          child.addEventListener('transitionend', clearLift);
         }
       } else if (!seenIds.current.has(key)) {
         child.style.opacity = '0';
