@@ -54,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           target_sha=$(git rev-parse HEAD)
-          git fetch origin master --tags
+          git fetch origin --tags '+refs/heads/master:refs/remotes/origin/master'
           git merge-base --is-ancestor "$target_sha" origin/master
 
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
@@ -81,6 +81,15 @@ jobs:
           printf 'operation=%s\nversion=%s\nparent_version=%s\nversion_changed=%s\ntag=cc-lb-v%s\ntarget_sha=%s\n' \
             "$operation" "$version" "$parent_version" "$version_changed" "$version" "$target_sha" \
             >> "$GITHUB_OUTPUT"
+
+      - name: Attach release-plz branch
+        if: steps.target.outputs.version_changed == 'true' && steps.target.outputs.operation != 'resume'
+        env:
+          TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          git checkout -B release-plz-server "$TARGET_SHA"
+          git branch --set-upstream-to=origin/master release-plz-server
 
       - uses: dtolnay/rust-toolchain@1.97.0
         if: steps.target.outputs.version_changed == 'true' && steps.target.outputs.operation != 'resume'

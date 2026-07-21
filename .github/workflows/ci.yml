@@ -104,6 +104,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Attach release-plz validation branch
+        run: |
+          set -euo pipefail
+          git fetch origin "+refs/heads/$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
+          git checkout -B release-plz-validation HEAD
+          git branch --set-upstream-to="origin/$GITHUB_BASE_REF" release-plz-validation
+
 
       - uses: docker/setup-buildx-action@v4
         with:
