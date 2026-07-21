@@ -94,15 +94,20 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
         .await
         .expect("generation 1 worker joins")
         .expect("generation 1 worker exits cleanly");
-    if let SchedulerBackend::Sqlite(sqlite) = &fixture.scheduler_backend {
-        sqlite
-            .pool()
-            .acquire()
-            .await
-            .expect("scheduler connection acquires")
-            .close()
-            .await
-            .expect("scheduler connection closes");
+    match &fixture.scheduler_backend {
+        #[cfg(feature = "sqlite")]
+        SchedulerBackend::Sqlite(sqlite) => {
+            sqlite
+                .pool()
+                .acquire()
+                .await
+                .expect("scheduler connection acquires")
+                .close()
+                .await
+                .expect("scheduler connection closes");
+        }
+        #[cfg(feature = "postgres")]
+        SchedulerBackend::Postgres(_) => panic!("test requires a SQLite scheduler backend"),
     }
 
     let initial_tokens = initial_tokens(&fixture.fake_base).await;
