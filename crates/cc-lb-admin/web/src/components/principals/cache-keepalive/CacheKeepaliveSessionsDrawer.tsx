@@ -43,6 +43,29 @@ const FILTERS: { key: CacheKeepaliveStatusFilter; label: string }[] = [
   { key: 'error', label: 'Error' },
 ];
 
+const FILTER_TONE: Record<CacheKeepaliveStatusFilter, string> = {
+  all: 'bg-accent/15 text-accent border-accent/40',
+  renewed:
+    'bg-[color:var(--color-ok)]/15 text-[color:var(--color-ok)] border-[color:var(--color-ok)]/40',
+  scheduled: 'bg-accent/15 text-accent border-accent/40',
+  capped: 'bg-overlay-4 text-text border-subtle',
+  expired:
+    'bg-[color:var(--color-warn)]/15 text-[color:var(--color-warn)] border-[color:var(--color-warn)]/40',
+  not_tracked: 'bg-overlay-3 text-text-faint border-subtle',
+  error:
+    'bg-[color:var(--color-danger)]/15 text-[color:var(--color-danger)] border-[color:var(--color-danger)]/40',
+};
+
+const FILTER_ACTIVE_RING: Record<CacheKeepaliveStatusFilter, string> = {
+  all: 'ring-[color:var(--color-accent)]/50',
+  renewed: 'ring-[color:var(--color-ok)]/50',
+  scheduled: 'ring-[color:var(--color-accent)]/50',
+  capped: 'ring-[color:var(--color-border-strong)]/70',
+  expired: 'ring-[color:var(--color-warn)]/50',
+  not_tracked: 'ring-[color:var(--color-border-strong)]/70',
+  error: 'ring-[color:var(--color-danger)]/50',
+};
+
 const STATE_TONE: Record<
   CacheKeepaliveState,
   'ok' | 'warn' | 'danger' | 'neutral' | 'accent' | 'mono'
@@ -111,13 +134,17 @@ function OverviewStrip({
 }) {
   const label = horizon === 'all' ? 'All time:' : `Last ${horizon}:`;
   return (
-    <div className="px-3 py-2.5 border-b border-subtle shrink-0">
-      <div className="flex items-baseline gap-2 mb-1 flex-wrap">
+    <div className="px-4 py-3 border-b border-subtle shrink-0">
+      <div className="flex items-baseline gap-2 flex-wrap">
         <span className="text-xs text-text-muted">{label}</span>
+        <span className="text-sm font-medium text-text">
+          {(summary?.renewals_fired ?? 0).toLocaleString('en-US')} renewals
+          fired
+        </span>
         <span className="text-[11px] text-text-faint">
-          {summary?.renewals_fired ?? 0} renewals fired ·{' '}
-          {summary ? formatMoney(summary.cost_saved) : '$0.00'} saved ·{' '}
-          {summary?.sessions_last_5m ?? 0} sessions tracked
+          · {summary ? formatMoney(summary.cost_saved) : '$0.00'} saved ·{' '}
+          {(summary?.sessions_last_5m ?? 0).toLocaleString('en-US')} sessions
+          tracked
         </span>
       </div>
     </div>
@@ -151,17 +178,15 @@ function SessionListRow({
         type="button"
         onClick={onSelect}
         className={cx(
-          'w-full text-left rounded-sm border px-2.5 py-1.5 transition-colors',
-          isSelected
-            ? 'bg-accent/10 border-accent/40'
-            : 'bg-overlay-1 border-subtle hover:bg-overlay-3',
+          'w-full text-left rounded-sm border-b border-subtle px-4 py-3 transition-colors',
+          isSelected ? 'bg-accent/10 border-accent/40' : 'hover:bg-overlay-2',
           isError && 'border-l-2 border-l-red-500',
           isError && !isSelected && 'bg-red-500/5',
         )}
       >
         <div className="flex items-center justify-between gap-2 flex-wrap leading-tight">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-mono text-text">{row.id}</span>
+            <span className="text-sm font-mono text-text">{row.id}</span>
             <Badge tone={STATE_TONE[row.state]}>{STATE_LABEL[row.state]}</Badge>
             {isError && <Badge tone="danger">Error</Badge>}
           </div>
@@ -188,10 +213,10 @@ function SessionListRow({
             </span>
           </div>
         </div>
-        <div className="flex items-center justify-between mt-1">
+        <div className="flex items-center justify-between mt-2">
           <p
             className={cx(
-              'text-[11px] truncate',
+              'text-[12px] truncate',
               isError ? 'text-red-400' : 'text-text-muted',
             )}
           >
@@ -341,7 +366,7 @@ export function CacheKeepaliveSessionsDrawer({
             Full list of cache keepalive sessions for {principal.name}.
           </BaseDialog.Description>
 
-          <header className="flex items-center justify-between gap-3 px-3 py-2.5 border-b border-subtle shrink-0">
+          <header className="flex items-center justify-between gap-3 px-4 py-3 border-b border-subtle shrink-0">
             <div className="min-w-0 flex items-center gap-3">
               <div className="min-w-0">
                 <h3 className="text-sm font-medium text-text">
@@ -365,7 +390,7 @@ export function CacheKeepaliveSessionsDrawer({
 
           <OverviewStrip horizon={horizon} summary={summary} />
 
-          <div className="px-3 py-2 border-b border-subtle shrink-0 flex gap-1 overflow-x-auto no-scrollbar">
+          <div className="px-4 py-2.5 border-b border-subtle shrink-0 flex gap-1.5 overflow-x-auto no-scrollbar">
             {FILTERS.map((f) => (
               <button
                 key={f.key}
@@ -373,10 +398,14 @@ export function CacheKeepaliveSessionsDrawer({
                 aria-pressed={filter === f.key}
                 onClick={() => setFilter(f.key)}
                 className={cx(
-                  'inline-flex items-center gap-1.5 px-2 h-6 rounded-sm text-[11px] transition-colors border whitespace-nowrap shrink-0',
+                  'inline-flex items-center gap-1.5 px-2 h-6 rounded-sm text-[11px] transition-opacity border whitespace-nowrap shrink-0',
+                  FILTER_TONE[f.key],
                   filter === f.key
-                    ? 'bg-accent/15 border-accent/40 text-accent'
-                    : 'bg-overlay-2 border-subtle text-text-muted hover:bg-overlay-4',
+                    ? cx(
+                        'opacity-100 ring-1 ring-inset',
+                        FILTER_ACTIVE_RING[f.key],
+                      )
+                    : 'opacity-60 hover:opacity-100',
                 )}
               >
                 {f.label}
@@ -414,7 +443,7 @@ export function CacheKeepaliveSessionsDrawer({
                   }
                 />
               ) : (
-                <ul ref={listRef} className="flex flex-col gap-1">
+                <ul ref={listRef} className="flex flex-col">
                   {allRows.map((r) => (
                     <SessionListRow
                       key={r.id}

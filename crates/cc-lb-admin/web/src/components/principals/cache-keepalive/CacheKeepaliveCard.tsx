@@ -1,5 +1,5 @@
 import { Switch as BaseSwitch } from '@base-ui/react/switch';
-import { HelpCircle } from 'lucide-react';
+import { HelpCircle, History, SlidersHorizontal } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ApiError } from '../../../lib/api';
@@ -70,10 +70,12 @@ function MetricTile({
   label,
   value,
   subtext,
+  valueClassName = 'text-text',
 }: {
   label: string;
   value: string | number;
   subtext: string;
+  valueClassName?: string;
 }) {
   const [flash, setFlash] = useState(false);
   const prevValueRef = useRef(value);
@@ -96,7 +98,8 @@ function MetricTile({
       </span>
       <div
         className={cx(
-          'text-sm font-medium text-text',
+          'text-lg font-medium tabular-nums',
+          valueClassName,
           flash && 'flash-text-active',
         )}
         style={
@@ -207,44 +210,52 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
 
   return (
     <>
-      <Card
-        data-testid="cache-keepalive-card"
-        className="w-full h-full flex flex-col"
-      >
-        <CardHeader
-          title={headerTitle}
-          subtitle="Renews the prompt-cache TTL during idle gaps."
-          action={headerActions}
-          align="center"
-        />
+      <Card data-testid="cache-keepalive-card" className="w-full flex flex-col">
+        <CardHeader title={headerTitle} action={headerActions} align="center" />
         <CardBody className="space-y-4 flex-1 flex flex-col">
           <div className="grid grid-cols-2 gap-4">
             <MetricTile
               label="Renewing now"
-              value={summary?.renewing_now ?? 0}
+              value={(summary?.renewing_now ?? 0).toLocaleString('en-US')}
               subtext="scheduled or mid-renewal"
             />
             <MetricTile
               label="Sessions (last 5m)"
-              value={summary?.sessions_last_5m ?? 0}
+              value={(summary?.sessions_last_5m ?? 0).toLocaleString('en-US')}
               subtext="seen in last 5 min"
             />
             <MetricTile
               label="Renewals fired"
-              value={summary?.renewals_fired ?? 0}
+              value={(summary?.renewals_fired ?? 0).toLocaleString('en-US')}
               subtext="all-time"
             />
             <MetricTile
               label="Cost saved"
               value={summary ? formatMoney(summary.cost_saved) : '$0.00'}
               subtext="net, after renewal spend"
+              valueClassName="text-green-400"
             />
           </div>
-          <div className="flex items-center gap-2 pt-2 mt-auto">
-            <Button size="sm" onClick={() => setSessionsOpen(true)}>
+          <p className="text-[11px] text-text-muted">
+            Renews the prompt-cache TTL during idle gaps.
+          </p>
+          <div className="grid grid-cols-2 gap-2 border-t border-subtle pt-3 mt-auto">
+            <Button
+              variant="secondary"
+              fullWidth
+              iconLeft={<History className="h-3 w-3" />}
+              size="sm"
+              onClick={() => setSessionsOpen(true)}
+            >
               Sessions
             </Button>
-            <Button size="sm" onClick={() => setSettingsOpen(true)}>
+            <Button
+              variant="ghost"
+              fullWidth
+              iconLeft={<SlidersHorizontal className="h-3 w-3" />}
+              size="sm"
+              onClick={() => setSettingsOpen(true)}
+            >
               Settings
             </Button>
           </div>
