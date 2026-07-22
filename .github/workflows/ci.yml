@@ -51,7 +51,7 @@ jobs:
     # feature PRs (they desync release-plz's baseline and make its release PR
     # conflict forever). release-plz's own PRs bump versions and are exempt.
     if: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-') }}
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
         with:

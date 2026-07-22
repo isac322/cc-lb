@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   bun-checks:
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     defaults:
       run:
         working-directory: crates/cc-lb-admin/web
