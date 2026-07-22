@@ -48,6 +48,15 @@ import {
 } from '../lib/queries';
 import type { RequestEventWithPhase } from '../lib/RequestEventTypes';
 import { useLiveEventStream } from '../lib/useLiveEventStream';
+import {
+  buildPoolQuotaChartData,
+  hasFableHistoryData,
+  type PoolQuotaChartRow,
+  type PoolQuotaLatest,
+  type PoolQuotaWindow,
+  poolQuotaChartLatest,
+  poolQuotaChartMax,
+} from './-overviewPoolQuota';
 export const Route = createFileRoute('/')({
   component: OverviewPage,
 });
@@ -152,7 +161,7 @@ type AggregateWindow = NonNullable<
   ReturnType<typeof useSubscriptionQuotaAggregate>['data']
 >['windows'][number];
 
-const POOL_PALETTES: Record<'5h' | '7d', readonly string[]> = {
+const POOL_PALETTES: Record<PoolQuotaWindow, readonly string[]> = {
   '5h': [
     'rgb(37, 99, 235)',
     'rgb(59, 130, 246)',
@@ -167,9 +176,16 @@ const POOL_PALETTES: Record<'5h' | '7d', readonly string[]> = {
     'rgb(196, 181, 253)',
     'rgb(221, 214, 254)',
   ],
+  '7d_fable': [
+    'rgb(190, 24, 93)',
+    'rgb(219, 39, 119)',
+    'rgb(236, 72, 153)',
+    'rgb(244, 114, 182)',
+    'rgb(251, 207, 232)',
+  ],
 };
 
-function poolSegmentColor(window: '5h' | '7d', index: number): string {
+function poolSegmentColor(window: PoolQuotaWindow, index: number): string {
   const palette = POOL_PALETTES[window];
   return palette[index % palette.length];
 }
@@ -179,7 +195,7 @@ function PoolQuotaPopoverContent({
   w,
   activeIdx,
 }: {
-  window: '5h' | '7d';
+  window: PoolQuotaWindow;
   w: AggregateWindow;
   activeIdx: number | null;
 }) {
@@ -257,18 +273,19 @@ export function PoolQuotaStackedBar({
   window,
   w,
 }: {
-  window: '5h' | '7d';
+  window: PoolQuotaWindow;
   w: AggregateWindow | undefined;
 }) {
   const [activeIdx, setActiveIdx] = useState<number | null>(null);
   const [openPopover, setOpenPopover] = useState(false);
+  const label = window === '7d_fable' ? '7d (Fable)' : window;
 
   if (!w) {
     return (
       <div className="flex flex-col gap-2 min-h-[56px]">
         <div className="flex items-center justify-between mb-1.5">
           <span className="text-xs font-medium text-text-muted">
-            {window} pool
+            {label} pool
           </span>
           <span className="text-xs text-text-faint">no data</span>
         </div>
@@ -365,7 +382,7 @@ export function PoolQuotaStackedBar({
         <div className="2xl:hidden flex flex-col gap-1.5">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-text-muted">
-              {window} pool
+              {label} pool
             </span>
             <span className="tabular-nums font-medium text-sm leading-none text-text">
               {pctText}
@@ -386,7 +403,7 @@ export function PoolQuotaStackedBar({
 
         <div className="hidden 2xl:flex items-center gap-2">
           <span className="text-xs font-medium text-text-muted shrink-0">
-            {window}
+            {label}
           </span>
           <BaseMeter.Root
             className="flex-1 h-5 min-w-0"
@@ -429,20 +446,23 @@ function PoolQuotaCard({
 }: {
   aggregate: ReturnType<typeof useSubscriptionQuotaAggregate>;
   chart: {
-    data: { unix: number; '5h': number | null; '7d': number | null }[];
+    data: PoolQuotaChartRow[];
     maxValue: number;
     rangeStartUnix: number;
     rangeEndUnix: number;
     range: Range;
-    latest: { '5h': number | null; '7d': number | null };
+    latest: PoolQuotaLatest;
+    showFable: boolean;
   };
 }) {
   const w5h = aggregate.data?.windows.find((x) => x.window === '5h');
   const w7d = aggregate.data?.windows.find((x) => x.window === '7d');
+  const wFable = aggregate.data?.windows.find((x) => x.window === '7d_fable');
   const upstreamCount = aggregate.data?.upstream_count ?? 0;
   const contributingCount = Math.max(
     w5h?.contributing_upstreams ?? 0,
     w7d?.contributing_upstreams ?? 0,
+    chart.showFable ? (wFable?.contributing_upstreams ?? 0) : 0,
   );
   return (
     <Card className="min-w-0 flex flex-col h-full">
@@ -464,9 +484,17 @@ function PoolQuotaCard({
           <div className="text-xs uppercase tracking-wider font-medium text-text-faint">
             Snapshot
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4">
+          <div
+            className={cx(
+              'grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4',
+              chart.showFable && 'xl:grid-cols-3',
+            )}
+          >
             <PoolQuotaStackedBar window="5h" w={w5h} />
             <PoolQuotaStackedBar window="7d" w={w7d} />
+            {chart.showFable ? (
+              <PoolQuotaStackedBar window="7d_fable" w={wFable} />
+            ) : null}
           </div>
         </div>
         <div className="h-px bg-border" />
@@ -475,7 +503,10 @@ function PoolQuotaCard({
             <div className="text-xs uppercase tracking-wider font-medium text-text-faint">
               Trend · {chart.range}
             </div>
-            <PoolQuotaLegend latest={chart.latest} />
+            <PoolQuotaLegend
+              latest={chart.latest}
+              showFable={chart.showFable}
+            />
           </div>
           <div className="flex-1 min-h-64 min-w-0 w-full relative">
             <PoolQuotaThemedChart
@@ -483,6 +514,7 @@ function PoolQuotaCard({
               rangeStartUnix={chart.rangeStartUnix}
               rangeEndUnix={chart.rangeEndUnix}
               maxValue={chart.maxValue}
+              showFable={chart.showFable}
             />
           </div>
         </div>
@@ -496,15 +528,18 @@ export function PoolQuotaThemedChart({
   maxValue,
   rangeStartUnix,
   rangeEndUnix,
+  showFable,
 }: {
-  seriesData: { unix: number; '5h': number | null; '7d': number | null }[];
+  seriesData: PoolQuotaChartRow[];
   maxValue: number;
   rangeStartUnix: number;
   rangeEndUnix: number;
+  showFable: boolean;
 }) {
   const chartId = useId();
   const c5h = getWindowColor('5h');
   const c7d = getWindowColor('7d');
+  const cFable = getWindowColor('7d_fable');
 
   return (
     <div className="relative size-full min-h-0 min-w-0">
@@ -528,6 +563,18 @@ export function PoolQuotaThemedChart({
             <stop offset="0%" stopColor={c7d.stroke} stopOpacity={0.55} />
             <stop offset="100%" stopColor={c7d.stroke} stopOpacity={0} />
           </linearGradient>
+          {showFable ? (
+            <linearGradient
+              id={`${chartId}-grad-fable`}
+              x1="0"
+              y1="0"
+              x2="0"
+              y2="1"
+            >
+              <stop offset="0%" stopColor={cFable.stroke} stopOpacity={0.55} />
+              <stop offset="100%" stopColor={cFable.stroke} stopOpacity={0} />
+            </linearGradient>
+          ) : null}
         </defs>
         <CartesianGrid stroke="var(--color-border)" />
         <XAxis
@@ -631,7 +678,13 @@ export function PoolQuotaThemedChart({
                 {payload.map((p, i) => {
                   const w = String(p.dataKey);
                   const wLabel =
-                    w === '5h' ? '5h window' : w === '7d' ? '7d window' : w;
+                    w === '5h'
+                      ? '5h window'
+                      : w === '7d'
+                        ? '7d window'
+                        : w === '7d_fable'
+                          ? 'Fable window'
+                          : w;
                   return (
                     <div
                       key={i}
@@ -670,6 +723,18 @@ export function PoolQuotaThemedChart({
             );
           }}
         />
+        {showFable ? (
+          <Area
+            type="monotone"
+            dataKey="7d_fable"
+            stroke={cFable.stroke}
+            strokeWidth={1.4}
+            fill={`url(#${chartId}-grad-fable)`}
+            fillOpacity={1}
+            isAnimationActive={false}
+            connectNulls={false}
+          />
+        ) : null}
         <Area
           type="monotone"
           dataKey="7d"
@@ -697,13 +762,17 @@ export function PoolQuotaThemedChart({
 
 export function PoolQuotaLegend({
   latest,
+  showFable,
 }: {
-  latest?: { '5h': number | null; '7d': number | null };
+  latest?: PoolQuotaLatest;
+  showFable: boolean;
 }) {
   const c5h = getWindowColor('5h');
   const c7d = getWindowColor('7d');
+  const cFable = getWindowColor('7d_fable');
   const v5h = latest?.['5h'];
   const v7d = latest?.['7d'];
+  const vFable = latest?.['7d_fable'];
   return (
     <div className="flex flex-wrap items-center gap-3 text-[11px] text-text-faint">
       <span className="inline-flex items-center gap-1.5">
@@ -720,6 +789,15 @@ export function PoolQuotaLegend({
         />
         7d{v7d != null ? ` · ${v7d.toFixed(0)}%` : ''}
       </span>
+      {showFable ? (
+        <span className="inline-flex items-center gap-1.5">
+          <span
+            className="w-2 h-2 rounded-sm"
+            style={{ background: cFable.stroke }}
+          />
+          Fable{vFable != null ? ` · ${vFable.toFixed(0)}%` : ''}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -744,7 +822,7 @@ function OverviewPage() {
   }, []);
 
   const quotaAggregate = useSubscriptionQuotaAggregate({
-    windows: '5h,7d',
+    windows: '5h,7d,7d_fable',
     source: 'merged',
   });
 
@@ -757,10 +835,11 @@ function OverviewPage() {
           ? 86400
           : 604800;
   const quotaPoolHistory = useSubscriptionQuotaPoolHistory({
-    windows: '5h,7d',
+    windows: '5h,7d,7d_fable',
     sinceUnixSecs: nowUnixSecs - seriesRangeSecs,
     untilUnixSecs: nowUnixSecs,
   });
+  const showFable = hasFableHistoryData(quotaPoolHistory.data?.windows);
 
   const live = useLiveEventStream({});
   const streamStatus = live.status;
@@ -862,59 +941,20 @@ function OverviewPage() {
     ) ?? [];
 
   // Chart Data
-  const chartData = useMemo(() => {
-    const w5h = quotaPoolHistory.data?.windows.find((x) => x.window === '5h');
-    const w7d = quotaPoolHistory.data?.windows.find((x) => x.window === '7d');
-    if (!w5h?.series.length && !w7d?.series.length) {
-      return [] as { unix: number; '5h': number | null; '7d': number | null }[];
-    }
-    const bucketsByTime = new Map<
-      number,
-      { '5h': number | null; '7d': number | null }
-    >();
-    const addPoint = (
-      window: '5h' | '7d',
-      points: {
-        snapshot_at_unix_secs: number;
-        utilization_percent: number | null;
-      }[],
-    ) => {
-      for (const point of points) {
-        const ts = point.snapshot_at_unix_secs;
-        if (!bucketsByTime.has(ts)) {
-          bucketsByTime.set(ts, { '5h': null, '7d': null });
-        }
-        const row = bucketsByTime.get(ts);
-        if (row && point.utilization_percent != null) {
-          row[window] = point.utilization_percent;
-        }
-      }
-    };
-    addPoint('5h', w5h?.series ?? []);
-    addPoint('7d', w7d?.series ?? []);
-    return Array.from(bucketsByTime.entries())
-      .map(([unix, row]) => ({ unix, '5h': row['5h'], '7d': row['7d'] }))
-      .sort((a, b) => a.unix - b.unix);
-  }, [quotaPoolHistory.data]);
+  const chartData = useMemo(
+    () => buildPoolQuotaChartData(quotaPoolHistory.data?.windows, showFable),
+    [quotaPoolHistory.data, showFable],
+  );
 
-  const chartMaxValue = useMemo(() => {
-    let m = 100;
-    for (const row of chartData) {
-      if (row['5h'] != null && row['5h'] > m) m = row['5h'];
-      if (row['7d'] != null && row['7d'] > m) m = row['7d'];
-    }
-    return Math.ceil(m / 10) * 10;
-  }, [chartData]);
+  const chartMaxValue = useMemo(
+    () => poolQuotaChartMax(chartData, showFable),
+    [chartData, showFable],
+  );
 
-  const chartLatest = useMemo(() => {
-    let latest5h: number | null = null;
-    let latest7d: number | null = null;
-    for (const row of chartData) {
-      if (row['5h'] != null) latest5h = row['5h'];
-      if (row['7d'] != null) latest7d = row['7d'];
-    }
-    return { '5h': latest5h, '7d': latest7d };
-  }, [chartData]);
+  const chartLatest = useMemo(
+    () => poolQuotaChartLatest(chartData, showFable),
+    [chartData, showFable],
+  );
 
   // Principals Data
   const topPrincipals = useMemo(() => {
@@ -1053,6 +1093,7 @@ function OverviewPage() {
             rangeEndUnix: nowUnixSecs,
             range,
             latest: chartLatest,
+            showFable,
           }}
         />
 

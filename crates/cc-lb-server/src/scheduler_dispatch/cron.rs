@@ -96,7 +96,7 @@ impl SchedulerDispatch {
         job: PoolQuotaSnapshotCronJob,
     ) -> SchedulerResult<JobOutcome> {
         use cc_lb_admin::subscription_quotas::{
-            build_cc_lb_aggregate_response, record_pool_quota_snapshots_now,
+            POOLED_HISTORY_WINDOWS, build_cc_lb_aggregate_response, record_pool_quota_snapshots_now,
         };
         use cc_lb_storage_api::SubscriptionQuotaSourceMerge;
 
@@ -108,10 +108,7 @@ impl SchedulerDispatch {
             self.storage.as_ref(),
             self.dynamic_view.as_ref(),
             None,
-            vec![
-                cc_lb_storage_api::SubscriptionQuotaWindow::FiveHour,
-                cc_lb_storage_api::SubscriptionQuotaWindow::SevenDay,
-            ],
+            POOLED_HISTORY_WINDOWS.to_vec(),
             SubscriptionQuotaSourceMerge::Merged,
             max_staleness_secs,
             &*self.clock,

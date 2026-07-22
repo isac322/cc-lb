@@ -5,9 +5,10 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventStore, SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample,
-    SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaStatus,
-    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore, UsageRollupStore,
+    PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, RequestEvent, RequestEventStore,
+    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSource, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
+    UpstreamSubscriptionQuotaStore, UsageRollupStore,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -129,6 +130,46 @@ async fn subscription_quota_series_explicit_fable_window_includes_stored_series(
     assert_eq!(series.len(), 1);
     assert_eq!(series[0]["window"], "7d_fable");
     assert_eq!(series[0]["buckets"][1]["utilization_last"], 0.28);
+}
+
+#[tokio::test]
+async fn subscription_quota_pool_history_accepts_explicit_fable_window() {
+    let server = admin_test_common::spawn_admin_server().await;
+    server
+        .storage
+        .record_pool_quota_snapshots(&[PoolQuotaSnapshotRecord {
+            snapshot_at_unix_secs: 120,
+            window: SubscriptionQuotaWindow::SevenDayFable,
+            utilization: Some(0.28),
+            weighted_utilization_sum: 1.4,
+            capacity_ratio_sum: 5.0,
+            eligible_upstreams: 1,
+            contributing_upstreams: 1,
+            stale_upstreams: 0,
+            missing_observation_upstreams: 0,
+            missing_metadata_upstreams: 0,
+            header_contributing_upstreams: 0,
+            api_contributing_upstreams: 1,
+            max_observed_at_unix_millis: Some(120_000),
+            computed_at_unix_millis: 120_000,
+            policy_version: 1,
+        }])
+        .await
+        .unwrap();
+
+    let (status, _, body) = server
+        .client
+        .get(
+            "/admin/v1/subscription-quotas/pool-history?windows=7d_fable&since_unix_secs=60&until_unix_secs=180",
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["windows"][0]["window"], "7d_fable");
+    assert_close(
+        body["windows"][0]["series"][0]["utilization_percent"].as_f64(),
+        28.0,
+    );
 }
 
 #[tokio::test]
