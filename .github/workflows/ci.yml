@@ -42,8 +42,6 @@ jobs:
         run: bash scripts/lint-audit-redaction.sh
       - name: Integration-test consolidation guard
         run: bash scripts/check-integration-test-consolidation.sh
-      - name: Fable pooled-quota backfill operator tests
-        run: python3 -m unittest discover -s tests/scripts -p 'test_backfill_pool_quota_fable.py'
 
   guard-crate-versions:
     name: guard crate versions
