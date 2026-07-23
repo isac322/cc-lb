@@ -30,7 +30,7 @@ concurrency:
 jobs:
   prepare:
     name: release-plz server release
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     permissions:
       contents: write
     outputs:
@@ -217,7 +217,7 @@ jobs:
     name: publish GitHub Release
     needs: [prepare, publish-docker, publish-chart]
     if: needs.prepare.outputs.action == 'start' || needs.prepare.outputs.action == 'resume'
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     permissions:
       contents: write
     steps:
