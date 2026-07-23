@@ -15,6 +15,7 @@ use cc_lb_routing::{
 };
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use http::StatusCode;
+use parking_lot::Mutex as ParkingMutex;
 use tokio::time::{Duration, timeout};
 use url::Url;
 use uuid::Uuid;
@@ -53,6 +54,32 @@ async fn pipeline_filters_candidates_before_terminal_strategy()
         &[vec![upstream_id]]
     );
     assert!(router_calls.lock().unwrap().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_model_reaches_filters_without_prompt_cache_shadow()
+-> Result<(), Box<dyn std::error::Error>> {
+    let upstream_id = default_upstream_id();
+    let canonical_models = Arc::new(ParkingMutex::new(Vec::new()));
+    let router_calls = Arc::new(Mutex::new(Vec::new()));
+    let state = TestState::default();
+    let hook = Arc::new(RecordingHook::default());
+    let filters: Vec<Arc<dyn FilterPlugin>> = vec![Arc::new(RecordingModelFilter {
+        canonical_models: canonical_models.clone(),
+        kept_upstream_ids: vec![upstream_id],
+    })];
+    let lifecycle = lifecycle_with_pipeline(filters, router_calls, state, hook);
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-fable-5","messages":[]}"#,
+        )))
+        .await?;
+    let (status, _headers, _body) = collect_body(response).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(canonical_models.lock().as_slice(), &["claude-fable-5"]);
     Ok(())
 }
 
@@ -306,6 +333,37 @@ impl FilterPlugin for RecordingFilter {
 
     fn plugin_name(&self) -> &str {
         self.name
+    }
+}
+struct RecordingModelFilter {
+    canonical_models: Arc<ParkingMutex<Vec<String>>>,
+    kept_upstream_ids: Vec<Uuid>,
+}
+
+impl FilterPlugin for RecordingModelFilter {
+    fn filter(
+        &self,
+        ctx: &cc_lb_routing::RoutingContext,
+        _principal: &Principal,
+        _candidates: &[UpstreamCandidate],
+    ) -> Result<FilterOutput, FilterError> {
+        self.canonical_models
+            .lock()
+            .push(ctx.canonical_model_id.clone());
+        Ok(FilterOutput {
+            kept_upstream_ids: self.kept_upstream_ids.clone(),
+            reason: "record:model".to_owned(),
+            per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
+        })
+    }
+
+    fn plugin_id(&self) -> Uuid {
+        Uuid::nil()
+    }
+
+    fn plugin_name(&self) -> &str {
+        "record-model"
     }
 }
 
