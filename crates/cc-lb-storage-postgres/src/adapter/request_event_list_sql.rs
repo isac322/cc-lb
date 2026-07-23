@@ -14,7 +14,7 @@ use super::request_event_list_row::list_row_to_item;
 const LIST_REQUEST_EVENTS_SQL: &str = "\
 SELECT \
     ts_secs, \
-    (payload_jsonb ->> 'ts_ms')::bigint AS ts_ms, \
+    list_ts_ms AS ts_ms, \
     COALESCE(payload_jsonb ->> 'request_id', '') AS request_id, \
     event_id, \
     principal_id, \
@@ -26,8 +26,8 @@ SELECT \
     thinking_budget_tokens, \
     thinking_tokens, \
     service_tier, \
-    (payload_jsonb ->> 'upstream') AS upstream, \
-    (payload_jsonb ->> 'status')::int AS status, \
+    list_upstream AS upstream, \
+    list_status AS status, \
     (payload_jsonb ->> 'duration_ms')::bigint AS duration_ms, \
     error_code, \
     upstream_error_type, \
@@ -63,50 +63,59 @@ SELECT \
     (payload_jsonb ->> 'cost_cache_read_micros')::bigint AS cost_cache_read_micros \
 FROM ( \
     SELECT \
-        EXTRACT(EPOCH FROM r.ts)::bigint AS ts_secs, \
-        convert_from(r.payload, 'UTF8')::jsonb AS payload_jsonb, \
-        r.event_id, \
-        r.principal_id, \
-        r.upstream_id, \
-        r.upstream_name, \
-        r.thread_id, \
-        r.model, \
-        r.reasoning_effort, \
-        r.thinking_budget_tokens, \
-        r.thinking_tokens, \
-        r.service_tier, \
-        r.error_code, \
-        r.upstream_error_type, \
-        r.upstream_error_message, \
-        r.input_tokens, \
-        r.output_tokens, \
-        r.cache_creation_input_tokens, \
-        r.cache_creation_input_tokens_5m, \
-        r.cache_creation_input_tokens_1h, \
-        r.cache_read_input_tokens \
-    FROM request_events_v1 r \
-    WHERE r.ts >= $1 AND ($2::timestamptz IS NULL OR r.ts <= $2) \
-      AND ($3::text IS NULL OR r.principal_id = $3) \
-      AND ($4::text IS NULL OR r.model = $4) \
-      AND ($5::uuid IS NULL OR r.upstream_id = $5) \
-      AND ( \
-            $12::int = 1 \
-         OR ($13::text IS NOT NULL AND r.source_kind = $13) \
-         OR ($13::text IS NULL AND (r.source_kind IS NULL OR r.source_kind <> 'renewal')) \
-      ) \
-) matched \
-WHERE ($6::text IS NULL OR (payload_jsonb ->> 'upstream') = $6) \
-  AND ($7::int IS NULL OR (payload_jsonb ->> 'status')::int BETWEEN $7 AND $8) \
-  AND ( \
-        $9::bigint IS NULL \
-     OR COALESCE((payload_jsonb ->> 'ts_ms')::bigint, ts_secs * 1000) < $9 \
-     OR (COALESCE((payload_jsonb ->> 'ts_ms')::bigint, ts_secs * 1000) = $9 \
-         AND $10::text IS NOT NULL \
-         AND COALESCE(event_id, payload_jsonb ->> 'request_id') < $10) \
-  ) \
-ORDER BY COALESCE((payload_jsonb ->> 'ts_ms')::bigint, ts_secs * 1000) DESC, \
-         COALESCE(event_id, payload_jsonb ->> 'request_id') DESC \
-LIMIT $11";
+        candidates.*, \
+        convert_from(candidates.payload, 'UTF8')::jsonb AS payload_jsonb \
+    FROM ( \
+        SELECT \
+            EXTRACT(EPOCH FROM r.ts)::bigint AS ts_secs, \
+            r.payload, \
+            r.list_ts_ms, \
+            r.list_event_key, \
+            r.list_upstream, \
+            r.list_status, \
+            r.event_id, \
+            r.principal_id, \
+            r.upstream_id, \
+            r.upstream_name, \
+            r.thread_id, \
+            r.model, \
+            r.reasoning_effort, \
+            r.thinking_budget_tokens, \
+            r.thinking_tokens, \
+            r.service_tier, \
+            r.error_code, \
+            r.upstream_error_type, \
+            r.upstream_error_message, \
+            r.input_tokens, \
+            r.output_tokens, \
+            r.cache_creation_input_tokens, \
+            r.cache_creation_input_tokens_5m, \
+            r.cache_creation_input_tokens_1h, \
+            r.cache_read_input_tokens \
+        FROM request_events_v1 r \
+        WHERE r.ts >= $1 AND ($2::timestamptz IS NULL OR r.ts <= $2) \
+          AND ($3::text IS NULL OR r.principal_id = $3) \
+          AND ($4::text IS NULL OR r.model = $4) \
+          AND ($5::uuid IS NULL OR r.upstream_id = $5) \
+          AND ($6::text IS NULL OR r.list_upstream = $6) \
+          AND ($7::int IS NULL OR r.list_status BETWEEN $7 AND $8) \
+          AND ( \
+                $12::int = 1 \
+             OR ($13::text IS NOT NULL AND r.source_kind = $13) \
+             OR ($13::text IS NULL AND (r.source_kind IS NULL OR r.source_kind <> 'renewal')) \
+          ) \
+          AND ( \
+                $9::bigint IS NULL \
+             OR r.list_ts_ms < $9 \
+             OR (r.list_ts_ms = $9 \
+                 AND $10::text IS NOT NULL \
+                 AND r.list_event_key < $10) \
+          ) \
+        ORDER BY r.list_ts_ms DESC, r.list_event_key DESC \
+        LIMIT $11 \
+    ) candidates \
+) parsed \
+ORDER BY list_ts_ms DESC, list_event_key DESC";
 
 #[derive(FromRow)]
 pub(super) struct ListRow {
