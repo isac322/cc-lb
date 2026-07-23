@@ -1,0 +1,48 @@
+name: Setup actionlint
+description: Install a pinned actionlint binary without modifying the runner image
+
+runs:
+  using: composite
+  steps:
+    - name: Install actionlint
+      shell: bash
+      env:
+        ACTIONLINT_VERSION: "1.7.12"
+        ACTIONLINT_SHA256_X64: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        ACTIONLINT_SHA256_ARM64: 325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
+      run: |
+        set -euo pipefail
+        if [ "$RUNNER_OS" != "Linux" ]; then
+          echo "::error::actionlint setup supports only Linux runners"
+          exit 1
+        fi
+
+        case "$RUNNER_ARCH" in
+          X64)
+            arch=amd64
+            checksum="$ACTIONLINT_SHA256_X64"
+            ;;
+          ARM64)
+            arch=arm64
+            checksum="$ACTIONLINT_SHA256_ARM64"
+            ;;
+          *)
+            echo "::error::unsupported runner architecture '$RUNNER_ARCH'"
+            exit 1
+            ;;
+        esac
+
+        archive="actionlint_${ACTIONLINT_VERSION}_linux_${arch}.tar.gz"
+        install_root="$RUNNER_TEMP/actionlint-${ACTIONLINT_VERSION}-${arch}"
+        archive_path="$RUNNER_TEMP/$archive"
+        command rm -rf "$install_root" "$archive_path"
+        mkdir -p "$install_root/bin"
+        curl --fail --silent --show-error --location \
+          "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}" \
+          --output "$archive_path"
+        printf '%s  %s\n' "$checksum" "$archive_path" | sha256sum --check -
+        tar -xzf "$archive_path" -C "$install_root"
+        mv "$install_root/actionlint" "$install_root/bin/actionlint"
+
+        echo "$install_root/bin" >> "$GITHUB_PATH"
+        "$install_root/bin/actionlint" -version
