@@ -1,11 +1,13 @@
 # release-plz config — https://release-plz.dev/docs/config
 #
-# CI-only: releases run exclusively via .github/workflows/release-plz.yml.
-# Do NOT run `release-plz release` or `release-plz release-pr` locally.
+# CI-only: public crate releases run via .github/workflows/release-plz.yml.
+# Server tags and draft Releases use release-plz-server.toml from
+# .github/workflows/release-server.yml. Do not run either release command
+# locally.
+#
 # Published contract crates (crates.io): cc-lb-plugin-wire,
 # cc-lb-pdk-wasmtime-macros, cc-lb-pdk-wasmtime, cc-lb-plugin-conformance,
-# cc-lb-runtime-wasmtime. Plus cc-lb-server as the publish=false app/image
-# release anchor (see its package block below).
+# and cc-lb-runtime-wasmtime.
 
 [workspace]
 release = false
@@ -34,17 +36,3 @@ semver_check = true
 name = "cc-lb-runtime-wasmtime"
 release = true
 semver_check = true
-
-# App/image release anchor. publish = false is set here to match cc-lb-server's
-# publish = false in Cargo.toml (release-plz aborts if the two disagree); it means
-# no crates.io, only the git tag + GitHub release. cc-lb-server shares version.workspace
-# with the other 26 internal crates, so its bump moves that one shared version —
-# the deployment unit's version. git_tag_name drops the crate prefix to `v{X}`,
-# which is exactly the tag cd.yml publishes the image from. semver_check is off:
-# a binary has no crates.io API contract to diff.
-[[package]]
-name = "cc-lb-server"
-release = true
-publish = false
-semver_check = false
-git_tag_name = "v{{ version }}"

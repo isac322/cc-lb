@@ -9,8 +9,8 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
     // finishes in well under a second, but under llvm-cov instrumentation plus
     // a co-scheduled heavy build on the shared runner it overran even a 30s
     // ceiling and flaked (the dispatch still happens; only the wait was too
-    // short). Scale by CC_LB_TEST_READY_TIMEOUT_SECS (120 in CI), the repo's
-    // convention for these tests, instead of a hardcoded value.
+    // short). Scale by CC_LB_TEST_READY_TIMEOUT_SECS (240 in active CI), the
+    // repo's convention for these tests, instead of a hardcoded value.
     let qa_timeout = std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
@@ -94,6 +94,21 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
         .await
         .expect("generation 1 worker joins")
         .expect("generation 1 worker exits cleanly");
+    match &fixture.scheduler_backend {
+        #[cfg(feature = "sqlite")]
+        SchedulerBackend::Sqlite(sqlite) => {
+            sqlite
+                .pool()
+                .acquire()
+                .await
+                .expect("scheduler connection acquires")
+                .close()
+                .await
+                .expect("scheduler connection closes");
+        }
+        #[cfg(feature = "postgres")]
+        SchedulerBackend::Postgres(_) => panic!("test requires a SQLite scheduler backend"),
+    }
 
     let initial_tokens = initial_tokens(&fixture.fake_base).await;
     let initial_access_token = initial_tokens.access_token.clone();
@@ -196,7 +211,7 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
     )
     .expect("generation 2 worker builds");
     let generation_two_cancel = CancellationToken::new();
-    let generation_two_task =
+    let mut generation_two_task =
         tokio::spawn(generation_two_worker.run_until_cancelled(generation_two_cancel.clone()));
     let request = Request::builder()
         .method(Method::POST)
@@ -208,13 +223,36 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
             br#"{"model":"claude-3-5-sonnet-20241022","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
         ))
         .expect("request builds");
-    let request_task =
+    let mut request_task =
         tokio::spawn(async move { timeout(qa_timeout, lifecycle.handle(request)).await });
 
-    let dispatched_b = timeout(qa_timeout, dispatch_rx.recv())
-        .await
-        .expect("generation 2 dispatch timed out")
-        .expect("generation 2 dispatch channel closed");
+    let dispatched_b = tokio::select! {
+        worker_result = &mut generation_two_task => {
+            panic!("generation 2 worker exited before dispatch: {worker_result:?}");
+        }
+        request_result = &mut request_task => {
+            match request_result {
+                Err(error) => panic!(
+                    "proxy request task failed before generation 2 dispatch: {error}"
+                ),
+                Ok(Err(_elapsed)) => panic!(
+                    "proxy request timed out before generation 2 dispatch"
+                ),
+                Ok(Ok(Err(error))) => panic!(
+                    "proxy request failed before generation 2 dispatch: {error}"
+                ),
+                Ok(Ok(Ok(response))) => panic!(
+                    "proxy request completed with status {} before generation 2 dispatch",
+                    response.status()
+                ),
+            }
+        }
+        result = timeout(qa_timeout, dispatch_rx.recv()) => {
+            result
+                .expect("generation 2 dispatch timed out")
+                .expect("generation 2 dispatch channel closed")
+        }
+    };
     timeout(qa_timeout, refresh_pause.wait_until_entered())
         .await
         .expect("OAuth token endpoint was not reached");

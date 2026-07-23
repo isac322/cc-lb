@@ -115,7 +115,8 @@ impl Fixture {
                 .expect("storage"),
         );
         storage.initialize(BackendKind::Sqlite).await.unwrap();
-        let scheduler_backend = sqlite_scheduler_backend(clock.clone()).await;
+        let scheduler_path = dir.path().join("scheduler.sqlite");
+        let scheduler_backend = sqlite_scheduler_backend(&scheduler_path, clock.clone()).await;
         let stores = Arc::new(Stores {
             upstreams: storage.clone(),
             principals: storage.clone(),
@@ -518,10 +519,18 @@ async fn refresh_history_len(base: &str) -> usize {
     body["refreshes"].as_array().expect("refreshes").len()
 }
 
-async fn sqlite_scheduler_backend(clock: ClockHandle) -> SchedulerBackend {
-    let pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
+async fn sqlite_scheduler_backend(path: &std::path::Path, clock: ClockHandle) -> SchedulerBackend {
+    use std::str::FromStr as _;
+
+    use scheduler_sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    let database_url = format!("sqlite://{}", path.display());
+    let options = SqliteConnectOptions::from_str(&database_url)
+        .expect("scheduler sqlite URL parses")
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
         .max_connections(1)
-        .connect("sqlite::memory:")
+        .connect_with(options)
         .await
         .expect("scheduler sqlite opens");
     apalis_sqlite::SqliteStorage::setup(&pool)
