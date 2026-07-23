@@ -1779,17 +1779,13 @@ impl Lifecycle {
 
         let body_value = sonic_rs::from_slice::<Value>(&input.body_bytes).ok();
         let cache_metadata = request_cache_metadata_from_value(&input.headers, body_value.as_ref());
-        let (cache_breakpoints, canonical_model_id) =
-            if view.prompt_cache_observation_cache_opt().is_some()
-                && self.config.prompt_cache_shadow.enabled
-            {
-                (
-                    cache_metadata.plugin_cache_breakpoints(),
-                    cache_metadata.canonical_model_id.clone(),
-                )
-            } else {
-                (Vec::new(), String::new())
-            };
+        let cache_breakpoints = if view.prompt_cache_observation_cache_opt().is_some()
+            && self.config.prompt_cache_shadow.enabled
+        {
+            cache_metadata.plugin_cache_breakpoints()
+        } else {
+            Vec::new()
+        };
 
         let request_id = input
             .request_id
@@ -1805,7 +1801,7 @@ impl Lifecycle {
             .query(None)
             .body_bytes(input.body_bytes)
             .cache_breakpoints(cache_breakpoints)
-            .canonical_model_id(canonical_model_id)
+            .canonical_model_id(cache_metadata.canonical_model_id.clone())
             .cache_pricing(cache_pricing_summary_for_model(
                 cc_lb_pricing::global_catalog(),
                 &cache_metadata.canonical_model_id,
@@ -1984,13 +1980,7 @@ impl Lifecycle {
             Vec::new()
         };
         ctx.cache_breakpoints = cache_breakpoints;
-        ctx.canonical_model_id = if view.prompt_cache_observation_cache_opt().is_some()
-            && self.config.prompt_cache_shadow.enabled
-        {
-            cache_metadata.canonical_model_id.clone()
-        } else {
-            String::new()
-        };
+        ctx.canonical_model_id = cache_metadata.canonical_model_id.clone();
         ctx.thread_id = cache_metadata.thread_id.clone();
         ctx.requested_service_tier = cache_metadata.requested_service_tier.clone();
         ctx.cache_pricing = cache_pricing_summary_for_model(
