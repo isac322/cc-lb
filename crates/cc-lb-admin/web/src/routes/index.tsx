@@ -37,6 +37,7 @@ import {
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { eventTime } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
+import { formatCount, formatRate, formatUsdAmount } from '../lib/format';
 import {
   usePrincipalNameMap,
   useRecentEventsInfinite,
@@ -67,19 +68,6 @@ type Range = (typeof RANGES)[number];
 const stepFor = (r: Range): 'hour' | 'minute' =>
   r === '7d' || r === '24h' ? 'hour' : 'minute';
 
-function fmtCount(n: number | undefined | null): string {
-  if (n == null) return '0';
-  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
-  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
-  if (Number.isInteger(n)) return n.toString();
-  return n.toFixed(1);
-}
-function fmtUsd(n: number | undefined | null, digits = 2): string {
-  if (n == null) return '$0.00';
-  if (n >= 1000) return `$${n.toFixed(0)}`;
-  return `$${n.toFixed(digits)}`;
-}
 function fmtMs(n: number | undefined | null): string {
   if (n == null) return '—';
   if (n >= 1000) return `${(n / 1000).toFixed(2)}s`;
@@ -475,7 +463,7 @@ function PoolQuotaCard({
         }
         subtitle={
           upstreamCount > 0
-            ? `plan-weighted · ${contributingCount} of ${upstreamCount} upstreams`
+            ? `plan-weighted · ${formatCount(contributingCount)} of ${formatCount(upstreamCount)} upstreams`
             : 'plan-weighted'
         }
       />
@@ -1042,9 +1030,9 @@ function OverviewPage() {
         <ValueTile
           size="sm"
           icon={<Activity className="w-3.5 h-3.5" />}
-          label="req/s"
-          value={reqPerSec.toFixed(1)}
-          sub={`${fmtCount(totals?.request_count)} / ${range}`}
+          label="avg req/s"
+          value={formatRate(reqPerSec)}
+          sub={`${formatCount(totals?.request_count)} / ${range}`}
           spark={sparkRate}
           sparkColor="var(--color-accent)"
         />
@@ -1052,7 +1040,7 @@ function OverviewPage() {
           size="sm"
           icon={<Database className="w-3.5 h-3.5" />}
           label="tokens"
-          value={fmtCount(totalTokens)}
+          value={formatCount(totalTokens)}
           spark={sparkTokens}
           sparkColor="#06b6d4"
         />
@@ -1060,7 +1048,7 @@ function OverviewPage() {
           size="sm"
           icon={<TrendingUp className="w-3.5 h-3.5" />}
           label="equiv $"
-          value={fmtUsd(virtualUsd)}
+          value={formatUsdAmount(virtualUsd)}
           spark={sparkCost}
           sparkColor="#10b981"
           tone="accent"
@@ -1126,8 +1114,8 @@ function OverviewPage() {
                     <div className="min-w-0 flex-1">
                       <div className="text-sm truncate">{p.name}</div>
                       <div className="text-[11px] text-text-faint truncate">
-                        {p.primary_model} · {p.requests.toLocaleString()} req ·{' '}
-                        {fmtCount(p.tokens)} tok
+                        {p.primary_model} · {formatCount(p.requests)} req ·{' '}
+                        {formatCount(p.tokens)} tok
                       </div>
                       <BaseMeter.Root
                         className="mt-1.5"
@@ -1147,7 +1135,7 @@ function OverviewPage() {
                     </div>
                     <div className="text-right shrink-0">
                       <div className="text-sm font-mono tabular-nums">
-                        {fmtUsd(p.cost_usd)}
+                        {formatUsdAmount(p.cost_usd)}
                       </div>
                       <div className="text-[11px] text-text-faint tabular-nums">
                         {p.share_pct.toFixed(1)}%
