@@ -36,7 +36,7 @@ export const WINDOW_COLORS: Record<string, { stroke: string; fill: string }> = {
   '7d': { stroke: '#8b5cf6', fill: '#8b5cf6' }, // violet
   '7d_sonnet': { stroke: '#14b8a6', fill: '#14b8a6' }, // teal
   '7d_opus': { stroke: '#f59e0b', fill: '#f59e0b' }, // amber
-  '7d_fable': { stroke: '#ec4899', fill: '#ec4899' }, // pink
+  '7d_fable': { stroke: '#65a30d', fill: '#84cc16' }, // lime
   overage: { stroke: '#f97316', fill: '#f97316' }, // orange
   unified: { stroke: '#64748b', fill: '#64748b' }, // slate
 };
