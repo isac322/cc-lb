@@ -1,14 +1,15 @@
 name: docker-build
 
-# Build the production image whenever the Docker build inputs change, so a
-# Dockerfile/.dockerignore edit can't silently break the image (hadolint in
-# deploy.yml only lints; it never actually compiles). Source-only changes are
-# covered by ci.yml and deliberately do NOT trigger this build.
+# Build the production image whenever Docker build inputs change, so source
+# linker configuration and Dockerfile/.dockerignore edits cannot silently break
+# the image (hadolint in deploy.yml only lints; it never actually compiles).
+# Other source-only changes are covered by ci.yml and do not trigger this build.
 on:
   pull_request:
     paths:
       - 'Dockerfile'
       - '.dockerignore'
+      - '.cargo/config.toml'
       - '.github/workflows/docker-build.yml'
   push:
     branches:
@@ -16,6 +17,7 @@ on:
     paths:
       - 'Dockerfile'
       - '.dockerignore'
+      - '.cargo/config.toml'
       - '.github/workflows/docker-build.yml'
 
 concurrency:
@@ -24,11 +26,10 @@ concurrency:
 
 jobs:
   build:
-    # Self-hosted arm64 runner. Cross-compiles the static musl binary (both
-    # storage backends), builds the SPA, and runs a smoke test. The runner pod
-    # already carries the in-cluster sccache S3 creds in its OS env (AWS_* from
-    # the sccache-s3-creds secret, per arc-cc-lb-values), so the compile caches
-    # to the same Garage store the cargo jobs use.
+    # The self-hosted pool may schedule either an x86_64 or arm64 runner.
+    # Dockerfile isolates host-only Cargo linker configuration, cross-compiles
+    # the static musl binary with both storage backends, builds the SPA, and
+    # runs a smoke test. Runner pods carry the in-cluster sccache S3 credentials.
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7

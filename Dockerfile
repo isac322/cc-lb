@@ -30,8 +30,8 @@ FROM --platform=$BUILDPLATFORM oven/bun:1.3.14-alpine AS bun
 FROM --platform=$BUILDPLATFORM rust:1.97.0-alpine AS builder
 SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 
-# clang/lld: xx uses clang as the cross linker driver (overrides the repo's
-#            .cargo/config.toml rust-lld, which is expected and correct).
+# clang/lld: xx uses clang as the cross linker driver for every target
+#            architecture.
 # git:       cc-lb-server/build.rs reads `git rev-parse` (falls back gracefully).
 # libstdc++/libgcc: Bun's runtime dependencies on Alpine.
 # make:      tikv-jemalloc-sys builds its vendored jemalloc via autotools (runs
@@ -78,6 +78,21 @@ ARG SCCACHE_S3_USE_SSL=""
 
 WORKDIR /src
 COPY . .
+
+# The repository's x86_64-musl linker is for standalone Cargo builds. When an
+# x86_64 Alpine builder also targets linux/amd64, Cargo applies that target
+# linker to host proc-macros and build scripts. Docker builds use xx-cargo for
+# every target, so remove the conflicting local override inside this image only.
+RUN config=.cargo/config.toml; \
+    section_count="$(grep -cx '\[target\.x86_64-unknown-linux-musl\]' "$config" || true)"; \
+    if [ "$section_count" -gt 1 ]; then \
+      echo "expected at most one x86_64 musl target section in $config" >&2; \
+      exit 1; \
+    fi; \
+    if [ "$section_count" = 1 ]; then \
+      sed -i '/^\[target\.x86_64-unknown-linux-musl\]$/,/^$/d' "$config"; \
+    fi; \
+    ! grep -q '^\[target\.x86_64-unknown-linux-musl\]$' "$config"
 
 # Caches reused across builds: the cargo download caches (registry/git) and the
 # Bun install cache. The target dir is intentionally NOT cache-mounted:
