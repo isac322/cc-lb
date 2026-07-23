@@ -4,6 +4,9 @@ import {
   fmtMsCompact,
   formatBigInteger,
   formatCostMicros,
+  formatCount,
+  formatRate,
+  formatUsdAmount,
   getRequestOutcome,
 } from './format';
 
@@ -48,6 +51,59 @@ describe('getRequestOutcome', () => {
   });
 });
 
+describe('formatCount', () => {
+  it('uses en-US grouping at count boundaries', () => {
+    expect(formatCount(999)).toBe('999');
+    expect(formatCount(1_000)).toBe('1,000');
+    expect(formatCount(1_234_567)).toBe('1,234,567');
+  });
+
+  it('handles missing, invalid, and overflowing counts', () => {
+    expect(formatCount(null)).toBe('—');
+    expect(formatCount(undefined)).toBe('—');
+    expect(formatCount(Number.NaN)).toBe('—');
+    expect(formatCount(Number.POSITIVE_INFINITY)).toBe('—');
+    expect(formatCount(-1)).toBe('—');
+    expect(formatCount(Number.MAX_SAFE_INTEGER)).toBe('9,007,199,254,740,991');
+    expect(formatCount(Number.MAX_SAFE_INTEGER + 1)).toBe('—');
+  });
+});
+
+describe('formatRate', () => {
+  it('uses adaptive significant precision for nonzero rates', () => {
+    expect(formatRate(1 / 60)).toBe('0.0167');
+    expect(formatRate(1 / 3_600)).toBe('0.000278');
+    expect(formatRate(1_234.5)).toBe('1,230');
+    expect(formatRate(Number.MIN_VALUE)).not.toBe('0');
+  });
+
+  it('handles zero, missing, invalid, negative, and overflowing rates', () => {
+    expect(formatRate(0)).toBe('0');
+    expect(formatRate(null)).toBe('—');
+    expect(formatRate(undefined)).toBe('—');
+    expect(formatRate(Number.NaN)).toBe('—');
+    expect(formatRate(Number.POSITIVE_INFINITY)).toBe('—');
+    expect(formatRate(-0.1)).toBe('—');
+    expect(formatRate(Number.MAX_SAFE_INTEGER + 1)).toBe('—');
+  });
+});
+
+describe('formatUsdAmount', () => {
+  it('groups the integer portion of dollar values', () => {
+    expect(formatUsdAmount(999.99)).toBe('$999.99');
+    expect(formatUsdAmount(1_234.5)).toBe('$1,235');
+  });
+
+  it('handles missing, invalid, negative, and overflowing values', () => {
+    expect(formatUsdAmount(null)).toBe('—');
+    expect(formatUsdAmount(undefined)).toBe('—');
+    expect(formatUsdAmount(Number.NaN)).toBe('—');
+    expect(formatUsdAmount(Number.POSITIVE_INFINITY)).toBe('—');
+    expect(formatUsdAmount(-1)).toBe('—');
+    expect(formatUsdAmount(Number.MAX_SAFE_INTEGER + 1)).toBe('—');
+  });
+});
+
 describe('formatBigInteger', () => {
   it('returns dash for null/undefined', () => {
     expect(formatBigInteger(null)).toBe('—');
@@ -82,6 +138,7 @@ describe('formatCostMicros', () => {
   });
   it('formats positive values as USD', () => {
     expect(formatCostMicros(1234567)).toBe('$1.2346');
+    expect(formatCostMicros(1_234_567_800)).toBe('$1,234.5678');
   });
 });
 

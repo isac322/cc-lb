@@ -332,7 +332,14 @@ pub(crate) fn build_window_for_step(
     now_unix_secs: u64,
 ) -> (u64, u64) {
     let width = step_width_secs(step);
-    let window_end_unix_secs = now_unix_secs - (now_unix_secs % width);
+    let bucket_offset = now_unix_secs % width;
+    // Minute/hour rollups are written atomically by one scheduler run; rounding up
+    // includes their current partial buckets without adding one at an exact boundary.
+    let window_end_unix_secs = if bucket_offset == 0 {
+        now_unix_secs
+    } else {
+        now_unix_secs.saturating_add(width - bucket_offset)
+    };
     let window_start_unix_secs = window_end_unix_secs.saturating_sub(range.as_secs());
     (window_start_unix_secs, window_end_unix_secs)
 }
@@ -589,5 +596,122 @@ fn group_key(group_by: UsageGroupBy, rollup: &UsageRollup) -> (String, Option<St
             rollup.upstream_id.to_string(),
             Some(rollup.upstream_name.clone()),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALIGNED_HOUR_UNIX_SECS: u64 = 8 * 24 * HOUR_SECS;
+    const ALIGNED_MINUTE_UNIX_SECS: u64 = ALIGNED_HOUR_UNIX_SECS + MINUTE_SECS;
+    const UNALIGNED_NOW_UNIX_SECS: u64 = ALIGNED_HOUR_UNIX_SECS + 1;
+
+    #[test]
+    fn unaligned_auto_step_windows_include_the_current_partial_bucket() {
+        let cases = [
+            (DashboardRange::OneHour, MINUTE_SECS, 60),
+            (DashboardRange::SixHours, MINUTE_SECS, 360),
+            (DashboardRange::TwentyFourHours, HOUR_SECS, 24),
+            (DashboardRange::SevenDays, HOUR_SECS, 168),
+        ];
+
+        for (range, width, expected_bucket_count) in cases {
+            let step = auto_step(range);
+            let (start, end) = build_window(range, UNALIGNED_NOW_UNIX_SECS);
+            let current_bucket_start = UNALIGNED_NOW_UNIX_SECS - (UNALIGNED_NOW_UNIX_SECS % width);
+
+            assert_eq!(end, current_bucket_start + width);
+            assert_eq!(end - start, range.as_secs());
+
+            let buckets = zero_filled_buckets(start, end, step);
+            assert_eq!(buckets.len(), expected_bucket_count);
+            assert_eq!(
+                buckets.last().map(|bucket| bucket.bucket_start_unix_secs),
+                Some(current_bucket_start)
+            );
+        }
+    }
+
+    #[test]
+    fn exact_boundaries_do_not_advance_or_add_a_bucket() {
+        let cases = [
+            (
+                DashboardRange::OneHour,
+                ALIGNED_MINUTE_UNIX_SECS,
+                MINUTE_SECS,
+                60,
+            ),
+            (
+                DashboardRange::SixHours,
+                ALIGNED_MINUTE_UNIX_SECS,
+                MINUTE_SECS,
+                360,
+            ),
+            (
+                DashboardRange::TwentyFourHours,
+                ALIGNED_HOUR_UNIX_SECS,
+                HOUR_SECS,
+                24,
+            ),
+            (
+                DashboardRange::SevenDays,
+                ALIGNED_HOUR_UNIX_SECS,
+                HOUR_SECS,
+                168,
+            ),
+        ];
+
+        for (range, now_unix_secs, width, expected_bucket_count) in cases {
+            let step = auto_step(range);
+            let (start, end) = build_window(range, now_unix_secs);
+
+            assert_eq!(end, now_unix_secs);
+            assert_eq!(end - start, range.as_secs());
+
+            let buckets = zero_filled_buckets(start, end, step);
+            assert_eq!(buckets.len(), expected_bucket_count);
+            assert_eq!(
+                buckets.last().map(|bucket| bucket.bucket_start_unix_secs),
+                Some(end - width)
+            );
+        }
+    }
+
+    #[test]
+    fn zero_time_stays_at_the_exact_boundary() {
+        for range in [
+            DashboardRange::OneHour,
+            DashboardRange::SixHours,
+            DashboardRange::TwentyFourHours,
+            DashboardRange::SevenDays,
+        ] {
+            let (start, end) = build_window(range, 0);
+            assert_eq!((start, end), (0, 0));
+            assert!(zero_filled_buckets(start, end, auto_step(range)).is_empty());
+        }
+    }
+
+    #[test]
+    fn window_rounding_saturates_near_u64_max_without_extra_buckets() {
+        let cases = [
+            (DashboardRange::OneHour, UsageRollupResolution::Minute, 60),
+            (
+                DashboardRange::TwentyFourHours,
+                UsageRollupResolution::Hour,
+                24,
+            ),
+        ];
+
+        for (range, step, expected_bucket_count) in cases {
+            let (start, end) = build_window_for_step(range, step, u64::MAX);
+
+            assert_eq!(end, u64::MAX);
+            assert_eq!(end - start, range.as_secs());
+            assert_eq!(
+                zero_filled_buckets(start, end, step).len(),
+                expected_bucket_count
+            );
+        }
     }
 }

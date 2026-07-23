@@ -1,17 +1,57 @@
 import type { RequestEvent } from './api';
 
 const DASH = '—';
+const EN_US_NUMBER = new Intl.NumberFormat('en-US', {
+  maximumFractionDigits: 20,
+});
+const EN_US_RATE = new Intl.NumberFormat('en-US', {
+  maximumSignificantDigits: 3,
+});
+const EN_US_USD_0 = new Intl.NumberFormat('en-US', {
+  maximumFractionDigits: 0,
+  minimumFractionDigits: 0,
+});
+const EN_US_USD_2 = new Intl.NumberFormat('en-US', {
+  maximumFractionDigits: 2,
+  minimumFractionDigits: 2,
+});
+const EN_US_USD_4 = new Intl.NumberFormat('en-US', {
+  maximumFractionDigits: 4,
+  minimumFractionDigits: 4,
+});
+
+function formatUsdValue(usd: number, fractionDigits: 0 | 2 | 4): string {
+  const formatter =
+    fractionDigits === 0
+      ? EN_US_USD_0
+      : fractionDigits === 2
+        ? EN_US_USD_2
+        : EN_US_USD_4;
+  return `$${formatter.format(usd === 0 ? 0 : usd)}`;
+}
 
 export function fmtMs(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v) || v < 0) return DASH;
   if (v > Number.MAX_SAFE_INTEGER) return DASH;
-  return `${Math.round(v).toLocaleString()} ms`;
+  return `${EN_US_NUMBER.format(Math.round(v))} ms`;
 }
 
 export function fmtN(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return DASH;
   if (v > Number.MAX_SAFE_INTEGER) return DASH;
-  return v.toLocaleString();
+  return EN_US_NUMBER.format(v === 0 ? 0 : v);
+}
+
+export function formatCount(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v) || v < 0) return DASH;
+  if (v > Number.MAX_SAFE_INTEGER) return DASH;
+  return EN_US_NUMBER.format(v === 0 ? 0 : v);
+}
+
+export function formatRate(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v) || v < 0) return DASH;
+  if (v > Number.MAX_SAFE_INTEGER) return DASH;
+  return EN_US_RATE.format(v === 0 ? 0 : v);
 }
 
 export function fmtBytes(v: number | null | undefined): string {
@@ -25,8 +65,13 @@ export function fmtBytes(v: number | null | undefined): string {
 export function fmtUsd(micros: number | null | undefined): string {
   if (micros == null || !Number.isFinite(micros) || micros < 0) return DASH;
   if (micros > Number.MAX_SAFE_INTEGER) return DASH;
-  const usd = micros / 1_000_000;
-  return `$${usd.toFixed(4)}`;
+  return formatUsdValue(micros / 1_000_000, 4);
+}
+
+export function formatUsdAmount(usd: number | null | undefined): string {
+  if (usd == null || !Number.isFinite(usd) || usd < 0) return DASH;
+  if (usd > Number.MAX_SAFE_INTEGER) return DASH;
+  return formatUsdValue(usd, usd >= 1_000 ? 0 : 2);
 }
 
 export function formatBigInteger(
@@ -35,14 +80,13 @@ export function formatBigInteger(
 ): string {
   if (n == null || !Number.isFinite(n)) return DASH;
   if (n > Number.MAX_SAFE_INTEGER) return DASH;
-  return n.toLocaleString();
+  return EN_US_NUMBER.format(n === 0 ? 0 : n);
 }
 
 export function formatCostMicros(micros?: number | null): string {
   if (micros == null || !Number.isFinite(micros) || micros < 0) return DASH;
   if (micros > Number.MAX_SAFE_INTEGER) return DASH;
-  const usd = micros / 1_000_000;
-  return `$${usd.toFixed(4)}`;
+  return formatUsdValue(micros / 1_000_000, 4);
 }
 
 export type RequestOutcome =
@@ -110,8 +154,7 @@ function roundCompact(v: number): string {
 export function fmtUsdCompact(micros: number | null | undefined): string {
   if (micros == null || !Number.isFinite(micros) || micros < 0) return DASH;
   if (micros > Number.MAX_SAFE_INTEGER) return DASH;
-  const usd = micros / 1_000_000;
-  return `$${usd.toFixed(4)}`;
+  return formatUsdValue(micros / 1_000_000, 4);
 }
 
 export function fmtMsCompact(ms: number | null | undefined): {
