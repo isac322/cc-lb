@@ -13,6 +13,7 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .transpose()?,
         request_id: row.request_id,
         event_id: row.event_id,
+        source_kind: row.source_kind,
         principal_id: row.principal_id,
         upstream: row.upstream.as_deref().map(parse_upstream).transpose()?,
         upstream_id: row

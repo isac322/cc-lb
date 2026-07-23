@@ -195,6 +195,36 @@ describe('useLiveEventStream retention lifecycle', () => {
     expect(result.current.eventsMap.get('event-0')?.phase).toBe('partial');
   });
 
+  it('clears retained rows and cursor when filters change', () => {
+    const client = new QueryClient();
+    const { result, rerender } = renderHook(
+      ({ principalId }: { readonly principalId: string }) =>
+        useLiveEventStream({ principal_id: principalId }),
+      {
+        initialProps: { principalId: 'principal-a' },
+        wrapper: makeWrapper(client),
+      },
+    );
+
+    act(() => latestOptions().onMessage?.(makeFinalMessage(1)));
+    expect(result.current.eventsMap.size).toBe(1);
+    expect(result.current.lastCursor).toBe('1');
+
+    rerender({ principalId: 'principal-b' });
+
+    expect(result.current.eventsMap.size).toBe(0);
+    expect(result.current.lastCursor).toBeNull();
+    const input = vi.mocked(createEventSource).mock.calls.at(-1)?.[0];
+    expect(input).not.toBeUndefined();
+    if (
+      input !== undefined &&
+      typeof input !== 'string' &&
+      !(input instanceof URL)
+    ) {
+      expect(input.url).toContain('principal_id=principal-b');
+    }
+  });
+
   it('discards an asynchronous backfill that resolves after streaming is disabled', async () => {
     const client = new QueryClient();
     let resolveBackfill:

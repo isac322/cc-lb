@@ -67,56 +67,22 @@ describe('logsSearchSchema', () => {
 });
 
 describe('getLogsRouteState', () => {
-  it('disables sentinel when session filter is active', () => {
-    const state = getLogsRouteState({
-      sessionFilter: 'session_123',
-      hasNextPage: true,
-      userRequestedTailing: true,
-      isLastClientPage: true,
-    });
-    expect(state.showSentinel).toBe(false);
-  });
-
-  it('enables sentinel when no session filter, hasNextPage is true, and isLastClientPage is true', () => {
-    const state = getLogsRouteState({
-      sessionFilter: undefined,
-      hasNextPage: true,
-      userRequestedTailing: true,
-      isLastClientPage: true,
-    });
-    expect(state.showSentinel).toBe(true);
-  });
-
-  it('disables sentinel when isLastClientPage is false', () => {
-    const state = getLogsRouteState({
-      sessionFilter: undefined,
-      hasNextPage: true,
-      userRequestedTailing: true,
-      isLastClientPage: false,
-    });
-    expect(state.showSentinel).toBe(false);
-  });
-
   it('disables effective tailing when custom time range is set', () => {
-    const state = getLogsRouteState({
-      sessionFilter: undefined,
-      hasNextPage: true,
-      userRequestedTailing: true,
-      time_range: 'custom',
-      isLastClientPage: true,
-    });
-    expect(state.effectiveTailing).toBe(false);
+    expect(
+      getLogsRouteState({
+        userRequestedTailing: true,
+        time_range: 'custom',
+      }).effectiveTailing,
+    ).toBe(false);
   });
 
   it('enables effective tailing when user requested it and no custom time range', () => {
-    const state = getLogsRouteState({
-      sessionFilter: undefined,
-      hasNextPage: true,
-      userRequestedTailing: true,
-      time_range: '1h',
-      isLastClientPage: true,
-    });
-    expect(state.effectiveTailing).toBe(true);
+    expect(
+      getLogsRouteState({
+        userRequestedTailing: true,
+        time_range: '1h',
+      }).effectiveTailing,
+    ).toBe(true);
   });
 });
 
@@ -124,12 +90,16 @@ describe('buildHistoricalFilters', () => {
   it('sends both custom bounds only when the range is complete', () => {
     expect(
       buildHistoricalFilters({
-        session: 'client-only',
+        session: 'session-1',
         time_range: 'custom',
         since_unix_secs: 100,
         until_unix_secs: 200,
       }),
-    ).toEqual({ since_unix_secs: '100', until_unix_secs: '200' });
+    ).toEqual({
+      thread_id: 'session-1',
+      since_unix_secs: '100',
+      until_unix_secs: '200',
+    });
 
     expect(
       buildHistoricalFilters({
@@ -158,20 +128,33 @@ describe('buildHistoricalFilters', () => {
     expect(all).not.toHaveProperty('until');
   });
 
-  it('maps the status filter to the backend status_class param', () => {
+  it('maps every route filter to the backend contract', () => {
     const filters = {
-      session: 'client-only',
+      principal_id: 'principal-1',
+      upstream_id: '018f0000-0000-7000-8000-000000000001',
+      session: 'session-1',
+      model: 'claude-sonnet-4-5',
       status: '4xx' as const,
+      source_kind: 'renewal' as const,
       time_range: 'custom' as const,
       since_unix_secs: 100,
       until_unix_secs: 200,
     };
-    expect(buildHistoricalFilters(filters)).toEqual({
+    const live = {
+      principal_id: 'principal-1',
+      upstream_id: '018f0000-0000-7000-8000-000000000001',
+      thread_id: 'session-1',
+      model: 'claude-sonnet-4-5',
       status_class: '4xx',
+      source_kind: 'renewal',
+    };
+    expect(buildHistoricalFilters(filters)).toEqual({
+      ...live,
       since_unix_secs: '100',
       until_unix_secs: '200',
     });
-    expect(buildLiveFilters(filters)).toEqual({ status_class: '4xx' });
+    expect(buildLiveFilters(filters)).toEqual(live);
     expect(buildLiveFilters(filters)).not.toHaveProperty('status');
+    expect(buildLiveFilters(filters)).not.toHaveProperty('session');
   });
 });

@@ -401,6 +401,11 @@ fn apply_filters_to_partial(partial: &RequestEventPartial, filters: &StreamFilte
     {
         return false;
     }
+    if let Some(thread_id) = filters.thread_id.as_deref()
+        && partial.thread_id.as_deref() != Some(thread_id)
+    {
+        return false;
+    }
     if let Some(model) = filters.model.as_deref()
         && partial.model.as_deref() != Some(model)
     {
@@ -413,6 +418,13 @@ fn apply_filters_to_partial(partial: &RequestEventPartial, filters: &StreamFilte
     }
     if let Some(upstream_id) = filters.upstream_id
         && partial.upstream_id != Some(upstream_id)
+    {
+        return false;
+    }
+    if let Some(status_class) = filters.status_class
+        && !partial
+            .upstream_response_status
+            .is_some_and(|status| status_class.matches(status))
     {
         return false;
     }

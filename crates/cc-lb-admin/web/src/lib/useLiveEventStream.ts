@@ -46,6 +46,7 @@ export function useLiveEventStream(
   options: LiveEventStreamOptions = {},
 ): LiveEventStreamState {
   const enabled = options.enabled ?? true;
+  const filterKey = JSON.stringify(filters);
   const visibility = useVisibility();
   const queryClient = useQueryClient();
 
@@ -79,6 +80,7 @@ export function useLiveEventStream(
     null,
   );
   const connectionGenerationRef = useRef(0);
+  const filterKeyRef = useRef(filterKey);
 
   const clearReconnectTimeout = () => {
     if (reconnectTimeoutRef.current) {
@@ -382,6 +384,22 @@ export function useLiveEventStream(
   // Main effect for connection lifecycle and visibility
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional
   useEffect(() => {
+    if (filterKeyRef.current !== filterKey) {
+      filterKeyRef.current = filterKey;
+      connectionGenerationRef.current += 1;
+      clearReconnectTimeout();
+      if (clientRef.current) {
+        clientRef.current.close();
+        clientRef.current = null;
+      }
+      eventsMapRef.current.clear();
+      finalizedIdsRef.current.clear();
+      tombstonesRef.current.clear();
+      lastCursorRef.current = null;
+      setLastCursor(null);
+      forceUpdate();
+    }
+
     if (!enabled) {
       connectionGenerationRef.current += 1;
       clearReconnectTimeout();
@@ -438,7 +456,7 @@ export function useLiveEventStream(
     visibility.gracePeriodElapsed,
     visibility.visible,
     enabled,
-    JSON.stringify(filters),
+    filterKey,
   ]);
 
   // Token refresh effect

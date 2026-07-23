@@ -17,6 +17,7 @@ SELECT \
     list_ts_ms AS ts_ms, \
     COALESCE(payload_jsonb ->> 'request_id', '') AS request_id, \
     event_id, \
+    source_kind, \
     principal_id, \
     upstream_id, \
     upstream_name, \
@@ -74,6 +75,7 @@ FROM ( \
             r.list_upstream, \
             r.list_status, \
             r.event_id, \
+            r.source_kind, \
             r.principal_id, \
             r.upstream_id, \
             r.upstream_name, \
@@ -97,6 +99,7 @@ FROM ( \
           AND ($3::text IS NULL OR r.principal_id = $3) \
           AND ($4::text IS NULL OR r.model = $4) \
           AND ($5::uuid IS NULL OR r.upstream_id = $5) \
+          AND ($14::text IS NULL OR r.thread_id = $14) \
           AND ($6::text IS NULL OR r.list_upstream = $6) \
           AND ($7::int IS NULL OR r.list_status BETWEEN $7 AND $8) \
           AND ( \
@@ -123,6 +126,7 @@ pub(super) struct ListRow {
     pub(super) ts_ms: Option<i64>,
     pub(super) request_id: String,
     pub(super) event_id: Option<String>,
+    pub(super) source_kind: Option<String>,
     pub(super) principal_id: Option<String>,
     pub(super) upstream_id: Option<uuid::Uuid>,
     pub(super) upstream_name: Option<String>,
@@ -209,6 +213,7 @@ pub(super) async fn list_request_events(
         .bind(u64_to_i64(query.limit as u64, "request event list limit")?)
         .bind(i32::from(source_kind_all))
         .bind(source_kind_exact)
+        .bind(query.filters.thread_id.as_deref())
         .fetch_all(&storage.pool)
         .await
         .map_err(map_sqlx_error)?;

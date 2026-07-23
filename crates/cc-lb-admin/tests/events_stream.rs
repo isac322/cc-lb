@@ -9,7 +9,7 @@ use axum::{
 };
 use cc_lb_config::Config;
 use cc_lb_control::{InMemoryBus, RequestEventBus};
-use cc_lb_request_log::RequestEventUpdate;
+use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use config_admin_common::{TOKEN, app, authed_bytes, temp_storage, test_state};
 use http_body_util::BodyExt;
@@ -165,6 +165,61 @@ async fn events_stream_resets_after_one_backfill_page_when_over_cap() {
     assert_eq!(text.matches("event: reset").count(), 1);
     assert!(text.contains(r#"reason":"backfill_cap"#));
 }
+#[tokio::test]
+async fn events_stream_applies_combined_filters_to_partial_updates() {
+    let (_dir, storage) = temp_storage().await;
+    let bus = Arc::new(InMemoryBus::with_capacity(8));
+    let mut state = test_state(Config::default(), Some(storage));
+    state.event_bus = Some(bus.clone() as Arc<dyn RequestEventBus>);
+
+    let response = stream_response_uri(
+        state,
+        "/admin/events/stream?principal_id=principal-target&thread_id=thread-target&model=model-target&status_class=4xx&source_kind=renewal",
+        Some("0"),
+    )
+    .await;
+    let mut body = response.into_body();
+    let mut text = String::new();
+    while !text.contains("event: cursor") {
+        let frame = timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("initial cursor frame timeout")
+            .expect("stream ended before initial cursor")
+            .expect("frame ok");
+        if let Ok(data) = frame.into_data() {
+            text.push_str(std::str::from_utf8(&data).unwrap());
+        }
+    }
+
+    let matching = RequestEventPartial {
+        event_id: "event-target".to_owned(),
+        request_id: "target".to_owned(),
+        principal_id: Some("principal-target".to_owned()),
+        thread_id: Some("thread-target".to_owned()),
+        model: Some("model-target".to_owned()),
+        upstream_response_status: Some(429),
+        source_kind: Some("renewal".to_owned()),
+        ..Default::default()
+    };
+    let mut non_matching = matching.clone();
+    non_matching.event_id = "event-wrong-session".to_owned();
+    non_matching.request_id = "wrong-session".to_owned();
+    non_matching.thread_id = Some("thread-other".to_owned());
+    bus.publish(RequestEventUpdate::Partial(non_matching));
+    bus.publish(RequestEventUpdate::Partial(matching));
+
+    while message_request_ids(&text).is_empty() {
+        let frame = timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("filtered message frame timeout")
+            .expect("stream ended before filtered message")
+            .expect("frame ok");
+        if let Ok(data) = frame.into_data() {
+            text.push_str(std::str::from_utf8(&data).unwrap());
+        }
+    }
+    assert_eq!(message_request_ids(&text), ["target"]);
+}
 
 #[tokio::test]
 async fn events_stream_reconnect_with_last_event_id_still_requires_auth() {
@@ -191,6 +246,25 @@ async fn stream_response(
     let mut request = Request::builder()
         .method("GET")
         .uri("/admin/events/stream")
+        .header("Authorization", format!("Bearer {TOKEN}"));
+    if let Some(last_event_id) = last_event_id {
+        request = request.header("Last-Event-ID", last_event_id);
+    }
+    let response = app(state)
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response
+}
+async fn stream_response_uri(
+    state: cc_lb_admin::AdminState,
+    uri: &str,
+    last_event_id: Option<&str>,
+) -> axum::response::Response {
+    let mut request = Request::builder()
+        .method("GET")
+        .uri(uri)
         .header("Authorization", format!("Bearer {TOKEN}"));
     if let Some(last_event_id) = last_event_id {
         request = request.header("Last-Event-ID", last_event_id);
@@ -239,6 +313,7 @@ fn message_request_id(frame: &str) -> Option<String> {
     let value: Value = serde_json::from_str(data).ok()?;
     value["payload"]["event"]["request_id"]
         .as_str()
+        .or_else(|| value["payload"]["request_id"].as_str())
         .map(ToOwned::to_owned)
 }
 

@@ -139,6 +139,178 @@ async fn events_recent_uses_compound_cursor_for_same_timestamp_pages() {
 }
 
 #[tokio::test]
+async fn events_recent_cursor_paginates_past_five_hundred_rows() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let upstream_id = Uuid::from_u128(1);
+    for index in 0..675 {
+        storage
+            .append_request_event(&request_event(
+                clock.as_ref(),
+                index,
+                &format!("req-deep-{index:03}"),
+                upstream_id,
+                "target-upstream",
+            ))
+            .await
+            .unwrap();
+    }
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage),
+        clock,
+    ));
+
+    let mut cursor: Option<(u64, String)> = None;
+    let mut request_ids = std::collections::HashSet::new();
+    let mut page_sizes = Vec::new();
+    loop {
+        let uri = match cursor.as_ref() {
+            Some((ts_ms, event_id)) => format!(
+                "/admin/events/recent?limit=200&source_kind=all&until_ts_ms={ts_ms}&until_event_id={event_id}"
+            ),
+            None => "/admin/events/recent?limit=200&source_kind=all".to_owned(),
+        };
+        let (status, _, body, _) = authed_json(admin_app.clone(), "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let events = body["events"].as_array().unwrap();
+        page_sizes.push(events.len());
+        for event in events {
+            assert!(
+                request_ids.insert(event["request_id"].as_str().unwrap().to_owned()),
+                "duplicate request across cursor pages"
+            );
+        }
+        if events.len() < 200 {
+            break;
+        }
+        let oldest = events.last().unwrap();
+        cursor = Some((
+            oldest["ts_ms"].as_u64().unwrap(),
+            oldest["event_id"].as_str().unwrap().to_owned(),
+        ));
+    }
+
+    assert_eq!(page_sizes, [200, 200, 200, 75]);
+    assert_eq!(request_ids.len(), 675);
+}
+
+#[tokio::test]
+async fn events_recent_applies_each_filter_and_their_combination() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let upstream_id = Uuid::from_u128(1);
+    let other_upstream_id = Uuid::from_u128(2);
+
+    let mut events = Vec::new();
+    for (index, request_id) in [
+        "target",
+        "wrong-principal",
+        "wrong-session",
+        "wrong-model",
+        "wrong-upstream",
+        "wrong-status",
+        "wrong-source",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut event = request_event(
+            clock.as_ref(),
+            index as u64,
+            request_id,
+            upstream_id,
+            "target-upstream",
+        );
+        event.principal_id = Some("principal-target".to_owned());
+        event.thread_id = Some("thread-target".to_owned());
+        event.model = Some("model-target".to_owned());
+        event.status = 429;
+        event.source_kind = Some("renewal".to_owned());
+        match request_id {
+            "wrong-principal" => event.principal_id = Some("principal-other".to_owned()),
+            "wrong-session" => event.thread_id = Some("thread-other".to_owned()),
+            "wrong-model" => event.model = Some("model-other".to_owned()),
+            "wrong-upstream" => {
+                event.upstream_id = Some(other_upstream_id);
+                event.upstream_name = Some("other-upstream".to_owned());
+            }
+            "wrong-status" => event.status = 200,
+            "wrong-source" => event.source_kind = Some("request".to_owned()),
+            _ => {}
+        }
+        events.push(event);
+    }
+    for event in &events {
+        storage.append_request_event(event).await.unwrap();
+    }
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage),
+        clock,
+    ));
+
+    for (query, excluded_request_id) in [
+        (
+            "principal_id=principal-target&source_kind=all".to_owned(),
+            "wrong-principal",
+        ),
+        (
+            "thread_id=thread-target&source_kind=all".to_owned(),
+            "wrong-session",
+        ),
+        (
+            "model=model-target&source_kind=all".to_owned(),
+            "wrong-model",
+        ),
+        (
+            format!("upstream_id={upstream_id}&source_kind=all"),
+            "wrong-upstream",
+        ),
+        (
+            "status_class=4xx&source_kind=all".to_owned(),
+            "wrong-status",
+        ),
+        ("source_kind=renewal".to_owned(), "wrong-source"),
+    ] {
+        let (status, _, body, _) = authed_json(
+            admin_app.clone(),
+            "GET",
+            &format!("/admin/events/recent?limit=20&{query}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let request_ids = body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|event| event["request_id"].as_str())
+            .collect::<Vec<_>>();
+        assert!(request_ids.contains(&"target"), "{query}");
+        assert!(!request_ids.contains(&excluded_request_id), "{query}");
+    }
+
+    let (status, _, body, _) = authed_json(
+        admin_app,
+        "GET",
+        &format!(
+            "/admin/events/recent?limit=20&principal_id=principal-target&thread_id=thread-target&model=model-target&upstream_id={upstream_id}&status_class=4xx&source_kind=renewal"
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let request_ids = body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["request_id"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(request_ids, ["target"]);
+}
+
+#[tokio::test]
 async fn events_recent_503_when_storage_missing() {
     let state = config_admin_common::test_state_without_storage();
     let (status, _, _) = authed_bytes(app(state), "GET", "/admin/events/recent", None).await;

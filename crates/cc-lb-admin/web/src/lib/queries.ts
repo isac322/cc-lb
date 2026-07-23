@@ -441,7 +441,6 @@ export function useRequestEventDetail(eventId: string | null) {
 }
 
 const RECENT_EVENTS_PAGE_SIZE = 200;
-const RECENT_EVENTS_LIMIT = 500;
 
 type RecentEventsPageParam =
   | { readonly kind: 'initial'; readonly limit: number }
@@ -488,12 +487,7 @@ export function useRecentEventsInfinite(
         `/admin/events/recent?${params.toString()}`,
       );
     },
-    getNextPageParam: (last, allPages) => {
-      const loadedEventCount = allPages.reduce(
-        (total, page) => total + page.events.length,
-        0,
-      );
-      if (loadedEventCount >= RECENT_EVENTS_LIMIT) return undefined;
+    getNextPageParam: (last) => {
       const evs = last.events;
       if (!evs.length || evs.length < last.limit) return undefined;
       const oldest = evs[evs.length - 1];
@@ -503,10 +497,7 @@ export function useRecentEventsInfinite(
       if (ts_ms != null && event_id != null) {
         return {
           kind: 'cursor',
-          limit: Math.min(
-            RECENT_EVENTS_PAGE_SIZE,
-            RECENT_EVENTS_LIMIT - loadedEventCount,
-          ),
+          limit: RECENT_EVENTS_PAGE_SIZE,
           ts_ms,
           event_id,
         };

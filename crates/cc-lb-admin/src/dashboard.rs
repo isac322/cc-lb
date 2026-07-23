@@ -199,6 +199,25 @@ pub async fn build_dashboard_summary(
     for rollup in &rollups {
         add_rollup_to_buckets(&mut buckets, rollup, window_start_unix_secs, step);
     }
+    let excluded_errors = storage
+        .query_overview_excluded_error_buckets_in_range(
+            step,
+            window_start_unix_secs,
+            window_end_unix_secs,
+        )
+        .await?;
+    for excluded in excluded_errors {
+        let Some(offset) = excluded.bucket_start.checked_sub(window_start_unix_secs) else {
+            continue;
+        };
+        let index = (offset / step_width_secs(step)) as usize;
+        let Some(bucket) = buckets.get_mut(index) else {
+            continue;
+        };
+        if bucket.bucket_start_unix_secs == excluded.bucket_start {
+            bucket.error_count = bucket.error_count.saturating_sub(excluded.error_count);
+        }
+    }
 
     let totals = summary_totals(&buckets);
     Ok(DashboardSummaryResponse {

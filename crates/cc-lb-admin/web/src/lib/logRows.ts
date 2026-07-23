@@ -2,9 +2,16 @@ import type { RequestEvent, RequestEventPartial } from './api';
 import type { RequestEventWithPhase } from './RequestEventTypes';
 import type { LiveEventMap } from './upsertReducer';
 
-export const MAX_RENDERED_LOG_ROWS = 500;
 export const LOG_STATUS_CLASSES = ['2xx', '3xx', '4xx', '5xx'] as const;
 export type LogStatusClass = (typeof LOG_STATUS_CLASSES)[number];
+export interface LogRowFilters {
+  readonly principal_id?: string;
+  readonly upstream_id?: string;
+  readonly session?: string;
+  readonly model?: string;
+  readonly status?: LogStatusClass;
+  readonly source_kind?: 'all' | 'renewal';
+}
 
 type EventIdentity = {
   readonly event_id?: string;
@@ -51,6 +58,33 @@ export function filterLogRowsByStatusClass(
     return status >= lowerBound && status < lowerBound + 100;
   });
 }
+export function filterLogRows(
+  rows: readonly RequestEventWithPhase[],
+  filters: LogRowFilters,
+): readonly RequestEventWithPhase[] {
+  const statusRows = filterLogRowsByStatusClass(rows, filters.status);
+  return statusRows.filter((row) => {
+    if (filters.principal_id && row.principal_id !== filters.principal_id) {
+      return false;
+    }
+    if (filters.upstream_id && row.upstream_id !== filters.upstream_id) {
+      return false;
+    }
+    if (filters.session && row.thread_id !== filters.session) {
+      return false;
+    }
+    if (filters.model && row.model !== filters.model) {
+      return false;
+    }
+    if (filters.source_kind === 'renewal') {
+      return row.source_kind === 'renewal';
+    }
+    if (filters.source_kind !== 'all' && row.source_kind === 'renewal') {
+      return false;
+    }
+    return true;
+  });
+}
 
 // Keyed on the source event so an unchanged event yields the same row reference
 // across merges, keeping memoized RequestEventRow subtrees from re-rendering on
@@ -82,35 +116,26 @@ export function mergeLogRows(
   historicalEvents: readonly RequestEvent[],
 ): RequestEventWithPhase[] {
   const seen = new Set<string>();
-  const partialRows: RequestEventWithPhase[] = [];
-  const finalRows: RequestEventWithPhase[] = [];
+  const rows: RequestEventWithPhase[] = [];
 
   for (const entry of liveEvents.values()) {
     const identity = eventIdentity(entry.event);
     if (seen.has(identity)) continue;
     seen.add(identity);
-    if (entry.phase === 'partial') {
-      partialRows.push(wrapPartial(entry.event));
-    } else {
-      finalRows.push(wrapFinal(entry.event));
-    }
+    rows.push(
+      entry.phase === 'partial'
+        ? wrapPartial(entry.event)
+        : wrapFinal(entry.event),
+    );
   }
 
   for (const event of historicalEvents) {
     const identity = eventIdentity(event);
     if (seen.has(identity)) continue;
     seen.add(identity);
-    finalRows.push(wrapFinal(event));
+    rows.push(wrapFinal(event));
   }
 
-  partialRows.sort(
-    (left, right) => eventTimestamp(right) - eventTimestamp(left),
-  );
-  finalRows.sort((left, right) => eventTimestamp(right) - eventTimestamp(left));
-
-  const selectedPartials = partialRows.slice(0, MAX_RENDERED_LOG_ROWS);
-  const finalBudget = MAX_RENDERED_LOG_ROWS - selectedPartials.length;
-  return [...selectedPartials, ...finalRows.slice(0, finalBudget)].sort(
-    (left, right) => eventTimestamp(right) - eventTimestamp(left),
-  );
+  rows.sort((left, right) => eventTimestamp(right) - eventTimestamp(left));
+  return rows;
 }

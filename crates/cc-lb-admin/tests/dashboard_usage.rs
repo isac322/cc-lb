@@ -141,6 +141,36 @@ async fn usage_filters_by_upstream_id() {
 }
 
 #[tokio::test]
+async fn summary_error_rate_excludes_client_navigation_statuses() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let upstream_id = Uuid::from_u128(1);
+    let bucket_ts = current_unix_secs(clock.as_ref()).saturating_sub(60);
+
+    for (index, status) in [200, 401, 403, 404, 500].into_iter().enumerate() {
+        let mut event = usage_event(
+            bucket_ts,
+            &format!("req-status-{status}"),
+            upstream_id,
+            "target-upstream",
+            index as u64,
+        );
+        event.status = status;
+        storage.append_request_event(&event).await.unwrap();
+    }
+    storage.rollup_usage_once().await.unwrap();
+
+    let state = test_state_with_clock(Config::default(), Some(storage), clock);
+    let (status, _, body, _) =
+        authed_json(app(state), "GET", "/admin/dashboard/summary?range=1h", None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["totals"]["request_count"], 5);
+    assert_eq!(body["totals"]["error_count"], 1);
+    assert_eq!(body["totals"]["error_rate"], 0.2);
+}
+
+#[tokio::test]
 async fn usage_503_when_storage_missing() {
     let state = config_admin_common::test_state_without_storage();
     let (status, _, _) = authed_bytes(
