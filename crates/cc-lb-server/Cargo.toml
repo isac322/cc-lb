@@ -56,7 +56,7 @@ axum = { workspace = true, features = ["multipart"] }
 bytes.workspace = true
 chrono.workspace = true
 cc-lb-aead = { path = "../cc-lb-aead" }
-cc-lb-admin = { version = "0.1.0", path = "../cc-lb-admin", default-features = false }
+cc-lb-admin = { path = "../cc-lb-admin", default-features = false }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-request-log.workspace = true

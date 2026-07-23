@@ -19,7 +19,7 @@ async-trait = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
-cc-lb-aead = { version = "0.1.0", path = "../cc-lb-aead" }
+cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-request-log.workspace = true
 cc-lb-domain.workspace = true
