@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-07-09
 - Ships with: pending
-- Supersedes: ADR 0003's base-window quota urgency formula and capacity multiplier inside base quota urgency; ADR 0004/0005 cache and warning multipliers remain in force.
+- Supersedes: ADR 0003's base-window quota urgency formula and capacity multiplier inside base quota urgency; ADR 0010 amends the warning multiplier used during deterministic cost-first selection.
 
 ## Context
 
@@ -106,7 +106,7 @@ overage_quota_weight_factor_i = if overage_bucket_total < EPSILON {
 unknown_probe_quota_weight_factor = 1.0
 ```
 
-The overage formula, its eligibility, and its uniform fallback therefore remain byte-for-byte behaviorally unchanged. `UnknownProbe` continues to have zero raw urgency and always reaches the existing uniform fallback. Every tier still multiplies its tier-specific quota factor by the unchanged cache and warning multipliers.
+The overage formula, its eligibility, and its uniform fallback therefore remain byte-for-byte behaviorally unchanged. `UnknownProbe` continues to have zero raw urgency and always reaches the existing uniform fallback. Warning-positive base candidates use the reset-aware multiplier defined by ADR 0010.
 
 Remove the old base `capacity_multiplier` from quota urgency. Do not delete or reinterpret `plan_capacity_ratio`; it remains useful for admin analytics and future policy experiments. Overage tier urgency remains out of scope for this ADR and should keep its existing formula and fallback behavior unless a later ADR revisits overage routing.
 
@@ -114,7 +114,7 @@ Keep existing eligibility and safety behavior:
 
 - Fresh `rejected`, fresh `disabled_reason`, and fresh finite `utilization >= 1.0` remain hard negatives.
 - Fresh `allowed_warning`, or fresh `allowed` with finite `utilization >= surpassed_threshold`, remains warning-positive.
-- Warning-positive candidates remain routable and continue to receive `WARNING_MULTIPLIER = 0.20`.
+- Warning-positive candidates remain routable, start with `WARNING_MULTIPLIER = 0.20`, and may relax only through ADR 0010's bounded near-reset policy.
 - Tier order remains `KnownBase > PartialBase > Overage > UnknownProbe`.
 - Cache multiplier and cache-affinity key selection remain unchanged.
 
@@ -217,7 +217,7 @@ Implementation must include local regression tests for:
 - Cache multiplier outputs unchanged for fixed cache inputs.
 - Cache-hot on-pace candidates keeping finite effective weight through `1 + pressure`.
 - All-on-pace buckets using uniform quota factor `1.0` while still applying warning multiplier.
-- Warning-positive candidates retaining `WARNING_MULTIPLIER = 0.20` in mixed and uniform fallback cases.
+- Warning-positive candidates retaining `WARNING_MULTIPLIER = 0.20` while on pace or below the warning relaxation threshold, with ADR 0010 covering near-reset relaxation.
 - Two otherwise-equal Fable candidates receiving different pressure, effective weights, and routing distribution from scoped weekly pressure.
 - All-candidate payload trace carrying U5/U7/combined/factor fields.
 - Historical v10 payload JSON deserializing with the documented compatibility defaults.

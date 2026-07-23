@@ -5,9 +5,9 @@
 //! 1. A strict tier ordering (KnownBase > PartialBase > Overage > UnknownProbe)
 //!    that keeps the Anthropic base plan strictly higher priority than the
 //!    overage bucket.
-//! 2. Within the winning tier, deterministic cost-first-v1 selection. Candidates
-//!    within five percent of the lowest known input cost use urgency, warning,
-//!    upstream ID, and original position as stable tiebreaks.
+//! 2. Within the winning tier, deterministic cost-first-v2 selection. Candidates
+//!    within five percent of the lowest known input cost use urgency, a reset-aware
+//!    warning penalty, upstream ID, and original position as stable tiebreaks.
 //!
 //! ## Design rationale
 //!
@@ -92,8 +92,12 @@ pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
 
 pub(crate) const CACHE_COST_BASIS_VERSION: &str = "v1";
 const WARNING_MULTIPLIER: f64 = 0.20;
+const WARNING_MULTIPLIER_CEILING: f64 = 0.80;
+const WARNING_RELAXATION_START_RATIO: f64 = 1.10;
+const WARNING_RELAXATION_END_RATIO: f64 = 2.0;
+const WARNING_RELAXATION_FALLBACK_THRESHOLD: f64 = 0.98;
 
-const COST_FIRST_FORMULA_VERSION: &str = "cost-first-v1";
+const COST_FIRST_FORMULA_VERSION: &str = "cost-first-v2";
 
 // -- Config knobs (compiled defaults today; expose per-principal later). ----
 
@@ -397,6 +401,7 @@ fn assess_candidate<'a>(
     let mut warning_positive_count = 0u32;
     let mut hard_negative_count = 0u32;
     let mut total = 0u32;
+    let mut min_warning_pressure = f64::INFINITY;
     let mut five_hour_pressure = 0.0f64;
     let mut shared_weekly_pressure = 0.0f64;
     let mut model_scoped_weekly_pressure = 0.0f64;
@@ -426,15 +431,18 @@ fn assess_candidate<'a>(
             BaseSignal::WarningPositive => {
                 positive_count += 1;
                 warning_positive_count += 1;
+                let pressure = base_window_pressure(snapshot, now_secs);
+                min_warning_pressure =
+                    min_warning_pressure.min(warning_relaxation_pressure(snapshot, now_secs));
                 match window {
                     WINDOW_FIVE_HOUR => {
-                        five_hour_pressure = base_window_pressure(snapshot, now_secs);
+                        five_hour_pressure = pressure;
                     }
                     WINDOW_SEVEN_DAY => {
-                        shared_weekly_pressure = base_window_pressure(snapshot, now_secs);
+                        shared_weekly_pressure = pressure;
                     }
                     WINDOW_SEVEN_DAY_FABLE | WINDOW_SEVEN_DAY_SONNET | WINDOW_SEVEN_DAY_OPUS => {
-                        model_scoped_weekly_pressure = base_window_pressure(snapshot, now_secs);
+                        model_scoped_weekly_pressure = pressure;
                     }
                     _ => {}
                 }
@@ -493,10 +501,12 @@ fn assess_candidate<'a>(
         quota_urgency_7d,
         quota_urgency_combined,
         overage_urgency,
-        warning_multiplier: if warning_positive_count > 0 {
-            WARNING_MULTIPLIER
-        } else {
+        warning_multiplier: if warning_positive_count == 0 {
             1.0
+        } else if matches!(tier, Tier::KnownBase | Tier::PartialBase) {
+            warning_multiplier_for_pressure(min_warning_pressure)
+        } else {
+            WARNING_MULTIPLIER
         },
     })
 }
@@ -542,6 +552,35 @@ fn pressure_from_ratios(
         .powf(pressure_config.gamma)
         .max(pressure_config.target_floor);
     (remaining_ratio / target).ln().max(0.0)
+}
+
+fn warning_relaxation_pressure(
+    snapshot: Option<&SubscriptionQuotaCandidateSnapshot>,
+    now_secs: u64,
+) -> f64 {
+    let Some(snapshot) = snapshot else {
+        return 0.0;
+    };
+    let Some(utilization) = snapshot.utilization.filter(|value| value.is_finite()) else {
+        return 0.0;
+    };
+    let threshold = snapshot
+        .surpassed_threshold
+        .filter(|value| value.is_finite())
+        .unwrap_or(WARNING_RELAXATION_FALLBACK_THRESHOLD)
+        .clamp(0.0, 1.0);
+    if utilization < threshold {
+        return 0.0;
+    }
+    base_window_pressure(Some(snapshot), now_secs)
+}
+
+fn warning_multiplier_for_pressure(pressure: f64) -> f64 {
+    let activation = WARNING_RELAXATION_START_RATIO.ln();
+    let ceiling = WARNING_RELAXATION_END_RATIO.ln();
+    let progress = ((pressure - activation) / (ceiling - activation)).clamp(0.0, 1.0);
+    let eased = progress * progress * (3.0 - 2.0 * progress);
+    WARNING_MULTIPLIER + (WARNING_MULTIPLIER_CEILING - WARNING_MULTIPLIER) * eased
 }
 
 fn base_window_pressure_config(window: &str) -> Option<BaseWindowPressureConfig> {

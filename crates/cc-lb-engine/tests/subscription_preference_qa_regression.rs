@@ -104,7 +104,7 @@ fn v11_trace_contains_distinct_winner_and_loser_pressure() {
 
     assert_eq!(
         result.trace.formula_version.as_deref(),
-        Some("cost-first-v1")
+        Some("cost-first-v2")
     );
     assert_ne!(winner.quota_urgency_combined, loser.quota_urgency_combined);
     for base in [winner, loser, partial] {

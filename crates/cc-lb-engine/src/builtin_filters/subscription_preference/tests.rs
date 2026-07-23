@@ -1489,6 +1489,52 @@ fn overage_non_uniform_urgency_matches_v10() {
 }
 
 #[test]
+fn overage_warning_multiplier_ignores_blocked_base_pressure() {
+    // Given: both candidates route through overage because 7d base quota is
+    // rejected, while their warned 5h base windows have different pressure.
+    let near_reset = oauth_at_t0(
+        "near-reset",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.98)
+                .status("allowed_warning")
+                .reset_at(T0_SECS + 60)
+                .build(),
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(0.50).status("allowed").build(),
+        ],
+    );
+    let far_reset = oauth_at_t0(
+        "far-reset",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.98)
+                .status("allowed_warning")
+                .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS)
+                .build(),
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(0.50).status("allowed").build(),
+        ],
+    );
+
+    // When: the filter assesses the overage bucket.
+    let output = filter_for_model(&[near_reset.clone(), far_reset.clone()], MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("trace present");
+
+    // Then: unusable base pressure cannot relax warning policy for overage.
+    assert_eq!(
+        candidate_urgency_for(&trace, near_reset.upstream_id).warning_multiplier,
+        WARNING_MULTIPLIER
+    );
+    assert_eq!(
+        candidate_urgency_for(&trace, far_reset.upstream_id).warning_multiplier,
+        WARNING_MULTIPLIER
+    );
+}
+
+#[test]
 fn overage_uniform_tiebreak_matches_cost_first() {
     // Given: two allowed overage candidates whose v10 urgency sum is below EPSILON.
     let first = oauth_at_t0(
