@@ -121,9 +121,7 @@ jobs:
           driver-opts: network=host
           buildkitd-flags: --allow-insecure-entitlement network.host
 
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: actionlint
+      - uses: ./.github/actions/setup-actionlint
 
       - uses: azure/setup-helm@v5.0.1
         with:
