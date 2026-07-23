@@ -20,6 +20,8 @@ mod prompt_cache_observation;
 mod quota_aggregates;
 #[path = "request_event_projections.rs"]
 mod request_event_projections;
+#[path = "request_events_cursor.rs"]
+mod request_events_cursor;
 #[path = "request_events_reasoning_effort.rs"]
 mod request_events_reasoning_effort;
 #[path = "request_events_thinking_budget_tokens.rs"]
