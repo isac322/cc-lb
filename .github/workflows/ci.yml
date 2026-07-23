@@ -107,6 +107,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: ./.github/actions/setup-gh
       - name: Attach release-plz validation branch
         run: |
           set -euo pipefail

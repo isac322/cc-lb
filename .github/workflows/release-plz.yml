@@ -82,6 +82,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: ./.github/actions/setup-gh
 
       - uses: dtolnay/rust-toolchain@1.97.0
 
@@ -117,6 +118,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - uses: ./.github/actions/setup-gh
 
       - uses: dtolnay/rust-toolchain@1.97.0
 
