@@ -37,9 +37,8 @@ jobs:
     name: build & push image
     # Runs in-cluster so the build can reach the garage-S3 sccache warmed by
     # Docker PR builds. The runner pool may schedule either x86_64 or arm64;
-    # the tagged checkout is normalized below when the x86_64 host triple
-    # collides with the linux/amd64 target. xx cross-compiles all four target
-    # architectures with no QEMU.
+    # the source Dockerfile isolates host-only Cargo configuration and xx
+    # cross-compiles all four target architectures with no QEMU.
     runs-on: oracle4-cc-lb
     permissions:
       contents: read
@@ -74,26 +73,6 @@ jobs:
             jq -r '.packages[] | select(.name == "cc-lb-server") | .version')
           if [ "$actual_version" != "$VERSION" ]; then
             echo "::error::checked-out server version '$actual_version' does not match '$VERSION'"
-            exit 1
-          fi
-
-      # On an x86_64 Alpine runner, the build host triple and the linux/amd64
-      # target are both x86_64-unknown-linux-musl. The repository's local
-      # rust-lld override then leaks into host proc-macro builds, which need
-      # Alpine's dynamic libc/libgcc. xx-cargo supplies the target linker, so
-      # remove only that local override from the ephemeral tagged checkout.
-      - name: Isolate x86 Docker host linker configuration
-        if: runner.arch == 'X64'
-        run: |
-          set -euo pipefail
-          config=.cargo/config.toml
-          if [ "$(grep -cx '\[target\.x86_64-unknown-linux-musl\]' "$config")" != "1" ]; then
-            echo "::error::expected one x86_64 musl target section in $config"
-            exit 1
-          fi
-          sed -i '/^\[target\.x86_64-unknown-linux-musl\]$/,/^$/d' "$config"
-          if grep -q '^\[target\.x86_64-unknown-linux-musl\]$' "$config"; then
-            echo "::error::failed to remove x86_64 musl host linker override"
             exit 1
           fi
 
