@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   hadolint:
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
       - uses: hadolint/hadolint-action@v3.3.0
@@ -30,7 +30,7 @@ jobs:
           dockerfile: Dockerfile
 
   helm:
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     env:
       CHART: deploy/helm/cc-lb
       # helm lint/template never runs the binary, so any non-empty value satisfies
