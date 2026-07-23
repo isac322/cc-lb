@@ -44,6 +44,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: ./.github/actions/setup-gh
 
       - name: Validate release target
         id: target
@@ -221,6 +222,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-gh
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
