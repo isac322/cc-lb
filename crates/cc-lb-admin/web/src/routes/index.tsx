@@ -177,11 +177,11 @@ const POOL_PALETTES: Record<PoolQuotaWindow, readonly string[]> = {
     'rgb(221, 214, 254)',
   ],
   '7d_fable': [
-    'rgb(190, 24, 93)',
-    'rgb(219, 39, 119)',
-    'rgb(236, 72, 153)',
-    'rgb(244, 114, 182)',
-    'rgb(251, 207, 232)',
+    'rgb(77, 124, 15)',
+    'rgb(101, 163, 13)',
+    'rgb(132, 204, 22)',
+    'rgb(163, 230, 53)',
+    'rgb(217, 249, 157)',
   ],
 };
 
@@ -571,7 +571,7 @@ export function PoolQuotaThemedChart({
               x2="0"
               y2="1"
             >
-              <stop offset="0%" stopColor={cFable.stroke} stopOpacity={0.55} />
+              <stop offset="0%" stopColor={cFable.fill} stopOpacity={0.55} />
               <stop offset="100%" stopColor={cFable.stroke} stopOpacity={0} />
             </linearGradient>
           ) : null}
