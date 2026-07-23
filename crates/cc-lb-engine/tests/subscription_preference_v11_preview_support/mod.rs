@@ -249,6 +249,26 @@ pub fn stale_overage_positive_quota() -> Vec<SubscriptionQuotaCandidateSnapshot>
     overage.state = SubscriptionQuotaDataState::Stale;
     vec![exhausted_shared_quota()[1].clone(), overage]
 }
+pub fn clean_pressure_quota() -> Vec<SubscriptionQuotaCandidateSnapshot> {
+    vec![
+        quota("5h", 0.50, NOW + 2 * 60 * 60),
+        quota("7d", 0.95, NOW + 604_800),
+    ]
+}
+
+pub fn near_reset_warning_quota() -> Vec<SubscriptionQuotaCandidateSnapshot> {
+    vec![
+        quota("5h", 0.95, NOW + 18_000),
+        warning_quota("7d", 0.98, NOW + 4 * 60 * 60),
+    ]
+}
+
+pub fn far_reset_warning_quota() -> Vec<SubscriptionQuotaCandidateSnapshot> {
+    vec![
+        quota("5h", 0.95, NOW + 18_000),
+        warning_quota("7d", 0.98, NOW + 24 * 60 * 60),
+    ]
+}
 
 pub fn fable_quota(fable_utilization: f64) -> Vec<SubscriptionQuotaCandidateSnapshot> {
     vec![
@@ -280,6 +300,12 @@ pub fn fable_quota_with_unobserved_shared_seven_day() -> Vec<SubscriptionQuotaCa
         shared,
         quota("7d_fable", 0.2, NOW + 60_480),
     ]
+}
+
+fn warning_quota(window: &str, utilization: f64, reset: u64) -> SubscriptionQuotaCandidateSnapshot {
+    let mut snapshot = quota(window, utilization, reset);
+    snapshot.status = Some("allowed_warning".to_owned());
+    snapshot
 }
 
 fn quota(window: &str, utilization: f64, reset: u64) -> SubscriptionQuotaCandidateSnapshot {

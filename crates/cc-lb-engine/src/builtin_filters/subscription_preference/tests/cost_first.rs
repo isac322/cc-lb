@@ -252,6 +252,167 @@ fn warning_multiplier_breaks_zero_urgency_tie() {
 }
 
 #[test]
+fn near_reset_warning_relaxes_without_removing_the_warning_penalty() {
+    // Given: a warned weekly window has 2% remaining near reset, while a clean
+    // peer has lower raw pressure. Both candidates have identical input cost.
+    let warned = with_cache_tokens(
+        oauth_at_t0(
+            "warned-near-reset",
+            1,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .util(0.95)
+                    .status("allowed")
+                    .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS)
+                    .build(),
+                fresh(WINDOW_SEVEN_DAY)
+                    .util(0.98)
+                    .status("allowed_warning")
+                    .reset_at(T0_SECS + 4 * 60 * 60)
+                    .build(),
+            ],
+        ),
+        CacheTokenEstimate::zero(),
+    );
+    let clean = with_cache_tokens(
+        oauth_at_t0(
+            "clean-peer",
+            2,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .util(0.50)
+                    .status("allowed")
+                    .reset_at(T0_SECS + 2 * 60 * 60)
+                    .build(),
+                fresh(WINDOW_SEVEN_DAY)
+                    .util(0.95)
+                    .status("allowed")
+                    .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS)
+                    .build(),
+            ],
+        ),
+        CacheTokenEstimate::zero(),
+    );
+
+    // When: the candidates are compared inside the same tier and cost bucket.
+    let output = filter_for_model(&[warned.clone(), clean], MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("trace present");
+    let warned_trace = candidate_urgency_for(&trace, warned.upstream_id);
+
+    // Then: the near-reset warning relaxes only to 0.80, which is enough to
+    // drain expiring quota while preserving a penalty against a clean peer.
+    assert!((warned_trace.warning_multiplier - 0.80).abs() < 1e-12);
+    assert_eq!(output.kept_upstream_ids, vec![warned.upstream_id]);
+}
+
+#[test]
+fn far_reset_warning_keeps_the_full_penalty() {
+    // Given: the same 98%-utilized warning is still far enough from reset that
+    // it has no use-it-or-lose-it pressure.
+    let warned = with_cache_tokens(
+        oauth_at_t0(
+            "warned-far-reset",
+            1,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .util(0.95)
+                    .status("allowed")
+                    .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS)
+                    .build(),
+                fresh(WINDOW_SEVEN_DAY)
+                    .util(0.98)
+                    .status("allowed_warning")
+                    .reset_at(T0_SECS + 24 * 60 * 60)
+                    .build(),
+            ],
+        ),
+        CacheTokenEstimate::zero(),
+    );
+    let clean = with_cache_tokens(
+        oauth_at_t0(
+            "clean-peer",
+            2,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .util(0.50)
+                    .status("allowed")
+                    .reset_at(T0_SECS + 2 * 60 * 60)
+                    .build(),
+                fresh(WINDOW_SEVEN_DAY)
+                    .util(0.95)
+                    .status("allowed")
+                    .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS)
+                    .build(),
+            ],
+        ),
+        CacheTokenEstimate::zero(),
+    );
+
+    // When: the warning has no pressure-derived release.
+    let output = filter_for_model(&[warned.clone(), clean.clone()], MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("trace present");
+    let warned_trace = candidate_urgency_for(&trace, warned.upstream_id);
+
+    // Then: the existing 0.20 penalty and clean-peer preference remain intact.
+    assert_eq!(warned_trace.warning_multiplier, WARNING_MULTIPLIER);
+    assert_eq!(output.kept_upstream_ids, vec![clean.upstream_id]);
+}
+
+#[test]
+fn least_urgent_warning_window_gates_relaxation() {
+    // Given: one warning window is near reset, but another warning window has
+    // no pressure. Every request would debit both windows.
+    let warned = with_cache_tokens(
+        oauth_at_t0(
+            "mixed-warning-pressure",
+            1,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .util(0.98)
+                    .status("allowed_warning")
+                    .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS)
+                    .build(),
+                fresh(WINDOW_SEVEN_DAY)
+                    .util(0.98)
+                    .status("allowed_warning")
+                    .reset_at(T0_SECS + 4 * 60 * 60)
+                    .build(),
+            ],
+        ),
+        CacheTokenEstimate::zero(),
+    );
+    let clean = with_cache_tokens(
+        oauth_at_t0(
+            "clean-peer",
+            2,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .util(0.50)
+                    .status("allowed")
+                    .reset_at(T0_SECS + 2 * 60 * 60)
+                    .build(),
+                fresh(WINDOW_SEVEN_DAY)
+                    .util(0.95)
+                    .status("allowed")
+                    .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS)
+                    .build(),
+            ],
+        ),
+        CacheTokenEstimate::zero(),
+    );
+
+    // When: the candidate-level warning policy considers both warned windows.
+    let output = filter_for_model(&[warned.clone(), clean.clone()], MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("trace present");
+    let warned_trace = candidate_urgency_for(&trace, warned.upstream_id);
+
+    // Then: the zero-pressure 5h warning keeps the full penalty, preventing the
+    // urgent 7d window from spending a more constrained warned quota.
+    assert_eq!(warned_trace.warning_multiplier, WARNING_MULTIPLIER);
+    assert_eq!(output.kept_upstream_ids, vec![clean.upstream_id]);
+}
+
+#[test]
 fn identical_inputs_choose_the_same_winner_repeatedly() {
     // Given: a fixed near-cost bucket and request identity.
     let cheap = with_cache_tokens(

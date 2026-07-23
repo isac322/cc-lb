@@ -7,10 +7,10 @@ use http::StatusCode;
 use uuid::Uuid;
 
 use subscription_preference_v11_preview_support::{
-    PreviewFixture, exhausted_shared_quota, fable_quota,
+    PreviewFixture, clean_pressure_quota, exhausted_shared_quota, fable_quota,
     fable_quota_with_unobserved_shared_seven_day, fable_quota_without_shared_seven_day,
-    on_pace_quota, sonnet_quota, stale_exhausted_shared_quota, stale_overage_positive_quota,
-    urgent_quota,
+    far_reset_warning_quota, near_reset_warning_quota, on_pace_quota, sonnet_quota,
+    stale_exhausted_shared_quota, stale_overage_positive_quota, urgent_quota,
 };
 
 const REQUEST_ID: &str = "preview-v11-transition";
@@ -32,7 +32,7 @@ fn preview_selects_use_it_or_lose_it_candidate_and_traces_all_candidates() {
     assert_eq!(terminal_upstream(&before), Some(fixture.urgent_id));
     assert_eq!(
         before_trace.formula_version.as_deref(),
-        Some("cost-first-v1")
+        Some("cost-first-v2")
     );
     assert_eq!(before_trace.candidates.len(), 2);
     assert!(urgent_before.quota_urgency_5h.expect("urgent 5h") > 0.0);
@@ -96,7 +96,7 @@ fn preview_all_on_pace_uses_deterministic_uniform_factor() {
     // Then: v11 uses uniform neutral factors and a stable WRH winner.
     assert_eq!(first.winner_upstream_id, second.winner_upstream_id);
     assert_eq!(first.winner_upstream_name, second.winner_upstream_name);
-    assert_eq!(trace.formula_version.as_deref(), Some("cost-first-v1"));
+    assert_eq!(trace.formula_version.as_deref(), Some("cost-first-v2"));
     assert_eq!(trace.candidates.len(), 2);
     for assessed in &trace.candidates {
         assert_eq!(assessed.quota_urgency_5h, Some(0.0));
@@ -149,6 +149,25 @@ async fn handle_sonnet_missing_scoped_window_is_noop() {
 }
 
 #[tokio::test]
+async fn handle_near_reset_warning_consumes_expiring_quota() {
+    // Given: a warned 7d window has 2% remaining near reset and a clean peer
+    // has lower use-it-or-lose-it pressure.
+    let fixture = PreviewFixture::with_statuses(
+        near_reset_warning_quota(),
+        clean_pressure_quota(),
+        StatusCode::OK,
+        StatusCode::TOO_MANY_REQUESTS,
+    );
+
+    // When: a request traverses the real lifecycle filter and dispatcher.
+    let status = fixture.handle_model("claude-test").await;
+
+    // Then: the near-reset warned upstream is selected and returns 200.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fixture.dispatch_hosts(), vec!["urgent.invalid"]);
+}
+
+#[tokio::test]
 async fn handle_stale_exhausted_shared_quota_returns_503_without_dispatch() {
     let fixture = PreviewFixture::new(
         stale_exhausted_shared_quota(),
@@ -172,6 +191,24 @@ async fn handle_stale_overage_positive_returns_503_without_dispatch() {
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(fixture.dispatch_hosts().is_empty());
+}
+
+#[tokio::test]
+async fn handle_far_reset_warning_preserves_clean_peer_priority() {
+    // Given: the same 98%-utilized warning is far from reset.
+    let fixture = PreviewFixture::with_statuses(
+        far_reset_warning_quota(),
+        clean_pressure_quota(),
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::OK,
+    );
+
+    // When: a request traverses the real lifecycle filter and dispatcher.
+    let status = fixture.handle_model("claude-test").await;
+
+    // Then: the full warning penalty keeps traffic on the clean peer.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fixture.dispatch_hosts(), vec!["steady.invalid"]);
 }
 
 #[test]

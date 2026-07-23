@@ -3,6 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+### Changed
+
+- Subscription routing now relaxes the provider warning penalty only when every warned quota window is both past its warning threshold and at risk of expiring unused. The strict tier order and 5% cost gate remain unchanged, while a 98%-utilized weekly quota can consume more of its final 2% near reset.
+
 
 ### Fixed
 
