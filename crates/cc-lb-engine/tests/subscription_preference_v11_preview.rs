@@ -3,9 +3,12 @@ mod subscription_preference_v11_preview_support;
 
 use cc_lb_domain::{CandidateUrgency, SubscriptionPreferenceTrace};
 use cc_lb_engine::lifecycle::PreviewRouteOutcome;
+use http::StatusCode;
 use uuid::Uuid;
 
-use subscription_preference_v11_preview_support::{PreviewFixture, on_pace_quota, urgent_quota};
+use subscription_preference_v11_preview_support::{
+    PreviewFixture, fable_quota, on_pace_quota, urgent_quota,
+};
 
 const REQUEST_ID: &str = "preview-v11-transition";
 
@@ -101,6 +104,80 @@ fn preview_all_on_pace_uses_deterministic_uniform_factor() {
     }
     print_outcome("uniform_first", &first);
     print_outcome("uniform_second", &second);
+}
+
+#[test]
+fn preview_fable_request_excludes_exhausted_scoped_quota() {
+    // Given: shared quota is healthy on both OAuth upstreams, while only the
+    // first upstream has exhausted its Fable-scoped weekly quota.
+    let fixture = PreviewFixture::new(fable_quota(1.0), fable_quota(0.2));
+
+    // When: the default lifecycle preview evaluates a real Fable request body.
+    let outcome = fixture.preview_model("preview-fable-exhausted", "claude-fable-5");
+    let trace = subscription_trace(&outcome);
+
+    // Then: the exhausted upstream is absent from the assessed candidates and
+    // cannot survive through terminal selection.
+    assert_eq!(outcome.winner_upstream_id, Some(fixture.steady_id));
+    assert_eq!(terminal_upstream(&outcome), Some(fixture.steady_id));
+    assert_eq!(trace.candidates.len(), 1);
+    assert_eq!(trace.candidates[0].upstream_id, fixture.steady_id);
+}
+
+#[tokio::test]
+async fn handle_fable_excludes_exhausted_scoped_upstream() {
+    // Given: dispatching the exhausted first upstream would return 429, while
+    // the second upstream has healthy Fable quota and returns 200.
+    let fixture = PreviewFixture::with_statuses(
+        fable_quota(1.0),
+        fable_quota(0.2),
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::OK,
+    );
+
+    // When: the real proxy lifecycle handles a Fable request.
+    let status = fixture.handle_model("claude-fable-5").await;
+
+    // Then: only the healthy upstream is dispatched and the client sees 200.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fixture.dispatch_hosts(), vec!["steady.invalid"]);
+}
+
+#[tokio::test]
+async fn handle_non_fable_ignores_fable_scoped_exhaustion() {
+    // Given: the first upstream is exhausted only in the Fable-scoped window.
+    let fixture = PreviewFixture::with_statuses(
+        fable_quota(1.0),
+        fable_quota(0.2),
+        StatusCode::OK,
+        StatusCode::OK,
+    );
+
+    // When: a non-Fable request uses the same quota snapshots.
+    let status = fixture.handle_model("claude-sonnet-4-5").await;
+
+    // Then: 7d_fable is ignored and deterministic first-pick remains unchanged.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fixture.dispatch_hosts(), vec!["urgent.invalid"]);
+}
+
+#[tokio::test]
+async fn handle_fable_propagates_selected_upstream_429_without_retrying_exhausted() {
+    // Given: the exhausted first upstream would return 200 if called, while the
+    // healthy Fable candidate returns a provider 429.
+    let fixture = PreviewFixture::with_statuses(
+        fable_quota(1.0),
+        fable_quota(0.2),
+        StatusCode::OK,
+        StatusCode::TOO_MANY_REQUESTS,
+    );
+
+    // When: the healthy candidate is selected but its provider rejects the request.
+    let status = fixture.handle_model("claude-fable-5").await;
+
+    // Then: the provider failure propagates without falling back to exhausted quota.
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(fixture.dispatch_hosts(), vec!["steady.invalid"]);
 }
 
 fn subscription_trace(outcome: &PreviewRouteOutcome) -> &SubscriptionPreferenceTrace {

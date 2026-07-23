@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_clock::TestClock;
 use cc_lb_domain::{
@@ -13,15 +14,19 @@ use cc_lb_engine::api_keys::principal_view::{
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_engine::lifecycle::{PreviewRouteInput, PreviewRouteOutcome};
 use cc_lb_engine::{
-    DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig, SubscriptionQuotaCacheLike,
+    Body, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
+    SubscriptionQuotaCacheLike, UpstreamDispatch,
 };
 use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::SubscriptionQuotaSample;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
-use http::HeaderMap;
+use cc_lb_upstream::SignedRequest;
+use http::{HeaderMap, Response, StatusCode};
+use parking_lot::Mutex as ParkingMutex;
+use url::Url;
 use uuid::Uuid;
 
-use super::common::{DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState};
+use super::common::{RecordingHook, TestAuthn, TestState, collect_body, messages_request};
 
 const PRINCIPAL: &str = "principal-test";
 const NOW: u64 = 1_700_000_000;
@@ -29,6 +34,7 @@ const NOW: u64 = 1_700_000_000;
 pub struct PreviewFixture {
     lifecycle: Lifecycle,
     cache: Arc<MutableQuotaCache>,
+    dispatch: Arc<RecordingDispatch>,
     pub urgent_id: Uuid,
     pub steady_id: Uuid,
 }
@@ -38,30 +44,60 @@ impl PreviewFixture {
         urgent: Vec<SubscriptionQuotaCandidateSnapshot>,
         steady: Vec<SubscriptionQuotaCandidateSnapshot>,
     ) -> Self {
+        Self::with_statuses(urgent, steady, StatusCode::OK, StatusCode::OK)
+    }
+
+    pub fn with_statuses(
+        urgent: Vec<SubscriptionQuotaCandidateSnapshot>,
+        steady: Vec<SubscriptionQuotaCandidateSnapshot>,
+        urgent_status: StatusCode,
+        steady_status: StatusCode,
+    ) -> Self {
         let urgent_id = Uuid::from_u128(1);
         let steady_id = Uuid::from_u128(2);
         let cache = Arc::new(MutableQuotaCache::new(HashMap::from([
             (urgent_id, urgent),
             (steady_id, steady),
         ])));
-        let lifecycle = lifecycle(Arc::clone(&cache), [urgent_id, steady_id]);
+        let dispatch = Arc::new(RecordingDispatch::new(urgent_status, steady_status));
+        let lifecycle = lifecycle(Arc::clone(&cache), [urgent_id, steady_id], dispatch.clone());
         Self {
             lifecycle,
             cache,
+            dispatch,
             urgent_id,
             steady_id,
         }
     }
 
     pub fn preview(&self, request_id: &str) -> PreviewRouteOutcome {
+        self.preview_model(request_id, "claude-test")
+    }
+
+    pub fn preview_model(&self, request_id: &str, model: &str) -> PreviewRouteOutcome {
+        let body = format!(r#"{{"model":"{model}","messages":[]}}"#);
         self.lifecycle
             .preview_route(PreviewRouteInput {
                 principal_id: PRINCIPAL.to_owned(),
                 request_id: Some(request_id.to_owned()),
                 headers: HeaderMap::new(),
-                body_bytes: Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
+                body_bytes: Bytes::from(body),
             })
             .expect("preview succeeds")
+    }
+
+    pub async fn handle_model(&self, model: &str) -> StatusCode {
+        let body = format!(r#"{{"model":"{model}","messages":[]}}"#);
+        let response = self
+            .lifecycle
+            .handle(messages_request(Bytes::from(body)))
+            .await
+            .expect("handle succeeds");
+        collect_body(response).await.0
+    }
+
+    pub fn dispatch_hosts(&self) -> Vec<String> {
+        self.dispatch.calls.lock().clone()
     }
 
     pub fn swap_quota_states(&self) {
@@ -103,14 +139,14 @@ impl SubscriptionQuotaCacheLike for MutableQuotaCache {
     }
 }
 
-fn lifecycle(cache: Arc<MutableQuotaCache>, ids: [Uuid; 2]) -> Lifecycle {
+fn lifecycle(
+    cache: Arc<MutableQuotaCache>,
+    ids: [Uuid; 2],
+    dispatcher: Arc<dyn UpstreamDispatch>,
+) -> Lifecycle {
     let state = TestState::default();
     let principal_view = principal_view();
-    let authn = TestAuthn::with_principal_view(state.clone(), Arc::clone(&principal_view));
-    let dispatcher = Arc::new(MockDispatch {
-        state,
-        mode: DispatchMode::Statuses(Arc::new(Mutex::new(vec![http::StatusCode::OK].into()))),
-    });
+    let authn = TestAuthn::with_principal_view(state, Arc::clone(&principal_view));
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
         .global_router(Arc::new(NoopRouter))
@@ -156,6 +192,9 @@ fn upstream(id: Uuid, name: &str) -> UpstreamRecord {
         id,
         name: name.to_owned(),
         kind: UpstreamKind::AnthropicOauth,
+        base_url: Some(
+            Url::parse(&format!("http://{name}.invalid/")).expect("test upstream URL parses"),
+        ),
         enabled: true,
         revision: 1,
         ..UpstreamRecord::default()
@@ -170,6 +209,14 @@ pub fn on_pace_quota() -> Vec<SubscriptionQuotaCandidateSnapshot> {
     vec![
         quota("5h", 0.9, NOW + 1_800),
         quota("7d", 0.95, NOW + 60_480),
+    ]
+}
+
+pub fn fable_quota(fable_utilization: f64) -> Vec<SubscriptionQuotaCandidateSnapshot> {
+    vec![
+        quota("5h", 0.2, NOW + 1_800),
+        quota("7d", 0.2, NOW + 60_480),
+        quota("7d_fable", fable_utilization, NOW + 60_480),
     ]
 }
 
@@ -193,6 +240,50 @@ fn quota(window: &str, utilization: f64, reset: u64) -> SubscriptionQuotaCandida
         overage_in_use: None,
         overage_period_monthly_utilization: None,
         upgrade_paths: None,
+    }
+}
+
+struct RecordingDispatch {
+    calls: ParkingMutex<Vec<String>>,
+    statuses: HashMap<String, StatusCode>,
+}
+
+impl RecordingDispatch {
+    fn new(urgent_status: StatusCode, steady_status: StatusCode) -> Self {
+        Self {
+            calls: ParkingMutex::new(Vec::new()),
+            statuses: HashMap::from([
+                ("urgent.invalid".to_owned(), urgent_status),
+                ("steady.invalid".to_owned(), steady_status),
+            ]),
+        }
+    }
+}
+
+#[async_trait]
+impl UpstreamDispatch for RecordingDispatch {
+    async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let host = request
+            .url()
+            .host_str()
+            .expect("test request has host")
+            .to_owned();
+        self.calls.lock().push(host.clone());
+        let status = self.statuses[&host];
+        let body = if status.is_success() {
+            Bytes::from_static(
+                br#"{"type":"message","usage":{"input_tokens":1,"output_tokens":1}}"#,
+            )
+        } else {
+            Bytes::from_static(
+                br#"{"type":"error","error":{"type":"rate_limit_error","message":"quota exhausted"}}"#,
+            )
+        };
+        Ok(Response::builder()
+            .status(status)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .expect("test response builds"))
     }
 }
 
