@@ -55,6 +55,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
       - name: Validate managed crate version changes
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}

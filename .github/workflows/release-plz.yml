@@ -36,16 +36,16 @@ concurrency:
 jobs:
   preflight:
     name: preflight publish-check
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     permissions:
       contents: read
     env:
       # cc-lb-plugin-conformance's semver check transitively pulls
       # cc-lb-runtime-wasmtime, whose build.rs pre-builds wasm32 test
       # fixtures. That pre-build has no bearing on the rustdoc surface
-      # semver-checks inspects, and it fails on runners without a
-      # wasm32-unknown-unknown target — which ubuntu-latest is. Skip
-      # via the same escape hatch that gates the release step below.
+      # semver-checks inspects, and it fails because release jobs do not install
+      # the wasm32-unknown-unknown target. Skip via the same escape hatch that
+      # gates the release step below.
       CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
@@ -72,7 +72,7 @@ jobs:
   release:
     name: release-plz release
     needs: preflight
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     permissions:
       contents: write
       pull-requests: write
@@ -109,7 +109,7 @@ jobs:
 
   release-pr:
     name: release-plz release-pr
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     permissions:
       contents: write
       pull-requests: write
