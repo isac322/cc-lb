@@ -127,6 +127,8 @@ jobs:
         with:
           version: v3.16.4
 
+      - uses: dtolnay/rust-toolchain@1.97.0
+
       - name: Inspect release target
         id: release
         run: |
@@ -136,8 +138,6 @@ jobs:
           printf 'version=%s\ntarget_sha=%s\nsource_date_epoch=%s\n' \
             "$version" "$(git rev-parse HEAD)" "$(git show -s --format=%ct HEAD)" \
             >> "$GITHUB_OUTPUT"
-
-      - uses: dtolnay/rust-toolchain@1.97.0
 
       # release-plz 0.3.160 supports git-only releases, but its release command
       # still filters out manifest-private packages before applying that mode.
