@@ -265,6 +265,7 @@ mod tests {
     async fn postgres_reconnects_after_terminate(
         notifier: Arc<cc_lb_storage_postgres::PostgresStorage>,
         pool: &sqlx::PgPool,
+        listener_application_name: &str,
     ) -> Result<()> {
         let cancel = CancellationToken::new();
         let handle = spawn_run(Arc::clone(&notifier), cancel.clone());
@@ -276,8 +277,8 @@ mod tests {
             "before-terminate",
         )
         .await?;
-        let terminated_pid = terminate_listener_backend(pool).await?;
-        wait_for_reconnected_listener(pool, terminated_pid).await?;
+        let terminated_pid = terminate_listener_backend(pool, listener_application_name).await?;
+        wait_for_reconnected_listener(pool, listener_application_name, terminated_pid).await?;
         emit_until_received(
             pool,
             &mut receiver,
@@ -298,9 +299,13 @@ mod tests {
         Ok(())
     }
 
-    async fn terminate_listener_backend(pool: &sqlx::PgPool) -> Result<i32> {
+    async fn terminate_listener_backend(
+        pool: &sqlx::PgPool,
+        listener_application_name: &str,
+    ) -> Result<i32> {
         for _ in 0..100 {
-            let pid = sqlx::query_scalar::<_, Option<i32>>("SELECT pid FROM pg_stat_activity WHERE query LIKE 'LISTEN %cclb_%_changed%' AND state = 'idle' ORDER BY backend_start DESC LIMIT 1")
+            let pid = sqlx::query_scalar::<_, Option<i32>>("SELECT pid FROM pg_stat_activity WHERE application_name = $1 AND query LIKE 'LISTEN %cclb_%_changed%' AND state = 'idle' ORDER BY backend_start DESC LIMIT 1")
+                .bind(listener_application_name)
                 .fetch_one(pool)
                 .await?;
             if let Some(pid) = pid {
@@ -316,9 +321,14 @@ mod tests {
         anyhow::bail!("timed out waiting for postgres listener backend")
     }
 
-    async fn wait_for_reconnected_listener(pool: &sqlx::PgPool, terminated_pid: i32) -> Result<()> {
+    async fn wait_for_reconnected_listener(
+        pool: &sqlx::PgPool,
+        listener_application_name: &str,
+        terminated_pid: i32,
+    ) -> Result<()> {
         for _ in 0..500 {
-            let pid = sqlx::query_scalar::<_, i32>("SELECT pid FROM pg_stat_activity WHERE query LIKE 'LISTEN %cclb_%_changed%' AND state = 'idle' AND pid <> $1 ORDER BY backend_start DESC LIMIT 1")
+            let pid = sqlx::query_scalar::<_, i32>("SELECT pid FROM pg_stat_activity WHERE application_name = $1 AND query LIKE 'LISTEN %cclb_%_changed%' AND state = 'idle' AND pid <> $2 ORDER BY backend_start DESC LIMIT 1")
+                .bind(listener_application_name)
                 .bind(terminated_pid)
                 .fetch_optional(pool)
                 .await?;
@@ -377,9 +387,12 @@ mod tests {
         let Some(fixture) = PostgresFixture::create().await? else {
             return Ok(());
         };
-        let result =
-            postgres_reconnects_after_terminate(Arc::new(fixture.storage.clone()), &fixture.pool)
-                .await;
+        let result = postgres_reconnects_after_terminate(
+            Arc::new(fixture.storage.clone()),
+            &fixture.pool,
+            &fixture.schema,
+        )
+        .await;
         fixture.teardown().await?;
         result
     }
@@ -409,8 +422,8 @@ mod tests {
             )))
             .execute(&admin_pool)
             .await?;
-            let pool = schema_pool(&url, &schema, 4).await?;
-            let listener_pool = schema_pool(&url, &schema, 1).await?;
+            let pool = schema_pool(&url, &schema, 4, None).await?;
+            let listener_pool = schema_pool(&url, &schema, 1, Some(&schema)).await?;
             let storage = cc_lb_storage_postgres::PostgresStorage::new_with_listener_pool(
                 pool.clone(),
                 listener_pool.clone(),
@@ -439,10 +452,18 @@ mod tests {
         }
     }
 
-    async fn schema_pool(url: &str, schema: &str, max_connections: u32) -> Result<sqlx::PgPool> {
+    async fn schema_pool(
+        url: &str,
+        schema: &str,
+        max_connections: u32,
+        application_name: Option<&str>,
+    ) -> Result<sqlx::PgPool> {
         let search_path = format!("{}, public", quote_ident(schema));
-        let options =
+        let mut options =
             PgConnectOptions::from_str(url)?.options([("search_path", search_path.as_str())]);
+        if let Some(application_name) = application_name {
+            options = options.application_name(application_name);
+        }
         Ok(PgPoolOptions::new()
             .max_connections(max_connections)
             .connect_with(options)
