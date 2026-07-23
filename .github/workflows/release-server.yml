@@ -33,6 +33,7 @@ jobs:
     runs-on: oracle4-cc-lb
     permissions:
       contents: write
+      pull-requests: read
     outputs:
       action: ${{ steps.released.outputs.action || steps.resumed.outputs.action || 'noop' }}
       version: ${{ steps.released.outputs.version || steps.resumed.outputs.version }}
