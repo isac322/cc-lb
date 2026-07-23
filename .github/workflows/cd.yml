@@ -59,6 +59,8 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
+      - uses: dtolnay/rust-toolchain@1.97.0
+
       - name: Validate version and source ref
         env:
           VERSION: ${{ inputs.version }}
