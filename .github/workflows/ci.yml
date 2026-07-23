@@ -45,9 +45,9 @@ jobs:
 
   guard-crate-versions:
     name: guard crate versions
-    # Versions under crates/ are owned by release-plz. Block manual bumps in
-    # feature PRs (they desync release-plz's baseline and make its release PR
-    # conflict forever). release-plz's own PRs bump versions and are exempt.
+    # release-plz owns literal crate versions. A dedicated release PR may bump
+    # the shared workspace version for cc-lb-server after strict validation.
+    # release-plz's own PRs remain exempt.
     if: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-') }}
     runs-on: oracle4-cc-lb
     steps:
@@ -55,14 +55,208 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Reject manual crate version bumps under crates/
+      - name: Validate managed crate version changes
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
-          git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
-          python3 scripts/check-crate-versions.py --base "$RUNNER_TEMP/base" --head .
-          git worktree remove --force "$RUNNER_TEMP/base"
+          base_tree="$RUNNER_TEMP/base"
+          cleanup() {
+            git worktree remove --force "$base_tree" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          git worktree add --detach "$base_tree" "$BASE_SHA"
+
+          args=(
+            --base "$base_tree"
+            --head .
+            --pr-title "$PR_TITLE"
+          )
+          while IFS= read -r path; do
+            args+=(--changed-file "$path")
+          done < <(git diff --name-only "$BASE_SHA"...HEAD)
+          while IFS= read -r tag; do
+            args+=(--existing-tag "$tag")
+          done < <(git tag --list 'cc-lb-v*')
+
+          python3 scripts/check-crate-versions.py "${args[@]}"
+      - name: Test managed version validator
+        run: python3 scripts/test_check_crate_versions.py -v
+      - name: Test chart metadata helper
+        run: python3 scripts/test_chart_metadata.py -v
+      - name: Test Docker release alias selection
+        run: node --test scripts/test_release_aliases.mjs
+
+  release-pr-artifacts:
+    name: verify server release artifacts
+    needs: guard-crate-versions
+    if: >-
+      github.event_name == 'pull_request' &&
+      startsWith(github.event.pull_request.title, 'chore: release cc-lb v')
+    runs-on: oracle4-cc-lb
+    permissions:
+      contents: read
+    env:
+      IMAGE: cc-lb:release-pr-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Attach release-plz validation branch
+        run: |
+          set -euo pipefail
+          git fetch origin "+refs/heads/$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
+          git checkout -B release-plz-validation HEAD
+          git branch --set-upstream-to="origin/$GITHUB_BASE_REF" release-plz-validation
+
+
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: network=host
+          buildkitd-flags: --allow-insecure-entitlement network.host
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: actionlint
+
+      - uses: azure/setup-helm@v5.0.1
+        with:
+          version: v3.16.4
+
+      - name: Inspect release target
+        id: release
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "cc-lb-server") | .version')
+          printf 'version=%s\ntarget_sha=%s\nsource_date_epoch=%s\n' \
+            "$version" "$(git rev-parse HEAD)" "$(git show -s --format=%ct HEAD)" \
+            >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@1.97.0
+
+      # release-plz 0.3.160 supports git-only releases, but its release command
+      # still filters out manifest-private packages before applying that mode.
+      - name: Expose private server package to release-plz
+        run: |
+          set -euo pipefail
+          manifest=crates/cc-lb-server/Cargo.toml
+          backup="$RUNNER_TEMP/cc-lb-server-Cargo.toml"
+          cp "$manifest" "$backup"
+          if [ "$(grep -cx 'publish = false' "$manifest")" != "1" ]; then
+            echo "::error::cc-lb-server publish=false marker not found exactly once"
+            exit 1
+          fi
+          sed -i '/^publish = false$/d' "$manifest"
+
+
+      - name: Install and dry-run release-plz server release
+        uses: MarcoIeni/release-plz-action@v0.5.131
+        with:
+          command: release
+          config: release-plz-server.toml
+          version: 0.3.160
+          dry_run: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Git-only dry-runs intentionally return releases=[].
+      - name: Verify release-plz server selection
+        env:
+          EXPECTED_VERSION: ${{ steps.release.outputs.version }}
+          GIT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          output=$(release-plz release \
+            --dry-run \
+            --config release-plz-server.toml \
+            --repo-url "https://github.com/$GITHUB_REPOSITORY" \
+            --forge github \
+            -v 2>&1)
+          printf '%s\n' "$output"
+          grep -F "cc-lb-server $EXPECTED_VERSION:" <<< "$output"
+          grep -F "creation of tag 'cc-lb-v$EXPECTED_VERSION'" <<< "$output"
+          grep -F "creation of git release" <<< "$output"
+
+      - name: Restore private server manifest
+        if: always()
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/cc-lb-server-Cargo.toml" crates/cc-lb-server/Cargo.toml
+          git diff --exit-code -- crates/cc-lb-server/Cargo.toml
+
+
+      - name: Build production image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE }}
+          network: host
+          allow: network.host
+          build-args: |
+            GIT_SHA=${{ steps.release.outputs.target_sha }}
+            SOURCE_DATE_EPOCH=${{ steps.release.outputs.source_date_epoch }}
+            SCCACHE_BUCKET=sccache
+            SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
+            SCCACHE_REGION=garage
+            SCCACHE_S3_USE_SSL=false
+          secret-envs: |
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+
+      - name: Smoke-test production image
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          output=$(docker run --rm "$IMAGE" --version)
+          printf '%s\n' "$output"
+          if ! printf '%s' "$output" | grep -Fq "cc-lb $VERSION ("; then
+            echo "::error::binary version output '$output' does not contain '$VERSION'"
+            exit 1
+          fi
+
+      - name: Lint and verify release chart
+        env:
+          SOURCE_SHA: ${{ steps.release.outputs.target_sha }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          chart_dir="$RUNNER_TEMP/cc-lb-release-chart"
+          package_dir="$RUNNER_TEMP/cc-lb-release-package"
+          command rm -rf "$chart_dir" "$package_dir"
+          command cp -R deploy/helm/cc-lb "$chart_dir"
+          mkdir -p "$package_dir/unpacked"
+          python3 scripts/chart_metadata.py stamp \
+            --chart "$chart_dir/Chart.yaml" \
+            --revision "$SOURCE_SHA"
+          helm lint "$chart_dir" --set secrets.masterKey=ci-lint-placeholder
+          helm package "$chart_dir" \
+            --version "$VERSION" \
+            --app-version "$VERSION" \
+            --destination "$package_dir"
+          tar -xzf "$package_dir/cc-lb-$VERSION.tgz" \
+            -C "$package_dir/unpacked"
+          python3 scripts/chart_metadata.py verify \
+            --chart "$package_dir/unpacked/cc-lb/Chart.yaml" \
+            --version "$VERSION" \
+            --revision "$SOURCE_SHA"
+
+      - name: Lint release workflows
+        run: >-
+          actionlint
+          .github/workflows/ci.yml
+          .github/workflows/cd.yml
+          .github/workflows/publish-chart.yml
+          .github/workflows/release-server.yml
+          .github/workflows/release-plz.yml
+
+      - name: Clean release image
+        if: always()
+        run: docker image rm -f "$IMAGE" || true
 
   clippy:
     runs-on: oracle4-cc-lb

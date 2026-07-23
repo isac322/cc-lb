@@ -1,0 +1,229 @@
+name: release-server
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'Cargo.toml'
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Start a missed release or resume an existing draft'
+        required: true
+        type: choice
+        options: [start, resume]
+      version:
+        description: 'Cargo server SemVer without a tag prefix'
+        required: true
+        type: string
+      target_sha:
+        description: 'Reviewed release PR merge commit or existing release tag commit'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-server
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: release-plz server release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      action: ${{ steps.released.outputs.action || steps.resumed.outputs.action || 'noop' }}
+      version: ${{ steps.released.outputs.version || steps.resumed.outputs.version }}
+      tag: ${{ steps.released.outputs.tag || steps.resumed.outputs.tag }}
+      target_sha: ${{ steps.target.outputs.target_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release target
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_OPERATION: ${{ inputs.operation }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          target_sha=$(git rev-parse HEAD)
+          git fetch origin --tags '+refs/heads/master:refs/remotes/origin/master'
+          git merge-base --is-ancestor "$target_sha" origin/master
+
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          parent_version=$(git show "$target_sha^:Cargo.toml" | python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["workspace"]["package"]["version"])')
+          version_changed=false
+          if [ "$version" != "$parent_version" ]; then
+            version_changed=true
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            operation=$INPUT_OPERATION
+            if [ "$INPUT_VERSION" != "$version" ]; then
+              echo "::error::requested version '$INPUT_VERSION' does not match target version '$version'"
+              exit 1
+            fi
+            if [ "$version_changed" != "true" ]; then
+              echo "::error::manual $operation target must change the workspace version"
+              exit 1
+            fi
+          else
+            operation=auto
+          fi
+
+          printf 'operation=%s\nversion=%s\nparent_version=%s\nversion_changed=%s\ntag=cc-lb-v%s\ntarget_sha=%s\n' \
+            "$operation" "$version" "$parent_version" "$version_changed" "$version" "$target_sha" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Attach release-plz branch
+        if: steps.target.outputs.version_changed == 'true' && steps.target.outputs.operation != 'resume'
+        env:
+          TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          git checkout -B release-plz-server "$TARGET_SHA"
+          git branch --set-upstream-to=origin/master release-plz-server
+
+      - uses: dtolnay/rust-toolchain@1.97.0
+        if: steps.target.outputs.version_changed == 'true' && steps.target.outputs.operation != 'resume'
+
+      # release-plz 0.3.160 supports git-only releases, but its release command
+      # still filters out manifest-private packages before applying that mode.
+      - name: Expose private server package to release-plz
+        if: steps.target.outputs.version_changed == 'true' && steps.target.outputs.operation != 'resume'
+        run: |
+          set -euo pipefail
+          manifest=crates/cc-lb-server/Cargo.toml
+          backup="$RUNNER_TEMP/cc-lb-server-Cargo.toml"
+          cp "$manifest" "$backup"
+          if [ "$(grep -cx 'publish = false' "$manifest")" != "1" ]; then
+            echo "::error::cc-lb-server publish=false marker not found exactly once"
+            exit 1
+          fi
+          sed -i '/^publish = false$/d' "$manifest"
+
+      - name: Run release-plz server release
+        id: release-plz
+        if: steps.target.outputs.version_changed == 'true' && steps.target.outputs.operation != 'resume'
+        uses: MarcoIeni/release-plz-action@v0.5.131
+        with:
+          command: release
+          config: release-plz-server.toml
+          version: 0.3.160
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore private server manifest
+        if: always() && steps.target.outputs.version_changed == 'true' && steps.target.outputs.operation != 'resume'
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/cc-lb-server-Cargo.toml" crates/cc-lb-server/Cargo.toml
+          git diff --exit-code -- crates/cc-lb-server/Cargo.toml
+
+      - name: Validate release-plz output
+        id: released
+        if: steps.target.outputs.version_changed == 'true' && steps.target.outputs.operation != 'resume'
+        env:
+          EXPECTED_TAG: ${{ steps.target.outputs.tag }}
+          EXPECTED_VERSION: ${{ steps.target.outputs.version }}
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          set -euo pipefail
+          matches=$(printf '%s' "${RELEASES:-[]}" | jq -c '[.[] | select(.package_name == "cc-lb-server")]')
+          count=$(printf '%s' "$matches" | jq 'length')
+          if [ "$count" != "1" ]; then
+            echo "::error::release-plz must emit exactly one cc-lb-server release, got $count"
+            exit 1
+          fi
+          version=$(printf '%s' "$matches" | jq -r '.[0].version')
+          tag=$(printf '%s' "$matches" | jq -r '.[0].tag')
+          if [ "$version" != "$EXPECTED_VERSION" ] || [ "$tag" != "$EXPECTED_TAG" ]; then
+            echo "::error::release-plz emitted version '$version' tag '$tag'; expected '$EXPECTED_VERSION' '$EXPECTED_TAG'"
+            exit 1
+          fi
+          printf 'action=start\nversion=%s\ntag=%s\n' "$version" "$tag" >> "$GITHUB_OUTPUT"
+
+
+      - name: Require matching draft Release for resume
+        if: steps.target.outputs.operation == 'resume'
+        uses: actions/github-script@v9
+        env:
+          TAG: ${{ steps.target.outputs.tag }}
+        with:
+          script: |
+            const releases = await github.paginate(
+              github.rest.repos.listReleases,
+              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 },
+            );
+            const matches = releases.filter((release) => release.tag_name === process.env.TAG);
+            if (matches.length !== 1) {
+              throw new Error(`expected one Release for ${process.env.TAG}, found ${matches.length}`);
+            }
+            if (!matches[0].draft) {
+              throw new Error(`Release ${process.env.TAG} is not a draft`);
+            }
+
+      - name: Validate immutable resume tag
+        id: resumed
+        if: steps.target.outputs.operation == 'resume'
+        env:
+          TAG: ${{ steps.target.outputs.tag }}
+          TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+          VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch origin "refs/tags/$TAG:refs/tags/$TAG"
+          tag_sha=$(git rev-parse "$TAG^{commit}")
+          if [ "$tag_sha" != "$TARGET_SHA" ]; then
+            echo "::error::immutable tag points to '$tag_sha', expected '$TARGET_SHA'"
+            exit 1
+          fi
+          printf 'action=resume\nversion=%s\ntag=%s\n' "$VERSION" "$TAG" >> "$GITHUB_OUTPUT"
+
+  publish-docker:
+    name: publish docker image
+    needs: prepare
+    if: needs.prepare.outputs.action == 'start' || needs.prepare.outputs.action == 'resume'
+    uses: ./.github/workflows/cd.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      source_ref: ${{ needs.prepare.outputs.tag }}
+    secrets: inherit
+
+  publish-chart:
+    name: publish helm chart
+    needs: [prepare, publish-docker]
+    if: needs.prepare.outputs.action == 'start' || needs.prepare.outputs.action == 'resume'
+    uses: ./.github/workflows/publish-chart.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      source_ref: ${{ needs.prepare.outputs.tag }}
+    secrets: inherit
+
+  publish-release:
+    name: publish GitHub Release
+    needs: [prepare, publish-docker, publish-chart]
+    if: needs.prepare.outputs.action == 'start' || needs.prepare.outputs.action == 'resume'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release edit "$TAG" --draft=false

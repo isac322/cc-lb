@@ -1,0 +1,31 @@
+# Server-only release-plz config. The regular release-plz.toml remains limited
+# to crates.io packages and release PR generation.
+#
+# release-plz 0.3.160 filters manifest-private packages before its git-only
+# release path. The workflows temporarily remove cc-lb-server's publish=false
+# marker from the checkout; publish=false below still blocks registry uploads.
+
+[workspace]
+release = false
+
+[[package]]
+name = "cc-lb-server"
+release = true
+git_only = true
+publish = false
+semver_check = false
+changelog_update = false
+changelog_path = "CHANGELOG.md"
+git_tag_name = "cc-lb-v{{ version }}"
+git_release_name = "cc-lb {{ version }}"
+git_release_type = "auto"
+git_release_draft = true
+git_release_latest = false
+git_release_body = """
+{{ changelog }}
+
+## Artifacts
+
+- Docker: `ghcr.io/isac322/cc-lb:{{ version }}`
+- Helm: `oci://ghcr.io/isac322/charts/cc-lb --version {{ version }}`
+"""
