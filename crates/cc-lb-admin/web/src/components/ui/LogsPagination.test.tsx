@@ -18,6 +18,7 @@ describe('LogsPagination', () => {
         pageCount={10}
         totalRows={450}
         pageSize={50}
+        hasMore={false}
         onPrev={onPrev}
         onNext={onNext}
       />,
@@ -51,6 +52,7 @@ describe('LogsPagination', () => {
         pageCount={9}
         totalRows={450}
         pageSize={50}
+        hasMore={false}
         onPrev={onPrev}
         onNext={onNext}
       />,
@@ -68,6 +70,44 @@ describe('LogsPagination', () => {
     expect(nextButton.textContent).toContain('Next');
   });
 
+  it('keeps Next enabled and avoids an exact count while older rows exist', () => {
+    render(
+      <LogsPagination
+        page={8}
+        pageCount={9}
+        totalRows={450}
+        pageSize={50}
+        hasMore
+        onPrev={vi.fn()}
+        onNext={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('Showing 401–450 of 450+')).toBeDefined();
+    expect(screen.getByText('Page 9 of 9+')).toBeDefined();
+    expect(
+      screen
+        .getByRole('button', { name: 'Next page' })
+        .hasAttribute('disabled'),
+    ).toBe(false);
+  });
+
+  it('caps the open-ended row label at 999+', () => {
+    render(
+      <LogsPagination
+        page={19}
+        pageCount={24}
+        totalRows={1_200}
+        pageSize={50}
+        hasMore
+        onPrev={vi.fn()}
+        onNext={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('Showing 951–1000 of 999+')).toBeDefined();
+  });
+
   it('renders correctly on a single page', () => {
     const onPrev = vi.fn();
     const onNext = vi.fn();
@@ -78,6 +118,7 @@ describe('LogsPagination', () => {
         pageCount={1}
         totalRows={30}
         pageSize={50}
+        hasMore={false}
         onPrev={onPrev}
         onNext={onNext}
       />,
@@ -105,6 +146,7 @@ describe('LogsPagination', () => {
         pageCount={1}
         totalRows={0}
         pageSize={50}
+        hasMore={false}
         onPrev={onPrev}
         onNext={onNext}
       />,
@@ -132,6 +174,7 @@ describe('LogsPagination', () => {
         pageCount={10}
         totalRows={450}
         pageSize={50}
+        hasMore={false}
         onPrev={onPrev}
         onNext={onNext}
       />,

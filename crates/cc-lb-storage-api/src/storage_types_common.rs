@@ -21,6 +21,7 @@ impl BackendKind {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RequestEventStreamFilters {
     pub principal_id: Option<String>,
+    pub thread_id: Option<String>,
     pub model: Option<String>,
     pub upstream: Option<cc_lb_request_log::RequestEventUpstream>,
     pub upstream_id: Option<Uuid>,
@@ -215,6 +216,11 @@ pub struct UsageRollup {
     #[serde(default)]
     pub upstream_body_ms_sum: u64,
     pub virtual_cost_micros: u64,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverviewExcludedErrorBucket {
+    pub bucket_start: u64,
+    pub error_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventUpstream, StorageError, StorageResult, UsageRollup,
-    UsageRollupResolution, UsageRollupRun, UsageRollupStore,
+    OverviewExcludedErrorBucket, RequestEvent, RequestEventUpstream, StorageError, StorageResult,
+    UsageRollup, UsageRollupResolution, UsageRollupRun, UsageRollupStore,
 };
 use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -165,6 +165,43 @@ impl UsageRollupStore for PostgresStorage {
 
         rows.into_iter().map(row_to_usage_rollup).collect()
     }
+    async fn query_overview_excluded_error_buckets_in_range(
+        &self,
+        resolution: UsageRollupResolution,
+        window_start_unix_secs: u64,
+        window_end_unix_secs: u64,
+    ) -> StorageResult<Vec<OverviewExcludedErrorBucket>> {
+        if window_end_unix_secs < window_start_unix_secs {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT bucket_start_unix_secs, error_count \
+             FROM overview_excluded_error_rollups_v1 \
+             WHERE resolution = $1 AND bucket_start_unix_secs >= $2 AND bucket_start_unix_secs < $3 \
+             ORDER BY bucket_start_unix_secs ASC",
+        )
+        .bind(resolution.as_str())
+        .bind(u64_to_i64(
+            window_start_unix_secs,
+            "overview excluded error range start",
+        )?)
+        .bind(u64_to_i64(
+            window_end_unix_secs,
+            "overview excluded error range end",
+        )?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        rows.into_iter()
+            .map(|(bucket_start, error_count)| {
+                Ok(OverviewExcludedErrorBucket {
+                    bucket_start: i64_to_u64(bucket_start, "overview excluded error bucket")?,
+                    error_count: i64_to_u64(error_count, "overview excluded error count")?,
+                })
+            })
+            .collect()
+    }
 
     async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
         let checkpoint = sqlx::query_scalar::<_, i64>(
@@ -254,6 +291,8 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
     let mut cursor_seq = previous_seq;
     let mut cursor_xid = previous_xid;
     let mut deltas: BTreeMap<RollupKey, RollupDelta> = BTreeMap::new();
+    let mut overview_excluded_error_deltas: BTreeMap<(UsageRollupResolution, u64), u64> =
+        BTreeMap::new();
     for row in &rows {
         let seq = row.try_get::<i64, _>("seq").map_err(map_sqlx_error)?;
         let tx_id_text: String = row.try_get("tx_id_text").map_err(map_sqlx_error)?;
@@ -273,6 +312,12 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
                 upstream_name: normalize_dimension(Some(&upstream.name)),
                 model: normalize_dimension(event.model.as_deref()),
             };
+            if is_overview_excluded_status(event.status) {
+                let count = overview_excluded_error_deltas
+                    .entry((resolution, key.bucket_start))
+                    .or_default();
+                *count = count.saturating_add(1);
+            }
             deltas.entry(key).or_default().add_event(&event);
         }
     }
@@ -357,6 +402,28 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         .await
         .map_err(map_sqlx_error)?;
     }
+    for ((resolution, bucket_start), error_count) in overview_excluded_error_deltas {
+        sqlx::query(
+            "INSERT INTO overview_excluded_error_rollups_v1 \
+             (resolution, bucket_start_unix_secs, error_count, updated_at) \
+             VALUES ($1, $2, $3, NOW()) \
+             ON CONFLICT (resolution, bucket_start_unix_secs) DO UPDATE SET \
+                 error_count = overview_excluded_error_rollups_v1.error_count + EXCLUDED.error_count, \
+                 updated_at = NOW()",
+        )
+        .bind(resolution.as_str())
+        .bind(u64_to_i64(
+            bucket_start,
+            "overview excluded error bucket",
+        )?)
+        .bind(u64_to_i64(
+            error_count,
+            "overview excluded error count",
+        )?)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
 
     sqlx::query(
         "INSERT INTO usage_rollup_checkpoints_v1 (id, value, value_xid) VALUES ($1, $2, $3::xid8) \
@@ -376,6 +443,10 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
         updated_rollups,
         checkpoint: Some(i64_to_u64(cursor_seq, "usage rollup checkpoint")?),
     })
+}
+
+fn is_overview_excluded_status(status: u16) -> bool {
+    matches!(status, 401 | 403 | 404)
 }
 
 async fn load_upstream_identities(

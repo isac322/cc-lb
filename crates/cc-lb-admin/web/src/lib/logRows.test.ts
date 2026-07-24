@@ -73,7 +73,7 @@ describe('mergeLogRows', () => {
     ]);
   });
 
-  it('reserves partials and fills the remaining 500-row budget with newest finals', () => {
+  it('keeps all loaded history while preserving partial rows', () => {
     const live: LiveEventMap = new Map();
     for (let index = 0; index < 100; index += 1) {
       const eventId = `partial-${index}`;
@@ -88,14 +88,14 @@ describe('mergeLogRows', () => {
 
     const rows = mergeLogRows(live, historical);
 
-    expect(rows).toHaveLength(500);
+    expect(rows).toHaveLength(700);
     expect(rows.filter(({ _phase }) => _phase === 'partial')).toHaveLength(100);
-    expect(rows.filter(({ _phase }) => _phase === 'final')).toHaveLength(400);
+    expect(rows.filter(({ _phase }) => _phase === 'final')).toHaveLength(600);
     expect(rows[0]?.event_id).toBe('final-599');
     expect(rows.at(-1)?.event_id).toBe('partial-0');
   });
 
-  it('caps an over-limit partial set at the newest 500 rows and omits finals', () => {
+  it('keeps every supplied partial and final row', () => {
     const live: LiveEventMap = new Map();
     for (let index = 0; index < 503; index += 1) {
       const eventId = `partial-${index}`;
@@ -109,10 +109,11 @@ describe('mergeLogRows', () => {
       makeFinal('final', 'final-request', 1000),
     ]);
 
-    expect(rows).toHaveLength(500);
-    expect(rows.every(({ _phase }) => _phase === 'partial')).toBe(true);
-    expect(rows[0]?.event_id).toBe('partial-502');
-    expect(rows.at(-1)?.event_id).toBe('partial-3');
+    expect(rows).toHaveLength(504);
+    expect(rows.filter(({ _phase }) => _phase === 'partial')).toHaveLength(503);
+    expect(rows.filter(({ _phase }) => _phase === 'final')).toHaveLength(1);
+    expect(rows[0]?.event_id).toBe('final');
+    expect(rows.at(-1)?.event_id).toBe('partial-0');
   });
 
   it('preserves final row identity across merges for unchanged source events', () => {

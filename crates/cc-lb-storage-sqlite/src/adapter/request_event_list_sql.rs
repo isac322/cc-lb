@@ -16,6 +16,7 @@ SELECT \
     list_ts_ms AS ts_ms, \
     request_id, \
     event_id, \
+    source_kind, \
     principal_id, \
     upstream_id, \
     upstream_name, \
@@ -65,6 +66,7 @@ WHERE ts >= ?1 AND ts <= ?2 \
   AND (?3 IS NULL OR principal_id = ?3) \
   AND (?4 IS NULL OR model = ?4) \
   AND (?5 IS NULL OR upstream_id = ?5) \
+  AND (?14 IS NULL OR thread_id = ?14) \
   AND (?6 IS NULL OR list_upstream = ?6) \
   AND (?7 IS NULL OR list_status BETWEEN ?7 AND ?8) \
   AND ( \
@@ -89,6 +91,7 @@ pub(super) struct ListRow {
     pub(super) ts_ms: Option<i64>,
     pub(super) request_id: String,
     pub(super) event_id: Option<String>,
+    pub(super) source_kind: Option<String>,
     pub(super) principal_id: Option<String>,
     pub(super) upstream_id: Option<String>,
     pub(super) upstream_name: Option<String>,
@@ -172,6 +175,7 @@ pub(super) async fn list_request_events(
         .bind(usize_to_i64(query.limit, "request event list limit")?)
         .bind(i64::from(source_kind_all))
         .bind(source_kind_exact)
+        .bind(query.filters.thread_id.as_deref())
         .fetch_all(storage.pool())
         .await
         .map_err(map_sqlx_error)?;

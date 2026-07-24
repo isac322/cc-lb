@@ -16,6 +16,7 @@ pub struct RequestEventListItem {
     pub ts_ms: Option<u64>,
     pub request_id: String,
     pub event_id: Option<String>,
+    pub source_kind: Option<String>,
     pub principal_id: Option<String>,
     pub upstream: Option<RequestEventUpstream>,
     pub upstream_id: Option<Uuid>,

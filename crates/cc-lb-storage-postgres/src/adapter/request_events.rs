@@ -673,6 +673,11 @@ fn request_event_matches_filters(
     {
         return false;
     }
+    if let Some(thread_id) = filters.thread_id.as_deref()
+        && event.thread_id.as_deref() != Some(thread_id)
+    {
+        return false;
+    }
     if let Some(model) = filters.model.as_deref()
         && event.model.as_deref() != Some(model)
     {

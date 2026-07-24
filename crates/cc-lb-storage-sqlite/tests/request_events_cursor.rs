@@ -257,6 +257,7 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
         request_id: "req-cursor-1".to_owned(),
         event_id: Some("0193a7b8-1234-7e2f-9012-cursor000001".to_owned()),
         principal_id: Some("principal-a".to_owned()),
+        thread_id: Some("thread-a".to_owned()),
         upstream: Some(RequestEventUpstream::AnthropicDirect),
         upstream_id: Some(upstream_id),
         model: Some("claude-sonnet-4-5".to_owned()),
@@ -301,6 +302,7 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
             500,
             &RequestEventStreamFilters {
                 principal_id: Some("principal-a".to_owned()),
+                thread_id: Some("thread-a".to_owned()),
                 model: Some("claude-sonnet-4-5".to_owned()),
                 upstream: Some(RequestEventUpstream::AnthropicDirect),
                 upstream_id: Some(upstream_id),

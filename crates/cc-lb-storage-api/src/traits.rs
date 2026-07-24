@@ -195,6 +195,15 @@ pub trait UsageRollupStore: Send + Sync {
         window_start_unix_secs: u64,
         window_end_unix_secs: u64,
     ) -> StorageResult<Vec<UsageRollup>>;
+    async fn query_overview_excluded_error_buckets_in_range(
+        &self,
+        resolution: UsageRollupResolution,
+        window_start_unix_secs: u64,
+        window_end_unix_secs: u64,
+    ) -> StorageResult<Vec<OverviewExcludedErrorBucket>> {
+        let _ = (resolution, window_start_unix_secs, window_end_unix_secs);
+        Ok(Vec::new())
+    }
 
     async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>>;
 

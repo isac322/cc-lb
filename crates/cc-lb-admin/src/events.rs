@@ -30,6 +30,7 @@ pub struct RecentEventsParams {
     pub until_event_id: Option<String>,
     pub limit: usize,
     pub principal_id: Option<String>,
+    pub thread_id: Option<String>,
     pub model: Option<String>,
     pub upstream_id: Option<Uuid>,
     pub upstream: Option<RequestEventUpstream>,
@@ -40,6 +41,7 @@ pub struct RecentEventsParams {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StreamFilters {
     pub principal_id: Option<String>,
+    pub thread_id: Option<String>,
     pub model: Option<String>,
     pub upstream: Option<RequestEventUpstream>,
     pub upstream_id: Option<Uuid>,
@@ -133,6 +135,7 @@ pub fn parse_recent_params(
         until_event_id,
         limit,
         principal_id: filters.principal_id,
+        thread_id: filters.thread_id,
         model: filters.model,
         upstream_id: filters.upstream_id,
         upstream: filters.upstream,
@@ -208,6 +211,7 @@ pub async fn build_delta_events_payload(
 pub fn parse_stream_filters(map: &HashMap<String, String>) -> Result<StreamFilters, EventsError> {
     Ok(StreamFilters {
         principal_id: map.get("principal_id").cloned(),
+        thread_id: map.get("thread_id").cloned(),
         model: map.get("model").cloned(),
         upstream: match map.get("upstream") {
             Some(value) => Some(parse_upstream(value)?),
@@ -230,6 +234,11 @@ pub fn parse_stream_filters(map: &HashMap<String, String>) -> Result<StreamFilte
 pub fn apply_filters_to_event(event: &RequestEvent, filters: &StreamFilters) -> bool {
     if let Some(principal_id) = filters.principal_id.as_deref()
         && event.principal_id.as_deref() != Some(principal_id)
+    {
+        return false;
+    }
+    if let Some(thread_id) = filters.thread_id.as_deref()
+        && event.thread_id.as_deref() != Some(thread_id)
     {
         return false;
     }
@@ -289,6 +298,7 @@ impl RecentEventsParams {
     pub fn stream_filters(&self) -> StreamFilters {
         StreamFilters {
             principal_id: self.principal_id.clone(),
+            thread_id: self.thread_id.clone(),
             model: self.model.clone(),
             upstream: self.upstream,
             upstream_id: self.upstream_id,
@@ -314,6 +324,7 @@ impl StreamFilters {
     pub fn storage_filters(&self) -> RequestEventStreamFilters {
         RequestEventStreamFilters {
             principal_id: self.principal_id.clone(),
+            thread_id: self.thread_id.clone(),
             model: self.model.clone(),
             upstream: self.upstream,
             upstream_id: self.upstream_id,

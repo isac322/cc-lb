@@ -433,9 +433,11 @@ export interface RequestEvent {
   key_id?: string;
   principal_kind?: string;
   upstream?: string;
+  upstream_id?: string;
   upstream_name?: string;
   thread_id?: string | null;
   model?: string;
+  source_kind?: string;
   status: number;
   upstream_error_type?: string;
   upstream_error_message?: string;
