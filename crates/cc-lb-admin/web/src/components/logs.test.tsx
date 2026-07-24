@@ -1,6 +1,8 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { filterLogRows } from '../lib/logRows';
+import type { RequestEventWithPhase } from '../lib/RequestEventTypes';
 import { Route } from '../routes/logs';
 
 const mockEvents = Array.from({ length: 120 }, (_, i) => ({
@@ -57,6 +59,70 @@ describe('LogsPage', () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+  });
+
+  it('applies every row filter individually and in combination', () => {
+    const target = {
+      ts: null,
+      request_id: 'target',
+      principal_id: 'principal-target',
+      upstream_id: 'upstream-target',
+      thread_id: 'thread-target',
+      model: 'model-target',
+      status: 429,
+      duration_ms: 0,
+      source_kind: 'renewal',
+      _phase: 'final',
+    } as RequestEventWithPhase;
+    const rows = [
+      target,
+      {
+        ...target,
+        request_id: 'wrong-principal',
+        principal_id: 'principal-other',
+      },
+      {
+        ...target,
+        request_id: 'wrong-upstream',
+        upstream_id: 'upstream-other',
+      },
+      { ...target, request_id: 'wrong-session', thread_id: 'thread-other' },
+      { ...target, request_id: 'wrong-model', model: 'model-other' },
+      { ...target, request_id: 'wrong-status', status: 200 },
+      { ...target, request_id: 'wrong-source', source_kind: 'request' },
+    ] as RequestEventWithPhase[];
+
+    for (const [filters, excludedRequestId] of [
+      [
+        { principal_id: 'principal-target', source_kind: 'all' },
+        'wrong-principal',
+      ],
+      [
+        { upstream_id: 'upstream-target', source_kind: 'all' },
+        'wrong-upstream',
+      ],
+      [{ session: 'thread-target', source_kind: 'all' }, 'wrong-session'],
+      [{ model: 'model-target', source_kind: 'all' }, 'wrong-model'],
+      [{ status: '4xx', source_kind: 'all' }, 'wrong-status'],
+      [{ source_kind: 'renewal' }, 'wrong-source'],
+    ] as const) {
+      const requestIds = filterLogRows(rows, filters).map(
+        (row) => row.request_id,
+      );
+      expect(requestIds).toContain('target');
+      expect(requestIds).not.toContain(excludedRequestId);
+    }
+
+    expect(
+      filterLogRows(rows, {
+        principal_id: 'principal-target',
+        upstream_id: 'upstream-target',
+        session: 'thread-target',
+        model: 'model-target',
+        status: '4xx',
+        source_kind: 'renewal',
+      }).map((row) => row.request_id),
+    ).toEqual(['target']);
   });
 
   it('renders Session select with an enforced w-64 and Clear button with h-9', async () => {

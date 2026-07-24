@@ -6,6 +6,7 @@ export interface LogsPaginationProps {
   readonly pageCount: number;
   readonly totalRows: number;
   readonly pageSize: number;
+  readonly hasMore: boolean;
   readonly onPrev: () => void;
   readonly onNext: () => void;
 }
@@ -15,12 +16,18 @@ export function LogsPagination({
   pageCount,
   totalRows,
   pageSize,
+  hasMore,
   onPrev,
   onNext,
 }: LogsPaginationProps) {
   const startRow = totalRows === 0 ? 0 : page * pageSize + 1;
   const endRow = Math.min((page + 1) * pageSize, totalRows);
-
+  const totalLabel = hasMore
+    ? totalRows >= 999
+      ? '999+'
+      : `${totalRows}+`
+    : String(totalRows);
+  const pageCountLabel = hasMore ? `${pageCount}+` : String(pageCount);
   return (
     <nav
       aria-label="Log pagination"
@@ -31,10 +38,10 @@ export function LogsPagination({
         className="text-xs text-text-muted flex items-center gap-4"
       >
         <span>
-          Showing {startRow}–{endRow} of {totalRows}
+          Showing {startRow}–{endRow} of {totalLabel}
         </span>
         <span className="hidden sm:inline">
-          Page {page + 1} of {pageCount}
+          Page {page + 1} of {pageCountLabel}
         </span>
       </div>
       <div className="flex items-center gap-2">
@@ -52,7 +59,7 @@ export function LogsPagination({
           variant="secondary"
           size="sm"
           onClick={onNext}
-          disabled={page >= pageCount - 1}
+          disabled={page >= pageCount - 1 && !hasMore}
           aria-label="Next page"
           iconRight={<ChevronRight className="w-4 h-4" />}
         >

@@ -42,8 +42,9 @@ afterEach(() => {
 });
 
 describe('useRecentEventsInfinite', () => {
-  it('loads exactly 500 events with a final 100-event page', async () => {
+  it('continues cursor pagination past 500 events until the backend is exhausted', async () => {
     const requestedLimits: number[] = [];
+    const pageSizes = [200, 200, 200, 75];
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const rawUrl =
         typeof input === 'string'
@@ -54,7 +55,11 @@ describe('useRecentEventsInfinite', () => {
       const url = new URL(rawUrl, 'http://localhost');
       const limit = Number(url.searchParams.get('limit'));
       requestedLimits.push(limit);
-      return jsonResponse(makePage(requestedLimits.length - 1, limit));
+      const pageIndex = requestedLimits.length - 1;
+      return jsonResponse({
+        ...makePage(pageIndex, pageSizes[pageIndex] ?? 0),
+        limit,
+      });
     });
     vi.stubGlobal('fetch', fetchMock);
     const client = new QueryClient({
@@ -65,23 +70,23 @@ describe('useRecentEventsInfinite', () => {
     });
     await waitFor(() => expect(result.current.data?.pages).toHaveLength(1));
 
-    await act(async () => {
-      await result.current.fetchNextPage();
-    });
-    await waitFor(() => expect(result.current.data?.pages).toHaveLength(2));
-    await act(async () => {
-      await result.current.fetchNextPage();
-    });
-    await waitFor(() => expect(result.current.data?.pages).toHaveLength(3));
+    for (let page = 2; page <= 4; page += 1) {
+      await act(async () => {
+        await result.current.fetchNextPage();
+      });
+      await waitFor(() =>
+        expect(result.current.data?.pages).toHaveLength(page),
+      );
+    }
 
     expect(
       result.current.data?.pages.flatMap(({ events }) => events),
-    ).toHaveLength(500);
-    expect(requestedLimits).toEqual([200, 200, 100]);
+    ).toHaveLength(675);
+    expect(requestedLimits).toEqual([200, 200, 200, 200]);
     expect(result.current.hasNextPage).toBe(false);
     await act(async () => {
       await result.current.fetchNextPage();
     });
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 });

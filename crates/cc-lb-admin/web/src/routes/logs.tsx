@@ -23,14 +23,13 @@ import {
 } from '../components/ui/TimeRangeSelect';
 import {
   filterLiveEventsByUnixSeconds,
-  filterLogRowsByStatusClass,
+  filterLogRows,
   LOG_STATUS_CLASSES,
   mergeLogRows,
 } from '../lib/logRows';
 import {
   clampLogsPage,
   getLogsPageCount,
-  isLastLogsPage,
   LOGS_PAGE_SIZE,
   selectLogsPageRows,
 } from '../lib/logsPagination';
@@ -56,7 +55,7 @@ const unixSecondsSearchParam = z.preprocess((value) => {
 export const logsSearchSchema = z
   .object({
     principal_id: z.string().optional(),
-    upstream: z.string().optional(),
+    upstream_id: z.string().optional(),
     session: z.string().optional(),
     model: z.string().optional(),
     status: z.enum(LOG_STATUS_CLASSES).optional(),
@@ -109,7 +108,8 @@ export function buildHistoricalFilters(
 export function buildLiveFilters(filters: z.infer<typeof logsSearchSchema>) {
   const base: Record<string, string> = {};
   if (filters.principal_id) base.principal_id = filters.principal_id;
-  if (filters.upstream) base.upstream = filters.upstream;
+  if (filters.upstream_id) base.upstream_id = filters.upstream_id;
+  if (filters.session) base.thread_id = filters.session;
   if (filters.model) base.model = filters.model;
   if (filters.status) base.status_class = filters.status;
   if (filters.source_kind) base.source_kind = filters.source_kind;
@@ -117,20 +117,13 @@ export function buildLiveFilters(filters: z.infer<typeof logsSearchSchema>) {
 }
 
 export function getLogsRouteState({
-  sessionFilter,
-  hasNextPage,
   userRequestedTailing,
   time_range,
-  isLastClientPage,
 }: {
-  sessionFilter?: string;
-  hasNextPage: boolean;
   userRequestedTailing: boolean;
   time_range?: TimeRangeMode;
-  isLastClientPage: boolean;
 }) {
   return {
-    showSentinel: !sessionFilter && hasNextPage && isLastClientPage,
     effectiveTailing: userRequestedTailing && time_range !== 'custom',
   };
 }
@@ -155,7 +148,6 @@ function LogsPage() {
   const [userRequestedTailing, setUserRequestedTailing] = useState(true);
   const [page, setPage] = useState(0);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const sentinelRef = useRef<HTMLTableRowElement>(null);
 
   const effectiveTailing = userRequestedTailing && time_range !== 'custom';
 
@@ -165,7 +157,7 @@ function LogsPage() {
     if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
   }, [
     filters.principal_id,
-    filters.upstream,
+    filters.upstream_id,
     filters.session,
     filters.model,
     filters.status,
@@ -242,12 +234,10 @@ function LogsPage() {
     return out;
   }, [rows]);
 
-  const visibleRows = useMemo(() => {
-    const statusRows = filterLogRowsByStatusClass(rows, filters.status);
-    return sessionFilter
-      ? statusRows.filter((row) => row.thread_id === sessionFilter)
-      : statusRows;
-  }, [rows, filters.status, sessionFilter]);
+  const visibleRows = useMemo(
+    () => filterLogRows(rows, filters),
+    [rows, filters],
+  );
   const deferredVisibleRows = useDeferredValue(visibleRows);
 
   const pageCount = getLogsPageCount(deferredVisibleRows.length);
@@ -256,40 +246,23 @@ function LogsPage() {
     () => selectLogsPageRows(deferredVisibleRows, clampedPage),
     [deferredVisibleRows, clampedPage],
   );
-  const isLastClientPage = isLastLogsPage(clampedPage, pageCount);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: clampedPage changes intentionally trigger the imperative scroll reset.
   useEffect(() => {
     if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
   }, [clampedPage]);
 
-  const { showSentinel } = getLogsRouteState({
-    sessionFilter,
-    hasNextPage: recent.hasNextPage,
-    userRequestedTailing,
-    time_range,
-    isLastClientPage,
-  });
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the deferred row count changes when the sentinel actually mounts; without it the observer can run once against a null ref and never attach.
-  useEffect(() => {
-    const el = sentinelRef.current;
-    if (!el || !showSentinel || recent.isFetchingNextPage) return;
-    const obs = new IntersectionObserver(
-      (entries) =>
-        entries.forEach((e) => {
-          if (e.isIntersecting) recent.fetchNextPage();
-        }),
-      { root: scrollContainerRef.current, threshold: 0.1 },
-    );
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, [
-    showSentinel,
-    recent.isFetchingNextPage,
-    recent.fetchNextPage,
-    pageRows.length,
-  ]);
+  const nextPage = () => {
+    if (clampedPage < pageCount - 1) {
+      setPage((current) => current + 1);
+      return;
+    }
+    if (recent.hasNextPage && !recent.isFetchingNextPage) {
+      void recent.fetchNextPage().then(() => {
+        setPage((current) => current + 1);
+      });
+    }
+  };
 
   const principalSelectOptions = useMemo<FilterOption[]>(
     () =>
@@ -303,7 +276,7 @@ function LogsPage() {
   const upstreamSelectOptions = useMemo<FilterOption[]>(
     () =>
       (upstreams.data?.upstreams ?? []).map((u) => ({
-        value: u.name,
+        value: u.id,
         label: <span className="font-mono truncate">{u.name}</span>,
       })),
     [upstreams.data],
@@ -468,9 +441,9 @@ function LogsPage() {
             </Field>
             <Field label="Upstream">
               <LogSelect
-                value={filters.upstream ?? ''}
+                value={filters.upstream_id ?? ''}
                 options={upstreamSelectOptions}
-                onChange={(v) => setFilter('upstream', v)}
+                onChange={(v) => setFilter('upstream_id', v)}
                 allLabel="All upstreams"
                 widthClass="w-44"
               />
@@ -489,7 +462,7 @@ function LogsPage() {
                 className={`${INPUT_CLASS} w-44 font-mono`}
                 value={filters.model ?? ''}
                 onChange={(e) => setFilter('model', e.target.value)}
-                placeholder="claude-*"
+                placeholder="claude-sonnet-4-5"
               />
             </Field>
             <Field label="Status">
@@ -528,7 +501,7 @@ function LogsPage() {
               }}
             />
             {filters.principal_id ||
-            filters.upstream ||
+            filters.upstream_id ||
             filters.session ||
             filters.model ||
             filters.status ||
@@ -557,9 +530,8 @@ function LogsPage() {
               }
               liveFlashIds={effectiveTailing ? recentLiveIds : undefined}
               columns={LOGS_TABLE_COLUMNS}
-              sentinelRef={showSentinel ? sentinelRef : undefined}
               loadingMore={recent.isFetchingNextPage}
-              hasMore={showSentinel}
+              hasMore={false}
               minWidthClass="min-w-[1080px]"
               emptyTitle="No requests"
               emptyDescription="Adjust filters or enable live tail."
@@ -571,8 +543,9 @@ function LogsPage() {
               pageCount={pageCount}
               totalRows={deferredVisibleRows.length}
               pageSize={LOGS_PAGE_SIZE}
+              hasMore={recent.hasNextPage}
               onPrev={() => setPage((p) => Math.max(0, p - 1))}
-              onNext={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+              onNext={nextPage}
             />
           )}
         </Card>
