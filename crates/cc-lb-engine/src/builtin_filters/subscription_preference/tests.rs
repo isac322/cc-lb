@@ -247,6 +247,43 @@ fn stale_rejected_resets_in_future_is_hard_negative() {
 }
 
 #[test]
+fn stale_exhausted_utilization_with_future_reset_is_hard_negative() {
+    let dead = oauth_at_t0(
+        "dead",
+        1,
+        vec![
+            stale(WINDOW_SEVEN_DAY)
+                .util(1.0)
+                .status("allowed")
+                .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS)
+                .build(),
+        ],
+    );
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[dead, key.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
+}
+
+#[test]
+fn stale_disabled_window_with_future_reset_is_hard_negative() {
+    let dead = oauth_at_t0(
+        "dead",
+        1,
+        vec![
+            stale(WINDOW_SEVEN_DAY)
+                .util(0.2)
+                .status("allowed")
+                .disabled("subscription_disabled")
+                .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS)
+                .build(),
+        ],
+    );
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[dead, key.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
+}
+
+#[test]
 fn stale_rejected_resets_in_past_is_unknown() {
     // Candidate observed 10 days after T0. Reset was 5 days after T0 → past.
     let observed_secs = T0_SECS + 10 * 24 * 3_600;
@@ -377,6 +414,43 @@ fn overage_util_ge_1_fresh_hard_block_overage() {
 }
 
 #[test]
+fn stale_positive_overage_signals_do_not_authorize_exhausted_base() {
+    let cases = [
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            stale(WINDOW_OVERAGE).util(0.2).status("allowed").build(),
+        ],
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            stale(WINDOW_UNIFIED).fallback_available(true).build(),
+        ],
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            stale(WINDOW_UNIFIED).overage_in_use(true).build(),
+        ],
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            stale(WINDOW_UNIFIED)
+                .extra_usage_enabled(true)
+                .extra_usage_limit(100.0)
+                .extra_usage_used(20.0)
+                .build(),
+        ],
+    ];
+
+    for (index, quotas) in cases.into_iter().enumerate() {
+        let candidate = oauth_with("stale-overage", index as u8 + 1, quotas);
+        let key = api_key("k", 100 + index as u8);
+        let output = filter_for_model(&[candidate, key.clone()], MODEL_AGNOSTIC);
+        assert_eq!(
+            output.kept_upstream_ids,
+            vec![key.upstream_id],
+            "stale positive case {index} must not authorize overage"
+        );
+    }
+}
+
+#[test]
 fn extra_usage_stale_ignored_no_block() {
     // Stale overage snapshot with `rejected` status is NOT a fresh block,
     // and the unified snapshot marks fallback_available=true → overage tier
@@ -401,8 +475,8 @@ fn extra_usage_stale_ignored_no_block() {
 // =============================================================================
 
 #[test]
-fn sonnet_request_excludes_7d_sonnet_window() {
-    let sonnet_alive = oauth_with(
+fn sonnet_request_blocks_exhausted_7d_sonnet_when_observed() {
+    let sonnet_exhausted = oauth_with(
         "sonnet",
         1,
         vec![
@@ -415,9 +489,9 @@ fn sonnet_request_excludes_7d_sonnet_window() {
         ],
     );
     let key = api_key("k", 2);
-    let output = filter_for_model(&[sonnet_alive.clone(), key], SONNET_MODEL);
-    assert_eq!(output.kept_upstream_ids, vec![sonnet_alive.upstream_id]);
-    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+    let output = filter_for_model(&[sonnet_exhausted, key.clone()], SONNET_MODEL);
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
+    assert_eq!(output.reason, API_KEY_FALLBACK_REASON);
 }
 
 #[test]
@@ -441,8 +515,28 @@ fn non_sonnet_request_excludes_7d_sonnet_window() {
 }
 
 #[test]
-fn always_ignores_7d_opus_window() {
-    for model in [SONNET_MODEL, OPUS_MODEL, HAIKU_MODEL, MODEL_AGNOSTIC] {
+fn opus_request_blocks_exhausted_7d_opus_when_observed() {
+    let opus_exhausted = oauth_with(
+        "opus",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY_OPUS)
+                .util(1.0)
+                .status("rejected")
+                .build(),
+        ],
+    );
+    let key = api_key("k", 2);
+    let output = filter_for_model(&[opus_exhausted, key.clone()], OPUS_MODEL);
+    assert_eq!(output.kept_upstream_ids, vec![key.upstream_id]);
+    assert_eq!(output.reason, API_KEY_FALLBACK_REASON);
+}
+
+#[test]
+fn non_opus_requests_ignore_7d_opus_window() {
+    for model in [SONNET_MODEL, HAIKU_MODEL, MODEL_AGNOSTIC] {
         let alive = oauth_with(
             "alive",
             1,
@@ -461,6 +555,34 @@ fn always_ignores_7d_opus_window() {
             output.kept_upstream_ids,
             vec![alive.upstream_id],
             "model={model} must ignore 7d_opus"
+        );
+    }
+}
+
+#[test]
+fn missing_optional_scoped_windows_are_noop() {
+    for (model, window) in [
+        (SONNET_MODEL, WINDOW_SEVEN_DAY_SONNET),
+        (OPUS_MODEL, WINDOW_SEVEN_DAY_OPUS),
+    ] {
+        let alive = oauth_with(
+            "alive",
+            1,
+            vec![
+                fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+                fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+                missing(window).build(),
+            ],
+        );
+        let output = filter_for_model(std::slice::from_ref(&alive), model);
+        assert_eq!(output.kept_upstream_ids, vec![alive.upstream_id]);
+        assert_eq!(
+            output
+                .subscription_preference
+                .expect("subscription trace")
+                .chosen_tier,
+            cc_lb_domain::SubscriptionTier::KnownBase,
+            "model={model} missing optional scoped quota must be a no-op"
         );
     }
 }
@@ -2029,6 +2151,12 @@ impl SnapBuilder {
 fn fresh(window: &str) -> SnapBuilder {
     SnapBuilder {
         inner: blank_snapshot(window, SubscriptionQuotaDataState::Fresh),
+    }
+}
+
+fn missing(window: &str) -> SnapBuilder {
+    SnapBuilder {
+        inner: blank_snapshot(window, SubscriptionQuotaDataState::Missing),
     }
 }
 

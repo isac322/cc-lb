@@ -7,7 +7,8 @@ use http::StatusCode;
 use uuid::Uuid;
 
 use subscription_preference_v11_preview_support::{
-    PreviewFixture, exhausted_shared_quota, fable_quota, on_pace_quota, urgent_quota,
+    PreviewFixture, exhausted_shared_quota, fable_quota, on_pace_quota, sonnet_quota,
+    stale_exhausted_shared_quota, stale_overage_positive_quota, urgent_quota,
 };
 
 const REQUEST_ID: &str = "preview-v11-transition";
@@ -116,6 +117,57 @@ async fn handle_shared_7d_exhaustion_without_api_key_returns_503_without_dispatc
     let status = fixture.handle_model("claude-sonnet-4-5").await;
 
     // Then: the proxy fails locally instead of dispatching known-exhausted quota.
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(fixture.dispatch_hosts().is_empty());
+}
+
+#[tokio::test]
+async fn handle_sonnet_excludes_observed_exhausted_scoped_upstream() {
+    let fixture = PreviewFixture::with_statuses(
+        sonnet_quota(Some(1.0)),
+        sonnet_quota(Some(0.2)),
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::OK,
+    );
+
+    let status = fixture.handle_model("claude-sonnet-4-5").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fixture.dispatch_hosts(), vec!["steady.invalid"]);
+}
+
+#[tokio::test]
+async fn handle_sonnet_missing_scoped_window_is_noop() {
+    let fixture = PreviewFixture::new(sonnet_quota(None), sonnet_quota(None));
+
+    let status = fixture.handle_model("claude-sonnet-4-5").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fixture.dispatch_hosts(), vec!["urgent.invalid"]);
+}
+
+#[tokio::test]
+async fn handle_stale_exhausted_shared_quota_returns_503_without_dispatch() {
+    let fixture = PreviewFixture::new(
+        stale_exhausted_shared_quota(),
+        stale_exhausted_shared_quota(),
+    );
+
+    let status = fixture.handle_model("claude-sonnet-4-5").await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(fixture.dispatch_hosts().is_empty());
+}
+
+#[tokio::test]
+async fn handle_stale_overage_positive_returns_503_without_dispatch() {
+    let fixture = PreviewFixture::new(
+        stale_overage_positive_quota(),
+        stale_overage_positive_quota(),
+    );
+
+    let status = fixture.handle_model("claude-sonnet-4-5").await;
+
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(fixture.dispatch_hosts().is_empty());
 }

@@ -20,11 +20,11 @@
 //! ## Windows
 //!
 //! Base: shared `5h` and `7d` windows for every model, plus `7d_fable` only for
-//! the canonical model ID `claude-fable-5`. Older model-specific
-//! `7d_sonnet` and `7d_opus` labels remain deliberately ignored because they
-//! are not stable enough to drive routing. `unified` is not itself an
-//! exhaustion window; its top-level flags (`overage_in_use`,
-//! `fallback_available`, `extra_usage_*`) enrich the overage assessment.
+//! the canonical model ID `claude-fable-5`. Sonnet and Opus scoped weekly
+//! windows are optional dormant constraints: `7d_sonnet` or `7d_opus` is
+//! enforced only when that candidate has a non-missing snapshot for the
+//! matching model family. `unified` is not itself an exhaustion window; its
+//! top-level flags enrich the overage assessment.
 //!
 //! ## Reset semantics
 //!
@@ -57,9 +57,13 @@ pub(crate) const NO_SUBSCRIPTION_REASON: &str = "keep:no_subscription_candidates
 pub(crate) const WINDOW_FIVE_HOUR: &str = "5h";
 pub(crate) const WINDOW_SEVEN_DAY: &str = "7d";
 pub(crate) const WINDOW_SEVEN_DAY_FABLE: &str = "7d_fable";
+pub(crate) const WINDOW_SEVEN_DAY_SONNET: &str = "7d_sonnet";
+pub(crate) const WINDOW_SEVEN_DAY_OPUS: &str = "7d_opus";
 pub(crate) const WINDOW_OVERAGE: &str = "overage";
 pub(crate) const WINDOW_UNIFIED: &str = "unified";
 pub(crate) const FABLE_MODEL: &str = "claude-fable-5";
+const SONNET_MODEL_PREFIX: &str = "claude-sonnet-";
+const OPUS_MODEL_PREFIX: &str = "claude-opus-";
 
 // -- Algorithm constants. ---------------------------------------------------
 
@@ -296,6 +300,10 @@ fn relevant_base_windows(canonical_model: &str) -> Vec<&'static str> {
     let mut windows = vec![WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY];
     if canonical_model == FABLE_MODEL {
         windows.push(WINDOW_SEVEN_DAY_FABLE);
+    } else if canonical_model.starts_with(SONNET_MODEL_PREFIX) {
+        windows.push(WINDOW_SEVEN_DAY_SONNET);
+    } else if canonical_model.starts_with(OPUS_MODEL_PREFIX) {
+        windows.push(WINDOW_SEVEN_DAY_OPUS);
     }
     windows
 }
@@ -388,10 +396,16 @@ fn assess_candidate<'a>(
     let mut positive_count = 0u32;
     let mut warning_positive_count = 0u32;
     let mut hard_negative_count = 0u32;
+    let mut total = 0u32;
     let mut five_hour_pressure = 0.0f64;
     let mut seven_day_pressure = 0.0f64;
     let mut fable_weekly_pressure = 0.0f64;
-    for &window in base_windows {
+    for window in base_windows.iter().copied().filter(|window| {
+        !matches!(*window, WINDOW_SEVEN_DAY_SONNET | WINDOW_SEVEN_DAY_OPUS)
+            || find_snapshot(candidate, window)
+                .is_some_and(|snapshot| snapshot.state != SubscriptionQuotaDataState::Missing)
+    }) {
+        total += 1;
         let snapshot = find_snapshot(candidate, window);
         let signal = classify_base_snapshot(snapshot, now_secs, config);
         match signal {
@@ -430,7 +444,6 @@ fn assess_candidate<'a>(
             BaseSignal::Unknown => {}
         }
     }
-    let total = base_windows.len() as u32;
     let effective_weekly_pressure = weekly_smoothmax(seven_day_pressure, fable_weekly_pressure);
     let base_urgency = weighted_smoothmax(five_hour_pressure, effective_weekly_pressure);
 
@@ -604,20 +617,24 @@ fn classify_base_snapshot(
             }
         }
         SubscriptionQuotaDataState::Stale => {
-            if snap.status.as_deref() == Some("rejected") {
-                match snap.resets_at_unix_secs {
-                    Some(resets_at) if resets_at > now_secs => BaseSignal::HardNegative,
-                    Some(_) => BaseSignal::Unknown,
-                    None => {
-                        if config.stale_rejected_without_reset_blocks {
-                            BaseSignal::HardNegative
-                        } else {
-                            BaseSignal::Unknown
-                        }
+            let hard_negative = snap.disabled_reason.is_some()
+                || snap
+                    .utilization
+                    .is_some_and(|util| util.is_finite() && util >= 1.0)
+                || snap.status.as_deref() == Some("rejected");
+            if !hard_negative {
+                return BaseSignal::Unknown;
+            }
+            match snap.resets_at_unix_secs {
+                Some(resets_at) if resets_at > now_secs => BaseSignal::HardNegative,
+                Some(_) => BaseSignal::Unknown,
+                None => {
+                    if config.stale_rejected_without_reset_blocks {
+                        BaseSignal::HardNegative
+                    } else {
+                        BaseSignal::Unknown
                     }
                 }
-            } else {
-                BaseSignal::Unknown
             }
         }
     }
@@ -635,56 +652,51 @@ fn utilization_signal(util: Option<f64>) -> BaseSignal {
 fn assess_overage(candidate: &UpstreamCandidate, config: &FilterConfig) -> OverageAssessment {
     let overage_snap = find_snapshot(candidate, WINDOW_OVERAGE);
     let unified_snap = find_snapshot(candidate, WINDOW_UNIFIED);
+    let fresh_overage_snap =
+        overage_snap.filter(|snapshot| snapshot.state == SubscriptionQuotaDataState::Fresh);
+    let fresh_unified_snap =
+        unified_snap.filter(|snapshot| snapshot.state == SubscriptionQuotaDataState::Fresh);
+    let fresh_snapshots = [fresh_overage_snap, fresh_unified_snap];
+    let all_snapshots = [overage_snap, unified_snap];
 
-    let overage_in_use = unified_snap
-        .and_then(|s| s.overage_in_use)
-        .or_else(|| overage_snap.and_then(|s| s.overage_in_use))
-        .unwrap_or(false);
-    let fallback_available = unified_snap
-        .and_then(|s| s.fallback_available)
-        .or_else(|| overage_snap.and_then(|s| s.fallback_available));
-    let extra_usage_enabled = overage_snap
-        .and_then(|s| s.extra_usage_enabled)
-        .or_else(|| unified_snap.and_then(|s| s.extra_usage_enabled));
-    let extra_usage_remaining = overage_snap
-        .and_then(snapshot_extra_usage_remaining)
-        .or_else(|| unified_snap.and_then(snapshot_extra_usage_remaining));
+    let overage_status = fresh_overage_snap.and_then(|snapshot| snapshot.status.as_deref());
+    let overage_util = fresh_overage_snap
+        .and_then(|snapshot| snapshot.utilization)
+        .filter(|utilization| utilization.is_finite());
+    let overage_in_use = fresh_snapshots
+        .iter()
+        .flatten()
+        .any(|snapshot| snapshot.overage_in_use == Some(true));
+    let fallback_available = fresh_snapshots
+        .iter()
+        .flatten()
+        .any(|snapshot| snapshot.fallback_available == Some(true));
+    let extra_usage_available = fresh_snapshots.iter().flatten().any(|snapshot| {
+        snapshot.extra_usage_enabled == Some(true)
+            && snapshot_extra_usage_remaining(snapshot).is_some_and(|remaining| remaining > 0.0)
+    });
 
-    let is_overage_fresh = overage_snap
-        .map(|s| s.state == SubscriptionQuotaDataState::Fresh)
-        .unwrap_or(false);
-    let overage_status = overage_snap.and_then(|s| s.status.as_deref());
-    let overage_util = overage_snap
-        .and_then(|s| s.utilization)
-        .filter(|u| u.is_finite());
+    let positive = matches!(overage_status, Some("allowed") | Some("allowed_warning"))
+        || overage_util.is_some_and(|utilization| utilization < 1.0)
+        || fallback_available
+        || overage_in_use
+        || extra_usage_available;
 
-    let mut positive_count = 0u32;
-    if matches!(overage_status, Some("allowed") | Some("allowed_warning")) {
-        positive_count += 1;
-    }
-    if let Some(u) = overage_util
-        && u < 1.0
-    {
-        positive_count += 1;
-    }
-    if fallback_available == Some(true) {
-        positive_count += 1;
-    }
-    if overage_in_use {
-        positive_count += 1;
-    }
-    if extra_usage_enabled == Some(true) && extra_usage_remaining.map(|r| r > 0.0).unwrap_or(false)
-    {
-        positive_count += 1;
-    }
-    let positive = positive_count > 0;
-
-    let overage_status_blocked = is_overage_fresh && overage_status == Some("rejected");
-    let overage_util_blocked = is_overage_fresh && overage_util.map(|u| u >= 1.0).unwrap_or(false);
-    let extra_usage_disabled = extra_usage_enabled == Some(false);
-    let extra_usage_exhausted = extra_usage_enabled == Some(true)
-        && extra_usage_remaining.map(|r| r <= 0.0).unwrap_or(false);
-    let blocked = fallback_available == Some(false)
+    let fallback_unavailable = all_snapshots
+        .iter()
+        .flatten()
+        .any(|snapshot| snapshot.fallback_available == Some(false));
+    let overage_status_blocked = overage_status == Some("rejected");
+    let overage_util_blocked = overage_util.is_some_and(|utilization| utilization >= 1.0);
+    let extra_usage_disabled = all_snapshots
+        .iter()
+        .flatten()
+        .any(|snapshot| snapshot.extra_usage_enabled == Some(false));
+    let extra_usage_exhausted = all_snapshots.iter().flatten().any(|snapshot| {
+        snapshot.extra_usage_enabled == Some(true)
+            && snapshot_extra_usage_remaining(snapshot).is_some_and(|remaining| remaining <= 0.0)
+    });
+    let blocked = fallback_unavailable
         || overage_status_blocked
         || overage_util_blocked
         || extra_usage_disabled
@@ -696,12 +708,10 @@ fn assess_overage(candidate: &UpstreamCandidate, config: &FilterConfig) -> Overa
         positive
     };
 
-    let fresh_overage_util = if is_overage_fresh { overage_util } else { None };
-
     OverageAssessment {
         ok,
         base_exhausted_hint: overage_in_use,
-        fresh_overage_util,
+        fresh_overage_util: overage_util,
     }
 }
 
