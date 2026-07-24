@@ -22,9 +22,6 @@ SELECT \
     upstream_id, \
     upstream_name, \
     thread_id, \
-    claude_agent_id, \
-    claude_parent_agent_id, \
-    claude_auxiliary_kind, \
     model, \
     reasoning_effort, \
     thinking_budget_tokens, \
@@ -83,9 +80,6 @@ FROM ( \
             r.upstream_id, \
             r.upstream_name, \
             r.thread_id, \
-            r.claude_agent_id, \
-            r.claude_parent_agent_id, \
-            r.claude_auxiliary_kind, \
             r.model, \
             r.reasoning_effort, \
             r.thinking_budget_tokens, \
@@ -137,9 +131,6 @@ pub(super) struct ListRow {
     pub(super) upstream_id: Option<uuid::Uuid>,
     pub(super) upstream_name: Option<String>,
     pub(super) thread_id: Option<String>,
-    pub(super) claude_agent_id: Option<String>,
-    pub(super) claude_parent_agent_id: Option<String>,
-    pub(super) claude_auxiliary_kind: Option<String>,
     pub(super) model: Option<String>,
     pub(super) reasoning_effort: Option<String>,
     pub(super) thinking_budget_tokens: Option<i64>,

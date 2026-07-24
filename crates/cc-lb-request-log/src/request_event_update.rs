@@ -56,12 +56,6 @@ pub struct RequestEventPartial {
     /// broadcast only in memory and is never persisted as a partial snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_agent_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_parent_agent_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_auxiliary_kind: Option<String>,
     /// HTTP status observed from upstream response headers, if received.
     /// Distinct from final client-visible `status` on [`RequestEvent`].
     #[serde(default, skip_serializing_if = "Option::is_none")]

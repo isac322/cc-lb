@@ -4,10 +4,6 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Added
-
-- Request history now records Claude Code agent lineage headers and fail-closed fingerprints for Advisor, compaction, and session-title requests so dashboards can distinguish known auxiliary traffic.
-
 ## [0.2.1] - 2026-07-24
 
 ### Fixed

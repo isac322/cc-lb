@@ -53,18 +53,6 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
         assert_eq!(page[0].auth_ms, matching.auth_ms);
         assert_eq!(page[0].connect_ms, matching.connect_ms);
         assert_eq!(page[0].connection_reused, matching.connection_reused);
-        assert_eq!(
-            page[0].claude_agent_id.as_deref(),
-            matching.claude_agent_id.as_deref()
-        );
-        assert_eq!(
-            page[0].claude_parent_agent_id.as_deref(),
-            matching.claude_parent_agent_id.as_deref()
-        );
-        assert_eq!(
-            page[0].claude_auxiliary_kind.as_deref(),
-            matching.claude_auxiliary_kind.as_deref()
-        );
 
         let detail = storage
             .get_request_event(matching.event_id.as_deref().unwrap_or_default())
@@ -106,9 +94,6 @@ fn request_event(
         principal_id: Some(principal_id.to_owned()),
         upstream: Some(RequestEventUpstream::AnthropicDirect),
         model: Some("claude-sonnet-4-5".to_owned()),
-        claude_agent_id: Some("agent-list".to_owned()),
-        claude_parent_agent_id: Some("parent-agent-list".to_owned()),
-        claude_auxiliary_kind: Some("advisor".to_owned()),
         status,
         input_tokens: Some(10),
         output_tokens: Some(20),

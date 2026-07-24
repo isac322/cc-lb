@@ -249,18 +249,6 @@ impl Partial {
                 .parse
                 .as_ref()
                 .and_then(|parse| parse.thread_id.clone()),
-            claude_agent_id: self
-                .parse
-                .as_ref()
-                .and_then(|parse| parse.claude_agent_id.clone()),
-            claude_parent_agent_id: self
-                .parse
-                .as_ref()
-                .and_then(|parse| parse.claude_parent_agent_id.clone()),
-            claude_auxiliary_kind: self
-                .parse
-                .as_ref()
-                .and_then(|parse| parse.claude_auxiliary_kind.clone()),
             upstream_response_status: self.upstream_response_status,
             input_tokens: self.usage_seen.then_some(self.usage.input_tokens),
             output_tokens: self.usage_seen.then_some(self.usage.output_tokens),
@@ -1023,31 +1011,20 @@ fn finalize_base(
     let model = route_model.or_else(|| partial.parse.as_ref().and_then(|p| p.model.clone()));
     let auth_ms = partial.auth.as_ref().and_then(|a| a.auth_ms);
     let routing_trace = partial.routing_trace.clone().or(route_routing_trace);
-    let (
-        thread_id,
-        claude_agent_id,
-        claude_parent_agent_id,
-        claude_auxiliary_kind,
-        message_id,
-        message_index,
-        message_count,
-        cache_control_message_indices,
-    ) = partial
-        .parse
-        .as_ref()
-        .map(|p| {
-            (
-                p.thread_id.clone(),
-                p.claude_agent_id.clone(),
-                p.claude_parent_agent_id.clone(),
-                p.claude_auxiliary_kind.clone(),
-                p.message_id.clone(),
-                p.message_index,
-                p.message_count,
-                p.cache_control_message_indices.clone(),
-            )
-        })
-        .unwrap_or_default();
+    let (thread_id, message_id, message_index, message_count, cache_control_message_indices) =
+        partial
+            .parse
+            .as_ref()
+            .map(|p| {
+                (
+                    p.thread_id.clone(),
+                    p.message_id.clone(),
+                    p.message_index,
+                    p.message_count,
+                    p.cache_control_message_indices.clone(),
+                )
+            })
+            .unwrap_or_default();
 
     let cost = partial.cost_options();
     RequestEvent {
@@ -1136,9 +1113,6 @@ fn finalize_base(
         inference_geo: partial.usage.inference_geo.clone(),
         sse_event_count: partial.stream_success,
         thread_id,
-        claude_agent_id,
-        claude_parent_agent_id,
-        claude_auxiliary_kind,
         message_id,
         message_index,
         message_count,
@@ -2132,9 +2106,6 @@ mod tests {
                 stream: true,
                 body_bytes: 128,
                 thread_id: Some("thread-live-1".to_owned()),
-                claude_agent_id: Some("agent-live-1".to_owned()),
-                claude_parent_agent_id: Some("parent-agent-live-1".to_owned()),
-                claude_auxiliary_kind: Some("advisor".to_owned()),
                 ..ParseInfo::default()
             }),
         })
@@ -2285,9 +2256,6 @@ mod tests {
         let parsed = partials[1];
         let parsed_json = serde_json::to_value(parsed).expect("serialize Parse partial");
         assert_eq!(parsed_json["thread_id"], "thread-live-1");
-        assert_eq!(parsed_json["claude_agent_id"], "agent-live-1");
-        assert_eq!(parsed_json["claude_parent_agent_id"], "parent-agent-live-1");
-        assert_eq!(parsed_json["claude_auxiliary_kind"], "advisor");
         assert_eq!(parsed.model.as_deref(), Some("claude-3-5-sonnet-20241022"));
         assert_eq!(parsed.principal_id, None);
         assert_eq!(parsed.upstream_name, None);
@@ -2316,18 +2284,6 @@ mod tests {
         assert_eq!(finals.len(), 1);
         assert_eq!(finals[0].cursor, 1);
         assert_eq!(finals[0].event.event_id.as_deref(), Some(event_id.as_str()));
-        assert_eq!(
-            finals[0].event.claude_agent_id.as_deref(),
-            Some("agent-live-1")
-        );
-        assert_eq!(
-            finals[0].event.claude_parent_agent_id.as_deref(),
-            Some("parent-agent-live-1")
-        );
-        assert_eq!(
-            finals[0].event.claude_auxiliary_kind.as_deref(),
-            Some("advisor")
-        );
         assert!(matches!(updates.last(), Some(RequestEventUpdate::Final(_))));
     }
 

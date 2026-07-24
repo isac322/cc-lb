@@ -1963,9 +1963,6 @@ impl Lifecycle {
                     cache_prefix_hash: cache_metadata.cache_prefix_hash.clone(),
                     matched_v3_cache_key: cache_metadata.cache_prefix_hash.clone(),
                     thread_id: cache_metadata.thread_id.clone(),
-                    claude_agent_id: cache_metadata.claude_agent_id.clone(),
-                    claude_parent_agent_id: cache_metadata.claude_parent_agent_id.clone(),
-                    claude_auxiliary_kind: cache_metadata.claude_auxiliary_kind.clone(),
                     message_id: cache_metadata.message_id.clone(),
                     message_index: cache_metadata.message_index,
                     message_count: cache_metadata.message_count,
@@ -4534,9 +4531,6 @@ pub(crate) use crate::response_transform::{
 pub(crate) struct RequestCacheMetadata {
     pub(crate) request_json: Option<Value>,
     pub(crate) thread_id: Option<String>,
-    pub(crate) claude_agent_id: Option<String>,
-    pub(crate) claude_parent_agent_id: Option<String>,
-    pub(crate) claude_auxiliary_kind: Option<String>,
     requested_service_tier: Option<String>,
     message_id: Option<String>,
     message_index: Option<u64>,
@@ -4629,19 +4623,13 @@ fn request_cache_metadata_from_value(
     headers: &HeaderMap,
     value: Option<&Value>,
 ) -> RequestCacheMetadata {
-    let claude_session_id = header_to_string(headers, "x-claude-code-session-id");
-    let thread_id = claude_session_id
-        .clone()
+    let thread_id = header_to_string(headers, "x-claude-code-session-id")
         .or_else(|| header_to_string(headers, "x-claude-session-id"))
         .or_else(|| header_to_string(headers, "x-session-affinity"))
         .or_else(|| header_to_string(headers, "x-session-id"));
-    let claude_agent_id = header_to_string(headers, "x-claude-code-agent-id");
-    let claude_parent_agent_id = header_to_string(headers, "x-claude-code-parent-agent-id");
     let Some(value) = value else {
         return RequestCacheMetadata {
             thread_id,
-            claude_agent_id,
-            claude_parent_agent_id,
             ..Default::default()
         };
     };
@@ -4712,17 +4700,10 @@ fn request_cache_metadata_from_value(
     let cache_prefix_hash = cache_breakpoints
         .last()
         .map(|breakpoint| breakpoint.prefix_hash.clone());
-    let claude_auxiliary_kind = claude_session_id
-        .as_ref()
-        .and_then(|_| classify_claude_auxiliary(value))
-        .map(str::to_owned);
 
     RequestCacheMetadata {
         request_json: None,
         thread_id,
-        claude_agent_id,
-        claude_parent_agent_id,
-        claude_auxiliary_kind,
         requested_service_tier,
         message_id,
         message_index,
@@ -4734,80 +4715,6 @@ fn request_cache_metadata_from_value(
         cache_breakpoints,
         cache_prefix_hash,
         canonical_model_id,
-    }
-}
-fn classify_claude_auxiliary(value: &Value) -> Option<&'static str> {
-    const COMPACTION_PREFIX: &str =
-        "Your task is to create a detailed summary of the conversation so far";
-    const TITLE_SYSTEM_MARKER: &str = "Generate a concise, sentence-case title (3-7 words)";
-    const ADVISOR_SYSTEM_MARKER: &str = "You shadow the main agent as a peer programmer";
-    const ADVISOR_TRANSCRIPT_MARKER: &str = "You receive the agent's transcript incrementally";
-
-    let last_user_text = value
-        .get("messages")
-        .and_then(Value::as_array)
-        .and_then(|messages| messages.last())
-        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-        .and_then(|message| message.get("content"))
-        .and_then(first_text);
-
-    let advisor_system = value.get("system").is_some_and(|system| {
-        text_content_contains(system, ADVISOR_SYSTEM_MARKER)
-            && text_content_contains(system, ADVISOR_TRANSCRIPT_MARKER)
-    });
-    if advisor_system {
-        return Some("advisor");
-    }
-
-    if last_user_text.is_some_and(|text| {
-        text.starts_with(COMPACTION_PREFIX)
-            && text.contains("Primary Request and Intent:")
-            && text.contains("REMINDER: Do NOT call any tools")
-    }) {
-        return Some("compaction");
-    }
-
-    let title_system = value
-        .get("system")
-        .is_some_and(|system| text_content_contains(system, TITLE_SYSTEM_MARKER));
-    let title_user = last_user_text.is_some_and(|text| {
-        text.contains("<session>")
-            && text.contains("</session>")
-            && text.contains("Write the title")
-    });
-    let title_schema = value
-        .pointer("/output_config/format/schema/properties/title")
-        .is_some();
-    if title_system && title_user && title_schema {
-        return Some("session_title");
-    }
-
-    None
-}
-
-fn first_text(content: &Value) -> Option<&str> {
-    match content {
-        Value::String(text) => Some(text),
-        Value::Array(blocks) => blocks.iter().find_map(|block| {
-            (block.get("type").and_then(Value::as_str) == Some("text"))
-                .then(|| block.get("text").and_then(Value::as_str))
-                .flatten()
-        }),
-        _ => None,
-    }
-}
-
-fn text_content_contains(content: &Value, marker: &str) -> bool {
-    match content {
-        Value::String(text) => text.contains(marker),
-        Value::Array(blocks) => blocks.iter().any(|block| {
-            block.get("type").and_then(Value::as_str) == Some("text")
-                && block
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .is_some_and(|text| text.contains(marker))
-        }),
-        _ => false,
     }
 }
 
@@ -6308,94 +6215,6 @@ mod tests {
         assert_eq!(hash.len(), 64);
         assert_eq!(hash, metadata.cache_breakpoints[2].prefix_hash);
         assert!(!hash.contains("secret"));
-    }
-
-    #[test]
-    fn request_cache_metadata_captures_claude_agent_lineage_headers() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static("x-claude-code-session-id"),
-            HeaderValue::from_static("session-123"),
-        );
-        headers.insert(
-            HeaderName::from_static("x-claude-code-agent-id"),
-            HeaderValue::from_static("agent-456"),
-        );
-        headers.insert(
-            HeaderName::from_static("x-claude-code-parent-agent-id"),
-            HeaderValue::from_static("agent-123"),
-        );
-
-        let metadata = request_cache_metadata(
-            &headers,
-            &Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
-        );
-
-        assert_eq!(metadata.thread_id.as_deref(), Some("session-123"));
-        assert_eq!(metadata.claude_agent_id.as_deref(), Some("agent-456"));
-        assert_eq!(
-            metadata.claude_parent_agent_id.as_deref(),
-            Some("agent-123")
-        );
-        assert_eq!(metadata.claude_auxiliary_kind, None);
-    }
-
-    #[test]
-    fn request_cache_metadata_classifies_known_claude_auxiliary_requests() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static("x-claude-code-session-id"),
-            HeaderValue::from_static("session-123"),
-        );
-        let cases: &[(&str, &[u8])] = &[
-            (
-                "advisor",
-                br#"{
-                    "model":"claude-test",
-                    "system":"You shadow the main agent as a peer programmer. You receive the agent's transcript incrementally.",
-                    "messages":[{"role":"user","content":"review this"}]
-                }"#,
-            ),
-            (
-                "compaction",
-                br#"{
-                    "model":"claude-test",
-                    "messages":[{"role":"user","content":"Your task is to create a detailed summary of the conversation so far. Primary Request and Intent: keep it exact. REMINDER: Do NOT call any tools."}]
-                }"#,
-            ),
-            (
-                "session_title",
-                br#"{
-                    "model":"claude-test",
-                    "system":"Generate a concise, sentence-case title (3-7 words)",
-                    "messages":[{"role":"user","content":"<session>hello</session> Write the title."}],
-                    "output_config":{"format":{"schema":{"properties":{"title":{"type":"string"}}}}}
-                }"#,
-            ),
-        ];
-
-        for (expected, body) in cases {
-            let metadata = request_cache_metadata(&headers, &Bytes::copy_from_slice(body));
-            assert_eq!(
-                metadata.claude_auxiliary_kind.as_deref(),
-                Some(*expected),
-                "classification for {expected}"
-            );
-        }
-    }
-
-    #[test]
-    fn request_cache_metadata_does_not_classify_auxiliary_text_without_claude_session() {
-        let body = Bytes::from_static(
-            br#"{
-                "model":"claude-test",
-                "messages":[{"role":"user","content":"The user stepped away and is coming back. Recap in under 40 words."}]
-            }"#,
-        );
-
-        let metadata = request_cache_metadata(&HeaderMap::new(), &body);
-
-        assert_eq!(metadata.claude_auxiliary_kind, None);
     }
 
     #[test]
