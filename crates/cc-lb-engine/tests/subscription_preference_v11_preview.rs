@@ -7,7 +7,7 @@ use http::StatusCode;
 use uuid::Uuid;
 
 use subscription_preference_v11_preview_support::{
-    PreviewFixture, fable_quota, on_pace_quota, urgent_quota,
+    PreviewFixture, exhausted_shared_quota, fable_quota, on_pace_quota, urgent_quota,
 };
 
 const REQUEST_ID: &str = "preview-v11-transition";
@@ -104,6 +104,20 @@ fn preview_all_on_pace_uses_deterministic_uniform_factor() {
     }
     print_outcome("uniform_first", &first);
     print_outcome("uniform_second", &second);
+}
+
+#[tokio::test]
+async fn handle_shared_7d_exhaustion_without_api_key_returns_503_without_dispatch() {
+    // Given: both OAuth upstreams have healthy 5h quota but exhausted shared
+    // weekly quota, and there is no API-key fallback.
+    let fixture = PreviewFixture::new(exhausted_shared_quota(), exhausted_shared_quota());
+
+    // When: the real proxy lifecycle handles a model request.
+    let status = fixture.handle_model("claude-sonnet-4-5").await;
+
+    // Then: the proxy fails locally instead of dispatching known-exhausted quota.
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(fixture.dispatch_hosts().is_empty());
 }
 
 #[test]

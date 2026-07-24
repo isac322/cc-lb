@@ -49,7 +49,7 @@ use uuid::Uuid;
 
 pub(crate) const SUBSCRIPTION_ALIVE_REASON: &str = "keep:best_subscription_candidate";
 pub(crate) const API_KEY_FALLBACK_REASON: &str = "keep:api_key_subscription_exhausted";
-pub(crate) const NO_API_KEY_REASON: &str = "keep:subscription_exhausted_no_api_key";
+pub(crate) const NO_API_KEY_REASON: &str = "drop:subscription_exhausted_no_api_key";
 pub(crate) const NO_SUBSCRIPTION_REASON: &str = "keep:no_subscription_candidates";
 
 // -- Window labels. ----------------------------------------------------------
@@ -284,7 +284,7 @@ fn evaluate(
         }
     } else {
         FilterOutput {
-            kept_upstream_ids: collect_kind(candidates, UpstreamKind::AnthropicOauth),
+            kept_upstream_ids: Vec::new(),
             reason: NO_API_KEY_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,

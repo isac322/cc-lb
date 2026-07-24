@@ -132,7 +132,7 @@ fn all_oauth_hard_negative_picks_api_key() {
 }
 
 #[test]
-fn all_oauth_hard_negative_no_api_key_fails_open_all_oauth() {
+fn all_oauth_hard_negative_no_api_key_fails_closed() {
     let dead_a = oauth_with(
         "dead-a",
         1,
@@ -143,11 +143,8 @@ fn all_oauth_hard_negative_no_api_key_fails_open_all_oauth() {
         2,
         vec![fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build()],
     );
-    let output = filter_for_model(&[dead_a.clone(), dead_b.clone()], MODEL_AGNOSTIC);
-    assert_eq!(
-        output.kept_upstream_ids,
-        vec![dead_a.upstream_id, dead_b.upstream_id]
-    );
+    let output = filter_for_model(&[dead_a, dead_b], MODEL_AGNOSTIC);
+    assert!(output.kept_upstream_ids.is_empty());
     assert_eq!(output.reason, NO_API_KEY_REASON);
 }
 
@@ -1653,7 +1650,7 @@ fn no_subscription_returns_no_trace() {
 }
 
 #[test]
-fn all_oauth_hard_negative_no_api_key_fails_open_without_trace() {
+fn all_oauth_hard_negative_no_api_key_fails_closed_without_trace() {
     let a = oauth_with(
         "dead-a",
         1,
@@ -1669,7 +1666,7 @@ fn all_oauth_hard_negative_no_api_key_fails_open_without_trace() {
     assert_eq!(output.reason, NO_API_KEY_REASON);
     assert!(
         output.subscription_preference.is_none(),
-        "fail-open path must not attach a trace"
+        "fail-closed path must not attach a trace"
     );
 }
 

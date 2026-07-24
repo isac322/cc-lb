@@ -212,6 +212,12 @@ pub fn on_pace_quota() -> Vec<SubscriptionQuotaCandidateSnapshot> {
     ]
 }
 
+pub fn exhausted_shared_quota() -> Vec<SubscriptionQuotaCandidateSnapshot> {
+    let mut weekly = quota("7d", 1.0, NOW + 60_480);
+    weekly.status = Some("rejected".to_owned());
+    vec![quota("5h", 0.0, NOW + 1_800), weekly]
+}
+
 pub fn fable_quota(fable_utilization: f64) -> Vec<SubscriptionQuotaCandidateSnapshot> {
     vec![
         quota("5h", 0.2, NOW + 1_800),
