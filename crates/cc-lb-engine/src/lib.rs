@@ -74,6 +74,8 @@ pub use cc_lb_quota::plan_capacity;
 pub mod prompt_cache_simulator;
 #[doc(hidden)]
 pub use cc_lb_quota::rate_limit_headers;
+#[cfg(not(loom))]
+mod request_classification;
 pub mod request_context;
 #[cfg(not(loom))]
 pub mod request_timing;

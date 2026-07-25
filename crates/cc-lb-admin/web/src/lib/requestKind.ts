@@ -4,6 +4,7 @@ const REQUEST_KIND_BADGE_TEXT: Readonly<Record<string, string>> = {
   subagent: 'sub',
   recap: 'recap',
   compaction: 'comp',
+  notification: 'notif',
   session_title: 'title',
   auto_thinking: 'think',
   side: 'side',
