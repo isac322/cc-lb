@@ -61,6 +61,7 @@ use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::prompt_cache_simulator::{
     V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheBlockSource, analyze_v3_prompt_cache,
 };
+use crate::request_classification::classify_client_request_kind;
 use crate::request_context::RequestContext;
 use crate::request_timing::{
     REQUEST_STAGE_TIMINGS, RequestStageTimings, finalize_connection_reused_if_unset,
@@ -4648,7 +4649,7 @@ fn request_cache_metadata_from_value(
     let claude_parent_agent_id = header_identity(headers, "x-claude-code-parent-agent-id");
     let client_app = header_identity(headers, "x-app");
     let parent_session_id = metadata.parent_session_id.clone();
-    let request_kind = classify_omp_request(
+    let request_kind = classify_client_request_kind(
         value,
         observed_session_id.as_deref(),
         claude_agent_id.is_some(),
@@ -4760,16 +4761,6 @@ fn request_cache_metadata_from_value(
     }
 }
 
-const OMP_CLASSIFIER_TEXT_LIMIT: usize = 4_096;
-const OMP_MAIN_SYSTEM_MARKER: &str = "operating in the Oh My Pi coding harness";
-const OMP_ADVISOR_SYSTEM_MARKER: &str = "You shadow the main agent as a peer programmer";
-const OMP_RECAP_PROMPT_PREFIX: &str =
-    "The user stepped away and is coming back. Recap in under 40 words";
-const OMP_COMPACTION_PROMPT_PREFIX: &str =
-    "Your task is to create a detailed summary of the conversation so far";
-const OMP_SESSION_TITLE_SYSTEM_MARKER: &str = "Generate a concise, sentence-case title (3-7 words)";
-const OMP_AUTO_THINKING_SYSTEM_PREFIX: &str = "You are a difficulty classifier for a coding agent.";
-const OMP_SUBAGENT_PROMPT_PREFIX: &str = "Complete the assignment below, thoroughly:";
 const OMP_LEGACY_SESSION_MARKER: &str = "_session_";
 const MAX_IDENTITY_VALUE_BYTES: usize = 512;
 
@@ -4837,123 +4828,6 @@ fn request_session_identity(
                 .clone()
                 .map(|session_id| (session_id, "metadata.user_id"))
         })
-}
-
-fn classify_omp_request(
-    value: Option<&Value>,
-    observed_session_id: Option<&str>,
-    has_claude_agent: bool,
-) -> Option<&'static str> {
-    if has_claude_agent {
-        return Some("subagent");
-    }
-
-    let value = value?;
-    let system = value.get("system");
-
-    // OMP v17.1.3 gives Advisor its own provider session ID internally, but its
-    // custom Anthropic request path emits neither the session header nor
-    // metadata.user_id. The exact built-in Advisor system marker is therefore
-    // the request's only OMP provenance.
-    if system.is_some_and(|content| bounded_text_contains(content, OMP_ADVISOR_SYSTEM_MARKER)) {
-        return Some("advisor");
-    }
-
-    observed_session_id?;
-
-    let first_user = first_user_content(value);
-    let last_user = last_user_content(value);
-
-    if [first_user, last_user]
-        .into_iter()
-        .flatten()
-        .any(|content| text_block_starts_with(content, OMP_RECAP_PROMPT_PREFIX))
-    {
-        return Some("recap");
-    }
-    if [first_user, last_user]
-        .into_iter()
-        .flatten()
-        .any(|content| text_block_starts_with(content, OMP_COMPACTION_PROMPT_PREFIX))
-    {
-        return Some("compaction");
-    }
-    if system.is_some_and(|content| bounded_text_contains(content, OMP_SESSION_TITLE_SYSTEM_MARKER))
-        && value
-            .pointer("/output_config/format/schema/properties/title")
-            .is_some()
-    {
-        return Some("session_title");
-    }
-    if system
-        .is_some_and(|content| text_block_starts_with(content, OMP_AUTO_THINKING_SYSTEM_PREFIX))
-    {
-        return Some("auto_thinking");
-    }
-    if first_user.is_some_and(|content| text_block_starts_with(content, OMP_SUBAGENT_PROMPT_PREFIX))
-    {
-        return Some("subagent");
-    }
-    if observed_session_id.is_some_and(|session_id| session_id.contains(":side:")) {
-        return Some("side");
-    }
-    if system.is_some_and(|content| bounded_text_contains(content, OMP_MAIN_SYSTEM_MARKER)) {
-        return Some("main");
-    }
-
-    Some("unknown")
-}
-
-fn first_user_content(value: &Value) -> Option<&Value> {
-    value
-        .get("messages")
-        .and_then(Value::as_array)
-        .and_then(|messages| messages.first())
-        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-        .and_then(|message| message.get("content"))
-}
-fn last_user_content(value: &Value) -> Option<&Value> {
-    value
-        .get("messages")
-        .and_then(Value::as_array)
-        .and_then(|messages| messages.last())
-        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-        .and_then(|message| message.get("content"))
-}
-
-fn text_block_starts_with(content: &Value, marker: &str) -> bool {
-    text_blocks(content).any(|text| text.trim_start().starts_with(marker))
-}
-
-fn bounded_text_contains(content: &Value, marker: &str) -> bool {
-    text_blocks(content).any(|text| bounded_prefix(text).contains(marker))
-}
-
-fn text_blocks(content: &Value) -> impl Iterator<Item = &str> {
-    let direct = match content {
-        Value::String(text) => Some(text.as_str()),
-        _ => None,
-    };
-    let blocks = match content {
-        Value::Array(blocks) => Some(blocks.as_slice()),
-        _ => None,
-    };
-
-    direct
-        .into_iter()
-        .chain(blocks.into_iter().flatten().filter_map(|block| {
-            (block.get("type").and_then(Value::as_str) == Some("text"))
-                .then(|| block.get("text").and_then(Value::as_str))
-                .flatten()
-        }))
-}
-
-fn bounded_prefix(text: &str) -> &str {
-    let mut end = text.len().min(OMP_CLASSIFIER_TEXT_LIMIT);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }
 
 fn request_breakpoint_source_from_v3(
@@ -6662,6 +6536,34 @@ mod tests {
     }
 
     #[test]
+    fn request_cache_metadata_classifies_claude_code_main_turn() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-claude-code-session-id"),
+            HeaderValue::from_static("87b3d2e6-ce49-439d-9e68-0c90138a726a"),
+        );
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "system": [{
+                    "type": "text",
+                    "text": "\nYou are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user."
+                }],
+                "messages": [{"role": "user", "content": "QA main turn reply ok"}],
+                "tools": [{"name": "Agent"}]
+            }))
+            .expect("serialize Claude Code main request fixture"),
+        );
+
+        let metadata = request_cache_metadata(&headers, &body);
+
+        assert_eq!(metadata.request_kind.as_deref(), Some("main"));
+        assert_eq!(
+            metadata.observed_session_id.as_deref(),
+            Some("87b3d2e6-ce49-439d-9e68-0c90138a726a")
+        );
+    }
+
+    #[test]
     fn request_cache_metadata_accepts_real_advisor_block_as_omp_provenance() {
         let headers = HeaderMap::new();
         let advisor_system_prefix = concat!(
@@ -6673,9 +6575,9 @@ mod tests {
             "You shadow the main agent as a peer programmer:\n",
         );
         let marker_offset = advisor_system_prefix
-            .find(OMP_ADVISOR_SYSTEM_MARKER)
+            .find(crate::request_classification::omp::OMP_ADVISOR_SYSTEM_MARKER)
             .expect("real OMP Advisor prompt contains its marker");
-        assert!(marker_offset < OMP_CLASSIFIER_TEXT_LIMIT);
+        assert!(marker_offset < crate::request_classification::CLASSIFIER_TEXT_LIMIT);
 
         // OMP sends advisorSystemPrompt as the first standalone system block;
         // later context, WATCHDOG, shared, and per-advisor instructions are
@@ -6683,9 +6585,9 @@ mod tests {
         // preserving the real prefix and marker position.
         let advisor_system = format!(
             "{advisor_system_prefix}{}",
-            "x".repeat(OMP_CLASSIFIER_TEXT_LIMIT)
+            "x".repeat(crate::request_classification::CLASSIFIER_TEXT_LIMIT)
         );
-        assert!(advisor_system.len() > OMP_CLASSIFIER_TEXT_LIMIT);
+        assert!(advisor_system.len() > crate::request_classification::CLASSIFIER_TEXT_LIMIT);
         let body = Bytes::from(
             serde_json::to_vec(&serde_json::json!({
                 "system": [{"type": "text", "text": advisor_system}],
@@ -6713,7 +6615,7 @@ mod tests {
                 "system": [
                     {
                         "type": "text",
-                        "text": "x".repeat(OMP_CLASSIFIER_TEXT_LIMIT + 1),
+                        "text": "x".repeat(crate::request_classification::CLASSIFIER_TEXT_LIMIT + 1),
                     },
                     {
                         "type": "text",
