@@ -60,6 +60,16 @@ pub struct RequestEventPartial {
     pub observed_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_parent_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_app: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id_source: Option<String>,
     /// HTTP status observed from upstream response headers, if received.
     /// Distinct from final client-visible `status` on [`RequestEvent`].
     #[serde(default, skip_serializing_if = "Option::is_none")]

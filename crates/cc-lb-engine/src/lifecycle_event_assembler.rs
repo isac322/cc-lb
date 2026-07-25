@@ -32,6 +32,21 @@ const FINALIZATION_GRACE: Duration = Duration::from_millis(200);
 /// waiting for the next tick.
 const FINALIZATION_TICK: Duration = Duration::from_millis(20);
 const PARTIAL_USAGE_THROTTLE: Duration = Duration::from_millis(250);
+#[derive(Default)]
+struct ParseIdentity {
+    thread_id: Option<String>,
+    observed_session_id: Option<String>,
+    request_kind: Option<String>,
+    claude_agent_id: Option<String>,
+    claude_parent_agent_id: Option<String>,
+    parent_session_id: Option<String>,
+    client_app: Option<String>,
+    session_id_source: Option<String>,
+    message_id: Option<String>,
+    message_index: Option<u64>,
+    message_count: Option<u64>,
+    cache_control_message_indices: Vec<u64>,
+}
 
 pub struct RequestEventAssemblerHandle {
     shutdown_tx: oneshot::Sender<()>,
@@ -257,6 +272,26 @@ impl Partial {
                 .parse
                 .as_ref()
                 .and_then(|parse| parse.request_kind.clone()),
+            claude_agent_id: self
+                .parse
+                .as_ref()
+                .and_then(|parse| parse.claude_agent_id.clone()),
+            claude_parent_agent_id: self
+                .parse
+                .as_ref()
+                .and_then(|parse| parse.claude_parent_agent_id.clone()),
+            parent_session_id: self
+                .parse
+                .as_ref()
+                .and_then(|parse| parse.parent_session_id.clone()),
+            client_app: self
+                .parse
+                .as_ref()
+                .and_then(|parse| parse.client_app.clone()),
+            session_id_source: self
+                .parse
+                .as_ref()
+                .and_then(|parse| parse.session_id_source.clone()),
             upstream_response_status: self.upstream_response_status,
             input_tokens: self.usage_seen.then_some(self.usage.input_tokens),
             output_tokens: self.usage_seen.then_some(self.usage.output_tokens),
@@ -1019,27 +1054,22 @@ fn finalize_base(
     let model = route_model.or_else(|| partial.parse.as_ref().and_then(|p| p.model.clone()));
     let auth_ms = partial.auth.as_ref().and_then(|a| a.auth_ms);
     let routing_trace = partial.routing_trace.clone().or(route_routing_trace);
-    let (
-        thread_id,
-        observed_session_id,
-        request_kind,
-        message_id,
-        message_index,
-        message_count,
-        cache_control_message_indices,
-    ) = partial
+    let identity = partial
         .parse
         .as_ref()
-        .map(|p| {
-            (
-                p.thread_id.clone(),
-                p.observed_session_id.clone(),
-                p.request_kind.clone(),
-                p.message_id.clone(),
-                p.message_index,
-                p.message_count,
-                p.cache_control_message_indices.clone(),
-            )
+        .map(|p| ParseIdentity {
+            thread_id: p.thread_id.clone(),
+            observed_session_id: p.observed_session_id.clone(),
+            request_kind: p.request_kind.clone(),
+            claude_agent_id: p.claude_agent_id.clone(),
+            claude_parent_agent_id: p.claude_parent_agent_id.clone(),
+            parent_session_id: p.parent_session_id.clone(),
+            client_app: p.client_app.clone(),
+            session_id_source: p.session_id_source.clone(),
+            message_id: p.message_id.clone(),
+            message_index: p.message_index,
+            message_count: p.message_count,
+            cache_control_message_indices: p.cache_control_message_indices.clone(),
         })
         .unwrap_or_default();
 
@@ -1129,13 +1159,18 @@ fn finalize_base(
         service_tier: partial.usage.service_tier.clone(),
         inference_geo: partial.usage.inference_geo.clone(),
         sse_event_count: partial.stream_success,
-        thread_id,
-        observed_session_id,
-        request_kind,
-        message_id,
-        message_index,
-        message_count,
-        cache_control_message_indices,
+        thread_id: identity.thread_id,
+        observed_session_id: identity.observed_session_id,
+        request_kind: identity.request_kind,
+        claude_agent_id: identity.claude_agent_id,
+        claude_parent_agent_id: identity.claude_parent_agent_id,
+        parent_session_id: identity.parent_session_id,
+        client_app: identity.client_app,
+        session_id_source: identity.session_id_source,
+        message_id: identity.message_id,
+        message_index: identity.message_index,
+        message_count: identity.message_count,
+        cache_control_message_indices: identity.cache_control_message_indices,
         auth_ms,
         route_ms,
         limit_reserve_ms: partial.limit_reserve_ms,
@@ -2122,6 +2157,11 @@ mod tests {
                 method: "POST".to_owned(),
                 observed_session_id: Some("session-123".to_owned()),
                 request_kind: Some("subagent".to_owned()),
+                claude_agent_id: Some("agent-123".to_owned()),
+                claude_parent_agent_id: Some("agent-parent".to_owned()),
+                parent_session_id: Some("session-parent".to_owned()),
+                client_app: Some("cli-bg".to_owned()),
+                session_id_source: Some("x-claude-code-session-id".to_owned()),
                 ..ParseInfo::default()
             }),
         })
@@ -2169,12 +2209,45 @@ mod tests {
                 RequestEventUpdate::Partial(_) | RequestEventUpdate::Final(_) => None,
             })
             .expect("final request event");
+        assert_eq!(
+            parse_partial.observed_session_id.as_deref(),
+            Some("session-123")
+        );
+        assert_eq!(parse_partial.request_kind.as_deref(), Some("subagent"));
+        assert_eq!(parse_partial.claude_agent_id.as_deref(), Some("agent-123"));
+        assert_eq!(
+            parse_partial.claude_parent_agent_id.as_deref(),
+            Some("agent-parent")
+        );
+        assert_eq!(
+            parse_partial.parent_session_id.as_deref(),
+            Some("session-parent")
+        );
+        assert_eq!(parse_partial.client_app.as_deref(), Some("cli-bg"));
+        assert_eq!(
+            parse_partial.session_id_source.as_deref(),
+            Some("x-claude-code-session-id")
+        );
 
         assert_eq!(
             parse_partial.observed_session_id,
             final_event.observed_session_id
         );
         assert_eq!(parse_partial.request_kind, final_event.request_kind);
+        assert_eq!(parse_partial.claude_agent_id, final_event.claude_agent_id);
+        assert_eq!(
+            parse_partial.claude_parent_agent_id,
+            final_event.claude_parent_agent_id
+        );
+        assert_eq!(
+            parse_partial.parent_session_id,
+            final_event.parent_session_id
+        );
+        assert_eq!(parse_partial.client_app, final_event.client_app);
+        assert_eq!(
+            parse_partial.session_id_source,
+            final_event.session_id_source
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
