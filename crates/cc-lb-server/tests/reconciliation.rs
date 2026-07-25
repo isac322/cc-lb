@@ -154,7 +154,6 @@ async fn initial_holder(
         None,
         None,
         1800,
-        &cc_lb_config::Config::default(),
         Arc::new(cc_lb_engine::SystemClock),
     )
     .await
@@ -182,7 +181,6 @@ fn reconciler(
         None,
         None,
         1800,
-        Arc::new(cc_lb_config::Config::default()),
         Arc::new(cc_lb_engine::SystemClock),
     ))
 }

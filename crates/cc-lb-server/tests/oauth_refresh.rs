@@ -294,7 +294,6 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         None,
         None,
         1800,
-        &cc_lb_config::Config::default(),
         fixture.clock.clone(),
     )
     .await

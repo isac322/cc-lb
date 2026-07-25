@@ -1779,9 +1779,7 @@ impl Lifecycle {
 
         let body_value = sonic_rs::from_slice::<Value>(&input.body_bytes).ok();
         let cache_metadata = request_cache_metadata_from_value(&input.headers, body_value.as_ref());
-        let cache_breakpoints = if view.prompt_cache_observation_cache_opt().is_some()
-            && self.config.prompt_cache_shadow.enabled
-        {
+        let cache_breakpoints = if view.prompt_cache_observation_cache_opt().is_some() {
             cache_metadata.plugin_cache_breakpoints()
         } else {
             Vec::new()
@@ -1979,9 +1977,7 @@ impl Lifecycle {
                 }),
             });
         }
-        let cache_breakpoints = if view.prompt_cache_observation_cache_opt().is_some()
-            && self.config.prompt_cache_shadow.enabled
-        {
+        let cache_breakpoints = if view.prompt_cache_observation_cache_opt().is_some() {
             cache_metadata.plugin_cache_breakpoints()
         } else {
             Vec::new()
@@ -2933,7 +2929,6 @@ impl Lifecycle {
         if let Some(o) = observer.as_ref()
             && usage.present
             && status == StatusCode::OK
-            && self.config.prompt_cache_shadow.enabled
             && let Some(context) = prompt_cache_observation_context.as_ref()
         {
             let now_unix_secs = context.cache.clock_now_unix_secs();
@@ -3319,7 +3314,6 @@ impl Lifecycle {
             );
         }
         let relay_start = Instant::now();
-        let prompt_cache_shadow_enabled = self.config.prompt_cache_shadow.enabled;
         let keepalive = crate::cache_keepalive::LifecycleKeepalive::new(
             self.cache_keepalive_enqueuer.clone(),
             Arc::clone(&self.dynamic_view),
@@ -3494,8 +3488,7 @@ impl Lifecycle {
                                     if message_start_at.is_none() {
                                         message_start_at = Some(now);
                                     }
-                                        if status == StatusCode::OK
-                                            && prompt_cache_shadow_enabled
+                                    if status == StatusCode::OK
                                         && !prompt_cache_observations_buffered
                                         && let Some(context) =
                                             prompt_cache_observation_context.as_ref()
@@ -3519,7 +3512,6 @@ impl Lifecycle {
                                         message_stop_at = Some(now);
                                     }
                                     if status == StatusCode::OK
-                                        && prompt_cache_shadow_enabled
                                         && prompt_cache_observations_buffered
                                         && !prompt_cache_observations_emitted
                                         && let Some(o) = observer.as_ref()
@@ -3852,7 +3844,6 @@ impl Lifecycle {
                 }
             }
             if status == StatusCode::OK
-                && prompt_cache_shadow_enabled
                 && prompt_cache_observations_buffered
                 && !prompt_cache_observations_emitted
                 && !prompt_cache_decode.observations.is_empty()
@@ -3915,7 +3906,6 @@ impl Lifecycle {
             }
             if let Some(o) = observer.as_ref() {
                 if status == StatusCode::OK
-                    && prompt_cache_shadow_enabled
                     && let Some(context) = prompt_cache_observation_context.as_ref()
                 {
                     let now_unix_secs = context.cache.clock_now_unix_secs();

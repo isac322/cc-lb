@@ -151,7 +151,6 @@ async fn build(
         None,
         None,
         1800,
-        &cc_lb_config::Config::default(),
         Arc::new(cc_lb_engine::SystemClock),
     )
     .await

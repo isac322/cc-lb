@@ -58,7 +58,6 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
         None,
         None,
         1800,
-        &cc_lb_config::Config::default(),
         Arc::new(cc_lb_engine::SystemClock),
     )
     .await

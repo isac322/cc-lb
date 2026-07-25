@@ -90,11 +90,6 @@ pub struct Config {
     #[serde(default)]
     pub lifecycle_routing_tier_subscriber: LifecycleRoutingTierSubscriberConfig,
     #[serde(default)]
-    pub lifecycle_prompt_cache_drift_subscriber: LifecyclePromptCacheDriftSubscriberConfig,
-    #[serde(default)]
-    pub lifecycle_prompt_cache_observation_subscriber:
-        LifecyclePromptCacheObservationSubscriberConfig,
-    #[serde(default)]
     pub limit_reservation_ttl: LimitReservationTtlConfig,
     #[serde(default)]
     pub lifecycle_limit_reconcile_subscriber: LifecycleLimitReconcileSubscriberConfig,
@@ -687,17 +682,14 @@ impl Default for SubscriptionQuotaConfig {
     }
 }
 
-/// Prompt cache shadow mode configuration.
+/// Always-on prompt cache routing configuration.
 ///
-/// Controls the prompt cache observation cache behavior. When `enabled=false`, the cache layer
-/// is not constructed and observation flow is gated off at the lifecycle level for byte-equivalent
-/// pre-T22 behavior (no observation enqueue, no snapshot, no sweeper). When `enabled=true`,
-/// the full cache pipeline activates: observations from successful responses are decoded,
-/// upserted into the in-memory cache, and enqueued for persistent storage; `build_candidates`
-/// reads cache state per `(upstream, canonical model)` partition to compute cache scores.
+/// Controls the prompt cache observation cache behavior. Observations from successful responses
+/// are decoded, upserted into the in-memory cache, and enqueued for persistent storage;
+/// `build_candidates` reads cache state per `(upstream, canonical model)` partition to compute
+/// cache scores.
 ///
 /// Configuration keys and defaults:
-/// - `enabled` (default: false) - gate all observation flow and sweeper spawn
 /// - `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed
 /// - `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence
 /// - `max_live_entries_per_partition` (default: 50000) - cache-negative admission ceiling for one
@@ -705,8 +697,6 @@ impl Default for SubscriptionQuotaConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct PromptCacheShadowConfig {
-    #[serde(default)]
-    pub enabled: bool,
     #[serde(default = "default_prompt_cache_shadow_grace_margin_secs")]
     pub grace_margin_secs: u64,
     #[serde(default = "default_prompt_cache_shadow_refresh_debounce_secs")]
@@ -718,7 +708,6 @@ pub struct PromptCacheShadowConfig {
 impl Default for PromptCacheShadowConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             grace_margin_secs: 30,
             refresh_debounce_secs: 60,
             max_live_entries_per_partition: 50_000,
@@ -838,32 +827,6 @@ pub struct LifecycleRoutingTierSubscriberConfig {
 }
 
 impl Default for LifecycleRoutingTierSubscriberConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecyclePromptCacheDriftSubscriberConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for LifecyclePromptCacheDriftSubscriberConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct LifecyclePromptCacheObservationSubscriberConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for LifecyclePromptCacheObservationSubscriberConfig {
     fn default() -> Self {
         Self { enabled: true }
     }

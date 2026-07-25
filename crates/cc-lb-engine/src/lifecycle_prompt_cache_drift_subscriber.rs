@@ -45,12 +45,10 @@ impl PromptCacheDriftSubscriberHandle {
 
 pub fn spawn_lifecycle_prompt_cache_drift_subscriber(
     rx: mpsc::Receiver<LifecycleEvent>,
-    prompt_cache_shadow_enabled: bool,
     metrics: Arc<dyn EngineMetricsHook>,
 ) -> PromptCacheDriftSubscriberHandle {
     spawn_with_config(
         rx,
-        prompt_cache_shadow_enabled,
         metrics,
         DEFAULT_PROMPT_CACHE_DRIFT_MAP_CAP,
         DEFAULT_PROMPT_CACHE_DRIFT_TTL,
@@ -59,20 +57,12 @@ pub fn spawn_lifecycle_prompt_cache_drift_subscriber(
 
 pub fn spawn_with_config(
     rx: mpsc::Receiver<LifecycleEvent>,
-    prompt_cache_shadow_enabled: bool,
     metrics: Arc<dyn EngineMetricsHook>,
     map_cap: usize,
     ttl: Duration,
 ) -> PromptCacheDriftSubscriberHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(subscriber_loop(
-        rx,
-        prompt_cache_shadow_enabled,
-        metrics,
-        map_cap,
-        ttl,
-        shutdown_rx,
-    ));
+    let join = tokio::spawn(subscriber_loop(rx, metrics, map_cap, ttl, shutdown_rx));
     PromptCacheDriftSubscriberHandle { shutdown_tx, join }
 }
 
@@ -98,7 +88,6 @@ impl Partial {
 
 async fn subscriber_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
-    prompt_cache_shadow_enabled: bool,
     metrics: Arc<dyn EngineMetricsHook>,
     map_cap: usize,
     ttl: Duration,
@@ -114,7 +103,7 @@ async fn subscriber_loop(
             biased;
                 event = rx.recv() => {
                     match event {
-                        Some(event) => handle_event(metrics.as_ref(), &mut partials, prompt_cache_shadow_enabled, map_cap, event),
+                        Some(event) => handle_event(metrics.as_ref(), &mut partials, map_cap, event),
                         None => break,
                     }
                 }
@@ -124,20 +113,13 @@ async fn subscriber_loop(
     }
 
     while let Ok(event) = rx.try_recv() {
-        handle_event(
-            metrics.as_ref(),
-            &mut partials,
-            prompt_cache_shadow_enabled,
-            map_cap,
-            event,
-        );
+        handle_event(metrics.as_ref(), &mut partials, map_cap, event);
     }
 }
 
 fn handle_event(
     metrics: &dyn EngineMetricsHook,
     partials: &mut HashMap<EventId, Partial>,
-    prompt_cache_shadow_enabled: bool,
     map_cap: usize,
     event: LifecycleEvent,
 ) {
@@ -147,7 +129,7 @@ fn handle_event(
     if let LifecycleEvent::RequestTerminated { client_status, .. } = &event {
         let status = *client_status;
         if let Some(partial) = partials.remove(&event_id) {
-            emit_metrics(metrics, &partial, status, prompt_cache_shadow_enabled);
+            emit_metrics(metrics, &partial, status);
         } else {
             metrics::counter!(
                 "cc_lb_lifecycle_prompt_cache_drift_events_total",
@@ -203,15 +185,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
     }
 }
 
-fn emit_metrics(
-    metrics_hook: &dyn EngineMetricsHook,
-    partial: &Partial,
-    status: u16,
-    prompt_cache_shadow_enabled: bool,
-) {
-    if !prompt_cache_shadow_enabled {
-        return;
-    }
+fn emit_metrics(metrics_hook: &dyn EngineMetricsHook, partial: &Partial, status: u16) {
     let has_context = partial.has_cache_breakpoints && partial.upstream_id.is_some();
     if (400..500).contains(&status) && has_context {
         metrics_hook.record_cache_observation_dropped(
@@ -372,7 +346,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn terminated_after_usage_sequence_observes_token_drift() {
         let (tx, rx) = mpsc::channel(16);
-        let handle = spawn_lifecycle_prompt_cache_drift_subscriber(rx, true, noop_metrics());
+        let handle = spawn_lifecycle_prompt_cache_drift_subscriber(rx, noop_metrics());
 
         tx.send(parse_completed("drift-a")).await.unwrap();
         tx.send(route_completed("drift-a")).await.unwrap();
@@ -394,7 +368,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn client_error_with_context_shuts_down_cleanly() {
         let (tx, rx) = mpsc::channel(16);
-        let handle = spawn_lifecycle_prompt_cache_drift_subscriber(rx, true, noop_metrics());
+        let handle = spawn_lifecycle_prompt_cache_drift_subscriber(rx, noop_metrics());
 
         tx.send(parse_completed("drift-b")).await.unwrap();
         tx.send(route_completed("drift-b")).await.unwrap();
@@ -406,7 +380,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn predicted_hit_with_zero_read_records_negative_drift() {
         let (tx, rx) = mpsc::channel(16);
-        let handle = spawn_lifecycle_prompt_cache_drift_subscriber(rx, true, noop_metrics());
+        let handle = spawn_lifecycle_prompt_cache_drift_subscriber(rx, noop_metrics());
 
         tx.send(parse_completed("drift-disagree")).await.unwrap();
         tx.send(route_completed_predicted("drift-disagree", Some(30)))
@@ -430,7 +404,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn unpredicted_read_records_positive_drift() {
         let (tx, rx) = mpsc::channel(16);
-        let handle = spawn_lifecycle_prompt_cache_drift_subscriber(rx, true, noop_metrics());
+        let handle = spawn_lifecycle_prompt_cache_drift_subscriber(rx, noop_metrics());
 
         tx.send(parse_completed("drift-unknown")).await.unwrap();
         tx.send(route_completed_predicted("drift-unknown", None))
