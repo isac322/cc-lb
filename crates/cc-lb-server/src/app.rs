@@ -374,7 +374,7 @@ pub async fn run_serve(
     _force_handshake: Option<bool>,
     clock: ClockHandle,
 ) -> Result<(), ServeError> {
-    let mut config = Config::load(config_path)?;
+    let (mut config, config_warnings) = Config::load_with_warnings(config_path)?;
     if let Some(data_dir) = data_dir {
         config.runtime.data_dir = Some(data_dir.to_path_buf());
     }
@@ -382,6 +382,7 @@ pub async fn run_serve(
         config.observability.user_prompt_redaction,
     ));
     let guard = init_observability(&mut config)?;
+    crate::reload::warn_removed_prompt_cache_switches(&config_warnings);
     let app = match build_app_with_path_inner(
         config,
         Some(config_path),
@@ -892,22 +893,16 @@ async fn build_app_with_storage_inner(
         anthropic_compatibility_kv: storage_for_dynamic.clone(),
         audit: Some(storage_for_dynamic.clone()),
     });
-    let (
-        prompt_cache_observation_cache,
-        prompt_cache_observation_sink,
-        prompt_cache_observation_writer_task,
-    ) = if config.prompt_cache_shadow.enabled {
-        let cache = new_prompt_cache_observation_cache(&config.prompt_cache_shadow, clock.clone());
-        let (sink, writer) = PromptCacheObservationSink::new(
-            stores.prompt_cache_observations.clone(),
-            DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
-            cc_lb_observability::cache_observation_store_kind::SQLITE,
-        );
-        let sink: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
-        (Some(cache), Some(sink), Some(writer))
-    } else {
-        (None, None, None)
-    };
+    let cache = new_prompt_cache_observation_cache(&config.prompt_cache_shadow, clock.clone());
+    let (sink, writer) = PromptCacheObservationSink::new(
+        stores.prompt_cache_observations.clone(),
+        DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
+        cc_lb_observability::cache_observation_store_kind::SQLITE,
+    );
+    let sink: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
+    let prompt_cache_observation_cache = Some(cache);
+    let prompt_cache_observation_sink = Some(sink);
+    let prompt_cache_observation_writer_task = Some(writer);
     let body_caps = RequestBodyCaps {
         messages: cap_to_usize(config.body.messages_cap_bytes),
         files: cap_to_usize(config.body.files_cap_bytes),
@@ -984,7 +979,6 @@ async fn build_app_with_storage_inner(
         prompt_cache_observation_cache.clone(),
         prompt_cache_observation_sink.clone(),
         config.subscription_quota.routing_max_staleness_secs,
-        &config,
         clock.clone(),
     )
     .await?;
@@ -1016,7 +1010,6 @@ async fn build_app_with_storage_inner(
         subscription_quota_routing_max_staleness_secs: config
             .subscription_quota
             .routing_max_staleness_secs,
-        config: Arc::new(config.clone()),
         clock: clock.clone(),
     }));
     let notify_listener_task = Some(tokio::spawn(async move {
@@ -1102,25 +1095,13 @@ async fn build_app_with_storage_inner(
     } else {
         None
     };
-    let lifecycle_prompt_cache_drift_rx = if config.lifecycle_prompt_cache_drift_subscriber.enabled
-    {
-        Some(in_memory_bus.attach_lifecycle_prompt_cache_drift(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_DRIFT_CAPACITY,
-        ))
-    } else {
-        None
-    };
+    let lifecycle_prompt_cache_drift_rx = Some(in_memory_bus.attach_lifecycle_prompt_cache_drift(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_DRIFT_CAPACITY,
+    ));
     let lifecycle_prompt_cache_observation_rx =
-        if config.lifecycle_prompt_cache_observation_subscriber.enabled
-            && config.prompt_cache_shadow.enabled
-            && prompt_cache_observation_cache.is_some()
-        {
-            Some(in_memory_bus.attach_lifecycle_prompt_cache_observation(
-                cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY,
-            ))
-        } else {
-            None
-        };
+        Some(in_memory_bus.attach_lifecycle_prompt_cache_observation(
+            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY,
+        ));
     let (event_fanout_shutdown_tx, event_fanout_shutdown_rx) = watch::channel(false);
     let mut event_fanout_tasks = Vec::new();
     let mut internal_partials_state = None;
@@ -1273,7 +1254,6 @@ async fn build_app_with_storage_inner(
         lifecycle_prompt_cache_drift_rx.map(|rx| {
             cc_lb_engine::spawn_lifecycle_prompt_cache_drift_subscriber(
                 rx,
-                config.prompt_cache_shadow.enabled,
                 Arc::clone(&metrics_hook),
             )
         });
@@ -1283,7 +1263,6 @@ async fn build_app_with_storage_inner(
                 let cache: Arc<dyn PromptCacheObservationCacheLike> = cache;
                 cc_lb_engine::spawn_lifecycle_prompt_cache_observation_subscriber(
                     rx,
-                    config.lifecycle_prompt_cache_observation_subscriber.clone(),
                     cache,
                     prompt_cache_observation_sink.clone(),
                     Arc::clone(&metrics_hook),
@@ -1408,7 +1387,6 @@ async fn build_app_with_storage_inner(
         subscription_quota_routing_max_staleness_secs: config
             .subscription_quota
             .routing_max_staleness_secs,
-        config: Arc::new(config.clone()),
         clock: clock.clone(),
     });
     let config_watcher = config_path.map(|path| {
@@ -1656,7 +1634,6 @@ async fn build_app_with_storage_inner(
         subscription_quota_routing_max_staleness_secs: config
             .subscription_quota
             .routing_max_staleness_secs,
-        config: Arc::new(config.clone()),
         clock: clock.clone(),
     });
     spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
@@ -1919,7 +1896,6 @@ struct ServerDynamicViewRebinder {
     prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
     prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     subscription_quota_routing_max_staleness_secs: u64,
-    config: Arc<cc_lb_config::Config>,
     clock: ClockHandle,
 }
 
@@ -1941,7 +1917,6 @@ impl DynamicViewRebinder for ServerDynamicViewRebinder {
             self.prompt_cache_observation_cache.clone(),
             self.prompt_cache_observation_sink.clone(),
             self.subscription_quota_routing_max_staleness_secs,
-            &self.config,
             self.clock.clone(),
         )
         .await?)
@@ -1961,7 +1936,6 @@ struct ReconcilerParams {
     prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
     prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     subscription_quota_routing_max_staleness_secs: u64,
-    config: Arc<cc_lb_config::Config>,
     clock: ClockHandle,
 }
 
@@ -1979,7 +1953,6 @@ fn spawn_reconciler(params: ReconcilerParams) {
         params.prompt_cache_observation_cache,
         params.prompt_cache_observation_sink,
         params.subscription_quota_routing_max_staleness_secs,
-        params.config,
         params.clock,
     ));
     tokio::spawn(reconciler.run());

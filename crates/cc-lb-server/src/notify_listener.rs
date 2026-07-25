@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cc_lb_aead::AeadService;
-use cc_lb_config::{AnthropicOAuthConfig, Config};
+use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_engine::DynamicViewHolder;
 use cc_lb_engine::PromptCacheObservationSinkLike;
 use cc_lb_engine::clock::ClockHandle;
@@ -31,7 +31,6 @@ pub struct NotifyListener {
     prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
     prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     subscription_quota_routing_max_staleness_secs: u64,
-    config: Arc<Config>,
     clock: ClockHandle,
 }
 
@@ -49,7 +48,6 @@ pub struct NotifyListenerParams {
     pub prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
     pub prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     pub subscription_quota_routing_max_staleness_secs: u64,
-    pub config: Arc<Config>,
     pub clock: ClockHandle,
 }
 
@@ -70,7 +68,6 @@ impl NotifyListener {
             prompt_cache_observation_sink: params.prompt_cache_observation_sink,
             subscription_quota_routing_max_staleness_secs: params
                 .subscription_quota_routing_max_staleness_secs,
-            config: params.config,
             clock: params.clock,
         }
     }
@@ -144,7 +141,6 @@ impl NotifyListener {
             self.prompt_cache_observation_cache.clone(),
             self.prompt_cache_observation_sink.clone(),
             self.subscription_quota_routing_max_staleness_secs,
-            &self.config,
             self.clock.clone(),
         )
         .await

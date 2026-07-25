@@ -126,18 +126,6 @@
         "enabled": true
       }
     },
-    "lifecycle_prompt_cache_drift_subscriber": {
-      "$ref": "#/$defs/LifecyclePromptCacheDriftSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_prompt_cache_observation_subscriber": {
-      "$ref": "#/$defs/LifecyclePromptCacheObservationSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
     "lifecycle_rate_limit_header_subscriber": {
       "$ref": "#/$defs/LifecycleRateLimitHeaderSubscriberConfig",
       "default": {
@@ -186,7 +174,6 @@
     "prompt_cache_shadow": {
       "$ref": "#/$defs/PromptCacheShadowConfig",
       "default": {
-        "enabled": false,
         "grace_margin_secs": 30,
         "max_live_entries_per_partition": 50000,
         "refresh_debounce_secs": 60
@@ -681,24 +668,6 @@
         }
       }
     },
-    "LifecyclePromptCacheDriftSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecyclePromptCacheObservationSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
     "LifecycleRateLimitHeaderSubscriberConfig": {
       "type": "object",
       "properties": {
@@ -948,13 +917,9 @@
       "additionalProperties": false
     },
     "PromptCacheShadowConfig": {
-      "description": "Prompt cache shadow mode configuration.\n\nControls the prompt cache observation cache behavior. When `enabled=false`, the cache layer\nis not constructed and observation flow is gated off at the lifecycle level for byte-equivalent\npre-T22 behavior (no observation enqueue, no snapshot, no sweeper). When `enabled=true`,\nthe full cache pipeline activates: observations from successful responses are decoded,\nupserted into the in-memory cache, and enqueued for persistent storage; `build_candidates`\nreads cache state per `(upstream, canonical model)` partition to compute cache scores.\n\nConfiguration keys and defaults:\n- `enabled` (default: false) - gate all observation flow and sweeper spawn\n- `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed\n- `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence\n- `max_live_entries_per_partition` (default: 50000) - cache-negative admission ceiling for one\n  `(upstream, canonical model)` partition",
+      "description": "Always-on prompt cache routing configuration.\n\nControls the prompt cache observation cache behavior. Observations from successful responses\nare decoded, upserted into the in-memory cache, and enqueued for persistent storage;\n`build_candidates` reads cache state per `(upstream, canonical model)` partition to compute\ncache scores.\n\nConfiguration keys and defaults:\n- `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed\n- `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence\n- `max_live_entries_per_partition` (default: 50000) - cache-negative admission ceiling for one\n  `(upstream, canonical model)` partition",
       "type": "object",
       "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": false
-        },
         "grace_margin_secs": {
           "type": "integer",
           "format": "uint64",

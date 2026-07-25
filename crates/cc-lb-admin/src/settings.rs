@@ -46,8 +46,6 @@ pub const COVERAGE_CHECKLIST: &[&str] = &[
     "lifecycle_api_key_metrics_subscriber",
     "lifecycle_cache_hit_miss_subscriber",
     "lifecycle_routing_tier_subscriber",
-    "lifecycle_prompt_cache_drift_subscriber",
-    "lifecycle_prompt_cache_observation_subscriber",
     "lifecycle_limit_reconcile_subscriber",
 ];
 
@@ -506,8 +504,6 @@ fn reject_unknown_top_level_keys(value: &Value) -> Result<(), String> {
         "lifecycle_api_key_metrics_subscriber",
         "lifecycle_cache_hit_miss_subscriber",
         "lifecycle_routing_tier_subscriber",
-        "lifecycle_prompt_cache_drift_subscriber",
-        "lifecycle_prompt_cache_observation_subscriber",
         "event_bus",
         "cluster",
     ];

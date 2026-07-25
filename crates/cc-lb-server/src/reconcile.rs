@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_aead::AeadService;
-use cc_lb_config::{AnthropicOAuthConfig, Config};
+use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_engine::DynamicViewHolder;
 use cc_lb_engine::clock::ClockHandle;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
@@ -30,7 +30,6 @@ pub struct Reconciler {
     pub prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
     pub prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     pub subscription_quota_routing_max_staleness_secs: u64,
-    pub config: Arc<Config>,
     pub clock: ClockHandle,
 }
 
@@ -49,7 +48,6 @@ impl Reconciler {
         prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
         prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
         subscription_quota_routing_max_staleness_secs: u64,
-        config: Arc<Config>,
         clock: ClockHandle,
     ) -> Self {
         Self {
@@ -65,7 +63,6 @@ impl Reconciler {
             prompt_cache_observation_cache,
             prompt_cache_observation_sink,
             subscription_quota_routing_max_staleness_secs,
-            config,
             clock,
         }
     }
@@ -119,7 +116,6 @@ impl Reconciler {
             self.prompt_cache_observation_cache.clone(),
             self.prompt_cache_observation_sink.clone(),
             self.subscription_quota_routing_max_staleness_secs,
-            &self.config,
             self.clock.clone(),
         )
         .await

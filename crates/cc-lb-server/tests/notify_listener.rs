@@ -252,7 +252,6 @@ async fn fixture() -> Fixture {
         None,
         None,
         1800,
-        &cc_lb_config::Config::default(),
         Arc::new(cc_lb_engine::SystemClock),
     )
     .await
@@ -289,7 +288,6 @@ async fn spawn_listener(
         prompt_cache_observation_cache: None,
         prompt_cache_observation_sink: None,
         subscription_quota_routing_max_staleness_secs: 1800,
-        config: Arc::new(cc_lb_config::Config::default()),
         clock: Arc::new(cc_lb_engine::SystemClock),
     }));
     let task = tokio::spawn(async move {
