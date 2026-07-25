@@ -88,6 +88,7 @@ describe('RequestEventsTable', () => {
         duration_ms: 100,
         model: 'claude-sonnet',
         request_kind: 'advisor',
+        thread_id: 'session-advisor',
         _phase: 'final',
       },
       {
@@ -109,7 +110,10 @@ describe('RequestEventsTable', () => {
       />,
     );
 
-    expect(screen.getByText('advisor')).toBeDefined();
+    const sessionChip = screen.getByTitle('session-advisor');
+    const requestKindBadge = screen.getByText('adv');
+    expect(sessionChip.closest('td')).toBe(requestKindBadge.closest('td'));
+    expect(screen.queryByText('advisor')).toBeNull();
     expect(screen.queryByText('main')).toBeNull();
   });
 

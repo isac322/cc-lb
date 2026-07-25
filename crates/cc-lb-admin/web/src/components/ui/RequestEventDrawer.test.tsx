@@ -140,6 +140,7 @@ describe('RequestEventDrawer', () => {
       ts: 1718553120,
       status: 200,
       duration_ms: 150,
+      thread_id: 'session-thread',
       observed_session_id: 'session-observed',
       request_kind: 'subagent',
       _phase: 'final',
@@ -156,8 +157,10 @@ describe('RequestEventDrawer', () => {
     expect(screen.getByText('Observed session')).toBeDefined();
     expect(screen.getByTitle('session-observed')).toBeDefined();
     expect(screen.getByLabelText('Copy observed session id')).toBeDefined();
-    expect(screen.getByText('Request kind')).toBeDefined();
-    expect(screen.getByText('subagent')).toBeDefined();
+    const sessionRow = screen.getByText('Session').parentElement;
+    expect(sessionRow?.textContent).toContain('sub');
+    expect(screen.queryByText('Request kind')).toBeNull();
+    expect(screen.queryByText('subagent')).toBeNull();
   });
 
   it('renders structured upstream failure details when only type is present', () => {
