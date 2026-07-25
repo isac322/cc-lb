@@ -4859,9 +4859,7 @@ fn classify_omp_request(
         return Some("advisor");
     }
 
-    if observed_session_id.is_none() {
-        return None;
-    }
+    observed_session_id?;
 
     let first_user = first_user_content(value);
     let last_user = last_user_content(value);
