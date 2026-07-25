@@ -4848,14 +4848,22 @@ fn classify_omp_request(
         return Some("subagent");
     }
 
-    let value = value.filter(|_| observed_session_id.is_some())?;
+    let value = value?;
     let system = value.get("system");
-    let first_user = first_user_content(value);
-    let last_user = last_user_content(value);
 
+    // OMP v17.1.3 gives Advisor its own provider session ID internally, but its
+    // custom Anthropic request path emits neither the session header nor
+    // metadata.user_id. The exact built-in Advisor system marker is therefore
+    // the request's only OMP provenance.
     if system.is_some_and(|content| bounded_text_contains(content, OMP_ADVISOR_SYSTEM_MARKER)) {
         return Some("advisor");
     }
+
+    observed_session_id?;
+
+    let first_user = first_user_content(value);
+    let last_user = last_user_content(value);
+
     if [first_user, last_user]
         .into_iter()
         .flatten()
@@ -6651,6 +6659,46 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    #[test]
+    fn request_cache_metadata_accepts_real_advisor_block_as_omp_provenance() {
+        let headers = HeaderMap::new();
+        let advisor_system_prefix = concat!(
+            "<system-conventions>\n",
+            "RFC 2119 applies to MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. ",
+            "`NEVER` and `AVOID` are aliases for `MUST NOT` and `SHOULD NOT`.\n",
+            "</system-conventions>\n\n",
+            "You bring a different angle, advocating for the user and for code quality & robustness.\n",
+            "You shadow the main agent as a peer programmer:\n",
+        );
+        let marker_offset = advisor_system_prefix
+            .find(OMP_ADVISOR_SYSTEM_MARKER)
+            .expect("real OMP Advisor prompt contains its marker");
+        assert!(marker_offset < OMP_CLASSIFIER_TEXT_LIMIT);
+
+        // OMP sends advisorSystemPrompt as the first standalone system block;
+        // later context, WATCHDOG, shared, and per-advisor instructions are
+        // separate blocks. Keep this fixture larger than the bounded scan while
+        // preserving the real prefix and marker position.
+        let advisor_system = format!(
+            "{advisor_system_prefix}{}",
+            "x".repeat(OMP_CLASSIFIER_TEXT_LIMIT)
+        );
+        assert!(advisor_system.len() > OMP_CLASSIFIER_TEXT_LIMIT);
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "system": [{"type": "text", "text": advisor_system}],
+                "messages": [{"role": "user", "content": "review this"}],
+            }))
+            .expect("serialize real-layout OMP Advisor request fixture"),
+        );
+
+        let metadata = request_cache_metadata(&headers, &body);
+
+        assert_eq!(metadata.observed_session_id, None);
+        assert_eq!(metadata.thread_id, None);
+        assert_eq!(metadata.request_kind.as_deref(), Some("advisor"));
     }
 
     #[test]
