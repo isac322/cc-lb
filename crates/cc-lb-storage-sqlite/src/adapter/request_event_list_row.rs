@@ -24,6 +24,11 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
         thread_id: row.thread_id,
         observed_session_id: row.observed_session_id,
         request_kind: row.request_kind,
+        claude_agent_id: row.claude_agent_id,
+        claude_parent_agent_id: row.claude_parent_agent_id,
+        parent_session_id: row.parent_session_id,
+        client_app: row.client_app,
+        session_id_source: row.session_id_source,
         model: row.model,
         reasoning_effort: row.reasoning_effort,
         thinking_budget_tokens: row

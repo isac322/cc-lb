@@ -61,12 +61,40 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
             page[0].request_kind.as_deref(),
             matching.request_kind.as_deref()
         );
+        assert_eq!(
+            page[0].claude_agent_id.as_deref(),
+            matching.claude_agent_id.as_deref()
+        );
+        assert_eq!(
+            page[0].claude_parent_agent_id.as_deref(),
+            matching.claude_parent_agent_id.as_deref()
+        );
+        assert_eq!(
+            page[0].parent_session_id.as_deref(),
+            matching.parent_session_id.as_deref()
+        );
+        assert_eq!(
+            page[0].client_app.as_deref(),
+            matching.client_app.as_deref()
+        );
+        assert_eq!(
+            page[0].session_id_source.as_deref(),
+            matching.session_id_source.as_deref()
+        );
 
         let detail = storage
             .get_request_event(matching.event_id.as_deref().unwrap_or_default())
             .await?
             .expect("stored request event detail");
         assert_eq!(serde_json::to_vec(&detail)?, serde_json::to_vec(&matching)?);
+        assert_eq!(detail.claude_agent_id, matching.claude_agent_id);
+        assert_eq!(
+            detail.claude_parent_agent_id,
+            matching.claude_parent_agent_id
+        );
+        assert_eq!(detail.parent_session_id, matching.parent_session_id);
+        assert_eq!(detail.client_app, matching.client_app);
+        assert_eq!(detail.session_id_source, matching.session_id_source);
 
         Ok(())
     })
@@ -104,6 +132,11 @@ fn request_event(
         model: Some("claude-sonnet-4-5".to_owned()),
         observed_session_id: Some("session-a".to_owned()),
         request_kind: Some("subagent".to_owned()),
+        claude_agent_id: Some("agent-a".to_owned()),
+        claude_parent_agent_id: Some("agent-parent".to_owned()),
+        parent_session_id: Some("session-parent".to_owned()),
+        client_app: Some("cli-bg".to_owned()),
+        session_id_source: Some("x-claude-code-session-id".to_owned()),
         status,
         input_tokens: Some(10),
         output_tokens: Some(20),

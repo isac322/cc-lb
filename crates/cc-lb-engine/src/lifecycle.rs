@@ -1965,6 +1965,11 @@ impl Lifecycle {
                     thread_id: cache_metadata.thread_id.clone(),
                     observed_session_id: cache_metadata.observed_session_id.clone(),
                     request_kind: cache_metadata.request_kind.clone(),
+                    claude_agent_id: cache_metadata.claude_agent_id.clone(),
+                    claude_parent_agent_id: cache_metadata.claude_parent_agent_id.clone(),
+                    parent_session_id: cache_metadata.parent_session_id.clone(),
+                    client_app: cache_metadata.client_app.clone(),
+                    session_id_source: cache_metadata.session_id_source.clone(),
                     message_id: cache_metadata.message_id.clone(),
                     message_index: cache_metadata.message_index,
                     message_count: cache_metadata.message_count,
@@ -4535,6 +4540,11 @@ pub(crate) struct RequestCacheMetadata {
     pub(crate) thread_id: Option<String>,
     pub(crate) observed_session_id: Option<String>,
     pub(crate) request_kind: Option<String>,
+    pub(crate) claude_agent_id: Option<String>,
+    pub(crate) claude_parent_agent_id: Option<String>,
+    pub(crate) parent_session_id: Option<String>,
+    pub(crate) client_app: Option<String>,
+    pub(crate) session_id_source: Option<String>,
     requested_service_tier: Option<String>,
     message_id: Option<String>,
     message_index: Option<u64>,
@@ -4627,18 +4637,34 @@ fn request_cache_metadata_from_value(
     headers: &HeaderMap,
     value: Option<&Value>,
 ) -> RequestCacheMetadata {
-    let observed_session_id = request_session_identity(headers, value);
+    let metadata = value.map(metadata_identity).unwrap_or_default();
+    let (observed_session_id, session_id_source) =
+        match request_session_identity(headers, &metadata) {
+            Some((session_id, source)) => (Some(session_id), Some(source.to_owned())),
+            None => (None, None),
+        };
     let thread_id = observed_session_id.clone();
-    let has_claude_agent = header_to_string(headers, "x-claude-code-agent-id").is_some();
-    let request_kind =
-        classify_omp_request(value, observed_session_id.as_deref(), has_claude_agent)
-            .map(str::to_owned);
+    let claude_agent_id = header_identity(headers, "x-claude-code-agent-id");
+    let claude_parent_agent_id = header_identity(headers, "x-claude-code-parent-agent-id");
+    let client_app = header_identity(headers, "x-app");
+    let parent_session_id = metadata.parent_session_id.clone();
+    let request_kind = classify_omp_request(
+        value,
+        observed_session_id.as_deref(),
+        claude_agent_id.is_some(),
+    )
+    .map(str::to_owned);
 
     let Some(value) = value else {
         return RequestCacheMetadata {
             thread_id,
             observed_session_id,
             request_kind,
+            claude_agent_id,
+            claude_parent_agent_id,
+            parent_session_id,
+            client_app,
+            session_id_source,
             ..Default::default()
         };
     };
@@ -4715,6 +4741,11 @@ fn request_cache_metadata_from_value(
         thread_id,
         observed_session_id,
         request_kind,
+        claude_agent_id,
+        claude_parent_agent_id,
+        parent_session_id,
+        client_app,
+        session_id_source,
         requested_service_tier,
         message_id,
         message_index,
@@ -4740,9 +4771,56 @@ const OMP_SESSION_TITLE_SYSTEM_MARKER: &str = "Generate a concise, sentence-case
 const OMP_AUTO_THINKING_SYSTEM_PREFIX: &str = "You are a difficulty classifier for a coding agent.";
 const OMP_SUBAGENT_PROMPT_PREFIX: &str = "Complete the assignment below, thoroughly:";
 const OMP_LEGACY_SESSION_MARKER: &str = "_session_";
-const OMP_MAX_SESSION_ID_BYTES: usize = 512;
+const MAX_IDENTITY_VALUE_BYTES: usize = 512;
 
-fn request_session_identity(headers: &HeaderMap, value: Option<&Value>) -> Option<String> {
+#[derive(Default)]
+struct MetadataIdentity {
+    session_id: Option<String>,
+    parent_session_id: Option<String>,
+}
+
+fn metadata_identity(value: &Value) -> MetadataIdentity {
+    let Some(user_id) = value
+        .get("metadata")
+        .and_then(|metadata| metadata.get("user_id"))
+        .and_then(Value::as_str)
+    else {
+        return MetadataIdentity::default();
+    };
+
+    if let Ok(parsed) = sonic_rs::from_str::<Value>(user_id) {
+        return MetadataIdentity {
+            session_id: parsed
+                .get("session_id")
+                .and_then(Value::as_str)
+                .and_then(bounded_identity),
+            parent_session_id: parsed
+                .get("parent_session_id")
+                .and_then(Value::as_str)
+                .and_then(bounded_identity),
+        };
+    }
+
+    MetadataIdentity {
+        session_id: user_id
+            .rsplit_once(OMP_LEGACY_SESSION_MARKER)
+            .and_then(|(_, session_id)| bounded_identity(session_id)),
+        parent_session_id: None,
+    }
+}
+
+fn bounded_identity(value: &str) -> Option<String> {
+    (!value.is_empty() && value.len() <= MAX_IDENTITY_VALUE_BYTES).then(|| value.to_owned())
+}
+
+fn header_identity(headers: &HeaderMap, name: &str) -> Option<String> {
+    header_to_string(headers, name).and_then(|value| bounded_identity(&value))
+}
+
+fn request_session_identity(
+    headers: &HeaderMap,
+    metadata: &MetadataIdentity,
+) -> Option<(String, &'static str)> {
     const SESSION_HEADERS: [&str; 4] = [
         "x-claude-code-session-id",
         "x-claude-session-id",
@@ -4752,30 +4830,13 @@ fn request_session_identity(headers: &HeaderMap, value: Option<&Value>) -> Optio
 
     SESSION_HEADERS
         .into_iter()
-        .find_map(|header| header_to_string(headers, header))
-        .or_else(|| value.and_then(metadata_session_id))
-}
-
-fn metadata_session_id(value: &Value) -> Option<String> {
-    let user_id = value
-        .get("metadata")
-        .and_then(|metadata| metadata.get("user_id"))
-        .and_then(Value::as_str)?;
-
-    if let Ok(parsed) = sonic_rs::from_str::<Value>(user_id)
-        && let Some(session_id) = parsed.get("session_id").and_then(Value::as_str)
-    {
-        return valid_session_id(session_id);
-    }
-
-    user_id
-        .rsplit_once(OMP_LEGACY_SESSION_MARKER)
-        .and_then(|(_, session_id)| valid_session_id(session_id))
-}
-
-fn valid_session_id(session_id: &str) -> Option<String> {
-    (!session_id.is_empty() && session_id.len() <= OMP_MAX_SESSION_ID_BYTES)
-        .then(|| session_id.to_owned())
+        .find_map(|header| header_identity(headers, header).map(|value| (value, header)))
+        .or_else(|| {
+            metadata
+                .session_id
+                .clone()
+                .map(|session_id| (session_id, "metadata.user_id"))
+        })
 }
 
 fn classify_omp_request(
@@ -6640,11 +6701,112 @@ mod tests {
         );
         assert_eq!(json.thread_id.as_deref(), Some("session-from-body"));
         assert_eq!(json.request_kind.as_deref(), Some("main"));
+        assert_eq!(json.session_id_source.as_deref(), Some("metadata.user_id"));
+        assert_eq!(json.parent_session_id, None);
         assert_eq!(
             legacy.observed_session_id.as_deref(),
             Some("legacy-session")
         );
         assert_eq!(legacy.request_kind.as_deref(), Some("unknown"));
+        assert_eq!(
+            legacy.session_id_source.as_deref(),
+            Some("metadata.user_id")
+        );
+        assert_eq!(legacy.parent_session_id, None);
+    }
+
+    #[test]
+    fn request_cache_metadata_extracts_claude_code_session_identity() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-claude-code-session-id"),
+            HeaderValue::from_static("7f25b3d8-6bf2-4832-94e5-66394f785210"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-claude-code-agent-id"),
+            HeaderValue::from_static("a5f4e1590bb7587bc"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-claude-code-parent-agent-id"),
+            HeaderValue::from_static("b1c2d3e4f5061728a"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-app"),
+            HeaderValue::from_static("cli-bg"),
+        );
+        let body = Bytes::from_static(
+            br#"{"model":"claude-sonnet-4-5","metadata":{"user_id":"{\"device_id\":\"d\",\"account_uuid\":\"acc\",\"session_id\":\"7f25b3d8-6bf2-4832-94e5-66394f785210\",\"parent_session_id\":\"0714858d-c434-4aae-8bc0-5f33cf6cf63d\"}"},"messages":[{"role":"user","content":"hi"}]}"#,
+        );
+
+        let metadata = request_cache_metadata(&headers, &body);
+
+        assert_eq!(
+            metadata.observed_session_id.as_deref(),
+            Some("7f25b3d8-6bf2-4832-94e5-66394f785210")
+        );
+        assert_eq!(
+            metadata.session_id_source.as_deref(),
+            Some("x-claude-code-session-id")
+        );
+        assert_eq!(
+            metadata.claude_agent_id.as_deref(),
+            Some("a5f4e1590bb7587bc")
+        );
+        assert_eq!(
+            metadata.claude_parent_agent_id.as_deref(),
+            Some("b1c2d3e4f5061728a")
+        );
+        assert_eq!(
+            metadata.parent_session_id.as_deref(),
+            Some("0714858d-c434-4aae-8bc0-5f33cf6cf63d")
+        );
+        assert_eq!(metadata.client_app.as_deref(), Some("cli-bg"));
+        assert_eq!(metadata.request_kind.as_deref(), Some("subagent"));
+    }
+
+    #[test]
+    fn request_cache_metadata_reports_metadata_session_source() {
+        let headers = HeaderMap::new();
+        let body = Bytes::from_static(
+            br#"{"metadata":{"user_id":"{\"session_id\":\"session-from-body\",\"parent_session_id\":\"session-parent\"}"},"messages":[]}"#,
+        );
+
+        let metadata = request_cache_metadata(&headers, &body);
+
+        assert_eq!(
+            metadata.observed_session_id.as_deref(),
+            Some("session-from-body")
+        );
+        assert_eq!(
+            metadata.session_id_source.as_deref(),
+            Some("metadata.user_id")
+        );
+        assert_eq!(
+            metadata.parent_session_id.as_deref(),
+            Some("session-parent")
+        );
+    }
+
+    #[test]
+    fn request_cache_metadata_rejects_oversized_identity_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-claude-code-session-id"),
+            HeaderValue::from_static("session-123"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-claude-code-agent-id"),
+            HeaderValue::from_bytes(&vec![b'a'; MAX_IDENTITY_VALUE_BYTES + 1])
+                .expect("valid oversized header"),
+        );
+
+        let metadata = request_cache_metadata(
+            &headers,
+            &Bytes::from_static(br#"{"messages":[{"role":"user","content":"work"}]}"#),
+        );
+
+        assert_eq!(metadata.claude_agent_id, None);
+        assert_ne!(metadata.request_kind.as_deref(), Some("subagent"));
     }
 
     #[test]
