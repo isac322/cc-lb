@@ -169,6 +169,40 @@ export function RequestEventIdentity({
           }
         />
         <KvRow
+          label="Observed session"
+          value={
+            event.observed_session_id ? (
+              <span className="flex items-center gap-1 justify-end flex-wrap min-w-0">
+                <SessionChip sessionId={event.observed_session_id} />
+                <button
+                  type="button"
+                  aria-label="Copy observed session id"
+                  className="text-text-faint hover:text-text shrink-0"
+                  onClick={() =>
+                    copy(event.observed_session_id ?? '', 'Observed session ID')
+                  }
+                >
+                  <Copy className="w-3 h-3" />
+                </button>
+              </span>
+            ) : (
+              DASH
+            )
+          }
+        />
+        <KvRow
+          label="Request kind"
+          value={
+            event.request_kind ? (
+              <Badge tone="mono" className="font-mono">
+                {event.request_kind}
+              </Badge>
+            ) : (
+              DASH
+            )
+          }
+        />
+        <KvRow
           label="Model"
           value={
             <span className="font-mono break-all min-w-0">

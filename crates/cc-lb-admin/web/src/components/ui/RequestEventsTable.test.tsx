@@ -78,6 +78,41 @@ describe('RequestEventsTable', () => {
     expect(screen.getByText('500')).toBeDefined();
   });
 
+  it('renders only explicit request-kind badges', () => {
+    const events: RequestEventWithPhase[] = [
+      {
+        event_id: 'evt_advisor',
+        request_id: 'req_advisor',
+        ts: 1718553120,
+        status: 200,
+        duration_ms: 100,
+        model: 'claude-sonnet',
+        request_kind: 'advisor',
+        _phase: 'final',
+      },
+      {
+        event_id: 'evt_unclassified',
+        request_id: 'req_unclassified',
+        ts: 1718553121,
+        status: 200,
+        duration_ms: 100,
+        model: 'claude-sonnet',
+        _phase: 'final',
+      },
+    ];
+
+    render(
+      <RequestEventsTable
+        events={events}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+
+    expect(screen.getByText('advisor')).toBeDefined();
+    expect(screen.queryByText('main')).toBeNull();
+  });
+
   it('supports keyboard navigation and correctly identifies events with colliding request_id', async () => {
     const user = userEvent.setup();
     const events: RequestEventWithPhase[] = [

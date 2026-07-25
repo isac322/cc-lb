@@ -133,6 +133,33 @@ describe('RequestEventDrawer', () => {
     expect(screen.queryByText('Upstream Failure')).toBeNull();
   });
 
+  it('renders observed session and explicit request kind', () => {
+    const event = {
+      event_id: 'evt_identity',
+      request_id: 'req_identity',
+      ts: 1718553120,
+      status: 200,
+      duration_ms: 150,
+      observed_session_id: 'session-observed',
+      request_kind: 'subagent',
+      _phase: 'final',
+    } satisfies RequestEventWithPhase;
+
+    render(
+      <RequestEventDrawer
+        event={event}
+        principalName={null}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByText('Observed session')).toBeDefined();
+    expect(screen.getByTitle('session-observed')).toBeDefined();
+    expect(screen.getByLabelText('Copy observed session id')).toBeDefined();
+    expect(screen.getByText('Request kind')).toBeDefined();
+    expect(screen.getByText('subagent')).toBeDefined();
+  });
+
   it('renders structured upstream failure details when only type is present', () => {
     const event = {
       event_id: 'evt_4',

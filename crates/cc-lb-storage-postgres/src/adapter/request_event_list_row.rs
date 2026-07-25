@@ -19,6 +19,8 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
         upstream_id: row.upstream_id,
         upstream_name: row.upstream_name,
         thread_id: row.thread_id,
+        observed_session_id: row.observed_session_id,
+        request_kind: row.request_kind,
         model: row.model,
         reasoning_effort: row.reasoning_effort,
         thinking_budget_tokens: row

@@ -22,6 +22,8 @@ pub struct RequestEventListItem {
     pub upstream_id: Option<Uuid>,
     pub upstream_name: Option<String>,
     pub thread_id: Option<String>,
+    pub observed_session_id: Option<String>,
+    pub request_kind: Option<String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub thinking_budget_tokens: Option<u64>,

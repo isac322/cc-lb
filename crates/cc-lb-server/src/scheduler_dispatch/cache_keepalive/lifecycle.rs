@@ -47,6 +47,8 @@ pub(super) fn publish_renewal_lifecycle(
             cache_prefix_hash: None,
             matched_v3_cache_key: None,
             thread_id: None,
+            observed_session_id: None,
+            request_kind: None,
             message_id: None,
             message_index: None,
             message_count: None,
