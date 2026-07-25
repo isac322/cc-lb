@@ -4730,8 +4730,8 @@ fn request_cache_metadata_from_value(
 }
 
 const OMP_CLASSIFIER_TEXT_LIMIT: usize = 4_096;
-const OMP_MAIN_SYSTEM_MARKER: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
-const OMP_ADVISOR_SYSTEM_MARKER: &str = "You shadow the main agent as a peer programmer.";
+const OMP_MAIN_SYSTEM_MARKER: &str = "operating in the Oh My Pi coding harness";
+const OMP_ADVISOR_SYSTEM_MARKER: &str = "You shadow the main agent as a peer programmer";
 const OMP_RECAP_PROMPT_PREFIX: &str =
     "The user stepped away and is coming back. Recap in under 40 words";
 const OMP_COMPACTION_PROMPT_PREFIX: &str =
@@ -6540,12 +6540,12 @@ mod tests {
         let cases = [
             (
                 "main",
-                r#"{"system":"You are Claude Code, Anthropic's official CLI for Claude.","messages":[{"role":"user","content":"hello"}]}"#,
+                r#"{"system":[{"type":"text","text":"<system-conventions>rules</system-conventions>\nROLE\n==============\nYou are a helpful assistant the team trusts with load-bearing changes, operating in the Oh My Pi coding harness."}],"messages":[{"role":"user","content":"hello"}]}"#,
                 "main",
             ),
             (
                 "advisor",
-                r#"{"system":[{"type":"text","text":"<system-conventions>rules</system-conventions>\nYou shadow the main agent as a peer programmer."}],"messages":[{"role":"user","content":"review this"}]}"#,
+                r#"{"system":[{"type":"text","text":"<system-conventions>rules</system-conventions>\nYou shadow the main agent as a peer programmer:"}],"messages":[{"role":"user","content":"review this"}]}"#,
                 "advisor",
             ),
             (
@@ -6593,10 +6593,39 @@ mod tests {
     }
 
     #[test]
+    fn request_cache_metadata_classifies_main_with_large_project_context_block() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-claude-code-session-id"),
+            HeaderValue::from_static("session-with-large-context"),
+        );
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "system": [
+                    {
+                        "type": "text",
+                        "text": "x".repeat(OMP_CLASSIFIER_TEXT_LIMIT + 1),
+                    },
+                    {
+                        "type": "text",
+                        "text": "You are a helpful assistant the team trusts with load-bearing changes, operating in the Oh My Pi coding harness.",
+                    },
+                ],
+                "messages": [{"role": "user", "content": "hello"}],
+            }))
+            .expect("serialize OMP request fixture"),
+        );
+
+        let metadata = request_cache_metadata(&headers, &body);
+
+        assert_eq!(metadata.request_kind.as_deref(), Some("main"));
+    }
+
+    #[test]
     fn request_cache_metadata_extracts_omp_metadata_session_id() {
         let headers = HeaderMap::new();
         let json_metadata = Bytes::from_static(
-            br#"{"metadata":{"user_id":"{\"session_id\":\"session-from-body\",\"account_uuid\":\"account\"}"},"system":"You are Claude Code, Anthropic's official CLI for Claude.","messages":[{"role":"user","content":"hello"}]}"#,
+            br#"{"metadata":{"user_id":"{\"session_id\":\"session-from-body\",\"account_uuid\":\"account\"}"},"system":"You are a helpful assistant the team trusts with load-bearing changes, operating in the Oh My Pi coding harness.","messages":[{"role":"user","content":"hello"}]}"#,
         );
         let legacy_metadata = Bytes::from_static(
             br#"{"metadata":{"user_id":"user_account_session_legacy-session"},"messages":[]}"#,
