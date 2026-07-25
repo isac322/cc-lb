@@ -8,6 +8,7 @@ import {
 } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { reasoningBadgeText } from '../../lib/reasoningTier';
+import { requestKindBadgeText } from '../../lib/requestKind';
 import { useCopyButton } from '../../lib/useCopyButton';
 import { Badge, cx, Hint } from './primitives';
 import { RelativeTime } from './RelativeTime';
@@ -87,6 +88,7 @@ export function RequestEventIdentity({
     event.thinking_budget_tokens,
     event.thinking_tokens,
   );
+  const requestKindBadge = requestKindBadgeText(event.request_kind);
 
   return (
     <DetailSection title="Identity">
@@ -151,17 +153,24 @@ export function RequestEventIdentity({
         <KvRow
           label="Session"
           value={
-            event.thread_id ? (
+            event.thread_id || requestKindBadge ? (
               <span className="flex items-center gap-1 justify-end flex-wrap min-w-0">
-                <SessionChip sessionId={event.thread_id} />
-                <button
-                  type="button"
-                  aria-label="Copy session id"
-                  className="text-text-faint hover:text-text shrink-0"
-                  onClick={() => copy(event.thread_id ?? '', 'Session ID')}
-                >
-                  <Copy className="w-3 h-3" />
-                </button>
+                <SessionChip sessionId={event.thread_id ?? null} />
+                {requestKindBadge && (
+                  <Badge tone="mono" className="font-mono">
+                    {requestKindBadge}
+                  </Badge>
+                )}
+                {event.thread_id && (
+                  <button
+                    type="button"
+                    aria-label="Copy session id"
+                    className="text-text-faint hover:text-text shrink-0"
+                    onClick={() => copy(event.thread_id ?? '', 'Session ID')}
+                  >
+                    <Copy className="w-3 h-3" />
+                  </button>
+                )}
               </span>
             ) : (
               DASH
@@ -185,18 +194,6 @@ export function RequestEventIdentity({
                   <Copy className="w-3 h-3" />
                 </button>
               </span>
-            ) : (
-              DASH
-            )
-          }
-        />
-        <KvRow
-          label="Request kind"
-          value={
-            event.request_kind ? (
-              <Badge tone="mono" className="font-mono">
-                {event.request_kind}
-              </Badge>
             ) : (
               DASH
             )

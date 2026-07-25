@@ -4,6 +4,7 @@ import { eventTime } from '../../lib/api';
 import { getRequestOutcome, statusTone } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { serviceTierBadgeText } from '../../lib/reasoningTier';
+import { requestKindBadgeText } from '../../lib/requestKind';
 import { CostCell } from './CostCell';
 import { LatencyCell } from './latency/LatencyCell';
 import { Badge, cx, SkeletonRow } from './primitives';
@@ -128,7 +129,7 @@ export function RequestEventsTable({
                 e._phase === 'final' ? e.error_code : undefined,
               );
               const tierBadge = serviceTierBadgeText(e.service_tier);
-              const requestKind = e.request_kind?.trim() || null;
+              const requestKindBadge = requestKindBadgeText(e.request_kind);
               return (
                 <tr
                   key={key}
@@ -180,17 +181,19 @@ export function RequestEventsTable({
                   )}
                   {showSession && (
                     <td className="px-3 py-2 whitespace-nowrap">
-                      <SessionChip sessionId={e.thread_id ?? null} />
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <SessionChip sessionId={e.thread_id ?? null} />
+                        {requestKindBadge != null && (
+                          <Badge tone="mono" className="shrink-0">
+                            {requestKindBadge}
+                          </Badge>
+                        )}
+                      </span>
                     </td>
                   )}
                   <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
                     <span className="flex items-center gap-2 min-w-0">
                       <span className="truncate">{e.model ?? DASH}</span>
-                      {requestKind != null && (
-                        <Badge tone="mono" className="shrink-0">
-                          {requestKind}
-                        </Badge>
-                      )}
                       {tierBadge != null && (
                         <Badge tone="neutral" className="shrink-0">
                           {tierBadge}
