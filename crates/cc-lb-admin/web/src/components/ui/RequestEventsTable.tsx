@@ -128,6 +128,7 @@ export function RequestEventsTable({
                 e._phase === 'final' ? e.error_code : undefined,
               );
               const tierBadge = serviceTierBadgeText(e.service_tier);
+              const requestKind = e.request_kind?.trim() || null;
               return (
                 <tr
                   key={key}
@@ -185,6 +186,11 @@ export function RequestEventsTable({
                   <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
                     <span className="flex items-center gap-2 min-w-0">
                       <span className="truncate">{e.model ?? DASH}</span>
+                      {requestKind != null && (
+                        <Badge tone="mono" className="shrink-0">
+                          {requestKind}
+                        </Badge>
+                      )}
                       {tierBadge != null && (
                         <Badge tone="neutral" className="shrink-0">
                           {tierBadge}

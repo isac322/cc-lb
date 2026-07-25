@@ -1963,6 +1963,8 @@ impl Lifecycle {
                     cache_prefix_hash: cache_metadata.cache_prefix_hash.clone(),
                     matched_v3_cache_key: cache_metadata.cache_prefix_hash.clone(),
                     thread_id: cache_metadata.thread_id.clone(),
+                    observed_session_id: cache_metadata.observed_session_id.clone(),
+                    request_kind: cache_metadata.request_kind.clone(),
                     message_id: cache_metadata.message_id.clone(),
                     message_index: cache_metadata.message_index,
                     message_count: cache_metadata.message_count,
@@ -4531,6 +4533,8 @@ pub(crate) use crate::response_transform::{
 pub(crate) struct RequestCacheMetadata {
     pub(crate) request_json: Option<Value>,
     pub(crate) thread_id: Option<String>,
+    pub(crate) observed_session_id: Option<String>,
+    pub(crate) request_kind: Option<String>,
     requested_service_tier: Option<String>,
     message_id: Option<String>,
     message_index: Option<u64>,
@@ -4623,13 +4627,18 @@ fn request_cache_metadata_from_value(
     headers: &HeaderMap,
     value: Option<&Value>,
 ) -> RequestCacheMetadata {
-    let thread_id = header_to_string(headers, "x-claude-code-session-id")
-        .or_else(|| header_to_string(headers, "x-claude-session-id"))
-        .or_else(|| header_to_string(headers, "x-session-affinity"))
-        .or_else(|| header_to_string(headers, "x-session-id"));
+    let observed_session_id = request_session_identity(headers, value);
+    let thread_id = observed_session_id.clone();
+    let has_claude_agent = header_to_string(headers, "x-claude-code-agent-id").is_some();
+    let request_kind =
+        classify_omp_request(value, observed_session_id.as_deref(), has_claude_agent)
+            .map(str::to_owned);
+
     let Some(value) = value else {
         return RequestCacheMetadata {
             thread_id,
+            observed_session_id,
+            request_kind,
             ..Default::default()
         };
     };
@@ -4704,6 +4713,8 @@ fn request_cache_metadata_from_value(
     RequestCacheMetadata {
         request_json: None,
         thread_id,
+        observed_session_id,
+        request_kind,
         requested_service_tier,
         message_id,
         message_index,
@@ -4716,6 +4727,164 @@ fn request_cache_metadata_from_value(
         cache_prefix_hash,
         canonical_model_id,
     }
+}
+
+const OMP_CLASSIFIER_TEXT_LIMIT: usize = 4_096;
+const OMP_MAIN_SYSTEM_MARKER: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+const OMP_ADVISOR_SYSTEM_MARKER: &str = "You shadow the main agent as a peer programmer.";
+const OMP_RECAP_PROMPT_PREFIX: &str =
+    "The user stepped away and is coming back. Recap in under 40 words";
+const OMP_COMPACTION_PROMPT_PREFIX: &str =
+    "Your task is to create a detailed summary of the conversation so far";
+const OMP_SESSION_TITLE_SYSTEM_MARKER: &str = "Generate a concise, sentence-case title (3-7 words)";
+const OMP_AUTO_THINKING_SYSTEM_PREFIX: &str = "You are a difficulty classifier for a coding agent.";
+const OMP_SUBAGENT_PROMPT_PREFIX: &str = "Complete the assignment below, thoroughly:";
+const OMP_LEGACY_SESSION_MARKER: &str = "_session_";
+const OMP_MAX_SESSION_ID_BYTES: usize = 512;
+
+fn request_session_identity(headers: &HeaderMap, value: Option<&Value>) -> Option<String> {
+    const SESSION_HEADERS: [&str; 4] = [
+        "x-claude-code-session-id",
+        "x-claude-session-id",
+        "x-session-affinity",
+        "x-session-id",
+    ];
+
+    SESSION_HEADERS
+        .into_iter()
+        .find_map(|header| header_to_string(headers, header))
+        .or_else(|| value.and_then(metadata_session_id))
+}
+
+fn metadata_session_id(value: &Value) -> Option<String> {
+    let user_id = value
+        .get("metadata")
+        .and_then(|metadata| metadata.get("user_id"))
+        .and_then(Value::as_str)?;
+
+    if let Ok(parsed) = sonic_rs::from_str::<Value>(user_id)
+        && let Some(session_id) = parsed.get("session_id").and_then(Value::as_str)
+    {
+        return valid_session_id(session_id);
+    }
+
+    user_id
+        .rsplit_once(OMP_LEGACY_SESSION_MARKER)
+        .and_then(|(_, session_id)| valid_session_id(session_id))
+}
+
+fn valid_session_id(session_id: &str) -> Option<String> {
+    (!session_id.is_empty() && session_id.len() <= OMP_MAX_SESSION_ID_BYTES)
+        .then(|| session_id.to_owned())
+}
+
+fn classify_omp_request(
+    value: Option<&Value>,
+    observed_session_id: Option<&str>,
+    has_claude_agent: bool,
+) -> Option<&'static str> {
+    if has_claude_agent {
+        return Some("subagent");
+    }
+
+    let value = value.filter(|_| observed_session_id.is_some())?;
+    let system = value.get("system");
+    let first_user = first_user_content(value);
+    let last_user = last_user_content(value);
+
+    if system.is_some_and(|content| bounded_text_contains(content, OMP_ADVISOR_SYSTEM_MARKER)) {
+        return Some("advisor");
+    }
+    if [first_user, last_user]
+        .into_iter()
+        .flatten()
+        .any(|content| text_block_starts_with(content, OMP_RECAP_PROMPT_PREFIX))
+    {
+        return Some("recap");
+    }
+    if [first_user, last_user]
+        .into_iter()
+        .flatten()
+        .any(|content| text_block_starts_with(content, OMP_COMPACTION_PROMPT_PREFIX))
+    {
+        return Some("compaction");
+    }
+    if system.is_some_and(|content| bounded_text_contains(content, OMP_SESSION_TITLE_SYSTEM_MARKER))
+        && value
+            .pointer("/output_config/format/schema/properties/title")
+            .is_some()
+    {
+        return Some("session_title");
+    }
+    if system
+        .is_some_and(|content| text_block_starts_with(content, OMP_AUTO_THINKING_SYSTEM_PREFIX))
+    {
+        return Some("auto_thinking");
+    }
+    if first_user.is_some_and(|content| text_block_starts_with(content, OMP_SUBAGENT_PROMPT_PREFIX))
+    {
+        return Some("subagent");
+    }
+    if observed_session_id.is_some_and(|session_id| session_id.contains(":side:")) {
+        return Some("side");
+    }
+    if system.is_some_and(|content| bounded_text_contains(content, OMP_MAIN_SYSTEM_MARKER)) {
+        return Some("main");
+    }
+
+    Some("unknown")
+}
+
+fn first_user_content(value: &Value) -> Option<&Value> {
+    value
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| messages.first())
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .and_then(|message| message.get("content"))
+}
+fn last_user_content(value: &Value) -> Option<&Value> {
+    value
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| messages.last())
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .and_then(|message| message.get("content"))
+}
+
+fn text_block_starts_with(content: &Value, marker: &str) -> bool {
+    text_blocks(content).any(|text| text.trim_start().starts_with(marker))
+}
+
+fn bounded_text_contains(content: &Value, marker: &str) -> bool {
+    text_blocks(content).any(|text| bounded_prefix(text).contains(marker))
+}
+
+fn text_blocks(content: &Value) -> impl Iterator<Item = &str> {
+    let direct = match content {
+        Value::String(text) => Some(text.as_str()),
+        _ => None,
+    };
+    let blocks = match content {
+        Value::Array(blocks) => Some(blocks.as_slice()),
+        _ => None,
+    };
+
+    direct
+        .into_iter()
+        .chain(blocks.into_iter().flatten().filter_map(|block| {
+            (block.get("type").and_then(Value::as_str) == Some("text"))
+                .then(|| block.get("text").and_then(Value::as_str))
+                .flatten()
+        }))
+}
+
+fn bounded_prefix(text: &str) -> &str {
+    let mut end = text.len().min(OMP_CLASSIFIER_TEXT_LIMIT);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 fn request_breakpoint_source_from_v3(
@@ -6358,6 +6527,142 @@ mod tests {
         let metadata = request_cache_metadata(&headers, &body);
 
         assert_eq!(metadata.thread_id.as_deref(), Some("opencode-session-456"));
+    }
+
+    #[test]
+    fn request_cache_metadata_classifies_omp_requests() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-claude-code-session-id"),
+            HeaderValue::from_static("session-123"),
+        );
+
+        let cases = [
+            (
+                "main",
+                r#"{"system":"You are Claude Code, Anthropic's official CLI for Claude.","messages":[{"role":"user","content":"hello"}]}"#,
+                "main",
+            ),
+            (
+                "advisor",
+                r#"{"system":[{"type":"text","text":"<system-conventions>rules</system-conventions>\nYou shadow the main agent as a peer programmer."}],"messages":[{"role":"user","content":"review this"}]}"#,
+                "advisor",
+            ),
+            (
+                "recap after reminder",
+                r#"{"messages":[{"role":"user","content":"original request"},{"role":"assistant","content":"response"},{"role":"user","content":[{"type":"text","text":"<system-reminder>context</system-reminder>"},{"type":"text","text":"The user stepped away and is coming back. Recap in under 40 words. Lead with the overall goal and current task."}]}]}"#,
+                "recap",
+            ),
+            (
+                "compaction after transcript",
+                r#"{"messages":[{"role":"user","content":"original request"},{"role":"assistant","content":"response"},{"role":"user","content":"Your task is to create a detailed summary of the conversation so far. Primary Request and Intent: keep this. REMINDER: Do NOT call any tools."}]}"#,
+                "compaction",
+            ),
+            (
+                "session title",
+                r#"{"system":"Generate a concise, sentence-case title (3-7 words)","messages":[{"role":"user","content":"<session>hello</session> Write the title"}],"output_config":{"format":{"schema":{"properties":{"title":{"type":"string"}}}}}}"#,
+                "session_title",
+            ),
+            (
+                "auto thinking",
+                r#"{"system":"You are a difficulty classifier for a coding agent. Read the user's request.","messages":[{"role":"user","content":"fix this"}]}"#,
+                "auto_thinking",
+            ),
+            (
+                "subagent prompt",
+                r#"{"messages":[{"role":"user","content":"Complete the assignment below, thoroughly:\n\nFix the issue"},{"role":"assistant","content":"working"},{"role":"user","content":"follow-up"}]}"#,
+                "subagent",
+            ),
+        ];
+
+        for (case, fixture, request_kind) in cases {
+            let metadata =
+                request_cache_metadata(&headers, &Bytes::copy_from_slice(fixture.as_bytes()));
+
+            assert_eq!(
+                metadata.observed_session_id.as_deref(),
+                Some("session-123"),
+                "{case}"
+            );
+            assert_eq!(
+                metadata.request_kind.as_deref(),
+                Some(request_kind),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_cache_metadata_extracts_omp_metadata_session_id() {
+        let headers = HeaderMap::new();
+        let json_metadata = Bytes::from_static(
+            br#"{"metadata":{"user_id":"{\"session_id\":\"session-from-body\",\"account_uuid\":\"account\"}"},"system":"You are Claude Code, Anthropic's official CLI for Claude.","messages":[{"role":"user","content":"hello"}]}"#,
+        );
+        let legacy_metadata = Bytes::from_static(
+            br#"{"metadata":{"user_id":"user_account_session_legacy-session"},"messages":[]}"#,
+        );
+
+        let json = request_cache_metadata(&headers, &json_metadata);
+        let legacy = request_cache_metadata(&headers, &legacy_metadata);
+
+        assert_eq!(
+            json.observed_session_id.as_deref(),
+            Some("session-from-body")
+        );
+        assert_eq!(json.thread_id.as_deref(), Some("session-from-body"));
+        assert_eq!(json.request_kind.as_deref(), Some("main"));
+        assert_eq!(
+            legacy.observed_session_id.as_deref(),
+            Some("legacy-session")
+        );
+        assert_eq!(legacy.request_kind.as_deref(), Some("unknown"));
+    }
+
+    #[test]
+    fn request_cache_metadata_prefers_session_header_over_body_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-session-affinity"),
+            HeaderValue::from_static("header-session"),
+        );
+        let body = Bytes::from_static(
+            br#"{"metadata":{"user_id":"{\"session_id\":\"body-session\"}"},"messages":[]}"#,
+        );
+
+        let metadata = request_cache_metadata(&headers, &body);
+
+        assert_eq!(
+            metadata.observed_session_id.as_deref(),
+            Some("header-session")
+        );
+    }
+
+    #[test]
+    fn request_cache_metadata_classifies_subagent_lineage_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-claude-code-agent-id"),
+            HeaderValue::from_static("agent-456"),
+        );
+
+        let metadata = request_cache_metadata(
+            &headers,
+            &Bytes::from_static(br#"{"messages":[{"role":"user","content":"work"}]}"#),
+        );
+
+        assert_eq!(metadata.request_kind.as_deref(), Some("subagent"));
+    }
+
+    #[test]
+    fn request_cache_metadata_does_not_fingerprint_without_omp_provenance() {
+        let headers = HeaderMap::new();
+        let body = Bytes::from_static(
+            br#"{"messages":[{"role":"user","content":"The user stepped away and is coming back. Recap in under 40 words."}]}"#,
+        );
+
+        let metadata = request_cache_metadata(&headers, &body);
+
+        assert_eq!(metadata.request_kind, None);
     }
 
     #[test]

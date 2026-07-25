@@ -249,6 +249,14 @@ impl Partial {
                 .parse
                 .as_ref()
                 .and_then(|parse| parse.thread_id.clone()),
+            observed_session_id: self
+                .parse
+                .as_ref()
+                .and_then(|parse| parse.observed_session_id.clone()),
+            request_kind: self
+                .parse
+                .as_ref()
+                .and_then(|parse| parse.request_kind.clone()),
             upstream_response_status: self.upstream_response_status,
             input_tokens: self.usage_seen.then_some(self.usage.input_tokens),
             output_tokens: self.usage_seen.then_some(self.usage.output_tokens),
@@ -1011,20 +1019,29 @@ fn finalize_base(
     let model = route_model.or_else(|| partial.parse.as_ref().and_then(|p| p.model.clone()));
     let auth_ms = partial.auth.as_ref().and_then(|a| a.auth_ms);
     let routing_trace = partial.routing_trace.clone().or(route_routing_trace);
-    let (thread_id, message_id, message_index, message_count, cache_control_message_indices) =
-        partial
-            .parse
-            .as_ref()
-            .map(|p| {
-                (
-                    p.thread_id.clone(),
-                    p.message_id.clone(),
-                    p.message_index,
-                    p.message_count,
-                    p.cache_control_message_indices.clone(),
-                )
-            })
-            .unwrap_or_default();
+    let (
+        thread_id,
+        observed_session_id,
+        request_kind,
+        message_id,
+        message_index,
+        message_count,
+        cache_control_message_indices,
+    ) = partial
+        .parse
+        .as_ref()
+        .map(|p| {
+            (
+                p.thread_id.clone(),
+                p.observed_session_id.clone(),
+                p.request_kind.clone(),
+                p.message_id.clone(),
+                p.message_index,
+                p.message_count,
+                p.cache_control_message_indices.clone(),
+            )
+        })
+        .unwrap_or_default();
 
     let cost = partial.cost_options();
     RequestEvent {
@@ -1113,6 +1130,8 @@ fn finalize_base(
         inference_geo: partial.usage.inference_geo.clone(),
         sse_event_count: partial.stream_success,
         thread_id,
+        observed_session_id,
+        request_kind,
         message_id,
         message_index,
         message_count,
@@ -2066,6 +2085,96 @@ mod tests {
             assert_eq!(parse_partial.reasoning_effort.as_deref(), expected_effort);
             assert_eq!(final_event.reasoning_effort.as_deref(), expected_effort);
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn classification_fields_preserve_partial_and_final_parity() {
+        use crate::event_bus::InMemoryBus;
+
+        let (tx, rx) = mpsc::channel(8);
+        let store = Arc::new(CapturingStore::default());
+        let bus = Arc::new(InMemoryBus::new());
+        let BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
+            panic!("expected InMemory receiver");
+        };
+        let handle = spawn_request_event_assembler(
+            rx,
+            store,
+            Some(bus.clone() as Arc<dyn RequestEventBus>),
+            noop_metrics(),
+        );
+        let event_id = eid("classification-parity");
+
+        tx.send(LifecycleEvent::RequestStarted {
+            event_id: event_id.clone(),
+            request_id: "req-classification-parity".to_owned(),
+            source_kind: None,
+            source_ref_id: None,
+            ts_ms: 1_730_000_000_000,
+            stream: false,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::ParseCompleted {
+            event_id: event_id.clone(),
+            result: Ok(ParseInfo {
+                path: "/v1/messages".to_owned(),
+                method: "POST".to_owned(),
+                observed_session_id: Some("session-123".to_owned()),
+                request_kind: Some("subagent".to_owned()),
+                ..ParseInfo::default()
+            }),
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id: event_id.clone(),
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 10,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            upstream_body_ms: None,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let mut updates = Vec::new();
+        while let Ok(update) = broadcast_rx.try_recv() {
+            updates.push(update);
+        }
+        let parse_partial = updates
+            .iter()
+            .filter_map(|update| match update {
+                RequestEventUpdate::Partial(partial) if partial.event_id == event_id => {
+                    Some(partial)
+                }
+                RequestEventUpdate::Partial(_) | RequestEventUpdate::Final(_) => None,
+            })
+            .nth(1)
+            .expect("partial snapshot immediately after ParseCompleted");
+        let final_event = updates
+            .iter()
+            .find_map(|update| match update {
+                RequestEventUpdate::Final(final_update)
+                    if final_update.event.event_id.as_deref() == Some(event_id.as_str()) =>
+                {
+                    Some(&final_update.event)
+                }
+                RequestEventUpdate::Partial(_) | RequestEventUpdate::Final(_) => None,
+            })
+            .expect("final request event");
+
+        assert_eq!(
+            parse_partial.observed_session_id,
+            final_event.observed_session_id
+        );
+        assert_eq!(parse_partial.request_kind, final_event.request_kind);
     }
 
     #[tokio::test(flavor = "current_thread")]
