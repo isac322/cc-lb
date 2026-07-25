@@ -195,7 +195,6 @@ pub async fn build_dynamic_view(
     prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
     prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     subscription_quota_routing_max_staleness_secs: u64,
-    config: &cc_lb_config::Config,
     clock: cc_lb_engine::ClockHandle,
 ) -> Result<Arc<DynamicView>, RebindError> {
     let upstreams = list_upstreams(stores).await?;
@@ -206,45 +205,40 @@ pub async fn build_dynamic_view(
     subscription_quota_cache
         .hydrate_from_store(stores, &all_upstream_ids)
         .await?;
-    let prompt_cache_shadow = &config.prompt_cache_shadow;
-    let prompt_cache_observation_handles = if prompt_cache_shadow.enabled {
-        match prompt_cache_observation_cache {
-            Some(cache) => {
-                match tokio::time::timeout(
-                    Duration::from_secs(5),
-                    cache.hydrate_from_store(
-                        stores.prompt_cache_observations.as_ref(),
-                        &all_upstream_ids,
-                    ),
-                )
-                .await
-                {
-                    Ok(Ok(record_count)) => {
-                        tracing::info!(
-                            record_count,
-                            upstream_count = all_upstream_ids.len(),
-                            "hydrated prompt cache observation cache from store"
-                        );
-                    }
-                    Ok(Err(error)) => {
-                        tracing::warn!(
-                            %error,
-                            "failed to hydrate prompt cache observation cache from store; continuing with shared cache"
-                        );
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            timeout_secs = 5,
-                            "timed out hydrating prompt cache observation cache from store; continuing with shared cache"
-                        );
-                    }
+    let prompt_cache_observation_handles = match prompt_cache_observation_cache {
+        Some(cache) => {
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                cache.hydrate_from_store(
+                    stores.prompt_cache_observations.as_ref(),
+                    &all_upstream_ids,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(record_count)) => {
+                    tracing::info!(
+                        record_count,
+                        upstream_count = all_upstream_ids.len(),
+                        "hydrated prompt cache observation cache from store"
+                    );
                 }
-                Some((cache, prompt_cache_observation_sink))
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        %error,
+                        "failed to hydrate prompt cache observation cache from store; continuing with shared cache"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        timeout_secs = 5,
+                        "timed out hydrating prompt cache observation cache from store; continuing with shared cache"
+                    );
+                }
             }
-            None => None,
+            Some((cache, prompt_cache_observation_sink))
         }
-    } else {
-        None
+        None => None,
     };
     let upstream_rate_limit_records = stores
         .upstream_rate_limits
@@ -1349,8 +1343,7 @@ mod tests {
         runtime: &Arc<WasmtimeRuntime>,
         data_dir: &Path,
     ) -> Arc<DynamicView> {
-        let mut config = cc_lb_config::Config::default();
-        config.prompt_cache_shadow.enabled = true;
+        let config = cc_lb_config::Config::default();
         build_view_with_config(stores, runtime, data_dir, config).await
     }
 
@@ -1361,20 +1354,15 @@ mod tests {
         config: cc_lb_config::Config,
     ) -> Arc<DynamicView> {
         let clock: cc_lb_engine::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
-        let (prompt_cache_observation_cache, prompt_cache_observation_sink) =
-            if config.prompt_cache_shadow.enabled {
-                let cache =
-                    new_prompt_cache_observation_cache(&config.prompt_cache_shadow, clock.clone());
-                let (sink, _writer) = PromptCacheObservationSink::new(
-                    stores.prompt_cache_observations.clone(),
-                    DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
-                    cc_lb_observability::cache_observation_store_kind::SQLITE,
-                );
-                let sink: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
-                (Some(cache), Some(sink))
-            } else {
-                (None, None)
-            };
+        let cache = new_prompt_cache_observation_cache(&config.prompt_cache_shadow, clock.clone());
+        let (sink, _writer) = PromptCacheObservationSink::new(
+            stores.prompt_cache_observations.clone(),
+            DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
+            cc_lb_observability::cache_observation_store_kind::SQLITE,
+        );
+        let sink: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
+        let prompt_cache_observation_cache = Some(cache);
+        let prompt_cache_observation_sink = Some(sink);
         build_dynamic_view(
             stores,
             &AnthropicOAuthConfig::default(),
@@ -1387,7 +1375,6 @@ mod tests {
             prompt_cache_observation_cache,
             prompt_cache_observation_sink,
             1800,
-            &config,
             clock,
         )
         .await
@@ -1512,8 +1499,7 @@ mod tests {
         let prompt_store = Arc::new(FakePromptCacheObservationStore::new(Vec::new()));
         let stores = stores(storage, prompt_store);
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-        let mut config = cc_lb_config::Config::default();
-        config.prompt_cache_shadow.enabled = true;
+        let config = cc_lb_config::Config::default();
         let clock: cc_lb_engine::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let shared_cache =
             new_prompt_cache_observation_cache(&config.prompt_cache_shadow, clock.clone());
@@ -1531,7 +1517,6 @@ mod tests {
             Some(shared_cache.clone()),
             None,
             1800,
-            &config,
             clock.clone(),
         )
         .await
@@ -1548,7 +1533,6 @@ mod tests {
             Some(shared_cache.clone()),
             None,
             1800,
-            &config,
             clock.clone(),
         )
         .await
@@ -1620,22 +1604,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_flag_skips_cache_construction() {
+    async fn default_config_constructs_cache() {
         let (dir, storage) = storage_fixture(21).await;
         let stores = stores(
             storage,
             Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
         );
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-        let mut config = cc_lb_config::Config::default();
-        config.prompt_cache_shadow.enabled = false;
 
-        let dynamic_view = build_view_with_config(&stores, &runtime, dir.path(), config).await;
+        let dynamic_view = build_view_with_config(
+            &stores,
+            &runtime,
+            dir.path(),
+            cc_lb_config::Config::default(),
+        )
+        .await;
 
-        assert!(dynamic_view.prompt_cache_observation_cache_opt().is_none());
+        assert!(dynamic_view.prompt_cache_observation_cache_opt().is_some());
         assert!(
-            dynamic_view.prompt_cache_observation_sink_opt().is_none(),
-            "prompt cache observation sink must NOT be wired when prompt_cache_shadow is disabled"
+            dynamic_view.prompt_cache_observation_sink_opt().is_some(),
+            "prompt cache observation sink must always be wired"
         );
     }
 
@@ -1648,7 +1636,6 @@ mod tests {
         );
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
         let mut config = cc_lb_config::Config::default();
-        config.prompt_cache_shadow.enabled = true;
         config.prompt_cache_shadow.grace_margin_secs = 99;
         config.prompt_cache_shadow.refresh_debounce_secs = 123;
 

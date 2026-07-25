@@ -21,15 +21,21 @@ pub use types::{
     CircuitBreakerConfig, ClusterConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV,
     DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
     DEFAULT_SQLITE_PATH, DnsConfig, DownstreamAuthConfig, DownstreamAuthMode, EgressConfig,
-    EventBusConfig, EventBusTransport, LifecyclePromptCacheObservationSubscriberConfig,
-    ListenerConfig, ListenerOverrides, NoneModeConfig, NoneModeUpstreamKind, ObservabilityConfig,
-    PluginFailurePolicy, PluginWireBounds, PostgresPoolConfig, PriceCatalogConfig,
-    PromptCacheShadowConfig, RecurringJobConfig, RestartRequiredField, RuntimeConfig,
-    SchedulerConfig, SchedulerIdempotencyConfig, SchedulerPoolConfig, SchedulerRetryClasses,
-    SchedulerRetryConfig, SchedulerStalenessConfig, ShapeOriginPolicy, StorageConfig,
-    SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig, WasmtimeAllocationStrategy, WasmtimeConfig,
+    EventBusConfig, EventBusTransport, ListenerConfig, ListenerOverrides, NoneModeConfig,
+    NoneModeUpstreamKind, ObservabilityConfig, PluginFailurePolicy, PluginWireBounds,
+    PostgresPoolConfig, PriceCatalogConfig, PromptCacheShadowConfig, RecurringJobConfig,
+    RestartRequiredField, RuntimeConfig, SchedulerConfig, SchedulerIdempotencyConfig,
+    SchedulerPoolConfig, SchedulerRetryClasses, SchedulerRetryConfig, SchedulerStalenessConfig,
+    ShapeOriginPolicy, StorageConfig, SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig,
+    WasmtimeAllocationStrategy, WasmtimeConfig,
 };
 pub use validation::{ValidationError, validate_postgres_url};
+
+pub fn removed_prompt_cache_switch_warning(field: &str) -> String {
+    format!(
+        "removed prompt-cache disable switch `{field}` is ignored; cache-aware routing is always enabled"
+    )
+}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -51,14 +57,30 @@ impl From<figment::Error> for ConfigError {
 
 impl Config {
     pub fn load(toml_path: &Path) -> Result<Self, ConfigError> {
-        Self::load_with_overrides(toml_path, ConfigOverrides::default())
+        Self::load_with_warnings(toml_path).map(|(config, _warnings)| config)
+    }
+
+    pub fn load_with_warnings(toml_path: &Path) -> Result<(Self, Vec<String>), ConfigError> {
+        Self::load_with_overrides_and_warnings(toml_path, ConfigOverrides::default())
     }
 
     pub fn load_with_overrides(
         toml_path: &Path,
         cli_overrides: ConfigOverrides,
     ) -> Result<Self, ConfigError> {
+        Self::load_with_overrides_and_warnings(toml_path, cli_overrides)
+            .map(|(config, _warnings)| config)
+    }
+
+    pub fn load_with_overrides_and_warnings(
+        toml_path: &Path,
+        cli_overrides: ConfigOverrides,
+    ) -> Result<(Self, Vec<String>), ConfigError> {
         let raw_toml = std::fs::read_to_string(toml_path).ok();
+        let mut warnings = raw_toml
+            .as_deref()
+            .map(validation::removed_prompt_cache_switches)
+            .unwrap_or_default();
         let migrated_toml = match raw_toml.as_deref() {
             Some(raw) => {
                 validation::validate_raw_toml(raw)?;
@@ -66,6 +88,7 @@ impl Config {
             }
             None => None,
         };
+        warnings.extend(validation::removed_prompt_cache_env_switches());
 
         let mut figment = Figment::from(Serialized::defaults(Config::default()));
         figment = match migrated_toml.as_deref() {
@@ -79,7 +102,7 @@ impl Config {
 
         config.resolve_runtime_values();
         config.validate()?;
-        Ok(config)
+        Ok((config, warnings))
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {

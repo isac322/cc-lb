@@ -102,8 +102,6 @@ mod preflight_common;
 mod prompt_cache_live_qa;
 #[path = "prompt_cache_observation_metrics.rs"]
 mod prompt_cache_observation_metrics;
-#[path = "prompt_cache_shadow_disabled_is_no_op.rs"]
-mod prompt_cache_shadow_disabled_is_no_op;
 #[path = "proxy_body_limits.rs"]
 mod proxy_body_limits;
 #[path = "proxy_error_fallbacks.rs"]

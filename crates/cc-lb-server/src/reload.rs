@@ -19,6 +19,16 @@ use tokio::task::JoinHandle;
 const DEBOUNCE: Duration = Duration::from_millis(500);
 const BROADCAST_CAPACITY: usize = 16;
 
+pub(crate) fn warn_removed_prompt_cache_switches(fields: &[String]) {
+    for field in fields {
+        tracing::warn!(
+            field,
+            "{}",
+            cc_lb_config::removed_prompt_cache_switch_warning(field)
+        );
+    }
+}
+
 pub struct ConfigWatcher {
     path: PathBuf,
     process_start_config: Arc<Config>,
@@ -108,14 +118,15 @@ impl ConfigWatcher {
 
     fn reload_from_path(&self, skip_unchanged: bool) -> Result<Arc<Config>, ReloadError> {
         let config_path = self.config_path_string();
-        let new_config = match Config::load(&self.path) {
-            Ok(config) => config,
+        let (new_config, config_warnings) = match Config::load_with_warnings(&self.path) {
+            Ok(loaded) => loaded,
             Err(source) => {
                 self.record_attempt();
                 self.record_failure(source.to_string(), None, None, config_path);
                 return Err(ReloadError::Config(source));
             }
         };
+        warn_removed_prompt_cache_switches(&config_warnings);
 
         let current_config = self.current_config();
         if skip_unchanged && *current_config == new_config {
@@ -427,11 +438,6 @@ fn summarize_lifecycle_subscriber_restart_required(
 
     let entries: &[(&str, bool, bool)] = &[
         (
-            "prompt_cache_shadow.enabled",
-            current.prompt_cache_shadow.enabled,
-            new_config.prompt_cache_shadow.enabled,
-        ),
-        (
             "lifecycle_hook_adapter.enabled",
             current.lifecycle_hook_adapter.enabled,
             new_config.lifecycle_hook_adapter.enabled,
@@ -477,20 +483,6 @@ fn summarize_lifecycle_subscriber_restart_required(
             "lifecycle_routing_tier_subscriber.enabled",
             current.lifecycle_routing_tier_subscriber.enabled,
             new_config.lifecycle_routing_tier_subscriber.enabled,
-        ),
-        (
-            "lifecycle_prompt_cache_drift_subscriber.enabled",
-            current.lifecycle_prompt_cache_drift_subscriber.enabled,
-            new_config.lifecycle_prompt_cache_drift_subscriber.enabled,
-        ),
-        (
-            "lifecycle_prompt_cache_observation_subscriber.enabled",
-            current
-                .lifecycle_prompt_cache_observation_subscriber
-                .enabled,
-            new_config
-                .lifecycle_prompt_cache_observation_subscriber
-                .enabled,
         ),
         (
             "lifecycle_limit_reconcile_subscriber.enabled",

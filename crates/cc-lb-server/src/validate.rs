@@ -16,7 +16,13 @@ pub enum ValidateError {
 }
 
 pub fn run(config_path: &Path, clock: cc_lb_engine::ClockHandle) -> Result<(), ValidateError> {
-    let config = Config::load(config_path)?;
+    let (config, warnings) = Config::load_with_warnings(config_path)?;
+    for field in warnings {
+        eprintln!(
+            "warning: {}",
+            cc_lb_config::removed_prompt_cache_switch_warning(&field)
+        );
+    }
     let report = validate_preflight(&config, clock)?;
     println!("validation: ok");
     print_preflight_report(&report);

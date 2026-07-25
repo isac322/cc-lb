@@ -30,3 +30,34 @@ fn load_minimal_toml_applies_plan_defaults() {
     assert_eq!(config.dns.cache_ttl_floor_secs, 30);
     assert_eq!(config.dns.cache_ttl_ceiling_secs, 300);
 }
+
+#[test]
+fn removed_prompt_cache_disable_switches_are_ignored_with_warnings() {
+    let (_dir, path) = crate::common::temp_config(
+        r#"
+[listener]
+
+[prompt_cache_shadow]
+enabled = false
+grace_margin_secs = 17
+
+[lifecycle_prompt_cache_drift_subscriber]
+enabled = false
+
+[lifecycle_prompt_cache_observation_subscriber]
+enabled = false
+"#,
+    );
+
+    let (config, warnings) = Config::load_with_warnings(&path).unwrap();
+
+    assert_eq!(config.prompt_cache_shadow.grace_margin_secs, 17);
+    assert_eq!(
+        warnings,
+        vec![
+            "prompt_cache_shadow.enabled",
+            "lifecycle_prompt_cache_drift_subscriber.enabled",
+            "lifecycle_prompt_cache_observation_subscriber.enabled",
+        ]
+    );
+}

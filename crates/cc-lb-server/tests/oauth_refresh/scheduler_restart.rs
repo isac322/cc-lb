@@ -152,7 +152,6 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
         None,
         None,
         1800,
-        &cc_lb_config::Config::default(),
         fixture.clock.clone(),
     )
     .await

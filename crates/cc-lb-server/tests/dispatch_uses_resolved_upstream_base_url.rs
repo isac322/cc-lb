@@ -132,7 +132,6 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         scopes: vec!["messages".to_owned()],
     });
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
-    let config = cc_lb_config::Config::default();
     let view = build_dynamic_view(
         stores.as_ref(),
         oauth_cfg.as_ref(),
@@ -145,7 +144,6 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         None,
         None,
         1800,
-        &config,
         Arc::new(cc_lb_engine::SystemClock),
     )
     .await

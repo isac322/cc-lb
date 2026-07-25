@@ -235,7 +235,6 @@ async fn router_choice_selects_matching_oauth_upstream() {
         None,
         None,
         1800,
-        &cc_lb_config::Config::default(),
         Arc::new(cc_lb_engine::SystemClock),
     )
     .await
@@ -279,7 +278,6 @@ async fn empty_router_choice_errors() {
         None,
         None,
         1800,
-        &cc_lb_config::Config::default(),
         Arc::new(cc_lb_engine::SystemClock),
     )
     .await

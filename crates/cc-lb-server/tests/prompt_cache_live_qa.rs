@@ -43,7 +43,6 @@ async fn full_proxy_write_then_non_breakpoint_lookback_hit_preserves_smart_routi
     };
     let extra_config = r#"
 [prompt_cache_shadow]
-enabled = true
 refresh_debounce_secs = 0
 "#;
     let server = common::spawn_test_server_with_two_upstreams(extra_config, fake_config).await;

@@ -1,4 +1,43 @@
 use super::ValidationError;
+const REMOVED_PROMPT_CACHE_SWITCHES: &[(&str, &str)] = &[
+    ("prompt_cache_shadow", "enabled"),
+    ("lifecycle_prompt_cache_drift_subscriber", "enabled"),
+    ("lifecycle_prompt_cache_observation_subscriber", "enabled"),
+];
+
+const REMOVED_PROMPT_CACHE_ENV_SWITCHES: &[&str] = &[
+    "CC_LB_PROMPT_CACHE_SHADOW__ENABLED",
+    "CC_LB_LIFECYCLE_PROMPT_CACHE_DRIFT_SUBSCRIBER__ENABLED",
+    "CC_LB_LIFECYCLE_PROMPT_CACHE_OBSERVATION_SUBSCRIBER__ENABLED",
+];
+
+pub fn removed_prompt_cache_switches(raw_toml: &str) -> Vec<String> {
+    let Ok(table) = raw_toml.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    REMOVED_PROMPT_CACHE_SWITCHES
+        .iter()
+        .filter(|&&(section, key)| {
+            table
+                .get(section)
+                .and_then(toml::Value::as_table)
+                .is_some_and(|section_table| section_table.contains_key(key))
+        })
+        .map(|&(section, key)| format!("{section}.{key}"))
+        .collect()
+}
+
+pub fn removed_prompt_cache_env_switches() -> Vec<String> {
+    removed_prompt_cache_env_switches_in(|variable| std::env::var_os(variable).is_some())
+}
+
+fn removed_prompt_cache_env_switches_in(mut present: impl FnMut(&str) -> bool) -> Vec<String> {
+    REMOVED_PROMPT_CACHE_ENV_SWITCHES
+        .iter()
+        .filter(|&&variable| present(variable))
+        .map(|&variable| variable.to_owned())
+        .collect()
+}
 
 pub fn validate_raw_toml(raw_toml: &str) -> Result<(), ValidationError> {
     let Ok(table) = raw_toml.parse::<toml::Table>() else {
@@ -112,4 +151,27 @@ pub fn migrate_legacy_storage_toml(raw_toml: &str) -> Result<String, ValidationE
             format!("failed to migrate legacy [storage] block: {err}"),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::removed_prompt_cache_env_switches_in;
+
+    #[test]
+    fn removed_prompt_cache_env_switches_are_detected_without_mutating_process_env() {
+        let present = [
+            "CC_LB_PROMPT_CACHE_SHADOW__ENABLED",
+            "CC_LB_LIFECYCLE_PROMPT_CACHE_OBSERVATION_SUBSCRIBER__ENABLED",
+        ];
+
+        let fields = removed_prompt_cache_env_switches_in(|variable| present.contains(&variable));
+
+        assert_eq!(
+            fields,
+            vec![
+                "CC_LB_PROMPT_CACHE_SHADOW__ENABLED",
+                "CC_LB_LIFECYCLE_PROMPT_CACHE_OBSERVATION_SUBSCRIBER__ENABLED",
+            ]
+        );
+    }
 }
