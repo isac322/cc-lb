@@ -24,6 +24,11 @@ SELECT \
     thread_id, \
     observed_session_id, \
     request_kind, \
+    claude_agent_id, \
+    claude_parent_agent_id, \
+    parent_session_id, \
+    client_app, \
+    session_id_source, \
     model, \
     reasoning_effort, \
     thinking_budget_tokens, \
@@ -84,6 +89,11 @@ FROM ( \
             r.thread_id, \
             r.observed_session_id, \
             r.request_kind, \
+            r.claude_agent_id, \
+            r.claude_parent_agent_id, \
+            r.parent_session_id, \
+            r.client_app, \
+            r.session_id_source, \
             r.model, \
             r.reasoning_effort, \
             r.thinking_budget_tokens, \
@@ -137,6 +147,11 @@ pub(super) struct ListRow {
     pub(super) thread_id: Option<String>,
     pub(super) observed_session_id: Option<String>,
     pub(super) request_kind: Option<String>,
+    pub(super) claude_agent_id: Option<String>,
+    pub(super) claude_parent_agent_id: Option<String>,
+    pub(super) parent_session_id: Option<String>,
+    pub(super) client_app: Option<String>,
+    pub(super) session_id_source: Option<String>,
     pub(super) model: Option<String>,
     pub(super) reasoning_effort: Option<String>,
     pub(super) thinking_budget_tokens: Option<i64>,

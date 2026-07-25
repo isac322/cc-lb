@@ -133,7 +133,7 @@ describe('RequestEventDrawer', () => {
     expect(screen.queryByText('Upstream Failure')).toBeNull();
   });
 
-  it('renders observed session and explicit request kind', () => {
+  it('renders Claude session identity and explicit request kind', () => {
     const event = {
       event_id: 'evt_identity',
       request_id: 'req_identity',
@@ -143,6 +143,11 @@ describe('RequestEventDrawer', () => {
       thread_id: 'session-thread',
       observed_session_id: 'session-observed',
       request_kind: 'subagent',
+      claude_agent_id: 'agent-a',
+      claude_parent_agent_id: 'agent-parent',
+      parent_session_id: 'session-parent',
+      client_app: 'cli-bg',
+      session_id_source: 'x-claude-code-session-id',
       _phase: 'final',
     } satisfies RequestEventWithPhase;
 
@@ -161,6 +166,44 @@ describe('RequestEventDrawer', () => {
     expect(sessionRow?.textContent).toContain('sub');
     expect(screen.queryByText('Request kind')).toBeNull();
     expect(screen.queryByText('subagent')).toBeNull();
+    expect(screen.getByText('Session source')).toBeDefined();
+    expect(screen.getByText('x-claude-code-session-id')).toBeDefined();
+    expect(screen.getByText('Parent session')).toBeDefined();
+    expect(screen.getByTitle('session-parent')).toBeDefined();
+    expect(screen.getByLabelText('Copy parent session id')).toBeDefined();
+    expect(screen.getByText('Agent')).toBeDefined();
+    expect(screen.getByText('agent-a')).toBeDefined();
+    expect(screen.getByLabelText('Copy agent id')).toBeDefined();
+    expect(screen.getByText('Parent agent')).toBeDefined();
+    expect(screen.getByText('agent-parent')).toBeDefined();
+    expect(screen.getByLabelText('Copy parent agent id')).toBeDefined();
+    expect(screen.getByText('Client app')).toBeDefined();
+    expect(screen.getByText('cli-bg')).toBeDefined();
+  });
+
+  it('omits Claude session identity rows when absent', () => {
+    const event = {
+      event_id: 'evt_identity_absent',
+      request_id: 'req_identity_absent',
+      ts: 1718553120,
+      status: 200,
+      duration_ms: 150,
+      _phase: 'final',
+    } satisfies RequestEventWithPhase;
+
+    render(
+      <RequestEventDrawer
+        event={event}
+        principalName={null}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.queryByText('Session source')).toBeNull();
+    expect(screen.queryByText('Parent session')).toBeNull();
+    expect(screen.queryByText('Agent')).toBeNull();
+    expect(screen.queryByText('Parent agent')).toBeNull();
+    expect(screen.queryByText('Client app')).toBeNull();
   });
 
   it('renders structured upstream failure details when only type is present', () => {

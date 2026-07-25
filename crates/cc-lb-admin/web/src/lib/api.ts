@@ -295,6 +295,11 @@ export const RequestEventPartialSchema = z.looseObject({
   thread_id: z.string().nullable().optional(),
   observed_session_id: z.string().nullable().optional(),
   request_kind: z.string().nullable().optional(),
+  claude_agent_id: z.string().nullable().optional(),
+  claude_parent_agent_id: z.string().nullable().optional(),
+  parent_session_id: z.string().nullable().optional(),
+  client_app: z.string().nullable().optional(),
+  session_id_source: z.string().nullable().optional(),
   model: z.string().nullable().optional(),
   upstream_response_status: z.number().nullable().optional(),
   input_tokens: z.number().nullable().optional(),
@@ -440,6 +445,11 @@ export interface RequestEvent {
   thread_id?: string | null;
   observed_session_id?: string | null;
   request_kind?: string | null;
+  claude_agent_id?: string | null;
+  claude_parent_agent_id?: string | null;
+  parent_session_id?: string | null;
+  client_app?: string | null;
+  session_id_source?: string | null;
   model?: string;
   source_kind?: string;
   status: number;

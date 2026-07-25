@@ -402,8 +402,8 @@ async fn insert_request_event_in_tx(
                    lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, \
                    thinking_budget_tokens, reasoning_effort, \
                    observed_session_id, request_kind, \
-                   list_ts_ms, list_event_key, list_upstream, list_status, payload, created_at) \
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,NOW()) \
+                   list_ts_ms, list_event_key, list_upstream, list_status, payload, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, created_at) \
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,NOW()) \
                ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
                RETURNING seq",
         )
@@ -571,6 +571,11 @@ async fn insert_request_event_in_tx(
         }))
         .bind(i32::from(event.status))
         .bind(payload)
+        .bind(event.claude_agent_id.as_deref())
+        .bind(event.claude_parent_agent_id.as_deref())
+        .bind(event.parent_session_id.as_deref())
+        .bind(event.client_app.as_deref())
+        .bind(event.session_id_source.as_deref())
         .fetch_optional(&mut **tx)
         .await
         .map_err(map_sqlx_error)

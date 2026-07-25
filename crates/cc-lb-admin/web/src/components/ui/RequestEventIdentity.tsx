@@ -199,6 +199,88 @@ export function RequestEventIdentity({
             )
           }
         />
+        {event.session_id_source != null && (
+          <KvRow
+            label="Session source"
+            value={
+              <span className="font-mono break-all min-w-0">
+                {event.session_id_source}
+              </span>
+            }
+          />
+        )}
+        {event.parent_session_id != null && (
+          <KvRow
+            label="Parent session"
+            value={
+              <span className="flex items-center gap-1 justify-end flex-wrap min-w-0">
+                <SessionChip sessionId={event.parent_session_id} />
+                <button
+                  type="button"
+                  aria-label="Copy parent session id"
+                  className="text-text-faint hover:text-text shrink-0"
+                  onClick={() =>
+                    copy(event.parent_session_id ?? '', 'Parent session ID')
+                  }
+                >
+                  <Copy className="w-3 h-3" />
+                </button>
+              </span>
+            }
+          />
+        )}
+        {event.claude_agent_id != null && (
+          <KvRow
+            label="Agent"
+            value={
+              <span className="flex items-center gap-1 justify-end flex-wrap min-w-0">
+                <span className="font-mono break-all min-w-0">
+                  {event.claude_agent_id}
+                </span>
+                <button
+                  type="button"
+                  aria-label="Copy agent id"
+                  className="text-text-faint hover:text-text shrink-0"
+                  onClick={() => copy(event.claude_agent_id ?? '', 'Agent ID')}
+                >
+                  <Copy className="w-3 h-3" />
+                </button>
+              </span>
+            }
+          />
+        )}
+        {event.claude_parent_agent_id != null && (
+          <KvRow
+            label="Parent agent"
+            value={
+              <span className="flex items-center gap-1 justify-end flex-wrap min-w-0">
+                <span className="font-mono break-all min-w-0">
+                  {event.claude_parent_agent_id}
+                </span>
+                <button
+                  type="button"
+                  aria-label="Copy parent agent id"
+                  className="text-text-faint hover:text-text shrink-0"
+                  onClick={() =>
+                    copy(event.claude_parent_agent_id ?? '', 'Parent agent ID')
+                  }
+                >
+                  <Copy className="w-3 h-3" />
+                </button>
+              </span>
+            }
+          />
+        )}
+        {event.client_app != null && (
+          <KvRow
+            label="Client app"
+            value={
+              <Badge tone="mono" className="font-mono">
+                {event.client_app}
+              </Badge>
+            }
+          />
+        )}
         <KvRow
           label="Model"
           value={
