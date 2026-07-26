@@ -904,6 +904,7 @@ mod tests {
     use cc_lb_storage_api::upstream::UpstreamKind;
     use cc_lb_storage_api::{BackendKind, MetaStore, StorageResult, UpstreamCreate, UpstreamStore};
     use tokio::net::TcpListener;
+    use tokio::sync::{Notify, watch};
     use tokio_util::sync::CancellationToken;
     use url::Url;
     use uuid::Uuid;
@@ -915,23 +916,31 @@ mod tests {
 
     #[tokio::test]
     async fn lazy_refresher_single_flight_under_concurrency() {
-        let fixture = LazyRefreshFixture::new(Duration::from_millis(50)).await;
+        let fixture = LazyRefreshFixture::new(Duration::ZERO).await;
+        fixture.hold_refresh_response();
         let upstream_id = fixture.create_oauth_upstream().await;
         let claims = Arc::new(TestOAuthRefreshClaims::single_winner());
         let config = LazyRefreshContentionConfig::for_tests(
-            Duration::from_millis(500),
+            Duration::from_secs(30),
             Duration::from_millis(5),
         );
         let first = fixture.lazy_refresher(claims.clone(), config);
         let second = fixture.lazy_refresher(claims.clone(), config);
 
-        let (left, right) = tokio::join!(
-            first.refresh_one(upstream_id),
-            second.refresh_one(upstream_id)
-        );
+        let first = tokio::spawn(async move { first.refresh_one(upstream_id).await });
+        fixture.wait_for_refresh_start().await;
+        let second = tokio::spawn(async move { second.refresh_one(upstream_id).await });
+        claims.wait_for_contention().await;
+        fixture.release_refresh_response();
 
-        left.expect("first lazy refresh succeeds");
-        right.expect("second lazy refresh joins");
+        first
+            .await
+            .expect("first lazy refresh task joins")
+            .expect("first lazy refresh succeeds");
+        second
+            .await
+            .expect("second lazy refresh task joins")
+            .expect("second lazy refresh joins");
         assert_eq!(fixture.refresh_call_count(), 1);
         assert_eq!(claims.completed_generation(), Some(1));
     }
@@ -1001,6 +1010,9 @@ mod tests {
         aead: Arc<AeadService>,
         oauth_cfg: Arc<AnthropicOAuthConfig>,
         refresh_calls: Arc<AtomicUsize>,
+        refresh_started: watch::Sender<bool>,
+        hold_refresh_response: Arc<AtomicBool>,
+        refresh_release: Arc<Notify>,
         scheduler_backend: SchedulerBackend,
         clock: ClockHandle,
     }
@@ -1008,8 +1020,17 @@ mod tests {
     impl LazyRefreshFixture {
         async fn new(refresh_delay: Duration) -> Self {
             let refresh_calls = Arc::new(AtomicUsize::new(0));
-            let token_url =
-                spawn_lazy_refresh_token_server(refresh_calls.clone(), refresh_delay).await;
+            let (refresh_started, _) = watch::channel(false);
+            let hold_refresh_response = Arc::new(AtomicBool::new(false));
+            let refresh_release = Arc::new(Notify::new());
+            let token_url = spawn_lazy_refresh_token_server(
+                refresh_calls.clone(),
+                refresh_delay,
+                refresh_started.clone(),
+                hold_refresh_response.clone(),
+                refresh_release.clone(),
+            )
+            .await;
             let dir = tempfile::tempdir().expect("tempdir");
             let database_url = format!(
                 "sqlite://{}",
@@ -1076,6 +1097,9 @@ mod tests {
                 aead,
                 oauth_cfg,
                 refresh_calls,
+                refresh_started,
+                hold_refresh_response,
+                refresh_release,
                 scheduler_backend,
                 clock,
             }
@@ -1137,11 +1161,34 @@ mod tests {
         fn refresh_call_count(&self) -> usize {
             self.refresh_calls.load(Ordering::SeqCst)
         }
+
+        fn hold_refresh_response(&self) {
+            self.hold_refresh_response.store(true, Ordering::SeqCst);
+        }
+
+        async fn wait_for_refresh_start(&self) {
+            let mut refresh_started = self.refresh_started.subscribe();
+            if *refresh_started.borrow() {
+                return;
+            }
+            refresh_started
+                .changed()
+                .await
+                .expect("test token server start sender remains alive");
+        }
+
+        fn release_refresh_response(&self) {
+            self.hold_refresh_response.store(false, Ordering::SeqCst);
+            self.refresh_release.notify_one();
+        }
     }
 
     async fn spawn_lazy_refresh_token_server(
         refresh_calls: Arc<AtomicUsize>,
         refresh_delay: Duration,
+        refresh_started: watch::Sender<bool>,
+        hold_refresh_response: Arc<AtomicBool>,
+        refresh_release: Arc<Notify>,
     ) -> Url {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -1152,6 +1199,9 @@ mod tests {
             .with_state(TokenServerState {
                 refresh_calls,
                 refresh_delay,
+                refresh_started,
+                hold_refresh_response,
+                refresh_release,
             });
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("token server runs");
@@ -1163,12 +1213,19 @@ mod tests {
     struct TokenServerState {
         refresh_calls: Arc<AtomicUsize>,
         refresh_delay: Duration,
+        refresh_started: watch::Sender<bool>,
+        hold_refresh_response: Arc<AtomicBool>,
+        refresh_release: Arc<Notify>,
     }
 
     async fn lazy_refresh_token_response(
         State(state): State<TokenServerState>,
     ) -> Json<serde_json::Value> {
         state.refresh_calls.fetch_add(1, Ordering::SeqCst);
+        state.refresh_started.send_replace(true);
+        if state.hold_refresh_response.load(Ordering::SeqCst) {
+            state.refresh_release.notified().await;
+        }
         if !state.refresh_delay.is_zero() {
             tokio::time::sleep(state.refresh_delay).await;
         }
@@ -1185,27 +1242,48 @@ mod tests {
         first_acquire_wins: bool,
         acquired: AtomicBool,
         completed_generation: Mutex<Option<u64>>,
+        completion: watch::Sender<Option<u64>>,
+        contention_observed: watch::Sender<bool>,
     }
 
     impl TestOAuthRefreshClaims {
         fn single_winner() -> Self {
+            let (completion, _) = watch::channel(None);
+            let (contention_observed, _) = watch::channel(false);
             Self {
                 first_acquire_wins: true,
                 acquired: AtomicBool::new(false),
                 completed_generation: Mutex::new(None),
+                completion,
+                contention_observed,
             }
         }
 
         fn always_contended() -> Self {
+            let (completion, _) = watch::channel(None);
+            let (contention_observed, _) = watch::channel(false);
             Self {
                 first_acquire_wins: false,
                 acquired: AtomicBool::new(true),
                 completed_generation: Mutex::new(None),
+                completion,
+                contention_observed,
             }
         }
 
         fn completed_generation(&self) -> Option<u64> {
             *self.completed_generation.lock().expect("completed lock")
+        }
+
+        async fn wait_for_contention(&self) {
+            let mut contention_observed = self.contention_observed.subscribe();
+            if *contention_observed.borrow() {
+                return;
+            }
+            contention_observed
+                .changed()
+                .await
+                .expect("test contention sender remains alive");
         }
     }
 
@@ -1234,6 +1312,7 @@ mod tests {
             generation: u64,
         ) -> StorageResult<bool> {
             *self.completed_generation.lock().expect("completed lock") = Some(generation);
+            self.completion.send_replace(Some(generation));
             Ok(true)
         }
 
@@ -1246,14 +1325,10 @@ mod tests {
         }
 
         async fn task_state(&self, _idempotency_key: &str) -> StorageResult<LazyRefreshTaskState> {
-            if self
-                .completed_generation
-                .lock()
-                .expect("completed lock")
-                .is_some()
-            {
+            if self.completion.borrow().is_some() {
                 Ok(LazyRefreshTaskState::Done)
             } else {
+                self.contention_observed.send_replace(true);
                 Ok(LazyRefreshTaskState::Active)
             }
         }
