@@ -45,6 +45,30 @@ jobs:
       # pod's AWS_* OS env vars into the build as BuildKit secrets (the Dockerfile
       # reads them via --mount=type=secret); the non-secret sccache S3 config goes
       # in as build-args. Fail-open: without creds the Dockerfile compiles uncached.
+
+      # Exercise one target that cannot be native on either runner architecture.
+      # This keeps the Rustup/sccache cross-compiler path covered without
+      # rebuilding release's full four-platform graph on every Dockerfile change.
+      - name: Build cross-target compiler
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/ppc64le
+          target: builder
+          outputs: type=cacheonly
+          network: host
+          allow: network.host
+          build-args: |
+            GIT_SHA=0000000
+            SOURCE_DATE_EPOCH=0
+            SCCACHE_BUCKET=sccache
+            SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
+            SCCACHE_REGION=garage
+            SCCACHE_S3_USE_SSL=false
+          secret-envs: |
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+
       - name: Build image
         uses: docker/build-push-action@v7
         with:

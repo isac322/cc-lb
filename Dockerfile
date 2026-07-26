@@ -54,8 +54,13 @@ ARG TARGETPLATFORM
 # (ring, zstd, brotli, libsqlite3-sys).
 RUN xx-apk add --no-cache musl-dev gcc
 
-# Ensure the resolved Rust target triple is installed for cross builds.
-RUN rustup target add "$(xx-cargo --print-target-triple)"
+# The cross target is installed alongside the compile below. That gives Cargo
+# and sccache the same immutable Rust toolchain snapshot.
+WORKDIR /src
+
+# Keep Cargo's package-cache lock in the same shared mount as its registry and
+# git data. /usr/local/cargo/bin remains on PATH; this only relocates CARGO_HOME.
+ENV CARGO_HOME=/cargo-home
 
 # Build-time metadata / knobs.
 ARG GIT_SHA=""
@@ -76,7 +81,6 @@ ARG SCCACHE_ENDPOINT=""
 ARG SCCACHE_REGION=""
 ARG SCCACHE_S3_USE_SSL=""
 
-WORKDIR /src
 COPY . .
 
 # The repository's x86_64-musl linker is for standalone Cargo builds. When an
@@ -94,14 +98,17 @@ RUN config=.cargo/config.toml; \
     fi; \
     ! grep -q '^\[target\.x86_64-unknown-linux-musl\]$' "$config"
 
-# Caches reused across builds: the cargo download caches (registry/git) and the
-# Bun install cache. The target dir is intentionally NOT cache-mounted:
-# cc-lb-admin/build.rs regenerates its embedded SPA (web/dist) into the freshly
-# COPYed source tree every build, and a persisted target dir makes cargo skip
-# that build script on a warm rebuild -> missing web/dist -> fail.
-RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
-    --mount=type=cache,id=bun-${BUILDPLATFORM},sharing=locked,target=/root/.bun/install/cache \
+# Cargo's package-cache lock lives at $CARGO_HOME/.package-cache. Mounting the
+# whole CARGO_HOME lets Cargo serialize only registry/git mutation while the
+# four target builds compile concurrently.
+# Bun does not have that established contract here: give each target its own
+# locked cache so a concurrent SPA install cannot serialize the other targets.
+# The target dir is intentionally NOT cache-mounted: cc-lb-admin/build.rs
+# regenerates its embedded SPA (web/dist) into the freshly COPYed source tree
+# every build, and a persisted target dir makes cargo skip that build script on
+# a warm rebuild -> missing web/dist -> fail.
+RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
+    --mount=type=cache,id=bun-${TARGETPLATFORM},sharing=locked,target=/root/.bun/install/cache \
     --mount=type=secret,id=AWS_ACCESS_KEY_ID,required=false \
     --mount=type=secret,id=AWS_SECRET_ACCESS_KEY,required=false <<'EOF'
 # An empty SOURCE_DATE_EPOCH makes ring's cc/clang C build abort; drop it unless
@@ -111,17 +118,23 @@ if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then unset SOURCE_DATE_EPOCH; fi
 export CC_LB_SKIP_WASM_FIXTURE_BUILD=1
 export GIT_SHA="${GIT_SHA}"
 if [ "${SKIP_SPA}" = "1" ]; then export CC_LB_ADMIN_SKIP_SPA=1; fi
-# Enable sccache (S3/garage backend) only when creds are mounted and a bucket is
-# set; otherwise compile uncached. SCCACHE_IGNORE_SERVER_IO_ERROR keeps a cache
-# outage non-fatal; SCCACHE_IDLE_TIMEOUT=0 keeps the server alive through the LTO
-# link so its --show-stats survives.
+# Install and verify the target in the same snapshot Cargo uses. Resolve rustc
+# to its concrete binary before sccache receives it: the daemon must not
+# re-execute rustup's cwd-sensitive proxy outside /src.
+target="$(xx-cargo --print-target-triple)"
+rustup target add "$target"
+sysroot="$(rustc --print sysroot)"
+test -n "$(find "$sysroot/lib/rustlib/$target/lib" -maxdepth 1 -type f -name 'libcore-*.rlib' -print -quit)"
+RUSTC="$(rustup which rustc)"
+export RUSTC
 # Read + export the creds with the shell -x trace OFF so it never prints them.
 set +x
 AWS_ACCESS_KEY_ID="$(cat /run/secrets/AWS_ACCESS_KEY_ID 2>/dev/null || true)"
 AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/AWS_SECRET_ACCESS_KEY 2>/dev/null || true)"
 if [ -n "${AWS_ACCESS_KEY_ID}" ] && [ -n "${AWS_SECRET_ACCESS_KEY}" ] && [ -n "${SCCACHE_BUCKET}" ]; then
   export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-  export SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION SCCACHE_S3_USE_SSL
+  export SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION
+  if [ -n "${SCCACHE_S3_USE_SSL}" ]; then export SCCACHE_S3_USE_SSL; fi
   export RUSTC_WRAPPER=sccache SCCACHE_IGNORE_SERVER_IO_ERROR=1 SCCACHE_IDLE_TIMEOUT=0 CARGO_INCREMENTAL=0
   set -x
   echo "sccache: S3 backend enabled (bucket=${SCCACHE_BUCKET})"
@@ -129,22 +142,22 @@ else
   set -x
   echo "sccache: disabled (no creds/bucket) - compiling uncached"
 fi
+build_status=0
 xx-cargo build --release --locked \
   -p cc-lb-server \
   --no-default-features --features "${FEATURES}" \
-  --target-dir /src/target
-# Tear sccache down BEFORE any further xx-cargo/rustc call. With RUSTC_WRAPPER
-# still set, the next call (target-triple detection) routes through the sccache
-# server while it is flushing its cold-cache S3 upload backlog, which hangs the
-# build for hours. Bound the flush + force-kill the lingering server so it can't
-# stall the RUN, then run the remaining steps uncached (the compile's cache
-# stores already happened during the build above).
+  --target-dir /src/target || build_status=$?
+# Tear sccache down before any further xx-cargo/rustc call. With
+# RUSTC_WRAPPER still set, target-triple detection routes through the server
+# while it flushes a cold-cache S3 upload backlog. Always print stats so a
+# failing compile preserves cache I/O evidence.
 if [ -n "${RUSTC_WRAPPER:-}" ]; then
   timeout 60 sccache --show-stats || true
   timeout 60 sccache --stop-server || true
   pkill -9 sccache 2>/dev/null || true
   unset RUSTC_WRAPPER
 fi
+if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi
 triple="$(xx-cargo --print-target-triple)"
 install -Dm0755 "/src/target/${triple}/release/cc-lb" /out/cc-lb
 xx-verify --static /out/cc-lb
