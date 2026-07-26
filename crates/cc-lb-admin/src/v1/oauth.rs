@@ -516,7 +516,7 @@ async fn create_upstream_from_oauth_draft(
             base_url,
             api_key_ciphertext: None,
             oauth_token_generation: None,
-            warmup_enabled: false,
+            warmup_enabled: true,
             warmup_dialect_plugin: None,
         },
     )

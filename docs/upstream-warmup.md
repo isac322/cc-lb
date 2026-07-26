@@ -4,11 +4,13 @@ This document describes the operator reference for the upstream warm-up system i
 
 ## What it does
 
-Anthropic OAuth upstreams require periodic activity to keep their five-hour rate limit reset windows active. If an upstream remains idle for too long, the reset window closes, which can lead to unexpected rate limits when traffic resumes. This warm-up system automatically sends minimal requests to opted-in upstreams to keep these windows ticking. It ensures that your upstreams are always ready to handle incoming requests without artificial delays.
+Anthropic OAuth upstreams require periodic activity to keep their five-hour rate limit reset windows active. If an upstream remains idle for too long, the reset window closes, which can lead to unexpected rate limits when traffic resumes. This warm-up system automatically sends minimal requests to keep these windows ticking. It ensures that your upstreams are always ready to handle incoming requests without artificial delays.
 
-## Enabling per upstream
+Warm-up is opt-out: `warmup_enabled` defaults to `true`, both for upstreams created through `POST /admin/v1/upstreams` and for those created by the OAuth flow. Only `anthropic_oauth` upstreams that hold OAuth credentials are ever scheduled, so the flag is inert until an upstream completes OAuth.
 
-To enable warm-up for a specific upstream, send a PATCH request to the admin API. Set the `warmup_enabled` field to `true` in the request body. PATCH requires an `If-Match` ETag from a prior GET to prevent lost updates.
+## Re-enabling per upstream
+
+To turn warm-up back on for an upstream you previously disabled, send a PATCH request to the admin API. Set the `warmup_enabled` field to `true` in the request body. PATCH requires an `If-Match` ETag from a prior GET to prevent lost updates. The upstream must already hold OAuth credentials; otherwise the request returns `400 warmup_requires_oauth_credentials`.
 
 ```bash
 # 1. fetch current revision

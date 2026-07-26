@@ -125,10 +125,14 @@ struct UpstreamCreateBody {
     api_key_env: Option<String>,
     #[serde(default)]
     api_key_value: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_warmup_enabled")]
     warmup_enabled: bool,
     #[serde(default)]
     warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
+}
+
+const fn default_warmup_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -312,13 +316,6 @@ async fn create_upstream(
     let storage = storage(&state)?;
     let api_key_ciphertext = api_key_ciphertext_for_create(&state, &body)?;
     let kind = body.kind;
-    // AnthropicOauth creates carry no credentials; warmup_due_candidate would silently skip.
-    if body.warmup_enabled && kind == UpstreamKind::AnthropicOauth {
-        return Err(UpstreamError::BadRequest {
-            error: "warmup_requires_oauth_credentials",
-            detail: "complete OAuth before enabling warmup".to_owned(),
-        });
-    }
     let created = UpstreamStore::create(
         storage,
         UpstreamCreate {
@@ -2134,12 +2131,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_upstream_with_warmup_enabled_rejects_anthropic_oauth_kind() {
+    async fn create_upstream_defaults_warmup_enabled_for_anthropic_oauth_kind() {
         let context = test_context().await;
         let body = serde_json::json!({
-            "name": "oauth-warmup-precreate",
+            "name": "oauth-warmup-default",
             "kind": "anthropic_oauth",
-            "warmup_enabled": true,
         });
         let response = router()
             .with_state(context.state)
@@ -2154,12 +2150,12 @@ mod tests {
             .await
             .expect("request completes");
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::CREATED);
         let bytes = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body read succeeds");
         let body: Value = serde_json::from_slice(&bytes).expect("response is json");
-        assert_eq!(body["error"], "warmup_requires_oauth_credentials");
+        assert_eq!(body["warmup_enabled"], true);
     }
 
     #[tokio::test]
