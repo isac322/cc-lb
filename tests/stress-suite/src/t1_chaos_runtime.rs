@@ -212,9 +212,6 @@ upstream_kind = "anthropic_key"
 kind = "sqlite"
 path = "{data_dir}/cc-lb.sqlite"
 
-[event_bus]
-transport = "in_memory"
-
 [aead]
 key_env = "CC_LB_MASTER_KEY"
 

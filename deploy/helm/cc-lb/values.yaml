@@ -116,6 +116,12 @@ config:
     # -- Env var name the server reads the 32-byte (64 hex) master key from.
     keyEnv: CC_LB_MASTER_KEY
 
+  # -- Cross-replica fanout identity. Required for the postgres backend: cc-lb
+  # always runs the pg_notify event fanout there. `instance_url` is injected
+  # from the pod IP at runtime; only the shared token comes from a Secret.
+  cluster:
+    tokenEnv: CC_LB_CLUSTER_TOKEN
+
   priceCatalog:
     # -- Writable cache path for the LiteLLM price catalog (on the data volume).
     cachePath: /var/lib/cc-lb/litellm.json
@@ -141,11 +147,15 @@ secrets:
   adminToken: ""
   # -- Optional bootstrap admin token (seeds the "admin" principal on first start).
   bootstrapAdminToken: ""
+  # -- Shared cross-replica fanout token. REQUIRED for the postgres backend
+  # unless existingSecret provides it. Generate with: `openssl rand -hex 32`.
+  clusterToken: ""
   # Key names to read from `existingSecret` (change if your secret differs).
   keys:
     masterKey: CC_LB_MASTER_KEY
     adminToken: CC_LB_ADMIN_TOKEN
     bootstrapAdminToken: CC_LB_BOOTSTRAP_ADMIN_TOKEN
+    clusterToken: CC_LB_CLUSTER_TOKEN
 
 # -- Additional environment variables (raw EnvVar list).
 env: []

@@ -20,7 +20,7 @@ use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
 use bytes::{Bytes, BytesMut};
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, DownstreamAuthMode, EventBusTransport, TlsConfig};
+use cc_lb_config::{Config, DownstreamAuthMode, TlsConfig};
 use cc_lb_engine::{
     BreakerRegistry, BreakerRuntimeConfig, BulkheadDispatch, BulkheadRegistry,
     BulkheadRuntimeConfig, CircuitBreakerDispatch, ClockHandle, DynamicView, DynamicViewBuilder,
@@ -229,8 +229,10 @@ pub enum BuildError {
     InvalidStorageKey,
     #[error("cluster token env {env} is missing")]
     ClusterTokenMissing { env: String },
-    #[error("pg_notify transport requires postgres storage pool")]
+    #[error("postgres storage pool unavailable for pg_notify fanout")]
     PgNotifyPoolUnavailable,
+    #[error("cluster.instance_url is required when storage.kind=postgres")]
+    ClusterInstanceUrlMissing,
 }
 
 impl App {
@@ -646,6 +648,12 @@ fn build_app_for_testing_postgres_config(database_url: &str) -> Config {
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
     config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
     config.downstream_auth.none_mode = None;
+    // The postgres backend always runs pg_notify fanout, which needs a peer
+    // identity and a shared cluster token. Postgres tests only run with
+    // CI_POSTGRES_URL set, so borrow it as the token env instead of mutating
+    // process-wide state from a library helper.
+    config.cluster.instance_url = Some("http://127.0.0.1:0".to_owned());
+    config.cluster.token_env = "CI_POSTGRES_URL".to_owned();
     config
 }
 
@@ -1127,9 +1135,9 @@ async fn build_app_with_storage_inner(
         let _ = &mut event_fanout_tasks;
         let _ = &mut internal_partials_state;
     }
-    let event_bus: Arc<dyn cc_lb_control::RequestEventBus> = match config.event_bus.transport {
-        EventBusTransport::InMemory => Arc::new(in_memory_bus.clone()),
-        EventBusTransport::PgNotify => {
+    let event_bus: Arc<dyn cc_lb_control::RequestEventBus> = match &config.storage {
+        cc_lb_config::StorageConfig::Sqlite { .. } => Arc::new(in_memory_bus.clone()),
+        cc_lb_config::StorageConfig::Postgres { .. } => {
             #[cfg(not(feature = "postgres"))]
             {
                 return Err(BuildError::StorageFactory(
@@ -1154,7 +1162,7 @@ async fn build_app_with_storage_inner(
                     .cluster
                     .instance_url
                     .clone()
-                    .ok_or(BuildError::PgNotifyPoolUnavailable)?;
+                    .ok_or(BuildError::ClusterInstanceUrlMissing)?;
 
                 event_fanout_tasks.push(cc_lb_engine::PgNotifier::spawn_with_channel(
                     pg_pool.clone(),

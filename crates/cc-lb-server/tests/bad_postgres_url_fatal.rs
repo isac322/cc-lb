@@ -18,6 +18,9 @@ proxy_addr = "127.0.0.1:0"
 admin_addr = "127.0.0.1:0"
 metrics_addr = "127.0.0.1:0"
 
+[cluster]
+instance_url = "http://127.0.0.1:9090"
+
 [storage.pool]
 acquire_timeout_secs = 3
 

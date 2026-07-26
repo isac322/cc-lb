@@ -6,6 +6,11 @@ Backend: {{ .Values.config.storage.kind }}
   NOTE: the sqlite backend is a single writer. Replicas are pinned to 1 and
   autoscaling is ignored. Use the postgres backend to scale horizontally.
 {{- end }}
+{{- if not $isSqlite }}
+  NOTE: the postgres backend always runs the pg_notify event fanout. The chart
+  injects CC_LB_CLUSTER__INSTANCE_URL from the pod IP and reads the shared
+  cluster token from {{ .Values.config.cluster.tokenEnv }} (secrets.clusterToken).
+{{- end }}
 
 Image: {{ include "cc-lb.image" . }}
 

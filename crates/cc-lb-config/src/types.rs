@@ -270,21 +270,11 @@ impl Default for PriceCatalogConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum EventBusTransport {
-    #[default]
-    InMemory,
-    PgNotify,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct EventBusConfig {
     #[serde(default = "default_event_bus_broadcast_capacity")]
     pub broadcast_capacity: usize,
-    #[serde(default)]
-    pub transport: EventBusTransport,
     #[serde(default = "default_storage_tail_poll_interval_ms")]
     pub storage_tail_poll_interval_ms: u64,
     #[serde(default = "default_pg_notify_channel")]
@@ -299,7 +289,6 @@ impl Default for EventBusConfig {
     fn default() -> Self {
         Self {
             broadcast_capacity: DEFAULT_EVENT_BUS_BROADCAST_CAPACITY,
-            transport: EventBusTransport::InMemory,
             storage_tail_poll_interval_ms: DEFAULT_STORAGE_TAIL_POLL_INTERVAL_MS,
             pg_notify_channel: DEFAULT_PG_NOTIFY_CHANNEL.to_owned(),
             partial_retention_ttl_secs: DEFAULT_PARTIAL_RETENTION_TTL_SECS,
@@ -1502,15 +1491,11 @@ upstream_kind = "anthropic_key"
     }
 
     #[test]
-    fn event_bus_defaults_and_pg_notify_stub_deserialize() {
+    fn event_bus_defaults_and_overrides_deserialize() {
         let default_config = Config::default();
         assert_eq!(
             default_config.event_bus.broadcast_capacity,
             DEFAULT_EVENT_BUS_BROADCAST_CAPACITY
-        );
-        assert_eq!(
-            default_config.event_bus.transport,
-            EventBusTransport::InMemory
         );
         assert_eq!(
             default_config.event_bus.storage_tail_poll_interval_ms,
@@ -1529,7 +1514,6 @@ url = "postgres://localhost/cc_lb"
 
 [event_bus]
 broadcast_capacity = 8192
-transport = "pg_notify"
 storage_tail_poll_interval_ms = 125
 pg_notify_channel = "cc_lb_events_partial_custom"
 partial_retention_ttl_secs = 60
@@ -1544,7 +1528,6 @@ instance_url = "http://127.0.0.1:9090"
         .expect("config should load");
 
         assert_eq!(config.event_bus.broadcast_capacity, 8192);
-        assert_eq!(config.event_bus.transport, EventBusTransport::PgNotify);
         assert_eq!(config.event_bus.storage_tail_poll_interval_ms, 125);
         assert_eq!(
             config.event_bus.pg_notify_channel,
@@ -1555,11 +1538,26 @@ instance_url = "http://127.0.0.1:9090"
     }
 
     #[test]
-    fn pg_notify_requires_postgres_and_instance_url() {
-        let sqlite_error = load_config(
+    fn event_bus_transport_key_is_rejected() {
+        let error = load_config(
             r#"
 [event_bus]
 transport = "pg_notify"
+
+[api_keys]
+"#,
+        )
+        .expect_err("removed event_bus.transport key should fail to parse");
+        assert!(error.to_string().contains("transport"));
+    }
+
+    #[test]
+    fn postgres_storage_requires_cluster_instance_url() {
+        load_config(
+            r#"
+[storage]
+kind = "postgres"
+url = "postgres://localhost/cc_lb"
 
 [cluster]
 instance_url = "http://127.0.0.1:9090"
@@ -1567,12 +1565,7 @@ instance_url = "http://127.0.0.1:9090"
 [api_keys]
 "#,
         )
-        .expect_err("sqlite pg_notify should fail validation");
-        assert!(
-            sqlite_error
-                .to_string()
-                .contains("requires postgres storage")
-        );
+        .expect("postgres with instance_url should load");
 
         let missing_url = load_config(
             r#"
@@ -1580,14 +1573,18 @@ instance_url = "http://127.0.0.1:9090"
 kind = "postgres"
 url = "postgres://localhost/cc_lb"
 
-[event_bus]
-transport = "pg_notify"
-
 [api_keys]
 "#,
         )
-        .expect_err("pg_notify without instance_url should fail validation");
+        .expect_err("postgres without instance_url should fail validation");
         assert!(missing_url.to_string().contains("cluster.instance_url"));
+
+        load_config(
+            r#"
+[api_keys]
+"#,
+        )
+        .expect("sqlite without instance_url should load");
     }
 
     #[test]

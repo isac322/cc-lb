@@ -36,6 +36,11 @@ data:
 
     [api_keys.price_catalog]
     cache_path = {{ .Values.config.priceCatalog.cachePath | quote }}
+    {{- if ne .Values.config.storage.kind "sqlite" }}
+
+    [cluster]
+    token_env = {{ .Values.config.cluster.tokenEnv | quote }}
+    {{- end }}
     {{- with .Values.config.extraToml }}
 {{ . | nindent 4 }}
     {{- end }}
