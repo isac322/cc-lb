@@ -78,6 +78,8 @@ ARG SCCACHE_ENDPOINT=""
 ARG SCCACHE_REGION=""
 ARG SCCACHE_S3_USE_SSL=""
 ARG REQUIRE_SCCACHE="0"
+ARG SCCACHE_S3_KEY_PREFIX=""
+ARG SCCACHE_MIN_HIT_RATE="0"
 
 COPY . .
 
@@ -133,6 +135,8 @@ if [ -n "${AWS_ACCESS_KEY_ID}" ] && [ -n "${AWS_SECRET_ACCESS_KEY}" ] && [ -n "$
   export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
   export SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION
   if [ -n "${SCCACHE_S3_USE_SSL}" ]; then export SCCACHE_S3_USE_SSL; fi
+  cache_prefix="${SCCACHE_S3_KEY_PREFIX:-cc-lb}"
+  export SCCACHE_S3_KEY_PREFIX="${cache_prefix%/}/${target}"
   export RUSTC_WRAPPER=sccache SCCACHE_IDLE_TIMEOUT=0 CARGO_INCREMENTAL=0
   # Docker's host network shares 127.0.0.1 across concurrent target containers.
   # A filesystem socket is isolated by each container's mount namespace, keeping
@@ -166,9 +170,18 @@ if [ -n "${RUSTC_WRAPPER:-}" ]; then
   if ! timeout 900 sccache --stop-server | tee /tmp/sccache-stats.txt; then
     cache_status=1
   fi
-  if grep -Eq '^Cache (read|write) errors[[:space:]]+[1-9][0-9]*$' /tmp/sccache-stats.txt; then
-    echo "sccache reported cache storage errors" >&2
+  if grep -Eq '^Cache (timeouts|read errors|write errors)[[:space:]]+[1-9][0-9]*$' /tmp/sccache-stats.txt; then
+    echo "sccache reported a cache storage error or timeout" >&2
     cache_status=1
+  fi
+  if [ "${SCCACHE_MIN_HIT_RATE}" != "0" ]; then
+    for language in Rust 'C/C++'; do
+      rate="$(awk -v language="$language" '$1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(" language ")" { print $(NF - 1); exit }' /tmp/sccache-stats.txt)"
+      if ! awk -v rate="$rate" -v minimum="${SCCACHE_MIN_HIT_RATE}" 'BEGIN { exit !(rate + 0 >= minimum) }'; then
+        echo "sccache ${language} hit rate ${rate:-missing}% is below ${SCCACHE_MIN_HIT_RATE}%" >&2
+        cache_status=1
+      fi
+    done
   fi
   unset RUSTC_WRAPPER
   if { [ "$cache_status" -ne 0 ] || [ "$build_status" -ne 0 ]; } && [ -s "${SCCACHE_ERROR_LOG}" ]; then

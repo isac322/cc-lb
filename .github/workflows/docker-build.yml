@@ -21,8 +21,13 @@ on:
       - '.github/workflows/docker-build.yml'
   workflow_dispatch:
     inputs:
+      cache_namespace:
+        description: Stable isolated namespace for a two-run all-target S3 cache lifecycle probe.
+        required: false
+        default: ''
+        type: string
       verify_cache_reuse:
-        description: Rebuild all release targets after the first pass to inspect warm S3 cache reuse.
+        description: Require at least 99% Rust and C/C++ cache hits. Requires cache_namespace from a completed cold-write run.
         required: false
         default: false
         type: boolean
@@ -48,6 +53,37 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "source_date_epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
 
+      - name: Select sccache namespace
+        id: sccache
+        env:
+          CACHE_NAMESPACE: ${{ inputs.cache_namespace }}
+          VERIFY_CACHE_REUSE: ${{ inputs.verify_cache_reuse }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CACHE_NAMESPACE" ]; then
+            case "$CACHE_NAMESPACE" in
+              *[!A-Za-z0-9._-]*)
+                echo "::error::cache_namespace may contain only letters, numbers, dots, underscores, and hyphens"
+                exit 1
+                ;;
+            esac
+            prefix="cc-lb/verify/$CACHE_NAMESPACE"
+          else
+            prefix="cc-lb"
+          fi
+          if [ "$VERIFY_CACHE_REUSE" = true ]; then
+            if [ -z "$CACHE_NAMESPACE" ]; then
+              echo "::error::verify_cache_reuse requires cache_namespace from a completed cold-write run"
+              exit 1
+            fi
+            min_hit_rate=99
+          else
+            min_hit_rate=0
+          fi
+          {
+            echo "prefix=$prefix"
+            echo "min_hit_rate=$min_hit_rate"
+          } >> "$GITHUB_OUTPUT"
 
       # network=host + the network.host entitlement let the in-Docker build
       # reach the in-cluster Garage S3 endpoint (garage.arc-systems.svc).
@@ -76,6 +112,8 @@ jobs:
             SCCACHE_REGION=garage
             SCCACHE_S3_USE_SSL=false
             REQUIRE_SCCACHE=1
+            SCCACHE_S3_KEY_PREFIX=${{ steps.sccache.outputs.prefix }}
+            SCCACHE_MIN_HIT_RATE=${{ steps.sccache.outputs.min_hit_rate }}
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
@@ -99,6 +137,8 @@ jobs:
             SCCACHE_REGION=garage
             SCCACHE_S3_USE_SSL=false
             REQUIRE_SCCACHE=1
+            SCCACHE_S3_KEY_PREFIX=${{ steps.sccache.outputs.prefix }}
+            SCCACHE_MIN_HIT_RATE=${{ steps.sccache.outputs.min_hit_rate }}
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
@@ -119,6 +159,7 @@ jobs:
             SCCACHE_REGION=garage
             SCCACHE_S3_USE_SSL=false
             REQUIRE_SCCACHE=1
+            SCCACHE_S3_KEY_PREFIX=${{ steps.sccache.outputs.prefix }}
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
