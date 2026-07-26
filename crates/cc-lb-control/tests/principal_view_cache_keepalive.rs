@@ -35,6 +35,7 @@ fn principal_with_cache_keepalive(enabled: bool) -> PrincipalRecord {
             snapshot_max_bytes: 128_000,
             classifier: Default::default(),
         }),
+        smart_routing_enabled: true,
     }
 }
 

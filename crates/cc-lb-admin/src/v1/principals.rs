@@ -80,6 +80,8 @@ struct UpdatePrincipalBody {
         skip_serializing_if = "Option::is_none"
     )]
     cache_keepalive: Option<Option<CacheKeepaliveConfig>>,
+    #[serde(default)]
+    smart_routing_enabled: Option<bool>,
 }
 
 fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
@@ -113,6 +115,7 @@ struct PrincipalResponse {
     default_limits: Vec<Limit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_keepalive: Option<CacheKeepaliveConfig>,
+    smart_routing_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -261,6 +264,7 @@ async fn update_principal(
             default_limits: body.default_limits,
             router_terminal_strategy: None,
             cache_keepalive: body.cache_keepalive,
+            smart_routing_enabled: body.smart_routing_enabled,
         },
         fields_changed,
     )
@@ -547,6 +551,7 @@ fn principal_response(record: PrincipalRecord) -> PrincipalResponse {
         allowed_upstreams: record.allowed_upstreams,
         default_limits: record.default_limits,
         cache_keepalive: record.cache_keepalive,
+        smart_routing_enabled: record.smart_routing_enabled,
     }
 }
 
@@ -576,6 +581,9 @@ fn update_fields_changed(body: &UpdatePrincipalBody) -> Vec<&'static str> {
     }
     if body.cache_keepalive.is_some() {
         fields.push("cache_keepalive");
+    }
+    if body.smart_routing_enabled.is_some() {
+        fields.push("smart_routing_enabled");
     }
     fields
 }

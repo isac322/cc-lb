@@ -29,6 +29,7 @@ pub(super) fn principal_record_with_id(id: &str) -> PrincipalRecord {
         updated_at_unix_secs: 0,
         router_terminal_strategy: Default::default(),
         cache_keepalive: Some(keepalive_config()),
+        smart_routing_enabled: true,
     }
 }
 

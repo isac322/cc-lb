@@ -31,7 +31,6 @@ import {
   Copy,
   GripVertical,
   KeyRound,
-  Lock,
   Plus,
   Trash2,
   X,
@@ -87,6 +86,7 @@ import {
   useSetAllowedModels,
   useTogglePrincipal,
   useUpdatePrincipalDefaultLimits,
+  useUpdatePrincipalSmartRouting,
   useUpdateRouterTerminalStrategy,
   useUpstreamNameMap,
 } from '../lib/queries';
@@ -570,7 +570,7 @@ function PrincipalDetail({
         <AllowedModelsCard principal={principal} />
         <DefaultLimitsCard principal={principal} />
         <RecentRequestsCard principal={principal} />
-        <RouterSlotEditor principalId={principal.id} />
+        <RouterSlotEditor principal={principal} />
         <ObservabilityHookEditor principalId={principal.id} />
         <ShapeSlotEditor principalId={principal.id} />
         <ApiKeysCard principal={principal} />
@@ -1219,7 +1219,8 @@ function useFlipReorder(
   }, [items]);
 }
 
-export function RouterSlotEditor({ principalId }: { principalId: string }) {
+export function RouterSlotEditor({ principal }: { principal: Principal }) {
+  const principalId = principal.id;
   const slot = 'router' as const;
   const chain = usePluginChain(principalId, slot);
   const registry = usePluginRegistry();
@@ -1228,6 +1229,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
   const del = useDeleteChainEntry();
   const terminalStrategy = useRouterTerminalStrategy(principalId);
   const updateTerminalStrategy = useUpdateRouterTerminalStrategy();
+  const updateSmartRouting = useUpdatePrincipalSmartRouting();
 
   const entries = useMemo(
     () => [...(chain.data?.entries ?? [])].sort((a, b) => a.order - b.order),
@@ -1241,15 +1243,14 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
     (e) => e.wasm_registry_id === subscriptionPreferencePlugin?.id,
   );
 
+  // A leftover built-in chain entry is an advanced override now that the filter
+  // is driven by principal.smart_routing_enabled, so surface it in Advanced.
   const isComplex = useMemo(() => {
     if (!subscriptionPreferencePlugin) return false;
     const hasOther = entries.some(
       (e) => e.wasm_registry_id !== subscriptionPreferencePlugin.id,
     );
-    const smartRoutingNotFirst =
-      subscriptionPreferenceEntry &&
-      entries[0]?.id !== subscriptionPreferenceEntry.id;
-    return hasOther || smartRoutingNotFirst;
+    return hasOther || !!subscriptionPreferenceEntry;
   }, [entries, subscriptionPreferencePlugin, subscriptionPreferenceEntry]);
 
   const [detailPlugin, setDetailPlugin] = useState<PluginEntry | null>(null);
@@ -1264,27 +1265,14 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
     }
   }, [isComplex, activeTab]);
 
-  const isSmartRouting = !!subscriptionPreferenceEntry;
+  const isSmartRouting = principal.smart_routing_enabled;
 
   const toggleSmartRouting = () => {
-    if (!subscriptionPreferencePlugin) return;
-    if (isSmartRouting) {
-      if (subscriptionPreferenceEntry) {
-        del.mutate({
-          id: subscriptionPreferenceEntry.id,
-          revision: subscriptionPreferenceEntry.revision,
-        });
-      }
-    } else {
-      insert.mutate({
-        pid: principalId,
-        body: {
-          slot,
-          wasm_registry_id: subscriptionPreferencePlugin.id,
-          order: 0,
-        },
-      });
-    }
+    updateSmartRouting.mutate({
+      id: principalId,
+      smart_routing_enabled: !principal.smart_routing_enabled,
+      expected_revision: principal.revision,
+    });
   };
 
   const setStrategy = (strategy: string) => {
@@ -1447,11 +1435,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                 nativeButton
                 onCheckedChange={() => toggleSmartRouting()}
                 render={<button type="button" />}
-                disabled={
-                  !subscriptionPreferencePlugin ||
-                  insert.isPending ||
-                  del.isPending
-                }
+                disabled={updateSmartRouting.isPending}
               >
                 <div
                   className={cx(
@@ -1582,11 +1566,6 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                   const reg = registry.data?.entries.find(
                     (r) => r.id === e.wasm_registry_id,
                   );
-                  const isBasicManaged =
-                    !isComplex &&
-                    isSmartRouting &&
-                    reg?.name === 'subscription-preference';
-
                   return (
                     <React.Fragment key={e.id}>
                       {idx > 0 && (
@@ -1621,37 +1600,26 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                           </div>
                         </div>
                         <div className="flex items-center gap-1 shrink-0">
-                          {isBasicManaged ? (
-                            <div
-                              className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint"
-                              title="Managed by Basic settings"
-                            >
-                              <Lock className="w-4 h-4" />
-                            </div>
-                          ) : (
-                            <>
-                              <button
-                                onClick={() => moveUp(idx)}
-                                className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
-                                disabled={idx === 0}
-                              >
-                                <ArrowUp className="w-4 h-4" />
-                              </button>
-                              <button
-                                onClick={() => moveDown(idx)}
-                                className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
-                                disabled={idx === entries.length - 1}
-                              >
-                                <ArrowDown className="w-4 h-4" />
-                              </button>
-                              <button
-                                onClick={() => removeFilter(e.id, e.revision)}
-                                className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-red-400 hover:bg-overlay-3"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            </>
-                          )}
+                          <button
+                            onClick={() => moveUp(idx)}
+                            className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
+                            disabled={idx === 0}
+                          >
+                            <ArrowUp className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => moveDown(idx)}
+                            className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
+                            disabled={idx === entries.length - 1}
+                          >
+                            <ArrowDown className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => removeFilter(e.id, e.revision)}
+                            className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-red-400 hover:bg-overlay-3"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
                         </div>
                       </li>
                     </React.Fragment>
@@ -1805,11 +1773,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                         const inChain = entries.some(
                           (e) => e.wasm_registry_id === p.id,
                         );
-                        const isBasicManaged =
-                          !isComplex &&
-                          isSmartRouting &&
-                          p.name === 'subscription-preference';
-                        const disabled = inChain || isBasicManaged;
+                        const disabled = inChain;
 
                         return (
                           <button
@@ -1829,9 +1793,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                               </span>
                               {disabled ? (
                                 <span className="text-[10px] text-text-faint">
-                                  {isBasicManaged
-                                    ? 'Managed by Basic'
-                                    : 'Already in chain'}
+                                  Already in chain
                                 </span>
                               ) : null}
                             </div>

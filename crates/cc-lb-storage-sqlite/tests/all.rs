@@ -4,6 +4,8 @@ mod api_key_usage;
 mod cache_keepalive_session_reads;
 #[path = "price_catalog_retention.rs"]
 mod price_catalog_retention;
+#[path = "principal_smart_routing_migration.rs"]
+mod principal_smart_routing_migration;
 #[path = "principal_terminal_strategy.rs"]
 mod principal_terminal_strategy;
 #[path = "prompt_cache_observation.rs"]

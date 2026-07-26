@@ -722,6 +722,7 @@ fn lifecycle_with_transforms_and_hook_and_config(
         updated_at_unix_secs: 0,
         router_terminal_strategy: Default::default(),
         cache_keepalive: None,
+        smart_routing_enabled: true,
     };
     let authn = TestAuthn::with_principal_view(
         state,

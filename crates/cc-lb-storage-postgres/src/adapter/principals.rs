@@ -54,7 +54,7 @@ impl PrincipalStore for PostgresStorage {
     }
 
     async fn get_by_id(&self, id: Uuid) -> StorageResult<Option<PrincipalRecord>> {
-        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE id = $1")
+        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive, smart_routing_enabled FROM principals_v1 WHERE id = $1")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -63,7 +63,7 @@ impl PrincipalStore for PostgresStorage {
     }
 
     async fn get_by_name(&self, name: &str) -> StorageResult<Option<PrincipalRecord>> {
-        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE name = $1")
+        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive, smart_routing_enabled FROM principals_v1 WHERE name = $1")
             .bind(name)
             .fetch_optional(&self.pool)
             .await
@@ -81,7 +81,7 @@ impl PrincipalStore for PostgresStorage {
             return Ok(Vec::new());
         }
         let rows = sqlx::query(
-            "SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE ($1 OR deleted_at IS NULL) ORDER BY name ASC OFFSET $2 LIMIT $3",
+            "SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive, smart_routing_enabled FROM principals_v1 WHERE ($1 OR deleted_at IS NULL) ORDER BY name ASC OFFSET $2 LIMIT $3",
         )
         .bind(include_deleted)
         .bind(u64_to_i64(offset as u64, "principal.offset")?)
@@ -129,9 +129,12 @@ impl PrincipalStore for PostgresStorage {
             .as_ref()
             .map(serde_json::to_value)
             .transpose()?;
+        let smart_routing_enabled = update
+            .smart_routing_enabled
+            .unwrap_or(current.smart_routing_enabled);
         let now = unix_secs_to_datetime(now_unix_secs, "principal.updated_at")?;
         let row = sqlx::query(
-            "UPDATE principals_v1 SET name = $2, allowed_models = $3, allowed_upstreams = $4, default_limits = $5, router_terminal_strategy = $6, cache_keepalive = $7, revision = revision + 1, updated_at = $8 WHERE id = $1 AND revision = $9 RETURNING *",
+            "UPDATE principals_v1 SET name = $2, allowed_models = $3, allowed_upstreams = $4, default_limits = $5, router_terminal_strategy = $6, cache_keepalive = $7, smart_routing_enabled = $8, revision = revision + 1, updated_at = $9 WHERE id = $1 AND revision = $10 RETURNING *",
         )
         .bind(id)
         .bind(name)
@@ -140,6 +143,7 @@ impl PrincipalStore for PostgresStorage {
         .bind(serde_json::to_value(default_limits)?)
         .bind(router_terminal_strategy)
         .bind(cache_keepalive_value)
+        .bind(smart_routing_enabled)
         .bind(now)
         .bind(u64_to_i64(expected_revision, "principal.revision")?)
         .fetch_one(&self.pool)
@@ -377,6 +381,9 @@ fn principal_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PrincipalReco
         updated_at_unix_secs: datetime_to_unix_secs(updated_at, "principal.updated_at")?,
         router_terminal_strategy: terminal_strategy_from_db_value(&router_terminal_strategy),
         cache_keepalive,
+        smart_routing_enabled: row
+            .try_get("smart_routing_enabled")
+            .map_err(map_sqlx_error)?,
     })
 }
 

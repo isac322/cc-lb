@@ -35,6 +35,7 @@ where
     principal_allowed_upstreams_roundtrip(Arc::clone(&backend)).await?;
     default_limits_roundtrip(Arc::clone(&backend)).await?;
     router_terminal_strategy_roundtrip(Arc::clone(&backend)).await?;
+    smart_routing_enabled_defaults_on_and_roundtrips(Arc::clone(&backend)).await?;
     soft_delete_excludes_default_list(Arc::clone(&backend)).await?;
     soft_delete_cascades_plugin_chains(Arc::clone(&backend)).await?;
     hard_delete_removes_unreferenced(Arc::clone(&backend)).await?;
@@ -125,6 +126,7 @@ where
                 default_limits: None,
                 router_terminal_strategy: None,
                 cache_keepalive: None,
+                smart_routing_enabled: None,
             },
             BASE_TS + 1,
         )
@@ -300,6 +302,65 @@ where
         ensure!(
             serde_json::to_value(&fetched.router_terminal_strategy)? == json!("random"),
             "terminal strategy persists"
+        );
+        Ok(())
+    })
+    .await
+}
+
+pub async fn smart_routing_enabled_defaults_on_and_roundtrips<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: AuditStore + PrincipalStore,
+{
+    with_fixture(backend, |storage| async move {
+        let record = PrincipalStore::create(&*storage, principal_create(16), BASE_TS).await?;
+        ensure!(
+            record.smart_routing_enabled,
+            "smart routing defaults to enabled"
+        );
+
+        let updated = PrincipalStore::update(
+            &*storage,
+            record.id,
+            record.revision,
+            PrincipalUpdate {
+                smart_routing_enabled: Some(false),
+                ..PrincipalUpdate::default()
+            },
+            BASE_TS + 1,
+        )
+        .await?
+        .expect("record should exist");
+        ensure!(
+            !updated.smart_routing_enabled,
+            "smart routing turns off via update"
+        );
+
+        let fetched = PrincipalStore::get_by_id(&*storage, record.id)
+            .await?
+            .expect("record should exist");
+        ensure!(
+            !fetched.smart_routing_enabled,
+            "smart routing off persists across reads"
+        );
+
+        // An update that does not mention the flag must leave it alone.
+        let renamed = PrincipalStore::update(
+            &*storage,
+            fetched.id,
+            fetched.revision,
+            PrincipalUpdate {
+                name: Some("principal-0016-renamed".to_owned()),
+                ..PrincipalUpdate::default()
+            },
+            BASE_TS + 2,
+        )
+        .await?
+        .expect("record should exist");
+        ensure!(
+            !renamed.smart_routing_enabled,
+            "unrelated update preserves smart routing"
         );
         Ok(())
     })

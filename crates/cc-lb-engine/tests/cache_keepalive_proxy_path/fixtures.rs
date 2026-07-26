@@ -131,6 +131,7 @@ pub(crate) fn principal_with_keepalive() -> PrincipalRecord {
             snapshot_max_bytes: 524_288,
             classifier: ClassifierConfig::default(),
         }),
+        smart_routing_enabled: true,
     }
 }
 
