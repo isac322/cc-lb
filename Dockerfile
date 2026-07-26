@@ -71,15 +71,13 @@ ARG SOURCE_DATE_EPOCH=""
 ARG FEATURES="sqlite,postgres"
 # Set to 1 to skip building the dashboard SPA (ships a placeholder page).
 ARG SKIP_SPA="0"
-# sccache S3 backend (optional, fail-open). When the AWS_ACCESS_KEY_ID /
-# AWS_SECRET_ACCESS_KEY secrets are mounted and SCCACHE_BUCKET is set, the Rust
-# compile is cached to the S3/garage bucket; otherwise it compiles uncached. On
-# the self-hosted runner these come from the in-cluster sccache-s3-creds secret
-# already present in the runner env (no GitHub Actions secret needed).
+# sccache S3 backend. Self-hosted CI and release builds require it so cache
+# failures are visible; local builds retain an explicit uncached fallback.
 ARG SCCACHE_BUCKET=""
 ARG SCCACHE_ENDPOINT=""
 ARG SCCACHE_REGION=""
 ARG SCCACHE_S3_USE_SSL=""
+ARG REQUIRE_SCCACHE="0"
 
 COPY . .
 
@@ -135,29 +133,47 @@ if [ -n "${AWS_ACCESS_KEY_ID}" ] && [ -n "${AWS_SECRET_ACCESS_KEY}" ] && [ -n "$
   export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
   export SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION
   if [ -n "${SCCACHE_S3_USE_SSL}" ]; then export SCCACHE_S3_USE_SSL; fi
-  export RUSTC_WRAPPER=sccache SCCACHE_IGNORE_SERVER_IO_ERROR=1 SCCACHE_IDLE_TIMEOUT=0 CARGO_INCREMENTAL=0
+  export RUSTC_WRAPPER=sccache SCCACHE_IDLE_TIMEOUT=0 CARGO_INCREMENTAL=0
+  export SCCACHE_LOG=error SCCACHE_ERROR_LOG=/tmp/sccache-error.log
   set -x
   echo "sccache: S3 backend enabled (bucket=${SCCACHE_BUCKET})"
 else
   set -x
   echo "sccache: disabled (no creds/bucket) - compiling uncached"
+  if [ "${REQUIRE_SCCACHE}" = "1" ]; then
+    echo "sccache is required for this build" >&2
+    exit 1
+  fi
 fi
 build_status=0
 xx-cargo build --release --locked \
   -p cc-lb-server \
   --no-default-features --features "${FEATURES}" \
   --target-dir /src/target || build_status=$?
-# Tear sccache down before any further xx-cargo/rustc call. With
-# RUSTC_WRAPPER still set, target-triple detection routes through the server
-# while it flushes a cold-cache S3 upload backlog. Always print stats so a
-# failing compile preserves cache I/O evidence.
+# Finalize the server normally. A forced kill can discard asynchronous S3
+# writes, and `SCCACHE_IGNORE_SERVER_IO_ERROR` would hide a broken cache.
+cache_status=0
 if [ -n "${RUSTC_WRAPPER:-}" ]; then
-  timeout 60 sccache --show-stats || true
-  timeout 60 sccache --stop-server || true
-  pkill -9 sccache 2>/dev/null || true
+  if ! sccache --show-stats | tee /tmp/sccache-stats.txt; then
+    cache_status=1
+  fi
+  if grep -Eq '^Cache (read|write) errors[[:space:]]+[1-9][0-9]*$|^Cache errors([[:space:]]|\()[^0-9]*[1-9][0-9]*$' /tmp/sccache-stats.txt; then
+    echo "sccache reported cache errors" >&2
+    cache_status=1
+  fi
+  if ! sccache --stop-server; then
+    cache_status=1
+  fi
   unset RUSTC_WRAPPER
+  if [ -s "${SCCACHE_ERROR_LOG}" ]; then
+    cat "${SCCACHE_ERROR_LOG}" >&2
+    if grep -Eq '(^|[[:space:]])ERROR([[:space:]:]|$)' "${SCCACHE_ERROR_LOG}"; then
+      cache_status=1
+    fi
+  fi
 fi
 if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi
+if [ "$cache_status" -ne 0 ]; then exit "$cache_status"; fi
 triple="$(xx-cargo --print-target-triple)"
 install -Dm0755 "/src/target/${triple}/release/cc-lb" /out/cc-lb
 xx-verify --static /out/cc-lb

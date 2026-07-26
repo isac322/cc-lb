@@ -19,6 +19,14 @@ on:
       - '.dockerignore'
       - '.cargo/config.toml'
       - '.github/workflows/docker-build.yml'
+  workflow_dispatch:
+    inputs:
+      verify_cache_reuse:
+        description: Rebuild all release targets after the first pass to inspect warm S3 cache reuse.
+        required: false
+        default: false
+        type: boolean
+
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -33,6 +41,13 @@ jobs:
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
+      - name: Resolve source revision
+        id: source
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "source_date_epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
+
 
       # network=host + the network.host entitlement let the in-Docker build
       # reach the in-cluster Garage S3 endpoint (garage.arc-systems.svc).
@@ -41,30 +56,49 @@ jobs:
           driver-opts: network=host
           buildkitd-flags: --allow-insecure-entitlement network.host
 
-      # Builds the DEFAULT (distroless) target. secret-envs forwards the runner
-      # pod's AWS_* OS env vars into the build as BuildKit secrets (the Dockerfile
-      # reads them via --mount=type=secret); the non-secret sccache S3 config goes
-      # in as build-args. Fail-open: without creds the Dockerfile compiles uncached.
-
-      # Exercise one target that cannot be native on either runner architecture.
-      # This keeps the Rustup/sccache cross-compiler path covered without
-      # rebuilding release's full four-platform graph on every Dockerfile change.
-      - name: Build cross-target compiler
+      # Build every release target on Dockerfile changes. A separate manual
+      # probe optionally rebuilds with the builder cache bypassed, avoiding a
+      # second full target graph on every pull request.
+      - name: Build all release targets
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/ppc64le
+          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le
           target: builder
           outputs: type=cacheonly
           network: host
           allow: network.host
           build-args: |
-            GIT_SHA=0000000
-            SOURCE_DATE_EPOCH=0
+            GIT_SHA=${{ steps.source.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
             SCCACHE_BUCKET=sccache
             SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
             SCCACHE_REGION=garage
             SCCACHE_S3_USE_SSL=false
+            REQUIRE_SCCACHE=1
+          secret-envs: |
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+
+      - name: Rebuild all release targets from sccache
+        if: inputs.verify_cache_reuse
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le
+          target: builder
+          outputs: type=cacheonly
+          no-cache-filters: builder
+          network: host
+          allow: network.host
+          build-args: |
+            GIT_SHA=${{ steps.source.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
+            SCCACHE_BUCKET=sccache
+            SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
+            SCCACHE_REGION=garage
+            SCCACHE_S3_USE_SSL=false
+            REQUIRE_SCCACHE=1
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
@@ -78,12 +112,13 @@ jobs:
           network: host
           allow: network.host
           build-args: |
-            GIT_SHA=0000000
-            SOURCE_DATE_EPOCH=0
+            GIT_SHA=${{ steps.source.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
             SCCACHE_BUCKET=sccache
             SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
             SCCACHE_REGION=garage
             SCCACHE_S3_USE_SSL=false
+            REQUIRE_SCCACHE=1
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
