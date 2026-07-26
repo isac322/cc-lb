@@ -70,7 +70,7 @@ If an operator keeps a local proxy client key file such as `~/.config/cc-lb/prox
   "name": "upstream-name",
   "kind": "anthropic_api_key",
   "enabled": true,
-  "warmup_enabled": false,
+  "warmup_enabled": true,
   "warmup_dialect_plugin": null,
   "spec_revision": 1,
   "status": {
@@ -81,7 +81,7 @@ If an operator keeps a local proxy client key file such as `~/.config/cc-lb/prox
 }
 ```
 
-`spec_revision` is the user-managed optimistic-lock counter used by `If-Match` and `ETag`. Background controller writes (status/lease/secret/token) never bump it. The nested `status` object holds system-managed operational state: only the apply daemon and warmup observer write here.
+`spec_revision` is the user-managed optimistic-lock counter used by `If-Match` and `ETag`. Background controller writes (status/lease/secret/token) never bump it. The nested `status` object holds system-managed operational state: only the apply daemon and warmup observer write here. `warmup_enabled` defaults to `true`; see [docs/upstream-warmup.md](./upstream-warmup.md).
 
 ### Principals API
 
@@ -138,13 +138,22 @@ create/update requests that set it return `unsupported_cache_keepalive_llm_judge
   "revision": 1,
   "allowed_models": ["claude-3-5-sonnet-20241022"],
   "default_limits": [],
-  "cache_keepalive": null
+  "cache_keepalive": null,
+  "smart_routing_enabled": true
 }
 ```
 
 The `cache_keepalive` field mirrors whatever was persisted on the
 principal, or `null` when unset. `PATCH /admin/v1/principals/{id}` with
 `"cache_keepalive": null` clears the config.
+
+`smart_routing_enabled` controls the built-in `subscription-preference`
+router filter. It is opt-out and defaults to `true`, so the filter runs
+first for every principal without any plugin-chain entry. Turn it off with
+`PATCH /admin/v1/principals/{id}` and `{"smart_routing_enabled": false}`.
+Adding an explicit `subscription-preference` chain entry stays supported as
+the advanced way to pin the filter's position among other router plugins;
+the implicit filter is not added twice in that case.
 
 ### Plugins API
 
