@@ -134,7 +134,13 @@ if [ -n "${AWS_ACCESS_KEY_ID}" ] && [ -n "${AWS_SECRET_ACCESS_KEY}" ] && [ -n "$
   export SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION
   if [ -n "${SCCACHE_S3_USE_SSL}" ]; then export SCCACHE_S3_USE_SSL; fi
   export RUSTC_WRAPPER=sccache SCCACHE_IDLE_TIMEOUT=0 CARGO_INCREMENTAL=0
-  export SCCACHE_LOG=error SCCACHE_ERROR_LOG=/tmp/sccache-error.log
+  # Docker's host network shares 127.0.0.1 across concurrent target containers.
+  # A filesystem socket is isolated by each container's mount namespace, keeping
+  # its sccache server bound to the matching Rust sysroot and installed target.
+  export SCCACHE_SERVER_UDS=/tmp/sccache.sock
+  export SCCACHE_LOG=warn SCCACHE_ERROR_LOG=/tmp/sccache-error.log
+  sccache --start-server
+  test -S "${SCCACHE_SERVER_UDS}"
   set -x
   echo "sccache: S3 backend enabled (bucket=${SCCACHE_BUCKET})"
 else
@@ -150,31 +156,28 @@ xx-cargo build --release --locked \
   -p cc-lb-server \
   --no-default-features --features "${FEATURES}" \
   --target-dir /src/target || build_status=$?
-# Finalize the server normally. A forced kill can discard asynchronous S3
-# writes, and `SCCACHE_IGNORE_SERVER_IO_ERROR` would hide a broken cache.
+ # Finish all asynchronous S3 writes before the container exits. Bound the flush
+ # so a cold-cache backlog fails this build instead of consuming the CI cap.
 cache_status=0
 if [ -n "${RUSTC_WRAPPER:-}" ]; then
-  if ! sccache --show-stats | tee /tmp/sccache-stats.txt; then
+  if ! sccache --show-stats; then
     cache_status=1
   fi
-  if grep -Eq '^Cache (read|write) errors[[:space:]]+[1-9][0-9]*$|^Cache errors([[:space:]]|\()[^0-9]*[1-9][0-9]*$' /tmp/sccache-stats.txt; then
-    echo "sccache reported cache errors" >&2
+  if ! timeout 900 sccache --stop-server | tee /tmp/sccache-stats.txt; then
     cache_status=1
   fi
-  if ! sccache --stop-server; then
+  if grep -Eq '^Cache (read|write) errors[[:space:]]+[1-9][0-9]*$' /tmp/sccache-stats.txt; then
+    echo "sccache reported cache storage errors" >&2
     cache_status=1
   fi
   unset RUSTC_WRAPPER
-  if [ -s "${SCCACHE_ERROR_LOG}" ]; then
-    cat "${SCCACHE_ERROR_LOG}" >&2
-    if grep -Eq '(^|[[:space:]])ERROR([[:space:]:]|$)' "${SCCACHE_ERROR_LOG}"; then
-      cache_status=1
-    fi
+  if { [ "$cache_status" -ne 0 ] || [ "$build_status" -ne 0 ]; } && [ -s "${SCCACHE_ERROR_LOG}" ]; then
+    tail -n 200 "${SCCACHE_ERROR_LOG}" >&2
   fi
 fi
 if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi
 if [ "$cache_status" -ne 0 ]; then exit "$cache_status"; fi
-triple="$(xx-cargo --print-target-triple)"
+triple="$target"
 install -Dm0755 "/src/target/${triple}/release/cc-lb" /out/cc-lb
 xx-verify --static /out/cc-lb
 # Minimal passwd/group so the scratch image can run as a real nonroot user.
