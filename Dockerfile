@@ -163,16 +163,12 @@ xx-cargo build --release --locked \
  # Finish all asynchronous S3 writes before the container exits. Bound the flush
  # so a cold-cache backlog fails this build instead of consuming the CI cap.
 cache_status=0
-sccache_errors=0
 if [ -n "${RUSTC_WRAPPER:-}" ]; then
   if ! sccache --show-stats; then
     cache_status=1
   fi
   if ! timeout 900 sccache --stop-server | tee /tmp/sccache-stats.txt; then
     cache_status=1
-  fi
-  if grep -Eq '^Cache errors[[:space:]]+[1-9][0-9]*$' /tmp/sccache-stats.txt; then
-    sccache_errors=1
   fi
   if grep -Eq '^Cache (timeouts|read errors|write errors)[[:space:]]+[1-9][0-9]*$' /tmp/sccache-stats.txt; then
     echo "sccache reported a cache storage error or timeout" >&2
@@ -188,7 +184,7 @@ if [ -n "${RUSTC_WRAPPER:-}" ]; then
     done
   fi
   unset RUSTC_WRAPPER
-  if { [ "$sccache_errors" -ne 0 ] || [ "$cache_status" -ne 0 ] || [ "$build_status" -ne 0 ]; } && [ -s "${SCCACHE_ERROR_LOG}" ]; then
+  if { [ "$cache_status" -ne 0 ] || [ "$build_status" -ne 0 ]; } && [ -s "${SCCACHE_ERROR_LOG}" ]; then
     tail -n 200 "${SCCACHE_ERROR_LOG}" >&2
   fi
 fi
