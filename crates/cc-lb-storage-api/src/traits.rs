@@ -214,6 +214,32 @@ pub trait UsageRollupStore: Send + Sync {
 }
 
 #[async_trait]
+pub trait ApiKeyUsageBucketStore: Send + Sync {
+    async fn register_api_key_usage_writer(
+        &self,
+        writer_epoch: uuid::Uuid,
+        lease_until_unix_secs: u64,
+    ) -> StorageResult<()>;
+
+    async fn flush_api_key_usage(
+        &self,
+        flush: &crate::ApiKeyUsageFlush,
+    ) -> StorageResult<crate::ApiKeyUsageFlushResult>;
+
+    async fn query_api_key_usage_buckets(
+        &self,
+        query: &crate::ApiKeyUsageBucketQuery,
+    ) -> StorageResult<Vec<crate::ApiKeyUsageBucket>>;
+
+    async fn compact_api_key_usage_buckets(
+        &self,
+        writer_inactive_after_secs: u64,
+        retain_for_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<crate::ApiKeyUsageCompactionRun>;
+}
+
+#[async_trait]
 pub trait UsageTokenIntervalStore: Send + Sync {
     /// Sums all token columns for each interval. Both boundaries are inclusive:
     /// `bucket_start >= start_unix_secs AND bucket_start <= end_unix_secs`.
@@ -413,6 +439,7 @@ pub trait Storage:
     + CacheKeepaliveSessionStore
     + CacheKeepaliveSessionReadStore
     + UsageRollupStore
+    + ApiKeyUsageBucketStore
     + UsageTokenIntervalStore
     + OAuthCredentialStore
     + ApiKeyStore
@@ -448,6 +475,7 @@ impl<T> Storage for T where
         + CacheKeepaliveSessionReadStore
         + UsageRollupStore
         + UsageTokenIntervalStore
+        + ApiKeyUsageBucketStore
         + OAuthCredentialStore
         + ApiKeyStore
         + PriceCatalogCache

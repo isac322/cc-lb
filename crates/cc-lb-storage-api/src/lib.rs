@@ -1,6 +1,7 @@
 #![allow(ambiguous_glob_reexports)]
 
 pub mod anthropic_compatibility_kv;
+pub mod api_key_usage;
 pub mod audit;
 pub mod cache_keepalive;
 pub mod cache_keepalive_sessions;
@@ -34,6 +35,7 @@ pub mod warmup_attempts;
 use async_trait::async_trait;
 
 pub use anthropic_compatibility_kv::*;
+pub use api_key_usage::*;
 pub use audit::*;
 pub use cache_keepalive::{
     CacheKeepaliveConfig, CacheTtl, ClassifierConfig, JudgeResponseFormat, LlmJudgeConfig,
@@ -54,9 +56,9 @@ pub use request_event_projections::*;
 pub use runtime_change_notifier::*;
 pub use traits::UsageTokenIntervalStore;
 pub use traits::{
-    ApiKeyStore, AuditStore, CURRENT_CONTRACT_VERSION, CacheKeepaliveProjectionStore, ConfigStore,
-    ManagedKeyStore, MetaStore, OAuthCredentialStore, PriceCatalogCache, RequestEventStore,
-    Storage, UsageRollupStore,
+    ApiKeyStore, ApiKeyUsageBucketStore, AuditStore, CURRENT_CONTRACT_VERSION,
+    CacheKeepaliveProjectionStore, ConfigStore, ManagedKeyStore, MetaStore, OAuthCredentialStore,
+    PriceCatalogCache, RequestEventStore, Storage, UsageRollupStore,
 };
 pub use types::*;
 pub use upstream::*;
