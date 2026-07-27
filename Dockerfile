@@ -170,8 +170,8 @@ if [ -n "${RUSTC_WRAPPER:-}" ]; then
   if ! timeout 900 sccache --stop-server | tee /tmp/sccache-stats.txt; then
     cache_status=1
   fi
-  if grep -Eq '^Cache (timeouts|read errors|write errors)[[:space:]]+[1-9][0-9]*$' /tmp/sccache-stats.txt; then
-    echo "sccache reported a cache storage error or timeout" >&2
+  if grep -Eq '^Cache (errors|timeouts|read errors|write errors)[[:space:]]+[1-9][0-9]*$' /tmp/sccache-stats.txt; then
+    echo "sccache reported a cache error or timeout" >&2
     cache_status=1
   fi
   if [ "${SCCACHE_MIN_HIT_RATE}" != "0" ]; then
@@ -184,7 +184,7 @@ if [ -n "${RUSTC_WRAPPER:-}" ]; then
     done
   fi
   unset RUSTC_WRAPPER
-  if { [ "$cache_status" -ne 0 ] || [ "$build_status" -ne 0 ]; } && [ -s "${SCCACHE_ERROR_LOG}" ]; then
+  if [ -s "${SCCACHE_ERROR_LOG}" ]; then
     tail -n 200 "${SCCACHE_ERROR_LOG}" >&2
   fi
 fi
