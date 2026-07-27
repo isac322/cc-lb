@@ -5,7 +5,7 @@
 // payload over the internal HTTP endpoint, then republishes it to its local bus.
 
 use std::error::Error;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cc_lb_admin::internal_partials::{InternalPartialsState, router as internal_partials_router};
@@ -48,7 +48,6 @@ fn warmup_timeout() -> Duration {
 }
 const WARMUP_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
-static POSTGRES_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 struct TestRetainedPartialPort {
@@ -102,7 +101,7 @@ async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
         eprintln!("SKIP: CI_POSTGRES_URL unset");
         return Ok(());
     };
-    let _serial = postgres_test_lock().lock().await;
+    let _serial = crate::common::postgres_test_lock(&database_url).await?;
 
     reset_request_event_tables(&database_url).await?;
     let handle = metrics_handle();
@@ -189,10 +188,6 @@ async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
 
 fn ci_postgres_url() -> Option<String> {
     std::env::var("CI_POSTGRES_URL").ok()
-}
-
-fn postgres_test_lock() -> &'static tokio::sync::Mutex<()> {
-    POSTGRES_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 fn metrics_handle() -> &'static PrometheusHandle {

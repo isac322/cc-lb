@@ -6,8 +6,8 @@ use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshUpstreams;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeStore;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneRunner;
 use cc_lb_storage_api::{
-    PromptCacheObservationStore, Storage, StorageError, StorageResult, UpstreamRecord,
-    UpstreamStore,
+    ApiKeyUsageBucketStore, ApiKeyUsageCompactionRun, PromptCacheObservationStore, Storage,
+    StorageError, StorageResult, UpstreamRecord, UpstreamStore,
     usage_pruner::{PruneResult, UsagePruner},
 };
 use uuid::Uuid;
@@ -63,6 +63,21 @@ impl UsagePruneRunner for StorageHandle {
         UsagePruner::new(self.storage.clone(), retention_days, clock)
             .prune_once()
             .await
+    }
+
+    async fn compact_api_key_usage_buckets(
+        &self,
+        writer_inactive_after_secs: u64,
+        retain_for_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<ApiKeyUsageCompactionRun> {
+        ApiKeyUsageBucketStore::compact_api_key_usage_buckets(
+            self.storage.as_ref(),
+            writer_inactive_after_secs,
+            retain_for_secs,
+            batch_size,
+        )
+        .await
     }
 }
 

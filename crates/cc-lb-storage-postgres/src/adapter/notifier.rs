@@ -72,6 +72,14 @@ impl PostgresStorage {
                     .map(|channel| channel.postgres_channel()),
             )
             .await?;
+        // NOTIFY is not durable. Rebuild from storage after every LISTEN
+        // establishment so changes committed during startup or reconnect are
+        // observed even when their notification arrived before this session.
+        let _ = self.change_tx.send(ChangeEvent::new(
+            ChangeChannel::Principal,
+            "postgres-listener-established",
+            self.clock.now(),
+        ));
 
         loop {
             let notification = tokio::select! {

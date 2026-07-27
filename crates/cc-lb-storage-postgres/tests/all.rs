@@ -1,3 +1,5 @@
+#[path = "api_key_usage.rs"]
+mod api_key_usage;
 #[path = "cache_keepalive_session_reads.rs"]
 mod cache_keepalive_session_reads;
 #[path = "cache_keepalive_sessions.rs"]

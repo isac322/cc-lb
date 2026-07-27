@@ -30,7 +30,7 @@ use crate::scheduler_dispatch::outcomes::{
     apalis_housekeeping_outcome, price_catalog_outcome, prompt_cache_purge_outcome,
     usage_prune_outcome, usage_rollup_outcome,
 };
-use crate::scheduler_dispatch::storage::StorageHandle;
+use crate::scheduler_dispatch::storage::{StorageHandle, storage_scheduler_error};
 
 impl SchedulerDispatch {
     pub(super) async fn dispatch_singleton(&self, job: CronJob) -> SchedulerResult<JobOutcome> {
@@ -38,15 +38,20 @@ impl SchedulerDispatch {
             CronJob::UsageRollup(job) => {
                 usage_rollup_outcome(handle_usage_rollup_job(job, self.storage.as_ref()).await)
             }
-            CronJob::UsagePrune(job) => usage_prune_outcome(
-                handle_usage_prune_job(
+            CronJob::UsagePrune(job) => {
+                let result = handle_usage_prune_job(
                     job,
                     &StorageHandle::new(self.storage.clone()),
                     self.config.api_keys.usage_retention_days,
                     self.clock.clone(),
+                    cc_lb_control::api_keys::limit_engine::LimitEngine::durable_usage_writer_inactive_after_secs(),
+                    cc_lb_control::api_keys::limit_engine::LimitEngine::durable_usage_retention_secs(),
+                    cc_lb_control::api_keys::limit_engine::LimitEngine::durable_usage_compaction_batch_size(),
                 )
-                .await,
-            ),
+                .await
+                .map_err(storage_scheduler_error)?;
+                usage_prune_outcome(result)
+            }
             CronJob::QuotaGc(_job) => {
                 tracing::debug!(
                     "quota_gc retired; subscription-quota retention removed (ADR 0005)"

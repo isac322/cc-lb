@@ -73,11 +73,13 @@ impl NotifyListener {
     }
 
     pub async fn run(self: Arc<Self>) {
-        let mut rx = match self.subscribe_with_retry().await {
-            Some(rx) => rx,
-            None => return,
+        let Some(rx) = self.subscribe_with_retry().await else {
+            return;
         };
+        self.run_subscribed(rx).await;
+    }
 
+    pub(crate) async fn run_subscribed(self: Arc<Self>, mut rx: broadcast::Receiver<ChangeEvent>) {
         loop {
             tokio::select! {
                 _ = self.cancel.cancelled() => break,
@@ -96,7 +98,7 @@ impl NotifyListener {
         }
     }
 
-    async fn subscribe_with_retry(&self) -> Option<broadcast::Receiver<ChangeEvent>> {
+    pub(crate) async fn subscribe_with_retry(&self) -> Option<broadcast::Receiver<ChangeEvent>> {
         match self.notifier.subscribe().await {
             Ok(rx) => Some(rx),
             Err(error) => {

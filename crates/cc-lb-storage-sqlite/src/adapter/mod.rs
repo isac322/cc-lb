@@ -1,4 +1,5 @@
 pub mod anthropic_compatibility_kv;
+pub mod api_key_usage;
 pub mod api_keys;
 pub mod audit;
 mod cache_keepalive_session_read_row;

@@ -9,6 +9,8 @@ pub const FAILURES_TOTAL: &str = "cclb_scheduler_failures_total";
 pub const INIT_FAILURE: &str = "cclb_scheduler_init_failure";
 pub const LAZY_REFRESH_TIMEOUT_TOTAL: &str = "cclb_scheduler_lazy_refresh_timeout_total";
 pub const PRUNE_ROWS_REMOVED_TOTAL: &str = "cclb_scheduler_prune_rows_removed_total";
+pub const API_KEY_USAGE_BUCKETS_FOLDED_TOTAL: &str =
+    "cclb_scheduler_api_key_usage_buckets_folded_total";
 pub const PRICE_CATALOG_STATUS_TOTAL: &str = "cclb_scheduler_price_catalog_status_total";
 pub const PROMPT_CACHE_PURGE_ROWS_REMOVED_TOTAL: &str =
     "cclb_scheduler_prompt_cache_purge_rows_removed_total";
@@ -72,6 +74,11 @@ pub fn describe_scheduler_metrics() {
             "Scheduler usage prune rows removed by table."
         );
         ::metrics::describe_counter!(
+            API_KEY_USAGE_BUCKETS_FOLDED_TOTAL,
+            Unit::Count,
+            "API-key usage bucket rows folded from inactive writer epochs."
+        );
+        ::metrics::describe_counter!(
             PRICE_CATALOG_STATUS_TOTAL,
             Unit::Count,
             "Scheduler price catalog refresh outcomes by status."
@@ -103,6 +110,8 @@ pub fn touch_scheduler_metric_handles() {
     ::metrics::counter!(LAZY_REFRESH_TIMEOUT_TOTAL).increment(0);
     ::metrics::counter!(PRUNE_ROWS_REMOVED_TOTAL, "table" => "request_events").increment(0);
     ::metrics::counter!(PRUNE_ROWS_REMOVED_TOTAL, "table" => "audit_log").increment(0);
+    ::metrics::counter!(PRUNE_ROWS_REMOVED_TOTAL, "table" => "api_key_usage_buckets").increment(0);
+    ::metrics::counter!(API_KEY_USAGE_BUCKETS_FOLDED_TOTAL).increment(0);
     ::metrics::counter!(PRICE_CATALOG_STATUS_TOTAL, "status" => "applied").increment(0);
     ::metrics::counter!(PRICE_CATALOG_STATUS_TOTAL, "status" => "noop").increment(0);
     ::metrics::counter!(PROMPT_CACHE_PURGE_ROWS_REMOVED_TOTAL).increment(0);
