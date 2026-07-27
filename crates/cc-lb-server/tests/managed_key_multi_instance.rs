@@ -47,14 +47,6 @@ static POSTGRES_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-// spawn_ok_upstream serves `{"ok":true}` on any path, which the cc-lb proxy
-// rejects with a 502 BAD_GATEWAY / "upstream request failed" Transport error
-// (lifecycle.rs:912) before it can return the body. Fixing the test requires
-// either swapping the fixture for fake-anthropic with proper Anthropic Message
-// JSON or adjusting the assertion - both are master-side concerns separate
-// from the multi-instance DB-sharing coverage already provided by
-// concurrent_cross_instance_issue.
-#[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cross_instance_issue_auth_revoke() -> TestResult<()> {
     let Some(database_url) = ci_postgres_url() else {
@@ -77,7 +69,7 @@ async fn cross_instance_issue_auth_revoke() -> TestResult<()> {
         authenticated.body
     );
     assert!(
-        authenticated.body.contains("\"ok\":true"),
+        authenticated.body.contains(r#""type":"message""#),
         "unexpected proxy success body: {}",
         authenticated.body
     );
@@ -286,6 +278,9 @@ async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
     sqlx::query("TRUNCATE managed_api_key_index_v1, managed_api_keys_v1")
         .execute(&pool)
         .await?;
+    sqlx::query("DELETE FROM upstream_spec_v1 WHERE name = 'test-upstream'")
+        .execute(&pool)
+        .await?;
     sqlx::query("DROP SCHEMA IF EXISTS apalis CASCADE")
         .execute(&pool)
         .await?;
@@ -315,7 +310,7 @@ async fn spawn_ok_upstream() -> TestResult<RunningUpstream> {
         (
             StatusCode::OK,
             [("content-type", "application/json")],
-            r#"{"ok":true}"#,
+            r#"{"id":"msg_multi_instance","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":7,"output_tokens":3}}"#,
         )
             .into_response()
     }));
