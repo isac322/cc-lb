@@ -124,14 +124,10 @@ fn five_hour_cycle_key(parsed_headers: &[UnifiedQuotaObservation]) -> Option<i64
 }
 
 fn seven_day_exhausted_cycle_key(parsed_headers: &[UnifiedQuotaObservation]) -> Option<i64> {
-    const SEVEN_DAY_WINDOWS: [SubscriptionQuotaWindow; 3] = [
-        SubscriptionQuotaWindow::SevenDay,
-        SubscriptionQuotaWindow::SevenDaySonnet,
-        SubscriptionQuotaWindow::SevenDayOpus,
-    ];
-
-    SEVEN_DAY_WINDOWS
-        .into_iter()
+    SubscriptionQuotaWindow::all()
+        .iter()
+        .copied()
+        .filter(|window| window.is_weekly())
         .find_map(|window| exhausted_cycle_key_for_window(parsed_headers, window))
 }
 

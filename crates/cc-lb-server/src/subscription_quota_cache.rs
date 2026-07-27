@@ -4,8 +4,8 @@ use std::sync::Arc;
 use cc_lb_domain::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_engine::SubscriptionQuotaCacheLike;
 use cc_lb_storage_api::{
-    StorageResult, SubscriptionQuotaSample, SubscriptionQuotaSource, SubscriptionQuotaStatus,
-    SubscriptionQuotaWindow,
+    StorageResult, SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow,
 };
 use parking_lot::RwLock;
 use uuid::Uuid;
@@ -32,6 +32,7 @@ impl MergedSource {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MergedQuotaSnapshot {
     pub source: MergedSource,
+    pub sample_kind: SubscriptionQuotaSampleKind,
     pub utilization: Option<f64>,
     pub status: Option<SubscriptionQuotaStatus>,
     pub resets_at_unix_secs: Option<u64>,
@@ -116,7 +117,7 @@ impl SubscriptionQuotaCache {
                     Some(sources) => {
                         candidate_from_sources(window, sources, now_unix_millis, max_staleness_secs)
                     }
-                    None => missing_candidate(window, max_staleness_secs),
+                    None => unobserved_candidate(window, max_staleness_secs),
                 },
             )
             .collect()
@@ -130,6 +131,7 @@ impl MergedQuotaSnapshot {
                 SubscriptionQuotaSource::Header => MergedSource::Header,
                 SubscriptionQuotaSource::Api => MergedSource::Api,
             },
+            sample_kind: record.sample_kind,
             utilization: record.utilization,
             status: record.status,
             resets_at_unix_secs: record.resets_at_unix_secs,
@@ -183,12 +185,17 @@ fn candidate_from_sources(
         .api
         .as_ref()
         .is_some_and(|snapshot| is_fresh(snapshot, now_unix_millis, max_staleness_secs));
-    let state = if header_fresh || api_fresh {
-        SubscriptionQuotaDataState::Fresh
-    } else {
-        SubscriptionQuotaDataState::Stale
-    };
     let merged = merge_sources(sources, header_fresh, api_fresh);
+    let state = match merged.sample_kind {
+        SubscriptionQuotaSampleKind::Absent => SubscriptionQuotaDataState::Absent,
+        SubscriptionQuotaSampleKind::Sample | SubscriptionQuotaSampleKind::ProcessStart => {
+            if is_fresh(&merged, now_unix_millis, max_staleness_secs) {
+                SubscriptionQuotaDataState::Fresh
+            } else {
+                SubscriptionQuotaDataState::Stale
+            }
+        }
+    };
     candidate_from_snapshot(window, state, merged, max_staleness_secs)
 }
 
@@ -224,6 +231,7 @@ fn merge_sources(
         (None, Some(api)) => api.clone(),
         (None, None) => MergedQuotaSnapshot {
             source: MergedSource::Merged,
+            sample_kind: SubscriptionQuotaSampleKind::Sample,
             utilization: None,
             status: None,
             resets_at_unix_secs: None,
@@ -276,13 +284,13 @@ fn candidate_from_snapshot(
     }
 }
 
-fn missing_candidate(
+fn unobserved_candidate(
     window: SubscriptionQuotaWindow,
     max_staleness_secs: u64,
 ) -> SubscriptionQuotaCandidateSnapshot {
     SubscriptionQuotaCandidateSnapshot {
         window: window.as_str().to_owned(),
-        state: SubscriptionQuotaDataState::Missing,
+        state: SubscriptionQuotaDataState::Unobserved,
         source: None,
         utilization: None,
         status: None,
@@ -313,6 +321,7 @@ mod tests {
     ) -> MergedQuotaSnapshot {
         MergedQuotaSnapshot {
             source,
+            sample_kind: SubscriptionQuotaSampleKind::Sample,
             utilization: Some(utilization),
             status: Some(SubscriptionQuotaStatus::Allowed),
             resets_at_unix_secs: Some(observed_at_unix_millis / 1_000 + 3_600),
@@ -328,6 +337,36 @@ mod tests {
             extra_usage_monthly_limit: None,
             extra_usage_used_credits: None,
             observed_at_unix_millis,
+        }
+    }
+
+    fn record(
+        sample_kind: SubscriptionQuotaSampleKind,
+        observed_at_unix_millis: u64,
+        utilization: Option<f64>,
+    ) -> SubscriptionQuotaSample {
+        SubscriptionQuotaSample {
+            upstream_id: Uuid::nil(),
+            window: SubscriptionQuotaWindow::SevenDay,
+            source: SubscriptionQuotaSource::Api,
+            sample_kind,
+            observed_at_unix_millis,
+            sample_id: Uuid::new_v4(),
+            utilization,
+            status: utilization.map(|_| SubscriptionQuotaStatus::Allowed),
+            resets_at_unix_secs: utilization.map(|_| observed_at_unix_millis / 1_000 + 3_600),
+            surpassed_threshold: None,
+            representative_claim: None,
+            fallback_percentage: None,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            ingested_at_unix_millis: observed_at_unix_millis,
         }
     }
 
@@ -422,5 +461,67 @@ mod tests {
         assert_eq!(result.source, MergedSource::Merged);
         assert!(result.utilization.is_none());
         assert_eq!(result.observed_at_unix_millis, 0);
+    }
+
+    #[test]
+    fn absent_remains_structurally_absent_after_freshness_window() {
+        let mut absent = snapshot(MergedSource::Api, 0.0, 1_000);
+        absent.sample_kind = SubscriptionQuotaSampleKind::Absent;
+        absent.utilization = None;
+        absent.status = None;
+        absent.resets_at_unix_secs = None;
+        let sources = SourceSnapshots {
+            header: None,
+            api: Some(absent),
+        };
+
+        let result =
+            candidate_from_sources(SubscriptionQuotaWindow::SevenDay, &sources, 100_000, 1);
+
+        assert_eq!(result.state, SubscriptionQuotaDataState::Absent);
+        assert_eq!(result.observed_at_unix_millis, Some(1_000));
+        assert!(result.utilization.is_none());
+    }
+
+    #[test]
+    fn newer_sample_clears_prior_absence() {
+        let cache = SubscriptionQuotaCache::new();
+        cache.upsert_observation(
+            Uuid::nil(),
+            &record(SubscriptionQuotaSampleKind::Absent, 1_000, None),
+        );
+        cache.upsert_observation(
+            Uuid::nil(),
+            &record(SubscriptionQuotaSampleKind::Sample, 2_000, Some(0.2)),
+        );
+
+        let snapshots = cache.snapshot_for_upstream(Uuid::nil(), 2_000, 1);
+        let seven_day = snapshots
+            .iter()
+            .find(|snapshot| snapshot.window == "7d")
+            .expect("7d snapshot");
+        assert_eq!(seven_day.state, SubscriptionQuotaDataState::Fresh);
+        assert_eq!(seven_day.utilization, Some(0.2));
+    }
+
+    #[test]
+    fn newer_stale_sample_wins_over_older_absence() {
+        let header = snapshot(MergedSource::Header, 0.2, 2_000);
+        let mut absent = snapshot(MergedSource::Api, 0.0, 1_000);
+        absent.sample_kind = SubscriptionQuotaSampleKind::Absent;
+        absent.utilization = None;
+        absent.status = None;
+        absent.resets_at_unix_secs = None;
+        let sources = SourceSnapshots {
+            header: Some(header),
+            api: Some(absent),
+        };
+
+        let result =
+            candidate_from_sources(SubscriptionQuotaWindow::SevenDay, &sources, 100_000, 1);
+
+        assert_eq!(result.state, SubscriptionQuotaDataState::Stale);
+        assert_eq!(result.source.as_deref(), Some("header"));
+        assert_eq!(result.utilization, Some(0.2));
     }
 }

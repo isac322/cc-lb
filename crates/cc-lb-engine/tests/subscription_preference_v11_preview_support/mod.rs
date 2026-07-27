@@ -227,7 +227,7 @@ pub fn sonnet_quota(scoped_utilization: Option<f64>) -> Vec<SubscriptionQuotaCan
         Some(utilization) => quota("7d_sonnet", utilization, NOW + 60_480),
         None => {
             let mut snapshot = quota("7d_sonnet", 0.0, NOW + 60_480);
-            snapshot.state = SubscriptionQuotaDataState::Missing;
+            snapshot.state = SubscriptionQuotaDataState::Unobserved;
             snapshot.utilization = None;
             snapshot.status = None;
             snapshot.resets_at_unix_secs = None;
@@ -255,6 +255,30 @@ pub fn fable_quota(fable_utilization: f64) -> Vec<SubscriptionQuotaCandidateSnap
         quota("5h", 0.2, NOW + 1_800),
         quota("7d", 0.2, NOW + 60_480),
         quota("7d_fable", fable_utilization, NOW + 60_480),
+    ]
+}
+pub fn fable_quota_without_shared_seven_day() -> Vec<SubscriptionQuotaCandidateSnapshot> {
+    let mut missing_shared = quota("7d", 0.0, NOW + 60_480);
+    missing_shared.state = SubscriptionQuotaDataState::Absent;
+    missing_shared.utilization = None;
+    missing_shared.status = None;
+    missing_shared.resets_at_unix_secs = None;
+    vec![
+        quota("5h", 0.2, NOW + 1_800),
+        missing_shared,
+        quota("7d_fable", 0.2, NOW + 60_480),
+    ]
+}
+pub fn fable_quota_with_unobserved_shared_seven_day() -> Vec<SubscriptionQuotaCandidateSnapshot> {
+    let mut shared = quota("7d", 0.0, NOW + 60_480);
+    shared.state = SubscriptionQuotaDataState::Unobserved;
+    shared.utilization = None;
+    shared.status = None;
+    shared.resets_at_unix_secs = None;
+    vec![
+        quota("5h", 0.2, NOW + 1_800),
+        shared,
+        quota("7d_fable", 0.2, NOW + 60_480),
     ]
 }
 

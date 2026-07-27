@@ -81,6 +81,7 @@ export function selectVisibleGraphWindows({
   return QUOTA_WINDOW_ORDER.filter((window) => {
     const snap = byWindow.get(window);
     if (!snap) return false;
+    if (snap.state === 'absent' || snap.state === 'unobserved') return false;
     if (!isObservedAtOrAfter(snap.observed_at_unix_millis, sinceUnixSecs)) {
       return false;
     }
@@ -91,10 +92,11 @@ export function selectVisibleGraphWindows({
 }
 
 /**
- * Snapshots the detail card grid should render. `5h` and `7d` are always shown
- * (even when missing, so the operator sees "no data"). Model-scoped windows are
- * dropped once they go missing or their last observation is older than a week.
- * Overage keeps its existing enabled/limit gate.
+ * Snapshots the detail card grid should render. Proven-absent windows are
+ * hidden. `5h` and `7d` still show an unobserved placeholder before the first
+ * successful quota lookup. Model-scoped windows are dropped when unobserved or
+ * their last observation is older than a week. Overage keeps its enabled/limit
+ * gate.
  */
 export function selectQuotaCardSnapshots({
   latestWindows,
@@ -109,11 +111,12 @@ export function selectQuotaCardSnapshots({
   for (const window of QUOTA_WINDOW_ORDER) {
     const snap = byWindow.get(window);
     if (!snap) continue;
+    if (snap.state === 'absent') continue;
     if (window === '5h' || window === '7d') {
       result.push(snap);
       continue;
     }
-    if (snap.state === 'missing') continue;
+    if (snap.state === 'unobserved') continue;
     if (window === 'overage') {
       if (isOverageActive(snap)) result.push(snap);
       continue;
@@ -128,32 +131,41 @@ export function selectQuotaCardSnapshots({
 }
 
 /**
- * Windows the sidebar mini meters should render. `5h` and `7d` are always shown.
- * `7d_fable` is shown if it exists, is not missing, and was observed within the last week.
- * Overage keeps its existing enabled/limit gate.
+ * Windows the sidebar mini meters should render. Proven-absent windows are
+ * hidden; unobserved `5h` and `7d` placeholders remain until the first
+ * successful lookup. `7d_fable` is shown only when observed within the last
+ * week. Overage keeps its existing enabled/limit gate.
  */
 export function selectSidebarQuotaWindows({
   latestWindows,
   nowUnixSecs,
 }: QuotaCardSnapshotsInput): string[] {
-  const result: string[] = ['5h', '7d'];
-  if (!latestWindows) return result;
+  if (!latestWindows) return ['5h', '7d'];
+  const result: string[] = [];
 
   const byWindow = new Map<string, QuotaSnapshot>(
     latestWindows.map((snap) => [snap.window, snap]),
   );
   const staleCutoffUnixSecs = nowUnixSecs - MODEL_WINDOW_MAX_AGE_SECS;
+  for (const window of ['5h', '7d'] as const) {
+    const snap = byWindow.get(window);
+    if (snap?.state !== 'absent') result.push(window);
+  }
 
   const fableSnap = byWindow.get('7d_fable');
   if (
     fableSnap &&
-    fableSnap.state !== 'missing' &&
+    fableSnap.state !== 'absent' &&
+    fableSnap.state !== 'unobserved' &&
     isObservedAtOrAfter(fableSnap.observed_at_unix_millis, staleCutoffUnixSecs)
   ) {
     result.push('7d_fable');
   }
 
   const overageSnap = byWindow.get('overage');
+  if (overageSnap?.state === 'absent' || overageSnap?.state === 'unobserved') {
+    return result;
+  }
   if (overageSnap && isOverageActive(overageSnap)) {
     result.push('overage');
   }

@@ -181,11 +181,11 @@ test.describe('Upstreams Sidebar Quota', () => {
     // Check Fable percentage
     await expect(meters.nth(2)).toContainText('30%');
 
-    // 2. Change to missing Fable
+    // 2. Change to unobserved Fable
     latestWindows = [
       { ...baseSnap, window: '5h', utilization: 0.1, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
       { ...baseSnap, window: '7d', utilization: 0.2, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
-      { ...baseSnap, window: '7d_fable', utilization: 0.3, state: 'missing', source: 'api', observed_at_unix_millis: now * 1000 },
+      { ...baseSnap, window: '7d_fable', utilization: 0.3, state: 'unobserved', source: 'api', observed_at_unix_millis: now * 1000 },
       { ...baseSnap, window: 'overage', utilization: null, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000, extra_usage_monthly_limit: 100, extra_usage_used_credits: 50 },
     ];
     await installAppFixtures(page, { latestWindows });
@@ -196,8 +196,23 @@ test.describe('Upstreams Sidebar Quota', () => {
     await expect(meters.nth(1)).toContainText('7d');
     await expect(meters.nth(2)).toContainText('Extra');
     await page.screenshot({ path: testInfo.outputPath('fable-sidebar-missing-desktop.png'), fullPage: true });
+    // 3. Hide a shared window that the successful usage response omitted
+    latestWindows = [
+      { ...baseSnap, window: '5h', utilization: 0.1, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
+      { ...baseSnap, window: '7d', utilization: null, state: 'absent', source: 'api', observed_at_unix_millis: now * 1000 },
+      { ...baseSnap, window: '7d_fable', utilization: 0.3, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
+      { ...baseSnap, window: 'overage', utilization: null, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000, extra_usage_monthly_limit: 100, extra_usage_used_credits: 50 },
+    ];
+    await installAppFixtures(page, { latestWindows });
+    await page.reload();
+    await expect(sidebar).toBeVisible();
+    await expect(meters).toHaveCount(3);
+    await expect(meters.nth(0)).toContainText('5h');
+    await expect(meters.nth(1)).toContainText('Fable');
+    await expect(meters.nth(2)).toContainText('Extra');
 
-    // 3. Change to stale Fable (> 7 days)
+
+    // 4. Change to stale Fable (> 7 days)
     latestWindows = [
       { ...baseSnap, window: '5h', utilization: 0.1, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
       { ...baseSnap, window: '7d', utilization: 0.2, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
@@ -213,7 +228,7 @@ test.describe('Upstreams Sidebar Quota', () => {
     await expect(meters.nth(2)).toContainText('Extra');
     await page.screenshot({ path: testInfo.outputPath('fable-sidebar-stale-desktop.png'), fullPage: true });
 
-    // 4. Responsive checks with fresh Fable
+    // 5. Responsive checks with fresh Fable
     latestWindows = [
       { ...baseSnap, window: '5h', utilization: 0.1, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },
       { ...baseSnap, window: '7d', utilization: 0.2, state: 'fresh', source: 'api', observed_at_unix_millis: now * 1000 },

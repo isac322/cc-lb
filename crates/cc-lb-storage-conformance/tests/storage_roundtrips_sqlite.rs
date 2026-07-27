@@ -289,6 +289,14 @@ upstream_subscription_quota_sqlite_test!(
     upstream_subscription_quota_aggregate_store_sqlite,
     aggregate_store
 );
+upstream_subscription_quota_sqlite_test!(
+    upstream_subscription_quota_absent_replaces_latest_without_erasing_history_sqlite,
+    absent_replaces_latest_without_erasing_history
+);
+upstream_subscription_quota_sqlite_test!(
+    upstream_subscription_quota_absent_is_idempotent_sqlite,
+    absent_is_idempotent
+);
 
 #[test]
 fn warmup_attempts_store_sqlite() {

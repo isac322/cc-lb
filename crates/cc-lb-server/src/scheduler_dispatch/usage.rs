@@ -91,40 +91,48 @@ fn records_from_usage(
     usage: UsageBody,
     observed_at_unix_millis: u64,
 ) -> Vec<SubscriptionQuotaSample> {
+    let UsageBody {
+        five_hour,
+        seven_day,
+        seven_day_sonnet,
+        seven_day_opus,
+        limits,
+        extra_usage,
+    } = usage;
     let mut records = Vec::new();
     push_window(
         &mut records,
         upstream_id,
         SubscriptionQuotaWindow::FiveHour,
-        usage.five_hour,
+        five_hour,
         observed_at_unix_millis,
     );
     push_window(
         &mut records,
         upstream_id,
         SubscriptionQuotaWindow::SevenDay,
-        usage.seven_day,
+        seven_day,
         observed_at_unix_millis,
     );
     push_window(
         &mut records,
         upstream_id,
         SubscriptionQuotaWindow::SevenDaySonnet,
-        usage.seven_day_sonnet,
+        seven_day_sonnet,
         observed_at_unix_millis,
     );
     push_window(
         &mut records,
         upstream_id,
         SubscriptionQuotaWindow::SevenDayOpus,
-        usage.seven_day_opus,
+        seven_day_opus,
         observed_at_unix_millis,
     );
     // Anthropic marks a per-model weekly meter (e.g. Fable) `is_active=false` unless that
     // model is the single currently-binding limit, which for a per-model meter is almost
     // never the case. The entry still carries real utilization, so record it regardless of
     // `is_active`; filtering on it drops live Fable usage entirely.
-    if let Some(limit) = usage.limits.into_iter().flatten().find(|limit| {
+    let fable = limits.into_iter().flatten().find(|limit| {
         limit.kind == "weekly_scoped"
             && limit
                 .scope
@@ -132,33 +140,40 @@ fn records_from_usage(
                 .and_then(|scope| scope.model.as_ref())
                 .and_then(|model| model.display_name.as_deref())
                 == Some("Fable")
-    }) {
-        push_window(
-            &mut records,
-            upstream_id,
-            SubscriptionQuotaWindow::SevenDayFable,
-            Some(UsageWindow {
-                utilization: limit.percent,
-                resets_at: limit.resets_at,
-            }),
-            observed_at_unix_millis,
-        );
-    }
-    if let Some(extra_usage) = usage.extra_usage {
-        let utilization = match (extra_usage.used_credits, extra_usage.monthly_limit) {
-            (Some(used), Some(limit)) if limit > 0.0 => Some((used / limit).clamp(0.0, 1.0)),
-            _ => None,
-        };
-        records.push(base_record(
+    });
+    push_window(
+        &mut records,
+        upstream_id,
+        SubscriptionQuotaWindow::SevenDayFable,
+        fable.map(|limit| UsageWindow {
+            utilization: limit.percent,
+            resets_at: limit.resets_at,
+        }),
+        observed_at_unix_millis,
+    );
+    match extra_usage {
+        Some(extra_usage) => {
+            let utilization = match (extra_usage.used_credits, extra_usage.monthly_limit) {
+                (Some(used), Some(limit)) if limit > 0.0 => Some((used / limit).clamp(0.0, 1.0)),
+                _ => None,
+            };
+            records.push(base_record(
+                upstream_id,
+                SubscriptionQuotaWindow::Overage,
+                SubscriptionQuotaSampleKind::Sample,
+                observed_at_unix_millis,
+                utilization,
+                None,
+                extra_usage.enabled,
+                extra_usage.monthly_limit,
+                extra_usage.used_credits,
+            ));
+        }
+        None => records.push(absent_record(
             upstream_id,
             SubscriptionQuotaWindow::Overage,
             observed_at_unix_millis,
-            utilization,
-            None,
-            extra_usage.enabled,
-            extra_usage.monthly_limit,
-            extra_usage.used_credits,
-        ));
+        )),
     }
     records
 }
@@ -170,10 +185,11 @@ fn push_window(
     usage: Option<UsageWindow>,
     observed_at_unix_millis: u64,
 ) {
-    if let Some(usage) = usage {
-        records.push(base_record(
+    match usage {
+        Some(usage) => records.push(base_record(
             upstream_id,
             window,
+            SubscriptionQuotaSampleKind::Sample,
             observed_at_unix_millis,
             usage
                 .utilization
@@ -182,14 +198,34 @@ fn push_window(
             None,
             None,
             None,
-        ));
+        )),
+        None => records.push(absent_record(upstream_id, window, observed_at_unix_millis)),
     }
+}
+
+fn absent_record(
+    upstream_id: Uuid,
+    window: SubscriptionQuotaWindow,
+    observed_at_unix_millis: u64,
+) -> SubscriptionQuotaSample {
+    base_record(
+        upstream_id,
+        window,
+        SubscriptionQuotaSampleKind::Absent,
+        observed_at_unix_millis,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn base_record(
     upstream_id: Uuid,
     window: SubscriptionQuotaWindow,
+    sample_kind: SubscriptionQuotaSampleKind,
     observed_at_unix_millis: u64,
     utilization: Option<f64>,
     resets_at_unix_secs: Option<u64>,
@@ -201,7 +237,7 @@ fn base_record(
         upstream_id,
         window,
         source: SubscriptionQuotaSource::Api,
-        sample_kind: SubscriptionQuotaSampleKind::Sample,
+        sample_kind,
         observed_at_unix_millis,
         sample_id: Uuid::new_v4(),
         utilization,

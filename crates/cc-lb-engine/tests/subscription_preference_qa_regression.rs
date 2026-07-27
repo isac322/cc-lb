@@ -182,9 +182,12 @@ fn oauth_candidate(name: &str, seed: u8, quota: BaseQuota) -> UpstreamCandidate 
 
 fn partial_base_candidate(name: &str, seed: u8, quota: BaseQuota) -> UpstreamCandidate {
     let mut candidate = oauth_candidate(name, seed, quota);
-    candidate
+    let seven_day = candidate
         .subscription_quotas
-        .retain(|snapshot| snapshot.window == WINDOW_FIVE_HOUR);
+        .iter_mut()
+        .find(|snapshot| snapshot.window == WINDOW_SEVEN_DAY)
+        .expect("test fixture contains seven-day quota");
+    seven_day.state = SubscriptionQuotaDataState::Stale;
     candidate
 }
 

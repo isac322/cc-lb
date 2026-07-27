@@ -1,14 +1,16 @@
 use crate::common;
 mod subscription_preference_v11_preview_support;
 
-use cc_lb_domain::{CandidateUrgency, SubscriptionPreferenceTrace};
+use cc_lb_domain::{CandidateUrgency, SubscriptionPreferenceTrace, SubscriptionTier};
 use cc_lb_engine::lifecycle::PreviewRouteOutcome;
 use http::StatusCode;
 use uuid::Uuid;
 
 use subscription_preference_v11_preview_support::{
-    PreviewFixture, exhausted_shared_quota, fable_quota, on_pace_quota, sonnet_quota,
-    stale_exhausted_shared_quota, stale_overage_positive_quota, urgent_quota,
+    PreviewFixture, exhausted_shared_quota, fable_quota,
+    fable_quota_with_unobserved_shared_seven_day, fable_quota_without_shared_seven_day,
+    on_pace_quota, sonnet_quota, stale_exhausted_shared_quota, stale_overage_positive_quota,
+    urgent_quota,
 };
 
 const REQUEST_ID: &str = "preview-v11-transition";
@@ -207,6 +209,46 @@ async fn handle_fable_excludes_exhausted_scoped_upstream() {
     // Then: only the healthy upstream is dispatched and the client sees 200.
     assert_eq!(status, StatusCode::OK);
     assert_eq!(fixture.dispatch_hosts(), vec!["steady.invalid"]);
+}
+
+#[tokio::test]
+async fn handle_fable_without_shared_7d_uses_available_quota_windows() {
+    // Given: a new-account quota shape exposes 5h and 7d_fable, while the
+    // shared 7d window is absent from the upstream usage response.
+    let fixture = PreviewFixture::new(
+        fable_quota_without_shared_seven_day(),
+        fable_quota_without_shared_seven_day(),
+    );
+
+    // When: the real lifecycle previews and handles a Fable request.
+    let preview = fixture.preview_model("preview-fable-without-shared-7d", "claude-fable-5");
+    let status = fixture.handle_model("claude-fable-5").await;
+
+    // Then: the available quota set is complete for this upstream, and the
+    // request reaches exactly one mock upstream without a missing-window error.
+    assert_eq!(
+        subscription_trace(&preview).chosen_tier,
+        SubscriptionTier::KnownBase
+    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fixture.dispatch_hosts().len(), 1);
+}
+#[tokio::test]
+async fn handle_fable_with_unobserved_shared_7d_remains_partial_base() {
+    let fixture = PreviewFixture::new(
+        fable_quota_with_unobserved_shared_seven_day(),
+        fable_quota_with_unobserved_shared_seven_day(),
+    );
+
+    let preview = fixture.preview_model("preview-fable-unobserved-shared-7d", "claude-fable-5");
+    let status = fixture.handle_model("claude-fable-5").await;
+
+    assert_eq!(
+        subscription_trace(&preview).chosen_tier,
+        SubscriptionTier::PartialBase
+    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fixture.dispatch_hosts().len(), 1);
 }
 
 #[tokio::test]

@@ -31,6 +31,8 @@ where
     series_source_merge_header_filters_api(Arc::clone(&backend)).await?;
     series_max_points_per_series_downsamples(Arc::clone(&backend)).await?;
     process_start_marker_persists_with_sample_kind(Arc::clone(&backend)).await?;
+    absent_replaces_latest_without_erasing_history(Arc::clone(&backend)).await?;
+    absent_is_idempotent(Arc::clone(&backend)).await?;
     empty_upstream_ids_returns_empty(Arc::clone(&backend)).await?;
     series_filters_observed_at_window(Arc::clone(&backend)).await?;
     checkpoint_writer_latest_freshness(Arc::clone(&backend)).await?;
@@ -328,6 +330,91 @@ scenario!(
         Ok(())
     }
 );
+scenario!(
+    absent_replaces_latest_without_erasing_history,
+    |storage| async move {
+        let upstream = upstream_id(12);
+        let sample = observation(upstream, 100, 1, SubscriptionQuotaSource::Api, 0.25);
+        storage.record_subscription_quota_sample(&sample).await?;
+
+        let mut absent = observation(upstream, 200, 2, SubscriptionQuotaSource::Api, 0.0);
+        absent.sample_kind = SubscriptionQuotaSampleKind::Absent;
+        absent.utilization = None;
+        absent.status = None;
+        absent.resets_at_unix_secs = None;
+        storage.record_subscription_quota_sample(&absent).await?;
+
+        let latest = storage
+            .list_latest_subscription_quota_for_upstreams(&[upstream])
+            .await?;
+        ensure!(latest == [absent], "absent marker should become latest");
+
+        let series = storage
+            .list_subscription_quota_series(series_query(
+                upstream,
+                0,
+                300,
+                60,
+                10,
+                SubscriptionQuotaSourceMerge::Api,
+            ))
+            .await?;
+        ensure!(series.len() == 1, "historical sample series should remain");
+        let sample_count = series[0]
+            .buckets
+            .iter()
+            .map(|bucket| bucket.sample_count)
+            .sum::<u32>();
+        ensure!(
+            sample_count == 1,
+            "absent marker must not become a utilization checkpoint"
+        );
+        ensure!(
+            series[0]
+                .buckets
+                .last()
+                .and_then(|bucket| bucket.utilization_last)
+                == Some(0.25),
+            "last historical utilization should remain the real sample"
+        );
+        Ok(())
+    }
+);
+scenario!(absent_is_idempotent, |storage| async move {
+    let upstream = upstream_id(13);
+    let mut absent = observation(upstream, 200, 2, SubscriptionQuotaSource::Api, 0.0);
+    absent.sample_kind = SubscriptionQuotaSampleKind::Absent;
+    absent.utilization = None;
+    absent.status = None;
+    absent.resets_at_unix_secs = None;
+
+    storage.record_subscription_quota_sample(&absent).await?;
+    storage.record_subscription_quota_sample(&absent).await?;
+
+    let latest = storage
+        .list_latest_subscription_quota_for_upstreams(&[upstream])
+        .await?;
+    ensure!(
+        latest == [absent],
+        "repeated absent marker should remain one latest row"
+    );
+
+    let series = storage
+        .list_subscription_quota_series(series_query(
+            upstream,
+            0,
+            300,
+            60,
+            10,
+            SubscriptionQuotaSourceMerge::Api,
+        ))
+        .await?;
+    ensure!(
+        series.is_empty(),
+        "repeated absent marker must not create utilization checkpoints"
+    );
+    Ok(())
+});
 
 scenario!(empty_upstream_ids_returns_empty, |storage| async move {
     ensure!(
