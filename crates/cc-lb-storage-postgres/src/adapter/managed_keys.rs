@@ -82,6 +82,7 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
                 .bind(key_id)
                 .execute(&mut *tx)
                 .await?;
+                notify_principal_changed(&mut tx, principal_id).await?;
                 tx.commit().await?;
                 Ok(())
             }
@@ -216,6 +217,7 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
 
                 apply_mutation(&mut record, mutation, &*clock);
                 update_record(principal_id, key_id, &record, &mut tx).await?;
+                notify_principal_changed(&mut tx, principal_id).await?;
                 tx.commit().await?;
                 Ok(())
             }
@@ -258,6 +260,7 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
                     .bind(captured_index_hash.as_slice())
                     .execute(&mut *tx)
                     .await?;
+                notify_principal_changed(&mut tx, principal_id).await?;
                 tx.commit().await?;
                 Ok(())
             }
@@ -265,6 +268,17 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
         .await
         .map_err(map_sqlx_error)
     }
+}
+
+async fn notify_principal_changed(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    principal_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_notify('cclb_principal_changed', $1)")
+        .bind(principal_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 const SELECT_BY_KEY_SQL: &str = "SELECT principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, \
