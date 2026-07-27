@@ -846,7 +846,9 @@ async fn build_app_with_storage_inner(
 
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
     let limit_engine = LimitEngine::new(concurrent_mgr, clock.clone());
-    limit_engine.startup_replay(storage.clone()).await;
+    tracing::warn!(
+        "API-key rolling-limit startup replay is disabled; rolling limits begin cold until durable shared state is available"
+    );
     let limit_reservation_ttl_handle = Some(
         cc_lb_control::api_keys::limit_engine::spawn_reservation_ttl_sweeper(
             limit_engine.clone(),
