@@ -162,6 +162,11 @@ impl RequestSnapshot {
     }
 }
 
+/// Shapes a captured request for a zero-output cache keepalive.
+///
+/// Coercing any `thinking` object to `disabled` is deliberate: `max_tokens: 0` requires it.
+/// The messages-scoped thinking salt keeps the resulting prefix distinct from real
+/// thinking-enabled traffic, so it cannot fabricate a warm message-tier entry.
 fn transform_for_keepalive(map: &mut Map<String, Value>) {
     map.insert("max_tokens".into(), Value::from(0));
     map.remove("stream");

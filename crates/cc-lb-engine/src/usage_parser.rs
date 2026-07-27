@@ -335,6 +335,14 @@ fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
     }
 }
 
+/// Splits `cache_creation` into `(total, 5m, 1h)`.
+///
+/// The nested `cache_creation` object is authoritative when it carries numbers. The
+/// `m5 == 0 && m1 == 0` branch is defensive hardening, not a documented provider shape: it keeps a
+/// positive flat `cache_creation_input_tokens` from being dropped if the nested object ever
+/// arrives present-but-empty. That path has to guess a bucket and picks 5m, the provider default
+/// and the TTL Anthropic uses for its own server-tool breakpoints. If a 1h write ever reached us
+/// this way it would be priced at 1.25x base input instead of 2.0x.
 fn parse_cache_creation_split(usage: &Value) -> (u64, u64, u64) {
     if let Some(cc) = usage.get("cache_creation").and_then(Value::as_object) {
         let m5 = cc
@@ -345,6 +353,15 @@ fn parse_cache_creation_split(usage: &Value) -> (u64, u64, u64) {
             .get("ephemeral_1h_input_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        if m5 == 0 && m1 == 0 {
+            let flat = usage
+                .get("cache_creation_input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if flat > 0 {
+                return (flat, flat, 0);
+            }
+        }
         return (m5.saturating_add(m1), m5, m1);
     }
     let flat = usage
@@ -385,6 +402,29 @@ mod tests {
         assert_eq!(usage.web_fetch_requests, 1);
         assert_eq!(usage.service_tier.as_deref(), Some("priority"));
         assert_eq!(usage.inference_geo.as_deref(), Some("us-east"));
+    }
+
+    #[test]
+    fn empty_nested_cache_creation_falls_back_to_positive_flat_total() {
+        let usage = serde_json::json!({
+            "cache_creation": {},
+            "cache_creation_input_tokens": 5_000,
+        });
+
+        assert_eq!(parse_cache_creation_split(&usage), (5_000, 5_000, 0));
+    }
+
+    #[test]
+    fn populated_nested_cache_creation_takes_precedence_over_flat_total() {
+        let usage = serde_json::json!({
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 500,
+                "ephemeral_1h_input_tokens": 500,
+            },
+            "cache_creation_input_tokens": 9_999,
+        });
+
+        assert_eq!(parse_cache_creation_split(&usage), (1_000, 500, 500));
     }
 
     #[test]

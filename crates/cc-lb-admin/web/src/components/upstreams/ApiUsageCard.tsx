@@ -12,7 +12,7 @@ import {
 } from 'recharts';
 import type { DashboardUsageResponse } from '../../lib/api';
 import { getWindowColor } from '../../lib/colors';
-import { fmtUsd } from '../../lib/format';
+import { fmtUsd, sumTokens } from '../../lib/format';
 import { Card, CardBody, CardHeader, Skeleton } from '../ui/primitives';
 
 type Props = {
@@ -48,7 +48,7 @@ export function ApiUsageCard({
         }
         const row = bucketsByTs.get(ts)!;
         if (metric === 'tokens') {
-          row[model] = bucket.input_tokens + bucket.output_tokens;
+          row[model] = sumTokens(bucket);
         } else {
           row[model] = bucket.virtual_cost_micros / 1_000_000;
         }

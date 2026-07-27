@@ -241,6 +241,18 @@ fn apply_cache_creation_split(usage: &mut StreamingUsage, reported: &Value) {
             .get("ephemeral_1h_input_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        if m5 == 0 && m1 == 0 {
+            let flat = reported
+                .get("cache_creation_input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if flat > 0 {
+                usage.cache_creation_input_tokens_5m = flat;
+                usage.cache_creation_input_tokens_1h = 0;
+                usage.cache_creation_input_tokens = flat;
+                return;
+            }
+        }
         usage.cache_creation_input_tokens_5m = m5;
         usage.cache_creation_input_tokens_1h = m1;
         usage.cache_creation_input_tokens = m5.saturating_add(m1);
@@ -727,7 +739,7 @@ mod tests {
 
     use crate::event_bus::InMemoryBus;
     use crate::lifecycle::{
-        PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
+        HASH_SCHEMA_VERSION, PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
         PromptCacheObservationInput, PromptCacheObservationSinkLike,
     };
     use cc_lb_control::LifecycleBusReceiver;
@@ -931,7 +943,7 @@ mod tests {
                             content_block_index: 0,
                             estimated_prefix_tokens: 0,
                             token_estimate_source: "local_tiktoken_v1".to_owned(),
-                            hash_schema_version: 4,
+                            hash_schema_version: HASH_SCHEMA_VERSION,
                         })
                 })
                 .collect()
@@ -1039,6 +1051,18 @@ mod tests {
         assert_eq!(usage.cache_creation_input_tokens_5m, 1600);
         assert_eq!(usage.cache_creation_input_tokens_1h, 0);
         assert_eq!(usage.cache_creation_input_tokens, 1600);
+    }
+
+    #[test]
+    fn observe_message_start_empty_nested_cache_creation_falls_back_to_flat_total() {
+        let mut usage = StreamingUsage::default();
+        let v = parse_usage(r#"{"cache_creation":{},"cache_creation_input_tokens":5000}"#);
+
+        usage.observe_message_start(&v);
+
+        assert_eq!(usage.cache_creation_input_tokens_5m, 5000);
+        assert_eq!(usage.cache_creation_input_tokens_1h, 0);
+        assert_eq!(usage.cache_creation_input_tokens, 5000);
     }
 
     #[test]

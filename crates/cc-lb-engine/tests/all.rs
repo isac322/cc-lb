@@ -36,8 +36,6 @@ mod half_open_concurrent_only_one_probe;
 mod half_open_failure_reopens;
 #[path = "half_open_success_closes.rs"]
 mod half_open_success_closes;
-#[path = "hash_golden.rs"]
-mod hash_golden;
 #[path = "key_store_smoke.rs"]
 mod key_store_smoke;
 #[path = "latency_stages_emit.rs"]

@@ -41,7 +41,6 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::Instrument as _;
 use url::Url;
@@ -85,7 +84,15 @@ use cc_lb_observability::{redact_internal_errors, truncate_reason};
 
 pub type Body = AxumBody;
 
-pub const HASH_SCHEMA_VERSION: u8 = 4;
+/// Prefix-hash schema persisted with prompt-cache observations.
+///
+/// Version 5 adds `thinking`, `redacted_thinking`, and `tool_reference` content blocks
+/// to the prefix chain, changing keys for requests that replay them. It also renames
+/// the unconditional hash domain tag from `cc-lb-cache-v4:*` to `cc-lb-cache-v5:*`,
+/// forcing a clean generational split for every prefix key. Hydration rejects
+/// mismatched versions, cold-starting warm state without a storage migration because
+/// the persisted schema-version column is an integer.
+pub const HASH_SCHEMA_VERSION: u8 = 5;
 
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
@@ -557,7 +564,9 @@ mod cache_score_tests {
     use std::collections::BTreeMap;
 
     use super::{
-        anthropic_family_cache_pricing_summary, build_cache_score, cache_pricing_summary_for_model,
+        HASH_SCHEMA_VERSION, anthropic_family_cache_pricing_summary,
+        anthropic_family_input_micros_per_million, build_cache_score,
+        cache_pricing_summary_for_model,
     };
     use cc_lb_domain::{
         BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, TtlClass,
@@ -645,22 +654,94 @@ mod cache_score_tests {
             .expect("opus family fallback exists");
 
         assert_eq!(pricing.status, "known");
-        assert_eq!(pricing.input_micros_per_million, Some(15_000_000));
+        assert_eq!(pricing.input_micros_per_million, Some(5_000_000));
         assert_eq!(
             pricing.cache_creation_5m_micros_per_million,
-            Some(18_750_000)
+            Some(6_250_000)
         );
         assert_eq!(
             pricing.cache_creation_1h_micros_per_million,
-            Some(30_000_000)
+            Some(10_000_000)
         );
-        assert_eq!(pricing.cache_read_micros_per_million, Some(1_500_000));
+        assert_eq!(pricing.cache_read_micros_per_million, Some(500_000));
+    }
+
+    #[test]
+    fn anthropic_family_input_pricing_splits_opus_generations() {
+        // A blanket `claude-opus => $15` overpriced every Opus from 4.5 on by 3x. Bare
+        // `claude-opus-4` must not be shadowed by the `claude-opus-4-N` arms that precede it.
+        for current in [
+            "claude-opus-4-5",
+            "claude-opus-4-5-20251101",
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-opus-4-8-20250514",
+            "claude-opus-5",
+        ] {
+            assert_eq!(
+                anthropic_family_input_micros_per_million(current),
+                Some(5_000_000),
+                "{current} is current-generation Opus pricing"
+            );
+        }
+        for legacy in [
+            "claude-opus-4",
+            "claude-opus-4-1",
+            "claude-opus-4-1-20250805",
+        ] {
+            assert_eq!(
+                anthropic_family_input_micros_per_million(legacy),
+                Some(15_000_000),
+                "{legacy} is legacy Opus pricing"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_family_input_pricing_covers_haiku_and_sonnet_generations() {
+        assert_eq!(
+            anthropic_family_input_micros_per_million("claude-3-5-haiku-20241022"),
+            Some(800_000),
+            "Haiku 3.5 uses the pre-4.0 id ordering and is cheaper than Haiku 4.5"
+        );
+        assert_eq!(
+            anthropic_family_input_micros_per_million("claude-haiku-4-5-20251001"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            anthropic_family_input_micros_per_million("claude-sonnet-5"),
+            Some(2_000_000),
+            "Sonnet 5 introductory pricing through 2026-08-31"
+        );
+        assert_eq!(
+            anthropic_family_input_micros_per_million("claude-sonnet-4-6"),
+            Some(3_000_000)
+        );
     }
 
     #[test]
     fn anthropic_family_cache_pricing_fallback_covers_fable_5() {
         let pricing = anthropic_family_cache_pricing_summary("claude-fable-5")
             .expect("fable family fallback exists");
+
+        assert_eq!(pricing.status, "known");
+        assert_eq!(pricing.input_micros_per_million, Some(10_000_000));
+        assert_eq!(
+            pricing.cache_creation_5m_micros_per_million,
+            Some(12_500_000)
+        );
+        assert_eq!(
+            pricing.cache_creation_1h_micros_per_million,
+            Some(20_000_000)
+        );
+        assert_eq!(pricing.cache_read_micros_per_million, Some(1_000_000));
+    }
+
+    #[test]
+    fn anthropic_family_cache_pricing_fallback_covers_mythos_5() {
+        let pricing = anthropic_family_cache_pricing_summary("claude-mythos-5")
+            .expect("mythos family fallback exists");
 
         assert_eq!(pricing.status, "known");
         assert_eq!(pricing.input_micros_per_million, Some(10_000_000));
@@ -720,7 +801,8 @@ mod cache_score_tests {
         // When the routing summary is built with the requested priority tier.
         let pricing = cache_pricing_summary_for_model(&catalog, "tier-model", Some("priority"));
 
-        // Then all cache estimate rates reflect that tier.
+        // Then all cache estimate rates reflect that tier: the 1h write derives from the tier's
+        // own base input price (2.0x), not from the tier 5m price.
         assert_eq!(pricing.input_micros_per_million, Some(3_000_000));
         assert_eq!(
             pricing.cache_creation_5m_micros_per_million,
@@ -728,7 +810,7 @@ mod cache_score_tests {
         );
         assert_eq!(
             pricing.cache_creation_1h_micros_per_million,
-            Some(9_600_000)
+            Some(6_000_000)
         );
         assert_eq!(pricing.cache_read_micros_per_million, Some(2_000_000));
     }
@@ -1037,7 +1119,7 @@ mod cache_score_tests {
                         content_block_index: index,
                         estimated_prefix_tokens: tokens[position],
                         token_estimate_source: "local_tiktoken_v1".to_owned(),
-                        hash_schema_version: 4,
+                        hash_schema_version: HASH_SCHEMA_VERSION,
                     }
                 })
                 .collect();
@@ -1121,7 +1203,7 @@ mod cache_score_tests {
             content_block_index: 0,
             estimated_prefix_tokens,
             token_estimate_source: "local_tiktoken_v1".to_owned(),
-            hash_schema_version: 4,
+            hash_schema_version: HASH_SCHEMA_VERSION,
         }
     }
 }
@@ -1185,23 +1267,62 @@ fn anthropic_family_cache_pricing_summary(model: &str) -> Option<CachePricingSum
         cache_creation_5m_micros_per_million: Some(cache_creation_5m_micros_from_input(
             input_micros_per_million,
         )),
-        cache_creation_1h_micros_per_million: Some(input_micros_per_million.saturating_mul(2)),
+        cache_creation_1h_micros_per_million: Some(
+            cc_lb_pricing::cache_creation_1h_micros_from_input(input_micros_per_million),
+        ),
         cache_read_micros_per_million: Some(cache_read_micros_from_input(input_micros_per_million)),
     })
 }
 
+/// Base input price per million tokens for an Anthropic model, used only when the live price
+/// catalog has no entry for it.
+///
+/// Matching is version-aware, not family-wide. A blanket `claude-opus => $15` was correct only
+/// for Opus 4 and 4.1: Opus 4.5 through Opus 5 are $5/MTok, so the family rule overpriced every
+/// newer Opus by 3x on input and, through the derived multipliers, on both cache-write rates and
+/// the cache-read rate. Prefixes are ordered most-specific first because `claude-opus-4` is a
+/// prefix of `claude-opus-4-5`.
+///
+/// Source: <https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing>
+/// (retrieved 2026-07-27).
 fn anthropic_family_input_micros_per_million(model: &str) -> Option<u64> {
-    if model.starts_with("claude-fable") {
-        Some(10_000_000)
-    } else if model.starts_with("claude-opus") {
-        Some(15_000_000)
-    } else if model.starts_with("claude-sonnet") {
-        Some(3_000_000)
-    } else if model.starts_with("claude-haiku") {
-        Some(1_000_000)
-    } else {
-        None
-    }
+    const FABLE_AND_MYTHOS: u64 = 10_000_000;
+    const OPUS_CURRENT: u64 = 5_000_000;
+    const OPUS_LEGACY: u64 = 15_000_000;
+    const SONNET_INTRODUCTORY: u64 = 2_000_000;
+    const SONNET_STANDARD: u64 = 3_000_000;
+    const HAIKU_CURRENT: u64 = 1_000_000;
+    const HAIKU_LEGACY: u64 = 800_000;
+
+    // Most specific first.
+    const PREFIXES: [(&str, u64); 14] = [
+        ("claude-fable", FABLE_AND_MYTHOS),
+        ("claude-mythos", FABLE_AND_MYTHOS),
+        ("claude-opus-4-1", OPUS_LEGACY),
+        ("claude-opus-4-5", OPUS_CURRENT),
+        ("claude-opus-4-6", OPUS_CURRENT),
+        ("claude-opus-4-7", OPUS_CURRENT),
+        ("claude-opus-4-8", OPUS_CURRENT),
+        ("claude-opus-5", OPUS_CURRENT),
+        // Bare `claude-opus-4` (no minor) is the retired original at legacy pricing. It must come
+        // after every `claude-opus-4-N` arm above.
+        ("claude-opus-4", OPUS_LEGACY),
+        // Catch-all for future generations. Without it a `claude-opus-6` would return None and
+        // lose cache pricing entirely, disabling cache-value scoring for that model; inheriting
+        // current pricing is the cheaper wrong answer.
+        ("claude-opus", OPUS_CURRENT),
+        ("claude-sonnet-5", SONNET_INTRODUCTORY),
+        ("claude-sonnet", SONNET_STANDARD),
+        // Haiku 3.5 is addressed as `claude-3-5-haiku-*`; `claude-haiku-3-5` is not an id
+        // Anthropic emits.
+        ("claude-3-5-haiku", HAIKU_LEGACY),
+        ("claude-haiku", HAIKU_CURRENT),
+    ];
+
+    PREFIXES
+        .iter()
+        .find(|(prefix, _)| model.starts_with(prefix))
+        .map(|(_, micros)| *micros)
 }
 
 fn cache_creation_5m_micros_from_input(input_micros: u64) -> u64 {
@@ -4830,197 +4951,6 @@ fn request_breakpoint_source_from_v3(
     }
 }
 
-pub fn cache_prefix_hash(
-    request: &Value,
-    source: RequestCacheBreakpointSource,
-    path: &str,
-    message_index: Option<u64>,
-) -> String {
-    let mut prefix = serde_json::Map::new();
-    prefix.insert("breakpoint_path".to_owned(), Value::String(path.to_owned()));
-    if let Some(value) = request.get("model") {
-        prefix.insert("model".to_owned(), value.clone());
-    }
-    if let Some(value) = request.get("tools") {
-        let value = if source == RequestCacheBreakpointSource::Tools {
-            truncate_value_at_path(value, &relative_cache_path(path, "tools"))
-        } else {
-            value.clone()
-        };
-        prefix.insert("tools".to_owned(), value);
-    }
-    if matches!(
-        source,
-        RequestCacheBreakpointSource::System | RequestCacheBreakpointSource::Message
-    ) && let Some(value) = request.get("system")
-    {
-        let value = if source == RequestCacheBreakpointSource::System {
-            truncate_value_at_path(value, &relative_cache_path(path, "system"))
-        } else {
-            value.clone()
-        };
-        prefix.insert("system".to_owned(), value);
-    }
-    if let (Some(messages), Some(_)) = (request.get("messages"), message_index) {
-        prefix.insert(
-            "messages".to_owned(),
-            truncate_value_at_path(messages, &relative_cache_path(path, "messages")),
-        );
-    }
-    let bytes = serde_json::to_vec(&Value::Object(prefix)).unwrap_or_default();
-    hex_sha256(&bytes)
-}
-
-pub fn cache_prefix_hash_v2(
-    request: &Value,
-    source: RequestCacheBreakpointSource,
-    path: &str,
-    message_index: Option<u64>,
-) -> String {
-    cache_prefix_hash_and_token_count_v2(request, source, path, message_index).0
-}
-
-pub fn cache_prefix_hash_and_token_count_v2(
-    request: &Value,
-    source: RequestCacheBreakpointSource,
-    path: &str,
-    message_index: Option<u64>,
-) -> (String, u64) {
-    let prefix = build_cache_prefix_value_v2(request, source, path, message_index);
-    let bytes = serde_json::to_vec(&prefix).unwrap_or_default();
-    let hash = hex_sha256(&bytes);
-    let token_count = match std::str::from_utf8(&bytes) {
-        Ok(text) => crate::tokenizer::PrefixTokenizer::global().count_tokens(text) as u64,
-        Err(_) => 0,
-    };
-    (hash, token_count)
-}
-
-fn build_cache_prefix_value_v2(
-    request: &Value,
-    source: RequestCacheBreakpointSource,
-    path: &str,
-    message_index: Option<u64>,
-) -> Value {
-    let mut prefix = serde_json::Map::new();
-    prefix.insert("breakpoint_path".to_owned(), Value::String(path.to_owned()));
-    if let Some(raw_model) = request.get("model").and_then(Value::as_str) {
-        prefix.insert(
-            "model".to_owned(),
-            Value::String(canonical_model_id(raw_model).to_owned()),
-        );
-    }
-    if let Some(value) = request.get("tools") {
-        let value = if source == RequestCacheBreakpointSource::Tools {
-            truncate_value_at_path(value, &relative_cache_path(path, "tools"))
-        } else {
-            value.clone()
-        };
-        prefix.insert("tools".to_owned(), value);
-    }
-    if matches!(
-        source,
-        RequestCacheBreakpointSource::System | RequestCacheBreakpointSource::Message
-    ) && let Some(value) = request.get("system")
-    {
-        let value = if source == RequestCacheBreakpointSource::System {
-            truncate_value_at_path(value, &relative_cache_path(path, "system"))
-        } else {
-            value.clone()
-        };
-        prefix.insert("system".to_owned(), value);
-    }
-    if let (Some(messages), Some(_)) = (request.get("messages"), message_index) {
-        prefix.insert(
-            "messages".to_owned(),
-            truncate_value_at_path(messages, &relative_cache_path(path, "messages")),
-        );
-    }
-    if let Some(value) = request.get("tool_choice") {
-        prefix.insert("tool_choice".to_owned(), value.clone());
-    }
-    if let Some(value) = request.get("thinking") {
-        prefix.insert("thinking".to_owned(), value.clone());
-    }
-    Value::Object(prefix)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum CachePathSegment {
-    Key(String),
-    Index(usize),
-}
-
-fn relative_cache_path(path: &str, root: &str) -> Vec<CachePathSegment> {
-    let Some(rest) = path.strip_prefix(root) else {
-        return Vec::new();
-    };
-    parse_cache_path(rest)
-}
-
-fn parse_cache_path(path: &str) -> Vec<CachePathSegment> {
-    let bytes = path.as_bytes();
-    let mut index = 0;
-    let mut segments = Vec::new();
-    while index < bytes.len() {
-        match bytes[index] {
-            b'.' => index += 1,
-            b'[' => {
-                let start = index + 1;
-                let Some(end) = bytes[start..].iter().position(|byte| *byte == b']') else {
-                    break;
-                };
-                let end = start + end;
-                if let Ok(value) = path[start..end].parse::<usize>() {
-                    segments.push(CachePathSegment::Index(value));
-                }
-                index = end + 1;
-            }
-            _ => {
-                let start = index;
-                while index < bytes.len() && bytes[index] != b'.' && bytes[index] != b'[' {
-                    index += 1;
-                }
-                segments.push(CachePathSegment::Key(path[start..index].to_owned()));
-            }
-        }
-    }
-    segments
-}
-
-fn truncate_value_at_path(value: &Value, path: &[CachePathSegment]) -> Value {
-    let Some((first, rest)) = path.split_first() else {
-        return value.clone();
-    };
-    match (value, first) {
-        (Value::Array(items), CachePathSegment::Index(index)) => {
-            let end = index.saturating_add(1).min(items.len());
-            let mut truncated = items[..end].to_vec();
-            if let Some(last) = truncated.last_mut() {
-                *last = truncate_value_at_path(last, rest);
-            }
-            Value::Array(truncated)
-        }
-        (Value::Object(map), CachePathSegment::Key(key)) => {
-            let mut truncated = map.clone();
-            if let Some(child) = map.get(key) {
-                truncated.insert(key.clone(), truncate_value_at_path(child, rest));
-            }
-            Value::Object(truncated)
-        }
-        _ => value.clone(),
-    }
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        let _ = write!(&mut output, "{byte:02x}");
-    }
-    output
-}
-
 fn unix_now_ms(clock: &dyn Clock) -> u64 {
     unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64
 }
@@ -5672,7 +5602,7 @@ mod tests {
                 content_block_index: index,
                 estimated_prefix_tokens: u64::from(index + 1),
                 token_estimate_source: "local_tiktoken_v1".to_owned(),
-                hash_schema_version: 4,
+                hash_schema_version: HASH_SCHEMA_VERSION,
             })
             .collect::<Vec<_>>();
         let cache = TestPromptCacheObservationCache::new(TEST_MODEL)
@@ -6830,22 +6760,8 @@ mod tests {
                 .expect("system cache breakpoint")
                 .prefix_key
                 .clone();
-        let legacy_v2 = cache_prefix_hash_v2(
-            &request,
-            RequestCacheBreakpointSource::System,
-            "system[0]",
-            None,
-        );
-        let legacy_v1 = cache_prefix_hash(
-            &request,
-            RequestCacheBreakpointSource::System,
-            "system[0]",
-            None,
-        );
 
         assert_eq!(breakpoint.prefix_hash, expected_v3);
-        assert_ne!(breakpoint.prefix_hash, legacy_v2);
-        assert_ne!(breakpoint.prefix_hash, legacy_v1);
     }
 
     #[test]
@@ -7236,7 +7152,7 @@ mod tests {
             content_block_index: 0,
             estimated_prefix_tokens,
             token_estimate_source: "local_tiktoken_v1".to_owned(),
-            hash_schema_version: 4,
+            hash_schema_version: HASH_SCHEMA_VERSION,
         }
     }
 

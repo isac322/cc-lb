@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use cc_lb_domain::TtlClass;
-use cc_lb_engine::{ClockHandle, clock::unix_secs};
+use cc_lb_engine::{ClockHandle, clock::unix_secs, lifecycle::HASH_SCHEMA_VERSION};
 use cc_lb_storage_api::{PromptCacheObservationRecord, PromptCacheObservationStore};
 use uuid::Uuid;
 
@@ -387,7 +387,7 @@ fn observation_with_model(
         ttl_class,
         expires_at_unix_secs,
         last_observed_at_unix_secs,
-        hash_schema_version: 4,
+        hash_schema_version: HASH_SCHEMA_VERSION,
         prefix_content_block_index: 7,
         estimated_prefix_tokens: 12_345,
         token_estimate_source: "local_tiktoken_v1".to_owned(),

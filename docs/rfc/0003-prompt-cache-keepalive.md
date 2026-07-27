@@ -5,6 +5,8 @@
 - Status: Draft — implementation in progress on branch `opencode/rfc-0003-cache-keepalive`.
 - Related PRs: (to be filled)
 - Related ADRs: [0004 — Keep-alive scheduler and dispatch strategy](../adr/0004-cache-keepalive-scheduler.md)
+- Source: <https://platform.claude.com/docs/en/build-with-claude/prompt-caching>.
+- Retrieved: 2026-07-27.
 
 ## Summary
 
@@ -13,17 +15,19 @@ warm across long-running agent turns. When enabled, cc-lb tracks each cache-
 using session by `thread_id`, classifies every completed response as "the
 agent is still executing tools" vs "waiting for the human user", and — for
 the former — schedules a synthetic `max_tokens: 0` request against the same
-upstream shortly before the cache TTL expires. Cache reads reset the TTL, so
-a single successful keep-alive extends the window; misses tear the session
-down. Nothing runs for principals without the config, and nothing runs for
-requests without a `cache_control` breakpoint.
+upstream shortly before the cache TTL expires. A cache hit refreshes the full
+TTL, and the refresh itself has no extra charge, so a single successful
+keep-alive extends the window; misses tear the session down. Nothing runs
+for principals without the config, and nothing runs for requests without a
+`cache_control` breakpoint.
 
 ## Motivation
 
 Anthropic prompt caching has two TTL modes: `"5m"` (default since 2026-03-06)
-and `"1h"`. Cache reads reset the TTL back to full duration, but cache
-misses force cc-lb operators to pay the entire prefix cost again. In real
-agent workflows we routinely observe:
+and `"1h"`. Cache hits refresh the TTL back to its full duration, and that
+refresh adds no charge beyond the cache read itself. Cache misses force
+cc-lb operators to pay the entire prefix cost again. In real agent workflows
+we routinely observe:
 
 - Bash / test / build tool calls that block for 3–20 minutes,
 - Human review pauses that exceed the 5 m default but stay well under 1 h,
@@ -120,8 +124,8 @@ Sessions are keyed by `(principal_id, session_id)`:
   `x-session-affinity`, `x-session-id`. (These are the same headers WRH
   already uses for replica affinity, so the keep-alive session naturally
   hashes to the same replica as the real traffic.)
-- Fallback: `session_id = cache_prefix_hash`, using the same content-
-  addressed hash cc-lb already computes for cache observation.
+- Fallback: `session_id` is the first cache breakpoint's v3 prefix key from
+  request cache metadata.
 
 Principals without one of these headers and without a cache breakpoint have
 no session identity and are silently skipped.
@@ -142,11 +146,20 @@ credentials). Content:
 - `ttl: CacheTtl` — `Ttl5m` or `Ttl1h`, extracted from the request's
   `cache_control` breakpoint.
 
-`build_keepalive_body()` produces the fire-time body: `max_tokens = 0`,
-`stream` removed, `thinking.type = "disabled"` and `budget_tokens`
-dropped, `output_config.format` removed, `tool_choice` in `{tool, any}`
-coerced to `{auto}`. These are the combinations Anthropic rejects with
-`invalid_request_error` when `max_tokens: 0` is set.
+`build_keepalive_body()` produces the fire-time body with `max_tokens = 0`.
+Anthropic rejects that pre-warm form when `stream: true`, extended thinking
+(`thinking.type = "enabled"`), structured outputs (`output_config.format`),
+or `tool_choice` of type `tool` or `any` is present, and it rejects the form
+inside Message Batches. The builder removes `stream`, removes
+`output_config.format`, coerces the incompatible tool choices to `auto`, and
+coerces any `thinking` object to `type: "disabled"` while removing
+`budget_tokens`.
+
+The messages-scoped thinking salt keeps this thinking-disabled pre-warm
+prefix distinct from real thinking-enabled traffic. The probe can therefore
+refresh genuine tools- and system-tier entries without creating a false
+message-tier warm entry. `output_config.effort` remains on the keep-alive
+body because it participates in the message-tier prefix.
 
 ### Classifier — `HeuristicClassifier`
 
@@ -198,6 +211,12 @@ dispatches. On `CacheHit` it re-installs the same entry with counters
 preserved and a fresh cancel channel; on `CacheMiss` or dispatch error it
 cancels the session (`UpstreamGone`).
 
+Existing timing behavior anchors each refresh window to response start.
+`cache_anchor_at.elapsed()` is carried as `cache_anchor_age` into
+`ScheduleParams::from_cache_anchor_age`, which subtracts that age from the
+configured refresh delay rather than starting a full new window after body
+collection.
+
 `cancel(key, reason)` removes the entry, closes the channel, records the
 cancellation reason, and updates the `active_sessions` gauge.
 
@@ -243,6 +262,9 @@ skipped at fire time:
 - **Bedrock, Vertex, OpenRouter:** `max_tokens: 0` schema behavior is
   untested / disallowed. OpenRouter's schema requires `max_tokens >= 1`.
   We do not attempt the request.
+- **Message Batches:** `max_tokens: 0` is rejected inside a batch. The
+  keep-alive dispatcher sends only standalone Messages API requests and
+  never attempts batch pre-warming.
 - **Detection point:** the upstream record's `kind` is inspected in the
   dispatcher; unsupported upstreams return a dispatch error and the session
   is cancelled with `reason=UpstreamGone`.

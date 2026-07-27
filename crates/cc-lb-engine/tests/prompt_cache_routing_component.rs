@@ -6,7 +6,8 @@ use cc_lb_domain::{TtlClass, UpstreamCandidate, WarmCacheEntry};
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_engine::{
-    DynamicView, DynamicViewBuilder, RequestKind, build_candidates, parse_request_cache_breakpoints,
+    DynamicView, DynamicViewBuilder, RequestKind, build_candidates, lifecycle::HASH_SCHEMA_VERSION,
+    parse_request_cache_breakpoints,
 };
 use cc_lb_routing::{FilterPlugin, RoutingContext};
 use http::{HeaderMap, Method};
@@ -49,7 +50,7 @@ fn built_candidate_cache_score_drives_subscription_preference_component_route() 
             content_block_index: 0,
             estimated_prefix_tokens: breakpoints[0].prefix_token_count,
             token_estimate_source: "local_tiktoken_v1".to_owned(),
-            hash_schema_version: 4,
+            hash_schema_version: HASH_SCHEMA_VERSION,
         }],
     )]));
     let view = test_view(prompt_cache, owner_id, quota_peer_id);
@@ -164,7 +165,7 @@ fn moved_cache_control_keeps_warm_upstream_routed_by_cache_hash() {
             content_block_index: 0,
             estimated_prefix_tokens: turn_one_breakpoints[1].prefix_token_count,
             token_estimate_source: "local_tiktoken_v1".to_owned(),
-            hash_schema_version: 4,
+            hash_schema_version: HASH_SCHEMA_VERSION,
         }],
     )]));
     let view = test_view(prompt_cache, owner_id, quota_peer_id);

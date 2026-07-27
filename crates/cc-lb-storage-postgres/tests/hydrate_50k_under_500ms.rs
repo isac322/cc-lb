@@ -20,9 +20,8 @@ const ACTIVE_PER_UPSTREAM: usize = RECORDS_PER_UPSTREAM - EXPIRED_PER_UPSTREAM;
 const TOTAL_RECORDS: u64 = (UPSTREAM_COUNT * RECORDS_PER_UPSTREAM) as u64;
 const NOW_UNIX_SECS: u64 = 1_700_000_000;
 const MAX_HYDRATE_ELAPSED: Duration = Duration::from_millis(500);
-const MIGRATIONS: &[&str] = &[include_str!(
-    "../migrations/0030_prompt_cache_observation.sql"
-)];
+
+use cc_lb_storage_api::{BackendKind, MetaStore};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -111,9 +110,10 @@ impl Fixture {
                 PgConnectOptions::from_str(&url)?.options([("search_path", schema.as_str())]),
             )
             .await?;
-        for migration in MIGRATIONS {
-            sqlx::raw_sql(*migration).execute(&pool).await?;
-        }
+        // Real migrator, not a hand-picked subset — see the note in `prompt_cache_observation.rs`.
+        PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock))
+            .initialize(BackendKind::Postgres)
+            .await?;
 
         Ok(Some(Self { url, schema, pool }))
     }
@@ -148,6 +148,9 @@ fn upstream_ids() -> [Uuid; UPSTREAM_COUNT] {
     })
 }
 
+/// Opaque to the storage layer; see the note in `prompt_cache_observation.rs`.
+const FIXTURE_SCHEMA_VERSION: u8 = 5;
+
 fn observation(
     upstream_index: usize,
     upstream_id: Uuid,
@@ -165,7 +168,7 @@ fn observation(
             NOW_UNIX_SECS + 300
         },
         last_observed_at_unix_secs: NOW_UNIX_SECS.saturating_sub(60),
-        hash_schema_version: 4,
+        hash_schema_version: FIXTURE_SCHEMA_VERSION,
         prefix_content_block_index: u32::try_from(record_index).expect("record index fits u32"),
         estimated_prefix_tokens: 1_000 + record_index as u64,
         token_estimate_source: "local_tiktoken_v1".to_owned(),

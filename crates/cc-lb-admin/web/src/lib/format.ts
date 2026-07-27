@@ -30,6 +30,30 @@ function formatUsdValue(usd: number, fractionDigits: 0 | 2 | 4): string {
   return `$${formatter.format(usd === 0 ? 0 : usd)}`;
 }
 
+/** Token components of a usage bucket or request event. */
+export interface TokenComponents {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+}
+
+/**
+ * Total tokens the model processed.
+ *
+ * All four components must be summed: `input_tokens` counts only the tokens after the last cache
+ * breakpoint, so on a cached workload the cache read and creation terms carry most of the volume
+ * and an input+output sum understates throughput by an order of magnitude.
+ */
+export function sumTokens(b: TokenComponents): number {
+  return (
+    (b.input_tokens ?? 0) +
+    (b.output_tokens ?? 0) +
+    (b.cache_creation_input_tokens ?? 0) +
+    (b.cache_read_input_tokens ?? 0)
+  );
+}
+
 export function fmtMs(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v) || v < 0) return DASH;
   if (v > Number.MAX_SAFE_INTEGER) return DASH;

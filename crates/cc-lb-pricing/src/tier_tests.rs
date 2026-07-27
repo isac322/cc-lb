@@ -135,7 +135,7 @@ fn routing_cache_pricing_resolves_requested_tier_for_every_component() {
     );
     assert_eq!(
         pricing.cache_creation_1h_per_million_usd,
-        Some(UsdPerMillion::from_micros_usd(9_600_000))
+        Some(UsdPerMillion::from_micros_usd(6_000_000))
     );
     assert_eq!(
         pricing.cache_read_per_million_usd,
@@ -165,7 +165,7 @@ fn routing_cache_pricing_uses_batch_fallback_for_every_component() {
     );
     assert_eq!(
         pricing.cache_creation_1h_per_million_usd,
-        Some(UsdPerMillion::from_micros_usd(3_200_000))
+        Some(UsdPerMillion::from_micros_usd(2_000_000))
     );
     assert_eq!(
         pricing.cache_read_per_million_usd,
@@ -213,37 +213,37 @@ fn estimate_max_uses_batch_fallback_when_catalog_has_no_tier_keys() {
 #[test]
 fn explicit_priority_rates_are_used_when_service_tier_is_priority() {
     // Given an explicit priority rate, when priority cost is computed, then every component uses it.
-    assert_eq!(total_for(Some("priority"), true), 32_600_000);
+    assert_eq!(total_for(Some("priority"), true), 29_000_000);
 }
 
 #[test]
 fn explicit_batch_rates_are_used_when_service_tier_is_batch() {
     // Given an explicit batch rate, when batch cost is computed, then every component uses it.
-    assert_eq!(total_for(Some("batch"), true), 10_700_000);
+    assert_eq!(total_for(Some("batch"), true), 9_500_000);
 }
 
 #[test]
 fn explicit_flex_rates_are_used_when_service_tier_is_flex() {
     // Given an explicit flex rate, when flex cost is computed, then every component uses it.
-    assert_eq!(total_for(Some("flex"), true), 16_050_000);
+    assert_eq!(total_for(Some("flex"), true), 14_250_000);
 }
 
 #[test]
 fn base_rates_are_used_when_service_tier_is_standard() {
     // Given explicit tiers, when standard is computed, then base component prices remain unchanged.
-    assert_eq!(total_for(Some("standard"), true), 21_400_000);
+    assert_eq!(total_for(Some("standard"), true), 19_000_000);
 }
 
 #[test]
 fn base_rates_are_used_when_service_tier_is_absent() {
     // Given explicit tiers, when no tier is observed, then base component prices remain unchanged.
-    assert_eq!(total_for(None, true), 21_400_000);
+    assert_eq!(total_for(None, true), 19_000_000);
 }
 
 #[test]
 fn base_rates_are_used_when_service_tier_is_auto() {
     // Given explicit tiers, when auto is observed, then base component prices remain unchanged.
-    assert_eq!(total_for(Some("auto"), true), 21_400_000);
+    assert_eq!(total_for(Some("auto"), true), 19_000_000);
 }
 
 #[test]
@@ -255,23 +255,23 @@ fn standard_only_is_canonicalized_to_base_pricing() {
 #[test]
 fn priority_falls_back_to_base_when_catalog_has_no_tier_keys() {
     // Given a sparse catalog, when priority is observed, then all base prices are used.
-    assert_eq!(total_for(Some("priority"), false), 21_400_000);
+    assert_eq!(total_for(Some("priority"), false), 19_000_000);
 }
 
 #[test]
 fn batch_falls_back_to_exact_half_when_catalog_has_no_tier_keys() {
     // Given a sparse catalog, when batch is observed, then every base price is halved exactly.
-    assert_eq!(total_for(Some("batch"), false), 10_700_000);
+    assert_eq!(total_for(Some("batch"), false), 9_500_000);
 }
 
 #[test]
 fn flex_falls_back_to_base_when_catalog_has_no_tier_keys() {
     // Given a sparse catalog, when flex is observed, then all base prices are used.
-    assert_eq!(total_for(Some("flex"), false), 21_400_000);
+    assert_eq!(total_for(Some("flex"), false), 19_000_000);
 }
 
 #[test]
 fn unknown_tier_falls_back_to_base_when_catalog_has_no_matching_keys() {
     // Given a future unknown tier, when no matching catalog key exists, then base prices are used.
-    assert_eq!(total_for(Some("ultra"), false), 21_400_000);
+    assert_eq!(total_for(Some("ultra"), false), 19_000_000);
 }

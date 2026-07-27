@@ -73,7 +73,7 @@ import {
 } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
-import { fmtChartTooltipTs } from '../lib/format';
+import { fmtChartTooltipTs, sumTokens } from '../lib/format';
 import {
   type UpdateUpstreamWarmupSettingsRequest,
   type Upstream,
@@ -135,7 +135,7 @@ function UpstreamsPage() {
       let tokens = 0;
       for (const b of series.buckets) {
         cost += (b.virtual_cost_micros ?? 0) / 1_000_000;
-        tokens += (b.input_tokens ?? 0) + (b.output_tokens ?? 0);
+        tokens += sumTokens(b);
       }
       m.set(series.key, { cost_usd: cost, tokens });
     }

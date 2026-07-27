@@ -2355,7 +2355,11 @@ fn tokens_in_interval(rollups: &[UsageRollup], start_unix_secs: u64, end_unix_se
 }
 
 fn proxy_tokens(rollup: &UsageRollup) -> u64 {
-    rollup.input_tokens.saturating_add(rollup.output_tokens)
+    rollup
+        .input_tokens
+        .saturating_add(rollup.output_tokens)
+        .saturating_add(rollup.cache_creation_input_tokens)
+        .saturating_add(rollup.cache_read_input_tokens)
 }
 
 fn median(mut values: Vec<f64>) -> Option<f64> {
@@ -2456,6 +2460,41 @@ mod tests {
             data_state_str(SubscriptionQuotaDataState::Unobserved),
             "unobserved"
         );
+    }
+
+    #[test]
+    fn proxy_tokens_includes_cache_creation_and_read_tokens() {
+        let rollup = UsageRollup {
+            resolution: UsageRollupResolution::Minute,
+            bucket_start: 0,
+            principal: String::new(),
+            upstream_id: Uuid::new_v4(),
+            upstream_name: String::new(),
+            model: String::new(),
+            request_count: 1,
+            input_tokens: 50,
+            output_tokens: 200,
+            cache_creation_input_tokens: 1_000,
+            cache_read_input_tokens: 40_000,
+            error_count: 0,
+            latency_count: 0,
+            latency_ms_sum: 0,
+            latency_ms_min: None,
+            latency_ms_max: None,
+            proxy_setup_ms_count: 0,
+            proxy_setup_ms_sum: 0,
+            shape_ms_count: 0,
+            shape_ms_sum: 0,
+            sign_ms_count: 0,
+            sign_ms_sum: 0,
+            upstream_ttfb_ms_count: 0,
+            upstream_ttfb_ms_sum: 0,
+            upstream_body_ms_count: 0,
+            upstream_body_ms_sum: 0,
+            virtual_cost_micros: 0,
+        };
+
+        assert_eq!(proxy_tokens(&rollup), 41_250);
     }
 
     #[test]

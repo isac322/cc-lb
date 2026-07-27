@@ -54,13 +54,6 @@ pub fn prefix_serializer_bytes(model: &str, blocks: &[V3PromptCacheBlock]) -> Ve
         .expect("prefix serializer serializes")
 }
 
-pub fn digest(bytes: &[u8]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"cc-lb-cache-v4:block");
-    hasher.update(bytes);
-    *hasher.finalize().as_bytes()
-}
-
 pub fn token_count(bytes: &[u8]) -> u64 {
     let text = std::str::from_utf8(bytes).expect("serde_json emits UTF-8");
     PrefixTokenizer::global().count_tokens(text) as u64

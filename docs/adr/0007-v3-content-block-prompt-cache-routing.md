@@ -5,7 +5,8 @@
 - Ships with: pending
 - Supersedes: ADR 0006's transitional exact-prefix/thread-memory merge, ADR 0005's thread-keyed cache-positive WRH keying, and every v1/v2 prompt-cache routing assumption.
 - Research source: `.omo/ulw-research/20260708-v3-cache-research/`.
-- Authoritative provider reference: <https://platform.claude.com/docs/en/build-with-claude/prompt-caching>.
+- Source: <https://platform.claude.com/docs/en/build-with-claude/prompt-caching>.
+- Retrieved: 2026-07-27.
 
 ## Context
 
@@ -20,7 +21,8 @@ Provider research closed the model we need to simulate:
 - Read lookup starts at the breakpoint and walks backward by **content-block position**, checking at most 20 positions including the breakpoint itself (`N, N-1, ..., N-19`).
 - The walk is over Anthropic-native cacheable content blocks, not `messages[]` objects and not the number of explicit breakpoints.
 - Cache-control placement is valid on tool definitions, `system[]` content blocks, and `messages[].content[]` content blocks. Native docs do not define `cache_control` on a `messages[]` message object itself.
-- Top-level automatic caching is a separate mode that picks provider-managed breakpoints; it is supported on Claude API / Claude Platform on AWS / Google Cloud / Microsoft Foundry, but not Bedrock.
+- Top-level automatic caching is a second activation mode. A request-level `cache_control` places a provider-managed breakpoint on the last eligible cacheable block and advances that breakpoint as the conversation grows. It consumes one of the same four breakpoint slots as block-level markers, so automatic caching plus four explicit markers is provider-invalid. It is supported on Claude API / Claude Platform on AWS / Google Cloud / Microsoft Foundry, but not Bedrock.
+- Cache state is isolated by workspace on Claude API, Claude Platform on AWS, and Microsoft Foundry. Bedrock and Google Cloud retain organization-level isolation; no provider shares cache state across organizations.
 - Provider responses expose aggregate `cache_read_input_tokens` and `cache_creation_input_tokens`; they do not expose Anthropic's internal cache key, hash, tokenizer, eviction topology, or per-breakpoint read/write attribution.
 
 The existing repo surface matches the old model:
@@ -50,13 +52,13 @@ The v3 simulator flattens the request into an Anthropic-compatible cacheable con
 tools -> system -> messages
 ```
 
-The sequence contains provider-cacheable content blocks only:
+The sequence contains every block that is significant to the rendered provider prefix:
 
 - tool definitions in `tools`;
-- text blocks in `system[]`;
-- text, image, document, tool_use, and tool_result blocks in `messages[].content[]`.
+- cacheable content blocks in `system[]`;
+- text, image, document, tool_use, tool_result, thinking, redacted_thinking, and tool_reference blocks in `messages[].content[]`.
 
-Thinking blocks are not direct breakpoints. Empty text blocks are not cacheable. Message objects are not cacheable units; only their content blocks are.
+Thinking, redacted_thinking, and tool_reference blocks contribute to the prefix chain but are not direct breakpoint targets. Empty text blocks are not cacheable. Message objects are not cacheable units; only their content blocks are.
 
 The local key is an Anthropic-compatible **proxy-local simulator key**, not Anthropic's private cache hash. Its job is to recognize equivalent rendered local prefixes and route consistently; it must never be described as the provider's real key.
 
@@ -70,6 +72,8 @@ match = longest unexpired upstream entry whose v3 prefix key appears in that win
 ```
 
 Read prediction uses the longest matched prefix. Write prediction is derived only from missing segments at requested breakpoints. The simulator must **not** persist all lookback candidates as warm entries just because they were checked. Warm entries are created or refreshed from provider-observed writes/reads at breakpoints and their TTL class.
+
+When a request carries at least one `cache_control` marker and produces a server-tool result, Anthropic inserts its own breakpoint on that result. The provider-managed breakpoint always uses the 5-minute TTL, regardless of the TTL on the request's markers. Consequently, `cache_creation.ephemeral_5m_input_tokens` may be non-zero even when every breakpoint cc-lb requested was 1 hour; aggregate creation usage must not be attributed only to the markers cc-lb supplied.
 
 ### Storage cutover
 
@@ -153,6 +157,19 @@ Decision records should still capture lineage would-have-predicted and would-hav
 
 Canonicalize only with known provider-valid mappings. Proven pre-4.6 alias/date pairs may collapse to the same key. Do not invent dated IDs for 4.6+ dateless model IDs; preserve the provider-valid ID as sent unless an official mapping exists.
 
+### Minimum cacheable prompt length
+
+The provider minimum is model-specific and deliberately treated as a lookup table, not a monotonic family rule:
+
+| Minimum tokens | Models |
+| --- | --- |
+| 512 | Opus 5, Fable 5, Mythos 5 |
+| 1024 | Opus 4.8, Sonnet 5, Sonnet 4.6, Sonnet 4.5, Opus 4.1, Opus 4, Sonnet 4 |
+| 2048 | Mythos Preview, Opus 4.7, Haiku 3.5 (`claude-3-5-haiku-*`) |
+| 4096 | Opus 4.6, Opus 4.5, Haiku 4.5 |
+
+The 1024-token row records the pre-existing default behavior; it is not a threshold correction. The corrected exceptions are Opus 4.7 at 2048 tokens, Opus 5 at 512, Mythos 5 at 512, Mythos Preview at 2048, and Haiku 3.5 at 2048. Haiku 3.5 predates the `claude-<family>-<major>-<minor>` ordering and must be keyed on `claude-3-5-haiku-20241022` / `claude-3-5-haiku-latest`; it is retired on the Claude API but still reachable through Bedrock and Google Cloud upstreams. Unknown canonical model ids use the conservative 1024-token fallback and emit a warning rather than inheriting a neighboring version's threshold. The authoritative list is `cache_threshold_tokens` in `crates/cc-lb-engine/src/model_resolution.rs`; this table is a summary.
+
 ### Trace and event fields
 
 Routing traces and request events must expose v3-specific evidence:
@@ -192,7 +209,7 @@ Provider usage remains the post-route calibration source. Multi-breakpoint provi
 ### Neutral
 
 - Quota tier ordering is unchanged. Cache value still only affects selection within the winning tier.
-- The v3 local key must continue using deterministic serialization. For bytes that feed hashes, keep `serde_json::to_vec` unless a separate ADR proves a safe alternative; do not replace hash-input serialization with `sonic_rs::to_vec`.
+- The v3 local key must continue using deterministic `serde_json` serialization. Do not replace hash-input serialization with `sonic_rs` unless a separate ADR proves a safe alternative.
 - Provider automatic caching can be represented by local automatic breakpoints, but Bedrock support must remain disabled or explicitly marked unsupported.
 
 ## Alternatives considered
@@ -206,7 +223,7 @@ Provider usage remains the post-route calibration source. Multi-breakpoint provi
 
 ## Verification requirements
 
-- Unit tests for v3 flattening order and valid cache-control placement: tools, system content blocks, and message content blocks are included; message-object-level cache-control is ignored or rejected according to the implementation decision; empty text and direct thinking breakpoints do not create cacheable blocks.
+- Unit tests for v3 flattening order and valid cache-control placement: tools, system content blocks, and message content blocks are included; message-object-level cache-control is ignored or rejected according to the implementation decision; empty text blocks are excluded; thinking, redacted_thinking, and tool_reference remain prefix participants but cannot become direct breakpoints.
 - Unit tests for lookback: `N` and `N-19` can hit; `N-20` cannot; write persistence only records breakpoint keys, not every lookup candidate.
 - Unit tests for model canonicalization: proven aliases share keys; fake 4.6+ dated IDs are not fabricated.
 - Storage migration tests for SQLite and Postgres proving v2 rows are dropped/replaced and v3 rows round-trip with block index/token provenance.

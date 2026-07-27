@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { fmtN, formatCostMicros } from '../../../lib/format';
+import { fmtN, formatCostMicros, sumTokens } from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { type ActiveSliceControl, PieChart, type PieSlice } from './PieChart';
 import { SLICE_COLORS } from './sliceColors';
@@ -73,11 +73,7 @@ export function CostPie({
   const slices = useMemo(() => buildCostSlices(event), [event]);
   const totalMicros = slices.reduce((sum, s) => sum + s.value, 0);
   const totalUsd = event.cost_usd_micros ?? totalMicros;
-  const totalTokens =
-    (event.input_tokens ?? 0) +
-    (event.output_tokens ?? 0) +
-    (event.cache_creation_input_tokens ?? 0) +
-    (event.cache_read_input_tokens ?? 0);
+  const totalTokens = sumTokens(event);
   const totalSecondary =
     totalTokens > 0 ? `${fmtN(totalTokens)} tk` : undefined;
 

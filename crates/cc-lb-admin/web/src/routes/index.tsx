@@ -37,7 +37,12 @@ import {
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { eventTime } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
-import { formatCount, formatRate, formatUsdAmount } from '../lib/format';
+import {
+  formatCount,
+  formatRate,
+  formatUsdAmount,
+  sumTokens,
+} from '../lib/format';
 import {
   usePrincipalNameMap,
   useRecentEventsInfinite,
@@ -897,7 +902,7 @@ function OverviewPage() {
       )
     : 1;
   const reqPerSec = totals ? totals.request_count / durationSecs : 0;
-  const totalTokens = totals ? totals.input_tokens + totals.output_tokens : 0;
+  const totalTokens = totals ? sumTokens(totals) : 0;
   const virtualUsd = totals ? totals.virtual_cost_micros / 1_000_000 : 0;
   const errRate =
     totals && totals.request_count > 0
@@ -912,9 +917,7 @@ function OverviewPage() {
         b.request_count / Math.max(1, summary.data.step === 'hour' ? 3600 : 60),
     ) ?? [];
   const sparkTokens =
-    summary.data?.sparkline.buckets.map(
-      (b) => b.input_tokens + b.output_tokens,
-    ) ?? [];
+    summary.data?.sparkline.buckets.map((b) => sumTokens(b)) ?? [];
   const sparkCost =
     summary.data?.sparkline.buckets.map(
       (b) => b.virtual_cost_micros / 1_000_000,
@@ -966,7 +969,7 @@ function OverviewPage() {
       let requests = 0;
       for (const b of s.buckets) {
         cost += (b.virtual_cost_micros ?? 0) / 1_000_000;
-        tokens += (b.input_tokens ?? 0) + (b.output_tokens ?? 0);
+        tokens += sumTokens(b);
         requests += b.request_count ?? 0;
       }
       if (cost <= 0 && requests <= 0) continue;

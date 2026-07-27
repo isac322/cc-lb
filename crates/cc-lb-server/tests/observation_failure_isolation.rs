@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cc_lb_domain::TtlClass;
+use cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
 use cc_lb_observability::cache_observation_store_kind;
 use cc_lb_server::prompt_cache_observation_sink::PromptCacheObservationSink;
 use cc_lb_storage_api::{
@@ -99,7 +100,7 @@ fn record(index: u64) -> PromptCacheObservationRecord {
         ttl_class: TtlClass::Ephemeral5m,
         expires_at_unix_secs: 1_800 + index,
         last_observed_at_unix_secs: 1_500 + index,
-        hash_schema_version: 4,
+        hash_schema_version: HASH_SCHEMA_VERSION,
         prefix_content_block_index: 0,
         estimated_prefix_tokens: 0,
         token_estimate_source: "local_tiktoken_v1".to_owned(),
