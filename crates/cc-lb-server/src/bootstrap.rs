@@ -457,8 +457,8 @@ mod tests {
     use super::*;
     use cc_lb_engine::clock::TestClock;
     use cc_lb_storage_api::{
-        BackendKind, MetaStore, PluginRegistryStore, PrincipalStore, WasmBlob,
-        WasmRegistryEntryInput,
+        BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BackendKind, MetaStore, PluginRegistryStore,
+        PrincipalStore, WasmBlob, WasmRegistryEntryInput,
     };
     use cc_lb_storage_sqlite::SqliteStorage as Storage;
 
@@ -527,8 +527,8 @@ mod tests {
     async fn bootstrap_seeds_plugin_chain_when_wasm_exists() {
         let (dir, storage) = fixture().await;
         let clock = TestClock::new_at_secs(1_800_000_000);
-        seed_principal(&storage, "plugin-principal").await;
-        seed_registry(&storage, "audit").await;
+        let principal = seed_principal(&storage, "plugin-principal").await;
+        let audit = seed_registry(&storage, "audit").await;
         fs::write(
             dir.path().join("bootstrap.toml"),
             r#"
@@ -552,15 +552,16 @@ plugins = ["audit"]
         .await
         .unwrap();
 
-        let principal = PrincipalStore::get_by_name(&storage, "plugin-principal")
-            .await
-            .unwrap()
-            .unwrap();
         let entries = storage
             .list_chain_for_principal(principal.id, PluginSlotKind::Router)
             .await
             .unwrap();
-        assert_eq!(entries.len(), 1);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.wasm_registry_id == audit.id),
+            "bootstrap inserts the configured router plugin"
+        );
 
         fs::write(
             dir.path().join("bootstrap.toml"),
@@ -587,7 +588,14 @@ plugins = ["audit"]
             .list_chain_for_principal(principal.id, PluginSlotKind::Router)
             .await
             .unwrap();
-        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.wasm_registry_id == audit.id)
+                .count(),
+            1,
+            "reapplying bootstrap does not duplicate the configured router plugin"
+        );
     }
 
     #[tokio::test]
@@ -622,7 +630,11 @@ plugins = ["missing-plugin"]
             .list_chain_for_principal(principal.id, PluginSlotKind::Router)
             .await
             .unwrap();
-        assert!(entries.is_empty());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].wasm_registry_id,
+            BUILTIN_SUBSCRIPTION_PREFERENCE_ID
+        );
     }
 
     #[test]

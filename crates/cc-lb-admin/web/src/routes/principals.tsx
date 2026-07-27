@@ -86,7 +86,6 @@ import {
   useSetAllowedModels,
   useTogglePrincipal,
   useUpdatePrincipalDefaultLimits,
-  useUpdatePrincipalSmartRouting,
   useUpdateRouterTerminalStrategy,
   useUpstreamNameMap,
 } from '../lib/queries';
@@ -1229,7 +1228,6 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
   const del = useDeleteChainEntry();
   const terminalStrategy = useRouterTerminalStrategy(principalId);
   const updateTerminalStrategy = useUpdateRouterTerminalStrategy();
-  const updateSmartRouting = useUpdatePrincipalSmartRouting();
 
   const entries = useMemo(
     () => [...(chain.data?.entries ?? [])].sort((a, b) => a.order - b.order),
@@ -1243,15 +1241,12 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
     (e) => e.wasm_registry_id === subscriptionPreferencePlugin?.id,
   );
 
-  // A leftover built-in chain entry is an advanced override now that the filter
-  // is driven by principal.smart_routing_enabled, so surface it in Advanced.
-  const isComplex = useMemo(() => {
-    if (!subscriptionPreferencePlugin) return false;
-    const hasOther = entries.some(
-      (e) => e.wasm_registry_id !== subscriptionPreferencePlugin.id,
-    );
-    return hasOther || !!subscriptionPreferenceEntry;
-  }, [entries, subscriptionPreferencePlugin, subscriptionPreferenceEntry]);
+  const isBasicCompatible =
+    subscriptionPreferencePlugin !== undefined &&
+    (entries.length === 0 ||
+      (entries.length === 1 &&
+        entries[0]?.wasm_registry_id === subscriptionPreferencePlugin.id));
+  const isComplex = !isBasicCompatible;
 
   const [detailPlugin, setDetailPlugin] = useState<PluginEntry | null>(null);
   const [activeTab, setActiveTab] = useState<'basic' | 'advanced'>(
@@ -1265,16 +1260,26 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
     }
   }, [isComplex, activeTab]);
 
-  const isSmartRouting = principal.smart_routing_enabled;
+  const hasSubscriptionPreference = subscriptionPreferenceEntry !== undefined;
 
-  const toggleSmartRouting = () => {
-    updateSmartRouting.mutate({
-      id: principalId,
-      smart_routing_enabled: !principal.smart_routing_enabled,
-      expected_revision: principal.revision,
+  const toggleSubscriptionPreference = () => {
+    if (subscriptionPreferenceEntry) {
+      del.mutate({
+        id: subscriptionPreferenceEntry.id,
+        revision: subscriptionPreferenceEntry.revision,
+      });
+      return;
+    }
+    if (!subscriptionPreferencePlugin) return;
+    insert.mutate({
+      pid: principalId,
+      body: {
+        slot,
+        wasm_registry_id: subscriptionPreferencePlugin.id,
+        order: 0,
+      },
     });
   };
-
   const setStrategy = (strategy: string) => {
     if (!terminalStrategy.data) return;
     updateTerminalStrategy.mutate(
@@ -1376,9 +1381,10 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
             <Hint
               label={
                 isComplex
-                  ? "Basic can't show this chain without losing the extra filters. Open Advanced to edit the full chain."
+                  ? 'Basic requires a router chain containing only subscription-preference. Open Advanced to edit the full chain.'
                   : ''
               }
+              stopClickPropagation={false}
             >
               <BaseTabs.Tab
                 aria-disabled={isComplex}
@@ -1404,8 +1410,8 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
         {showMobileNotice && (
           <div className="absolute left-4 top-full mt-2 z-10 text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-sm px-3 py-2 text-xs shadow-lg flex items-start gap-2 max-w-xs">
             <span>
-              Basic can't show this chain without losing the extra filters. Open
-              Advanced to edit the full chain.
+              Basic requires a router chain containing only
+              subscription-preference. Open Advanced to edit the full chain.
             </span>
             <button
               onClick={() => setShowMobileNotice(false)}
@@ -1430,17 +1436,17 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                 </div>
               </div>
               <BaseSwitch.Root
-                checked={isSmartRouting}
+                checked={hasSubscriptionPreference}
                 className="group inline-flex items-center gap-2 h-7 px-2 rounded-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-overlay-3"
                 nativeButton
-                onCheckedChange={() => toggleSmartRouting()}
+                onCheckedChange={() => toggleSubscriptionPreference()}
                 render={<button type="button" />}
-                disabled={updateSmartRouting.isPending}
+                disabled={del.isPending || insert.isPending}
               >
                 <div
                   className={cx(
                     'relative inline-flex h-4 w-8 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out border',
-                    isSmartRouting
+                    hasSubscriptionPreference
                       ? 'bg-emerald-500 border-emerald-500'
                       : 'bg-overlay-5 border-subtle-strong group-hover:border-text-muted',
                   )}
@@ -1448,7 +1454,9 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                   <BaseSwitch.Thumb
                     className={cx(
                       'pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
-                      isSmartRouting ? 'translate-x-4' : 'translate-x-0.5',
+                      hasSubscriptionPreference
+                        ? 'translate-x-4'
+                        : 'translate-x-0.5',
                     )}
                   />
                 </div>

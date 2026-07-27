@@ -832,11 +832,11 @@ fn compute_order(
                     "unknown_before_entry",
                 )));
             };
+            let upper = entries[index].order;
             let lower = index
                 .checked_sub(1)
                 .map(|idx| entries[idx].order)
-                .unwrap_or(0);
-            let upper = entries[index].order;
+                .unwrap_or(upper - sparse_order::STEP * 2);
             between_or_rebalance(lower, upper)
         }
         Position::After { after } => {

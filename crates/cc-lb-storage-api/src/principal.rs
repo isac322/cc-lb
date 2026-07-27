@@ -34,14 +34,6 @@ pub struct PrincipalRecord {
     pub router_terminal_strategy: cc_lb_domain::TerminalStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_keepalive: Option<CacheKeepaliveConfig>,
-    /// Implicit built-in `subscription-preference` router filter. Defaults to
-    /// true at the DB level; an explicit chain entry takes precedence.
-    #[serde(default = "default_smart_routing_enabled")]
-    pub smart_routing_enabled: bool,
-}
-
-const fn default_smart_routing_enabled() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,8 +61,6 @@ pub struct PrincipalUpdate {
     /// value is preserved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_keepalive: Option<Option<CacheKeepaliveConfig>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub smart_routing_enabled: Option<bool>,
 }
 
 #[async_trait]

@@ -138,8 +138,7 @@ create/update requests that set it return `unsupported_cache_keepalive_llm_judge
   "revision": 1,
   "allowed_models": ["claude-3-5-sonnet-20241022"],
   "default_limits": [],
-  "cache_keepalive": null,
-  "smart_routing_enabled": true
+  "cache_keepalive": null
 }
 ```
 
@@ -147,13 +146,9 @@ The `cache_keepalive` field mirrors whatever was persisted on the
 principal, or `null` when unset. `PATCH /admin/v1/principals/{id}` with
 `"cache_keepalive": null` clears the config.
 
-`smart_routing_enabled` controls the built-in `subscription-preference`
-router filter. It is opt-out and defaults to `true`, so the filter runs
-first for every principal without any plugin-chain entry. Turn it off with
-`PATCH /admin/v1/principals/{id}` and `{"smart_routing_enabled": false}`.
-Adding an explicit `subscription-preference` chain entry stays supported as
-the advanced way to pin the filter's position among other router plugins;
-the implicit filter is not added twice in that case.
+Each principal receives a built-in `subscription-preference` Router chain
+entry at creation, with order `0`. Use the plugin-chain endpoints below to
+remove the entry or change its position among other router plugins.
 
 ### Plugins API
 

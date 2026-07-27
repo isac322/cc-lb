@@ -121,7 +121,7 @@ async fn partial_state() {
     assert_eq!(report.upstream_warnings, 0);
     assert_eq!(report.principal_count, 2);
     assert_eq!(report.principal_disabled_count, 1);
-    assert_eq!(report.plugin_chain_entry_count, 4);
+    assert_eq!(report.plugin_chain_entry_count, 6);
     assert_eq!(report.plugin_blob_missing_count, 0);
     assert!(report.warnings.is_empty(), "warnings={:?}", report.warnings);
 }

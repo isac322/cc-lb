@@ -35,7 +35,7 @@ where
     principal_allowed_upstreams_roundtrip(Arc::clone(&backend)).await?;
     default_limits_roundtrip(Arc::clone(&backend)).await?;
     router_terminal_strategy_roundtrip(Arc::clone(&backend)).await?;
-    smart_routing_enabled_defaults_on_and_roundtrips(Arc::clone(&backend)).await?;
+    subscription_preference_is_seeded_as_router_entry(Arc::clone(&backend)).await?;
     soft_delete_excludes_default_list(Arc::clone(&backend)).await?;
     soft_delete_cascades_plugin_chains(Arc::clone(&backend)).await?;
     hard_delete_removes_unreferenced(Arc::clone(&backend)).await?;
@@ -126,7 +126,6 @@ where
                 default_limits: None,
                 router_terminal_strategy: None,
                 cache_keepalive: None,
-                smart_routing_enabled: None,
             },
             BASE_TS + 1,
         )
@@ -308,59 +307,30 @@ where
     .await
 }
 
-pub async fn smart_routing_enabled_defaults_on_and_roundtrips<B>(backend: Arc<B>) -> Result<()>
+pub async fn subscription_preference_is_seeded_as_router_entry<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
-    B::Storage: AuditStore + PrincipalStore,
+    B::Storage: AuditStore + PrincipalStore + PluginRegistryStore,
 {
     with_fixture(backend, |storage| async move {
         let record = PrincipalStore::create(&*storage, principal_create(16), BASE_TS).await?;
-        ensure!(
-            record.smart_routing_enabled,
-            "smart routing defaults to enabled"
-        );
-
-        let updated = PrincipalStore::update(
+        let entries = PluginRegistryStore::list_chain_for_principal(
             &*storage,
             record.id,
-            record.revision,
-            PrincipalUpdate {
-                smart_routing_enabled: Some(false),
-                ..PrincipalUpdate::default()
-            },
-            BASE_TS + 1,
+            PluginSlotKind::Router,
         )
-        .await?
-        .expect("record should exist");
+        .await?;
         ensure!(
-            !updated.smart_routing_enabled,
-            "smart routing turns off via update"
+            entries.len() == 1,
+            "new principals must receive exactly one subscription-preference router entry"
         );
-
-        let fetched = PrincipalStore::get_by_id(&*storage, record.id)
-            .await?
-            .expect("record should exist");
         ensure!(
-            !fetched.smart_routing_enabled,
-            "smart routing off persists across reads"
+            entries[0].wasm_registry_id == cc_lb_storage_api::BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+            "the seeded router entry must be subscription-preference"
         );
-
-        // An update that does not mention the flag must leave it alone.
-        let renamed = PrincipalStore::update(
-            &*storage,
-            fetched.id,
-            fetched.revision,
-            PrincipalUpdate {
-                name: Some("principal-0016-renamed".to_owned()),
-                ..PrincipalUpdate::default()
-            },
-            BASE_TS + 2,
-        )
-        .await?
-        .expect("record should exist");
         ensure!(
-            !renamed.smart_routing_enabled,
-            "unrelated update preserves smart routing"
+            entries[0].order == 0,
+            "the seeded router entry uses the reserved zero order"
         );
         Ok(())
     })

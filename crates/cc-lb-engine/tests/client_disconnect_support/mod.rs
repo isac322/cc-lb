@@ -84,7 +84,6 @@ pub fn transform_lifecycle(
         updated_at_unix_secs: 0,
         router_terminal_strategy: TerminalStrategy::FirstPick,
         cache_keepalive: None,
-        smart_routing_enabled: true,
     };
     let authn = TestAuthn::with_principal_view(
         state,

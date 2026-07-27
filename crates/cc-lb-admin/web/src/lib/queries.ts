@@ -140,7 +140,6 @@ export interface Principal {
       llm_judge?: unknown;
     };
   } | null;
-  smart_routing_enabled: boolean;
 }
 interface PrincipalListResp {
   principals: Principal[];
@@ -1179,29 +1178,6 @@ export function useUpdatePrincipalCacheKeepalive() {
   });
 }
 
-export function useUpdatePrincipalSmartRouting() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      id,
-      smart_routing_enabled,
-      expected_revision,
-    }: {
-      id: string;
-      smart_routing_enabled: boolean;
-      expected_revision: number;
-    }) =>
-      patchJson<Principal, { smart_routing_enabled: boolean }>(
-        `/admin/v1/principals/${id}`,
-        { smart_routing_enabled },
-        { ifMatch: expected_revision },
-      ),
-    onSuccess: (_d, vars) => {
-      qc.invalidateQueries({ queryKey: qk.principal(vars.id) });
-      qc.invalidateQueries({ queryKey: qk.principals });
-    },
-  });
-}
 export function useIssueKey() {
   const qc = useQueryClient();
   return useMutation({

@@ -104,7 +104,6 @@ impl PrincipalView {
             updated_at_unix_secs: 0,
             router_terminal_strategy: Default::default(),
             cache_keepalive: None,
-            smart_routing_enabled: true,
         };
         principal_chains.entry(principal_id.to_owned()).or_insert((
             None,

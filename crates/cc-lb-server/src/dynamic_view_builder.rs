@@ -55,6 +55,8 @@ use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
 use crate::reconcile::collect_revision_hash;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
+/// Maximum number of user-supplied router filters. The built-in
+/// `subscription-preference` entry is structural router-chain state.
 const MAX_ROUTER_CHAIN_DEPTH: usize = 16;
 
 pub struct Stores {
@@ -857,17 +859,20 @@ async fn build_router_pipeline(
     registry: &HashMap<Uuid, cc_lb_storage_api::WasmRegistryEntry>,
     registered_slot_keys: &mut HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey>,
 ) -> Result<Option<Arc<RouterPipelineCache>>, RebindError> {
-    if router_entries.is_empty() && !principal.smart_routing_enabled {
+    if router_entries.is_empty() {
         return Ok(None);
     }
-    if router_entries.len() > MAX_ROUTER_CHAIN_DEPTH {
+    let user_router_filter_count = router_entries
+        .iter()
+        .filter(|entry| entry.wasm_registry_id != BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
+        .count();
+    if user_router_filter_count > MAX_ROUTER_CHAIN_DEPTH {
         return Ok(Some(Arc::new(RouterPipelineCache {
             user_filters: Vec::new(),
             terminal: principal.router_terminal_strategy.clone(),
             instantiation_error: Some(Arc::<str>::from(format!(
-                "router chain depth {} exceeds maximum {}",
-                router_entries.len(),
-                MAX_ROUTER_CHAIN_DEPTH
+                "router user filter depth {} exceeds maximum {}",
+                user_router_filter_count, MAX_ROUTER_CHAIN_DEPTH
             ))),
         })));
     }
@@ -952,33 +957,11 @@ async fn build_router_pipeline(
         }
     }
 
-    apply_smart_routing_default(&mut filters, principal.smart_routing_enabled);
-
     Ok(Some(Arc::new(RouterPipelineCache {
         user_filters: filters,
         terminal: principal.router_terminal_strategy.clone(),
         instantiation_error: None,
     })))
-}
-
-/// Smart Routing is opt-out: when the principal flag is on, the built-in
-/// `subscription-preference` filter runs first. An explicit chain entry wins —
-/// it is how an operator pins the filter's position among other router
-/// plugins — so the filter is never inserted twice.
-fn apply_smart_routing_default(
-    filters: &mut Vec<Arc<dyn FilterPlugin>>,
-    smart_routing_enabled: bool,
-) {
-    if !smart_routing_enabled {
-        return;
-    }
-    if filters
-        .iter()
-        .any(|filter| filter.plugin_id() == BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
-    {
-        return;
-    }
-    filters.insert(0, Arc::new(SubscriptionPreferenceFilter::new()));
 }
 
 async fn apply_upstreams(
@@ -1246,85 +1229,12 @@ mod tests {
 
     /// Stand-in for a user-uploaded router filter so ordering and dedupe can be
     /// observed without a wasm runtime.
-    struct StubFilter(Uuid);
-
-    impl cc_lb_routing::FilterPlugin for StubFilter {
-        fn filter(
-            &self,
-            _ctx: &cc_lb_routing::RoutingContext,
-            _principal: &cc_lb_domain::Principal,
-            _candidates: &[cc_lb_domain::UpstreamCandidate],
-        ) -> Result<cc_lb_routing::FilterOutput, cc_lb_routing::FilterError> {
-            unreachable!("composition tests never execute the filter")
-        }
-
-        fn plugin_id(&self) -> Uuid {
-            self.0
-        }
-
-        fn plugin_name(&self) -> &str {
-            "stub"
-        }
-    }
-
     fn plugin_ids(filters: &[Arc<dyn FilterPlugin>]) -> Vec<Uuid> {
         filters.iter().map(|filter| filter.plugin_id()).collect()
     }
 
-    #[test]
-    fn smart_routing_default_prepends_builtin_to_an_empty_chain() {
-        let mut filters: Vec<Arc<dyn FilterPlugin>> = Vec::new();
-
-        apply_smart_routing_default(&mut filters, true);
-
-        assert_eq!(
-            plugin_ids(&filters),
-            vec![BUILTIN_SUBSCRIPTION_PREFERENCE_ID]
-        );
-    }
-
-    #[test]
-    fn smart_routing_disabled_leaves_the_chain_untouched() {
-        let other = Uuid::from_u128(0xabc);
-        let mut filters: Vec<Arc<dyn FilterPlugin>> = vec![Arc::new(StubFilter(other))];
-
-        apply_smart_routing_default(&mut filters, false);
-
-        assert_eq!(plugin_ids(&filters), vec![other]);
-    }
-
-    #[test]
-    fn smart_routing_default_runs_before_user_filters() {
-        let other = Uuid::from_u128(0xabc);
-        let mut filters: Vec<Arc<dyn FilterPlugin>> = vec![Arc::new(StubFilter(other))];
-
-        apply_smart_routing_default(&mut filters, true);
-
-        assert_eq!(
-            plugin_ids(&filters),
-            vec![BUILTIN_SUBSCRIPTION_PREFERENCE_ID, other]
-        );
-    }
-
-    #[test]
-    fn an_explicit_chain_entry_keeps_its_position_and_is_not_duplicated() {
-        let other = Uuid::from_u128(0xabc);
-        let mut filters: Vec<Arc<dyn FilterPlugin>> = vec![
-            Arc::new(StubFilter(other)),
-            Arc::new(SubscriptionPreferenceFilter::new()),
-        ];
-
-        apply_smart_routing_default(&mut filters, true);
-
-        assert_eq!(
-            plugin_ids(&filters),
-            vec![other, BUILTIN_SUBSCRIPTION_PREFERENCE_ID],
-            "explicit ordering wins and the builtin is inserted only once"
-        );
-    }
-
-    async fn router_pipeline_for_flag(
-        smart_routing_enabled: bool,
+    async fn router_pipeline_for_seeded_principal(
+        include_router_entries: bool,
     ) -> Option<Arc<RouterPipelineCache>> {
         let (dir, storage) = storage_fixture(9).await;
         let stores = stores(
@@ -1334,7 +1244,7 @@ mod tests {
         let runtime = Arc::new(
             cc_lb_runtime_wasmtime::WasmtimeRuntime::new(Default::default()).expect("runtime"),
         );
-        let mut principal = PrincipalStore::create(
+        let principal = PrincipalStore::create(
             storage.as_ref(),
             cc_lb_storage_api::PrincipalCreate {
                 name: "pipeline-wiring".to_owned(),
@@ -1348,11 +1258,23 @@ mod tests {
         )
         .await
         .expect("principal created");
-        assert!(
-            principal.smart_routing_enabled,
-            "storage default must be opt-out"
-        );
-        principal.smart_routing_enabled = smart_routing_enabled;
+        let router_entries = if include_router_entries {
+            PluginRegistryStore::list_chain_for_principal(
+                storage.as_ref(),
+                principal.id,
+                cc_lb_storage_api::PluginSlotKind::Router,
+            )
+            .await
+            .expect("seeded router chain")
+        } else {
+            Vec::new()
+        };
+        let registry = PluginRegistryStore::list_registry(storage.as_ref(), None, 100)
+            .await
+            .expect("plugin registry")
+            .into_iter()
+            .map(|entry| (entry.id, entry))
+            .collect();
 
         let mut slot_keys = HashSet::new();
         let pipeline = build_router_pipeline(
@@ -1360,8 +1282,8 @@ mod tests {
             &runtime,
             dir.path(),
             &principal,
-            Vec::new(),
-            &HashMap::new(),
+            router_entries,
+            &registry,
             &mut slot_keys,
         )
         .await
@@ -1371,10 +1293,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_chain_with_smart_routing_on_yields_the_builtin_filter() {
-        let pipeline = router_pipeline_for_flag(true)
+    async fn seeded_subscription_preference_chain_yields_the_builtin_filter() {
+        let pipeline = router_pipeline_for_seeded_principal(true)
             .await
-            .expect("flag on produces a pipeline for an empty chain");
+            .expect("seeded entry produces a router pipeline");
 
         assert!(pipeline.instantiation_error.is_none());
         assert_eq!(
@@ -1384,10 +1306,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_chain_with_smart_routing_off_yields_no_pipeline() {
+    async fn empty_router_chain_yields_no_pipeline() {
         assert!(
-            router_pipeline_for_flag(false).await.is_none(),
-            "flag off and no chain entries must inherit the default pipeline"
+            router_pipeline_for_seeded_principal(false).await.is_none(),
+            "an absent chain means no router filter pipeline"
         );
     }
 

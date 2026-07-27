@@ -259,7 +259,8 @@ async fn registry_references_endpoint_lists_chain_and_cascade_delete_removes_it(
             .list_chain_for_principal(principal_id, PluginSlotKind::Router)
             .await
             .unwrap()
-            .is_empty()
+            .iter()
+            .all(|chain| chain.wasm_registry_id != entry.id)
     );
     assert!(
         storage
@@ -289,13 +290,13 @@ async fn registry_cascade_delete_rejects_stale_reference_fingerprint() {
 
     assert_eq!(status, StatusCode::CONFLICT, "body={body}");
     assert_eq!(body["error"], "references_changed");
-    assert_eq!(
+    assert!(
         storage
             .list_chain_for_principal(principal_id, PluginSlotKind::Router)
             .await
             .unwrap()
-            .len(),
-        1
+            .iter()
+            .any(|chain| chain.wasm_registry_id == entry.id)
     );
     assert!(
         storage
@@ -397,6 +398,36 @@ async fn chain_insert_position_before_uses_sparse_between() {
 }
 
 #[tokio::test]
+async fn chain_insert_position_before_seeded_builtin_uses_sparse_order() {
+    let (_dir, storage) = temp_storage().await;
+    let principal_id = seed_principal(&storage, "principal-before-seeded-builtin").await;
+    let entry = seed_registry(&storage, 79, "plugin-before-seeded-builtin").await;
+    let builtin = storage
+        .list_chain_for_principal(principal_id, PluginSlotKind::Router)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|chain| chain.wasm_registry_id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
+        .unwrap();
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, inserted, _) = authed_json(
+        app,
+        "POST",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
+        Some(json!({
+            "slot": "Router",
+            "wasm_registry_id": entry.id,
+            "position": { "before": builtin.id }
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(inserted["order"], -sparse_order::STEP);
+}
+
+#[tokio::test]
 async fn chain_insert_position_first_uses_min_minus_step() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-first").await;
@@ -460,12 +491,9 @@ async fn chain_insert_accepts_builtin_subscription_preference_registry_id() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let entries = chain["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["id"], body["id"]);
-    assert_eq!(
-        entries[0]["wasm_registry_id"],
-        BUILTIN_SUBSCRIPTION_PREFERENCE_ID.to_string()
-    );
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().any(|entry| entry["id"] == body["id"]
+        && entry["wasm_registry_id"] == BUILTIN_SUBSCRIPTION_PREFERENCE_ID.to_string()));
 }
 
 #[tokio::test]
@@ -512,8 +540,13 @@ async fn plugin_chain_accepts_runtime_slot_aliases() {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["entries"].as_array().unwrap().len(), 1);
-        assert_eq!(body["entries"][0]["id"], expected_id.to_string());
+        assert!(
+            body["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == expected_id.to_string())
+        );
     }
 
     for slot in ["sign", "build_signer", "on_unauthorized"] {
@@ -654,17 +687,21 @@ async fn insert_chain_duplicate_router_returns_201_and_lists_both_entries() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let entries = chain["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 2);
+    let matching_entries: Vec<_> = entries
+        .iter()
+        .filter(|chain| chain["wasm_registry_id"] == entry.id.to_string())
+        .collect();
+    assert_eq!(matching_entries.len(), 2);
     let first_id = first.id.to_string();
     assert!(
-        entries
+        matching_entries
             .iter()
-            .any(|entry| entry["id"].as_str() == Some(first_id.as_str()))
+            .any(|chain| chain["id"].as_str() == Some(first_id.as_str()))
     );
     assert!(
-        entries
+        matching_entries
             .iter()
-            .any(|entry| entry["id"].as_str() == Some(second_id.as_str()))
+            .any(|chain| chain["id"].as_str() == Some(second_id.as_str()))
     );
 }
 
@@ -763,7 +800,8 @@ async fn chain_delete_forwards_if_match_to_storage_and_returns_204() {
             .list_chain_for_principal(principal_id, PluginSlotKind::Router)
             .await
             .unwrap()
-            .is_empty()
+            .iter()
+            .all(|entry| entry.id != chain.id)
     );
 }
 

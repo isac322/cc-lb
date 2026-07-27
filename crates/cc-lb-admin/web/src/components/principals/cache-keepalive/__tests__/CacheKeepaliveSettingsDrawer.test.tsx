@@ -27,7 +27,6 @@ const mockPrincipal: queries.Principal = {
       treat_end_turn_as_ambiguous: true,
     },
   },
-  smart_routing_enabled: true,
 };
 
 const mockPrincipalEmpty: queries.Principal = {

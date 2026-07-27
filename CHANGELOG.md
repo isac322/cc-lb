@@ -7,7 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - **BREAKING**: Removed the `event_bus.transport` config key. The event fanout now follows the storage backend: postgres always runs pg_notify fanout, sqlite always uses the in-memory bus. A config that still sets `event_bus.transport` fails to load. The postgres backend now requires `cluster.instance_url` and a cluster token; the Helm chart injects both automatically and fails to render when `secrets.clusterToken` is unset.
-- **BREAKING**: Smart Routing no longer has a `smart_routing_enabled` principal field. The built-in `subscription-preference` filter is the Router chain entry: every new principal receives it at order `0`, and its presence is the enabled state. On upgrade, active principals with an empty Router chain receive that entry; configured chains remain untouched. Use the plugin-chain endpoints to insert, remove, or reorder the entry.
+- **BREAKING**: The `smart_routing_enabled` principal field is removed. The built-in `subscription-preference` filter is the Router chain entry: every new principal receives it at order `0`, and its presence is the enabled state. On upgrade, active principals with an empty Router chain receive that entry; configured chains remain untouched. Use the plugin-chain endpoints to insert, remove, or reorder the entry.
 - Upstream warm-up is now opt-out: `warmup_enabled` defaults to `true` for upstreams created through the admin API and through the OAuth flow. Creating an `anthropic_oauth` upstream no longer fails when warm-up is on without credentials; the warm-up scheduler already skips credential-less upstreams.
 
 ### Fixed
