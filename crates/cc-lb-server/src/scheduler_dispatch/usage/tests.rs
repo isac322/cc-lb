@@ -4,6 +4,23 @@ fn parse(body: &str) -> Vec<SubscriptionQuotaSample> {
     let usage: UsageBody = serde_json::from_str(body).expect("usage body parses");
     records_from_usage(Uuid::nil(), usage, 1_700_000_000_000)
 }
+fn record(
+    records: &[SubscriptionQuotaSample],
+    window: SubscriptionQuotaWindow,
+) -> &SubscriptionQuotaSample {
+    records
+        .iter()
+        .find(|record| record.window == window)
+        .expect("quota window record")
+}
+
+fn sample_windows(records: &[SubscriptionQuotaSample]) -> Vec<SubscriptionQuotaWindow> {
+    records
+        .iter()
+        .filter(|record| record.sample_kind == SubscriptionQuotaSampleKind::Sample)
+        .map(|record| record.window)
+        .collect()
+}
 
 #[test]
 fn rfc3339_resets_at_is_accepted() {
@@ -40,19 +57,23 @@ fn string_resets_at_does_not_poison_other_windows() {
     let records = parse(
         r#"{"five_hour":{"utilization":10,"resets_at":"2026-06-21T20:30:00Z"},"seven_day":{"utilization":3,"resets_at":1800000000}}"#,
     );
-    assert_eq!(records.len(), 2);
+    assert_eq!(records.len(), 6);
+    assert_eq!(sample_windows(&records).len(), 2);
 }
 
 #[test]
-fn full_production_body_produces_all_four_records() {
+fn full_production_body_marks_omitted_windows_absent() {
     let body = r#"{"five_hour":{"utilization":60.0,"resets_at":"2026-06-21T08:10:00.885300+00:00"},"seven_day":{"utilization":21.0,"resets_at":"2026-06-25T19:00:00.885325+00:00"},"seven_day_oauth_apps":null,"seven_day_opus":null,"seven_day_sonnet":{"utilization":0.0,"resets_at":"2026-06-25T18:59:59.885338+00:00"},"extra_usage":{"is_enabled":false,"monthly_limit":null,"used_credits":null}}"#;
     let records = parse(body);
-    let windows: Vec<_> = records.iter().map(|r| r.window).collect();
+    assert_eq!(records.len(), 6);
+    assert_eq!(sample_windows(&records).len(), 4);
     assert_eq!(
-        records.len(),
-        4,
-        "expected 4 records, got windows={:?}",
-        windows
+        record(&records, SubscriptionQuotaWindow::SevenDayOpus).sample_kind,
+        SubscriptionQuotaSampleKind::Absent
+    );
+    assert_eq!(
+        record(&records, SubscriptionQuotaWindow::SevenDayFable).sample_kind,
+        SubscriptionQuotaSampleKind::Absent
     );
 }
 
@@ -75,10 +96,10 @@ fn active_weekly_scoped_fable_limit_emits_normalized_window() {
         r#"{"limits":[{"kind":"weekly_scoped","percent":28,"resets_at":"2026-07-14T00:00:00Z","scope":{"model":{"display_name":"Fable","id":null},"surface":null},"is_active":true}]}"#,
     );
 
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].window, SubscriptionQuotaWindow::SevenDayFable);
-    assert_eq!(records[0].utilization, Some(0.28));
-    assert_eq!(records[0].resets_at_unix_secs, Some(1_783_987_200));
+    let fable = record(&records, SubscriptionQuotaWindow::SevenDayFable);
+    assert_eq!(fable.sample_kind, SubscriptionQuotaSampleKind::Sample);
+    assert_eq!(fable.utilization, Some(0.28));
+    assert_eq!(fable.resets_at_unix_secs, Some(1_783_987_200));
 }
 
 #[test]
@@ -87,8 +108,9 @@ fn active_fable_limit_percent_is_clamped_after_normalization() {
         r#"{"limits":[{"kind":"weekly_scoped","percent":128,"resets_at":1800000000,"scope":{"model":{"display_name":"Fable"}},"is_active":true}]}"#,
     );
 
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].utilization, Some(1.0));
+    let fable = record(&records, SubscriptionQuotaWindow::SevenDayFable);
+    assert_eq!(fable.sample_kind, SubscriptionQuotaSampleKind::Sample);
+    assert_eq!(fable.utilization, Some(1.0));
 }
 
 #[test]
@@ -97,9 +119,9 @@ fn inactive_weekly_scoped_fable_limit_is_still_recorded() {
         r#"{"limits":[{"kind":"weekly_scoped","percent":16,"resets_at":"2026-07-15T15:00:00Z","scope":{"model":{"display_name":"Fable","id":null},"surface":null},"is_active":false}]}"#,
     );
 
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].window, SubscriptionQuotaWindow::SevenDayFable);
-    assert_eq!(records[0].utilization, Some(0.16));
+    let fable = record(&records, SubscriptionQuotaWindow::SevenDayFable);
+    assert_eq!(fable.sample_kind, SubscriptionQuotaSampleKind::Sample);
+    assert_eq!(fable.utilization, Some(0.16));
 }
 
 #[test]
@@ -108,9 +130,9 @@ fn weekly_scoped_fable_limit_without_is_active_is_recorded() {
         r#"{"limits":[{"kind":"weekly_scoped","percent":14,"resets_at":1800000000,"scope":{"model":{"display_name":"Fable"}}}]}"#,
     );
 
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].window, SubscriptionQuotaWindow::SevenDayFable);
-    assert_eq!(records[0].utilization, Some(0.14));
+    let fable = record(&records, SubscriptionQuotaWindow::SevenDayFable);
+    assert_eq!(fable.sample_kind, SubscriptionQuotaSampleKind::Sample);
+    assert_eq!(fable.utilization, Some(0.14));
 }
 
 #[test]
@@ -119,7 +141,11 @@ fn non_weekly_or_non_fable_scoped_limits_are_ignored() {
         r#"{"limits":[{"kind":"monthly_scoped","percent":28,"resets_at":1800000000,"scope":{"model":{"display_name":"Fable"}},"is_active":true},{"kind":"weekly_scoped","percent":28,"resets_at":1800000000,"scope":{"model":{"display_name":"Sonnet"}},"is_active":true}]}"#,
     );
 
-    assert!(records.is_empty());
+    assert!(sample_windows(&records).is_empty());
+    assert_eq!(
+        record(&records, SubscriptionQuotaWindow::SevenDayFable).sample_kind,
+        SubscriptionQuotaSampleKind::Absent
+    );
 }
 
 #[test]
@@ -143,4 +169,25 @@ fn realistic_body_records_inactive_fable_beside_top_level_windows() {
             .any(|r| r.window == SubscriptionQuotaWindow::SevenDay),
         "top-level seven_day still recorded"
     );
+}
+
+#[test]
+fn missing_seven_day_body_marks_only_omitted_windows_absent() {
+    let records = parse(
+        r#"{"five_hour":{"utilization":11.0,"resets_at":"2026-07-27T12:00:00Z"},"limits":[{"kind":"weekly_scoped","percent":16,"resets_at":"2026-08-03T12:00:00Z","scope":{"model":{"display_name":"Fable"}}}]}"#,
+    );
+
+    assert_eq!(
+        sample_windows(&records),
+        vec![
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaWindow::SevenDayFable,
+        ]
+    );
+    let seven_day = record(&records, SubscriptionQuotaWindow::SevenDay);
+    assert_eq!(seven_day.sample_kind, SubscriptionQuotaSampleKind::Absent);
+    assert_eq!(seven_day.observed_at_unix_millis, 1_700_000_000_000);
+    assert!(seven_day.utilization.is_none());
+    assert!(seven_day.status.is_none());
+    assert!(seven_day.resets_at_unix_secs.is_none());
 }

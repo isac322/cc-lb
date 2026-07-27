@@ -560,7 +560,7 @@ fn non_opus_requests_ignore_7d_opus_window() {
 }
 
 #[test]
-fn missing_optional_scoped_windows_are_noop() {
+fn absent_optional_scoped_windows_are_noop() {
     for (model, window) in [
         (SONNET_MODEL, WINDOW_SEVEN_DAY_SONNET),
         (OPUS_MODEL, WINDOW_SEVEN_DAY_OPUS),
@@ -571,7 +571,7 @@ fn missing_optional_scoped_windows_are_noop() {
             vec![
                 fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
                 fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
-                missing(window).build(),
+                absent(window).build(),
             ],
         );
         let output = filter_for_model(std::slice::from_ref(&alive), model);
@@ -582,9 +582,32 @@ fn missing_optional_scoped_windows_are_noop() {
                 .expect("subscription trace")
                 .chosen_tier,
             cc_lb_domain::SubscriptionTier::KnownBase,
-            "model={model} missing optional scoped quota must be a no-op"
+            "model={model} absent optional scoped quota must be a no-op"
         );
     }
+}
+
+#[test]
+fn unobserved_optional_scoped_window_remains_partial_base() {
+    let candidate = oauth_with(
+        "unobserved-opus",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
+            missing(WINDOW_SEVEN_DAY_OPUS).build(),
+        ],
+    );
+
+    let assessment = assess_candidate(
+        &candidate,
+        0,
+        &relevant_base_windows(OPUS_MODEL),
+        &FilterConfig::default(),
+    )
+    .expect("candidate remains assessable");
+
+    assert_eq!(assessment.tier, Tier::PartialBase);
 }
 
 #[test]
@@ -650,6 +673,59 @@ fn non_fable_requests_ignore_exhausted_7d_fable_window() {
             "model={model} must ignore 7d_fable"
         );
         assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+    }
+}
+
+#[test]
+fn model_scoped_weekly_pressure_is_used_without_shared_seven_day() {
+    for (model, window) in [
+        (SONNET_MODEL, WINDOW_SEVEN_DAY_SONNET),
+        (OPUS_MODEL, WINDOW_SEVEN_DAY_OPUS),
+    ] {
+        let available = oauth_at_t0(
+            "available",
+            1,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .util(0.2)
+                    .status("allowed")
+                    .reset_at(T0_SECS + 9_000)
+                    .build(),
+                fresh(window)
+                    .util(0.25)
+                    .status("allowed")
+                    .reset_at(T0_SECS + 302_400)
+                    .build(),
+            ],
+        );
+        let nearly_exhausted = oauth_at_t0(
+            "nearly-exhausted",
+            2,
+            vec![
+                fresh(WINDOW_FIVE_HOUR)
+                    .util(0.2)
+                    .status("allowed")
+                    .reset_at(T0_SECS + 9_000)
+                    .build(),
+                fresh(window)
+                    .util(0.98)
+                    .status("allowed")
+                    .reset_at(T0_SECS + 302_400)
+                    .build(),
+            ],
+        );
+        let windows = relevant_base_windows(model);
+        let available_assessment =
+            assess_candidate(&available, 0, &windows, &FilterConfig::default())
+                .expect("available scoped-weekly candidate is assessable");
+        let nearly_exhausted_assessment =
+            assess_candidate(&nearly_exhausted, 1, &windows, &FilterConfig::default())
+                .expect("nearly exhausted scoped-weekly candidate is assessable");
+
+        assert!(
+            available_assessment.quota_urgency_7d > nearly_exhausted_assessment.quota_urgency_7d,
+            "model={model} must include the observed {window} window in weekly pressure"
+        );
     }
 }
 
@@ -2155,9 +2231,15 @@ fn fresh(window: &str) -> SnapBuilder {
     }
 }
 
+fn absent(window: &str) -> SnapBuilder {
+    SnapBuilder {
+        inner: blank_snapshot(window, SubscriptionQuotaDataState::Absent),
+    }
+}
+
 fn missing(window: &str) -> SnapBuilder {
     SnapBuilder {
-        inner: blank_snapshot(window, SubscriptionQuotaDataState::Missing),
+        inner: blank_snapshot(window, SubscriptionQuotaDataState::Unobserved),
     }
 }
 

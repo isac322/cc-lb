@@ -252,7 +252,7 @@ fn fresh_allowed(
 }
 
 fn missing(window: &str) -> SubscriptionQuotaCandidateSnapshot {
-    blank_snapshot(window, SubscriptionQuotaDataState::Missing)
+    blank_snapshot(window, SubscriptionQuotaDataState::Unobserved)
 }
 
 fn blank_snapshot(

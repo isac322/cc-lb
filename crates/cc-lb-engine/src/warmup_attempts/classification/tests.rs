@@ -40,6 +40,38 @@ fn classifies_429_with_future_seven_day_reset_as_skipped() {
 }
 
 #[test]
+fn classifies_429_with_fable_weekly_and_no_shared_seven_day_as_skipped() {
+    let observations = [quota_observation(
+        SubscriptionQuotaWindow::SevenDayFable,
+        SEVEN_DAY_RESET,
+        Some(SubscriptionQuotaStatus::Rejected),
+        None,
+    )];
+
+    assert_429(&observations, SEVEN_DAY_SKIPPED);
+}
+
+#[test]
+fn classifies_429_preserving_shared_seven_day_precedence() {
+    let observations = [
+        quota_observation(
+            SubscriptionQuotaWindow::SevenDayFable,
+            SEVEN_DAY_RESET + 10_000,
+            Some(SubscriptionQuotaStatus::Rejected),
+            None,
+        ),
+        quota_observation(
+            SubscriptionQuotaWindow::SevenDay,
+            SEVEN_DAY_RESET,
+            Some(SubscriptionQuotaStatus::Rejected),
+            None,
+        ),
+    ];
+
+    assert_429(&observations, SEVEN_DAY_SKIPPED);
+}
+
+#[test]
 fn classifies_429_with_future_five_hour_and_seven_day_reset_as_seven_day_skipped() {
     let observations = [
         quota_observation(

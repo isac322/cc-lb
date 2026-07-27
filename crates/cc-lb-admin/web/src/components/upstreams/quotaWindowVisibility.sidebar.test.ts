@@ -25,7 +25,7 @@ function snap(overrides: Partial<QuotaSnapshot>): QuotaSnapshot {
 describe('selectSidebarQuotaWindows', () => {
   const nowUnixSecs = 1_000_000;
 
-  it('always includes 5h and 7d even when latestWindows is undefined', () => {
+  it('defaults to 5h and 7d before latestWindows loads', () => {
     const result = selectSidebarQuotaWindows({
       latestWindows: undefined,
       nowUnixSecs,
@@ -33,15 +33,34 @@ describe('selectSidebarQuotaWindows', () => {
     expect(result).toEqual(['5h', '7d']);
   });
 
-  it('always includes 5h and 7d even when missing', () => {
+  it('includes unobserved 5h and 7d placeholders', () => {
     const result = selectSidebarQuotaWindows({
       latestWindows: [
-        snap({ window: '5h', state: 'missing', observed_at_unix_millis: null }),
-        snap({ window: '7d', state: 'missing', observed_at_unix_millis: null }),
+        snap({
+          window: '5h',
+          state: 'unobserved',
+          observed_at_unix_millis: null,
+        }),
+        snap({
+          window: '7d',
+          state: 'unobserved',
+          observed_at_unix_millis: null,
+        }),
       ],
       nowUnixSecs,
     });
     expect(result).toEqual(['5h', '7d']);
+  });
+
+  it('hides a proven-absent shared window', () => {
+    const result = selectSidebarQuotaWindows({
+      latestWindows: [
+        snap({ window: '5h' }),
+        snap({ window: '7d', state: 'absent', utilization: null }),
+      ],
+      nowUnixSecs,
+    });
+    expect(result).toEqual(['5h']);
   });
 
   it('includes 7d_fable when observed within the last week', () => {
@@ -83,12 +102,12 @@ describe('selectSidebarQuotaWindows', () => {
     expect(result).toEqual(['5h', '7d']);
   });
 
-  it('drops 7d_fable when missing', () => {
+  it('drops 7d_fable when unobserved', () => {
     const result = selectSidebarQuotaWindows({
       latestWindows: [
         snap({
           window: '7d_fable',
-          state: 'missing',
+          state: 'unobserved',
           observed_at_unix_millis: null,
         }),
       ],

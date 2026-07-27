@@ -44,6 +44,60 @@ fn quota_preflight_skips_fresh_seven_day_exhausted_snapshot() {
 }
 
 #[test]
+fn quota_preflight_skips_fresh_fable_weekly_exhausted_without_shared_seven_day() {
+    let snapshots = [
+        quota_snapshot(
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaDataState::Fresh,
+            Some(0.2),
+            Some(SubscriptionQuotaStatus::Allowed),
+            Some(1_782_018_000),
+        ),
+        quota_snapshot(
+            SubscriptionQuotaWindow::SevenDayFable,
+            SubscriptionQuotaDataState::Fresh,
+            Some(1.0),
+            Some(SubscriptionQuotaStatus::Rejected),
+            Some(1_782_414_000),
+        ),
+    ];
+
+    assert_eq!(
+        quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
+        WarmupQuotaPreflightDecision::SevenDayQuotaExhausted {
+            cycle_key: 1_782_414_000
+        }
+    );
+}
+
+#[test]
+fn quota_preflight_preserves_shared_seven_day_precedence() {
+    let snapshots = [
+        quota_snapshot(
+            SubscriptionQuotaWindow::SevenDayFable,
+            SubscriptionQuotaDataState::Fresh,
+            Some(1.0),
+            Some(SubscriptionQuotaStatus::Rejected),
+            Some(1_782_500_000),
+        ),
+        quota_snapshot(
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaDataState::Fresh,
+            Some(1.0),
+            Some(SubscriptionQuotaStatus::Rejected),
+            Some(1_782_414_000),
+        ),
+    ];
+
+    assert_eq!(
+        quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
+        WarmupQuotaPreflightDecision::SevenDayQuotaExhausted {
+            cycle_key: 1_782_414_000
+        }
+    );
+}
+
+#[test]
 fn quota_preflight_prefers_seven_day_over_five_hour_snapshot() {
     let snapshots = [
         quota_snapshot(
@@ -100,7 +154,7 @@ fn quota_preflight_falls_through_for_stale_or_missing_snapshots() {
         ),
         quota_snapshot(
             SubscriptionQuotaWindow::FiveHour,
-            SubscriptionQuotaDataState::Missing,
+            SubscriptionQuotaDataState::Unobserved,
             None,
             None,
             Some(1_782_018_000),

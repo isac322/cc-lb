@@ -41,16 +41,18 @@ pub struct RateLimitObservation {
     pub reset: Option<String>,
 }
 
-/// Freshness state for subscription quota data exposed to router plugins.
+/// Availability and freshness state for subscription quota data exposed to router plugins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubscriptionQuotaDataState {
-    /// Data is inside the configured routing freshness window.
+    /// A quota observation is inside the configured routing freshness window.
     Fresh,
-    /// Data exists but is older than the configured routing freshness window.
+    /// A quota observation exists but is older than the configured routing freshness window.
     Stale,
-    /// No usable subscription quota data exists for the candidate/window.
-    Missing,
+    /// The latest successful enumeration confirmed that this quota window is not present.
+    Absent,
+    /// No source has observed whether this quota window is present.
+    Unobserved,
 }
 
 /// Latest subscription quota snapshot for one candidate/window.
@@ -102,9 +104,9 @@ pub struct SubscriptionQuotaCandidateSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubscriptionTier {
-    /// All relevant base quota windows are fresh positive signals.
+    /// Every relevant base quota window is fresh positive or proven absent.
     KnownBase,
-    /// At least one base window is a positive signal but not all.
+    /// At least one present base window is positive while another is unobserved or stale.
     PartialBase,
     /// Base quotas are exhausted but extra usage is available.
     Overage,

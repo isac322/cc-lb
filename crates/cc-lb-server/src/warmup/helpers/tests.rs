@@ -21,6 +21,19 @@ fn seven_day_header(
         ..Default::default()
     }
 }
+fn fable_weekly_header(
+    resets_at_unix_secs: u64,
+    status: Option<SubscriptionQuotaStatus>,
+    utilization: Option<f64>,
+) -> UnifiedQuotaObservation {
+    UnifiedQuotaObservation {
+        window: SubscriptionQuotaWindow::SevenDayFable,
+        utilization,
+        status,
+        resets_at_unix_secs: Some(resets_at_unix_secs),
+        ..Default::default()
+    }
+}
 
 #[test]
 fn jitter_is_deterministic() {
@@ -121,6 +134,41 @@ fn classify_429_with_7d_reset_writes_seven_day_window_exhausted() {
                 Some(SubscriptionQuotaStatus::Rejected),
                 None,
             )],
+            1_800_000_000,
+        ),
+        WarmupResult::SevenDayWindowExhausted {
+            resets_at: 1_800_604_800,
+        }
+    );
+}
+
+#[test]
+fn classify_429_with_fable_weekly_reset_writes_seven_day_window_exhausted() {
+    assert_eq!(
+        classify_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            &[fable_weekly_header(
+                1_800_604_800,
+                Some(SubscriptionQuotaStatus::Rejected),
+                None,
+            )],
+            1_800_000_000,
+        ),
+        WarmupResult::SevenDayWindowExhausted {
+            resets_at: 1_800_604_800,
+        }
+    );
+}
+
+#[test]
+fn classify_429_preserves_shared_seven_day_precedence() {
+    assert_eq!(
+        classify_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            &[
+                fable_weekly_header(1_800_700_000, Some(SubscriptionQuotaStatus::Rejected), None,),
+                seven_day_header(1_800_604_800, Some(SubscriptionQuotaStatus::Rejected), None,),
+            ],
             1_800_000_000,
         ),
         WarmupResult::SevenDayWindowExhausted {

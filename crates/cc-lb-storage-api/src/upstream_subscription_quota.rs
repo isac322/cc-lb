@@ -78,6 +78,15 @@ impl SubscriptionQuotaWindow {
         })
     }
 
+    pub const fn is_weekly(self) -> bool {
+        match self {
+            Self::SevenDay | Self::SevenDaySonnet | Self::SevenDayOpus | Self::SevenDayFable => {
+                true
+            }
+            Self::FiveHour | Self::Overage | Self::Unified => false,
+        }
+    }
+
     pub const fn all() -> &'static [SubscriptionQuotaWindow] {
         &[
             Self::FiveHour,
@@ -113,6 +122,23 @@ mod subscription_quota_window_tests {
             window
         );
         assert!(SubscriptionQuotaWindow::all().contains(&window));
+    }
+
+    #[test]
+    fn weekly_classification_covers_every_quota_window() {
+        for window in SubscriptionQuotaWindow::all() {
+            assert_eq!(
+                window.is_weekly(),
+                matches!(
+                    window,
+                    SubscriptionQuotaWindow::SevenDay
+                        | SubscriptionQuotaWindow::SevenDaySonnet
+                        | SubscriptionQuotaWindow::SevenDayOpus
+                        | SubscriptionQuotaWindow::SevenDayFable
+                ),
+                "window={window:?}"
+            );
+        }
     }
 
     #[test]
@@ -206,14 +232,17 @@ impl SubscriptionQuotaStatus {
     }
 }
 
-/// `Sample` is a real quota observation. `ProcessStart` is a synthetic marker
-/// emitted once on writer/poller boot so downstream Δ-rate estimators can
-/// detect that the dedup cache restarted and avoid attributing a discontinuity
-/// to a spike. See `SubscriptionQuotaSeriesQuery` consumers (R3 prediction).
+/// `Sample` is a real quota observation. `Absent` is a fresh successful API
+/// enumeration that did not include this window. `ProcessStart` is a synthetic
+/// marker emitted once on writer/poller boot so downstream Δ-rate estimators
+/// can detect that the dedup cache restarted and avoid attributing a
+/// discontinuity to a spike. See `SubscriptionQuotaSeriesQuery` consumers
+/// (R3 prediction).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubscriptionQuotaSampleKind {
     Sample,
+    Absent,
     ProcessStart,
 }
 
@@ -221,6 +250,7 @@ impl SubscriptionQuotaSampleKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Sample => "sample",
+            Self::Absent => "absent",
             Self::ProcessStart => "process_start",
         }
     }
@@ -229,6 +259,7 @@ impl SubscriptionQuotaSampleKind {
     pub fn from_str(value: &str) -> Option<Self> {
         Some(match value {
             "sample" => Self::Sample,
+            "absent" => Self::Absent,
             "process_start" => Self::ProcessStart,
             _ => return None,
         })
