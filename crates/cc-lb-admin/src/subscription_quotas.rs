@@ -1747,7 +1747,7 @@ fn build_analysis_window(
         });
     let data_state = latest
         .map(|snapshot| data_state_str(snapshot.state).to_owned())
-        .unwrap_or_else(|| "missing".to_owned());
+        .unwrap_or_else(|| "unobserved".to_owned());
     let cycles = split_reset_cycles(observations);
     let intervals = valid_utilization_intervals(&cycles);
     let actual_account_burn = infer_actual_account_burn(
@@ -2407,7 +2407,8 @@ fn data_state_str(state: SubscriptionQuotaDataState) -> &'static str {
     match state {
         SubscriptionQuotaDataState::Fresh => "fresh",
         SubscriptionQuotaDataState::Stale => "stale",
-        SubscriptionQuotaDataState::Missing => "missing",
+        SubscriptionQuotaDataState::Absent => "absent",
+        SubscriptionQuotaDataState::Unobserved => "unobserved",
     }
 }
 
@@ -2447,6 +2448,15 @@ fn now_unix_millis(clock: &dyn Clock) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quota_data_states_preserve_absent_and_unobserved() {
+        assert_eq!(data_state_str(SubscriptionQuotaDataState::Absent), "absent");
+        assert_eq!(
+            data_state_str(SubscriptionQuotaDataState::Unobserved),
+            "unobserved"
+        );
+    }
 
     #[test]
     fn reset_cycle_splitter_detects_resets_at_change() {

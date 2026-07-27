@@ -45,22 +45,20 @@ pub(super) fn quota_preflight_decision_from_snapshots(
     snapshots: &[SubscriptionQuotaCandidateSnapshot],
     now_unix_secs: i64,
 ) -> WarmupQuotaPreflightDecision {
-    const SEVEN_DAY_WINDOWS: [SubscriptionQuotaWindow; 3] = [
-        SubscriptionQuotaWindow::SevenDay,
-        SubscriptionQuotaWindow::SevenDaySonnet,
-        SubscriptionQuotaWindow::SevenDayOpus,
-    ];
-
-    for window in SEVEN_DAY_WINDOWS {
-        if let Some(cycle_key) = snapshots
-            .iter()
-            .find(|snapshot| quota_snapshot_matches_window(snapshot, window))
-            .filter(|snapshot| quota_snapshot_is_usable(snapshot, now_unix_secs))
-            .filter(|snapshot| quota_snapshot_is_exhausted(snapshot))
-            .and_then(|snapshot| quota_snapshot_future_reset(snapshot, now_unix_secs))
-        {
-            return WarmupQuotaPreflightDecision::SevenDayQuotaExhausted { cycle_key };
-        }
+    if let Some(cycle_key) = SubscriptionQuotaWindow::all()
+        .iter()
+        .copied()
+        .filter(|window| window.is_weekly())
+        .find_map(|window| {
+            snapshots
+                .iter()
+                .find(|snapshot| quota_snapshot_matches_window(snapshot, window))
+                .filter(|snapshot| quota_snapshot_is_usable(snapshot, now_unix_secs))
+                .filter(|snapshot| quota_snapshot_is_exhausted(snapshot))
+                .and_then(|snapshot| quota_snapshot_future_reset(snapshot, now_unix_secs))
+        })
+    {
+        return WarmupQuotaPreflightDecision::SevenDayQuotaExhausted { cycle_key };
     }
 
     match snapshots

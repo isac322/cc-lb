@@ -28,8 +28,13 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
         let mut tx = self.begin_immediate().await?;
         for record in records {
             upsert_latest(&mut tx, record).await?;
-            insert_checkpoint_if_changed(&mut tx, &SubscriptionQuotaCheckpointRecord::from(record))
+            if record.sample_kind != SubscriptionQuotaSampleKind::Absent {
+                insert_checkpoint_if_changed(
+                    &mut tx,
+                    &SubscriptionQuotaCheckpointRecord::from(record),
+                )
                 .await?;
+            }
         }
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())

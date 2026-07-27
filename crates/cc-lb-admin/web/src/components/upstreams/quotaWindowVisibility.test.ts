@@ -115,12 +115,32 @@ describe('selectVisibleGraphWindows', () => {
     expect(result).toEqual([]);
   });
 
-  it('hides a missing window (observed null)', () => {
+  it('hides an unobserved window', () => {
     const result = selectVisibleGraphWindows({
       latestWindows: [
-        snap({ window: '5h', state: 'missing', observed_at_unix_millis: null }),
+        snap({
+          window: '5h',
+          state: 'unobserved',
+          observed_at_unix_millis: null,
+        }),
       ],
       series: [series('5h', [1200])],
+      sinceUnixSecs,
+    });
+    expect(result).toEqual([]);
+  });
+
+  it('hides a proven-absent window even when older series data is in range', () => {
+    const result = selectVisibleGraphWindows({
+      latestWindows: [
+        snap({
+          window: '7d',
+          state: 'absent',
+          observed_at_unix_millis: 1_500_000,
+          utilization: null,
+        }),
+      ],
+      series: [series('7d', [1200])],
       sinceUnixSecs,
     });
     expect(result).toEqual([]);
@@ -205,15 +225,39 @@ describe('selectVisibleGraphWindows', () => {
 describe('selectQuotaCardSnapshots', () => {
   const nowUnixSecs = 1_000_000;
 
-  it('always includes 5h and 7d cards even when missing', () => {
+  it('includes unobserved 5h and 7d placeholders', () => {
     const result = selectQuotaCardSnapshots({
       latestWindows: [
-        snap({ window: '5h', state: 'missing', observed_at_unix_millis: null }),
-        snap({ window: '7d', state: 'missing', observed_at_unix_millis: null }),
+        snap({
+          window: '5h',
+          state: 'unobserved',
+          observed_at_unix_millis: null,
+        }),
+        snap({
+          window: '7d',
+          state: 'unobserved',
+          observed_at_unix_millis: null,
+        }),
       ],
       nowUnixSecs,
     });
     expect(result.map((s) => s.window)).toEqual(['5h', '7d']);
+  });
+
+  it('hides a proven-absent shared window', () => {
+    const result = selectQuotaCardSnapshots({
+      latestWindows: [
+        snap({ window: '5h' }),
+        snap({
+          window: '7d',
+          state: 'absent',
+          utilization: null,
+          observed_at_unix_millis: nowUnixSecs * 1000,
+        }),
+      ],
+      nowUnixSecs,
+    });
+    expect(result.map((s) => s.window)).toEqual(['5h']);
   });
 
   it('includes a model window observed within the last week', () => {
@@ -255,12 +299,12 @@ describe('selectQuotaCardSnapshots', () => {
     expect(result.map((s) => s.window)).toEqual(['7d_fable']);
   });
 
-  it('drops a missing model window', () => {
+  it('drops an unobserved model window', () => {
     const result = selectQuotaCardSnapshots({
       latestWindows: [
         snap({
           window: '7d_opus',
-          state: 'missing',
+          state: 'unobserved',
           observed_at_unix_millis: null,
         }),
       ],
@@ -283,12 +327,12 @@ describe('selectQuotaCardSnapshots', () => {
     expect(result.map((s) => s.window)).toEqual(['overage']);
   });
 
-  it('drops a missing overage card', () => {
+  it('drops an unobserved overage card', () => {
     const result = selectQuotaCardSnapshots({
       latestWindows: [
         snap({
           window: 'overage',
-          state: 'missing',
+          state: 'unobserved',
           extra_usage_enabled: true,
         }),
       ],

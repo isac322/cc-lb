@@ -80,16 +80,57 @@ fn fable_observation_tier_uses_uniform_base_classification() {
 }
 
 #[test]
-fn stale_nonrejected_or_missing_fable_remains_partial_base() {
-    let stale_fable = candidate_with_fable(
+fn stale_nonrejected_fable_remains_partial_base() {
+    let candidate = candidate_with_fable(
         stale(WINDOW_SEVEN_DAY_FABLE)
             .util(0.5)
             .status("allowed")
             .build(),
         None,
     );
-    let missing_fable = oauth_at_t0(
-        "missing-fable",
+
+    let assessment = assess_candidate(
+        &candidate,
+        0,
+        &relevant_base_windows(FABLE_MODEL),
+        &FilterConfig::default(),
+    )
+    .expect("partial Fable candidate is assessable");
+
+    assert_eq!(assessment.tier, Tier::PartialBase);
+}
+
+#[test]
+fn absent_fable_window_is_noop() {
+    let candidate = oauth_at_t0(
+        "absent-fable",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY)
+                .util(0.25)
+                .status("allowed")
+                .reset_at(T0_SECS + 302_400)
+                .build(),
+            absent(WINDOW_SEVEN_DAY_FABLE).build(),
+        ],
+    );
+
+    let assessment = assess_candidate(
+        &candidate,
+        0,
+        &relevant_base_windows(FABLE_MODEL),
+        &FilterConfig::default(),
+    )
+    .expect("candidate with a proven-absent Fable window is assessable");
+
+    assert_eq!(assessment.tier, Tier::KnownBase);
+}
+
+#[test]
+fn unobserved_fable_window_remains_partial_base() {
+    let candidate = oauth_at_t0(
+        "unobserved-fable",
         2,
         vec![
             fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
@@ -101,17 +142,15 @@ fn stale_nonrejected_or_missing_fable_remains_partial_base() {
         ],
     );
 
-    for candidate in [stale_fable, missing_fable] {
-        let assessment = assess_candidate(
-            &candidate,
-            0,
-            &relevant_base_windows(FABLE_MODEL),
-            &FilterConfig::default(),
-        )
-        .expect("partial Fable candidate is assessable");
+    let assessment = assess_candidate(
+        &candidate,
+        0,
+        &relevant_base_windows(FABLE_MODEL),
+        &FilterConfig::default(),
+    )
+    .expect("candidate without a Fable observation is assessable");
 
-        assert_eq!(assessment.tier, Tier::PartialBase);
-    }
+    assert_eq!(assessment.tier, Tier::PartialBase);
 }
 
 #[test]

@@ -739,7 +739,11 @@ export const WINDOW_LABELS: Record<SubscriptionQuotaWindow, string> = {
   unified: 'Unified',
 };
 
-export type SubscriptionQuotaDataState = 'fresh' | 'stale' | 'missing';
+export type SubscriptionQuotaDataState =
+  | 'fresh'
+  | 'stale'
+  | 'absent'
+  | 'unobserved';
 export type SubscriptionQuotaSourceMerge = 'header' | 'api' | 'merged';
 
 export interface QuotaSnapshot {

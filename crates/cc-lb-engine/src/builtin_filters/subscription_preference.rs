@@ -19,11 +19,11 @@
 //!
 //! ## Windows
 //!
-//! Base: shared `5h` and `7d` windows for every model, plus `7d_fable` only for
-//! the canonical model ID `claude-fable-5`. Sonnet and Opus scoped weekly
-//! windows are optional dormant constraints: `7d_sonnet` or `7d_opus` is
-//! enforced only when that candidate has a non-missing snapshot for the
-//! matching model family. `unified` is not itself an exhaustion window; its
+//! Base: every non-missing shared quota window exposed by the upstream, plus
+//! the matching model-scoped weekly window when present. `7d_fable` applies
+//! only to the canonical model ID `claude-fable-5`; `7d_sonnet` and `7d_opus`
+//! apply only to their matching model families. Absent quota kinds are not
+//! synthesized into requirements. `unified` is not itself an exhaustion window; its
 //! top-level flags enrich the overage assessment.
 //!
 //! ## Reset semantics
@@ -398,15 +398,14 @@ fn assess_candidate<'a>(
     let mut hard_negative_count = 0u32;
     let mut total = 0u32;
     let mut five_hour_pressure = 0.0f64;
-    let mut seven_day_pressure = 0.0f64;
-    let mut fable_weekly_pressure = 0.0f64;
-    for window in base_windows.iter().copied().filter(|window| {
-        !matches!(*window, WINDOW_SEVEN_DAY_SONNET | WINDOW_SEVEN_DAY_OPUS)
-            || find_snapshot(candidate, window)
-                .is_some_and(|snapshot| snapshot.state != SubscriptionQuotaDataState::Missing)
-    }) {
-        total += 1;
+    let mut shared_weekly_pressure = 0.0f64;
+    let mut model_scoped_weekly_pressure = 0.0f64;
+    for window in base_windows.iter().copied() {
         let snapshot = find_snapshot(candidate, window);
+        if snapshot.is_some_and(|snapshot| snapshot.state == SubscriptionQuotaDataState::Absent) {
+            continue;
+        }
+        total += 1;
         let signal = classify_base_snapshot(snapshot, now_secs, config);
         match signal {
             BaseSignal::CurrentPositive => {
@@ -416,10 +415,10 @@ fn assess_candidate<'a>(
                         five_hour_pressure = base_window_pressure(snapshot, now_secs);
                     }
                     WINDOW_SEVEN_DAY => {
-                        seven_day_pressure = base_window_pressure(snapshot, now_secs);
+                        shared_weekly_pressure = base_window_pressure(snapshot, now_secs);
                     }
-                    WINDOW_SEVEN_DAY_FABLE => {
-                        fable_weekly_pressure = base_window_pressure(snapshot, now_secs);
+                    WINDOW_SEVEN_DAY_FABLE | WINDOW_SEVEN_DAY_SONNET | WINDOW_SEVEN_DAY_OPUS => {
+                        model_scoped_weekly_pressure = base_window_pressure(snapshot, now_secs);
                     }
                     _ => {}
                 }
@@ -432,10 +431,10 @@ fn assess_candidate<'a>(
                         five_hour_pressure = base_window_pressure(snapshot, now_secs);
                     }
                     WINDOW_SEVEN_DAY => {
-                        seven_day_pressure = base_window_pressure(snapshot, now_secs);
+                        shared_weekly_pressure = base_window_pressure(snapshot, now_secs);
                     }
-                    WINDOW_SEVEN_DAY_FABLE => {
-                        fable_weekly_pressure = base_window_pressure(snapshot, now_secs);
+                    WINDOW_SEVEN_DAY_FABLE | WINDOW_SEVEN_DAY_SONNET | WINDOW_SEVEN_DAY_OPUS => {
+                        model_scoped_weekly_pressure = base_window_pressure(snapshot, now_secs);
                     }
                     _ => {}
                 }
@@ -444,7 +443,8 @@ fn assess_candidate<'a>(
             BaseSignal::Unknown => {}
         }
     }
-    let effective_weekly_pressure = weekly_smoothmax(seven_day_pressure, fable_weekly_pressure);
+    let effective_weekly_pressure =
+        weekly_smoothmax(shared_weekly_pressure, model_scoped_weekly_pressure);
     let base_urgency = weighted_smoothmax(five_hour_pressure, effective_weekly_pressure);
 
     let overage = assess_overage(candidate, config);
@@ -551,7 +551,10 @@ fn base_window_pressure_config(window: &str) -> Option<BaseWindowPressureConfig>
             gamma: FIVE_HOUR_GAMMA,
             target_floor: FIVE_HOUR_TARGET_FLOOR,
         }),
-        WINDOW_SEVEN_DAY | WINDOW_SEVEN_DAY_FABLE => Some(BaseWindowPressureConfig {
+        WINDOW_SEVEN_DAY
+        | WINDOW_SEVEN_DAY_FABLE
+        | WINDOW_SEVEN_DAY_SONNET
+        | WINDOW_SEVEN_DAY_OPUS => Some(BaseWindowPressureConfig {
             window_len_secs: SEVEN_DAY_WINDOW_LEN_SECS,
             gamma: SEVEN_DAY_GAMMA,
             target_floor: SEVEN_DAY_TARGET_FLOOR,
@@ -560,8 +563,8 @@ fn base_window_pressure_config(window: &str) -> Option<BaseWindowPressureConfig>
     }
 }
 
-fn weekly_smoothmax(shared_weekly_pressure: f64, fable_weekly_pressure: f64) -> f64 {
-    (shared_weekly_pressure.powf(SMOOTHMAX_P) + fable_weekly_pressure.powf(SMOOTHMAX_P))
+fn weekly_smoothmax(shared_weekly_pressure: f64, model_scoped_weekly_pressure: f64) -> f64 {
+    (shared_weekly_pressure.powf(SMOOTHMAX_P) + model_scoped_weekly_pressure.powf(SMOOTHMAX_P))
         .powf(1.0 / SMOOTHMAX_P)
 }
 
@@ -591,7 +594,9 @@ fn classify_base_snapshot(
         return BaseSignal::Unknown;
     };
     match snap.state {
-        SubscriptionQuotaDataState::Missing => BaseSignal::Unknown,
+        SubscriptionQuotaDataState::Absent | SubscriptionQuotaDataState::Unobserved => {
+            BaseSignal::Unknown
+        }
         SubscriptionQuotaDataState::Fresh => {
             if snap.disabled_reason.is_some() {
                 return BaseSignal::HardNegative;

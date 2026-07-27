@@ -391,6 +391,21 @@ fn upstream_subscription_quota_store_postgres() {
         upstream_subscription_quota_store::run_all,
     );
 }
+#[test]
+fn upstream_subscription_quota_absent_replaces_latest_without_erasing_history_postgres() {
+    run_postgres_scenario(
+        "upstream_subscription_quota_absent_replaces_latest_without_erasing_history",
+        upstream_subscription_quota_store::absent_replaces_latest_without_erasing_history,
+    );
+}
+
+#[test]
+fn upstream_subscription_quota_absent_is_idempotent_postgres() {
+    run_postgres_scenario(
+        "upstream_subscription_quota_absent_is_idempotent",
+        upstream_subscription_quota_store::absent_is_idempotent,
+    );
+}
 
 #[test]
 fn upstream_subscription_quota_checkpoint_writer_latest_freshness_postgres() {

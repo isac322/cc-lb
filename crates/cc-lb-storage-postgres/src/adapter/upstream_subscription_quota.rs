@@ -30,8 +30,13 @@ impl UpstreamSubscriptionQuotaStore for PostgresStorage {
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         for record in records {
             upsert_latest(&mut tx, record).await?;
-            insert_checkpoint_if_changed(&mut tx, &SubscriptionQuotaCheckpointRecord::from(record))
+            if record.sample_kind != SubscriptionQuotaSampleKind::Absent {
+                insert_checkpoint_if_changed(
+                    &mut tx,
+                    &SubscriptionQuotaCheckpointRecord::from(record),
+                )
                 .await?;
+            }
         }
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())
