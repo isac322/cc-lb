@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -25,6 +25,10 @@ use sqlx::postgres::PgPoolOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
+use tracing::field::{Field, Visit};
+use tracing::{Event, Subscriber};
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::{Layer, prelude::*};
 use url::Url;
 
 const ADMIN_TOKEN: &str = "test-token";
@@ -43,62 +47,114 @@ fn ready_timeout() -> Duration {
 }
 const MESSAGES_BODY: &str = r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":1}"#;
 
-static POSTGRES_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static REBIND_COMPLETIONS: LazyLock<tokio::sync::broadcast::Sender<()>> = LazyLock::new(|| {
+    let (tx, _) = tokio::sync::broadcast::channel(32);
+    let subscriber = tracing_subscriber::registry().with(RebindCompletionLayer { tx: tx.clone() });
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("managed-key test tracing subscriber installs once");
+    tx
+});
+
+const REBIND_TERMINAL_MESSAGES: [&str; 3] = [
+    "dynamic view rebound after runtime change notification",
+    "notify-triggered view rejected: newer generation already resident",
+    "dynamic view rebind failed after runtime change notification",
+];
+
+#[derive(Default)]
+struct EventMessage {
+    value: Option<String>,
+}
+
+impl Visit for EventMessage {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.value = Some(format!("{value:?}"));
+        }
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.value = Some(value.to_owned());
+        }
+    }
+}
+
+struct RebindCompletionLayer {
+    tx: tokio::sync::broadcast::Sender<()>,
+}
+
+impl<S> Layer<S> for RebindCompletionLayer
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+        if event.metadata().target() != "cc_lb_server::notify_listener" {
+            return;
+        }
+        let mut message = EventMessage::default();
+        event.record(&mut message);
+        if message.value.as_deref().is_some_and(|message| {
+            REBIND_TERMINAL_MESSAGES
+                .iter()
+                .any(|terminal| message.contains(terminal))
+        }) {
+            let _ = self.tx.send(());
+        }
+    }
+}
+
+fn rebind_completions() -> &'static tokio::sync::broadcast::Sender<()> {
+    &REBIND_COMPLETIONS
+}
 
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-// spawn_ok_upstream serves `{"ok":true}` on any path, which the cc-lb proxy
-// rejects with a 502 BAD_GATEWAY / "upstream request failed" Transport error
-// (lifecycle.rs:912) before it can return the body. Fixing the test requires
-// either swapping the fixture for fake-anthropic with proper Anthropic Message
-// JSON or adjusting the assertion - both are master-side concerns separate
-// from the multi-instance DB-sharing coverage already provided by
-// concurrent_cross_instance_issue.
-#[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cross_instance_issue_auth_revoke() -> TestResult<()> {
     let Some(database_url) = ci_postgres_url() else {
         eprintln!("skipped: CI_POSTGRES_URL unset");
         return Ok(());
     };
-    let _serial = postgres_test_lock().lock().await;
+    let rebind_completions = rebind_completions();
+    let _serial = crate::common::postgres_test_lock(&database_url).await?;
 
     reset_managed_key_tables(&database_url).await?;
     let upstream = spawn_ok_upstream().await?;
     let (instance_a, instance_b) = spawn_two_instances(&database_url, upstream.addr).await?;
 
+    let mut issue_rebinds = rebind_completions.subscribe();
     let issued = issue_key(instance_a.admin_addr, "issued-on-instance-a").await?;
     assert_eq!(issued.principal_id, PRINCIPAL_ID);
-
-    let authenticated = proxy_messages(instance_b.proxy_addr, &issued.plaintext_key).await?;
-    assert_eq!(
-        authenticated.status, 200,
-        "instance B should accept key issued by instance A: body={}",
-        authenticated.body
-    );
+    let authenticated = wait_for_proxy_status(
+        instance_b.proxy_addr,
+        &issued.plaintext_key,
+        200,
+        401,
+        &mut issue_rebinds,
+    )
+    .await?;
     assert!(
-        authenticated.body.contains("\"ok\":true"),
+        authenticated.body.contains(r#""type":"message""#),
         "unexpected proxy success body: {}",
         authenticated.body
     );
 
+    let mut revoke_rebinds = rebind_completions.subscribe();
     let revoked = revoke_key(instance_a.admin_addr, &issued.key_id).await?;
     assert_eq!(
         revoked.status, 200,
         "instance A revoke should succeed: body={}",
         revoked.body
     );
-
-    let rejected = proxy_messages(instance_b.proxy_addr, &issued.plaintext_key).await?;
-    assert_eq!(
-        rejected.status, 401,
-        "instance B should reject key revoked by instance A: body={}",
-        rejected.body
-    );
-    assert_ne!(
-        rejected.status, 503,
-        "revoked key must not look unavailable"
-    );
+    wait_for_proxy_status(
+        instance_b.proxy_addr,
+        &issued.plaintext_key,
+        401,
+        200,
+        &mut revoke_rebinds,
+    )
+    .await?;
 
     Ok(())
 }
@@ -109,7 +165,8 @@ async fn concurrent_cross_instance_issue() -> TestResult<()> {
         eprintln!("skipped: CI_POSTGRES_URL unset");
         return Ok(());
     };
-    let _serial = postgres_test_lock().lock().await;
+    let _ = rebind_completions();
+    let _serial = crate::common::postgres_test_lock(&database_url).await?;
 
     reset_managed_key_tables(&database_url).await?;
     let upstream = spawn_ok_upstream().await?;
@@ -146,10 +203,6 @@ async fn concurrent_cross_instance_issue() -> TestResult<()> {
 
 fn ci_postgres_url() -> Option<String> {
     std::env::var("CI_POSTGRES_URL").ok()
-}
-
-fn postgres_test_lock() -> &'static tokio::sync::Mutex<()> {
-    POSTGRES_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 async fn spawn_two_instances(
@@ -286,6 +339,9 @@ async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
     sqlx::query("TRUNCATE managed_api_key_index_v1, managed_api_keys_v1")
         .execute(&pool)
         .await?;
+    sqlx::query("DELETE FROM upstream_spec_v1 WHERE name = 'test-upstream'")
+        .execute(&pool)
+        .await?;
     sqlx::query("DROP SCHEMA IF EXISTS apalis CASCADE")
         .execute(&pool)
         .await?;
@@ -315,7 +371,7 @@ async fn spawn_ok_upstream() -> TestResult<RunningUpstream> {
         (
             StatusCode::OK,
             [("content-type", "application/json")],
-            r#"{"ok":true}"#,
+            r#"{"id":"msg_multi_instance","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":7,"output_tokens":3}}"#,
         )
             .into_response()
     }));
@@ -412,6 +468,47 @@ async fn admin_post_body(
     .await
 }
 
+async fn wait_for_proxy_status(
+    proxy_addr: SocketAddr,
+    api_key: &str,
+    expected_status: u16,
+    transitional_status: u16,
+    rebinds: &mut tokio::sync::broadcast::Receiver<()>,
+) -> TestResult<RawResponse> {
+    let mut observed_rebinds = 0u64;
+    let mut last_response = None;
+    let result = tokio::time::timeout(ready_timeout(), async {
+        loop {
+            match rebinds.recv().await {
+                Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Err(error("rebind completion channel closed"));
+                }
+            }
+            observed_rebinds += 1;
+            let response = proxy_messages(proxy_addr, api_key).await?;
+            if response.status == expected_status {
+                return Ok(response);
+            }
+            if response.status != transitional_status {
+                return Err(error(format!(
+                    "instance {proxy_addr} returned unexpected status {} after rebind: body={}",
+                    response.status, response.body
+                )));
+            }
+            last_response = Some(response);
+        }
+    })
+    .await;
+    match result {
+        Ok(result) => result,
+        Err(_) => Err(error(format!(
+            "instance {proxy_addr} did not return status {expected_status} after \
+             {observed_rebinds} completed rebinds; last_response={last_response:?}"
+        ))),
+    }
+}
+
 async fn wait_for_status(addr: SocketAddr, path: &str, status: u16) -> TestResult<()> {
     let deadline = Instant::now() + ready_timeout();
     loop {
@@ -480,23 +577,22 @@ async fn raw_http(addr: SocketAddr, request: &str) -> TestResult<RawResponse> {
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
         .unwrap_or(0);
-    let (_headers, body) = split_response(&text);
+    let body = response_body(&text);
     Ok(RawResponse { status, body })
 }
 
-fn split_response(text: &str) -> (String, String) {
+fn response_body(text: &str) -> String {
     let Some((headers, body)) = text.split_once("\r\n\r\n") else {
-        return (text.to_owned(), String::new());
+        return String::new();
     };
-    let body = if headers
+    if headers
         .lines()
         .any(|line| line.eq_ignore_ascii_case("transfer-encoding: chunked"))
     {
         decode_chunked_body(body).unwrap_or_else(|| body.to_owned())
     } else {
         body.to_owned()
-    };
-    (headers.to_owned(), body)
+    }
 }
 
 fn decode_chunked_body(body: &str) -> Option<String> {

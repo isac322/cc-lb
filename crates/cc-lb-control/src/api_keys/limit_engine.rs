@@ -1,5 +1,8 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Weak};
+use std::sync::{
+    Arc, Weak,
+    atomic::{AtomicU32, Ordering},
+};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -7,7 +10,10 @@ use cc_lb_storage_api::types::{
     KeyStatus as StoredKeyStatus, PrincipalLimitIdentityKind, PrincipalLimitKind,
     PrincipalLimitState, StoredApiKeyRecord,
 };
-use cc_lb_storage_api::{RequestEvent, Storage, StorageError};
+use cc_lb_storage_api::{
+    ApiKeyUsage, ApiKeyUsageBucketDelta, ApiKeyUsageBucketKey, ApiKeyUsageBucketQuery,
+    ApiKeyUsageFlush, ApiKeyUsageFlushResult, Storage, StorageError,
+};
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use uuid::Uuid;
@@ -25,8 +31,17 @@ use cc_lb_clock::{ClockHandle, unix_secs};
 pub type ReservationId = String;
 
 type RollingKey = (String, LimitKind, u64);
-const STARTUP_REPLAY_PAGE_LIMIT: usize = 50_000;
-const STARTUP_REPLAY_WINDOWS_SECS: &[u64] = &[60, 3_600, 18_000, 604_800];
+const API_KEY_USAGE_WRITER_LEASE_SECS: u64 = 30;
+const API_KEY_USAGE_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+const API_KEY_USAGE_REFRESH_BATCH_SIZE: usize = 100;
+const API_KEY_USAGE_COLD_ALLOWANCE_DIVISOR: i64 = 10;
+const API_KEY_USAGE_OUTAGE_CEILING_SECS: u64 = 300;
+const API_KEY_USAGE_RETENTION_MARGIN_SECS: u64 = 3_600;
+const API_KEY_USAGE_PENDING_MAX_ENTRIES: usize = 100_000;
+const API_KEY_USAGE_PENDING_TARGET_ENTRIES: usize = 90_000;
+const API_KEY_USAGE_WRITER_INACTIVE_AFTER_SECS: u64 = 60;
+const API_KEY_USAGE_COMPACTION_BATCH_SIZE: usize = 1_000;
+const API_KEY_USAGE_FINAL_FLUSH_MAX_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdentityFilter {
@@ -73,10 +88,73 @@ pub struct LimitEngine {
 
 struct LimitEngineInner {
     rolling: RwLock<HashMap<RollingKey, RingCounter>>,
+    remote_rolling: RwLock<HashMap<RollingKey, RingCounter>>,
     effective_limits: RwLock<HashMap<(String, String), Vec<Limit>>>,
     reservations: Mutex<HashMap<ReservationId, ReservationRecord>>,
     concurrent_mgr: Arc<KeyConcurrencyManager>,
     clock: ClockHandle,
+    durable_usage: RwLock<Option<Arc<DurableApiKeyUsage>>>,
+}
+
+struct DurableApiKeyUsage {
+    storage: Arc<dyn Storage>,
+    writer_epoch: RwLock<Uuid>,
+    pending: Mutex<HashMap<ApiKeyUsageBucketKey, ApiKeyUsage>>,
+    in_flight: Mutex<Option<ApiKeyUsageFlush>>,
+    key_limits: RwLock<KeyLimitRegistry>,
+    refreshed_at: RwLock<HashMap<String, u64>>,
+    refresh_cursor: AtomicU32,
+}
+
+#[derive(Default)]
+struct KeyLimitRegistry {
+    by_key: HashMap<String, Vec<Limit>>,
+    sorted_key_ids: Vec<String>,
+}
+
+impl KeyLimitRegistry {
+    fn record(&mut self, key_id: String, limits: Vec<Limit>) {
+        if !self.by_key.contains_key(&key_id) {
+            let index = self
+                .sorted_key_ids
+                .binary_search(&key_id)
+                .unwrap_or_else(|index| index);
+            self.sorted_key_ids.insert(index, key_id.clone());
+        }
+        self.by_key.insert(key_id, limits);
+    }
+}
+
+pub struct ApiKeyUsageHandle {
+    cancel: tokio_util::sync::CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ApiKeyUsageHandle {
+    pub async fn shutdown(self) {
+        self.cancel.cancel();
+        let _ = self.task.await;
+    }
+}
+
+impl DurableApiKeyUsage {
+    fn record(&self, key_id: &str, bucket_widths: &[u64], usage: ApiKeyUsage, now_sec: u64) {
+        let mut pending = self.pending.lock();
+        for bucket_width_secs in bucket_widths {
+            let bucket_start_unix_secs = now_sec - now_sec % bucket_width_secs;
+            let key = ApiKeyUsageBucketKey {
+                key_id: key_id.to_owned(),
+                bucket_width_secs: *bucket_width_secs,
+                bucket_start_unix_secs,
+            };
+            add_usage(pending.entry(key).or_default(), usage);
+        }
+        bound_pending_usage(&mut pending, now_sec);
+    }
+
+    fn record_key_limits(&self, key_id: String, limits: Vec<Limit>) {
+        self.key_limits.write().record(key_id, limits);
+    }
 }
 
 pub struct Reservation {
@@ -114,12 +192,14 @@ impl Reservation {
 struct ReservationRecord {
     key_id: String,
     reserved: Vec<ReservedAmount>,
+    durable_bucket_widths: Vec<u64>,
     /// Held here to keep the concurrent-request slot occupied until refund
     /// or reconcile removes the record.
     concurrent_guards: Vec<KeyConcurrencyGuard>,
     created_at: Instant,
 }
 
+#[derive(Clone)]
 struct ReservedAmount {
     kind: LimitKind,
     window_sec: u64,
@@ -139,6 +219,7 @@ pub enum RejectReason {
     CostRateLimit,
     ConcurrentRateLimit,
     CostUnavailable,
+    UnsupportedLimitWindow { window_secs: u64 },
     OutputCapExceeded { cap: i64, requested: i64 },
 }
 
@@ -160,8 +241,39 @@ impl RingCounter {
         self.buckets.iter().map(|(_, delta)| *delta).sum()
     }
 
+    fn total_at(&self, now_sec: u64) -> i64 {
+        self.buckets
+            .iter()
+            .filter(|(bucket_sec, _)| bucket_sec.saturating_add(self.window_sec) > now_sec)
+            .map(|(_, delta)| *delta)
+            .sum()
+    }
+
     pub fn record(&mut self, now_sec: u64, delta: i64) {
-        self.buckets.push_back((now_sec, delta));
+        let bucket_width = durable_bucket_width(self.window_sec).unwrap_or(self.window_sec.max(1));
+        let bucket_start = now_sec - now_sec % bucket_width;
+        match self.buckets.back().copied() {
+            None => self.buckets.push_back((bucket_start, delta)),
+            Some((last_start, _)) if last_start == bucket_start => {
+                let (_, last_delta) = self.buckets.back_mut().expect("last bucket exists");
+                *last_delta = last_delta.saturating_add(delta);
+            }
+            Some((last_start, _)) if last_start < bucket_start => {
+                self.buckets.push_back((bucket_start, delta));
+            }
+            Some(_) => {
+                let index = self
+                    .buckets
+                    .iter()
+                    .position(|(existing_start, _)| *existing_start >= bucket_start)
+                    .expect("out-of-order bucket has an insertion point");
+                if self.buckets[index].0 == bucket_start {
+                    self.buckets[index].1 = self.buckets[index].1.saturating_add(delta);
+                } else {
+                    self.buckets.insert(index, (bucket_start, delta));
+                }
+            }
+        }
         self.evict_old(now_sec);
     }
 
@@ -175,6 +287,13 @@ impl RingCounter {
     fn oldest_bucket_sec(&mut self, now_sec: u64) -> Option<u64> {
         self.evict_old(now_sec);
         self.buckets.front().map(|(bucket_sec, _)| *bucket_sec)
+    }
+
+    fn oldest_at(&self, now_sec: u64) -> Option<u64> {
+        self.buckets
+            .iter()
+            .find(|(bucket_sec, _)| bucket_sec.saturating_add(self.window_sec) > now_sec)
+            .map(|(bucket_sec, _)| *bucket_sec)
     }
 
     fn evict_old(&mut self, now_sec: u64) {
@@ -193,12 +312,82 @@ impl LimitEngine {
         Arc::new(Self {
             inner: Arc::new(LimitEngineInner {
                 rolling: RwLock::new(HashMap::new()),
+                remote_rolling: RwLock::new(HashMap::new()),
                 effective_limits: RwLock::new(HashMap::new()),
                 reservations: Mutex::new(HashMap::new()),
                 concurrent_mgr,
                 clock,
+                durable_usage: RwLock::new(None),
             }),
         })
+    }
+
+    pub async fn start_durable_usage_sync(
+        self: &Arc<Self>,
+        storage: Arc<dyn Storage>,
+    ) -> Result<ApiKeyUsageHandle, StorageError> {
+        let now_sec = unix_secs(self.inner.clock.now());
+        let writer_epoch = Uuid::now_v7();
+        storage
+            .register_api_key_usage_writer(
+                writer_epoch,
+                now_sec.saturating_add(API_KEY_USAGE_WRITER_LEASE_SECS),
+            )
+            .await?;
+        let state = Arc::new(DurableApiKeyUsage {
+            storage,
+            writer_epoch: RwLock::new(writer_epoch),
+            pending: Mutex::new(HashMap::new()),
+            in_flight: Mutex::new(None),
+            key_limits: RwLock::new(KeyLimitRegistry::default()),
+            refreshed_at: RwLock::new(HashMap::new()),
+            refresh_cursor: AtomicU32::new(0),
+        });
+        *self.inner.durable_usage.write() = Some(state.clone());
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let engine = self.clone();
+        let task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(API_KEY_USAGE_FLUSH_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = task_cancel.cancelled() => {
+                        if let Err(error) = flush_all_durable_api_key_usage(
+                            &engine,
+                            &state,
+                            unix_secs(engine.inner.clock.now()),
+                        ).await {
+                            tracing::warn!(%error, "final durable API-key usage flush failed");
+                        }
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        let now_sec = unix_secs(engine.inner.clock.now());
+                        if let Err(error) = flush_durable_api_key_usage(&engine, &state, now_sec).await {
+                            tracing::warn!(%error, "durable API-key usage flush failed; continuing with local counters");
+                        }
+                        if let Err(error) = refresh_remote_api_key_usage(&engine, &state, now_sec).await {
+                            tracing::warn!(%error, "durable API-key usage refresh failed; freezing last remote snapshot");
+                        }
+                    }
+                }
+            }
+        });
+        Ok(ApiKeyUsageHandle { cancel, task })
+    }
+
+    pub const fn durable_usage_retention_secs() -> u64 {
+        604_800 + API_KEY_USAGE_RETENTION_MARGIN_SECS
+    }
+
+    pub const fn durable_usage_writer_inactive_after_secs() -> u64 {
+        API_KEY_USAGE_WRITER_INACTIVE_AFTER_SECS
+    }
+
+    pub const fn durable_usage_compaction_batch_size() -> usize {
+        API_KEY_USAGE_COMPACTION_BATCH_SIZE
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -239,16 +428,35 @@ impl LimitEngine {
         }
 
         let effective_limits = effective_limits(record, view.default_limits(principal_id));
+        let durable_usage = self.inner.durable_usage.read().clone();
+        let mut durable_bucket_widths = Vec::new();
+        if let Some(state) = durable_usage.as_ref() {
+            for limit in &effective_limits {
+                if limit.kind == LimitKind::Concurrent {
+                    continue;
+                }
+                let Some(bucket_width) = durable_bucket_width(limit.window_secs) else {
+                    return Err(RejectReason::UnsupportedLimitWindow {
+                        window_secs: limit.window_secs,
+                    });
+                };
+                durable_bucket_widths.push(bucket_width);
+            }
+            durable_bucket_widths.sort_unstable();
+            durable_bucket_widths.dedup();
+            state.record_key_limits(key_id.clone(), effective_limits.clone());
+        }
         let mut reserved = Vec::new();
         let mut concurrent_guards = Vec::new();
 
         for limit in &effective_limits {
             let window_sec = limit.window_secs;
+            let admission_cap = self.admission_cap(&key_id, limit, now_sec);
             match limit.kind {
                 LimitKind::Requests => {
                     let amount = 1;
                     if self.current_total(&key_id, limit.kind, window_sec, now_sec) + amount
-                        > limit.cap_micros
+                        > admission_cap
                     {
                         return Err(RejectReason::RequestsRateLimit);
                     }
@@ -266,7 +474,7 @@ impl LimitEngine {
                         });
                     }
                     if self.current_total(&key_id, limit.kind, window_sec, now_sec) + max_tokens
-                        > limit.cap_micros
+                        > admission_cap
                     {
                         return Err(RejectReason::TokenRateLimit { kind: limit.kind });
                     }
@@ -279,7 +487,7 @@ impl LimitEngine {
                 LimitKind::InputTokens => {
                     if self.current_total(&key_id, limit.kind, window_sec, now_sec)
                         + max_input_estimate
-                        > limit.cap_micros
+                        > admission_cap
                     {
                         return Err(RejectReason::TokenRateLimit { kind: limit.kind });
                     }
@@ -292,7 +500,7 @@ impl LimitEngine {
                 LimitKind::TotalTokens => {
                     let amount = max_input_estimate.saturating_add(max_tokens);
                     if self.current_total(&key_id, limit.kind, window_sec, now_sec) + amount
-                        > limit.cap_micros
+                        > admission_cap
                     {
                         return Err(RejectReason::TokenRateLimit { kind: limit.kind });
                     }
@@ -307,7 +515,7 @@ impl LimitEngine {
                         return Err(RejectReason::CostUnavailable);
                     };
                     if self.current_total(&key_id, limit.kind, window_sec, now_sec) + amount
-                        > limit.cap_micros
+                        > admission_cap
                     {
                         return Err(RejectReason::CostRateLimit);
                     }
@@ -348,6 +556,7 @@ impl LimitEngine {
             ReservationRecord {
                 key_id: key_id.clone(),
                 reserved,
+                durable_bucket_widths,
                 concurrent_guards,
                 created_at: Instant::now(),
             },
@@ -395,6 +604,7 @@ impl LimitEngine {
         let Some(record) = self.inner.reservations.lock().remove(id) else {
             return false;
         };
+        let now_sec = unix_secs(self.inner.clock.now());
         refund_difference(
             &self.inner,
             &record.key_id,
@@ -402,8 +612,21 @@ impl LimitEngine {
             actual_input,
             actual_output,
             actual_cost_micros,
-            unix_secs(self.inner.clock.now()),
+            now_sec,
         );
+        if let Some(state) = self.inner.durable_usage.read().as_ref() {
+            state.record(
+                &record.key_id,
+                &record.durable_bucket_widths,
+                ApiKeyUsage {
+                    requests: 1,
+                    input_tokens: u64_to_i64_saturating(actual_input),
+                    output_tokens: u64_to_i64_saturating(actual_output),
+                    cost_usd_micros: actual_cost_micros,
+                },
+                now_sec,
+            );
+        }
         true
     }
 
@@ -586,69 +809,6 @@ impl LimitEngine {
         }
         sort_windows(windows)
     }
-
-    pub async fn startup_replay(&self, storage: Arc<dyn Storage>) {
-        match self.startup_replay_inner(storage).await {
-            Ok(replayed) => tracing::info!(replayed, "limit engine startup replay completed"),
-            Err(error) => {
-                tracing::warn!(%error, "limit engine startup replay failed; rolling counters start empty")
-            }
-        }
-    }
-
-    async fn startup_replay_inner(&self, storage: Arc<dyn Storage>) -> Result<usize, StorageError> {
-        let max_window = STARTUP_REPLAY_WINDOWS_SECS
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or(0);
-        let now = unix_secs(self.inner.clock.now());
-        let events = storage
-            .query_request_events(
-                now.saturating_sub(max_window),
-                now,
-                STARTUP_REPLAY_PAGE_LIMIT,
-            )
-            .await?;
-        let mut replayed = 0;
-        for event in events {
-            if self.replay_event(&event) {
-                replayed += 1;
-            }
-        }
-        Ok(replayed)
-    }
-
-    fn replay_event(&self, event: &RequestEvent) -> bool {
-        let Some(key_id) = &event.key_id else {
-            return false;
-        };
-        let event_sec = event.ts_ms.map(|ts| ts / 1_000).unwrap_or(event.ts);
-        for window_sec in STARTUP_REPLAY_WINDOWS_SECS {
-            for kind in replay_kinds() {
-                let amount = replay_amount(event, kind);
-                if amount != 0 {
-                    self.record_amount(key_id, kind, *window_sec, amount, event_sec);
-                }
-            }
-        }
-        true
-    }
-
-    #[cfg(test)]
-    fn replay_event_for_test(&self, event: &RequestEvent) -> bool {
-        self.replay_event(event)
-    }
-}
-
-fn replay_kinds() -> [LimitKind; 5] {
-    [
-        LimitKind::Requests,
-        LimitKind::InputTokens,
-        LimitKind::OutputTokens,
-        LimitKind::TotalTokens,
-        LimitKind::CostUsd,
-    ]
 }
 
 impl LimitEngine {
@@ -685,12 +845,40 @@ impl LimitEngine {
         }
     }
 
+    fn admission_cap(&self, key_id: &str, limit: &Limit, now_sec: u64) -> i64 {
+        let Some(state) = self.inner.durable_usage.read().clone() else {
+            return limit.cap_micros;
+        };
+        let refreshed_at = state.refreshed_at.read().get(key_id).copied();
+        let registered_keys = state.key_limits.read().sorted_key_ids.len();
+        let max_staleness = api_key_usage_max_staleness_secs(limit.window_secs, registered_keys);
+        if refreshed_at
+            .is_some_and(|refreshed_at| now_sec.saturating_sub(refreshed_at) <= max_staleness)
+        {
+            return limit.cap_micros;
+        }
+        limit
+            .cap_micros
+            .saturating_div(API_KEY_USAGE_COLD_ALLOWANCE_DIVISOR)
+            .max(1)
+    }
+
     fn current_total(&self, key_id: &str, kind: LimitKind, window_sec: u64, now_sec: u64) -> i64 {
-        let mut rolling = self.inner.rolling.write();
-        rolling
-            .entry((key_id.to_owned(), kind, window_sec))
+        let key = (key_id.to_owned(), kind, window_sec);
+        let local = self
+            .inner
+            .rolling
+            .write()
+            .entry(key.clone())
             .or_insert_with(|| RingCounter::new(window_sec))
-            .current_total(now_sec)
+            .current_total(now_sec);
+        let remote = self
+            .inner
+            .remote_rolling
+            .read()
+            .get(&key)
+            .map_or(0, |counter| counter.total_at(now_sec));
+        local.saturating_add(remote)
     }
 
     fn current_total_and_oldest(
@@ -700,13 +888,33 @@ impl LimitEngine {
         window_sec: u64,
         now_sec: u64,
     ) -> (i64, Option<u64>) {
-        let mut rolling = self.inner.rolling.write();
-        let counter = rolling
-            .entry((key_id.to_owned(), kind, window_sec))
-            .or_insert_with(|| RingCounter::new(window_sec));
-        let total = counter.current_total(now_sec);
-        let oldest = counter.oldest_bucket_sec(now_sec);
-        (total, oldest)
+        let key = (key_id.to_owned(), kind, window_sec);
+        let (local_total, local_oldest) = {
+            let mut rolling = self.inner.rolling.write();
+            let counter = rolling
+                .entry(key.clone())
+                .or_insert_with(|| RingCounter::new(window_sec));
+            (
+                counter.current_total(now_sec),
+                counter.oldest_bucket_sec(now_sec),
+            )
+        };
+        let (remote_total, remote_oldest) = self
+            .inner
+            .remote_rolling
+            .read()
+            .get(&key)
+            .map_or((0, None), |counter| {
+                (counter.total_at(now_sec), counter.oldest_at(now_sec))
+            });
+        (
+            local_total.saturating_add(remote_total),
+            match (local_oldest, remote_oldest) {
+                (Some(left), Some(right)) => Some(left.min(right)),
+                (Some(value), None) | (None, Some(value)) => Some(value),
+                (None, None) => None,
+            },
+        )
     }
 
     fn record_amount(
@@ -737,6 +945,387 @@ impl LimitEngineInner {
             .or_insert_with(|| RingCounter::new(window_sec))
             .record(now_sec, delta);
     }
+}
+
+fn add_usage(aggregate: &mut ApiKeyUsage, usage: ApiKeyUsage) {
+    aggregate.requests = aggregate.requests.saturating_add(usage.requests);
+    aggregate.input_tokens = aggregate.input_tokens.saturating_add(usage.input_tokens);
+    aggregate.output_tokens = aggregate.output_tokens.saturating_add(usage.output_tokens);
+    aggregate.cost_usd_micros = aggregate
+        .cost_usd_micros
+        .saturating_add(usage.cost_usd_micros);
+}
+
+fn bucket_retention_secs(bucket_width_secs: u64) -> u64 {
+    match bucket_width_secs {
+        1 => 60,
+        60 => 3_600,
+        300 => 18_000,
+        3_600 => 604_800,
+        _ => 0,
+    }
+}
+
+fn bound_pending_usage(pending: &mut HashMap<ApiKeyUsageBucketKey, ApiKeyUsage>, now_sec: u64) {
+    bound_pending_usage_to(
+        pending,
+        now_sec,
+        API_KEY_USAGE_PENDING_MAX_ENTRIES,
+        API_KEY_USAGE_PENDING_TARGET_ENTRIES,
+    );
+}
+
+fn bound_pending_usage_to(
+    pending: &mut HashMap<ApiKeyUsageBucketKey, ApiKeyUsage>,
+    now_sec: u64,
+    max_entries: usize,
+    target_entries: usize,
+) {
+    if pending.len() <= max_entries {
+        return;
+    }
+    let before_expiry = pending.len();
+    pending.retain(|key, _| {
+        let retention_secs = bucket_retention_secs(key.bucket_width_secs);
+        retention_secs != 0
+            && key
+                .bucket_start_unix_secs
+                .saturating_add(key.bucket_width_secs.saturating_sub(1))
+                .saturating_add(retention_secs)
+                > now_sec
+    });
+    let expired = before_expiry.saturating_sub(pending.len());
+    if expired > 0 {
+        metrics::counter!(
+            "cc_lb_api_key_usage_pending_compacted_total",
+            "reason" => "expired"
+        )
+        .increment(expired as u64);
+    }
+    if pending.len() <= max_entries {
+        return;
+    }
+
+    let target_entries = target_entries.min(max_entries);
+    let drop_count = pending.len().saturating_sub(target_entries);
+    let mut oldest = pending.keys().cloned().collect::<Vec<_>>();
+    oldest.sort_unstable_by(|left, right| {
+        left.bucket_start_unix_secs
+            .cmp(&right.bucket_start_unix_secs)
+            .then_with(|| left.bucket_width_secs.cmp(&right.bucket_width_secs))
+            .then_with(|| left.key_id.cmp(&right.key_id))
+    });
+    for key in oldest.into_iter().take(drop_count) {
+        pending.remove(&key);
+    }
+    metrics::counter!(
+        "cc_lb_api_key_usage_pending_compacted_total",
+        "reason" => "capacity"
+    )
+    .increment(drop_count as u64);
+    tracing::warn!(
+        dropped = drop_count,
+        retained = pending.len(),
+        "durable API-key usage pending buffer reached capacity; dropped oldest deltas"
+    );
+}
+
+fn durable_bucket_width(window_secs: u64) -> Option<u64> {
+    match window_secs {
+        0..=60 => Some(1),
+        61..=3_600 => Some(60),
+        3_601..=18_000 => Some(300),
+        18_001..=604_800 => Some(3_600),
+        _ => None,
+    }
+}
+
+fn api_key_usage_max_staleness_secs(window_secs: u64, registered_keys: usize) -> u64 {
+    let refresh_cycles = registered_keys.div_ceil(API_KEY_USAGE_REFRESH_BATCH_SIZE);
+    let refresh_cycle_secs = u64::try_from(refresh_cycles)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(API_KEY_USAGE_FLUSH_INTERVAL.as_secs());
+    window_secs
+        .saturating_div(10)
+        .max(refresh_cycle_secs.saturating_mul(2))
+        .min(API_KEY_USAGE_OUTAGE_CEILING_SECS)
+}
+
+fn durable_usage_amount(usage: ApiKeyUsage, kind: LimitKind) -> i64 {
+    match kind {
+        LimitKind::Requests => usage.requests,
+        LimitKind::InputTokens => usage.input_tokens,
+        LimitKind::OutputTokens => usage.output_tokens,
+        LimitKind::TotalTokens => usage.input_tokens.saturating_add(usage.output_tokens),
+        LimitKind::CostUsd => usage.cost_usd_micros,
+        LimitKind::Concurrent => 0,
+    }
+}
+
+async fn flush_durable_api_key_usage(
+    engine: &Arc<LimitEngine>,
+    state: &Arc<DurableApiKeyUsage>,
+    now_sec: u64,
+) -> Result<(), StorageError> {
+    let request = {
+        let mut in_flight = state.in_flight.lock();
+        if in_flight.is_none() {
+            let deltas = state
+                .pending
+                .lock()
+                .drain()
+                .map(|(key, usage)| ApiKeyUsageBucketDelta { key, usage })
+                .collect();
+            *in_flight = Some(ApiKeyUsageFlush {
+                writer_epoch: *state.writer_epoch.read(),
+                flush_id: Uuid::now_v7(),
+                lease_until_unix_secs: now_sec.saturating_add(API_KEY_USAGE_WRITER_LEASE_SECS),
+                deltas,
+            });
+        }
+        let request = in_flight.as_mut().expect("flush initialized");
+        request.lease_until_unix_secs = now_sec.saturating_add(API_KEY_USAGE_WRITER_LEASE_SECS);
+        request.clone()
+    };
+
+    match state.storage.flush_api_key_usage(&request).await {
+        Ok(ApiKeyUsageFlushResult::Applied | ApiKeyUsageFlushResult::AlreadyApplied) => {
+            let mut in_flight = state.in_flight.lock();
+            if in_flight
+                .as_ref()
+                .is_some_and(|current| current.flush_id == request.flush_id)
+            {
+                *in_flight = None;
+            }
+            Ok(())
+        }
+        Ok(ApiKeyUsageFlushResult::LeaseLost) => {
+            handoff_durable_writer(engine, state, now_sec).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn flush_all_durable_api_key_usage(
+    engine: &Arc<LimitEngine>,
+    state: &Arc<DurableApiKeyUsage>,
+    now_sec: u64,
+) -> Result<(), StorageError> {
+    for _ in 0..API_KEY_USAGE_FINAL_FLUSH_MAX_ATTEMPTS {
+        flush_durable_api_key_usage(engine, state, now_sec).await?;
+        if state.in_flight.lock().is_none() && state.pending.lock().is_empty() {
+            return Ok(());
+        }
+    }
+    Err(StorageError::Unavailable {
+        message: format!(
+            "durable API-key usage still pending after {API_KEY_USAGE_FINAL_FLUSH_MAX_ATTEMPTS} final flush attempts"
+        ),
+    })
+}
+
+async fn handoff_durable_writer(
+    engine: &Arc<LimitEngine>,
+    state: &Arc<DurableApiKeyUsage>,
+    now_sec: u64,
+) -> Result<(), StorageError> {
+    let writer_epoch = Uuid::now_v7();
+    state
+        .storage
+        .register_api_key_usage_writer(
+            writer_epoch,
+            now_sec.saturating_add(API_KEY_USAGE_WRITER_LEASE_SECS),
+        )
+        .await?;
+    *state.writer_epoch.write() = writer_epoch;
+    if let Some(in_flight) = state.in_flight.lock().as_mut() {
+        in_flight.writer_epoch = writer_epoch;
+        in_flight.flush_id = Uuid::now_v7();
+        in_flight.lease_until_unix_secs = now_sec.saturating_add(API_KEY_USAGE_WRITER_LEASE_SECS);
+    }
+    state.refreshed_at.write().clear();
+    engine.inner.remote_rolling.write().clear();
+    rebuild_local_usage_after_handoff(engine, state, now_sec);
+    tracing::warn!(%writer_epoch, "durable API-key usage writer lease lost; started fresh epoch");
+    Ok(())
+}
+
+fn rebuild_local_usage_after_handoff(
+    engine: &Arc<LimitEngine>,
+    state: &Arc<DurableApiKeyUsage>,
+    now_sec: u64,
+) {
+    let mut unflushed = state
+        .pending
+        .lock()
+        .iter()
+        .map(|(key, usage)| ApiKeyUsageBucketDelta {
+            key: key.clone(),
+            usage: *usage,
+        })
+        .collect::<Vec<_>>();
+    if let Some(in_flight) = state.in_flight.lock().as_ref() {
+        unflushed.extend(in_flight.deltas.iter().cloned());
+    }
+    unflushed.sort_unstable_by(|left, right| {
+        left.key
+            .bucket_start_unix_secs
+            .cmp(&right.key.bucket_start_unix_secs)
+            .then_with(|| left.key.bucket_width_secs.cmp(&right.key.bucket_width_secs))
+            .then_with(|| left.key.key_id.cmp(&right.key.key_id))
+    });
+    let reservations = engine
+        .inner
+        .reservations
+        .lock()
+        .values()
+        .map(|record| (record.key_id.clone(), record.reserved.clone()))
+        .collect::<Vec<_>>();
+    let limits = state.key_limits.read();
+    engine
+        .inner
+        .rolling
+        .write()
+        .retain(|(key_id, _, _), _| !limits.by_key.contains_key(key_id));
+    for delta in unflushed {
+        let Some(key_limits) = limits.by_key.get(&delta.key.key_id) else {
+            continue;
+        };
+        let observed_at = delta
+            .key
+            .bucket_start_unix_secs
+            .saturating_add(delta.key.bucket_width_secs.saturating_sub(1));
+        for limit in key_limits {
+            if durable_bucket_width(limit.window_secs) != Some(delta.key.bucket_width_secs) {
+                continue;
+            }
+            let amount = durable_usage_amount(delta.usage, limit.kind);
+            if amount != 0 {
+                engine.inner.record_amount(
+                    &delta.key.key_id,
+                    limit.kind,
+                    limit.window_secs,
+                    amount,
+                    observed_at,
+                );
+            }
+        }
+    }
+    for (key_id, reserved) in reservations {
+        if !limits.by_key.contains_key(&key_id) {
+            continue;
+        }
+        for amount in reserved {
+            engine.inner.record_amount(
+                &key_id,
+                amount.kind,
+                amount.window_sec,
+                amount.amount,
+                now_sec,
+            );
+        }
+    }
+    drop(limits);
+}
+
+async fn refresh_remote_api_key_usage(
+    engine: &Arc<LimitEngine>,
+    state: &Arc<DurableApiKeyUsage>,
+    now_sec: u64,
+) -> Result<(), StorageError> {
+    let (batch, limits) = {
+        let registry = state.key_limits.read();
+        if registry.sorted_key_ids.is_empty() {
+            return Ok(());
+        }
+        let start = (state
+            .refresh_cursor
+            .fetch_add(API_KEY_USAGE_REFRESH_BATCH_SIZE as u32, Ordering::AcqRel)
+            as usize)
+            % registry.sorted_key_ids.len();
+        let batch = registry
+            .sorted_key_ids
+            .iter()
+            .cycle()
+            .skip(start)
+            .take(API_KEY_USAGE_REFRESH_BATCH_SIZE.min(registry.sorted_key_ids.len()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let limits = batch
+            .iter()
+            .filter_map(|key_id| {
+                registry
+                    .by_key
+                    .get(key_id)
+                    .cloned()
+                    .map(|limits| (key_id.clone(), limits))
+            })
+            .collect::<HashMap<_, _>>();
+        (batch, limits)
+    };
+    let max_window = limits
+        .values()
+        .flatten()
+        .filter(|limit| limit.kind != LimitKind::Concurrent)
+        .map(|limit| limit.window_secs)
+        .max()
+        .unwrap_or(0);
+    if max_window == 0 {
+        return Ok(());
+    }
+    let exclude_writer_epoch = *state.writer_epoch.read();
+    let buckets = state
+        .storage
+        .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
+            key_ids: batch.clone(),
+            since_unix_secs: now_sec.saturating_sub(max_window),
+            until_unix_secs: now_sec,
+            exclude_writer_epoch,
+        })
+        .await?;
+    let mut replacement = HashMap::<RollingKey, RingCounter>::new();
+    for key_id in &batch {
+        let Some(key_limits) = limits.get(key_id) else {
+            continue;
+        };
+        for limit in key_limits {
+            if limit.kind == LimitKind::Concurrent {
+                continue;
+            }
+            let Some(bucket_width) = durable_bucket_width(limit.window_secs) else {
+                continue;
+            };
+            let mut counter = RingCounter::new(limit.window_secs);
+            for bucket in buckets.iter().filter(|bucket| {
+                bucket.key.key_id == *key_id && bucket.key.bucket_width_secs == bucket_width
+            }) {
+                let amount = durable_usage_amount(bucket.usage, limit.kind);
+                if amount != 0 {
+                    counter.record(
+                        bucket
+                            .key
+                            .bucket_start_unix_secs
+                            .saturating_add(bucket_width.saturating_sub(1)),
+                        amount,
+                    );
+                }
+            }
+            replacement.insert((key_id.clone(), limit.kind, limit.window_secs), counter);
+        }
+    }
+    let batch_keys = batch
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let mut remote = engine.inner.remote_rolling.write();
+    remote.retain(|(key_id, _, _), _| !batch_keys.contains(key_id));
+    remote.extend(replacement);
+    drop(remote);
+    let mut refreshed_at = state.refreshed_at.write();
+    for key_id in batch {
+        refreshed_at.insert(key_id, now_sec);
+    }
+    Ok(())
 }
 
 impl Drop for Reservation {
@@ -908,21 +1497,6 @@ fn effective_limits(record: &StoredApiKeyRecord, defaults: &[Limit]) -> Vec<Limi
     limits
 }
 
-fn replay_amount(event: &RequestEvent, kind: LimitKind) -> i64 {
-    match kind {
-        LimitKind::Requests => 1,
-        LimitKind::InputTokens => event.input_tokens.unwrap_or(0) as i64,
-        LimitKind::OutputTokens => event.output_tokens.unwrap_or(0) as i64,
-        LimitKind::TotalTokens => event
-            .input_tokens
-            .unwrap_or(0)
-            .saturating_add(event.output_tokens.unwrap_or(0))
-            as i64,
-        LimitKind::CostUsd => event.cost_usd_micros.unwrap_or(0).max(0),
-        LimitKind::Concurrent => 0,
-    }
-}
-
 fn principal_limit_kind(kind: PrincipalLimitKind) -> LimitKind {
     match kind {
         PrincipalLimitKind::Requests => LimitKind::Requests,
@@ -1071,8 +1645,11 @@ fn sweep_expired(engine: &LimitEngine, ttl: Duration) {
 
 #[cfg(test)]
 mod tests {
+    use cc_lb_clock::Clock;
     use std::collections::HashMap;
 
+    use cc_lb_storage_api::BackendKind;
+    use cc_lb_storage_api::MetaStore;
     use cc_lb_storage_api::types::{
         PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState,
     };
@@ -1277,42 +1854,222 @@ mod tests {
     }
 
     #[test]
-    fn replay_event_restores_all_rolling_counters() {
-        let engine = LimitEngine::new(
-            Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_clock::SystemClock),
-        );
-        let observed_at_unix_secs = unix_secs(engine.inner.clock.now());
-        let event = RequestEvent {
-            key_id: Some("key-a".to_owned()),
-            ts: observed_at_unix_secs,
-            input_tokens: Some(3),
-            output_tokens: Some(5),
-            cost_usd_micros: Some(11),
-            ..RequestEvent::default()
+    fn ring_counter_keeps_out_of_order_buckets_sorted_for_eviction() {
+        let mut counter = RingCounter::new(60);
+        counter.record(120, 1);
+        counter.record(60, 2);
+
+        assert_eq!(counter.current_total(121), 1);
+        assert_eq!(counter.oldest_bucket_sec(121), Some(120));
+    }
+
+    #[test]
+    fn key_limit_registry_keeps_key_ids_sorted_without_duplicates() {
+        let mut registry = KeyLimitRegistry::default();
+        let limit = Limit {
+            kind: LimitKind::Requests,
+            window_secs: 60,
+            cap_micros: 10,
         };
 
-        assert!(engine.replay_event_for_test(&event));
+        registry.record("key-c".to_owned(), vec![limit]);
+        registry.record("key-a".to_owned(), vec![limit]);
+        registry.record("key-b".to_owned(), vec![limit]);
+        registry.record("key-b".to_owned(), vec![limit]);
 
+        assert_eq!(registry.sorted_key_ids, ["key-a", "key-b", "key-c"]);
+        assert_eq!(registry.by_key.len(), 3);
+    }
+
+    #[test]
+    fn pending_usage_capacity_drops_oldest_entries_to_target() {
+        let mut pending = HashMap::new();
+        for (key_id, bucket_start_unix_secs) in [
+            ("key-a", 100),
+            ("key-b", 101),
+            ("key-c", 102),
+            ("key-d", 103),
+        ] {
+            pending.insert(
+                ApiKeyUsageBucketKey {
+                    key_id: key_id.to_owned(),
+                    bucket_width_secs: 60,
+                    bucket_start_unix_secs,
+                },
+                ApiKeyUsage {
+                    requests: 1,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cost_usd_micros: 0,
+                },
+            );
+        }
+
+        bound_pending_usage_to(&mut pending, 1_000, 3, 2);
+
+        let mut retained = pending
+            .keys()
+            .map(|key| key.key_id.as_str())
+            .collect::<Vec<_>>();
+        retained.sort_unstable();
+        assert_eq!(retained, ["key-c", "key-d"]);
+    }
+
+    #[test]
+    fn max_staleness_covers_two_refresh_cycles_and_remains_bounded() {
+        assert_eq!(api_key_usage_max_staleness_secs(60, 1), 6);
+        assert_eq!(api_key_usage_max_staleness_secs(60, 601), 14);
+
+        assert_eq!(api_key_usage_max_staleness_secs(60, 100_000), 300);
+    }
+
+    fn complete_reserved_request(engine: &Arc<LimitEngine>, reservation: Reservation) {
+        let id = reservation.id().to_owned();
+        reservation.forget();
+        assert!(engine.reconcile_by_id(&id, 0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn durable_usage_coordinates_request_limits_across_engines() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database_url = format!(
+            "sqlite://{}",
+            directory.path().join("durable-limits.sqlite").display()
+        );
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let storage_impl = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+            .await
+            .expect("open sqlite");
+        storage_impl
+            .initialize(BackendKind::Sqlite)
+            .await
+            .expect("migrate sqlite");
+        let storage: Arc<dyn Storage> = Arc::new(storage_impl);
+        let engine_a = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
+        let engine_b = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
+        engine_a
+            .start_durable_usage_sync(storage.clone())
+            .await
+            .expect("start engine A durable usage")
+            .shutdown()
+            .await;
+        engine_b
+            .start_durable_usage_sync(storage.clone())
+            .await
+            .expect("start engine B durable usage")
+            .shutdown()
+            .await;
+
+        let view = PrincipalView::for_tests(
+            "principal-a",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            vec![Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 10,
+            }],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            index_hash: [11u8; 32],
+            key_hash_b64: "durable-key".to_owned(),
+            ..StoredApiKeyRecord::default()
+        };
+        let key_id = key_id_for(&record);
+        let now_sec = unix_secs(clock.now());
+
+        complete_reserved_request(
+            &engine_a,
+            engine_a
+                .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+                .expect("engine A cold allowance"),
+        );
+        complete_reserved_request(
+            &engine_b,
+            engine_b
+                .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+                .expect("engine B cold allowance"),
+        );
+
+        let state_a = engine_a
+            .inner
+            .durable_usage
+            .read()
+            .clone()
+            .expect("engine A durable state");
+        let state_b = engine_b
+            .inner
+            .durable_usage
+            .read()
+            .clone()
+            .expect("engine B durable state");
+        flush_durable_api_key_usage(&engine_a, &state_a, now_sec)
+            .await
+            .expect("flush engine A");
+        flush_durable_api_key_usage(&engine_b, &state_b, now_sec)
+            .await
+            .expect("flush engine B");
+        refresh_remote_api_key_usage(&engine_a, &state_a, now_sec)
+            .await
+            .expect("refresh engine A");
+        refresh_remote_api_key_usage(&engine_b, &state_b, now_sec)
+            .await
+            .expect("refresh engine B");
         assert_eq!(
-            engine.current_total("key-a", LimitKind::Requests, 60, observed_at_unix_secs),
-            1
+            engine_a.current_total(&key_id, LimitKind::Requests, 60, now_sec),
+            2,
+            "engine A should combine its local request with engine B's durable request",
         );
         assert_eq!(
-            engine.current_total("key-a", LimitKind::InputTokens, 60, observed_at_unix_secs),
-            3
+            engine_b.current_total(&key_id, LimitKind::Requests, 60, now_sec),
+            2,
+            "engine B should combine its local request with engine A's durable request",
         );
+
+        for _ in 0..8 {
+            complete_reserved_request(
+                &engine_a,
+                engine_a
+                    .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+                    .expect("shared request budget remains"),
+            );
+        }
         assert_eq!(
-            engine.current_total("key-a", LimitKind::OutputTokens, 60, observed_at_unix_secs),
-            5
+            engine_a
+                .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+                .err(),
+            Some(RejectReason::RequestsRateLimit),
         );
+
+        flush_durable_api_key_usage(&engine_a, &state_a, now_sec)
+            .await
+            .expect("flush engine A final usage");
+        refresh_remote_api_key_usage(&engine_b, &state_b, now_sec)
+            .await
+            .expect("refresh engine B final usage");
         assert_eq!(
-            engine.current_total("key-a", LimitKind::TotalTokens, 60, observed_at_unix_secs),
-            8
+            engine_b
+                .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+                .err(),
+            Some(RejectReason::RequestsRateLimit),
         );
+
+        let buckets = storage
+            .query_api_key_usage_buckets(&ApiKeyUsageBucketQuery {
+                key_ids: vec![key_id],
+                since_unix_secs: now_sec.saturating_sub(60),
+                until_unix_secs: now_sec,
+                exclude_writer_epoch: Uuid::nil(),
+            })
+            .await
+            .expect("query durable usage");
         assert_eq!(
-            engine.current_total("key-a", LimitKind::CostUsd, 60, observed_at_unix_secs),
-            11
+            buckets
+                .iter()
+                .map(|bucket| bucket.usage.requests)
+                .sum::<i64>(),
+            10,
         );
     }
 }

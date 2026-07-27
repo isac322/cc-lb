@@ -5149,6 +5149,12 @@ fn limit_rejection_response(
             format!("cost limits unavailable for model {model}"),
             None,
         ),
+        RejectReason::UnsupportedLimitWindow { window_secs } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            format!("API key limit window {window_secs}s is unsupported"),
+            None,
+        ),
         RejectReason::OutputCapExceeded { cap, requested } => (
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
@@ -5208,6 +5214,7 @@ fn limit_violation_name(reason: &RejectReason) -> Option<&'static str> {
         | RejectReason::Expired
         | RejectReason::ModelNotAllowed
         | RejectReason::CostUnavailable
+        | RejectReason::UnsupportedLimitWindow { .. }
         | RejectReason::OutputCapExceeded { .. } => None,
     }
 }

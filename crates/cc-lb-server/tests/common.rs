@@ -26,6 +26,19 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use url::Url;
 
+#[cfg(feature = "postgres")]
+pub async fn postgres_test_lock(database_url: &str) -> Result<sqlx::PgConnection, sqlx::Error> {
+    use sqlx::Connection as _;
+
+    const LOCK_KEY: i64 = 0x4343_4C42_5445_5354;
+    let mut connection = sqlx::PgConnection::connect(database_url).await?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(LOCK_KEY)
+        .execute(&mut connection)
+        .await?;
+    Ok(connection)
+}
+
 pub fn install_prometheus() -> &'static PrometheusHandle {
     static PROMETHEUS: OnceLock<PrometheusHandle> = OnceLock::new();
     PROMETHEUS.get_or_init(|| {
