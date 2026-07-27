@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -47,7 +47,6 @@ fn ready_timeout() -> Duration {
 }
 const MESSAGES_BODY: &str = r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":1}"#;
 
-static POSTGRES_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 static REBIND_COMPLETIONS: LazyLock<tokio::sync::broadcast::Sender<()>> = LazyLock::new(|| {
     let (tx, _) = tokio::sync::broadcast::channel(32);
     let subscriber = tracing_subscriber::registry().with(RebindCompletionLayer { tx: tx.clone() });
@@ -118,7 +117,7 @@ async fn cross_instance_issue_auth_revoke() -> TestResult<()> {
         return Ok(());
     };
     let rebind_completions = rebind_completions();
-    let _serial = postgres_test_lock().lock().await;
+    let _serial = crate::common::postgres_test_lock(&database_url).await?;
 
     reset_managed_key_tables(&database_url).await?;
     let upstream = spawn_ok_upstream().await?;
@@ -167,7 +166,7 @@ async fn concurrent_cross_instance_issue() -> TestResult<()> {
         return Ok(());
     };
     let _ = rebind_completions();
-    let _serial = postgres_test_lock().lock().await;
+    let _serial = crate::common::postgres_test_lock(&database_url).await?;
 
     reset_managed_key_tables(&database_url).await?;
     let upstream = spawn_ok_upstream().await?;
@@ -204,10 +203,6 @@ async fn concurrent_cross_instance_issue() -> TestResult<()> {
 
 fn ci_postgres_url() -> Option<String> {
     std::env::var("CI_POSTGRES_URL").ok()
-}
-
-fn postgres_test_lock() -> &'static tokio::sync::Mutex<()> {
-    POSTGRES_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 async fn spawn_two_instances(

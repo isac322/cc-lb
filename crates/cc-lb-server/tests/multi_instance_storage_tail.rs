@@ -2,7 +2,7 @@
 
 use std::error::Error;
 use std::io;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -37,8 +37,6 @@ fn storage_tail_timeout() -> Duration {
         .unwrap_or(STORAGE_TAIL_TIMEOUT_DEFAULT)
 }
 
-static POSTGRES_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -47,7 +45,7 @@ async fn storage_tail_reaches_second_instance_over_pg_notify() -> TestResult<()>
         eprintln!("SKIP: CI_POSTGRES_URL unset");
         return Ok(());
     };
-    let _serial = postgres_test_lock().lock().await;
+    let _serial = crate::common::postgres_test_lock(&database_url).await?;
 
     reset_request_event_tables(&database_url).await?;
     let instance_a = build_running_app(&database_url, "instance-a").await?;
@@ -94,10 +92,6 @@ async fn storage_tail_reaches_second_instance_over_pg_notify() -> TestResult<()>
 
 fn ci_postgres_url() -> Option<String> {
     std::env::var("CI_POSTGRES_URL").ok()
-}
-
-fn postgres_test_lock() -> &'static tokio::sync::Mutex<()> {
-    POSTGRES_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 async fn reset_request_event_tables(database_url: &str) -> TestResult<()> {
