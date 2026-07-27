@@ -187,6 +187,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    const POSTGRES_LISTENER_ESTABLISHED_PAYLOAD: &str = "postgres-listener-established";
 
     /// Emit `payload` on `channel` repeatedly until a subscriber observes it,
     /// bounded by `RECEIVE_TIMEOUT`. Postgres LISTEN/NOTIFY is best-effort: a
@@ -268,8 +269,14 @@ mod tests {
         listener_application_name: &str,
     ) -> Result<()> {
         let cancel = CancellationToken::new();
-        let handle = spawn_run(Arc::clone(&notifier), cancel.clone());
         let mut receiver = notifier.subscribe().await?;
+        let handle = spawn_run(Arc::clone(&notifier), cancel.clone());
+        recv_matching(
+            &mut receiver,
+            ChangeChannel::Principal,
+            POSTGRES_LISTENER_ESTABLISHED_PAYLOAD,
+        )
+        .await?;
         emit_until_received(
             pool,
             &mut receiver,
@@ -279,6 +286,12 @@ mod tests {
         .await?;
         let terminated_pid = terminate_listener_backend(pool, listener_application_name).await?;
         wait_for_reconnected_listener(pool, listener_application_name, terminated_pid).await?;
+        recv_matching(
+            &mut receiver,
+            ChangeChannel::Principal,
+            POSTGRES_LISTENER_ESTABLISHED_PAYLOAD,
+        )
+        .await?;
         emit_until_received(
             pool,
             &mut receiver,

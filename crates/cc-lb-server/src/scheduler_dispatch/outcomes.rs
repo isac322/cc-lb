@@ -23,10 +23,9 @@ pub(super) fn usage_rollup_outcome(result: UsageRollupResult) -> SchedulerResult
 }
 
 pub(super) fn usage_prune_outcome(result: UsagePruneJobResult) -> SchedulerResult<JobOutcome> {
-    Ok(match result {
-        UsagePruneJobResult::Done { result: _ } => JobOutcome::Done,
-        UsagePruneJobResult::Skip => JobOutcome::Skip,
-    })
+    match result {
+        UsagePruneJobResult::Done { .. } => Ok(JobOutcome::Done),
+    }
 }
 
 pub(super) fn prompt_cache_purge_outcome(

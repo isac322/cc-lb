@@ -846,7 +846,10 @@ async fn build_app_with_storage_inner(
 
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
     let limit_engine = LimitEngine::new(concurrent_mgr, clock.clone());
-    limit_engine.startup_replay(storage.clone()).await;
+    let api_key_usage_handle = limit_engine
+        .start_durable_usage_sync(storage.clone())
+        .await?;
+    let api_key_usage_slot = Arc::new(tokio::sync::Mutex::new(Some(api_key_usage_handle)));
     let limit_reservation_ttl_handle = Some(
         cc_lb_control::api_keys::limit_engine::spawn_reservation_ttl_sweeper(
             limit_engine.clone(),
@@ -985,17 +988,8 @@ async fn build_app_with_storage_inner(
     let dynamic_view_holder = Arc::new(DynamicViewHolder::new(initial_view.clone()));
     let notify_cancel = CancellationToken::new();
     let notifier: Arc<dyn RuntimeChangeNotifier> = storage_for_dynamic.clone();
-    let notifier_task = {
-        let notifier = Arc::clone(&notifier);
-        let cancel = notify_cancel.clone();
-        Some(tokio::spawn(async move {
-            if let Err(error) = notifier.run(cancel).await {
-                tracing::error!(error = %error, "runtime change notifier task failed");
-            }
-        }))
-    };
     let notify_listener = Arc::new(NotifyListener::new(NotifyListenerParams {
-        notifier,
+        notifier: Arc::clone(&notifier),
         cancel: notify_cancel.clone(),
         holder: Arc::clone(&dynamic_view_holder),
         stores: Arc::clone(&stores),
@@ -1012,9 +1006,21 @@ async fn build_app_with_storage_inner(
             .routing_max_staleness_secs,
         clock: clock.clone(),
     }));
-    let notify_listener_task = Some(tokio::spawn(async move {
-        notify_listener.run().await;
-    }));
+    let notify_rx = notify_listener.subscribe_with_retry().await;
+    let notifier_task = {
+        let notifier = Arc::clone(&notifier);
+        let cancel = notify_cancel.clone();
+        Some(tokio::spawn(async move {
+            if let Err(error) = notifier.run(cancel).await {
+                tracing::error!(error = %error, "runtime change notifier task failed");
+            }
+        }))
+    };
+    let notify_listener_task = notify_rx.map(|rx| {
+        tokio::spawn(async move {
+            notify_listener.run_subscribed(rx).await;
+        })
+    });
     let in_memory_bus =
         cc_lb_control::InMemoryBus::with_capacity(config.event_bus.broadcast_capacity);
     let lifecycle_event_logger_rx = in_memory_bus
@@ -1580,6 +1586,18 @@ async fn build_app_with_storage_inner(
             let prompt_cache_observation_slot = prompt_cache_observation_slot.clone();
             async move {
                 let mut guard = prompt_cache_observation_slot.lock().await;
+                if let Some(handle) = guard.take() {
+                    handle.shutdown().await;
+                }
+            }
+        });
+    }
+    {
+        let api_key_usage_slot = api_key_usage_slot.clone();
+        signals.add_shutdown_hook(move || {
+            let api_key_usage_slot = api_key_usage_slot.clone();
+            async move {
+                let mut guard = api_key_usage_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }
