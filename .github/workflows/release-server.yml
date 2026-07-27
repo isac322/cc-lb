@@ -93,7 +93,7 @@ jobs:
           git checkout -B release-plz-server "$TARGET_SHA"
           git branch --set-upstream-to=origin/master release-plz-server
 
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         if: steps.target.outputs.version_changed == 'true' && steps.target.outputs.operation != 'resume'
 
       # release-plz 0.3.160 supports git-only releases, but its release command
