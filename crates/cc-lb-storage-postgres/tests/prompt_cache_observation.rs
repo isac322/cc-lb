@@ -16,9 +16,7 @@ use sqlx::{
 };
 use uuid::Uuid;
 
-const MIGRATIONS: &[&str] = &[include_str!(
-    "../migrations/0030_prompt_cache_observation.sql"
-)];
+use cc_lb_storage_api::{BackendKind, MetaStore};
 
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -141,9 +139,13 @@ impl Fixture {
                 PgConnectOptions::from_str(&url)?.options([("search_path", schema.as_str())]),
             )
             .await?;
-        for migration in MIGRATIONS {
-            sqlx::raw_sql(*migration).execute(&pool).await?;
-        }
+        // Run the real migrator rather than hand-picking migrations. A pinned subset is how this
+        // fixture rotted: it applied only `0030` and never saw `0072` rename `prefix_hash` to
+        // `v3_prefix_key`. `initialize` is the same entry point the sibling fixtures in this
+        // directory use, so it cannot fall behind the migrations directory.
+        PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock))
+            .initialize(BackendKind::Postgres)
+            .await?;
 
         Ok(Some(Self { url, schema, pool }))
     }
@@ -172,6 +174,11 @@ impl Fixture {
     }
 }
 
+/// Opaque to the storage layer: the column has no default or constraint and these tests only
+/// round-trip it, so the value is arbitrary and deliberately not tied to the engine's
+/// HASH_SCHEMA_VERSION (which would drag cc-lb-engine into this crate's dev graph).
+const FIXTURE_SCHEMA_VERSION: u8 = 5;
+
 fn observation(
     upstream_id: Uuid,
     prefix_hash: &str,
@@ -186,7 +193,7 @@ fn observation(
         ttl_class,
         expires_at_unix_secs,
         last_observed_at_unix_secs,
-        hash_schema_version: 4,
+        hash_schema_version: FIXTURE_SCHEMA_VERSION,
         prefix_content_block_index: 7,
         estimated_prefix_tokens: 12_345,
         token_estimate_source: "local_tiktoken_v1".to_owned(),

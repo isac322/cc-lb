@@ -83,7 +83,7 @@ pub fn wide_corpus() -> Vec<CorpusCase> {
             }),
         ),
         case(
-            "empty-and-non-cacheable",
+            "empty-text-and-prefix-only-blocks",
             json!({
                 "model": "claude-sonnet-4-5-20250929",
                 "tools": [null, "not-an-object", 17],

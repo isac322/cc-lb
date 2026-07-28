@@ -1,8 +1,7 @@
 use std::collections::BTreeSet;
 
 use cc_lb_engine::prompt_cache_simulator::{
-    PromptCachePrefixChain, PromptCacheSimulatorKey, V3PromptCacheBlock, V3PromptCacheBlockSource,
-    analyze_v3_prompt_cache,
+    V3PromptCacheBlock, V3PromptCacheBlockSource, analyze_v3_prompt_cache,
 };
 use serde_json::{Value, json};
 
@@ -12,7 +11,7 @@ mod corpus;
 mod oracles;
 
 use oracles::{
-    block_digest_serializer_bytes, digest, digest_bytes_preserving_cache_control,
+    block_digest_serializer_bytes, digest_bytes_preserving_cache_control,
     legacy_block_digest_oracle_bytes, legacy_prefix_oracle_bytes,
     prefix_bytes_stripping_cache_control, prefix_serializer_bytes, token_count,
 };
@@ -23,13 +22,31 @@ const CANONICAL_MODEL: &str = "claude-sonnet-4-5-20250929";
 fn prompt_cache_byte_oracle_matches_current_behavior_over_wide_corpus() {
     let cases = corpus::wide_corpus();
     let mut coverage = BTreeSet::new();
-    let mut saw_empty_non_cacheable = false;
+    let mut saw_prefix_only_blocks = false;
     let mut saw_four_breakpoints = false;
 
     for case in &cases {
         let analysis = analyze_v3_prompt_cache(&case.request, CANONICAL_MODEL);
-        saw_empty_non_cacheable |=
-            case.name == "empty-and-non-cacheable" && analysis.blocks.is_empty();
+        if case.name == "empty-text-and-prefix-only-blocks" {
+            let block_types = analysis
+                .blocks
+                .iter()
+                .filter_map(|block| block.value.get("type").and_then(Value::as_str))
+                .collect::<Vec<_>>();
+            assert_eq!(block_types, vec!["thinking", "unknown"]);
+            assert!(
+                analysis.blocks.iter().all(|block| {
+                    block.value.get("type").and_then(Value::as_str) != Some("text")
+                        || block.value.get("text").and_then(Value::as_str) != Some("")
+                }),
+                "empty text blocks must not participate in the prefix"
+            );
+            assert!(
+                analysis.breakpoints.is_empty(),
+                "prefix-only block types must not become breakpoints"
+            );
+            saw_prefix_only_blocks = true;
+        }
         saw_four_breakpoints |=
             case.name == "four-breakpoint-maximum" && analysis.breakpoints.len() == 4;
 
@@ -44,36 +61,8 @@ fn prompt_cache_byte_oracle_matches_current_behavior_over_wide_corpus() {
             );
         }
 
-        let legacy_digests = analysis
-            .blocks
-            .iter()
-            .map(|block| digest(&legacy_block_digest_oracle_bytes(block)));
-        let serializer_digests = analysis
-            .blocks
-            .iter()
-            .map(|block| digest(&block_digest_serializer_bytes(block)));
-        let legacy_chain = PromptCachePrefixChain::from_block_digests(
-            PromptCacheSimulatorKey::seed(CANONICAL_MODEL),
-            legacy_digests,
-        );
-        let serializer_chain = PromptCachePrefixChain::from_block_digests(
-            PromptCacheSimulatorKey::seed(CANONICAL_MODEL),
-            serializer_digests,
-        );
-
         for breakpoint in &analysis.breakpoints {
             let index = breakpoint.block_index as usize;
-            let legacy_key = legacy_chain
-                .prefix_key(index)
-                .expect("breakpoint index has a legacy prefix key")
-                .to_hex();
-            let serializer_key = serializer_chain
-                .prefix_key(index)
-                .expect("breakpoint index has a serializer prefix key")
-                .to_hex();
-            assert_eq!(serializer_key, legacy_key, "BLAKE3 key: {}", case.name);
-            assert_eq!(breakpoint.prefix_key, legacy_key, "live key: {}", case.name);
-
             let blocks = &analysis.blocks[..=index];
             let legacy_prefix = legacy_prefix_oracle_bytes(CANONICAL_MODEL, blocks);
             let serializer_prefix = prefix_serializer_bytes(CANONICAL_MODEL, blocks);
@@ -94,8 +83,8 @@ fn prompt_cache_byte_oracle_matches_current_behavior_over_wide_corpus() {
     }
 
     assert!(
-        saw_empty_non_cacheable,
-        "empty/non-cacheable corpus case missing"
+        saw_prefix_only_blocks,
+        "empty-text/prefix-only corpus case missing"
     );
     assert!(
         saw_four_breakpoints,
@@ -107,12 +96,14 @@ fn prompt_cache_byte_oracle_matches_current_behavior_over_wide_corpus() {
             "document",
             "image",
             "system-string",
+            "thinking",
             "text",
             "tool_result",
             "tool_use",
             "tools",
+            "unknown",
         ]),
-        "prompt-cache byte-oracle corpus must cover every supported block type"
+        "prompt-cache byte-oracle corpus must cover eligible and prefix-only block types"
     );
 }
 
@@ -133,14 +124,10 @@ fn prompt_cache_byte_oracle_prefix_preserves_cache_control() {
     let stripped_digest_bytes = legacy_block_digest_oracle_bytes(block);
     let preserved_digest_bytes = digest_bytes_preserving_cache_control(block);
     assert_ne!(stripped_digest_bytes, preserved_digest_bytes);
-    let chain = PromptCachePrefixChain::from_block_digests(
-        PromptCacheSimulatorKey::seed(CANONICAL_MODEL),
-        [digest(&stripped_digest_bytes)],
-    );
     assert_eq!(
-        breakpoint.prefix_key,
-        chain.prefix_key(0).expect("sentinel prefix key").to_hex(),
-        "live block digest must strip cache_control"
+        block_digest_serializer_bytes(block),
+        stripped_digest_bytes,
+        "block-digest oracle must strip cache_control"
     );
 
     let preserved_prefix = legacy_prefix_oracle_bytes(CANONICAL_MODEL, &analysis.blocks);
@@ -200,7 +187,8 @@ fn record_coverage(coverage: &mut BTreeSet<&'static str>, block: &V3PromptCacheB
                     "document" => "document",
                     "tool_use" => "tool_use",
                     "tool_result" => "tool_result",
-                    _ => return,
+                    "thinking" => "thinking",
+                    _ => "unknown",
                 });
             }
         }

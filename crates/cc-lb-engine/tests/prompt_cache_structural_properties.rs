@@ -1,12 +1,90 @@
-use serde_json::json;
+use serde_json::{Value, json};
 
 use cc_lb_engine::model_resolution::canonical_model_id;
 use cc_lb_engine::prompt_cache_simulator::{V3PromptCacheBlockSource, analyze_v3_prompt_cache};
 
 const CANONICAL_MODEL: &str = "claude-sonnet-4-5-20250929";
 
+fn salt_scope_request() -> Value {
+    json!({
+        "model": CANONICAL_MODEL,
+        "tools": [{
+            "name":"lookup",
+            "description":"lookup",
+            "input_schema":{"type":"object"},
+            "cache_control":{"type":"ephemeral"}
+        }],
+        "system": [{
+            "type":"text",
+            "text":"stable system",
+            "cache_control":{"type":"ephemeral"}
+        }],
+        "messages": [{"role":"user","content":[{
+            "type":"text",
+            "text":"stable message",
+            "cache_control":{"type":"ephemeral"}
+        }]}]
+    })
+}
+
+fn with_top_level(mut request: Value, key: &str, value: Value) -> Value {
+    let Value::Object(map) = &mut request else {
+        panic!("salt-scope fixture must be an object");
+    };
+    map.insert(key.to_owned(), value);
+    request
+}
+
+fn invalidator_variants(request: &Value) -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "thinking",
+            with_top_level(
+                request.clone(),
+                "thinking",
+                json!({"type":"enabled","budget_tokens":2048}),
+            ),
+        ),
+        (
+            "effort",
+            with_top_level(request.clone(), "output_config", json!({"effort":"low"})),
+        ),
+        (
+            "speed",
+            with_top_level(request.clone(), "speed", json!("fast")),
+        ),
+        (
+            "tool_choice",
+            with_top_level(request.clone(), "tool_choice", json!({"type":"any"})),
+        ),
+    ]
+}
+
+fn all_invalidator_request(request: &Value) -> Value {
+    let request = with_top_level(
+        request.clone(),
+        "thinking",
+        json!({"type":"enabled","budget_tokens":2048}),
+    );
+    let request = with_top_level(request, "output_config", json!({"effort":"low"}));
+    let request = with_top_level(request, "speed", json!("fast"));
+    with_top_level(request, "tool_choice", json!({"type":"any"}))
+}
+
+fn breakpoint_prefix_key(request: &Value, source: V3PromptCacheBlockSource) -> String {
+    let analysis = analyze_v3_prompt_cache(request, canonical_model_id(CANONICAL_MODEL));
+    let Some(breakpoint) = analysis
+        .breakpoints
+        .iter()
+        .find(|breakpoint| breakpoint.source == source)
+    else {
+        panic!("salt-scope fixture must contain a {source:?} breakpoint");
+    };
+    breakpoint.prefix_key.clone()
+}
+
 #[test]
-fn v4_blake3_prefix_key_golden() {
+fn v5_blake3_prefix_key_golden() {
     let request = json!({
         "model": CANONICAL_MODEL,
         "system": [
@@ -17,13 +95,89 @@ fn v4_blake3_prefix_key_golden() {
     });
 
     let analysis = analyze_v3_prompt_cache(&request, canonical_model_id(CANONICAL_MODEL));
-    let breakpoint = analysis.breakpoints.first().expect("v4 breakpoint");
+    let breakpoint = analysis.breakpoints.first().expect("v5 breakpoint");
 
     assert_eq!(breakpoint.block_index, 1);
     assert_eq!(
         breakpoint.prefix_key,
-        "2b2a6da458eca712951957290badc4e27115ba801f1115b7418af0214327aa26"
+        "7d44779303f224534f0737cb9d71fb39f3606798b09b7dec4e52d8b56d20e784"
     );
+}
+
+#[test]
+fn v5_tools_scope_salt_golden() {
+    let request = salt_scope_request();
+    let baseline = breakpoint_prefix_key(&request, V3PromptCacheBlockSource::Tools);
+    let fully_salted = breakpoint_prefix_key(
+        &all_invalidator_request(&request),
+        V3PromptCacheBlockSource::Tools,
+    );
+
+    assert_eq!(
+        fully_salted,
+        "ee7065c21fb86d116f207ef7f728a35e3688e32c696aad1ee7abf5a429c34607"
+    );
+    assert_eq!(fully_salted, baseline);
+    for (name, variant) in invalidator_variants(&request) {
+        assert_eq!(
+            breakpoint_prefix_key(&variant, V3PromptCacheBlockSource::Tools),
+            baseline,
+            "{name} must not perturb a tools-source prefix"
+        );
+    }
+}
+
+#[test]
+fn v5_system_scope_salt_golden() {
+    let request = salt_scope_request();
+    let baseline = breakpoint_prefix_key(&request, V3PromptCacheBlockSource::System);
+    let fully_salted = breakpoint_prefix_key(
+        &all_invalidator_request(&request),
+        V3PromptCacheBlockSource::System,
+    );
+
+    assert_eq!(
+        fully_salted,
+        "50b0ebb0432ed4899e7183e5ce50244730dcd026bc0908b798dfe53966c2400b"
+    );
+    assert_ne!(fully_salted, baseline);
+    for (name, variant) in invalidator_variants(&request) {
+        let variant_key = breakpoint_prefix_key(&variant, V3PromptCacheBlockSource::System);
+        if name == "speed" {
+            assert_eq!(
+                variant_key, fully_salted,
+                "speed must perturb a system-source prefix"
+            );
+        } else {
+            assert_eq!(
+                variant_key, baseline,
+                "{name} must not perturb a system-source prefix"
+            );
+        }
+    }
+}
+
+#[test]
+fn v5_messages_scope_salt_golden() {
+    let request = salt_scope_request();
+    let baseline = breakpoint_prefix_key(&request, V3PromptCacheBlockSource::Message);
+    let fully_salted = breakpoint_prefix_key(
+        &all_invalidator_request(&request),
+        V3PromptCacheBlockSource::Message,
+    );
+
+    assert_eq!(
+        fully_salted,
+        "38495b16fa68cceaa0fa0b804cb629e747327111a623d84c2c7394d3ab10526e"
+    );
+    assert_ne!(fully_salted, baseline);
+    for (name, variant) in invalidator_variants(&request) {
+        assert_ne!(
+            breakpoint_prefix_key(&variant, V3PromptCacheBlockSource::Message),
+            baseline,
+            "{name} must perturb a messages-source prefix"
+        );
+    }
 }
 
 #[test]
