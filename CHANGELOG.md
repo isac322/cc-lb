@@ -4,9 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-28
+
+### Changed
+
+- Cache-affinity prefix hashing moves to schema 5 (`cc-lb-cache-v5:*` domain tags). Warm prompt-cache state recorded by earlier versions is dropped on hydration, so the first deploy after upgrading starts cold and re-warms over subsequent requests. No data migration is required.
+
 ### Fixed
 
 - Subscription routing and warmup now use only quota windows reported by each upstream, so accounts without a shared `7d` window continue through `5h` and model-scoped weekly quota while preserving shared-weekly precedence when both exist.
+- API key rolling limits now persist in durable usage buckets shared by every replica, so a restart or a second instance no longer resets or double-counts a key's rolling window.
+- Prompt-cache simulation now models top-level `cache_control` (automatic caching). Such requests previously produced no breakpoints, leaving cache-affinity routing blind and recording no warm entry.
+- Prompt-cache simulation now keeps `thinking`, `redacted_thinking` and `tool_reference` blocks in the prefix chain, and salts the documented request-level invalidators (`thinking`, `output_config.effort`, `speed`, `tool_choice`) at the tier each one affects. Requests differing only by replayed reasoning or by a changed invalidator no longer predict a hit the provider misses, and `tools`-tier prefixes stay byte-stable across those changes.
+- Minimum cacheable prefix lengths now follow the provider table. Opus 4.7 is 2048 rather than 4096, which was discarding cacheable prefixes in that range; Opus 5 and Mythos 5 are 512, and Mythos Preview and Haiku 3.5 are 2048.
+- Model pricing fallbacks no longer overcharge current Opus models by 3x. The cold-start catalog priced Opus 4.5 at $15/$75 instead of $5/$25, and the routing family fallback applied a blanket `claude-opus` rate correct only for Opus 4 and 4.1; both are now version-aware. Mythos, which previously returned unknown pricing and disabled cache scoring for that family, is now covered.
+- One-hour cache writes now derive as 2.0x base input through a single shared helper, so the billing and routing paths no longer disagree whenever a catalog 5m rate is not exactly 1.25x base.
+- Admin and dashboard token totals now include cache creation and cache read tokens. They previously summed only input plus output, understating a cached workload by an order of magnitude.
 
 ## [0.3.0] - 2026-07-25
 
