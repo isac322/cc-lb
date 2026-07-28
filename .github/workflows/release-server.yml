@@ -228,12 +228,55 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.prepare.outputs.tag }}
           persist-credentials: false
       - uses: ./.github/actions/setup-gh
+
+      - name: Extract changelog section for this version
+        id: changelog
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          section=$(awk -v want="## [${VERSION}]" '
+            index($0, "## [") == 1 {
+              if (found) exit
+              if (index($0, want) == 1) { found = 1; skip_blank = 1; next }
+              next
+            }
+            found && skip_blank {
+              if ($0 == "") next
+              skip_blank = 0
+            }
+            found { print }
+          ' CHANGELOG.md)
+          if [ -z "$section" ]; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section; release-plz's template renders an empty {{ changelog }}, so the Release would publish with no notes. Add the section before releasing."
+            exit 1
+          fi
+          {
+            echo "section<<CHANGELOG_SECTION_EOF"
+            printf '%s\n' "$section"
+            echo "CHANGELOG_SECTION_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.prepare.outputs.tag }}
-        run: gh release edit "$TAG" --draft=false
+          CHANGELOG_SECTION: ${{ steps.changelog.outputs.section }}
+        run: |
+          set -euo pipefail
+          # release-plz-server.toml's git_release_body no longer references the always-
+          # empty {{ changelog }} var (changelog_update = false), so the draft body is
+          # exactly the static "## Artifacts" block. Prepend the CHANGELOG.md section
+          # instead of overwriting, so the Docker/Helm coordinates the template already
+          # rendered are kept verbatim.
+          artifacts_body=$(gh release view "$TAG" --json body --jq .body)
+          if [ -z "$artifacts_body" ]; then
+            echo "::error::draft Release $TAG has an empty body; expected the static Artifacts block from release-plz-server.toml"
+            exit 1
+          fi
+          { printf '%s\n\n' "$CHANGELOG_SECTION"; printf '%s\n' "$artifacts_body"; } \
+            | gh release edit "$TAG" --draft=false --notes-file -
