@@ -147,6 +147,8 @@ jobs:
             SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
             SCCACHE_REGION=garage
             SCCACHE_S3_USE_SSL=false
+            REQUIRE_SCCACHE=1
+            SCCACHE_S3_KEY_PREFIX=cc-lb
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
