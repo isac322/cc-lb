@@ -33,6 +33,12 @@ jobs:
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
+      - name: Resolve source revision
+        id: source
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "source_date_epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
 
       # network=host + the network.host entitlement let the in-Docker build
       # reach the in-cluster Garage S3 endpoint (garage.example-build.svc).
@@ -41,10 +47,30 @@ jobs:
           driver-opts: network=host
           buildkitd-flags: --allow-insecure-entitlement network.host
 
-      # Builds the DEFAULT (distroless) target. secret-envs forwards the runner
-      # pod's AWS_* OS env vars into the build as BuildKit secrets (the Dockerfile
-      # reads them via --mount=type=secret); the non-secret sccache S3 config goes
-      # in as build-args. Fail-open: without creds the Dockerfile compiles uncached.
+      # Build every release target on Dockerfile changes so cross-compilation
+      # failures are caught before publication and the release cache stays warm.
+      - name: Build all release targets
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le
+          target: builder
+          outputs: type=cacheonly
+          network: host
+          allow: network.host
+          build-args: |
+            GIT_SHA=${{ steps.source.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
+            SCCACHE_BUCKET=sccache
+            SCCACHE_ENDPOINT=http://buildkit.example.com:3900
+            SCCACHE_REGION=garage
+            SCCACHE_S3_USE_SSL=false
+            REQUIRE_SCCACHE=1
+            SCCACHE_S3_KEY_PREFIX=cc-lb
+          secret-envs: |
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+
       - name: Build image
         uses: docker/build-push-action@v7
         with:
@@ -54,12 +80,14 @@ jobs:
           network: host
           allow: network.host
           build-args: |
-            GIT_SHA=0000000
-            SOURCE_DATE_EPOCH=0
+            GIT_SHA=${{ steps.source.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
             SCCACHE_BUCKET=sccache
             SCCACHE_ENDPOINT=http://buildkit.example.com:3900
             SCCACHE_REGION=garage
             SCCACHE_S3_USE_SSL=false
+            REQUIRE_SCCACHE=1
+            SCCACHE_S3_KEY_PREFIX=cc-lb
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
