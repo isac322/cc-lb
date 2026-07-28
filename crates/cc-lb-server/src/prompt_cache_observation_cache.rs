@@ -338,6 +338,11 @@ impl PromptCacheObservationCache {
             return false;
         };
 
+        // Deliberately does NOT extend `expires_at_unix_secs`. A verified hit already refreshes it
+        // via the `Kind::Hit` observation, which carries a fresh `now + ttl - grace` and is written
+        // through `upsert_observation` in
+        // `lifecycle_prompt_cache_observation_subscriber::handle_event`. This method owns only the
+        // last-observed timestamp and the storage write-through debounce.
         let should_persist = now_unix_secs.saturating_sub(entry.last_persisted_at_unix_secs)
             > self.refresh_debounce_secs;
         entry.last_observed_at_unix_secs = now_unix_secs;
@@ -651,7 +656,7 @@ pub(crate) mod tests {
         assert_eq!(entry.content_block_index, 2);
         assert_eq!(entry.estimated_prefix_tokens, 1_234);
         assert_eq!(entry.token_estimate_source, V3_TOKEN_ESTIMATE_SOURCE);
-        assert_eq!(entry.hash_schema_version, 4);
+        assert_eq!(entry.hash_schema_version, HASH_SCHEMA_VERSION);
     }
 
     #[test]
@@ -1227,14 +1232,14 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn hydrate_cold_starts_schema_v3_keeps_v4() {
+    async fn hydrate_cold_starts_previous_schema_and_keeps_current() {
         let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
         let cache = PromptCacheObservationCache::new(clock, 30);
         let upstream_id = Uuid::new_v4();
         let store = MockStore::new(vec![
             storage_record(
                 upstream_id,
-                "current-v4",
+                "current-schema",
                 StorageTtlClass::Ephemeral5m,
                 BASE_TS + 300,
                 BASE_TS - 10,
@@ -1242,11 +1247,11 @@ pub(crate) mod tests {
             ),
             storage_record(
                 upstream_id,
-                "stale-v3",
+                "previous-schema",
                 StorageTtlClass::Ephemeral5m,
                 BASE_TS + 300,
                 BASE_TS - 20,
-                3,
+                HASH_SCHEMA_VERSION - 1,
             ),
         ]);
 
@@ -1255,19 +1260,26 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        assert_eq!(HASH_SCHEMA_VERSION, 4, "ADR 0008 cutover pins schema v4");
-        assert_eq!(loaded, 1, "only the current-schema (v4) record hydrates");
+        assert_eq!(
+            HASH_SCHEMA_VERSION, 5,
+            "ADR 0008 schema-5 amendment pins schema v5"
+        );
+
+        assert_eq!(
+            loaded, 1,
+            "only records carrying the current hash schema version hydrate"
+        );
         let snapshot = cache.snapshot_for_upstream(
             upstream_id,
             MODEL,
             &[
-                ("current-v4".to_owned(), TtlClass::Ephemeral5m),
-                ("stale-v3".to_owned(), TtlClass::Ephemeral5m),
+                ("current-schema".to_owned(), TtlClass::Ephemeral5m),
+                ("previous-schema".to_owned(), TtlClass::Ephemeral5m),
             ],
             BASE_TS,
         );
         assert_eq!(snapshot.len(), 1);
-        assert_eq!(snapshot[0].prefix_hash, "current-v4");
+        assert_eq!(snapshot[0].prefix_hash, "current-schema");
     }
 
     #[test]

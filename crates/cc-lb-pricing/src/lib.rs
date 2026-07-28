@@ -14,8 +14,10 @@ use std::sync::{Arc, OnceLock};
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 
-use cost::{cache_creation_1h_price, record_missing_price_field, token_cost_micros};
-pub use cost::{virtual_cost_micros, virtual_cost_micros_full};
+pub use cost::{
+    cache_creation_1h_micros_from_input, virtual_cost_micros, virtual_cost_micros_full,
+};
+use cost::{record_missing_price_field, resolved_cache_creation_1h_price, token_cost_micros};
 use tier_resolver::{resolve_optional_price, resolve_tier_rate};
 
 #[cfg(test)]
@@ -240,11 +242,15 @@ impl PriceCatalog {
             snapshot.cache_read_per_million_usd_by_tier.get(&normalized),
             tier.as_deref(),
         );
+        let cache_creation_1h_per_million_usd = if cache_creation_5m_per_million_usd.is_some() {
+            Some(resolved_cache_creation_1h_price(rate.input_per_million_usd))
+        } else {
+            None
+        };
         Some(RoutingCachePricing {
             input_per_million_usd: rate.input_per_million_usd,
             cache_creation_5m_per_million_usd,
-            cache_creation_1h_per_million_usd: cache_creation_5m_per_million_usd
-                .map(cache_creation_1h_price),
+            cache_creation_1h_per_million_usd,
             cache_read_per_million_usd,
         })
     }
@@ -485,15 +491,6 @@ mod tests {
                 .insert(model.to_owned(), price);
         }
         snap
-    }
-
-    #[test]
-    fn cache_creation_1h_price_derives_1_6x_5m() {
-        let price_5m = UsdPerMillion::from_micros_usd(3_750_000);
-        assert_eq!(
-            cache_creation_1h_price(price_5m),
-            UsdPerMillion::from_micros_usd(6_000_000),
-        );
     }
 
     #[test]

@@ -91,6 +91,7 @@ mod tests {
     use std::sync::{Arc, Mutex, atomic::AtomicU64};
     use std::time::Duration;
 
+    use crate::prompt_cache_observation_cache::HASH_SCHEMA_VERSION;
     use async_trait::async_trait;
     use cc_lb_domain::TtlClass;
     use cc_lb_storage_api::{PromptCacheObservationRecord, StorageResult};
@@ -126,7 +127,7 @@ mod tests {
             ttl_class: TtlClass::Ephemeral5m,
             expires_at_unix_secs: 1_800 + index,
             last_observed_at_unix_secs: 1_500 + index,
-            hash_schema_version: 4,
+            hash_schema_version: HASH_SCHEMA_VERSION,
             prefix_content_block_index: 0,
             estimated_prefix_tokens: 0,
             token_estimate_source: "local_tiktoken_v1".to_owned(),

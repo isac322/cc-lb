@@ -29,14 +29,16 @@ macro, `to_vec`/`to_string` serialization — stays on `serde_json`.
 
 Rationale for the split:
 
-1. **Byte-parity of hashes.** `cache_prefix_hash*` in
-   `crates/cc-lb-engine/src/lifecycle.rs` SHA-256-hashes a serialized
-   `serde_json::Map`. `serde_json` (without the `preserve_order` feature)
-   uses `BTreeMap`, so keys are emitted in sorted order regardless of
-   insertion order. `sonic_rs::Object` preserves insertion order. Swapping
-   serialization would silently change every cache-affinity routing hash
-   at deploy time — a real regression risk. Keeping `serde_json::to_vec`
-   on this path gives byte-identical output to origin/master.
+1. **Byte-parity of prompt-cache hashes.** `SerializationScratch::serialize`,
+   `DigestBlockSerializer`, and `PrefixSerializer` in
+   `crates/cc-lb-engine/src/prompt_cache_simulator.rs` serialize block-hash
+   inputs and prefix token-count inputs with `serde_json`; block bytes then
+   feed BLAKE3.
+   `serde_json` (without the `preserve_order` feature) uses `BTreeMap`, so
+   object keys are emitted in sorted order regardless of insertion order.
+   `sonic_rs::Object` preserves insertion order. Swapping serialization
+   would silently change cache-affinity routing keys. Keeping `serde_json`
+   on this path preserves the canonical bytes.
 2. **Frameworks forcing `serde_json`.** `sqlx` (the `json` feature)
    encodes/decodes JSON columns through `serde_json::Value`. `schemars`
    generates schemas as `serde_json::Value`. Neither has a `sonic_rs`
@@ -80,9 +82,10 @@ remain.
 
 ### Sites kept on `serde_json` (intentional)
 
-- **Serialization on hash paths** — `cache_prefix_hash*` in
-  `lifecycle.rs` (`serde_json::to_vec(&Value::Object(prefix))`). See
-  Constraint 1 above.
+- **Serialization on hash paths** — `SerializationScratch::serialize`,
+  `DigestBlockSerializer`, and `PrefixSerializer` in
+  `prompt_cache_simulator.rs` use `serde_json::to_writer`. See Constraint 1
+  above.
 - **Serialization elsewhere in hot files** — e.g. `tokenizer.rs`,
   `audit_payload.rs`, `error_format.rs`, `sse_error_frame.rs`,
   `warmup/dialect.rs`. `serde_json::to_vec` / `to_string` output is what
@@ -125,13 +128,20 @@ remain.
 - Existing unit tests (`cc-lb-engine` `usage_parser`, `sse_relay`,
   `lifecycle`, `error_normalizer`) exercise all migrated call sites and
   must remain green — they are the byte-parity assertion for parsing.
-- Existing `request_cache_metadata` tests
-  (`lifecycle::request_cache_metadata_*`) exercise `cache_prefix_hash`
-  and pin the hash bytes. If serialization were accidentally swapped to
-  sonic-rs these would fail.
-- End-to-end: send a set of stream and non-stream requests through the
-  fake-anthropic fixture on both `origin/master` and this branch; SSE
-  bytes and `cache_prefix_hash` values must match.
+- `prompt_cache_byte_oracle_matches_current_behavior_over_wide_corpus` in
+  `crates/cc-lb-engine/tests/prompt_cache_byte_oracle.rs` compares the live
+  simulator's block and prefix bytes with independent `serde_json` oracles
+  across the retained `tests/fixtures/hash_golden/` corpus. The companion
+  `prompt_cache_byte_oracle_key_reordering_is_byte_stable` test explicitly
+  verifies key-order stability. An accidental serializer swap would fail
+  these comparisons.
+- `v5_blake3_prefix_key_golden` in
+  `crates/cc-lb-engine/tests/prompt_cache_structural_properties.rs` pins a
+  schema-5 prefix key.
+- The byte-oracle corpus includes `base_request_trailing_space.json`, but no
+  current assertion compares it with `base_request.json` to prove whitespace
+  sensitivity directly. Add that explicit comparison before relying on the
+  corpus as a whitespace-sensitivity golden.
 
 ## Future work (out of scope for this ADR)
 

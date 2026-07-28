@@ -40,13 +40,6 @@ impl PrefixTokenizer {
         let serialized = serde_json::to_string(body_prefix_json).unwrap_or_else(|_| String::new());
         self.count_tokens(&serialized)
     }
-
-    /// Check if prefix token count is above the model's cache threshold.
-    /// If model_resolution is not yet available, uses TEMP constant (1024 for Sonnet 4.5).
-    pub fn is_above_threshold(&self, prefix_tokens: usize, canonical_model: &str) -> bool {
-        let threshold = cache_threshold_tokens(canonical_model);
-        prefix_tokens >= threshold
-    }
 }
 
 #[cfg(test)]
@@ -57,19 +50,6 @@ pub fn tokenizer_call_count() -> u64 {
 #[cfg(test)]
 pub fn reset_tokenizer_call_count() {
     TOKENIZER_CALLS.with(|calls| calls.set(0));
-}
-
-/// Temporary threshold mapping. TODO(T3): Replace with import from model_resolution.
-/// For now, return a conservative default of 1024 tokens for all models.
-fn cache_threshold_tokens(canonical_model: &str) -> usize {
-    // TODO(T3): Once model_resolution is merged, replace with:
-    // cc_lb_engine::model_resolution::cache_threshold_tokens(canonical_model)
-    match canonical_model {
-        "claude-3-5-sonnet-20241022" => 1024,
-        "claude-3-opus-20250219" => 1024,
-        "claude-3-sonnet-20240229" => 1024,
-        _ => 1024,
-    }
 }
 
 #[cfg(test)]
@@ -95,33 +75,6 @@ mod tests {
         });
         let count = tokenizer.count_tokens_for_prefix(&json);
         assert!(count > 0, "Expected non-zero token count for JSON prefix");
-    }
-
-    #[test]
-    fn is_above_threshold_for_sonnet_at_1024() {
-        let tokenizer = PrefixTokenizer::global();
-        let model = "claude-3-5-sonnet-20241022";
-
-        // Below threshold (512 < 1024)
-        assert!(
-            !tokenizer.is_above_threshold(512, model),
-            "512 tokens should be below threshold for {}",
-            model
-        );
-
-        // At threshold (1024 >= 1024)
-        assert!(
-            tokenizer.is_above_threshold(1024, model),
-            "1024 tokens should be at/above threshold for {}",
-            model
-        );
-
-        // Above threshold (2048 >= 1024)
-        assert!(
-            tokenizer.is_above_threshold(2048, model),
-            "2048 tokens should be above threshold for {}",
-            model
-        );
     }
 
     #[test]

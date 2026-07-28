@@ -67,6 +67,7 @@ pub trait PromptCacheObservationStore: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
 
     fn record_with_ttl(ttl_class: TtlClass) -> PromptCacheObservationRecord {
         PromptCacheObservationRecord {
@@ -76,7 +77,7 @@ mod tests {
             ttl_class,
             expires_at_unix_secs: 1_800,
             last_observed_at_unix_secs: 1_500,
-            hash_schema_version: 4,
+            hash_schema_version: HASH_SCHEMA_VERSION,
             prefix_content_block_index: 7,
             estimated_prefix_tokens: 12_345,
             token_estimate_source: "local_tiktoken_v1".to_owned(),

@@ -2196,7 +2196,7 @@ fn claude_default_snapshot(clock: &dyn cc_lb_engine::Clock) -> cc_lb_pricing::Ca
     use std::collections::HashMap;
 
     // Per-million USD in micros (1 USD = 1_000_000 micros).
-    // Sources: anthropic.com/pricing (Nov 2026 snapshot).
+    // Source: Anthropic pricing (July 2026 snapshot).
     #[allow(clippy::type_complexity)]
     let raw: &[(&str, u64, u64, u64, u64)] = &[
         // model name, input, output, cache_creation_5m, cache_read
@@ -2208,18 +2208,33 @@ fn claude_default_snapshot(clock: &dyn cc_lb_engine::Clock) -> cc_lb_pricing::Ca
             1_000_000,
         ),
         (
-            "claude-opus-4-5",
-            15_000_000,
-            75_000_000,
-            18_750_000,
-            1_500_000,
+            "claude-mythos-5",
+            10_000_000,
+            50_000_000,
+            12_500_000,
+            1_000_000,
         ),
+        ("claude-opus-5", 5_000_000, 25_000_000, 6_250_000, 500_000),
+        ("claude-opus-4-8", 5_000_000, 25_000_000, 6_250_000, 500_000),
+        ("claude-opus-4-7", 5_000_000, 25_000_000, 6_250_000, 500_000),
+        ("claude-opus-4-6", 5_000_000, 25_000_000, 6_250_000, 500_000),
+        // Pre-change, both Opus 4.5 fallbacks were $15/$75 and overpriced every
+        // component by 3x.
+        ("claude-opus-4-5", 5_000_000, 25_000_000, 6_250_000, 500_000),
         (
             "claude-opus-4-5-20251101",
+            5_000_000,
+            25_000_000,
+            6_250_000,
+            500_000,
+        ),
+        ("claude-sonnet-5", 2_000_000, 10_000_000, 2_500_000, 200_000),
+        (
+            "claude-sonnet-4-6",
+            3_000_000,
             15_000_000,
-            75_000_000,
-            18_750_000,
-            1_500_000,
+            3_750_000,
+            300_000,
         ),
         (
             "claude-sonnet-4-5",
@@ -3097,32 +3112,134 @@ mod tests {
     }
 
     #[test]
-    fn default_fallback_contains_fable_5_pricing() {
+    fn default_fallback_contains_current_anthropic_pricing() {
         let catalog = cc_lb_pricing::PriceCatalog::new_empty();
         let clock = cc_lb_engine::SystemClock;
 
         install_default_fallback_if_uninitialized(&catalog, &clock);
 
-        let pricing = catalog
-            .lookup("claude-fable-5", None, None)
-            .expect("fable fallback pricing exists");
-        assert_eq!(pricing.input_per_million_usd.as_micros_usd(), 10_000_000);
-        assert_eq!(pricing.output_per_million_usd.as_micros_usd(), 50_000_000);
+        let expected = [
+            (
+                "claude-fable-5",
+                10_000_000,
+                12_500_000,
+                20_000_000,
+                1_000_000,
+                50_000_000,
+            ),
+            (
+                "claude-mythos-5",
+                10_000_000,
+                12_500_000,
+                20_000_000,
+                1_000_000,
+                50_000_000,
+            ),
+            (
+                "claude-opus-5",
+                5_000_000,
+                6_250_000,
+                10_000_000,
+                500_000,
+                25_000_000,
+            ),
+            (
+                "claude-opus-4-8",
+                5_000_000,
+                6_250_000,
+                10_000_000,
+                500_000,
+                25_000_000,
+            ),
+            (
+                "claude-opus-4-7",
+                5_000_000,
+                6_250_000,
+                10_000_000,
+                500_000,
+                25_000_000,
+            ),
+            (
+                "claude-opus-4-6",
+                5_000_000,
+                6_250_000,
+                10_000_000,
+                500_000,
+                25_000_000,
+            ),
+            (
+                "claude-opus-4-5",
+                5_000_000,
+                6_250_000,
+                10_000_000,
+                500_000,
+                25_000_000,
+            ),
+            (
+                "claude-sonnet-5",
+                2_000_000,
+                2_500_000,
+                4_000_000,
+                200_000,
+                10_000_000,
+            ),
+            (
+                "claude-sonnet-4-6",
+                3_000_000,
+                3_750_000,
+                6_000_000,
+                300_000,
+                15_000_000,
+            ),
+            (
+                "claude-sonnet-4-5",
+                3_000_000,
+                3_750_000,
+                6_000_000,
+                300_000,
+                15_000_000,
+            ),
+            (
+                "claude-haiku-4-5",
+                1_000_000,
+                1_250_000,
+                2_000_000,
+                100_000,
+                5_000_000,
+            ),
+        ];
+
+        for (model, input, cache_5m, cache_1h, cache_read, output) in expected {
+            let pricing = catalog
+                .lookup(model, None, None)
+                .unwrap_or_else(|| panic!("{model} fallback pricing exists"));
+            assert_eq!(pricing.input_per_million_usd.as_micros_usd(), input);
+            assert_eq!(pricing.output_per_million_usd.as_micros_usd(), output);
+
+            let cache_pricing = catalog
+                .routing_cache_pricing(model, None)
+                .unwrap_or_else(|| panic!("{model} fallback cache pricing exists"));
+            assert_eq!(
+                cache_pricing
+                    .cache_creation_5m_per_million_usd
+                    .map(cc_lb_pricing::UsdPerMillion::as_micros_usd),
+                Some(cache_5m)
+            );
+            assert_eq!(
+                cache_pricing
+                    .cache_creation_1h_per_million_usd
+                    .map(cc_lb_pricing::UsdPerMillion::as_micros_usd),
+                Some(cache_1h)
+            );
+            assert_eq!(
+                cache_pricing
+                    .cache_read_per_million_usd
+                    .map(cc_lb_pricing::UsdPerMillion::as_micros_usd),
+                Some(cache_read)
+            );
+        }
+
         let snapshot = catalog.current();
-        assert_eq!(
-            snapshot
-                .cache_creation_per_million_usd
-                .get("claude-fable-5")
-                .map(|price| price.as_micros_usd()),
-            Some(12_500_000)
-        );
-        assert_eq!(
-            snapshot
-                .cache_read_per_million_usd
-                .get("claude-fable-5")
-                .map(|price| price.as_micros_usd()),
-            Some(1_000_000)
-        );
         assert_eq!(
             snapshot
                 .models
@@ -3130,6 +3247,16 @@ mod tests {
                 .filter(|model| model.starts_with("claude-fable"))
                 .count(),
             1
+        );
+
+        const SONNET_5_INTRODUCTORY_PRICE_CUTOVER_UNIX_SECS: u64 = 1_788_220_800;
+        assert!(
+            cc_lb_engine::clock::unix_secs(cc_lb_engine::Clock::now(&clock))
+                < SONNET_5_INTRODUCTORY_PRICE_CUTOVER_UNIX_SECS,
+            "claude-sonnet-5 introductory pricing expired on 2026-09-01. Two sites hardcode it: \
+             the fallback catalog rates in this file (2/2.50/4/0.20/10 -> 3/3.75/6/0.30/15), and \
+             SONNET_INTRODUCTORY in cc-lb-engine's anthropic_family_input_micros_per_million. \
+             This is the only tripwire for both; update them together."
         );
     }
 

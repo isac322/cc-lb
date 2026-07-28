@@ -151,6 +151,25 @@ describe('LogsPage', () => {
     expect(sessionSelect?.className).toContain('!w-64');
   });
 
+  // Budgeted, not raced. This body has no `await`, `waitFor` or `findBy`: it is one synchronous
+  // block that mounts LogsPage over 120 rows and re-renders it four times (three page clicks plus
+  // a filter rerender), so there is no async boundary that can hang and nothing to widen a
+  // tolerance around. Its cost is pure render throughput and tracks available CPU:
+  //
+  //   isolated, node                          529-555ms
+  //   full suite, 8 cores                        998ms
+  //   full suite, 2 cores pinned                1774ms
+  //   full suite, 2 cores + 4 busy loops        7168ms  <- reproduces the CI failure
+  //
+  // `oracle4-cc-lb` is one self-hosted box shared by clippy, nextest-cov, e2e and docker-build
+  // from the same PR, so the last row is the realistic case and the 5s default has no headroom.
+  // Capping vitest workers was measured and rejected: `--maxWorkers=2` under the same pin made
+  // this test worse (1774ms -> 3427ms) by packing more files onto each worker's event loop.
+  //
+  // Budgeting this one test does not just move the failure elsewhere. Under the same load the
+  // next-slowest test in the whole suite is 1543ms - 3.4x cheaper, and 31% of the stock 5s
+  // budget - so this mount is a genuine outlier rather than the first casualty of a tier that
+  // needs raising. Re-check that gap before budgeting a second test here.
   it('paginates rows correctly and clamps on filter change', async () => {
     const queryClient = new QueryClient();
     let currentSearch: Record<string, string> = {};
@@ -212,7 +231,7 @@ describe('LogsPage', () => {
     expect(screen.getByText('Page 1 of 2')).toBeDefined();
     expect(getRowCount()).toBe(50);
     expect(scroller.scrollTop).toBe(0);
-  });
+  }, 30_000);
 
   it('exports all visible rows, not just the current page', async () => {
     const queryClient = new QueryClient();

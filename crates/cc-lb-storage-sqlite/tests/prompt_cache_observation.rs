@@ -20,6 +20,10 @@ async fn prompt_cache_v3_observation_roundtrips_and_filters_by_key() {
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
+    // Opaque to the storage layer: the column has no default or constraint and this test only
+    // round-trips it, so the value is arbitrary and deliberately not tied to the engine's
+    // HASH_SCHEMA_VERSION (which would drag cc-lb-engine into this crate's dev graph).
+    const FIXTURE_SCHEMA_VERSION: u8 = 5;
     storage
         .initialize(BackendKind::Sqlite)
         .await
@@ -32,7 +36,7 @@ async fn prompt_cache_v3_observation_roundtrips_and_filters_by_key() {
         ttl_class: TtlClass::Ephemeral1h,
         expires_at_unix_secs: 1_800,
         last_observed_at_unix_secs: 1_500,
-        hash_schema_version: 4,
+        hash_schema_version: FIXTURE_SCHEMA_VERSION,
         prefix_content_block_index: 17,
         estimated_prefix_tokens: 12_345,
         token_estimate_source: "local_tiktoken_v1".to_owned(),

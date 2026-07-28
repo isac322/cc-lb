@@ -1,3 +1,14 @@
+//! Simulates Anthropic prompt-cache prefix identity and breakpoint lookback.
+//!
+//! Requests enable caching through explicit block-level `cache_control` markers or one automatic
+//! top-level `cache_control` marker. Both forms share the four-slot breakpoint cap. Prefixes follow
+//! provider order (`tools` → `system` → `messages`), and each breakpoint searches at most twenty
+//! participating content-block positions, including itself.
+//!
+//! Request-level invalidators are mixed into the prefix chain at provider boundaries: `speed`
+//! enters at `system` (or the first message when no system block exists), while thinking, effort,
+//! and tool choice enter at `messages`. Earlier prefix tiers remain stable.
+
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
@@ -6,12 +17,58 @@ use crate::tokenizer::PrefixTokenizer;
 
 pub const V3_TOKEN_ESTIMATE_SOURCE: &str = "local_tiktoken_v1";
 
-/// Anthropic's hard cap on explicit `cache_control` breakpoints; more is provider-invalid, so
-/// analysis is skipped (request forwarded as-is) before any per-breakpoint prefix tokenization.
+/// Anthropic's shared cap for resolved explicit and automatic breakpoints. Provider-invalid
+/// requests skip analysis before tokenization.
 pub const MAX_EXPLICIT_BREAKPOINTS: usize = 4;
 
 const SERIALIZATION_SCRATCH_INITIAL_CAPACITY: usize = 4 * 1024;
 const SERIALIZATION_SCRATCH_MAX_RETAINED_CAPACITY: usize = 256 * 1024;
+const DEFAULT_CACHE_TTL: &str = "5m";
+const DEFAULT_SPEED: &str = "standard";
+const INVALIDATOR_SALT_COUNT: usize = 4;
+const SALT_NAME_SEPARATOR: &[u8] = b"\0";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SaltScope {
+    System,
+    Messages,
+}
+
+impl SaltScope {
+    fn domain_tag(self) -> &'static [u8] {
+        match self {
+            Self::System => b"cc-lb-cache-v5:salt-system",
+            Self::Messages => b"cc-lb-cache-v5:salt-message",
+        }
+    }
+}
+
+// Thinking and effort stay message-scoped despite Anthropic's model-specific earlier-tier
+// invalidation. A config change invalidates every upstream uniformly, so optimistic retention
+// cannot change the routing choice; pessimistic invalidation fragments affinity and may force a
+// paid tools+system recreation on another upstream.
+const THINKING_SALT_SCOPE: SaltScope = SaltScope::Messages;
+const EFFORT_SALT_SCOPE: SaltScope = SaltScope::Messages;
+const SPEED_SALT_SCOPE: SaltScope = SaltScope::System;
+const TOOL_CHOICE_SALT_SCOPE: SaltScope = SaltScope::Messages;
+
+// Keep this as a denylist: unknown future models keep non-default speed salted. A stale denylist
+// costs one cache creation; a stale allowlist can falsely predict a standard-speed cache hit.
+// Opus 4.6 serves fast requests at standard speed, and Opus 4.7 rejects the field.
+const MODELS_NOT_HONORING_FAST_SPEED: [&str; 2] = ["claude-opus-4-6", "claude-opus-4-7"];
+
+#[derive(Clone, Copy)]
+struct InvalidatorSalt<'a> {
+    name: &'static str,
+    scope: SaltScope,
+    value: Option<&'a Value>,
+}
+
+#[derive(Clone, Copy)]
+struct ResolvedBreakpoint<'a> {
+    block_index: usize,
+    ttl: &'a str,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PromptCacheSimulatorKey([u8; 32]);
@@ -19,7 +76,7 @@ pub struct PromptCacheSimulatorKey([u8; 32]);
 impl PromptCacheSimulatorKey {
     pub fn seed(canonical_model: &str) -> Self {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"cc-lb-cache-v4:seed");
+        hasher.update(b"cc-lb-cache-v5:seed");
         hasher.update(canonical_model.as_bytes());
         Self(*hasher.finalize().as_bytes())
     }
@@ -121,6 +178,14 @@ impl CacheBlockRef<'_> {
             message_index: self.message_index,
             value,
             explicit_ttl: self.explicit_ttl.map(ToOwned::to_owned),
+        }
+    }
+
+    fn is_breakpoint_eligible(&self) -> bool {
+        match (self.source, self.value) {
+            (V3PromptCacheBlockSource::Tools, _) => true,
+            (_, CacheBlockValueRef::SyntheticText(text)) => !text.is_empty(),
+            (_, CacheBlockValueRef::Json(value)) => is_breakpoint_eligible(value),
         }
     }
 }
@@ -254,37 +319,47 @@ pub struct PromptCachePrefixChain {
 }
 
 impl PromptCachePrefixChain {
-    pub fn from_block_digests(
+    fn from_request_blocks(
         seed: PromptCacheSimulatorKey,
-        block_digests: impl IntoIterator<Item = [u8; 32]>,
+        blocks: &[CacheBlockRef<'_>],
+        salts: &[InvalidatorSalt<'_>; INVALIDATOR_SALT_COUNT],
+        scratch: &mut SerializationScratch,
     ) -> Self {
         let mut previous = seed;
-        let mut keys = Vec::new();
-        for digest in block_digests {
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(b"cc-lb-cache-v4:prefix");
-            hasher.update(&previous.0);
-            hasher.update(&digest);
-            previous = PromptCacheSimulatorKey(*hasher.finalize().as_bytes());
+        let mut keys = Vec::with_capacity(blocks.len());
+        let mut system_salts_applied = false;
+        let mut message_salts_applied = false;
+
+        for block in blocks {
+            match block.source {
+                V3PromptCacheBlockSource::Tools => {}
+                V3PromptCacheBlockSource::System => {
+                    if !system_salts_applied {
+                        previous = mix_scope_salts(previous, SaltScope::System, salts, scratch);
+                        system_salts_applied = true;
+                    }
+                }
+                V3PromptCacheBlockSource::Message => {
+                    if !system_salts_applied {
+                        previous = mix_scope_salts(previous, SaltScope::System, salts, scratch);
+                        system_salts_applied = true;
+                    }
+                    if !message_salts_applied {
+                        previous = mix_scope_salts(previous, SaltScope::Messages, salts, scratch);
+                        message_salts_applied = true;
+                    }
+                }
+            }
+
+            previous = extend_prefix(previous, block_digest(block, scratch));
             keys.push(previous);
         }
+
         Self { keys }
     }
 
     pub fn prefix_key(&self, block_index: usize) -> Option<PromptCacheSimulatorKey> {
         self.keys.get(block_index).copied()
-    }
-
-    pub fn lookback_keys(&self, block_index: usize) -> Vec<PromptCacheSimulatorKey> {
-        let start = block_index.saturating_sub(19);
-        self.keys
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(block_index.saturating_sub(start).saturating_add(1))
-            .rev()
-            .map(|(_, key)| *key)
-            .collect()
     }
 
     fn prefix_key_hex(&self, block_index: usize) -> Option<String> {
@@ -293,45 +368,151 @@ impl PromptCachePrefixChain {
     }
 }
 
-pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3PromptCacheAnalysis {
-    if exceeds_explicit_breakpoint_cap(value) {
-        return V3PromptCacheAnalysis {
-            blocks: Vec::new(),
-            breakpoints: Vec::new(),
+fn extend_prefix(
+    previous: PromptCacheSimulatorKey,
+    block_digest: [u8; 32],
+) -> PromptCacheSimulatorKey {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"cc-lb-cache-v5:prefix");
+    hasher.update(&previous.0);
+    hasher.update(&block_digest);
+    PromptCacheSimulatorKey(*hasher.finalize().as_bytes())
+}
+
+fn mix_scope_salts(
+    mut previous: PromptCacheSimulatorKey,
+    scope: SaltScope,
+    salts: &[InvalidatorSalt<'_>; INVALIDATOR_SALT_COUNT],
+    scratch: &mut SerializationScratch,
+) -> PromptCacheSimulatorKey {
+    for salt in salts {
+        if salt.scope != scope {
+            continue;
+        }
+        let Some(value) = salt.value else {
+            continue;
         };
+        let bytes = scratch.serialize(value);
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(scope.domain_tag());
+        hasher.update(&previous.0);
+        hasher.update(salt.name.as_bytes());
+        hasher.update(SALT_NAME_SEPARATOR);
+        hasher.update(bytes);
+        previous = PromptCacheSimulatorKey(*hasher.finalize().as_bytes());
+        scratch.clear_for_reuse();
     }
-    let blocks = flatten_cacheable_blocks(value);
+    previous
+}
+
+fn request_invalidator_salts<'a>(
+    value: &'a Value,
+    canonical_model: &str,
+) -> [InvalidatorSalt<'a>; INVALIDATOR_SALT_COUNT] {
+    let effort = value
+        .get("output_config")
+        .and_then(|output_config| output_config.get("effort"));
+    [
+        InvalidatorSalt {
+            name: "thinking",
+            scope: THINKING_SALT_SCOPE,
+            value: value.get("thinking"),
+        },
+        InvalidatorSalt {
+            // Salted on presence, like `thinking` and for the same reason. The provider's
+            // invalidation table says an explicit *model* default is equivalent to omission, but
+            // the default is per-model; hardcoding one value here would collapse omitted and
+            // explicit onto one key for any model whose default differs, predicting a hit the
+            // provider misses. Splitting them instead costs at most one extra cache creation.
+            name: "output_config.effort",
+            scope: EFFORT_SALT_SCOPE,
+            value: effort,
+        },
+        InvalidatorSalt {
+            name: "speed",
+            scope: SPEED_SALT_SCOPE,
+            value: effective_speed_invalidator(value.get("speed"), canonical_model),
+        },
+        InvalidatorSalt {
+            name: "tool_choice",
+            scope: TOOL_CHOICE_SALT_SCOPE,
+            value: value.get("tool_choice"),
+        },
+    ]
+}
+
+// `thinking` is salted on presence, with no default-normalization.
+//
+// `{"type":"disabled"}` renders the same prompt as omitting `thinking` only where thinking is off
+// by default; on Opus 5, Sonnet 5, Fable 5 and Mythos 5 it is on unless disabled, so there the two
+// are different prompts in different provider cache entries. Collapsing them would predict a hit
+// the provider misses and pay a 1.25x creation instead of a 0.1x read.
+//
+// Rather than carry a third model table (after the threshold map and the fast-speed denylist) to
+// tell those cases apart, salt whenever the field is present. The only cost is that a client
+// sending an explicit `disabled` on a thinking-off model splits its prefix population from a
+// client that omits the field — one extra cache creation. A false hit is structurally impossible.
+
+fn effective_speed_invalidator<'a>(
+    value: Option<&'a Value>,
+    canonical_model: &str,
+) -> Option<&'a Value> {
+    if MODELS_NOT_HONORING_FAST_SPEED.contains(&canonical_model) {
+        None
+    } else {
+        non_default_string_invalidator(value, DEFAULT_SPEED)
+    }
+}
+
+fn non_default_string_invalidator<'a>(
+    value: Option<&'a Value>,
+    model_default: &str,
+) -> Option<&'a Value> {
+    value.filter(|value| value.as_str() != Some(model_default))
+}
+
+/// Analyzes block-level explicit and top-level automatic Anthropic prompt caching without
+/// changing the request.
+///
+/// Both modes share four breakpoint slots. The flattened chain preserves every participating
+/// content-block position for the provider's twenty-position lookback. System- and message-scoped
+/// salts enter only at their first matching source boundary, so earlier tiers remain byte-stable.
+/// Provider-invalid resolved breakpoint counts return an un-analyzable result with no
+/// breakpoints. Long-after-short TTL ordering is deliberately NOT
+/// rejected here: the provider documents it as a billing-position constraint, not a request
+/// error, so discarding the analysis would blind cache-affinity routing on a request the
+/// upstream still serves. `lifecycle::build_cache_score_from_match` applies the ordering rule
+/// where it actually matters, when pricing a matched prefix.
+pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3PromptCacheAnalysis {
+    let blocks = flatten_prefix_blocks(value);
+    let Some(resolved_breakpoints) = resolve_breakpoints(value, &blocks) else {
+        return unanalyzable_prompt_cache();
+    };
+
     let mut serialization_scratch = SerializationScratch::default();
-    let block_digests = blocks
-        .iter()
-        .map(|block| block_digest(block, &mut serialization_scratch));
-    let chain = PromptCachePrefixChain::from_block_digests(
+    let salts = request_invalidator_salts(value, canonical_model);
+    let chain = PromptCachePrefixChain::from_request_blocks(
         PromptCacheSimulatorKey::seed(canonical_model),
-        block_digests,
+        &blocks,
+        &salts,
+        &mut serialization_scratch,
     );
-    let structural_breakpoints = blocks
-        .iter()
-        .enumerate()
-        .filter_map(|(index, block)| {
-            block.explicit_ttl?;
-            let prefix_key = chain.prefix_key_hex(index)?;
+    let structural_breakpoints = resolved_breakpoints
+        .into_iter()
+        .filter_map(|resolved| {
+            let block = blocks.get(resolved.block_index)?;
+            let prefix_key = chain.prefix_key_hex(resolved.block_index)?;
             Some(V3StructuralBreakpoint {
-                block_index: index as u64,
+                block_index: resolved.block_index as u64,
                 source: block.source,
                 path: block.path.clone(),
                 message_index: block.message_index,
-                ttl: block.explicit_ttl.map(ToOwned::to_owned),
+                ttl: Some(resolved.ttl.to_owned()),
                 prefix_key,
-                lookback_prefixes: lookback_prefixes(&chain, index),
+                lookback_prefixes: lookback_prefixes(&chain, resolved.block_index),
             })
         })
         .collect::<Vec<_>>();
-    if structural_breakpoints.len() > MAX_EXPLICIT_BREAKPOINTS {
-        return V3PromptCacheAnalysis {
-            blocks: blocks.into_iter().map(CacheBlockRef::into_owned).collect(),
-            breakpoints: Vec::new(),
-        };
-    }
     let breakpoints = structural_breakpoints
         .into_iter()
         .map(|breakpoint| V3PromptCacheBreakpoint {
@@ -356,52 +537,44 @@ pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3Prompt
     }
 }
 
-fn exceeds_explicit_breakpoint_cap(value: &Value) -> bool {
-    let mut count = 0;
-    if let Some(Value::Array(tools)) = value.get("tools") {
-        for tool in tools.iter().filter(|tool| tool.is_object()) {
-            if record_explicit_breakpoint(&mut count, tool) {
-                return true;
-            }
-        }
+fn unanalyzable_prompt_cache() -> V3PromptCacheAnalysis {
+    V3PromptCacheAnalysis {
+        blocks: Vec::new(),
+        breakpoints: Vec::new(),
     }
-    if let Some(Value::Array(system)) = value.get("system") {
-        for block in system
-            .iter()
-            .filter(|block| is_cacheable_content_block(block))
-        {
-            if record_explicit_breakpoint(&mut count, block) {
-                return true;
-            }
-        }
-    }
-    let Some(Value::Array(messages)) = value.get("messages") else {
-        return false;
-    };
-    for content in messages
-        .iter()
-        .filter_map(|message| message.get("content").and_then(Value::as_array))
-    {
-        for block in content
-            .iter()
-            .filter(|block| is_cacheable_content_block(block))
-        {
-            if record_explicit_breakpoint(&mut count, block) {
-                return true;
-            }
-        }
-    }
-    false
 }
 
-fn record_explicit_breakpoint(count: &mut usize, value: &Value) -> bool {
-    if value.get("cache_control").is_some() {
-        *count = count.saturating_add(1);
+fn resolve_breakpoints<'a>(
+    value: &'a Value,
+    blocks: &[CacheBlockRef<'a>],
+) -> Option<Vec<ResolvedBreakpoint<'a>>> {
+    let mut breakpoints = Vec::with_capacity(MAX_EXPLICIT_BREAKPOINTS);
+    for (block_index, block) in blocks.iter().enumerate() {
+        if let Some(ttl) = block.explicit_ttl {
+            breakpoints.push(ResolvedBreakpoint { block_index, ttl });
+        }
     }
-    *count > MAX_EXPLICIT_BREAKPOINTS
+
+    if let Some(automatic_ttl) = cache_control_ttl(value) {
+        let automatic_block = blocks
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, block)| block.is_breakpoint_eligible());
+        if let Some((block_index, block)) = automatic_block
+            && block.explicit_ttl.is_none()
+        {
+            breakpoints.push(ResolvedBreakpoint {
+                block_index,
+                ttl: automatic_ttl,
+            });
+        }
+    }
+
+    (breakpoints.len() <= MAX_EXPLICIT_BREAKPOINTS).then_some(breakpoints)
 }
 
-fn flatten_cacheable_blocks(value: &Value) -> Vec<CacheBlockRef<'_>> {
+fn flatten_prefix_blocks(value: &Value) -> Vec<CacheBlockRef<'_>> {
     let mut blocks = Vec::new();
     flatten_tools(value.get("tools"), &mut blocks);
     flatten_system(value.get("system"), &mut blocks);
@@ -422,7 +595,7 @@ fn flatten_tools<'a>(value: Option<&'a Value>, blocks: &mut Vec<CacheBlockRef<'a
             path: format!("tools[{index}]"),
             message_index: None,
             value: CacheBlockValueRef::Json(tool),
-            explicit_ttl: explicit_cache_ttl(tool),
+            explicit_ttl: cache_control_ttl(tool),
         });
     }
 }
@@ -490,7 +663,7 @@ fn push_content_block<'a>(
     message_index: Option<u64>,
     value: &'a Value,
 ) {
-    if !is_cacheable_content_block(value) {
+    if !participates_in_prefix(value) {
         return;
     }
     blocks.push(CacheBlockRef {
@@ -498,11 +671,27 @@ fn push_content_block<'a>(
         path,
         message_index,
         value: CacheBlockValueRef::Json(value),
-        explicit_ttl: explicit_cache_ttl(value),
+        explicit_ttl: is_breakpoint_eligible(value)
+            .then(|| cache_control_ttl(value))
+            .flatten(),
     });
 }
 
-fn is_cacheable_content_block(value: &Value) -> bool {
+fn participates_in_prefix(value: &Value) -> bool {
+    let Value::Object(map) = value else {
+        return false;
+    };
+    match map.get("type").and_then(Value::as_str) {
+        Some("text") => map
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty()),
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn is_breakpoint_eligible(value: &Value) -> bool {
     match value {
         Value::Object(map) => match map.get("type").and_then(Value::as_str) {
             Some("text") => map
@@ -516,18 +705,23 @@ fn is_cacheable_content_block(value: &Value) -> bool {
     }
 }
 
-fn explicit_cache_ttl(value: &Value) -> Option<&str> {
+fn cache_control_ttl(value: &Value) -> Option<&str> {
     value
         .get("cache_control")
         .and_then(|cache_control| cache_control.get("ttl"))
         .and_then(Value::as_str)
-        .or_else(|| value.get("cache_control").is_some().then_some("5m"))
+        .or_else(|| {
+            value
+                .get("cache_control")
+                .is_some()
+                .then_some(DEFAULT_CACHE_TTL)
+        })
 }
 
 fn block_digest(block: &CacheBlockRef<'_>, scratch: &mut SerializationScratch) -> [u8; 32] {
     let bytes = scratch.serialize(&DigestBlockSerializer(block));
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"cc-lb-cache-v4:block");
+    hasher.update(b"cc-lb-cache-v5:block");
     hasher.update(bytes);
     let digest = *hasher.finalize().as_bytes();
     scratch.clear_for_reuse();
@@ -593,36 +787,7 @@ mod tests {
         tokenizer::{reset_tokenizer_call_count, tokenizer_call_count},
     };
 
-    use super::{
-        PromptCachePrefixChain, PromptCacheSimulatorKey, V3PromptCacheBlockSource,
-        analyze_v3_prompt_cache,
-    };
-
-    #[test]
-    fn lookback_includes_nineteen_prior_blocks() {
-        let chain = PromptCachePrefixChain::from_block_digests(
-            PromptCacheSimulatorKey::seed("claude-opus-4-8"),
-            (0_u8..25).map(|value| [value; 32]),
-        );
-
-        let keys = chain.lookback_keys(24);
-
-        assert_eq!(keys.len(), 20);
-        assert_eq!(keys[0], chain.prefix_key(24).expect("n exists"));
-        assert_eq!(keys[19], chain.prefix_key(5).expect("n-19 exists"));
-    }
-
-    #[test]
-    fn lookback_excludes_twenty_prior_blocks() {
-        let chain = PromptCachePrefixChain::from_block_digests(
-            PromptCacheSimulatorKey::seed("claude-opus-4-8"),
-            (0_u8..25).map(|value| [value; 32]),
-        );
-
-        let keys = chain.lookback_keys(24);
-
-        assert!(!keys.contains(&chain.prefix_key(4).expect("n-20 exists")));
-    }
+    use super::{V3PromptCacheBlockSource, analyze_v3_prompt_cache};
 
     #[test]
     fn flattens_tools_system_messages_in_provider_order() {
@@ -645,13 +810,14 @@ mod tests {
     }
 
     #[test]
-    fn ignores_message_object_cache_control_and_non_cacheable_blocks() {
+    fn keeps_prefix_only_blocks_without_recording_breakpoints() {
         let request = json!({
             "model": "claude-sonnet-4-5",
             "messages": [
                 {"role":"user","cache_control":{"type":"ephemeral"},"content":[
                     {"type":"text","text":""},
                     {"type":"thinking","thinking":"hidden","cache_control":{"type":"ephemeral"}},
+                    {"type":"future_block","payload":"opaque","cache_control":{"type":"ephemeral"}},
                     {"type":"text","text":"cache me","cache_control":{"type":"ephemeral"}}
                 ]}
             ]
@@ -659,9 +825,340 @@ mod tests {
 
         let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
 
+        assert_eq!(analysis.blocks.len(), 3);
+        assert_eq!(analysis.blocks[0].path, "messages[0].content[1]");
+        assert_eq!(analysis.blocks[1].path, "messages[0].content[2]");
+        assert_eq!(analysis.blocks[2].path, "messages[0].content[3]");
+        assert!(
+            analysis.blocks[..2]
+                .iter()
+                .all(|block| block.explicit_ttl.is_none())
+        );
+        assert_eq!(analysis.breakpoints.len(), 1);
+        assert_eq!(analysis.breakpoints[0].block_index, 2);
+        assert_eq!(analysis.breakpoints[0].path, "messages[0].content[3]");
+    }
+
+    #[test]
+    fn malformed_text_blocks_do_not_participate_in_prefix() {
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role":"user","content":[
+                {"type":"text","cache_control":{"type":"ephemeral"}},
+                {"type":"text","text":123,"cache_control":{"type":"ephemeral"}},
+                {"type":"future_block","payload":"opaque"},
+                {"type":"text","text":"cache me","cache_control":{"type":"ephemeral"}}
+            ]}]
+        });
+
+        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+
+        assert_eq!(analysis.blocks.len(), 2);
+        assert_eq!(analysis.blocks[0].path, "messages[0].content[2]");
+        assert_eq!(analysis.blocks[1].path, "messages[0].content[3]");
+        assert_eq!(analysis.breakpoints.len(), 1);
+        assert_eq!(analysis.breakpoints[0].block_index, 1);
+    }
+
+    #[test]
+    fn automatic_cache_control_uses_last_eligible_block() {
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "cache_control": {"type":"ephemeral","ttl":"1h"},
+            "messages": [{"role":"assistant","content":[
+                {"type":"text","text":"eligible"},
+                {"type":"thinking","thinking":"trailing prefix-only block"}
+            ]}]
+        });
+
+        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+
+        assert_eq!(analysis.blocks.len(), 2);
+        assert_eq!(analysis.breakpoints.len(), 1);
+        assert_eq!(analysis.breakpoints[0].block_index, 0);
+        assert_eq!(analysis.breakpoints[0].path, "messages[0].content[0]");
+        assert_eq!(analysis.breakpoints[0].ttl.as_deref(), Some("1h"));
+    }
+
+    #[test]
+    fn automatic_cache_control_without_eligible_block_skips_breakpoint() {
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "cache_control": {"type":"ephemeral"},
+            "messages": [{"role":"assistant","content":[
+                {"type":"thinking","thinking":"prefix-only"},
+                {"type":"future_block","payload":"opaque"}
+            ]}]
+        });
+
+        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+
+        assert_eq!(analysis.blocks.len(), 2);
+        assert!(analysis.breakpoints.is_empty());
+    }
+
+    #[test]
+    fn automatic_cache_control_only_consumes_slot_when_it_synthesizes_breakpoint() {
+        let marked_content = (0..4)
+            .map(|index| {
+                json!({
+                    "type":"text",
+                    "text":format!("block-{index}"),
+                    "cache_control":{"type":"ephemeral"}
+                })
+            })
+            .collect::<Vec<_>>();
+        let deduplicated_request = json!({
+            "model": "claude-sonnet-4-5",
+            "cache_control": {"type":"ephemeral"},
+            "messages": [{"role":"user","content":marked_content.clone()}]
+        });
+
+        reset_tokenizer_call_count();
+        let deduplicated = analyze_v3_prompt_cache(
+            &deduplicated_request,
+            canonical_model_id("claude-sonnet-4-5"),
+        );
+
+        assert_eq!(deduplicated.blocks.len(), 4);
+        assert_eq!(deduplicated.breakpoints.len(), 4);
+        assert!(
+            deduplicated
+                .breakpoints
+                .iter()
+                .all(|breakpoint| breakpoint.ttl.as_deref() == Some("5m"))
+        );
+        assert_eq!(tokenizer_call_count(), 4);
+
+        let mut synthesized_content = marked_content;
+        synthesized_content.push(json!({"type":"text","text":"automatic target"}));
+        let over_cap_request = json!({
+            "model": "claude-sonnet-4-5",
+            "cache_control": {"type":"ephemeral"},
+            "messages": [{"role":"user","content":synthesized_content}]
+        });
+
+        reset_tokenizer_call_count();
+        let over_cap =
+            analyze_v3_prompt_cache(&over_cap_request, canonical_model_id("claude-sonnet-4-5"));
+
+        assert!(over_cap.blocks.is_empty());
+        assert!(over_cap.breakpoints.is_empty());
+        assert_eq!(tokenizer_call_count(), 0);
+    }
+
+    #[test]
+    fn explicit_ttl_wins_over_conflicting_automatic_ttl() {
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "cache_control": {"type":"ephemeral","ttl":"1h"},
+            "messages": [{"role":"user","content":[{
+                "type":"text",
+                "text":"conflicting ttl",
+                "cache_control":{"type":"ephemeral"}
+            }]}]
+        });
+
+        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+
         assert_eq!(analysis.blocks.len(), 1);
         assert_eq!(analysis.breakpoints.len(), 1);
-        assert_eq!(analysis.breakpoints[0].path, "messages[0].content[2]");
+        assert_eq!(analysis.breakpoints[0].block_index, 0);
+        assert_eq!(analysis.breakpoints[0].ttl.as_deref(), Some("5m"));
+    }
+
+    #[test]
+    fn one_hour_breakpoint_after_five_minute_still_yields_breakpoints() {
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role":"user","content":[
+                {
+                    "type":"text",
+                    "text":"short first",
+                    "cache_control":{"type":"ephemeral"}
+                },
+                {
+                    "type":"text",
+                    "text":"long second",
+                    "cache_control":{"type":"ephemeral","ttl":"1h"}
+                }
+            ]}]
+        });
+
+        let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
+
+        assert_eq!(analysis.blocks.len(), 2);
+        assert_eq!(analysis.breakpoints.len(), 2);
+        assert_eq!(analysis.breakpoints[0].ttl.as_deref(), Some("5m"));
+        assert_eq!(analysis.breakpoints[1].ttl.as_deref(), Some("1h"));
+    }
+
+    #[test]
+    fn thinking_block_shifts_following_index_and_prefix_key() {
+        let without_thinking = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role":"assistant","content":[
+                {"type":"text","text":"stable"},
+                {
+                    "type":"text",
+                    "text":"breakpoint",
+                    "cache_control":{"type":"ephemeral"}
+                }
+            ]}]
+        });
+        let with_thinking = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role":"assistant","content":[
+                {"type":"text","text":"stable"},
+                {"type":"thinking","thinking":"preserved reasoning"},
+                {
+                    "type":"text",
+                    "text":"breakpoint",
+                    "cache_control":{"type":"ephemeral"}
+                }
+            ]}]
+        });
+
+        let without_thinking =
+            analyze_v3_prompt_cache(&without_thinking, canonical_model_id("claude-sonnet-4-5"));
+        let with_thinking =
+            analyze_v3_prompt_cache(&with_thinking, canonical_model_id("claude-sonnet-4-5"));
+
+        assert_eq!(without_thinking.breakpoints[0].block_index, 1);
+        assert_eq!(with_thinking.breakpoints[0].block_index, 2);
+        assert_eq!(
+            with_thinking.blocks[1].value["type"].as_str(),
+            Some("thinking")
+        );
+        assert_ne!(
+            without_thinking.breakpoints[0].prefix_key,
+            with_thinking.breakpoints[0].prefix_key
+        );
+    }
+
+    #[test]
+    fn standard_speed_is_hash_neutral_but_explicit_effort_is_salted() {
+        // `standard` speed is structurally the absence of fast mode (opt-in, beta-gated), so it
+        // normalizes to absent. `effort` does not: its default is per-model, so an explicit value
+        // is always salted rather than compared against a hardcoded default.
+        let omitted = json!({
+            "model": "claude-sonnet-4-5",
+            "tools": [{
+                "name":"lookup",
+                "description":"lookup",
+                "input_schema":{"type":"object"},
+                "cache_control":{"type":"ephemeral"}
+            }],
+            "system": [{
+                "type":"text",
+                "text":"system",
+                "cache_control":{"type":"ephemeral"}
+            }],
+            "messages": [{"role":"user","content":[{
+                "type":"text",
+                "text":"message",
+                "cache_control":{"type":"ephemeral"}
+            }]}]
+        });
+        let mut explicit_effort = omitted.clone();
+        explicit_effort["output_config"] = json!({"effort":"high"});
+        let mut explicit_speed = omitted.clone();
+        explicit_speed["speed"] = json!("standard");
+
+        let omitted = analyze_v3_prompt_cache(&omitted, canonical_model_id("claude-sonnet-4-5"));
+        let explicit_effort =
+            analyze_v3_prompt_cache(&explicit_effort, canonical_model_id("claude-sonnet-4-5"));
+        let explicit_speed =
+            analyze_v3_prompt_cache(&explicit_speed, canonical_model_id("claude-sonnet-4-5"));
+        let prefix_keys = |analysis: &super::V3PromptCacheAnalysis| {
+            analysis
+                .breakpoints
+                .iter()
+                .map(|breakpoint| breakpoint.prefix_key.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(prefix_keys(&omitted), prefix_keys(&explicit_speed));
+        // Tools tier is never salted, so only the system and message tiers may diverge.
+        assert_eq!(prefix_keys(&omitted)[0], prefix_keys(&explicit_effort)[0]);
+        assert_ne!(prefix_keys(&omitted)[2], prefix_keys(&explicit_effort)[2]);
+    }
+
+    #[test]
+    fn explicit_disabled_thinking_is_salted_rather_than_treated_as_absent() {
+        // Collapsing the two would be a false-hit prediction on models where thinking is on by
+        // default (Opus 5, Sonnet 5, Fable 5, Mythos 5). Splitting them costs at most one extra
+        // cache creation on models where thinking is off by default.
+        let omitted = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role":"user","content":[{
+                "type":"text",
+                "text":"message",
+                "cache_control":{"type":"ephemeral"}
+            }]}]
+        });
+        let mut disabled = omitted.clone();
+        disabled["thinking"] = json!({"type":"disabled"});
+
+        let omitted = analyze_v3_prompt_cache(&omitted, canonical_model_id("claude-sonnet-4-5"));
+        let disabled = analyze_v3_prompt_cache(&disabled, canonical_model_id("claude-sonnet-4-5"));
+
+        assert_ne!(
+            omitted.breakpoints[0].prefix_key,
+            disabled.breakpoints[0].prefix_key
+        );
+    }
+
+    #[test]
+    fn fast_speed_is_hash_neutral_when_model_does_not_honor_it() {
+        let omitted = json!({
+            "model": "claude-opus-4-6",
+            "system": [{
+                "type":"text",
+                "text":"system",
+                "cache_control":{"type":"ephemeral"}
+            }]
+        });
+        let mut fast = omitted.clone();
+        fast["speed"] = json!("fast");
+
+        let omitted = analyze_v3_prompt_cache(&omitted, "claude-opus-4-6");
+        let fast = analyze_v3_prompt_cache(&fast, "claude-opus-4-6");
+
+        assert_eq!(
+            omitted.breakpoints[0].source,
+            V3PromptCacheBlockSource::System
+        );
+        assert_eq!(
+            omitted.breakpoints[0].prefix_key,
+            fast.breakpoints[0].prefix_key
+        );
+    }
+
+    #[test]
+    fn fast_speed_perturbs_unknown_future_model_system_prefix() {
+        let omitted = json!({
+            "model": "claude-opus-6",
+            "system": [{
+                "type":"text",
+                "text":"system",
+                "cache_control":{"type":"ephemeral"}
+            }]
+        });
+        let mut fast = omitted.clone();
+        fast["speed"] = json!("fast");
+
+        let omitted = analyze_v3_prompt_cache(&omitted, "claude-opus-6");
+        let fast = analyze_v3_prompt_cache(&fast, "claude-opus-6");
+
+        assert_eq!(
+            omitted.breakpoints[0].source,
+            V3PromptCacheBlockSource::System
+        );
+        assert_ne!(
+            omitted.breakpoints[0].prefix_key,
+            fast.breakpoints[0].prefix_key
+        );
     }
 
     #[test]

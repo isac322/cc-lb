@@ -4,13 +4,23 @@ use crate::{
     canonical_service_tier, global_catalog, normalize_model_id,
 };
 
-const CACHE_CREATION_1H_NUMERATOR: u128 = 8;
-const CACHE_CREATION_1H_DENOMINATOR: u128 = 5;
+/// Multiplier the provider applies to base input pricing for a 1-hour cache write.
+const CACHE_CREATION_1H_BASE_INPUT_MULTIPLIER: u64 = 2;
 
-pub(crate) fn cache_creation_1h_price(price_5m: UsdPerMillion) -> UsdPerMillion {
-    let numer = u128::from(price_5m.as_micros_usd()) * CACHE_CREATION_1H_NUMERATOR;
-    let micros = (numer + CACHE_CREATION_1H_DENOMINATOR / 2) / CACHE_CREATION_1H_DENOMINATOR;
-    UsdPerMillion::from_micros_usd(micros.try_into().unwrap_or(u64::MAX))
+/// 1-hour cache-write price, derived from the base input price of whichever pricing path is in
+/// use (catalog tier rate, or the Anthropic family fallback in `cc-lb-engine`).
+///
+/// Unlike the older `1.6 * price_5m` form, `2 * base_input` does not structurally guarantee
+/// `price_1h > price_5m`: a catalog whose 5m rate exceeds 2x base input would invert TTL cost
+/// ordering. That is data hygiene, not an invariant clamped here.
+pub fn cache_creation_1h_micros_from_input(input_micros_per_million: u64) -> u64 {
+    input_micros_per_million.saturating_mul(CACHE_CREATION_1H_BASE_INPUT_MULTIPLIER)
+}
+
+pub(crate) fn resolved_cache_creation_1h_price(base_input_price: UsdPerMillion) -> UsdPerMillion {
+    UsdPerMillion::from_micros_usd(cache_creation_1h_micros_from_input(
+        base_input_price.as_micros_usd(),
+    ))
 }
 
 #[deprecated(note = "use virtual_cost_micros_full to include cache token costs and upstream kind")]
@@ -63,9 +73,10 @@ pub fn virtual_cost_micros_full(
     let output_micros = component_cost(output, rate.output_per_million_usd);
 
     let (cc_5m_micros, cc_1h_micros) = if let Some(price_5m) = cc_5m_price {
+        let price_1h = resolved_cache_creation_1h_price(rate.input_per_million_usd);
         (
             component_cost(cache_creation_5m_input, price_5m),
-            component_cost(cache_creation_1h_input, cache_creation_1h_price(price_5m)),
+            component_cost(cache_creation_1h_input, price_1h),
         )
     } else {
         if cache_creation_5m_input + cache_creation_1h_input > 0 {
@@ -131,4 +142,48 @@ pub(crate) fn record_missing_price_field(model: &str, field: &'static str) {
         "field" => field
     )
     .increment(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use super::*;
+    use crate::{CatalogSnapshot, CatalogStatus, GLOBAL_TEST_LOCK, Pricing};
+
+    #[test]
+    fn one_hour_cache_write_uses_base_input_when_five_minute_price_differs() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = "cache-1h-base-input-test";
+        let base_input_price = UsdPerMillion::from_micros_usd(3_000_000);
+        let nonstandard_5m_price = UsdPerMillion::from_micros_usd(10_000_000);
+        global_catalog().install_snapshot(CatalogSnapshot {
+            payload_hash: String::new(),
+            fetched_at_ms: 1,
+            models: HashMap::from([(
+                model.to_owned(),
+                Pricing {
+                    model: model.to_owned(),
+                    input_per_million_usd: base_input_price,
+                    output_per_million_usd: UsdPerMillion::from_micros_usd(15_000_000),
+                    by_tier: BTreeMap::new(),
+                },
+            )]),
+            raw_json: b"{}".to_vec(),
+            cache_creation_per_million_usd: HashMap::from([(
+                model.to_owned(),
+                nonstandard_5m_price,
+            )]),
+            cache_read_per_million_usd: HashMap::new(),
+            cache_creation_per_million_usd_by_tier: HashMap::new(),
+            cache_read_per_million_usd_by_tier: HashMap::new(),
+            status: CatalogStatus::Ok,
+        });
+
+        let breakdown = virtual_cost_micros_full(model, 0, 0, 0, 1_000_000, 0, None, None);
+
+        assert_eq!(breakdown.cache_creation_1h_micros, 6_000_000);
+    }
 }

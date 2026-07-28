@@ -38,6 +38,8 @@ const populatedData: DashboardUsageResponse = {
           bucket_start_unix_secs: 1_700_000_000,
           input_tokens: 100,
           output_tokens: 50,
+          cache_creation_input_tokens: 1_000,
+          cache_read_input_tokens: 40_000,
           virtual_cost_micros: 1_500_000,
         },
       ],
@@ -65,5 +67,6 @@ describe('ApiUsageCard legend slot reservation', () => {
     const slot = screen.getByTestId('api-usage-legend-slot');
     expect(slot.className).toContain('min-h-[28px]');
     expect(slot.textContent).toContain('claude-sonnet-4');
+    expect(slot.textContent).toContain((41150).toLocaleString());
   });
 });
