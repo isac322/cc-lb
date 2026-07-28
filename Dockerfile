@@ -79,7 +79,6 @@ ARG SCCACHE_REGION=""
 ARG SCCACHE_S3_USE_SSL=""
 ARG REQUIRE_SCCACHE="0"
 ARG SCCACHE_S3_KEY_PREFIX=""
-ARG SCCACHE_MIN_HIT_RATE="0"
 
 COPY . .
 
@@ -173,15 +172,6 @@ if [ -n "${RUSTC_WRAPPER:-}" ]; then
   if grep -Eq '^Cache (timeouts|read errors|write errors)[[:space:]]+[1-9][0-9]*$' /tmp/sccache-stats.txt; then
     echo "sccache reported a cache storage error or timeout" >&2
     cache_status=1
-  fi
-  if [ "${SCCACHE_MIN_HIT_RATE}" != "0" ]; then
-    for language in Rust 'C/C++'; do
-      rate="$(awk -v language="$language" '$1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(" language ")" { print $(NF - 1); exit }' /tmp/sccache-stats.txt)"
-      if ! awk -v rate="$rate" -v minimum="${SCCACHE_MIN_HIT_RATE}" 'BEGIN { exit !(rate + 0 >= minimum) }'; then
-        echo "sccache ${language} hit rate ${rate:-missing}% is below ${SCCACHE_MIN_HIT_RATE}%" >&2
-        cache_status=1
-      fi
-    done
   fi
   unset RUSTC_WRAPPER
   if { [ "$cache_status" -ne 0 ] || [ "$build_status" -ne 0 ]; } && [ -s "${SCCACHE_ERROR_LOG}" ]; then

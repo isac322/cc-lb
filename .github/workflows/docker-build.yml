@@ -19,19 +19,6 @@ on:
       - '.dockerignore'
       - '.cargo/config.toml'
       - '.github/workflows/docker-build.yml'
-  workflow_dispatch:
-    inputs:
-      cache_namespace:
-        description: Stable isolated namespace for a two-run all-target S3 cache lifecycle probe.
-        required: false
-        default: ''
-        type: string
-      verify_cache_reuse:
-        description: Require at least 99% Rust and C/C++ cache hits. Requires cache_namespace from a completed cold-write run.
-        required: false
-        default: false
-        type: boolean
-
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -53,38 +40,6 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "source_date_epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
 
-      - name: Select sccache namespace
-        id: sccache
-        env:
-          CACHE_NAMESPACE: ${{ inputs.cache_namespace }}
-          VERIFY_CACHE_REUSE: ${{ inputs.verify_cache_reuse }}
-        run: |
-          set -euo pipefail
-          if [ -n "$CACHE_NAMESPACE" ]; then
-            case "$CACHE_NAMESPACE" in
-              *[!A-Za-z0-9._-]*)
-                echo "::error::cache_namespace may contain only letters, numbers, dots, underscores, and hyphens"
-                exit 1
-                ;;
-            esac
-            prefix="cc-lb/verify/$CACHE_NAMESPACE"
-          else
-            prefix="cc-lb"
-          fi
-          if [ "$VERIFY_CACHE_REUSE" = true ]; then
-            if [ -z "$CACHE_NAMESPACE" ]; then
-              echo "::error::verify_cache_reuse requires cache_namespace from a completed cold-write run"
-              exit 1
-            fi
-            min_hit_rate=99
-          else
-            min_hit_rate=0
-          fi
-          {
-            echo "prefix=$prefix"
-            echo "min_hit_rate=$min_hit_rate"
-          } >> "$GITHUB_OUTPUT"
-
       # network=host + the network.host entitlement let the in-Docker build
       # reach the in-cluster Garage S3 endpoint (garage.arc-systems.svc).
       - uses: docker/setup-buildx-action@v4
@@ -92,9 +47,8 @@ jobs:
           driver-opts: network=host
           buildkitd-flags: --allow-insecure-entitlement network.host
 
-      # Build every release target on Dockerfile changes. A separate manual
-      # probe optionally rebuilds with the builder cache bypassed, avoiding a
-      # second full target graph on every pull request.
+      # Build every release target on Dockerfile changes so cross-compilation
+      # failures are caught before publication and the release cache stays warm.
       - name: Build all release targets
         uses: docker/build-push-action@v7
         with:
@@ -112,33 +66,7 @@ jobs:
             SCCACHE_REGION=garage
             SCCACHE_S3_USE_SSL=false
             REQUIRE_SCCACHE=1
-            SCCACHE_S3_KEY_PREFIX=${{ steps.sccache.outputs.prefix }}
-            SCCACHE_MIN_HIT_RATE=${{ steps.sccache.outputs.min_hit_rate }}
-          secret-envs: |
-            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
-            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
-
-      - name: Rebuild all release targets from sccache
-        if: inputs.verify_cache_reuse
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le
-          target: builder
-          outputs: type=cacheonly
-          no-cache-filters: builder
-          network: host
-          allow: network.host
-          build-args: |
-            GIT_SHA=${{ steps.source.outputs.sha }}
-            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
-            SCCACHE_BUCKET=sccache
-            SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
-            SCCACHE_REGION=garage
-            SCCACHE_S3_USE_SSL=false
-            REQUIRE_SCCACHE=1
-            SCCACHE_S3_KEY_PREFIX=${{ steps.sccache.outputs.prefix }}
-            SCCACHE_MIN_HIT_RATE=${{ steps.sccache.outputs.min_hit_rate }}
+            SCCACHE_S3_KEY_PREFIX=cc-lb
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
@@ -159,7 +87,7 @@ jobs:
             SCCACHE_REGION=garage
             SCCACHE_S3_USE_SSL=false
             REQUIRE_SCCACHE=1
-            SCCACHE_S3_KEY_PREFIX=${{ steps.sccache.outputs.prefix }}
+            SCCACHE_S3_KEY_PREFIX=cc-lb
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
