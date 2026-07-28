@@ -235,23 +235,42 @@ jobs:
       - name: Extract changelog section for this version
         id: changelog
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          section=$(awk -v want="## [${VERSION}]" '
-            index($0, "## [") == 1 {
-              if (found) exit
-              if (index($0, want) == 1) { found = 1; skip_blank = 1; next }
-              next
-            }
-            found && skip_blank {
-              if ($0 == "") next
-              skip_blank = 0
-            }
-            found { print }
-          ' CHANGELOG.md)
+          extract_section() {
+            awk -v want="## [${VERSION}]" '
+              index($0, "## [") == 1 {
+                if (found) exit
+                if (index($0, want) == 1) { found = 1; skip_blank = 1; next }
+                next
+              }
+              found && skip_blank {
+                if ($0 == "") next
+                skip_blank = 0
+              }
+              found { print }
+            ' "$1"
+          }
+
+          section=$(extract_section CHANGELOG.md)
           if [ -z "$section" ]; then
-            echo "::error::CHANGELOG.md has no '## [$VERSION]' section; release-plz's template renders an empty {{ changelog }}, so the Release would publish with no notes. Add the section before releasing."
+            # The tag is immutable (validated above/in `prepare`), so a missing section
+            # here reproduces on every retry, including `resume`. By the time `resume`
+            # runs, Docker and Helm are already published for this version, so failing
+            # outright would leave the Release permanently stuck as a draft with no
+            # recovery route other than moving the tag. Fall back to origin/master's
+            # CHANGELOG.md: an operator can land the missing section as a normal commit
+            # there and re-dispatch `resume` without touching the tag.
+            echo "::warning::CHANGELOG.md has no '## [$VERSION]' section at the release tag; falling back to origin/master."
+            gh api "repos/$GH_REPO/contents/CHANGELOG.md?ref=master" \
+              -H 'Accept: application/vnd.github.raw' > "$RUNNER_TEMP/master-CHANGELOG.md"
+            section=$(extract_section "$RUNNER_TEMP/master-CHANGELOG.md")
+          fi
+          if [ -z "$section" ]; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section at the release tag or on origin/master; release-plz's template renders an empty {{ changelog }}, so the Release would publish with no notes. Add the section (a normal commit to master is enough; the tag does not need to move) before releasing or before re-dispatching resume."
             exit 1
           fi
           {
