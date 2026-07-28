@@ -169,8 +169,12 @@ if [ -n "${RUSTC_WRAPPER:-}" ]; then
   if ! timeout 900 sccache --stop-server | tee /tmp/sccache-stats.txt; then
     cache_status=1
   fi
-  if grep -Eq '^Cache (timeouts|read errors|write errors)[[:space:]]+[1-9][0-9]*$' /tmp/sccache-stats.txt; then
-    echo "sccache reported a cache storage error or timeout" >&2
+  cache_timeouts="$(awk '$1 == "Cache" && $2 == "timeouts" { print $3; exit }' /tmp/sccache-stats.txt)"
+  if [ "${cache_timeouts:-0}" -gt 0 ]; then
+    echo "::warning::sccache reported ${cache_timeouts} cache timeouts; affected compilations fell back to local compilation"
+  fi
+  if grep -Eq '^Cache (read errors|write errors)[[:space:]]+[1-9][0-9]*$' /tmp/sccache-stats.txt; then
+    echo "sccache reported a cache storage read or write error" >&2
     cache_status=1
   fi
   unset RUSTC_WRAPPER
