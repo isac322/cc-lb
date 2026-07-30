@@ -270,6 +270,9 @@ if [ "$client" = "senpi" ]; then
     custom)
       senpi_provider=senpi-mock
       senpi_model=senpi-main
+      # Any accidental fallback to the ambient Anthropic provider must fail
+      # locally instead of reaching the real API or silently passing via cc-lb.
+      senpi_anthropic_base_url=http://127.0.0.1:1
       cat > "$TMP_DIR/senpi-agent/models.json" <<JSON
 {"providers":{"senpi-mock":{"baseUrl":"http://127.0.0.1:$proxy_port","apiKey":"$API_KEY","api":"anthropic-messages","models":[{"id":"senpi-main","name":"Senpi Main","api":"anthropic-messages","reasoning":false,"input":["text"],"contextWindow":128000,"maxTokens":4096,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"headers":{"x-fake-mode":"senpi-tools","x-senpi-image-path":"$TMP_DIR/senpi-look-at.png"},"compat":{"sendSessionAffinityHeaders":true}},{"id":"senpi-vision","name":"Senpi Vision","api":"anthropic-messages","reasoning":false,"input":["text","image"],"contextWindow":128000,"maxTokens":4096,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"headers":{"x-fake-mode":"senpi-tools"},"compat":{"sendSessionAffinityHeaders":true}}]}}}
 JSON
@@ -280,29 +283,32 @@ JSON
     anthropic-direct|anthropic-affinity)
       senpi_provider=anthropic
       senpi_model=claude-sonnet-4-5
+      senpi_anthropic_base_url="http://127.0.0.1:$proxy_port"
       # Child subagent/look_at processes do not inherit the parent's
-      # `--api-key`, so keep auth in this isolated /tmp provider override.
-      # Direct mode intentionally omits session-affinity compatibility.
+      # `--api-key`; the isolated `ANTHROPIC_API_KEY` environment below
+      # supplies their credentials. Direct mode intentionally omits
+      # session-affinity compatibility.
       senpi_compat=''
       if [ "$upstream" = "anthropic-affinity" ]; then
         senpi_compat=',"compat":{"sendSessionAffinityHeaders":true}'
       fi
       cat > "$TMP_DIR/senpi-agent/models.json" <<JSON
-{"providers":{"anthropic":{"baseUrl":"http://127.0.0.1:$proxy_port","apiKey":"$API_KEY"$senpi_compat}}}
+{"providers":{"anthropic":{"baseUrl":"http://127.0.0.1:$proxy_port"$senpi_compat}}}
 JSON
       cat > "$TMP_DIR/senpi-agent/settings.json" <<JSON
 {"defaultProvider":"anthropic","defaultModel":"$senpi_model","lookAt":{"enabled":true,"models":["anthropic/$senpi_model"]}}
 JSON
       ;;
   esac
-fi
-cat > "$TMP_DIR/senpi-agent/agents/reviewer.md" <<'EOF'
+  cat > "$TMP_DIR/senpi-agent/agents/reviewer.md" <<EOF
 ---
 name: reviewer
 description: Reviews one small request for the real-client proxy test.
+model: $senpi_provider/$senpi_model
 ---
 Answer the delegated request directly.
 EOF
+fi
 
 python3 - "$TMP_DIR/senpi-look-at.png" <<'PY'
 import binascii
@@ -513,6 +519,8 @@ PY
       XDG_DATA_HOME="$TMP_DIR/xdg-data"
       SENPI_CODING_AGENT_DIR="$TMP_DIR/senpi-agent"
       SENPI_CODING_AGENT_SESSION_DIR="$TMP_DIR/senpi-sessions"
+      ANTHROPIC_BASE_URL="$senpi_anthropic_base_url"
+      ANTHROPIC_API_KEY="$API_KEY"
       SENPI_OMO_LOCAL_UPDATE=0
       PI_OFFLINE=1
       PI_TELEMETRY=0
