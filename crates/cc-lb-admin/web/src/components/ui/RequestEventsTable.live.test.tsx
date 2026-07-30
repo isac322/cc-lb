@@ -143,6 +143,79 @@ describe('RequestEventsTable - Live & Outcomes', () => {
     });
   });
 
+  it('replaces an in-progress row with the final upstream stream error', () => {
+    const partialEvent = {
+      event_id: 'evt_stream_error',
+      request_id: 'req_stream_error',
+      ts: 1718553120,
+      ts_ms: 1718553120000,
+      status: 0,
+      duration_ms: 0,
+      _phase: 'partial',
+    } satisfies RequestEventWithPhase;
+
+    const { container, rerender } = render(
+      <RequestEventsTable
+        events={[partialEvent]}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+
+    expect(screen.getByText('In progress')).toBeDefined();
+
+    const finalEvent = {
+      ...partialEvent,
+      status: 200,
+      duration_ms: 12,
+      error_code: 'upstream_stream_error',
+      upstream_error_type: 'overloaded_error',
+      upstream_error_message: 'Overloaded',
+      _phase: 'final',
+    } satisfies RequestEventWithPhase;
+
+    rerender(
+      <RequestEventsTable
+        events={[finalEvent]}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+
+    expect(screen.queryByText('In progress')).toBeNull();
+    expect(screen.getByText('overloaded_error')).toBeDefined();
+    expect(container.querySelector('.status-dot')?.classList).toContain(
+      'danger',
+    );
+  });
+
+  it('keeps an HTTP upstream error as its numeric status', () => {
+    const events: RequestEventWithPhase[] = [
+      {
+        event_id: 'evt_http_error',
+        request_id: 'req_http_error',
+        ts: 1718553120,
+        ts_ms: 1718553120000,
+        status: 429,
+        error_code: 'upstream_4xx',
+        upstream_error_type: 'rate_limit_error',
+        duration_ms: 100,
+        _phase: 'final',
+      } satisfies RequestEventWithPhase,
+    ];
+
+    render(
+      <RequestEventsTable
+        events={events}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+
+    expect(screen.getByText('429')).toBeDefined();
+    expect(screen.queryByText('rate_limit_error')).toBeNull();
+  });
+
   describe('Drawer Live Updates', () => {
     it('updates an already-open drawer when the event transitions from partial to richer partial to final', async () => {
       cleanup();
