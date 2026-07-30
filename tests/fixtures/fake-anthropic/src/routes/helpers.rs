@@ -53,7 +53,8 @@ pub(crate) async fn mode_response(mode: FakeMode, retry_after: u64) -> Option<Re
         FakeMode::Ok
         | FakeMode::Slow
         | FakeMode::TamperUnknownEvent
-        | FakeMode::TruncateMidStream => None,
+        | FakeMode::TruncateMidStream
+        | FakeMode::SenpiTools => None,
     }
 }
 

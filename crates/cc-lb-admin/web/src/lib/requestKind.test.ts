@@ -12,6 +12,7 @@ describe('requestKindBadgeText', () => {
     ['session_title', 'title'],
     ['auto_thinking', 'think'],
     ['side', 'side'],
+    ['look_at', 'vision'],
     ['unknown', 'unk'],
   ])('renders %s as %s', (requestKind, expected) => {
     expect(requestKindBadgeText(requestKind)).toBe(expected);

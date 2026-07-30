@@ -6400,6 +6400,73 @@ mod tests {
     }
 
     #[test]
+    fn request_cache_metadata_classifies_senpi_without_inventing_client_app() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-session-affinity"),
+            HeaderValue::from_static("senpi-affinity-session"),
+        );
+        let body = Bytes::from_static(
+            br#"{"model":"mock-with-affinity","system":"You are senpi, a coding agent. Your work should be indistinguishable from a careful senior engineer's.\n\n## Intent Gate (EVERY message)","messages":[{"role":"user","content":"Reply exactly SENPI_FAKE_OK"}],"tools":[]}"#,
+        );
+
+        let metadata = request_cache_metadata(&headers, &body);
+
+        assert_eq!(
+            metadata.observed_session_id.as_deref(),
+            Some("senpi-affinity-session")
+        );
+        assert_eq!(
+            metadata.session_id_source.as_deref(),
+            Some("x-session-affinity")
+        );
+        assert_eq!(metadata.request_kind.as_deref(), Some("main"));
+        assert_eq!(metadata.client_app, None);
+    }
+
+    #[test]
+    fn request_cache_metadata_classifies_senpi_auxiliary_requests() {
+        let cases = [
+            (
+                "subagent",
+                Some("019d20f2-6f15-7de2-a800-f3e97928a87c"),
+                r#"{"system":[{"type":"text","text":"You are senpi, a coding agent. Your work should be indistinguishable from a careful senior engineer's.\n\nYou are a focused code-review subagent."}],"messages":[{"role":"user","content":"Task: Review the auth change"}],"tools":[{"name":"read"}]}"#,
+                "subagent",
+            ),
+            (
+                "look at",
+                None,
+                r#"{"system":[{"type":"text","text":"You analyze attached media for a downstream agent that cannot inspect the attachments directly.\n\nExtract only the information requested by the goal."}],"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}},{"type":"text","text":"Goal:\nRead the label"}]}]}"#,
+                "look_at",
+            ),
+        ];
+
+        for (case, session_id, fixture, request_kind) in cases {
+            let mut headers = HeaderMap::new();
+            if let Some(session_id) = session_id {
+                headers.insert(
+                    HeaderName::from_static("x-session-affinity"),
+                    HeaderValue::from_str(session_id).expect("valid session ID header"),
+                );
+            }
+            let metadata =
+                request_cache_metadata(&headers, &Bytes::copy_from_slice(fixture.as_bytes()));
+
+            assert_eq!(
+                metadata.observed_session_id.as_deref(),
+                session_id,
+                "{case}"
+            );
+            assert_eq!(
+                metadata.request_kind.as_deref(),
+                Some(request_kind),
+                "{case}"
+            );
+            assert_eq!(metadata.client_app, None, "{case}");
+        }
+    }
+
+    #[test]
     fn request_cache_metadata_classifies_omp_requests() {
         let mut headers = HeaderMap::new();
         headers.insert(

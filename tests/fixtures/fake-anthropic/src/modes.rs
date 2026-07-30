@@ -15,6 +15,7 @@ pub enum FakeMode {
     Slow,
     TamperUnknownEvent,
     TruncateMidStream,
+    SenpiTools,
 }
 
 impl FakeMode {
@@ -37,6 +38,7 @@ impl FakeMode {
             "slow" => Self::Slow,
             "tamper-unknown-event" => Self::TamperUnknownEvent,
             "truncate-mid-stream" => Self::TruncateMidStream,
+            "senpi-tools" => Self::SenpiTools,
             _ => Self::Ok,
         }
     }

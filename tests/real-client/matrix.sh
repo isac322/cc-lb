@@ -8,7 +8,7 @@ SUMMARY="$EVIDENCE_DIR/task-36-real-client-matrix.txt"
 mkdir -p "$EVIDENCE_DIR"
 : > "$SUMMARY"
 
-clients='claude-code opencode pi'
+clients='claude-code opencode pi senpi'
 upstreams='anthropic-direct custom'
 failures=0
 
