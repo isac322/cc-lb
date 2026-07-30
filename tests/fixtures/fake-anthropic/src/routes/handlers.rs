@@ -72,6 +72,9 @@ pub(crate) async fn messages(
         .and_then(Value::as_str)
         .unwrap_or("claude-3-5-sonnet-20241022")
         .to_owned();
+    if mode == FakeMode::OpenCodeTools && wants_stream(&headers, &body_json) {
+        return crate::sse::opencode_tools_response(model, &body_json);
+    }
     if mode == FakeMode::SenpiTools && wants_stream(&headers, &body_json) {
         let image_path = headers
             .get("x-senpi-image-path")
