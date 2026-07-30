@@ -38,6 +38,127 @@ describe('RequestEventsTable', () => {
   const principalNameMap = new Map<string, string>();
   const upstreamNameMap = new Map<string, string>();
 
+  it('matches visible columns in reserved loading rows', () => {
+    const { container } = render(
+      <RequestEventsTable
+        events={[]}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+        loading
+        reservedRowCount={3}
+        columns={{ session: false }}
+      />,
+    );
+
+    const headerCells = container.querySelectorAll('thead th');
+    const body = container.querySelector('tbody');
+    const rows = container.querySelectorAll('tbody > tr');
+    const expectedSkeletonWidths = [
+      'max-w-24',
+      'max-w-24',
+      'max-w-28',
+      'max-w-40',
+      'max-w-12',
+      'max-w-16',
+      'max-w-36',
+      'max-w-20',
+    ];
+
+    expect(headerCells).toHaveLength(8);
+    expect(rows).toHaveLength(3);
+    expect(body?.style.height).toBe('7.59375rem');
+
+    for (const row of rows) {
+      expect(row.className).toContain('border-b');
+      expect(row.className).toContain('border-row');
+      expect((row as HTMLTableRowElement).style.height).toBe('2.53125rem');
+      const cells = row.querySelectorAll('td');
+      expect(cells).toHaveLength(headerCells.length);
+
+      cells.forEach((cell, index) => {
+        const skeleton = cell.querySelector('.skeleton');
+        expect(skeleton?.className).toContain(expectedSkeletonWidths[index]);
+
+        if (index >= 4) {
+          expect(cell.className).toContain('text-right');
+          expect(cell.className).toContain('tabular-nums');
+          expect(skeleton?.className).toContain('ml-auto');
+        }
+      });
+    }
+  });
+
+  it('uses the same row height for loading and loaded events', () => {
+    const event = {
+      event_id: 'evt_row_height',
+      request_id: 'req_row_height',
+      ts: 1718553120,
+      ts_ms: 1718553120000,
+      status: 200,
+      duration_ms: 100,
+      _phase: 'final',
+    } satisfies RequestEventWithPhase;
+    const { container, rerender } = render(
+      <RequestEventsTable
+        events={[]}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+        loading
+        reservedRowCount={1}
+      />,
+    );
+    const loadingRow = container.querySelector(
+      'tbody > tr',
+    ) as HTMLTableRowElement;
+    const loadingRowHeight = loadingRow.style.height;
+
+    expect(loadingRowHeight).toBe('2.53125rem');
+
+    rerender(
+      <RequestEventsTable
+        events={[event]}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+
+    const loadedRow = container.querySelector(
+      'tbody > tr[aria-label="View request evt_row_height"]',
+    ) as HTMLTableRowElement;
+    expect(loadedRow.style.height).toBe(loadingRowHeight);
+  });
+
+  it('keeps the empty state at the reserved loading body height', () => {
+    const { container, rerender } = render(
+      <RequestEventsTable
+        events={[]}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+        loading
+        reservedRowCount={4}
+      />,
+    );
+
+    const loadingHeight = container.querySelector('tbody')?.style.height;
+    expect(loadingHeight).toBe('10.125rem');
+
+    rerender(
+      <RequestEventsTable
+        events={[]}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+        reservedRowCount={4}
+      />,
+    );
+
+    const emptyBody = container.querySelector('tbody');
+    const emptyRow = emptyBody?.querySelector('tr');
+    expect(emptyBody?.style.height).toBe(loadingHeight);
+    expect(emptyRow?.className).toContain('h-full');
+    expect(emptyRow?.querySelector('td')?.getAttribute('colspan')).toBe('9');
+    expect(screen.getByText('No requests')).toBeDefined();
+  });
+
   it('renders two events with the same request_id but distinct event_id as separate rows', () => {
     const events: RequestEventWithPhase[] = [
       {

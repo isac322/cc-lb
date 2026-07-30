@@ -253,6 +253,33 @@ describe('LatencyTimeline', () => {
     expect(screen.getByText('SSE markers')).toBeTruthy();
   });
 
+  it('keeps the latency region height reserved while detail hydrates', () => {
+    const event = ev({
+      duration_ms: 500,
+      auth_ms: 4,
+      upstream_ttfb_ms: 200,
+      upstream_body_ms: 250,
+    });
+    const { rerender } = render(
+      <LatencyTimeline event={event} isLoading={true} />,
+    );
+
+    const pendingRegion = screen.getByTestId('latency-timeline-region');
+    expect(pendingRegion.className).toContain('min-h-80');
+    expect(pendingRegion.getAttribute('aria-busy')).toBe('true');
+    expect(pendingRegion.querySelectorAll('.skeleton').length).toBeGreaterThan(
+      0,
+    );
+
+    rerender(<LatencyTimeline event={event} />);
+
+    const hydratedRegion = screen.getByTestId('latency-timeline-region');
+    expect(hydratedRegion).toBe(pendingRegion);
+    expect(hydratedRegion.className).toContain('min-h-80');
+    expect(hydratedRegion.getAttribute('aria-busy')).toBeNull();
+    expect(screen.getByText('Internal pre')).toBeTruthy();
+  });
+
   it('omits the SSE lane for non-stream events', () => {
     const event = ev({
       duration_ms: 500,

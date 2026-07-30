@@ -48,54 +48,61 @@ export function PluginDetail({
           <Section title="Used by">
             <Card>
               <CardBody>
-                {refs.isLoading ? (
-                  <Skeleton className="h-20" />
-                ) : refs.data?.references.length ? (
-                  <ul className="space-y-2">
-                    {refs.data.references.map((r, i) => (
-                      <li
-                        key={i}
-                        className="flex items-center justify-between text-sm p-2 border border-subtle rounded-sm bg-overlay-1"
-                      >
-                        {r.kind === 'plugin_chain' ? (
-                          <>
-                            <span className="flex flex-col gap-0.5">
-                              <span className="text-sm">
-                                Used by principal{' '}
-                                <a
-                                  href={`/principals?selectedId=${r.principal_id}`}
-                                  className="text-accent hover:underline font-medium"
-                                >
-                                  {r.principal_name ?? r.principal_id}
-                                </a>
+                <div data-testid="plugin-used-by-slot" className="min-h-20">
+                  {refs.isLoading ? (
+                    <div className="space-y-2" aria-hidden="true">
+                      <div className="flex items-center justify-between gap-4 p-2 border border-subtle rounded-sm bg-overlay-1">
+                        <Skeleton className="h-4 w-2/3" />
+                        <Skeleton className="h-5 w-16 shrink-0" />
+                      </div>
+                    </div>
+                  ) : refs.data?.references.length ? (
+                    <ul className="space-y-2">
+                      {refs.data.references.map((r, i) => (
+                        <li
+                          key={i}
+                          className="flex items-center justify-between text-sm p-2 border border-subtle rounded-sm bg-overlay-1"
+                        >
+                          {r.kind === 'plugin_chain' ? (
+                            <>
+                              <span className="flex flex-col gap-0.5">
+                                <span className="text-sm">
+                                  Used by principal{' '}
+                                  <a
+                                    href={`/principals?selectedId=${r.principal_id}`}
+                                    className="text-accent hover:underline font-medium"
+                                  >
+                                    {r.principal_name ?? r.principal_id}
+                                  </a>
+                                </span>
                               </span>
-                            </span>
-                            <Badge tone="neutral">Slot: {r.slot}</Badge>
-                          </>
-                        ) : (
-                          <>
-                            <span className="flex flex-col gap-0.5">
-                              <span className="text-sm">
-                                Used by upstream{' '}
-                                <a
-                                  href={`/upstreams?selectedId=${r.upstream_id}`}
-                                  className="text-accent hover:underline font-medium"
-                                >
-                                  {r.upstream_name ?? r.upstream_id}
-                                </a>
+                              <Badge tone="neutral">Slot: {r.slot}</Badge>
+                            </>
+                          ) : (
+                            <>
+                              <span className="flex flex-col gap-0.5">
+                                <span className="text-sm">
+                                  Used by upstream{' '}
+                                  <a
+                                    href={`/upstreams?selectedId=${r.upstream_id}`}
+                                    className="text-accent hover:underline font-medium"
+                                  >
+                                    {r.upstream_name ?? r.upstream_id}
+                                  </a>
+                                </span>
                               </span>
-                            </span>
-                            <Badge tone="neutral">Warmup</Badge>
-                          </>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="text-sm text-text-faint">
-                    This plugin is uploaded but not used anywhere yet.
-                  </p>
-                )}
+                              <Badge tone="neutral">Warmup</Badge>
+                            </>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-sm text-text-faint">
+                      This plugin is uploaded but not used anywhere yet.
+                    </p>
+                  )}
+                </div>
               </CardBody>
             </Card>
           </Section>

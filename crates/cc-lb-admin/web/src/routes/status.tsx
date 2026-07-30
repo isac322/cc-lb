@@ -9,6 +9,7 @@ import {
   CardBody,
   CardHeader,
   ConfirmDialog,
+  cx,
   EmptyState,
   PageContainer,
   Section,
@@ -48,6 +49,32 @@ function ExpiryBadge({ secs }: { readonly secs?: number | null }) {
   );
 }
 
+const SYSTEM_CARD_CLASS = 'flex min-h-[144px] flex-col';
+const LAST_RELOAD_VALUE_SLOT_CLASS = 'min-w-20';
+const PLUGIN_COUNT_VALUE_SLOT_CLASS = 'min-w-8';
+const KILLSWITCH_STATUS_SLOT_CLASS =
+  'inline-flex min-h-[22px] min-w-14 items-center justify-end text-right';
+const OAUTH_CARD_GEOMETRY_CLASS = 'min-h-[230px] sm:min-h-[205px]';
+const OAUTH_CARD_CLASS = cx('flex flex-col', OAUTH_CARD_GEOMETRY_CLASS);
+const OAUTH_GRID_CLASS = cx(
+  'grid grid-cols-1 gap-4 md:grid-cols-2',
+  OAUTH_CARD_GEOMETRY_CLASS,
+);
+const CREDENTIAL_CELL_CLASS_NAMES = [
+  'px-4',
+  'px-4',
+  'px-4',
+  'px-4',
+  'px-4',
+] as const;
+const CREDENTIAL_SKELETON_CLASS_NAMES = [
+  'h-5 w-20',
+  'h-5 w-16',
+  'h-5 w-32',
+  'h-5 w-20',
+  'h-5 w-16',
+] as const;
+
 function StatusPage() {
   const status = useStatus();
   const creds = useCredentials();
@@ -62,17 +89,18 @@ function StatusPage() {
         title="Restart-Required Changes"
         subtitle="Fields needing process restart"
       >
-        {status.isLoading ? (
-          <Card>
-            <CardBody className="space-y-2">
-              <Skeleton className="h-4 w-1/2" />
-              <Skeleton className="h-4 w-2/3" />
-            </CardBody>
-          </Card>
-        ) : status.data ? (
-          <Card>
-            <CardBody>
-              {status.data.restart_required_changes.length ? (
+        <Card data-testid="restart-required-card">
+          <CardBody
+            data-testid="restart-required-body"
+            className="min-h-[72px]"
+          >
+            {status.isLoading ? (
+              <div className="space-y-2">
+                <Skeleton className="h-4 w-1/2" />
+                <Skeleton className="h-4 w-2/3" />
+              </div>
+            ) : status.data ? (
+              status.data.restart_required_changes.length ? (
                 <ul className="space-y-2">
                   {status.data.restart_required_changes.map((c, i) => (
                     <li key={i} className="text-xs flex items-start gap-2">
@@ -90,66 +118,110 @@ function StatusPage() {
                 <p className="text-xs text-text-faint">
                   All hot-applied. No restart required.
                 </p>
-              )}
-            </CardBody>
-          </Card>
-        ) : null}
+              )
+            ) : null}
+          </CardBody>
+        </Card>
       </Section>
 
       <Section title="System">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <Card>
+        <div
+          data-testid="system-grid"
+          className="grid grid-cols-1 md:grid-cols-3 gap-4"
+        >
+          <Card className={SYSTEM_CARD_CLASS} data-testid="system-card">
             <CardHeader title="Storage Backend" />
-            <CardBody className="space-y-2 text-xs">
+            <CardBody className="flex-1 space-y-2 text-xs">
               <Row label="Kind" value="postgres" />
               <Row label="Pool" value="10/10 idle" />
               <Row
                 label="Last reload"
+                valueClassName={LAST_RELOAD_VALUE_SLOT_CLASS}
+                valueTestId="system-last-reload-slot"
                 value={
-                  <RelativeTime
-                    ts={
-                      status.data?.last_reload_status?.applied_at_unix_secs
-                        ? status.data.last_reload_status.applied_at_unix_secs *
-                          1000
-                        : null
-                    }
-                  />
+                  status.isLoading ? (
+                    <Skeleton className="h-4 w-full" />
+                  ) : (
+                    <RelativeTime
+                      ts={
+                        status.data?.last_reload_status?.applied_at_unix_secs
+                          ? status.data.last_reload_status
+                              .applied_at_unix_secs * 1000
+                          : null
+                      }
+                    />
+                  )
                 }
               />
             </CardBody>
           </Card>
-          <Card>
+          <Card className={SYSTEM_CARD_CLASS} data-testid="system-card">
             <CardHeader title="Plugin Chain Summary" />
-            <CardBody className="space-y-2 text-xs">
+            <CardBody className="flex-1 space-y-2 text-xs">
               <Row
                 label="Principals w/ chain"
+                valueClassName={PLUGIN_COUNT_VALUE_SLOT_CLASS}
+                valueTestId="system-principal-chain-count-slot"
                 value={
-                  status.data?.plugin_chain_summary
-                    .principal_count_with_chain ?? 0
+                  status.isLoading ? (
+                    <Skeleton className="h-4 w-full" />
+                  ) : (
+                    (status.data?.plugin_chain_summary
+                      .principal_count_with_chain ?? 0)
+                  )
                 }
               />
               <Row
                 label="Total entries"
-                value={status.data?.plugin_chain_summary.total_entries ?? 0}
+                valueClassName={PLUGIN_COUNT_VALUE_SLOT_CLASS}
+                valueTestId="system-total-chain-count-slot"
+                value={
+                  status.isLoading ? (
+                    <Skeleton className="h-4 w-full" />
+                  ) : (
+                    (status.data?.plugin_chain_summary.total_entries ?? 0)
+                  )
+                }
               />
             </CardBody>
           </Card>
-          <Card>
+          <Card className={SYSTEM_CARD_CLASS} data-testid="system-card">
             <CardHeader
               title="Killswitch"
               subtitle="Emergency stop for all traffic"
             />
-            <CardBody className="space-y-3">
-              <div className="flex items-center justify-between text-xs">
+            <CardBody className="flex flex-1 flex-col space-y-3">
+              <div className="flex min-h-[22px] items-center justify-between text-xs">
                 <span className="text-text-faint">Status</span>
-                <Badge tone={status.data?.killswitch ? 'danger' : 'ok'}>
-                  {status.data?.killswitch ? 'ACTIVE' : 'OFF'}
-                </Badge>
+                <div
+                  data-testid="system-killswitch-status-slot"
+                  className={KILLSWITCH_STATUS_SLOT_CLASS}
+                >
+                  {status.isLoading ? (
+                    <Skeleton className="h-5 w-full" />
+                  ) : (
+                    <Badge tone={status.data?.killswitch ? 'danger' : 'ok'}>
+                      {status.data?.killswitch ? 'ACTIVE' : 'OFF'}
+                    </Badge>
+                  )}
+                </div>
               </div>
               <Button
                 fullWidth
                 size="sm"
-                variant={status.data?.killswitch ? 'secondary' : 'danger'}
+                className="mt-auto"
+                data-testid="killswitch-control"
+                aria-label={
+                  status.isLoading ? 'Killswitch status loading' : undefined
+                }
+                disabled={status.isLoading}
+                variant={
+                  status.isLoading
+                    ? 'secondary'
+                    : status.data?.killswitch
+                      ? 'secondary'
+                      : 'danger'
+                }
                 iconLeft={<Power className="w-3 h-3" />}
                 onClick={() => {
                   if (status.data?.killswitch) {
@@ -161,7 +233,13 @@ function StatusPage() {
                   }
                 }}
               >
-                {status.data?.killswitch ? 'Disengage' : 'Engage killswitch'}
+                {status.isLoading ? (
+                  <Skeleton className="h-3 w-24" />
+                ) : status.data?.killswitch ? (
+                  'Disengage'
+                ) : (
+                  'Engage killswitch'
+                )}
               </Button>
             </CardBody>
           </Card>
@@ -173,37 +251,41 @@ function StatusPage() {
         subtitle="API keys and OAuth tokens observed for upstreams"
       >
         <Card>
-          <div className="overflow-x-auto">
-            {creds.isLoading ? (
-              <table className="w-full font-mono text-xs">
-                <thead className="table-header sticky top-0 z-10">
-                  <tr className="text-[10px] uppercase tracking-wider">
-                    <th className="text-left px-4 py-2">Provider</th>
-                    <th className="text-left px-4 py-2">Kind</th>
-                    <th className="text-left px-4 py-2">Identity</th>
-                    <th className="text-left px-4 py-2">Expires</th>
-                    <th className="text-left px-4 py-2">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <SkeletonRow cols={5} />
-                  <SkeletonRow cols={5} />
-                  <SkeletonRow cols={5} />
-                </tbody>
-              </table>
-            ) : creds.data?.credentials.length ? (
-              <table className="w-full font-mono text-xs">
-                <thead className="table-header sticky top-0 z-10">
-                  <tr className="text-[10px] uppercase tracking-wider">
-                    <th className="text-left px-4 py-2">Provider</th>
-                    <th className="text-left px-4 py-2">Kind</th>
-                    <th className="text-left px-4 py-2">Identity</th>
-                    <th className="text-left px-4 py-2">Expires</th>
-                    <th className="text-left px-4 py-2">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {creds.data.credentials.map((c, i) => (
+          <div
+            data-testid="credentials-table-slot"
+            className="min-h-[191px] overflow-x-auto"
+          >
+            <table className="min-w-[640px] w-full font-mono text-xs">
+              <thead className="table-header sticky top-0 z-10">
+                <tr className="text-[10px] uppercase tracking-wider">
+                  <th className="text-left px-4 py-2">Provider</th>
+                  <th className="text-left px-4 py-2">Kind</th>
+                  <th className="text-left px-4 py-2">Identity</th>
+                  <th className="text-left px-4 py-2">Expires</th>
+                  <th className="text-left px-4 py-2">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {creds.isLoading ? (
+                  <>
+                    <SkeletonRow
+                      cols={5}
+                      cellClassNames={CREDENTIAL_CELL_CLASS_NAMES}
+                      skeletonClassNames={CREDENTIAL_SKELETON_CLASS_NAMES}
+                    />
+                    <SkeletonRow
+                      cols={5}
+                      cellClassNames={CREDENTIAL_CELL_CLASS_NAMES}
+                      skeletonClassNames={CREDENTIAL_SKELETON_CLASS_NAMES}
+                    />
+                    <SkeletonRow
+                      cols={5}
+                      cellClassNames={CREDENTIAL_CELL_CLASS_NAMES}
+                      skeletonClassNames={CREDENTIAL_SKELETON_CLASS_NAMES}
+                    />
+                  </>
+                ) : creds.data?.credentials.length ? (
+                  creds.data.credentials.map((c, i) => (
                     <tr key={i} className="border-b border-row">
                       <td className="px-4 py-2">{c.provider}</td>
                       <td className="px-4 py-2">
@@ -220,44 +302,57 @@ function StatusPage() {
                         />
                       </td>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <CardBody>
-                <EmptyState title="No credentials observed" />
-              </CardBody>
-            )}
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-4">
+                      <EmptyState title="No credentials observed" />
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </Card>
       </Section>
 
       <Section title="OAuth Tokens" subtitle="Active OAuth flow status">
-        {oauth.isLoading ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <Card>
-              <CardHeader title={<Skeleton className="h-4 w-32" />} />
-              <CardBody className="space-y-2">
-                <Skeleton className="h-3 w-3/4" />
-                <Skeleton className="h-3 w-1/2" />
-                <Skeleton className="h-3 w-2/3" />
-                <Skeleton className="h-3 w-1/3" />
+        <div data-testid="oauth-grid" className={OAUTH_GRID_CLASS}>
+          {oauth.isLoading ? (
+            <Card
+              className={cx(OAUTH_CARD_CLASS, 'md:col-span-2')}
+              data-testid="oauth-card"
+            >
+              <CardHeader
+                title={<Skeleton className="h-4 w-32" />}
+                subtitle={<Skeleton className="h-4 w-24" />}
+              />
+              <CardBody className="flex-1 space-y-2 text-xs">
+                <Row
+                  label="Expires"
+                  value={<Skeleton className="h-4 w-20" />}
+                />
+                <Row
+                  label="Refresh token"
+                  value={<Skeleton className="h-4 w-16" />}
+                />
+                <Row
+                  label="Last update"
+                  value={<Skeleton className="h-4 w-20" />}
+                />
+                <Row label="Scopes" value={<Skeleton className="h-4 w-28" />} />
               </CardBody>
             </Card>
-            <Card>
-              <CardHeader title={<Skeleton className="h-4 w-32" />} />
-              <CardBody className="space-y-2">
-                <Skeleton className="h-3 w-3/4" />
-                <Skeleton className="h-3 w-1/2" />
-                <Skeleton className="h-3 w-2/3" />
-                <Skeleton className="h-3 w-1/3" />
-              </CardBody>
-            </Card>
-          </div>
-        ) : oauth.data?.credentials.length ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {oauth.data.credentials.map((o, i) => (
-              <Card key={i}>
+          ) : oauth.data?.credentials.length ? (
+            oauth.data.credentials.map((o, i) => (
+              <Card
+                key={i}
+                className={cx(
+                  OAUTH_CARD_CLASS,
+                  oauth.data.credentials.length === 1 && 'md:col-span-2',
+                )}
+                data-testid="oauth-card"
+              >
                 <CardHeader
                   title={o.provider}
                   subtitle={
@@ -267,7 +362,7 @@ function StatusPage() {
                   }
                   action={<ShieldCheck className="w-4 h-4 text-green-400" />}
                 />
-                <CardBody className="space-y-2 text-xs">
+                <CardBody className="flex-1 space-y-2 text-xs">
                   <Row
                     label="Expires"
                     value={<ExpiryBadge secs={o.expires_at_unix_secs} />}
@@ -296,11 +391,20 @@ function StatusPage() {
                   />
                 </CardBody>
               </Card>
-            ))}
-          </div>
-        ) : (
-          <EmptyState title="No OAuth tokens" />
-        )}
+            ))
+          ) : (
+            <Card
+              className={cx(OAUTH_CARD_CLASS, 'md:col-span-2')}
+              data-testid="oauth-card"
+            >
+              <CardBody className="flex flex-1 items-center">
+                <div className="w-full">
+                  <EmptyState title="No OAuth tokens" />
+                </div>
+              </CardBody>
+            </Card>
+          )}
+        </div>
       </Section>
 
       <ConfirmDialog
@@ -320,11 +424,29 @@ function StatusPage() {
   );
 }
 
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
+function Row({
+  label,
+  value,
+  valueClassName,
+  valueTestId,
+}: {
+  label: string;
+  value: React.ReactNode;
+  valueClassName?: string;
+  valueTestId?: string;
+}) {
   return (
-    <div className="flex items-center justify-between">
+    <div className="flex min-h-[22px] items-center justify-between">
       <span className="text-text-faint">{label}</span>
-      <span className="text-right">{value}</span>
+      <div
+        className={cx(
+          'inline-flex min-h-[22px] items-center justify-end text-right',
+          valueClassName,
+        )}
+        data-testid={valueTestId}
+      >
+        {value}
+      </div>
     </div>
   );
 }

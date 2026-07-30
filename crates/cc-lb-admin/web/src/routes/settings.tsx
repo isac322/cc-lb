@@ -22,6 +22,7 @@ import {
   PageContainer,
   Section,
   Skeleton,
+  SkeletonRow,
   StatusBadge,
 } from '../components/ui/primitives';
 import {
@@ -231,37 +232,78 @@ function SettingsPage() {
         subtitle="Admin self-service, configuration draft pipeline, and exports."
       >
         {/* Version card */}
-        <Card>
+        <Card data-testid="version-card">
           <CardHeader
             title="Version"
             subtitle={
-              status.data ? (
-                <>
-                  cc-lb {status.data.version} · {status.data.git_sha} · started{' '}
-                  <RelativeOffsetTime
-                    offsetSeconds={-status.data.uptime_secs}
-                  />
-                </>
+              status.isLoading ? (
+                <Skeleton
+                  as="span"
+                  className="block h-8 w-72 max-w-full sm:h-4"
+                />
               ) : (
-                '—'
+                <span className="block min-h-8 sm:min-h-4">
+                  {status.data ? (
+                    <>
+                      cc-lb {status.data.version} · {status.data.git_sha} ·
+                      started{' '}
+                      <RelativeOffsetTime
+                        offsetSeconds={-status.data.uptime_secs}
+                      />
+                    </>
+                  ) : (
+                    '—'
+                  )}
+                </span>
               )
             }
           />
-          <CardBody className="space-y-3 text-xs">
+          <CardBody
+            data-testid="version-metadata"
+            className="space-y-3 text-xs"
+          >
             <div className="grid grid-cols-3 gap-3">
               <Row
                 label="Rust"
-                value={status.data?.build.rust_version ?? '—'}
+                value={
+                  status.isLoading ? (
+                    <Skeleton className="h-4 w-16" />
+                  ) : (
+                    (status.data?.build.rust_version ?? '—')
+                  )
+                }
               />
-              <Row label="Profile" value={status.data?.build.profile ?? '—'} />
-              <Row label="Generation" value={status.data?.generation ?? '—'} />
+              <Row
+                label="Profile"
+                value={
+                  status.isLoading ? (
+                    <Skeleton className="h-4 w-12" />
+                  ) : (
+                    (status.data?.build.profile ?? '—')
+                  )
+                }
+              />
+              <Row
+                label="Generation"
+                value={
+                  status.isLoading ? (
+                    <Skeleton className="h-4 w-8" />
+                  ) : (
+                    (status.data?.generation ?? '—')
+                  )
+                }
+              />
             </div>
             <div className="pt-2 border-t border-subtle/40">
               <div className="text-text-faint text-[10px] uppercase tracking-wider mb-0.5">
                 Build target
               </div>
-              <div className="font-mono break-all">
-                {status.data?.build.target ?? '—'}
+              <div className="min-h-4 font-mono break-all">
+                {status.isLoading ? (
+                  <Skeleton className="h-4 w-64 max-w-full" />
+                ) : (
+                  (status.data?.build.target ?? '—')
+                )}
               </div>
             </div>
           </CardBody>
@@ -499,34 +541,56 @@ function ConfigDraftSection() {
           }
         />
         <CardBody className="space-y-3">
-          <div className="text-xs text-text-faint flex flex-wrap gap-4">
-            <span>
-              Revision:{' '}
-              <span className="font-mono">{draftRevision ?? '—'}</span>
-            </span>
-            <span>
-              Last validated:{' '}
-              <span
+          <div
+            data-testid="draft-metadata"
+            className="flex min-h-4 flex-wrap gap-4 text-xs text-text-faint"
+          >
+            <div className="inline-flex items-center gap-1">
+              Revision:
+              <div
+                data-testid="draft-revision-slot"
+                className="inline-flex h-4 min-w-8 items-center font-mono"
+              >
+                {draft.isLoading ? (
+                  <Skeleton className="h-3 w-8" />
+                ) : (
+                  (draftRevision ?? '—')
+                )}
+              </div>
+            </div>
+            <div className="inline-flex items-center gap-1">
+              Last validated:
+              <div
+                data-testid="draft-last-validated-slot"
                 className={cx(
-                  'font-mono',
+                  'inline-flex h-4 min-w-24 items-center font-mono',
                   lastValidationError ? 'text-red-400' : undefined,
                 )}
               >
-                {lastValidatedLabel}
-              </span>
-            </span>
-            <span>
-              Saved at:{' '}
-              <span className="font-mono">
-                {draft.data?.saved_at_unix_secs ? (
+                {draft.isLoading ? (
+                  <Skeleton className="h-3 w-20" />
+                ) : (
+                  lastValidatedLabel
+                )}
+              </div>
+            </div>
+            <div className="inline-flex items-center gap-1">
+              Saved at:
+              <div
+                data-testid="draft-saved-at-slot"
+                className="inline-flex h-4 min-w-24 items-center font-mono"
+              >
+                {draft.isLoading ? (
+                  <Skeleton className="h-3 w-20" />
+                ) : draft.data?.saved_at_unix_secs ? (
                   <RelativeTime
                     ts={new Date(draft.data.saved_at_unix_secs * 1000)}
                   />
                 ) : (
                   '—'
                 )}
-              </span>
-            </span>
+              </div>
+            </div>
           </div>
           <textarea
             className="w-full min-h-[260px] p-3 text-xs font-mono bg-panel-strong border border-subtle rounded-sm placeholder:text-text-faint focus:border-accent focus:outline-none"
@@ -539,51 +603,81 @@ function ConfigDraftSection() {
                 : 'JSON config draft…'
             }
           />
-          {schema.data ? (
-            <BaseCollapsible.Root className="text-xs">
-              <BaseCollapsible.Trigger className="cursor-pointer text-text-faint">
-                Coverage checklist ({schema.data.coverage_checklist.length}{' '}
-                fields)
-              </BaseCollapsible.Trigger>
-              <BaseCollapsible.Panel className="overflow-hidden h-[var(--collapsible-panel-height)] transition-[height] duration-150 ease-out data-[ending-style]:h-0 data-[starting-style]:h-0">
-                <ul className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-1 font-mono">
-                  {schema.data.coverage_checklist.map((f) => (
-                    <li key={f}>· {f}</li>
-                  ))}
-                </ul>
-              </BaseCollapsible.Panel>
-            </BaseCollapsible.Root>
-          ) : null}
+          <div data-testid="config-checklist-slot" className="min-h-[20px]">
+            {schema.isLoading ? (
+              <Skeleton className="h-4 w-48" />
+            ) : schema.data ? (
+              <BaseCollapsible.Root className="text-xs">
+                <BaseCollapsible.Trigger className="cursor-pointer text-text-faint">
+                  Coverage checklist ({schema.data.coverage_checklist.length}{' '}
+                  fields)
+                </BaseCollapsible.Trigger>
+                <BaseCollapsible.Panel className="overflow-hidden h-[var(--collapsible-panel-height)] transition-[height] duration-150 ease-out data-[ending-style]:h-0 data-[starting-style]:h-0">
+                  <ul className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-1 font-mono">
+                    {schema.data.coverage_checklist.map((f) => (
+                      <li key={f}>· {f}</li>
+                    ))}
+                  </ul>
+                </BaseCollapsible.Panel>
+              </BaseCollapsible.Root>
+            ) : null}
+          </div>
         </CardBody>
       </Card>
     </Section>
   );
 }
 
+const HISTORY_CELL_CLASS_NAMES = [
+  'px-4',
+  'px-4',
+  'px-4',
+  'px-4',
+  'px-4',
+  'px-4',
+] as const;
+const HISTORY_SKELETON_CLASS_NAMES = [
+  'ml-auto w-8',
+  'w-24',
+  'ml-auto w-8',
+  'ml-auto w-8',
+  'ml-auto w-8',
+  'mx-auto w-12',
+] as const;
+const HISTORY_LOADING_ROW_IDS = [0, 1, 2, 3] as const;
+
 function ConfigHistorySection() {
   const history = useConfigHistory();
   return (
     <Section title="Configuration History" subtitle="Last 20 applied revisions">
       <Card>
-        <div className="overflow-x-auto">
-          {history.isLoading ? (
-            <CardBody>
-              <Skeleton className="h-12" />
-            </CardBody>
-          ) : history.data?.history.length ? (
-            <table className="min-w-[640px] w-full font-mono text-xs">
-              <thead className="table-header sticky top-0 z-10">
-                <tr className="text-[10px] uppercase tracking-wider">
-                  <th className="text-right px-4 py-2">Rev</th>
-                  <th className="text-left px-4 py-2">Applied</th>
-                  <th className="text-right px-4 py-2">Upstreams</th>
-                  <th className="text-right px-4 py-2">Principals</th>
-                  <th className="text-right px-4 py-2">Plugins</th>
-                  <th className="text-center px-4 py-2">TLS</th>
-                </tr>
-              </thead>
-              <tbody>
-                {history.data.history.map((h) => (
+        <div
+          data-testid="config-history-slot"
+          className="min-h-[173px] overflow-x-auto sm:min-h-[163px]"
+        >
+          <table className="min-w-[640px] w-full font-mono text-xs">
+            <thead className="table-header sticky top-0 z-10">
+              <tr className="text-[10px] uppercase tracking-wider">
+                <th className="text-right px-4 py-2">Rev</th>
+                <th className="text-left px-4 py-2">Applied</th>
+                <th className="text-right px-4 py-2">Upstreams</th>
+                <th className="text-right px-4 py-2">Principals</th>
+                <th className="text-right px-4 py-2">Plugins</th>
+                <th className="text-center px-4 py-2">TLS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.isLoading ? (
+                HISTORY_LOADING_ROW_IDS.map((id) => (
+                  <SkeletonRow
+                    key={id}
+                    cols={6}
+                    cellClassNames={HISTORY_CELL_CLASS_NAMES}
+                    skeletonClassNames={HISTORY_SKELETON_CLASS_NAMES}
+                  />
+                ))
+              ) : history.data?.history.length ? (
+                history.data.history.map((h) => (
                   <tr key={h.revision} className="border-b border-row">
                     <td className="px-4 py-2 text-right">{h.revision}</td>
                     <td className="px-4 py-2">
@@ -607,14 +701,19 @@ function ConfigHistorySection() {
                       />
                     </td>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <CardBody>
-              <p className="text-xs text-text-faint">No history available.</p>
-            </CardBody>
-          )}
+                ))
+              ) : (
+                <tr>
+                  <td
+                    colSpan={6}
+                    className="px-4 py-12 text-center text-xs text-text-faint"
+                  >
+                    No history available.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </Card>
     </Section>
@@ -698,7 +797,7 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex items-center justify-between">
       <span className="text-text-faint">{label}</span>
-      <span className="text-right">{value}</span>
+      <div className="text-right">{value}</div>
     </div>
   );
 }

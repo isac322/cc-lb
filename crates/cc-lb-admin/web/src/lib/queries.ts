@@ -1042,13 +1042,15 @@ export function useOAuthComplete() {
     // Only complete() success means the backend's OAuth credential changed.
     // useOAuthStart() intentionally invalidates nothing: clicking "Reconnect"
     // and then bailing out of the modal must NOT flip the OAuth Status card.
-    onSuccess: (_data, { id }) => {
-      qc.invalidateQueries({ queryKey: qk.upstreams });
-      qc.invalidateQueries({ queryKey: qk.status });
-      qc.invalidateQueries({ queryKey: qk.upstreamOauthStatus(id) });
-      qc.invalidateQueries({
-        queryKey: qk.upstreamSubscriptionMetadata(id),
-      });
+    onSuccess: async (_data, { id }) => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: qk.upstreams }),
+        qc.invalidateQueries({ queryKey: qk.status }),
+        qc.invalidateQueries({ queryKey: qk.upstreamOauthStatus(id) }),
+        qc.invalidateQueries({
+          queryKey: qk.upstreamSubscriptionMetadata(id),
+        }),
+      ]);
     },
     onError: (error) => {
       const message =

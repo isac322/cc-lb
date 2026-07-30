@@ -2,7 +2,7 @@ import { Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { type PluginEntry, usePatchPlugin, useStatus } from '../../lib/queries';
-import { Button, Card, CardBody, Section } from '../ui/primitives';
+import { Button, Card, CardBody, Section, Skeleton } from '../ui/primitives';
 
 export function PluginDetailOperate({
   plugin,
@@ -100,15 +100,22 @@ export function PluginDetailOperate({
                 <strong>Global Killswitch:</strong>{' '}
                 {status.data?.killswitch ? 'Active' : 'Inactive'}
               </p>
-              {status.data?.plugin_chain_summary && (
-                <p>
-                  <strong>Global Usage:</strong>{' '}
-                  {status.data.plugin_chain_summary.total_entries} entries
-                  across{' '}
-                  {status.data.plugin_chain_summary.principal_count_with_chain}{' '}
-                  principals.
-                </p>
-              )}
+              <div data-testid="plugin-global-usage-slot" className="min-h-4">
+                {status.isLoading ? (
+                  <Skeleton className="h-4 w-full" />
+                ) : status.data?.plugin_chain_summary ? (
+                  <p>
+                    <strong>Global Usage:</strong>{' '}
+                    {status.data.plugin_chain_summary.total_entries} entries
+                    across{' '}
+                    {
+                      status.data.plugin_chain_summary
+                        .principal_count_with_chain
+                    }{' '}
+                    principals.
+                  </p>
+                ) : null}
+              </div>
               <div className="mt-2">
                 <p className="font-medium text-text mb-1">
                   Available Prometheus metrics:

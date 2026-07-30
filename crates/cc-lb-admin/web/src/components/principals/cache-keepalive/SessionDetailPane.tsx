@@ -1,7 +1,7 @@
 import { AlertTriangle, ChevronRight, Lock } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { useCacheKeepaliveSessionDetail } from '../../../lib/queries';
-import { Badge, cx, Spinner } from '../../ui/primitives';
+import { Badge, cx, Skeleton } from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
 
 interface Props {
@@ -10,17 +10,153 @@ interface Props {
   onClose: () => void;
 }
 
+const METADATA_SKELETON_ROWS = [
+  ['Session ID', 'w-full max-w-40'],
+  ['Upstream', 'w-24'],
+  ['TTL', 'w-12'],
+  ['Generation', 'w-8'],
+  ['First seen', 'w-24'],
+  [null, 'w-24'],
+  ['Total renewals', 'w-8'],
+] as const;
+
+function SessionDetailHeader({ onClose }: Pick<Props, 'onClose'>) {
+  return (
+    <div className="flex items-start justify-between gap-2 sticky top-0 bg-bg-sub -m-3 mb-0 px-3 py-2 border-b border-subtle z-10">
+      <h4 className="text-sm font-medium text-text">Session detail</h4>
+      <button
+        type="button"
+        onClick={onClose}
+        className="text-text-faint hover:text-text text-xs inline-flex items-center gap-1"
+      >
+        <span className="max-[960px]:hidden">Close ▶</span>
+        <span className="hidden max-[960px]:inline">◀ Back</span>
+      </button>
+    </div>
+  );
+}
+
+function SessionDetailSkeleton({ onClose }: Pick<Props, 'onClose'>) {
+  return (
+    <div
+      className="flex-1 min-w-0 overflow-y-auto"
+      data-testid="session-detail-loading"
+      role="status"
+      aria-busy="true"
+      aria-label="Loading session detail"
+    >
+      <div
+        className="flex flex-col gap-3 p-3"
+        data-testid="session-detail-loading-content"
+      >
+        <SessionDetailHeader onClose={onClose} />
+
+        <div
+          className="bg-overlay-1 border border-subtle rounded-sm p-3 flex flex-col gap-3"
+          data-testid="session-detail-overview-skeleton"
+        >
+          <div className="flex justify-between items-start">
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase text-text-faint tracking-wider">
+                Net P&amp;L
+              </span>
+              <div className="w-28" aria-hidden="true">
+                <Skeleton className="h-8" />
+              </div>
+            </div>
+            <div className="w-20" aria-hidden="true">
+              <Skeleton className="h-5" />
+            </div>
+          </div>
+          <Skeleton className="h-4" />
+
+          <div className="h-px bg-subtle w-full my-1"></div>
+
+          <dl
+            className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[11px]"
+            data-testid="session-detail-metadata-skeleton"
+          >
+            {METADATA_SKELETON_ROWS.map(([label, valueClassName]) => (
+              <div key={label ?? 'state-time'} className="contents">
+                <dt className="text-text-faint">
+                  {label ?? (
+                    <span className="block w-14" aria-hidden="true">
+                      <Skeleton className="h-3" />
+                    </span>
+                  )}
+                </dt>
+                <dd className={valueClassName} aria-hidden="true">
+                  <Skeleton className="h-3" />
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+
+        <div className="mt-2" data-testid="session-detail-turns-skeleton">
+          <h4 className="text-sm font-medium text-text mb-3">
+            Message-by-message
+          </h4>
+          <div className="flex flex-col gap-2">
+            {Array.from({ length: 3 }).map((_, index) => (
+              <div
+                key={index}
+                className={cx(
+                  'rounded-sm border border-subtle bg-overlay-1 px-3',
+                  index === 0 ? 'py-2.5 relative' : 'py-2 opacity-70',
+                )}
+                data-testid="session-detail-turn-skeleton"
+                aria-hidden="true"
+              >
+                {index === 0 && (
+                  <div className="absolute -top-2.5 right-2 w-20">
+                    <Skeleton className="h-4" />
+                  </div>
+                )}
+                <div className="flex items-center justify-between mb-1.5">
+                  <div className="w-32">
+                    <Skeleton className="h-3" />
+                  </div>
+                  <div className="w-16">
+                    <Skeleton className="h-3" />
+                  </div>
+                </div>
+                <div className="flex justify-between items-end mt-2">
+                  <div className="flex flex-col gap-0.5">
+                    <div className="w-20">
+                      <Skeleton className="h-3" />
+                    </div>
+                    <div className="w-36">
+                      <Skeleton className="h-3" />
+                    </div>
+                  </div>
+                  <div className="w-16">
+                    <Skeleton className={index === 0 ? 'h-4' : 'h-3'} />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-4 w-48" aria-hidden="true">
+          <Skeleton className="h-4" />
+        </div>
+        <div className="w-32" aria-hidden="true">
+          <Skeleton className="h-4" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
   const query = useCacheKeepaliveSessionDetail(principalId, sessionId);
   const [showConfig, setShowConfig] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
 
   if (query.isLoading) {
-    return (
-      <div className="flex-1 min-w-0 overflow-y-auto p-4 flex items-center justify-center">
-        <Spinner />
-      </div>
-    );
+    return <SessionDetailSkeleton onClose={onClose} />;
   }
 
   if (query.isError || !query.data) {
@@ -94,17 +230,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
   return (
     <div className="flex-1 min-w-0 overflow-y-auto">
       <div className="flex flex-col gap-3 p-3">
-        <div className="flex items-start justify-between gap-2 sticky top-0 bg-bg-sub -m-3 mb-0 px-3 py-2 border-b border-subtle z-10">
-          <h4 className="text-sm font-medium text-text">Session detail</h4>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-text-faint hover:text-text text-xs inline-flex items-center gap-1"
-          >
-            <span className="max-[960px]:hidden">Close ▶</span>
-            <span className="hidden max-[960px]:inline">◀ Back</span>
-          </button>
-        </div>
+        <SessionDetailHeader onClose={onClose} />
 
         {isError && (
           <div className="border border-[var(--color-danger)]/30 bg-red-500/10 text-[var(--color-danger)] rounded-sm px-2 py-1.5 flex items-start gap-2 mb-3">

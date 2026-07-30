@@ -65,6 +65,12 @@ function makeResetFormatter(locale: string, compact: boolean): Formatter {
   };
 }
 
+function validDate(ts: Date | number | null | undefined): Date | null {
+  if (ts == null) return null;
+  const date = typeof ts === 'number' ? new Date(ts) : ts;
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
 export function RelativeTime({
   ts,
   className,
@@ -76,11 +82,7 @@ export function RelativeTime({
 }) {
   const { effective: locale } = useLocale();
   const { effective: timezone } = useTimezone();
-  const date = useMemo(() => {
-    if (ts == null) return null;
-    if (typeof ts === 'number') return new Date(ts);
-    return ts;
-  }, [ts]);
+  const date = useMemo(() => validDate(ts), [ts]);
   const formatter = useMemo(
     () =>
       compact
@@ -132,11 +134,7 @@ export function ResetCountdown({
 }) {
   const { effective: locale } = useLocale();
   const { effective: timezone } = useTimezone();
-  const date = useMemo(() => {
-    if (ts == null) return null;
-    if (typeof ts === 'number') return new Date(ts);
-    return ts;
-  }, [ts]);
+  const date = useMemo(() => validDate(ts), [ts]);
   const formatter = useMemo(
     () => makeResetFormatter(locale, compact),
     [locale, compact],

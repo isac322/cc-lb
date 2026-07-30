@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { renderHook, waitFor } from '@testing-library/react';
+import { renderHook } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { qk, useOAuthComplete, useOAuthStart } from '../../queries';
@@ -69,11 +69,6 @@ describe('OAuth invalidation contract', () => {
       state_token: 'state',
       code: 'code',
     });
-
-    await waitFor(() => {
-      expect(invalidateSpy).toHaveBeenCalled();
-    });
-
     const invalidatedKeys = invalidateSpy.mock.calls.map(
       ([arg]) => arg?.queryKey,
     );
