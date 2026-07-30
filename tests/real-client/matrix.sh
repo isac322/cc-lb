@@ -18,7 +18,11 @@ cargo build \
   -p fake-anthropic
 
 for client in $clients; do
-  for upstream in $upstreams; do
+  client_upstreams=$upstreams
+  if [ "$client" = "senpi" ]; then
+    client_upstreams="$client_upstreams anthropic-affinity"
+  fi
+  for upstream in $client_upstreams; do
     log="$EVIDENCE_DIR/task-36-real-$client-$upstream.log"
     printf 'running %s/%s\n' "$client" "$upstream" > "$log"
     set +e
