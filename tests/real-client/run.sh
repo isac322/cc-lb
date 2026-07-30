@@ -60,10 +60,17 @@ case "$client" in
 esac
 case "$upstream" in
   anthropic-direct|custom) ;;
+  anthropic-affinity)
+    [ "$client" = "senpi" ] || fail "unsupported upstream for $client: $upstream"
+    ;;
   *) fail "unsupported upstream: $upstream" ;;
 esac
 
-expected_file="$SCRIPT_DIR/expected/$client-$upstream.txt"
+expected_upstream=$upstream
+if [ "$client" = "senpi" ] && [ "$upstream" = "anthropic-affinity" ]; then
+  expected_upstream=anthropic-direct
+fi
+expected_file="$SCRIPT_DIR/expected/$client-$expected_upstream.txt"
 [ -f "$expected_file" ] || fail "missing expected file: $expected_file"
 expected=$(tr -d '\r\n' < "$expected_file")
 [ -n "$expected" ] || fail "empty expected substring: $expected_file"
@@ -258,12 +265,37 @@ cat > "$TMP_DIR/opencode-config/opencode/opencode.json" <<JSON
 {"provider":{"anthropic":{"options":{"baseURL":"http://127.0.0.1:$proxy_port/v1","headers":{"x-fake-mode":"opencode-tools"}}}}}
 JSON
 
-cat > "$TMP_DIR/senpi-agent/models.json" <<JSON
+if [ "$client" = "senpi" ]; then
+  case "$upstream" in
+    custom)
+      senpi_provider=senpi-mock
+      senpi_model=senpi-main
+      cat > "$TMP_DIR/senpi-agent/models.json" <<JSON
 {"providers":{"senpi-mock":{"baseUrl":"http://127.0.0.1:$proxy_port","apiKey":"$API_KEY","api":"anthropic-messages","models":[{"id":"senpi-main","name":"Senpi Main","api":"anthropic-messages","reasoning":false,"input":["text"],"contextWindow":128000,"maxTokens":4096,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"headers":{"x-fake-mode":"senpi-tools","x-senpi-image-path":"$TMP_DIR/senpi-look-at.png"},"compat":{"sendSessionAffinityHeaders":true}},{"id":"senpi-vision","name":"Senpi Vision","api":"anthropic-messages","reasoning":false,"input":["text","image"],"contextWindow":128000,"maxTokens":4096,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"headers":{"x-fake-mode":"senpi-tools"},"compat":{"sendSessionAffinityHeaders":true}}]}}}
 JSON
-cat > "$TMP_DIR/senpi-agent/settings.json" <<'JSON'
+      cat > "$TMP_DIR/senpi-agent/settings.json" <<'JSON'
 {"defaultProvider":"senpi-mock","defaultModel":"senpi-main","lookAt":{"enabled":true,"models":["senpi-mock/senpi-vision"]}}
 JSON
+      ;;
+    anthropic-direct|anthropic-affinity)
+      senpi_provider=anthropic
+      senpi_model=claude-sonnet-4-5
+      # Child subagent/look_at processes do not inherit the parent's
+      # `--api-key`, so keep auth in this isolated /tmp provider override.
+      # Direct mode intentionally omits session-affinity compatibility.
+      senpi_compat=''
+      if [ "$upstream" = "anthropic-affinity" ]; then
+        senpi_compat=',"compat":{"sendSessionAffinityHeaders":true}'
+      fi
+      cat > "$TMP_DIR/senpi-agent/models.json" <<JSON
+{"providers":{"anthropic":{"baseUrl":"http://127.0.0.1:$proxy_port","apiKey":"$API_KEY"$senpi_compat}}}
+JSON
+      cat > "$TMP_DIR/senpi-agent/settings.json" <<JSON
+{"defaultProvider":"anthropic","defaultModel":"$senpi_model","lookAt":{"enabled":true,"models":["anthropic/$senpi_model"]}}
+JSON
+      ;;
+  esac
+fi
 cat > "$TMP_DIR/senpi-agent/agents/reviewer.md" <<'EOF'
 ---
 name: reviewer
@@ -302,13 +334,17 @@ PY
 cat > "$gcp_credentials" <<'JSON'
 {"type":"authorized_user","client_id":"fake-client","client_secret":"fake-secret","refresh_token":"fake-refresh"}
 JSON
-render_config "$SCRIPT_DIR/configs/$client-$upstream.toml" "$config_path"
+render_config "$SCRIPT_DIR/configs/$client-$expected_upstream.toml" "$config_path"
 
+fake_default_mode=''
+if [ "$client" = "senpi" ] && [ "$upstream" != "custom" ]; then
+  fake_default_mode=senpi-tools
+fi
 fake_bin="${FAKE_BIN:-$ROOT_DIR/target/debug/$fake_package}"
 if [ -x "$fake_bin" ]; then
-  "$fake_bin" --port "$fake_port" > "$TMP_DIR/fake.log" 2>&1 &
+  FAKE_DEFAULT_MODE="$fake_default_mode" "$fake_bin" --port "$fake_port" > "$TMP_DIR/fake.log" 2>&1 &
 else
-  cargo run -q -p "$fake_package" -- --port "$fake_port" > "$TMP_DIR/fake.log" 2>&1 &
+  FAKE_DEFAULT_MODE="$fake_default_mode" cargo run -q -p "$fake_package" -- --port "$fake_port" > "$TMP_DIR/fake.log" 2>&1 &
 fi
 FAKE_PID=$!
 if ! wait_port "$fake_port" "$fake_package"; then
@@ -483,8 +519,8 @@ PY
     )
     run_isolated_client 60 env -i PATH="$PATH" "${senpi_env[@]}" \
       "$bin" \
-      --provider senpi-mock \
-      --model senpi-main \
+      --provider "$senpi_provider" \
+      --model "$senpi_model" \
       --api-key "$API_KEY" \
       --session-id senpi-real-client-main \
       --extension "$senpi_extension" \
@@ -575,53 +611,86 @@ PY
 fi
 
 if [ "$client" = "senpi" ]; then
-  python3 - "$TMP_DIR/cc-lb.sqlite" <<'PY'
+  python3 - "$TMP_DIR/cc-lb.sqlite" "$upstream" <<'PY'
 import sqlite3
 import sys
 import time
 
-database = sys.argv[1]
+database, upstream = sys.argv[1:]
+expected_kinds = {"main", "subagent"}
+if upstream == "custom":
+    expected_kinds.add("look_at")
 deadline = time.monotonic() + 10
 rows = []
+stable_rows = None
+stable_since = None
+quiescent = False
 while time.monotonic() < deadline:
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
             """
-            SELECT DISTINCT request_kind, observed_session_id, session_id_source, client_app
+            SELECT DISTINCT request_kind, observed_session_id, session_id_source,
+                            client_app, cache_prefix_hash
             FROM request_events_v1
             WHERE request_kind IS NOT NULL
             ORDER BY request_kind, observed_session_id
             """
         ).fetchall()
     kinds = {row[0] for row in rows}
-    if {"main", "subagent", "look_at"}.issubset(kinds):
-        break
+    if expected_kinds.issubset(kinds):
+        now = time.monotonic()
+        if rows != stable_rows:
+            stable_rows = rows
+            stable_since = now
+        elif stable_since is not None and now - stable_since >= 0.2:
+            quiescent = True
+            break
+    else:
+        stable_rows = None
+        stable_since = None
     time.sleep(0.05)
 
 kinds = {row[0] for row in rows}
-missing = {"main", "subagent", "look_at"} - kinds
+missing = expected_kinds - kinds
 if missing:
     print(f"FAIL reason: missing Senpi request kinds {sorted(missing)}; rows={rows}", file=sys.stderr)
     sys.exit(1)
-main_session_ids = {row[1] for row in rows if row[0] == "main" and row[1] is not None}
-if main_session_ids != {"senpi-real-client-main"}:
-    print(f"FAIL reason: Senpi main session ID was not preserved; rows={rows}", file=sys.stderr)
+if not quiescent:
+    print(f"FAIL reason: Senpi request rows did not quiesce before deadline; rows={rows}", file=sys.stderr)
     sys.exit(1)
-if any(row[0] == "subagent" and row[1] == "senpi-real-client-main" for row in rows):
-    print(f"FAIL reason: Senpi subagent reused the parent session ID; rows={rows}", file=sys.stderr)
+if upstream != "custom" and "look_at" in kinds:
+    # Senpi disables look_at when the active model accepts images; built-in Claude does.
+    print(f"FAIL reason: image-capable Senpi mode unexpectedly sent a look_at request; rows={rows}", file=sys.stderr)
     sys.exit(1)
-if any(row[0] in {"main", "subagent"} and row[2] != "x-session-affinity" for row in rows):
-    print(f"FAIL reason: Senpi session-bearing requests used an unexpected source; rows={rows}", file=sys.stderr)
-    sys.exit(1)
+session_rows = [row for row in rows if row[0] in {"main", "subagent"}]
+if upstream == "anthropic-direct":
+    if any(row[1] is not None or row[2] is not None for row in session_rows):
+        print(f"FAIL reason: baseUrl-only Senpi unexpectedly emitted session identity; rows={rows}", file=sys.stderr)
+        sys.exit(1)
+    if any(row[4] is None for row in session_rows):
+        print(f"FAIL reason: sessionless Senpi request lacked cache-prefix fallback; rows={rows}", file=sys.stderr)
+        sys.exit(1)
+else:
+    main_session_ids = {row[1] for row in rows if row[0] == "main" and row[1] is not None}
+    if main_session_ids != {"senpi-real-client-main"}:
+        print(f"FAIL reason: Senpi main session ID was not preserved; rows={rows}", file=sys.stderr)
+        sys.exit(1)
+    if any(row[0] == "subagent" and row[1] == "senpi-real-client-main" for row in rows):
+        print(f"FAIL reason: Senpi subagent reused the parent session ID; rows={rows}", file=sys.stderr)
+        sys.exit(1)
+    if any(row[2] != "x-session-affinity" for row in session_rows):
+        print(f"FAIL reason: Senpi session-bearing requests used an unexpected source; rows={rows}", file=sys.stderr)
+        sys.exit(1)
 look_at_identities = {(row[1], row[2]) for row in rows if row[0] == "look_at"}
-if look_at_identities != {(None, None)}:
+if upstream == "custom" and look_at_identities != {(None, None)}:
     print(f"FAIL reason: Senpi look_at unexpectedly carried session identity; rows={rows}", file=sys.stderr)
     sys.exit(1)
 if any(row[3] is not None for row in rows):
     print(f"FAIL reason: Senpi requests invented client_app; rows={rows}", file=sys.stderr)
     sys.exit(1)
 
-print("PASS senpi request kinds: main, subagent, look_at")
+identity = "cache-prefix fallback" if upstream == "anthropic-direct" else "x-session-affinity"
+print(f"PASS senpi request kinds: {', '.join(sorted(expected_kinds))}; identity={identity}")
 PY
 fi
 
