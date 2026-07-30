@@ -1,17 +1,55 @@
 use cc_lb_storage_api::{RequestEventListItem, RequestEventUpstream, StorageError, StorageResult};
+use serde::Deserialize;
 
 use crate::adapter::i64_to_u64;
 
 use super::request_event_list_sql::ListRow;
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ListPayload {
+    request_id: Option<String>,
+    duration_ms: Option<i64>,
+    auth_ms: Option<i64>,
+    route_ms: Option<i64>,
+    limit_reserve_ms: Option<i64>,
+    bulkhead_wait_ms: Option<i64>,
+    dns_ms: Option<i64>,
+    connect_ms: Option<i64>,
+    connection_reused: Option<bool>,
+    limit_reconcile_ms: Option<i64>,
+    observability_post_ms: Option<i64>,
+    proxy_setup_ms: Option<i64>,
+    shape_ms: Option<i64>,
+    sign_ms: Option<i64>,
+    upstream_ttfb_ms: Option<i64>,
+    upstream_body_ms: Option<i64>,
+    stream_first_content_delta_ms: Option<i64>,
+    stream_last_content_delta_ms: Option<i64>,
+    inter_token_avg_ms: Option<i64>,
+    cost_usd_micros: Option<i64>,
+    cost_input_micros: Option<i64>,
+    cost_output_micros: Option<i64>,
+    cost_cache_creation_5m_micros: Option<i64>,
+    cost_cache_creation_1h_micros: Option<i64>,
+    cost_cache_read_micros: Option<i64>,
+}
+
 pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListItem> {
+    let payload = match row.payload.as_deref() {
+        Some(payload) => {
+            serde_json::from_slice::<Option<ListPayload>>(payload)?.unwrap_or_default()
+        }
+        None => ListPayload::default(),
+    };
+
     Ok(RequestEventListItem {
         ts: i64_to_u64(row.ts_secs, "request event list ts")?,
         ts_ms: row
             .ts_ms
             .map(|value| i64_to_u64(value, "request event list ts_ms"))
             .transpose()?,
-        request_id: row.request_id,
+        request_id: payload.request_id.unwrap_or_default(),
         event_id: row.event_id,
         source_kind: row.source_kind,
         principal_id: row.principal_id,
@@ -50,73 +88,73 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
         error_code: row.error_code,
         upstream_error_type: row.upstream_error_type,
         upstream_error_message: row.upstream_error_message,
-        duration_ms: row
+        duration_ms: payload
             .duration_ms
             .map(|value| i64_to_u64(value, "request event list duration_ms"))
             .transpose()?
             .unwrap_or(0),
-        auth_ms: row
+        auth_ms: payload
             .auth_ms
             .map(|value| i64_to_u64(value, "request event list auth_ms"))
             .transpose()?,
-        route_ms: row
+        route_ms: payload
             .route_ms
             .map(|value| i64_to_u64(value, "request event list route_ms"))
             .transpose()?,
-        limit_reserve_ms: row
+        limit_reserve_ms: payload
             .limit_reserve_ms
             .map(|value| i64_to_u64(value, "request event list limit_reserve_ms"))
             .transpose()?,
-        bulkhead_wait_ms: row
+        bulkhead_wait_ms: payload
             .bulkhead_wait_ms
             .map(|value| i64_to_u64(value, "request event list bulkhead_wait_ms"))
             .transpose()?,
-        dns_ms: row
+        dns_ms: payload
             .dns_ms
             .map(|value| i64_to_u64(value, "request event list dns_ms"))
             .transpose()?,
-        connect_ms: row
+        connect_ms: payload
             .connect_ms
             .map(|value| i64_to_u64(value, "request event list connect_ms"))
             .transpose()?,
-        connection_reused: row.connection_reused,
-        limit_reconcile_ms: row
+        connection_reused: payload.connection_reused,
+        limit_reconcile_ms: payload
             .limit_reconcile_ms
             .map(|value| i64_to_u64(value, "request event list limit_reconcile_ms"))
             .transpose()?,
-        observability_post_ms: row
+        observability_post_ms: payload
             .observability_post_ms
             .map(|value| i64_to_u64(value, "request event list observability_post_ms"))
             .transpose()?,
-        proxy_setup_ms: row
+        proxy_setup_ms: payload
             .proxy_setup_ms
             .map(|value| i64_to_u64(value, "request event list proxy_setup_ms"))
             .transpose()?,
-        shape_ms: row
+        shape_ms: payload
             .shape_ms
             .map(|value| i64_to_u64(value, "request event list shape_ms"))
             .transpose()?,
-        sign_ms: row
+        sign_ms: payload
             .sign_ms
             .map(|value| i64_to_u64(value, "request event list sign_ms"))
             .transpose()?,
-        upstream_ttfb_ms: row
+        upstream_ttfb_ms: payload
             .upstream_ttfb_ms
             .map(|value| i64_to_u64(value, "request event list upstream_ttfb_ms"))
             .transpose()?,
-        upstream_body_ms: row
+        upstream_body_ms: payload
             .upstream_body_ms
             .map(|value| i64_to_u64(value, "request event list upstream_body_ms"))
             .transpose()?,
-        stream_first_content_delta_ms: row
+        stream_first_content_delta_ms: payload
             .stream_first_content_delta_ms
             .map(|value| i64_to_u64(value, "request event list stream_first_content_delta_ms"))
             .transpose()?,
-        stream_last_content_delta_ms: row
+        stream_last_content_delta_ms: payload
             .stream_last_content_delta_ms
             .map(|value| i64_to_u64(value, "request event list stream_last_content_delta_ms"))
             .transpose()?,
-        inter_token_avg_ms: row
+        inter_token_avg_ms: payload
             .inter_token_avg_ms
             .map(|value| i64_to_u64(value, "request event list inter_token_avg_ms"))
             .transpose()?,
@@ -144,12 +182,12 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .cache_read_input_tokens
             .map(|value| i64_to_u64(value, "request event list cache_read_input_tokens"))
             .transpose()?,
-        cost_usd_micros: row.cost_usd_micros,
-        cost_input_micros: row.cost_input_micros,
-        cost_output_micros: row.cost_output_micros,
-        cost_cache_creation_5m_micros: row.cost_cache_creation_5m_micros,
-        cost_cache_creation_1h_micros: row.cost_cache_creation_1h_micros,
-        cost_cache_read_micros: row.cost_cache_read_micros,
+        cost_usd_micros: payload.cost_usd_micros,
+        cost_input_micros: payload.cost_input_micros,
+        cost_output_micros: payload.cost_output_micros,
+        cost_cache_creation_5m_micros: payload.cost_cache_creation_5m_micros,
+        cost_cache_creation_1h_micros: payload.cost_cache_creation_1h_micros,
+        cost_cache_read_micros: payload.cost_cache_read_micros,
     })
 }
 
