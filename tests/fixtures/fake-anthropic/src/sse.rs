@@ -95,9 +95,23 @@ pub(crate) fn senpi_tools_response(
             )
         });
 
-    let items = if is_subagent || is_look_at || has_tool_result(request, LOOK_AT_TOOL_ID) {
+    let has_subagent_result = has_tool_result(request, SUBAGENT_TOOL_ID);
+    let has_look_at_result = has_tool_result(request, LOOK_AT_TOOL_ID);
+
+    let items = if is_subagent || is_look_at {
         text_stream_items(&model, "fake anthropic fixture response HELLO")
-    } else if has_tool_result(request, SUBAGENT_TOOL_ID) {
+    } else if has_tool(request, "subagent") && !has_subagent_result {
+        tool_stream_items(
+            &model,
+            SUBAGENT_TOOL_ID,
+            "subagent",
+            json!({
+                "agent": "reviewer",
+                "task": "Print the word HELLO",
+                "agentScope": "user"
+            }),
+        )
+    } else if has_tool(request, "look_at") && !has_look_at_result {
         let input = image_path.map_or_else(
             || {
                 json!({
@@ -114,16 +128,7 @@ pub(crate) fn senpi_tools_response(
         );
         tool_stream_items(&model, LOOK_AT_TOOL_ID, "look_at", input)
     } else {
-        tool_stream_items(
-            &model,
-            SUBAGENT_TOOL_ID,
-            "subagent",
-            json!({
-                "agent": "reviewer",
-                "task": "Print the word HELLO",
-                "agentScope": "user"
-            }),
-        )
+        text_stream_items(&model, "fake anthropic fixture response HELLO")
     };
 
     immediate_streaming_response(items)

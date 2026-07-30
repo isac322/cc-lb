@@ -136,6 +136,83 @@ install_requested() {
   install_client "$client" "$@"
 }
 
+verify_senpi_markers() {
+  local client_dir="$TARGET_DIR/senpi"
+  python3 - "$client_dir" <<'PY'
+import sys
+import re
+from pathlib import Path
+
+root = Path(sys.argv[1]) / "node_modules" / "@code-yeongyu" / "senpi"
+preset_dir = root / "dist" / "core" / "extensions" / "builtin" / "prompt-preset"
+builder_pattern = re.compile(r"function (build[A-Za-z0-9]+Core)\(")
+allowed_main_prefixes = ("You are senpi,", "You are senpi on ")
+core_builders = []
+for path in sorted(preset_dir.glob("*.js")):
+    text = path.read_text()
+    for builder in builder_pattern.finditer(text):
+        return_prompt = re.search(r"\breturn\s+`([^`]*)", text[builder.end():builder.end() + 512], re.DOTALL)
+        if return_prompt is None:
+            print(
+                f"FAIL reason: senpi core prompt builder shape drifted in {path.name}: {builder.group(1)}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        prompt = return_prompt.group(1).lstrip()
+        if not prompt.startswith(allowed_main_prefixes):
+            print(
+                f"FAIL reason: senpi main prompt prefix drifted in {path.name}: {prompt[:80]!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        core_builders.append(f"{path.name}:{builder.group(1)}")
+if not core_builders:
+    print("FAIL reason: no senpi core prompt builders found", file=sys.stderr)
+    sys.exit(1)
+
+expected = {
+    "dist/core/dynamic-prompt/identity.js": [
+        "You are senpi, a coding agent",
+    ],
+    "examples/extensions/subagent/index.ts": [
+        "args.push(`Task: ${task}`);",
+    ],
+    "dist/core/session-title-generator.js": [
+        "Generate a concise title for this coding-agent session.",
+    ],
+    "dist/core/compaction/utils.js": [
+        "You are a context summarization assistant.",
+    ],
+    "dist/core/extensions/builtin/look-at/prompts.js": [
+        "You analyze attached media for a downstream agent that cannot inspect the attachments directly.",
+    ],
+    "dist/core/extensions/builtin/btw/side-query.js": [
+        ":btw:",
+        "The user is asking a side question about the conversation so far, outside the main task.",
+        "Answer it directly and concisely from the context above.",
+        "Do not continue any task, do not modify anything, and do not treat this as new work.",
+    ],
+}
+
+for relative_path, markers in expected.items():
+    path = root / relative_path
+    try:
+        text = path.read_text()
+    except OSError as error:
+        print(f"FAIL reason: senpi marker source unavailable: {path}: {error}", file=sys.stderr)
+        sys.exit(1)
+    for marker in markers:
+        if marker not in text:
+            print(
+                f"FAIL reason: senpi request marker drifted in {relative_path}: {marker!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+print("PASS senpi request-family markers match pinned package")
+PY
+}
+
 install_requested claude-code @anthropic-ai/claude-code 2.1.207 claude CLAUDE_CODE_BIN
 install_requested opencode opencode-ai 1.17.18 opencode OPENCODE_BIN
 # pi-coding-agent's ^0.80.6 companion ranges currently resolve to incompatible
@@ -144,4 +221,7 @@ install_requested pi @earendil-works/pi-coding-agent 0.80.6 pi PI_BIN npm \
   @earendil-works/pi-ai@0.80.6 \
   @earendil-works/pi-agent-core@0.80.6 \
   @earendil-works/pi-tui@0.80.6
-install_requested senpi @code-yeongyu/senpi 2026.7.26 senpi SENPI_BIN
+install_requested senpi @code-yeongyu/senpi 2026.7.30 senpi SENPI_BIN
+if [ -z "${REAL_CLIENT_ONLY:-}" ] || [ "$REAL_CLIENT_ONLY" = "senpi" ]; then
+  verify_senpi_markers
+fi

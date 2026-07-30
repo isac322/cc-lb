@@ -1,6 +1,6 @@
 use super::{ClientRequestKind, RequestView};
 
-const SENPI_MAIN_SYSTEM_PREFIX: &str = "You are senpi, a coding agent.";
+const SENPI_MAIN_SYSTEM_PREFIXES: [&str; 2] = ["You are senpi,", "You are senpi on "];
 const SENPI_SESSION_TITLE_SYSTEM_PREFIX: &str =
     "Generate a concise title for this coding-agent session.";
 const SENPI_COMPACTION_SYSTEM_PREFIX: &str = "You are a context summarization assistant.";
@@ -13,9 +13,14 @@ const SENPI_SIDE_SYSTEM_SUFFIX: &str = concat!(
     "Do not continue any task, do not modify anything, and do not treat this as new work."
 );
 
+fn is_main(view: &RequestView<'_>) -> bool {
+    SENPI_MAIN_SYSTEM_PREFIXES
+        .iter()
+        .any(|prefix| view.system_starts_with(prefix))
+}
+
 pub(crate) fn classify_main(view: &RequestView<'_>) -> Option<ClientRequestKind> {
-    view.system_starts_with(SENPI_MAIN_SYSTEM_PREFIX)
-        .then_some(ClientRequestKind::Main)
+    is_main(view).then_some(ClientRequestKind::Main)
 }
 
 pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequestKind> {
@@ -29,15 +34,14 @@ pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequest
     if view.system_starts_with(SENPI_LOOK_AT_SYSTEM_PREFIX) {
         return Some(ClientRequestKind::LookAt);
     }
-    // Senpi's shipped subagent extension launches a fresh `senpi --no-session`
-    // process and encodes the delegated prompt as the first user message.
+    // Senpi's shipped opt-in subagent example launches a fresh
+    // `senpi --no-session` process and encodes the delegated prompt as the
+    // first user message.
     // In-memory sessions still carry a generated provider session ID, so the
     // stable wire marker is the `Task: ` prefix rather than header absence.
     // This intentionally fails toward `subagent`: an interactive first prompt
     // beginning with `Task: ` is indistinguishable on the wire.
-    if view.system_starts_with(SENPI_MAIN_SYSTEM_PREFIX)
-        && view.first_user_starts_with(SENPI_SUBAGENT_USER_PREFIX)
-    {
+    if is_main(view) && view.first_user_starts_with(SENPI_SUBAGENT_USER_PREFIX) {
         return Some(ClientRequestKind::Subagent);
     }
     if view.system_starts_with(SENPI_SESSION_TITLE_SYSTEM_PREFIX) {
@@ -94,6 +98,32 @@ mod tests {
 
         for (value, session_id, expected) in cases {
             assert_eq!(classify(&value, session_id), Some(expected));
+        }
+    }
+
+    #[test]
+    fn classifies_current_senpi_prompt_preset_variants() {
+        let systems = [
+            "You are senpi, a coding agent. Ship work indistinguishable from a careful senior engineer's.",
+            "You are senpi, a coding agent and autonomous deep worker: you receive goals, not step-by-step instructions.",
+            "You are senpi, a coding agent running on Kimi K3 - decisive and evidence-first.",
+            "You are senpi on Grok 4.5, acting as CEO and orchestrator: the single human-facing surface.",
+        ];
+
+        for system in systems {
+            let main = json!({
+                "system": system,
+                "messages": [{"role": "user", "content": "hello"}],
+                "tools": [{"name": "read"}]
+            });
+            assert_eq!(classify(&main, None), Some("main"));
+
+            let subagent = json!({
+                "system": system,
+                "messages": [{"role": "user", "content": "Task: Review the auth change"}],
+                "tools": [{"name": "read"}]
+            });
+            assert_eq!(classify(&subagent, None), Some("subagent"));
         }
     }
 
