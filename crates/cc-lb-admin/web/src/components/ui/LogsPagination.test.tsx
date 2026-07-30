@@ -189,4 +189,22 @@ describe('LogsPagination', () => {
     fireEvent.click(nextButton);
     expect(onNext).toHaveBeenCalledTimes(1);
   });
+  it('disables Next while the next page is loading', () => {
+    render(
+      <LogsPagination
+        page={0}
+        pageCount={1}
+        totalRows={50}
+        pageSize={50}
+        hasMore={true}
+        loadingNext={true}
+        onPrev={vi.fn()}
+        onNext={vi.fn()}
+      />,
+    );
+
+    const nextButton = screen.getByRole('button', { name: 'Next page' });
+    expect(nextButton.hasAttribute('disabled')).toBe(true);
+    expect(nextButton.textContent).toContain('Loading…');
+  });
 });

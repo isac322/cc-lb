@@ -7,6 +7,7 @@ export interface LogsPaginationProps {
   readonly totalRows: number;
   readonly pageSize: number;
   readonly hasMore: boolean;
+  readonly loadingNext?: boolean;
   readonly onPrev: () => void;
   readonly onNext: () => void;
 }
@@ -17,6 +18,7 @@ export function LogsPagination({
   totalRows,
   pageSize,
   hasMore,
+  loadingNext = false,
   onPrev,
   onNext,
 }: LogsPaginationProps) {
@@ -59,11 +61,11 @@ export function LogsPagination({
           variant="secondary"
           size="sm"
           onClick={onNext}
-          disabled={page >= pageCount - 1 && !hasMore}
+          disabled={loadingNext || (page >= pageCount - 1 && !hasMore)}
           aria-label="Next page"
           iconRight={<ChevronRight className="w-4 h-4" />}
         >
-          Next
+          {loadingNext ? 'Loading…' : 'Next'}
         </Button>
       </div>
     </nav>

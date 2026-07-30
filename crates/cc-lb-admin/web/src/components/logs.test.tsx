@@ -1,37 +1,118 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { filterLogRows } from '../lib/logRows';
 import type { RequestEventWithPhase } from '../lib/RequestEventTypes';
 import { Route } from '../routes/logs';
 
+const queryMocks = vi.hoisted(() => ({
+  fetchRecentEventsPage: vi.fn(),
+  pageCache: new Map<string, unknown>(),
+}));
+
+const liveState = vi.hoisted(() => ({
+  eventsMap: new Map(),
+  version: 0,
+}));
+
 const mockEvents = Array.from({ length: 120 }, (_, i) => ({
   request_id: `req-${i}`,
   thread_id: i % 2 === 0 ? 'session-a' : 'session-b',
-  timestamp: new Date().toISOString(),
+  ts: (1_000 - i) / 1_000,
+  ts_ms: 1_000 - i,
   model: 'claude-3',
   status: 200,
   tokens: 100,
   cost: 0.01,
 }));
+type TestPageParam =
+  | { readonly kind: 'initial'; readonly limit: number }
+  | {
+      readonly kind: 'cursor';
+      readonly limit: number;
+      readonly ts_ms: number;
+      readonly event_id: string;
+    };
+
+function makeRecentPage(
+  filters: Record<string, string | undefined>,
+  pageParam: TestPageParam,
+) {
+  const cacheKey = JSON.stringify([filters, pageParam]);
+  const cached = queryMocks.pageCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const filtered = filters.thread_id
+    ? mockEvents.filter((event) => event.thread_id === filters.thread_id)
+    : mockEvents;
+  const start =
+    pageParam.kind === 'initial'
+      ? 0
+      : filtered.findIndex(
+          (event) =>
+            event.ts_ms < pageParam.ts_ms ||
+            (event.ts_ms === pageParam.ts_ms &&
+              event.request_id < pageParam.event_id),
+        );
+  const pageStart = start < 0 ? filtered.length : start;
+  const events = filtered.slice(pageStart, pageStart + pageParam.limit);
+  const page = {
+    events,
+    observed: events.length > 0,
+    count: events.length,
+    limit: pageParam.limit,
+  };
+  queryMocks.pageCache.set(cacheKey, page);
+  return page;
+}
 
 vi.mock('../lib/queries', () => ({
+  getRecentEventsCursor: (event: {
+    ts?: number | null;
+    ts_ms?: number | null;
+    event_id?: string;
+    request_id: string;
+  }) => ({
+    ts_ms: event.ts_ms ?? (event.ts ?? 0) * 1_000,
+    event_id: event.event_id ?? event.request_id,
+  }),
+  recentEventsPageQueryOptions: (
+    filters: Record<string, string | undefined>,
+    pageParam: TestPageParam,
+  ) => ({
+    queryKey: [
+      'events',
+      filters,
+      'page',
+      pageParam.limit,
+      pageParam.kind === 'cursor' ? pageParam.ts_ms : null,
+      pageParam.kind === 'cursor' ? pageParam.event_id : null,
+    ],
+    queryFn: () => queryMocks.fetchRecentEventsPage(filters, pageParam),
+  }),
   useUpstreams: () => ({ data: { upstreams: [] } }),
   usePrincipalNameMap: () => new Map(),
   useUpstreamNameMap: () => new Map(),
-  useRecentEventsInfinite: () => ({
-    data: { pages: [{ events: mockEvents }] },
-    hasNextPage: false,
-    isFetchingNextPage: false,
+  useRecentEventsPage: (
+    filters: Record<string, string | undefined>,
+    pageParam: TestPageParam,
+  ) => ({
+    data: makeRecentPage(filters, pageParam),
     isPlaceholderData: false,
+    isPending: false,
     refetch: vi.fn(),
   }),
 }));
 
 vi.mock('../lib/useLiveEventStream', () => ({
   useLiveEventStream: () => ({
-    eventsMap: new Map(),
-    version: 0,
+    eventsMap: liveState.eventsMap,
+    version: liveState.version,
     status: 'idle',
     permanentFailure: false,
   }),
@@ -56,9 +137,22 @@ global.IntersectionObserver = class IntersectionObserver {
 } as unknown as typeof global.IntersectionObserver;
 
 describe('LogsPage', () => {
+  beforeEach(() => {
+    queryMocks.fetchRecentEventsPage.mockImplementation(
+      async (
+        filters: Record<string, string | undefined>,
+        pageParam: TestPageParam,
+      ) => makeRecentPage(filters, pageParam),
+    );
+  });
+
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+    queryMocks.fetchRecentEventsPage.mockReset();
+    queryMocks.pageCache.clear();
+    liveState.eventsMap.clear();
+    liveState.version = 0;
   });
 
   it('applies every row filter individually and in combination', () => {
@@ -151,25 +245,11 @@ describe('LogsPage', () => {
     expect(sessionSelect?.className).toContain('!w-64');
   });
 
-  // Budgeted, not raced. This body has no `await`, `waitFor` or `findBy`: it is one synchronous
-  // block that mounts LogsPage over 120 rows and re-renders it four times (three page clicks plus
-  // a filter rerender), so there is no async boundary that can hang and nothing to widen a
-  // tolerance around. Its cost is pure render throughput and tracks available CPU:
-  //
-  //   isolated, node                          529-555ms
-  //   full suite, 8 cores                        998ms
-  //   full suite, 2 cores pinned                1774ms
-  //   full suite, 2 cores + 4 busy loops        7168ms  <- reproduces the CI failure
-  //
-  // `oracle4-cc-lb` is one self-hosted box shared by clippy, nextest-cov, e2e and docker-build
-  // from the same PR, so the last row is the realistic case and the 5s default has no headroom.
-  // Capping vitest workers was measured and rejected: `--maxWorkers=2` under the same pin made
-  // this test worse (1774ms -> 3427ms) by packing more files onto each worker's event loop.
-  //
-  // Budgeting this one test does not just move the failure elsewhere. Under the same load the
-  // next-slowest test in the whole suite is 1543ms - 3.4x cheaper, and 31% of the stock 5s
-  // budget - so this mount is a genuine outlier rather than the first casualty of a tier that
-  // needs raising. Re-check that gap before budgeting a second test here.
+  // This remains the page-render throughput outlier: prior shared-runner
+  // measurements reached 7.2s under two pinned cores plus competing CPU load.
+  // It now also awaits the intentional per-page fetch transitions; the 30s
+  // budget preserves measured CI headroom rather than masking an async race.
+  // Re-check that gap before budgeting another test in this file.
   it('paginates rows correctly and clamps on filter change', async () => {
     const queryClient = new QueryClient();
     let currentSearch: Record<string, string> = {};
@@ -191,8 +271,8 @@ describe('LogsPage', () => {
       return tbody ? tbody.querySelectorAll('tr').length : 0;
     };
 
-    expect(screen.getByText('Showing 1–50 of 120')).toBeDefined();
-    expect(screen.getByText('Page 1 of 3')).toBeDefined();
+    expect(screen.getByText('Showing 1–50 of 50+')).toBeDefined();
+    expect(screen.getByText('Page 1 of 1+')).toBeDefined();
     expect(getRowCount()).toBe(50);
 
     const scroller = document.querySelector<HTMLDivElement>(
@@ -203,19 +283,25 @@ describe('LogsPage', () => {
 
     const nextBtn = screen.getByRole('button', { name: /Next page/i });
     fireEvent.click(nextBtn);
-    expect(screen.getByText('Showing 51–100 of 120')).toBeDefined();
-    expect(screen.getByText('Page 2 of 3')).toBeDefined();
+    await waitFor(() =>
+      expect(screen.getByText('Showing 51–100 of 100+')).toBeDefined(),
+    );
+    expect(screen.getByText('Page 2 of 2+')).toBeDefined();
     expect(getRowCount()).toBe(50);
     expect(scroller.scrollTop).toBe(0);
 
     fireEvent.click(nextBtn);
-    expect(screen.getByText('Showing 101–120 of 120')).toBeDefined();
+    await waitFor(() =>
+      expect(screen.getByText('Showing 101–120 of 120')).toBeDefined(),
+    );
     expect(screen.getByText('Page 3 of 3')).toBeDefined();
     expect(getRowCount()).toBe(20);
 
     const prevBtn = screen.getByRole('button', { name: /Previous page/i });
     fireEvent.click(prevBtn);
-    expect(screen.getByText('Showing 51–100 of 120')).toBeDefined();
+    await waitFor(() =>
+      expect(screen.getByText('Showing 51–100 of 120')).toBeDefined(),
+    );
     expect(screen.getByText('Page 2 of 3')).toBeDefined();
     expect(getRowCount()).toBe(50);
 
@@ -227,11 +313,92 @@ describe('LogsPage', () => {
       </QueryClientProvider>,
     );
 
-    expect(screen.getByText('Showing 1–50 of 60')).toBeDefined();
-    expect(screen.getByText('Page 1 of 2')).toBeDefined();
+    await waitFor(() =>
+      expect(screen.getByText('Showing 1–50 of 50+')).toBeDefined(),
+    );
+    expect(screen.getByText('Page 1 of 1+')).toBeDefined();
     expect(getRowCount()).toBe(50);
     expect(scroller.scrollTop).toBe(0);
   }, 30_000);
+
+  it('keeps historical pages stable while live rows continue arriving', async () => {
+    const queryClient = new QueryClient();
+    vi.spyOn(Route, 'useSearch').mockReturnValue({});
+
+    const LogsPage = Route.options.component;
+    if (LogsPage === undefined) {
+      throw new Error('Expected logs route component');
+    }
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <LogsPage />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Next page/i }));
+    await waitFor(() => expect(screen.getByText('Page 2 of 2+')).toBeDefined());
+    expect(screen.getByLabelText('View request req-50')).toBeDefined();
+
+    liveState.eventsMap.set('live-new', {
+      phase: 'final',
+      event: {
+        ...mockEvents[0],
+        request_id: 'live-new',
+        ts: 2,
+        ts_ms: 2_000,
+      },
+    });
+    liveState.version = 1;
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <LogsPage />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByText('Page 2 of 2+')).toBeDefined();
+    expect(screen.getByLabelText('View request req-50')).toBeDefined();
+    expect(screen.queryByLabelText('View request live-new')).toBeNull();
+  });
+
+  it('moves the displaced historical tail onto the next page', async () => {
+    const queryClient = new QueryClient();
+    vi.spyOn(Route, 'useSearch').mockReturnValue({});
+    liveState.eventsMap.set('live-new', {
+      phase: 'final',
+      event: {
+        ...mockEvents[0],
+        request_id: 'live-new',
+        ts: 2,
+        ts_ms: 2_000,
+      },
+    });
+    liveState.version = 1;
+
+    const LogsPage = Route.options.component;
+    if (LogsPage === undefined) {
+      throw new Error('Expected logs route component');
+    }
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LogsPage />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Next page/i }));
+
+    await waitFor(() =>
+      expect(queryMocks.fetchRecentEventsPage).toHaveBeenCalledWith(
+        {},
+        {
+          kind: 'cursor',
+          limit: 50,
+          ts_ms: mockEvents[48].ts_ms,
+          event_id: mockEvents[48].request_id,
+        },
+      ),
+    );
+    expect(screen.getByLabelText('View request req-49')).toBeDefined();
+  });
 
   it('exports all visible rows, not just the current page', async () => {
     const queryClient = new QueryClient();
@@ -247,6 +414,12 @@ describe('LogsPage', () => {
         <LogsPage />
       </QueryClientProvider>,
     );
+
+    const nextButton = screen.getByRole('button', { name: /Next page/i });
+    fireEvent.click(nextButton);
+    await waitFor(() => expect(screen.getByText('Page 2 of 2+')).toBeDefined());
+    fireEvent.click(nextButton);
+    await waitFor(() => expect(screen.getByText('Page 3 of 3')).toBeDefined());
 
     const exportBtn = screen.getByRole('button', { name: /Export/i });
 
@@ -273,6 +446,6 @@ describe('LogsPage', () => {
     if (Array.isArray(exportedRows)) expect(exportedRows.length).toBe(120);
 
     const tbody = document.querySelector('tbody');
-    expect(tbody?.querySelectorAll('tr').length).toBe(50);
+    expect(tbody?.querySelectorAll('tr').length).toBe(20);
   });
 });
