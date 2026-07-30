@@ -4759,10 +4759,12 @@ fn request_cache_metadata_from_value(
     let claude_agent_id = header_identity(headers, "x-claude-code-agent-id");
     let claude_parent_agent_id = header_identity(headers, "x-claude-code-parent-agent-id");
     let client_app = header_identity(headers, "x-app");
-    let parent_session_id = metadata.parent_session_id.clone();
+    let parent_session_id = header_identity(headers, "x-parent-session-id")
+        .or_else(|| metadata.parent_session_id.clone());
     let request_kind = classify_client_request_kind(
         value,
         observed_session_id.as_deref(),
+        parent_session_id.as_deref(),
         claude_agent_id.is_some(),
     )
     .map(str::to_owned);
@@ -6397,6 +6399,76 @@ mod tests {
         let metadata = request_cache_metadata(&headers, &body);
 
         assert_eq!(metadata.thread_id.as_deref(), Some("opencode-session-456"));
+    }
+
+    #[test]
+    fn request_cache_metadata_classifies_opencode_requests_and_parent_session() {
+        let cases = [
+            (
+                "main",
+                None,
+                r#"{"model":"claude-sonnet-4-5","system":[{"type":"text","text":"You are OpenCode, the best coding agent on the planet.\n\nYou are an interactive CLI tool."}],"messages":[{"role":"user","content":"hello"}],"tools":[{"name":"task"}]}"#,
+                "main",
+            ),
+            (
+                "session title",
+                None,
+                r#"{"model":"claude-haiku-4-5-20251001","system":[{"type":"text","text":"You are a title generator. You output ONLY a thread title. Nothing else.\n\n<task>Generate a title</task>"}],"messages":[{"role":"user","content":"fix the router"}]}"#,
+                "session_title",
+            ),
+            (
+                "compaction",
+                None,
+                r#"{"model":"claude-sonnet-4-5","system":[{"type":"text","text":"You are an anchored context summarization assistant for coding sessions.\n\nSummarize only the conversation provided."}],"messages":[{"role":"user","content":"conversation"}]}"#,
+                "compaction",
+            ),
+            (
+                "subagent",
+                Some("ses_opencode_parent"),
+                r#"{"model":"claude-sonnet-4-5","system":[{"type":"text","text":"You are OpenCode, the best coding agent on the planet.\n\nYou are an interactive CLI tool."}],"messages":[{"role":"user","content":"Reply with CHILD only."}],"tools":[{"name":"task"}]}"#,
+                "subagent",
+            ),
+        ];
+
+        for (case, parent_session_id, fixture, request_kind) in cases {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                HeaderName::from_static("x-session-affinity"),
+                HeaderValue::from_static("ses_opencode_child_or_main"),
+            );
+            if let Some(parent_session_id) = parent_session_id {
+                headers.insert(
+                    HeaderName::from_static("x-parent-session-id"),
+                    HeaderValue::from_str(parent_session_id)
+                        .expect("valid OpenCode parent session ID"),
+                );
+            }
+
+            let metadata =
+                request_cache_metadata(&headers, &Bytes::copy_from_slice(fixture.as_bytes()));
+
+            assert_eq!(
+                metadata.observed_session_id.as_deref(),
+                Some("ses_opencode_child_or_main"),
+                "{case}"
+            );
+            assert_eq!(
+                metadata.session_id_source.as_deref(),
+                Some("x-session-affinity"),
+                "{case}"
+            );
+            assert_eq!(
+                metadata.parent_session_id.as_deref(),
+                parent_session_id,
+                "{case}"
+            );
+            assert_eq!(
+                metadata.request_kind.as_deref(),
+                Some(request_kind),
+                "{case}"
+            );
+            assert_eq!(metadata.client_app, None, "{case}");
+        }
     }
 
     #[test]

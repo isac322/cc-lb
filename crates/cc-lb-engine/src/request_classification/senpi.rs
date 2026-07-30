@@ -58,7 +58,7 @@ mod tests {
     use crate::request_classification::{CLASSIFIER_TEXT_LIMIT, classify_client_request_kind};
 
     fn classify(value: &serde_json::Value, session_id: Option<&str>) -> Option<&'static str> {
-        classify_client_request_kind(Some(value), session_id, false)
+        classify_client_request_kind(Some(value), session_id, None, false)
     }
 
     #[test]

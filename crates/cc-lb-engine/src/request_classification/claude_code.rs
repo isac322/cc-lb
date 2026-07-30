@@ -69,7 +69,7 @@ mod tests {
         });
 
         assert_eq!(
-            classify(&RequestView::new(&value, Some("session-1"))),
+            classify(&RequestView::new(&value, Some("session-1"), None)),
             Some(ClientRequestKind::Main)
         );
     }
@@ -93,7 +93,7 @@ mod tests {
         });
 
         assert_eq!(
-            classify(&RequestView::new(&value, Some("session-1"))),
+            classify(&RequestView::new(&value, Some("session-1"), None)),
             Some(ClientRequestKind::Main)
         );
     }
@@ -113,7 +113,7 @@ mod tests {
         });
 
         assert_eq!(
-            classify(&RequestView::new(&value, Some("session-1"))),
+            classify(&RequestView::new(&value, Some("session-1"), None)),
             Some(ClientRequestKind::Side)
         );
     }
@@ -130,7 +130,7 @@ mod tests {
         });
 
         assert_eq!(
-            classify(&RequestView::new(&value, Some("session-1"))),
+            classify(&RequestView::new(&value, Some("session-1"), None)),
             Some(ClientRequestKind::Notification)
         );
     }
@@ -146,7 +146,7 @@ mod tests {
         });
 
         assert_eq!(
-            classify(&RequestView::new(&value, None)),
+            classify(&RequestView::new(&value, None, None)),
             Some(ClientRequestKind::Subagent)
         );
     }
@@ -171,7 +171,7 @@ mod tests {
         });
 
         assert_eq!(
-            classify(&RequestView::new(&value, Some("session-1"))),
+            classify(&RequestView::new(&value, Some("session-1"), None)),
             Some(ClientRequestKind::SessionTitle)
         );
     }
@@ -189,7 +189,7 @@ mod tests {
             "messages": [{"role": "user", "content": "work"}]
         });
 
-        assert_eq!(classify(&RequestView::new(&value, None)), None);
+        assert_eq!(classify(&RequestView::new(&value, None, None)), None);
     }
 
     #[test]
@@ -203,6 +203,6 @@ mod tests {
             "tools": [{"name": "bash"}]
         });
 
-        assert_eq!(classify(&RequestView::new(&value, None)), None);
+        assert_eq!(classify(&RequestView::new(&value, None, None)), None);
     }
 }

@@ -5,6 +5,7 @@
 
 pub(crate) mod claude_code;
 pub(crate) mod omp;
+pub(crate) mod opencode;
 pub(crate) mod senpi;
 
 use serde_json::Value;
@@ -68,10 +69,15 @@ pub(crate) struct RequestView<'a> {
     last_user: Option<&'a Value>,
     billing: Option<BillingAttribution<'a>>,
     session_id: Option<&'a str>,
+    parent_session_id: Option<&'a str>,
 }
 
 impl<'a> RequestView<'a> {
-    pub(crate) fn new(value: &'a Value, session_id: Option<&'a str>) -> Self {
+    pub(crate) fn new(
+        value: &'a Value,
+        session_id: Option<&'a str>,
+        parent_session_id: Option<&'a str>,
+    ) -> Self {
         let system = value.get("system");
         Self {
             value,
@@ -80,6 +86,7 @@ impl<'a> RequestView<'a> {
             last_user: last_user_content(value),
             billing: billing_attribution(system),
             session_id,
+            parent_session_id,
         }
     }
 
@@ -89,6 +96,10 @@ impl<'a> RequestView<'a> {
 
     pub(crate) const fn session_id(&self) -> Option<&'a str> {
         self.session_id
+    }
+
+    pub(crate) const fn parent_session_id(&self) -> Option<&'a str> {
+        self.parent_session_id
     }
 
     pub(crate) const fn has_provenance(&self) -> bool {
@@ -159,12 +170,17 @@ fn classify_shared(view: &RequestView<'_>) -> Option<ClientRequestKind> {
 }
 
 type FamilyClassifier = fn(&RequestView<'_>) -> Option<ClientRequestKind>;
-const FAMILY_CLASSIFIERS: [FamilyClassifier; 3] =
-    [senpi::classify_main, omp::classify, claude_code::classify];
+const FAMILY_CLASSIFIERS: [FamilyClassifier; 4] = [
+    senpi::classify_main,
+    opencode::classify_main,
+    omp::classify,
+    claude_code::classify,
+];
 
 pub(crate) fn classify_client_request_kind(
     value: Option<&Value>,
     observed_session_id: Option<&str>,
+    parent_session_id: Option<&str>,
     has_claude_agent: bool,
 ) -> Option<&'static str> {
     if has_claude_agent {
@@ -172,11 +188,14 @@ pub(crate) fn classify_client_request_kind(
     }
 
     let value = value?;
-    let view = RequestView::new(value, observed_session_id);
+    let view = RequestView::new(value, observed_session_id, parent_session_id);
     if let Some(kind) = omp::classify_advisor(&view) {
         return Some(kind.as_str());
     }
     if let Some(kind) = senpi::classify_auxiliary(&view) {
+        return Some(kind.as_str());
+    }
+    if let Some(kind) = opencode::classify_auxiliary(&view) {
         return Some(kind.as_str());
     }
     if let Some(kind) = classify_shared(&view) {
@@ -274,7 +293,7 @@ mod tests {
     #[test]
     fn header_agent_short_circuits_to_subagent() {
         assert_eq!(
-            classify_client_request_kind(None, None, true),
+            classify_client_request_kind(None, None, None, true),
             Some("subagent")
         );
     }
@@ -293,7 +312,7 @@ mod tests {
         });
 
         assert_eq!(
-            classify_client_request_kind(Some(&value), Some("session-1"), false),
+            classify_client_request_kind(Some(&value), Some("session-1"), None, false),
             Some("recap")
         );
     }
@@ -317,7 +336,7 @@ mod tests {
         });
 
         assert_eq!(
-            classify_client_request_kind(Some(&value), Some("session-1"), false),
+            classify_client_request_kind(Some(&value), Some("session-1"), None, false),
             Some("compaction")
         );
     }
@@ -345,7 +364,7 @@ mod tests {
         });
 
         assert_eq!(
-            classify_client_request_kind(Some(&value), None, false),
+            classify_client_request_kind(Some(&value), None, None, false),
             Some("advisor")
         );
     }
@@ -361,7 +380,7 @@ mod tests {
         });
 
         assert_eq!(
-            classify_client_request_kind(Some(&value), None, false),
+            classify_client_request_kind(Some(&value), None, None, false),
             Some("session_title")
         );
     }
@@ -376,7 +395,7 @@ mod tests {
         });
 
         assert_eq!(
-            classify_client_request_kind(Some(&value), None, false),
+            classify_client_request_kind(Some(&value), None, None, false),
             None
         );
     }
