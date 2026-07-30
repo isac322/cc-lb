@@ -4,7 +4,7 @@ import { eventTime } from '../../lib/api';
 import {
   getRequestOutcome,
   type RequestOutcome,
-  statusTone,
+  requestOutcomeTone,
 } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { reasoningBadgeText } from '../../lib/reasoningTier';
@@ -35,9 +35,19 @@ export function RequestOutcomeBadge({ outcome }: { outcome: RequestOutcome }) {
       </Badge>
     );
   }
+  if (outcome.type === 'semantic_error') {
+    return (
+      <Badge
+        tone="danger"
+        className="min-w-0 whitespace-normal text-right break-words"
+      >
+        {outcome.label}
+      </Badge>
+    );
+  }
   return (
     <Badge
-      tone={statusTone(outcome.status)}
+      tone={requestOutcomeTone(outcome)}
       className="min-w-0 whitespace-normal text-right break-words"
     >
       {outcome.status}
@@ -65,6 +75,9 @@ export function RequestOutcomeTableCell({
       </span>
     );
   }
+  if (outcome.type === 'semantic_error') {
+    return <>{outcome.label}</>;
+  }
   return <>{outcome.status}</>;
 }
 
@@ -82,6 +95,7 @@ export function RequestEventIdentity({
     isPartial,
     event._phase === 'final' ? event.status : 0,
     event._phase === 'final' ? event.error_code : undefined,
+    event._phase === 'final' ? event.upstream_error_type : undefined,
   );
   const reasoningText = reasoningBadgeText(
     event.reasoning_effort,
@@ -316,6 +330,16 @@ export function RequestEventIdentity({
         {outcome.type === 'client_disconnected' ? (
           <KvRow
             label="Status Code"
+            value={
+              <span className="font-mono break-all min-w-0">
+                {outcome.status}
+              </span>
+            }
+          />
+        ) : null}
+        {outcome.type === 'semantic_error' ? (
+          <KvRow
+            label="HTTP Status"
             value={
               <span className="font-mono break-all min-w-0">
                 {outcome.status}

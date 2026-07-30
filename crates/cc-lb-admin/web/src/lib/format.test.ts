@@ -49,6 +49,49 @@ describe('getRequestOutcome', () => {
       error_code: null,
     });
   });
+  it('returns semantic_error for a completed 2xx upstream stream error', () => {
+    expect(
+      getRequestOutcome(
+        false,
+        200,
+        'upstream_stream_error',
+        'overloaded_error',
+      ),
+    ).toEqual({
+      type: 'semantic_error',
+      status: 200,
+      error_code: 'upstream_stream_error',
+      upstream_error_type: 'overloaded_error',
+      label: 'overloaded_error',
+    });
+  });
+  it('falls back to the terminal error code when the upstream type is absent', () => {
+    expect(
+      getRequestOutcome(false, 200, 'upstream_stream_error', null),
+    ).toEqual({
+      type: 'semantic_error',
+      status: 200,
+      error_code: 'upstream_stream_error',
+      upstream_error_type: null,
+      label: 'upstream_stream_error',
+    });
+  });
+  it('does not classify unrelated 2xx terminal metadata as an upstream error', () => {
+    expect(getRequestOutcome(false, 200, 'terminal_without_partial')).toEqual({
+      type: 'completed',
+      status: 200,
+      error_code: 'terminal_without_partial',
+    });
+  });
+  it('keeps an HTTP error numeric even when structured upstream details exist', () => {
+    expect(
+      getRequestOutcome(false, 429, 'upstream_4xx', 'rate_limit_error'),
+    ).toEqual({
+      type: 'completed',
+      status: 429,
+      error_code: 'upstream_4xx',
+    });
+  });
 });
 
 describe('formatCount', () => {

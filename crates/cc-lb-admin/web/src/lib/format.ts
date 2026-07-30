@@ -116,16 +116,33 @@ export function formatCostMicros(micros?: number | null): string {
 export type RequestOutcome =
   | { type: 'partial' }
   | { type: 'client_disconnected'; status: number; error_code: string }
+  | {
+      type: 'semantic_error';
+      status: number;
+      error_code?: string | null;
+      upstream_error_type?: string | null;
+      label: string;
+    }
   | { type: 'completed'; status: number; error_code?: string | null };
 
 export function getRequestOutcome(
   isPartial: boolean,
   status: number,
   error_code?: string | null,
+  upstream_error_type?: string | null,
 ): RequestOutcome {
   if (isPartial) return { type: 'partial' };
   if (status === 499 && error_code === 'client_closed_request') {
     return { type: 'client_disconnected', status, error_code };
+  }
+  if (status >= 200 && status < 300 && error_code === 'upstream_stream_error') {
+    return {
+      type: 'semantic_error',
+      status,
+      error_code,
+      upstream_error_type,
+      label: upstream_error_type || error_code || 'Request failed',
+    };
   }
   return { type: 'completed', status, error_code };
 }
@@ -135,6 +152,15 @@ export function statusTone(s: number): 'ok' | 'warn' | 'danger' | 'neutral' {
   if (s >= 400) return 'warn';
   if (s >= 200 && s < 300) return 'ok';
   return 'neutral';
+}
+
+export function requestOutcomeTone(
+  outcome: RequestOutcome,
+): 'ok' | 'warn' | 'danger' | 'neutral' {
+  if (outcome.type === 'partial') return 'neutral';
+  if (outcome.type === 'client_disconnected') return 'warn';
+  if (outcome.type === 'semantic_error') return 'danger';
+  return statusTone(outcome.status);
 }
 
 export function cacheHitRatio(e: RequestEvent): number | null {

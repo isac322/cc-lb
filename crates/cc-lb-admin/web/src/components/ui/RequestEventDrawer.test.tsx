@@ -109,6 +109,37 @@ describe('RequestEventDrawer', () => {
       screen.getByText('forced fake rate limit response <markup>'),
     ).toBeDefined();
     expect(screen.getByText('upstream_4xx')).toBeDefined();
+    expect(screen.getByText('429')).toBeDefined();
+  });
+
+  it('shows a final SSE error as the outcome while preserving HTTP 200', () => {
+    const event = {
+      event_id: 'evt_stream_error',
+      request_id: 'req_stream_error',
+      ts: 1718553120,
+      ts_ms: 1718553120000,
+      status: 200,
+      duration_ms: 12,
+      error_code: 'upstream_stream_error',
+      upstream_error_type: 'overloaded_error',
+      upstream_error_message: 'Overloaded',
+      _phase: 'final',
+    } satisfies RequestEventWithPhase;
+
+    render(
+      <RequestEventDrawer
+        event={event}
+        principalName={null}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText('overloaded_error').length).toBeGreaterThan(0);
+    expect(screen.getByText('HTTP Status')).toBeDefined();
+    expect(screen.getByText('200')).toBeDefined();
+    expect(screen.getByText('upstream_stream_error')).toBeDefined();
+    expect(screen.getByText('Upstream Failure')).toBeDefined();
+    expect(screen.getByText('Overloaded')).toBeDefined();
   });
 
   it('omits structured upstream failure details when absent', () => {
