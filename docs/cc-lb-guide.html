@@ -283,7 +283,7 @@
 
     <section id="hero" class="hero">
       <h2>cc-lb 한눈에</h2>
-      <p>Claude Code · OpenCode · pi 같은 코딩 에이전트의 <code>ANTHROPIC_BASE_URL</code>만 cc-lb로 돌려주면, 그 안에서 <b>인증 브로커링 · 사용량 쿼터 · 감사 로그 · 메트릭</b>을 강제할 수 있는 Rust 정적 musl 바이너리입니다. 클라이언트 코드는 단 한 줄도 안 바꿔도 됩니다.</p>
+      <p>Claude Code · OpenCode · pi · Senpi 같은 코딩 에이전트의 <code>ANTHROPIC_BASE_URL</code>만 cc-lb로 돌려주면, 그 안에서 <b>인증 브로커링 · 사용량 쿼터 · 감사 로그 · 메트릭</b>을 강제할 수 있는 Rust 정적 musl 바이너리입니다. 클라이언트 코드는 단 한 줄도 안 바꿔도 됩니다.</p>
       <div class="qa">
         <a href="#quick-start">2분 컷 Quick Start</a>
         <a href="#decision" class="secondary">내 상황에 맞는 길 찾기</a>
@@ -495,7 +495,35 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
 # 예: pi
 ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
   ANTHROPIC_API_KEY=$YOUR_ANTHROPIC_KEY \
-  pi</code></pre><button class="copy">복사</button></div>
+  pi
+
+# 예: Senpi (요청 종류 분류, 세션 헤더 없음)
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
+  ANTHROPIC_API_KEY=$YOUR_ANTHROPIC_KEY \
+  senpi --provider anthropic --model claude-sonnet-4-5</code></pre><button class="copy">복사</button></div>
+        <div class="callout info">
+          <span class="label">Senpi 세션 ID</span>
+          기본 Anthropic provider는 custom <code>baseUrl</code>에서 세션 헤더를 보내지 않습니다. cc-lb는 Senpi의 system prompt로 <code>request_kind</code>를 분류하고, cache prefix로 세션 없는 요청의 affinity를 유지합니다.
+        </div>
+        <p>Senpi의 <code>--session-id</code>를 <code>observed_session_id</code>로 기록하려면 전용 설정 디렉터리에서 <code>sendSessionAffinityHeaders</code>를 켭니다. API 키는 파일에 쓰지 않고 환경변수로 전달하면 child subagent도 상속합니다.</p>
+        <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>export SENPI_CODING_AGENT_DIR=&quot;$HOME/.config/senpi-cc-lb/agent&quot;
+export SENPI_CODING_AGENT_SESSION_DIR=&quot;$HOME/.local/share/senpi-cc-lb/sessions&quot;
+mkdir -p &quot;$SENPI_CODING_AGENT_DIR&quot; &quot;$SENPI_CODING_AGENT_SESSION_DIR&quot;
+
+cat &gt; &quot;$SENPI_CODING_AGENT_DIR/models.json&quot; &lt;&lt;&#39;JSON&#39;
+{
+  &quot;providers&quot;: {
+    &quot;anthropic&quot;: {
+      &quot;baseUrl&quot;: &quot;http://127.0.0.1:8080&quot;,
+      &quot;compat&quot;: { &quot;sendSessionAffinityHeaders&quot;: true }
+    }
+  }
+}
+JSON
+
+ANTHROPIC_API_KEY=$YOUR_ANTHROPIC_KEY \
+  senpi --provider anthropic --model claude-sonnet-4-5 \
+  --session-id my-senpi-session</code></pre><button class="copy">복사</button></div>
         <p>이 시점부터 모든 호출이 cc-lb를 통과하며 메트릭/감사 로그에 잡힙니다.</p>
       </li>
 
