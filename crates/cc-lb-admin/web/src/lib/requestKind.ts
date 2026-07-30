@@ -8,6 +8,7 @@ const REQUEST_KIND_BADGE_TEXT: Readonly<Record<string, string>> = {
   session_title: 'title',
   auto_thinking: 'think',
   side: 'side',
+  look_at: 'vision',
   unknown: 'unk',
 };
 

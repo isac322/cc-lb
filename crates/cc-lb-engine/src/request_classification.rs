@@ -5,6 +5,7 @@
 
 pub(crate) mod claude_code;
 pub(crate) mod omp;
+pub(crate) mod senpi;
 
 use serde_json::Value;
 
@@ -32,6 +33,7 @@ pub(crate) enum ClientRequestKind {
     AutoThinking,
     Notification,
     Side,
+    LookAt,
     Unknown,
 }
 
@@ -47,6 +49,7 @@ impl ClientRequestKind {
             Self::AutoThinking => "auto_thinking",
             Self::Notification => "notification",
             Self::Side => "side",
+            Self::LookAt => "look_at",
             Self::Unknown => "unknown",
         }
     }
@@ -101,6 +104,10 @@ impl<'a> RequestView<'a> {
         self.system
             .is_some_and(|content| text_block_starts_with(content, marker))
     }
+    pub(crate) fn system_ends_with(&self, marker: &str) -> bool {
+        self.system
+            .is_some_and(|content| text_block_ends_with(content, marker))
+    }
 
     pub(crate) fn user_contains(&self, marker: &str) -> bool {
         [self.first_user, self.last_user]
@@ -152,7 +159,8 @@ fn classify_shared(view: &RequestView<'_>) -> Option<ClientRequestKind> {
 }
 
 type FamilyClassifier = fn(&RequestView<'_>) -> Option<ClientRequestKind>;
-const FAMILY_CLASSIFIERS: [FamilyClassifier; 2] = [omp::classify, claude_code::classify];
+const FAMILY_CLASSIFIERS: [FamilyClassifier; 3] =
+    [senpi::classify_main, omp::classify, claude_code::classify];
 
 pub(crate) fn classify_client_request_kind(
     value: Option<&Value>,
@@ -166,6 +174,9 @@ pub(crate) fn classify_client_request_kind(
     let value = value?;
     let view = RequestView::new(value, observed_session_id);
     if let Some(kind) = omp::classify_advisor(&view) {
+        return Some(kind.as_str());
+    }
+    if let Some(kind) = senpi::classify_auxiliary(&view) {
         return Some(kind.as_str());
     }
     if let Some(kind) = classify_shared(&view) {
@@ -218,6 +229,9 @@ fn last_user_content(value: &Value) -> Option<&Value> {
 
 fn text_block_starts_with(content: &Value, marker: &str) -> bool {
     text_blocks(content).any(|text| text.trim_start().starts_with(marker))
+}
+fn text_block_ends_with(content: &Value, marker: &str) -> bool {
+    text_blocks(content).any(|text| text.trim_end().ends_with(marker))
 }
 
 fn bounded_text_contains(content: &Value, marker: &str) -> bool {
@@ -333,6 +347,22 @@ mod tests {
         assert_eq!(
             classify_client_request_kind(Some(&value), None, false),
             Some("advisor")
+        );
+    }
+
+    #[test]
+    fn senpi_auxiliary_marker_precedes_shared_recap_marker() {
+        let value = json!({
+            "system": "Generate a concise title for this coding-agent session.\n\nRules:\n- Use 3 to 6 words.",
+            "messages": [{
+                "role": "user",
+                "content": "The user stepped away and is coming back. Recap in under 40 words."
+            }]
+        });
+
+        assert_eq!(
+            classify_client_request_kind(Some(&value), None, false),
+            Some("session_title")
         );
     }
 
