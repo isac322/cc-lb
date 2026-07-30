@@ -85,6 +85,9 @@ fn app_config(storage: StorageConfig) -> Config {
         ..Config::default()
     };
     config.aead.key_env = TEST_KEY_ENV.to_owned();
+    // Postgres validates the cluster token before opening the scheduler pool.
+    // Borrow an immutable harness variable instead of mutating process-wide env.
+    config.cluster.token_env = crate::common::TEST_NONEMPTY_ENV.to_owned();
     config.downstream_auth.mode = DownstreamAuthMode::None;
     config.downstream_auth.none_mode = Some(NoneModeConfig {
         principal_id: "task25-hard-fail".to_owned(),

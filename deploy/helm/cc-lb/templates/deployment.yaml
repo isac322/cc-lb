@@ -104,6 +104,8 @@ spec:
                   fieldPath: status.podIP
             - name: CC_LB_CLUSTER__INSTANCE_URL
               value: "http://$(POD_IP):{{ .Values.ports.admin }}"
+            - name: CC_LB_CLUSTER__TOKEN_ENV
+              value: {{ .Values.config.cluster.tokenEnv | quote }}
             - name: {{ .Values.config.cluster.tokenEnv }}
               valueFrom:
                 secretKeyRef:

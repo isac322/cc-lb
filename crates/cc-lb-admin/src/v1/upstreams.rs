@@ -125,14 +125,10 @@ struct UpstreamCreateBody {
     api_key_env: Option<String>,
     #[serde(default)]
     api_key_value: Option<String>,
-    #[serde(default = "default_warmup_enabled")]
-    warmup_enabled: bool,
+    #[serde(default)]
+    warmup_enabled: Option<bool>,
     #[serde(default)]
     warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
-}
-
-const fn default_warmup_enabled() -> bool {
-    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,6 +312,9 @@ async fn create_upstream(
     let storage = storage(&state)?;
     let api_key_ciphertext = api_key_ciphertext_for_create(&state, &body)?;
     let kind = body.kind;
+    let warmup_enabled = body
+        .warmup_enabled
+        .unwrap_or(kind == UpstreamKind::AnthropicOauth);
     let created = UpstreamStore::create(
         storage,
         UpstreamCreate {
@@ -324,7 +323,7 @@ async fn create_upstream(
             base_url: body.base_url,
             api_key_ciphertext,
             oauth_token_generation: None,
-            warmup_enabled: body.warmup_enabled,
+            warmup_enabled,
             warmup_dialect_plugin: body.warmup_dialect_plugin,
         },
     )
@@ -2156,6 +2155,35 @@ mod tests {
             .expect("body read succeeds");
         let body: Value = serde_json::from_slice(&bytes).expect("response is json");
         assert_eq!(body["warmup_enabled"], true);
+    }
+
+    #[tokio::test]
+    async fn create_upstream_defaults_warmup_disabled_for_api_key_kind() {
+        let context = test_context().await;
+        let body = serde_json::json!({
+            "name": "api-key-warmup-default",
+            "kind": "anthropic_api_key",
+            "api_key_value": "test-api-key",
+        });
+        let response = router()
+            .with_state(context.state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/admin/v1/upstreams")
+                    .header("content-type", "application/json")
+                    .body(AxumBody::from(body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body read succeeds");
+        let body: Value = serde_json::from_slice(&bytes).expect("response is json");
+        assert_eq!(body["warmup_enabled"], false);
     }
 
     #[tokio::test]

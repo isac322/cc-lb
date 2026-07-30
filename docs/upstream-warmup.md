@@ -6,7 +6,7 @@ This document describes the operator reference for the upstream warm-up system i
 
 Anthropic OAuth upstreams require periodic activity to keep their five-hour rate limit reset windows active. If an upstream remains idle for too long, the reset window closes, which can lead to unexpected rate limits when traffic resumes. This warm-up system automatically sends minimal requests to keep these windows ticking. It ensures that your upstreams are always ready to handle incoming requests without artificial delays.
 
-Warm-up is opt-out: `warmup_enabled` defaults to `true`, both for upstreams created through `POST /admin/v1/upstreams` and for those created by the OAuth flow. Only `anthropic_oauth` upstreams that hold OAuth credentials are ever scheduled, so the flag is inert until an upstream completes OAuth.
+Warm-up is opt-out for `anthropic_oauth`: `warmup_enabled` defaults to `true` for OAuth upstreams created through `POST /admin/v1/upstreams` and through the OAuth flow. Other upstream kinds default to `false`. Only `anthropic_oauth` upstreams that hold OAuth credentials are ever scheduled, so the flag is inert until an upstream completes OAuth.
 
 ## Re-enabling per upstream
 

@@ -295,6 +295,43 @@ test('renders ordered list with locked terminal row', () => {
   expect(screen.getByText('Terminal step')).toBeDefined();
 });
 
+test('loading router metadata keeps Basic selected and disables mutations', () => {
+  vi.mocked(queries.usePluginChain).mockReturnValue({
+    data: undefined,
+    isLoading: true,
+  } as never);
+  vi.mocked(queries.usePluginRegistry).mockReturnValue({
+    data: undefined,
+    isLoading: true,
+  } as never);
+  vi.mocked(queries.useRouterTerminalStrategy).mockReturnValue({
+    data: undefined,
+    isLoading: true,
+  } as never);
+  vi.mocked(queries.useUpdateRouterTerminalStrategy).mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as never);
+  vi.mocked(queries.useReorderChain).mockReturnValue({
+    mutate: vi.fn(),
+  } as never);
+  vi.mocked(queries.useInsertChainEntry).mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as never);
+  vi.mocked(queries.useDeleteChainEntry).mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as never);
+
+  renderWithProviders(<RouterSlotEditor principal={principalFixture()} />);
+
+  const basicTab = screen.getByRole('tab', { name: 'Basic' });
+  expect(basicTab.getAttribute('aria-disabled')).toBe('false');
+  expect(basicTab.getAttribute('aria-selected')).toBe('true');
+  expect(screen.getByRole('switch').hasAttribute('disabled')).toBe(true);
+});
+
 test('empty router chain keeps Basic available and enables subscription-preference', () => {
   const insertMock = vi.fn();
   vi.mocked(queries.usePluginChain).mockReturnValue({

@@ -38,6 +38,10 @@ pub async fn postgres_test_lock(database_url: &str) -> Result<sqlx::PgConnection
     Ok(connection)
 }
 
+/// Runtime environment variable that Cargo-invoked tests inherit without
+/// mutating the integration binary's process-global environment.
+pub const TEST_NONEMPTY_ENV: &str = "CARGO_PKG_NAME";
+
 pub fn install_prometheus() -> &'static PrometheusHandle {
     static PROMETHEUS: OnceLock<PrometheusHandle> = OnceLock::new();
     PROMETHEUS.get_or_init(|| {

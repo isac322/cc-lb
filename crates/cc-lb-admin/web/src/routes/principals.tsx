@@ -1241,12 +1241,14 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
     (e) => e.wasm_registry_id === subscriptionPreferencePlugin?.id,
   );
 
+  const isChainMetadataLoading = chain.isLoading || registry.isLoading;
   const isBasicCompatible =
+    !isChainMetadataLoading &&
     subscriptionPreferencePlugin !== undefined &&
     (entries.length === 0 ||
       (entries.length === 1 &&
         entries[0]?.wasm_registry_id === subscriptionPreferencePlugin.id));
-  const isComplex = !isBasicCompatible;
+  const isComplex = !isChainMetadataLoading && !isBasicCompatible;
 
   const [detailPlugin, setDetailPlugin] = useState<PluginEntry | null>(null);
   const [activeTab, setActiveTab] = useState<'basic' | 'advanced'>(
@@ -1441,7 +1443,9 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                 nativeButton
                 onCheckedChange={() => toggleSubscriptionPreference()}
                 render={<button type="button" />}
-                disabled={del.isPending || insert.isPending}
+                disabled={
+                  isChainMetadataLoading || del.isPending || insert.isPending
+                }
               >
                 <div
                   className={cx(

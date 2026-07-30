@@ -21,6 +21,7 @@ async fn storage_tail_poller_broadcasts_rows_appended_after_spawn() {
         storage.as_request_event_store(),
         tx,
         Duration::from_millis(10),
+        0,
         shutdown_rx,
     );
 
@@ -57,6 +58,7 @@ async fn storage_tail_poller_heals_final_missed_by_local_publish_path() {
         storage.as_request_event_store(),
         tx,
         Duration::from_millis(10),
+        0,
         shutdown_rx,
     );
 
@@ -84,23 +86,84 @@ async fn storage_tail_poller_heals_final_missed_by_local_publish_path() {
 }
 
 #[tokio::test]
+async fn storage_tail_poller_starts_after_existing_rows() {
+    let storage = HorizonBlockedStorage::new();
+    storage.make_cursor_visible(
+        1,
+        RequestEvent {
+            request_id: "req-existing".to_owned(),
+            event_id: Some("event-existing".to_owned()),
+            ts: 1_700_000_002,
+            ts_ms: Some(1_700_000_002_000),
+            status: 200,
+            duration_ms: 13,
+            ..RequestEvent::default()
+        },
+    );
+    let initial_cursor = storage
+        .current_request_event_cursor()
+        .await
+        .expect("startup cursor loads");
+    let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let handle = StorageTailPoller::spawn(
+        storage.clone(),
+        tx,
+        Duration::from_millis(10),
+        initial_cursor,
+        shutdown_rx,
+    );
+
+    storage.make_cursor_visible(
+        2,
+        RequestEvent {
+            request_id: "req-new".to_owned(),
+            event_id: Some("event-new".to_owned()),
+            ts: 1_700_000_003,
+            ts_ms: Some(1_700_000_003_000),
+            status: 200,
+            duration_ms: 17,
+            ..RequestEvent::default()
+        },
+    );
+
+    let update = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("tail poller should broadcast the new row")
+        .expect("tail broadcast should be open");
+    assert_eq!(update.cursor, 2);
+    assert_eq!(update.event.event_id.as_deref(), Some("event-new"));
+
+    shutdown_tx.send(true).expect("shutdown signal sends");
+    handle.await.expect("poller task joins");
+}
+
+#[tokio::test]
 async fn storage_tail_poller_does_not_advance_past_ineligible_cursor() {
     let storage = HorizonBlockedStorage::new();
     let (tx, mut rx) = tokio::sync::broadcast::channel(16);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let handle =
-        StorageTailPoller::spawn(storage.clone(), tx, Duration::from_millis(10), shutdown_rx);
+    let handle = StorageTailPoller::spawn(
+        storage.clone(),
+        tx,
+        Duration::from_millis(10),
+        0,
+        shutdown_rx,
+    );
 
     storage.first_empty_query.notified().await;
-    storage.make_cursor_visible(RequestEvent {
-        request_id: "req-horizon-blocked".to_owned(),
-        event_id: Some("event-horizon-blocked".to_owned()),
-        ts: 1_700_000_002,
-        ts_ms: Some(1_700_000_002_000),
-        status: 200,
-        duration_ms: 13,
-        ..RequestEvent::default()
-    });
+    storage.make_cursor_visible(
+        1,
+        RequestEvent {
+            request_id: "req-horizon-blocked".to_owned(),
+            event_id: Some("event-horizon-blocked".to_owned()),
+            ts: 1_700_000_002,
+            ts_ms: Some(1_700_000_002_000),
+            status: 200,
+            duration_ms: 13,
+            ..RequestEvent::default()
+        },
+    );
 
     let update = tokio::time::timeout(Duration::from_secs(1), rx.recv())
         .await
@@ -133,11 +196,12 @@ impl HorizonBlockedStorage {
         })
     }
 
-    fn make_cursor_visible(&self, event: RequestEvent) {
+    fn make_cursor_visible(&self, cursor: u64, event: RequestEvent) {
+        self.current.fetch_max(cursor, Ordering::SeqCst);
         self.rows
             .lock()
             .expect("horizon-blocked rows lock")
-            .push_back((1, event));
+            .push_back((cursor, event));
     }
 }
 

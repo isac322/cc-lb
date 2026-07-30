@@ -81,7 +81,7 @@ If an operator keeps a local proxy client key file such as `~/.config/cc-lb/prox
 }
 ```
 
-`spec_revision` is the user-managed optimistic-lock counter used by `If-Match` and `ETag`. Background controller writes (status/lease/secret/token) never bump it. The nested `status` object holds system-managed operational state: only the apply daemon and warmup observer write here. `warmup_enabled` defaults to `true`; see [docs/upstream-warmup.md](./upstream-warmup.md).
+`spec_revision` is the user-managed optimistic-lock counter used by `If-Match` and `ETag`. Background controller writes (status/lease/secret/token) never bump it. The nested `status` object holds system-managed operational state: only the apply daemon and warmup observer write here. `warmup_enabled` defaults to `true` for `anthropic_oauth` upstreams and `false` for other kinds; see [docs/upstream-warmup.md](./upstream-warmup.md).
 
 ### Principals API
 

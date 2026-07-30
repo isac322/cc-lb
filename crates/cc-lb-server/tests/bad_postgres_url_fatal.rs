@@ -33,6 +33,7 @@ key_env = "CC_LB_AEAD_KEY"
     let output = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
         .args(["serve", "--config"])
         .arg(&config_path)
+        .env("CC_LB_CLUSTER_TOKEN", "test-cluster-token")
         .env(
             "CC_LB_AEAD_KEY",
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",

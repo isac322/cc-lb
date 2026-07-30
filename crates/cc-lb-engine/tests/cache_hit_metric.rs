@@ -77,10 +77,10 @@ impl DnsResolver for FakeResolver {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn cache_hit_metric() {
     let recorder = CountingRecorder::default();
-    metrics::set_global_recorder(recorder.clone()).expect("install recorder");
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
