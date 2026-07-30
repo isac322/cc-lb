@@ -86,7 +86,7 @@ mod tests {
 
         for (value, session_id, expected) in cases {
             assert_eq!(
-                classify(&RequestView::new(&value, Some(session_id))),
+                classify(&RequestView::new(&value, Some(session_id), None)),
                 Some(expected)
             );
         }
@@ -103,7 +103,7 @@ mod tests {
         });
 
         assert_eq!(
-            classify(&RequestView::new(&value, None)),
+            classify(&RequestView::new(&value, None, None)),
             Some(ClientRequestKind::Advisor)
         );
     }
@@ -128,7 +128,7 @@ mod tests {
         });
 
         assert_eq!(
-            classify(&RequestView::new(&value, None)),
+            classify(&RequestView::new(&value, None, None)),
             Some(ClientRequestKind::Advisor)
         );
     }

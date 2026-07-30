@@ -38,6 +38,34 @@ pub(crate) fn streaming_response(
         .into_response();
     with_fixture_headers(response)
 }
+pub(crate) fn opencode_tools_response(model: String, request: &Value) -> Response {
+    const TASK_TOOL_ID: &str = "toolu_opencode_task";
+
+    let wants_subagent = request.get("system").is_some_and(|value| {
+        content_starts_with(
+            value,
+            "You are OpenCode, the best coding agent on the planet.",
+        )
+    }) && request_user_contains(request, "Use the task tool")
+        && has_tool(request, "task");
+    let items = if wants_subagent && !has_tool_result(request, TASK_TOOL_ID) {
+        tool_stream_items(
+            &model,
+            TASK_TOOL_ID,
+            "task",
+            json!({
+                "description": "Inspect child request",
+                "prompt": "Reply with CHILD only.",
+                "subagent_type": "general"
+            }),
+        )
+    } else {
+        text_stream_items(&model, "fake anthropic fixture response HELLO")
+    };
+
+    immediate_streaming_response(items)
+}
+
 pub(crate) fn senpi_tools_response(
     model: String,
     request: &Value,
@@ -112,6 +140,44 @@ fn content_starts_with(content: &Value, prefix: &str) -> bool {
         }),
         _ => false,
     }
+}
+
+fn request_user_contains(request: &Value, marker: &str) -> bool {
+    request
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message.get("role").and_then(Value::as_str) == Some("user")
+                    && message
+                        .get("content")
+                        .is_some_and(|content| content_contains(content, marker))
+            })
+        })
+}
+
+fn content_contains(content: &Value, marker: &str) -> bool {
+    match content {
+        Value::String(text) => text.contains(marker),
+        Value::Array(blocks) => blocks.iter().any(|block| {
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains(marker))
+        }),
+        _ => false,
+    }
+}
+
+fn has_tool(request: &Value, tool_name: &str) -> bool {
+    request
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|tool| tool.get("name").and_then(Value::as_str) == Some(tool_name))
+        })
 }
 
 fn has_tool_result(request: &Value, tool_use_id: &str) -> bool {

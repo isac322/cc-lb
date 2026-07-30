@@ -7,6 +7,7 @@ PROMPT='Print the word HELLO'
 API_KEY='sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789'
 FAKE_PID=''
 PROXY_PID=''
+CLIENT_PID=''
 TMP_DIR=''
 
 usage() {
@@ -40,6 +41,7 @@ cleanup_pid_tree() {
 }
 
 cleanup() {
+  cleanup_pid_tree "$CLIENT_PID"
   cleanup_pid_tree "$PROXY_PID"
   cleanup_pid_tree "$FAKE_PID"
   if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
@@ -122,6 +124,39 @@ print(f'{name} did not accept tcp on 127.0.0.1:{port}: {last}', file=sys.stderr)
 sys.exit(1)
 PY
 }
+wait_http() {
+  port=$1
+  name=$2
+  path=$3
+  python3 - "$port" "$name" "$path" <<'PY'
+import socket, sys, time
+port = int(sys.argv[1])
+name = sys.argv[2]
+path = sys.argv[3]
+deadline = time.time() + 30
+last = None
+request = (
+    f"GET {path} HTTP/1.1\r\n"
+    "Host: 127.0.0.1\r\n"
+    "Connection: close\r\n\r\n"
+).encode()
+while time.time() < deadline:
+    try:
+        with socket.create_connection(('127.0.0.1', port), timeout=0.5) as sock:
+            sock.settimeout(0.5)
+            sock.sendall(request)
+            response = sock.recv(1024)
+            if response.startswith(b"HTTP/1.1 200") or response.startswith(b"HTTP/1.0 200"):
+                print(f'{name} ready on http://127.0.0.1:{port}{path}')
+                sys.exit(0)
+            last = response.splitlines()[0].decode(errors='replace') if response else 'empty response'
+    except OSError as exc:
+        last = exc
+    time.sleep(0.1)
+print(f'{name} did not become ready on http://127.0.0.1:{port}{path}: {last}', file=sys.stderr)
+sys.exit(1)
+PY
+}
 run_isolated_client() {
   timeout_secs=$1
   shift
@@ -181,14 +216,14 @@ detect_skip_reason() {
 }
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cc-lb-real-client.XXXXXX")
-# Allocate 4 distinct ports atomically: hold all sockets open during reservation
+# Allocate 5 distinct ports atomically: hold all sockets open during reservation
 # so the kernel cannot hand the same ephemeral port to two sockets, then close
 # them just before binding. Avoids race collisions seen on busy CI runners.
-read -r proxy_port admin_port metrics_port fake_port <<EOF
+read -r proxy_port admin_port metrics_port fake_port client_port <<EOF
 $(python3 - <<'PY'
 import socket
 socks = []
-for _ in range(4):
+for _ in range(5):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(('127.0.0.1', 0))
     socks.append(s)
@@ -207,11 +242,20 @@ mkdir -p \
   "$TMP_DIR/home" \
   "$TMP_DIR/xdg-config" \
   "$TMP_DIR/xdg-data" \
+  "$TMP_DIR/xdg-cache" \
+  "$TMP_DIR/xdg-state" \
+  "$TMP_DIR/opencode-config/opencode" \
+  "$TMP_DIR/opencode-workspace" \
   "$TMP_DIR/pi-agent" \
   "$TMP_DIR/senpi-agent/agents" \
   "$TMP_DIR/senpi-sessions"
+touch "$stdout_file" "$stderr_file"
 cat > "$TMP_DIR/pi-agent/models.json" <<JSON
 {"providers":{"anthropic":{"baseUrl":"http://127.0.0.1:$proxy_port","apiKey":"ANTHROPIC_API_KEY","api":"anthropic-messages","compat":{"supportsEagerToolInputStreaming":false}}}}
+JSON
+
+cat > "$TMP_DIR/opencode-config/opencode/opencode.json" <<JSON
+{"provider":{"anthropic":{"options":{"baseURL":"http://127.0.0.1:$proxy_port/v1","headers":{"x-fake-mode":"opencode-tools"}}}}}
 JSON
 
 cat > "$TMP_DIR/senpi-agent/models.json" <<JSON
@@ -338,12 +382,6 @@ if [ "$upstream_code" != "201" ] && [ "$upstream_code" != "409" ]; then
 fi
 
 set +e
-unset_args=()
-while IFS='=' read -r name _; do
-  case "$name" in
-    OPENCODE*|CLIO*|SISYPHUS*|AGENT*|SOURCE_DATE_EPOCH) unset_args+=("-u" "$name") ;;
-  esac
-done < <(env)
 case "$client" in
   claude-code)
     timeout 30s env \
@@ -357,21 +395,66 @@ case "$client" in
     code=$?
     ;;
   opencode)
-    # opencode 1.15.6 dropped claude-3-5-sonnet-20241022 from its built-in
-    # model whitelist; the request never reaches the proxy. fake-anthropic
-    # echoes whatever model the client sends, so any current Claude name works.
-    # Timeout is 90s instead of the other clients' 30s because opencode's
-    # first-run db migration + agent bootstrap can push past 30s on a cold CI
-    # runner; later runs in the same job hit warm caches and finish faster.
-    timeout 90s env "${unset_args[@]}" \
-      HOME="$TMP_DIR/home" \
-      XDG_CONFIG_HOME="$TMP_DIR/xdg-config" \
-      XDG_DATA_HOME="$TMP_DIR/xdg-data" \
-      ANTHROPIC_API_KEY="$API_KEY" \
-      ANTHROPIC_BASE_URL="http://127.0.0.1:$proxy_port/v1" \
-      ANTHROPIC_MODEL=claude-sonnet-4-5 \
-      "$bin" run --pure --dangerously-skip-permissions --model anthropic/claude-sonnet-4-5 "$PROMPT" > "$stdout_file" 2> "$stderr_file"
+    (
+      cd "$TMP_DIR/opencode-workspace"
+      exec env -i PATH="$PATH" \
+        HOME="$TMP_DIR/home" \
+        XDG_CONFIG_HOME="$TMP_DIR/opencode-config" \
+        XDG_DATA_HOME="$TMP_DIR/xdg-data" \
+        XDG_CACHE_HOME="$TMP_DIR/xdg-cache" \
+        XDG_STATE_HOME="$TMP_DIR/xdg-state" \
+        OPENCODE_DISABLE_MODELS_FETCH=1 \
+        ANTHROPIC_API_KEY="$API_KEY" \
+        ANTHROPIC_BASE_URL="http://127.0.0.1:$proxy_port/v1" \
+        ANTHROPIC_MODEL=claude-sonnet-4-5 \
+        "$bin" serve --pure --print-logs --hostname 127.0.0.1 --port "$client_port"
+    ) > "$TMP_DIR/opencode-server.log" 2>&1 &
+    CLIENT_PID=$!
+    if ! wait_http "$client_port" opencode /global/health; then
+      printf '%s\n' '--- opencode server log ---' >&2
+      cat "$TMP_DIR/opencode-server.log" >&2 || true
+      fail "opencode did not start"
+    fi
+
+    session_file="$TMP_DIR/opencode-session.json"
+    if ! curl -fsS --max-time 30 \
+      -H 'content-type: application/json' \
+      --data '{"agent":"build","model":{"providerID":"anthropic","id":"claude-sonnet-4-5"}}' \
+      "http://127.0.0.1:$client_port/session" \
+      -o "$session_file"; then
+      printf '%s\n' '--- opencode server log ---' >&2
+      cat "$TMP_DIR/opencode-server.log" >&2 || true
+      printf '%s\n' '--- proxy log ---' >&2
+      cat "$TMP_DIR/proxy.log" >&2 || true
+      printf '%s\n' "--- $fake_package log ---" >&2
+      cat "$TMP_DIR/fake.log" >&2 || true
+      fail "opencode session creation failed"
+    fi
+    session_id=$(python3 - "$session_file" <<'PY'
+import json
+import sys
+with open(sys.argv[1]) as source:
+    print(json.load(source)["id"])
+PY
+)
+    if ! printf '%s' "$session_id" | grep -q '^ses'; then
+      fail "opencode session creation returned an invalid ID"
+    fi
+
+    curl -fsS --max-time 90 \
+      -H 'content-type: application/json' \
+      --data '{"model":{"providerID":"anthropic","modelID":"claude-sonnet-4-5"},"agent":"build","parts":[{"type":"text","text":"Use the task tool to ask a general subagent to reply CHILD, then reply HELLO."}]}' \
+      "http://127.0.0.1:$client_port/session/$session_id/message" \
+      -o "$stdout_file"
     code=$?
+    if [ "$code" -eq 0 ]; then
+      curl -fsS --max-time 30 \
+        -H 'content-type: application/json' \
+        --data '{"providerID":"anthropic","modelID":"claude-sonnet-4-5","auto":false}' \
+        "http://127.0.0.1:$client_port/session/$session_id/summarize" \
+        >> "$stdout_file"
+      code=$?
+    fi
     ;;
   pi)
     run_isolated_client 30 env \
@@ -440,6 +523,55 @@ fi
 
 if ! grep -qiF "$expected" "$stdout_file"; then
   fail "client stdout did not contain expected substring: $expected"
+fi
+
+if [ "$client" = "opencode" ]; then
+  python3 - "$TMP_DIR/cc-lb.sqlite" "$session_id" <<'PY'
+import sqlite3
+import sys
+import time
+
+database, parent_session_id = sys.argv[1:]
+deadline = time.monotonic() + 10
+rows = []
+expected = {"main", "subagent", "session_title", "compaction"}
+while time.monotonic() < deadline:
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT request_kind, observed_session_id, session_id_source,
+                            parent_session_id, client_app
+            FROM request_events_v1
+            WHERE request_kind IS NOT NULL
+            ORDER BY request_kind, observed_session_id
+            """
+        ).fetchall()
+    if expected.issubset({row[0] for row in rows}):
+        break
+    time.sleep(0.05)
+
+kinds = {row[0] for row in rows}
+missing = expected - kinds
+if missing:
+    print(f"FAIL reason: missing OpenCode request kinds {sorted(missing)}; rows={rows}", file=sys.stderr)
+    sys.exit(1)
+parent_kinds = {"main", "session_title", "compaction"}
+if any(row[0] in parent_kinds and row[1] != parent_session_id for row in rows):
+    print(f"FAIL reason: OpenCode parent requests changed session ID; rows={rows}", file=sys.stderr)
+    sys.exit(1)
+subagent_rows = [row for row in rows if row[0] == "subagent"]
+if not any(row[1] != parent_session_id and row[3] == parent_session_id for row in subagent_rows):
+    print(f"FAIL reason: OpenCode subagent linkage was not preserved; rows={rows}", file=sys.stderr)
+    sys.exit(1)
+if any(row[0] in expected and row[2] != "x-session-affinity" for row in rows):
+    print(f"FAIL reason: OpenCode requests used an unexpected session source; rows={rows}", file=sys.stderr)
+    sys.exit(1)
+if any(row[0] in expected and row[4] is not None for row in rows):
+    print(f"FAIL reason: OpenCode requests invented client_app; rows={rows}", file=sys.stderr)
+    sys.exit(1)
+
+print("PASS opencode request kinds: main, subagent, session_title, compaction")
+PY
 fi
 
 if [ "$client" = "senpi" ]; then
