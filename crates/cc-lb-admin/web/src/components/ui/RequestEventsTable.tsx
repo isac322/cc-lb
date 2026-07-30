@@ -1,7 +1,7 @@
 import type React from 'react';
 import { useState } from 'react';
 import { eventTime } from '../../lib/api';
-import { getRequestOutcome, statusTone } from '../../lib/format';
+import { getRequestOutcome, requestOutcomeTone } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { serviceTierBadgeText } from '../../lib/reasoningTier';
 import { requestKindBadgeText } from '../../lib/requestKind';
@@ -127,6 +127,7 @@ export function RequestEventsTable({
                 isPartial,
                 e._phase === 'final' ? e.status : 0,
                 e._phase === 'final' ? e.error_code : undefined,
+                e._phase === 'final' ? e.upstream_error_type : undefined,
               );
               const tierBadge = serviceTierBadgeText(e.service_tier);
               const requestKindBadge = requestKindBadgeText(e.request_kind);
@@ -152,13 +153,9 @@ export function RequestEventsTable({
                     <span
                       className={cx(
                         'status-dot mr-2',
-                        isPartial
+                        outcome.type === 'partial'
                           ? 'neutral animate-pulse'
-                          : e._phase === 'final' && e.status >= 500
-                            ? 'danger'
-                            : e._phase === 'final' && e.status >= 400
-                              ? 'warn'
-                              : 'ok',
+                          : requestOutcomeTone(outcome),
                       )}
                     />
                     <RelativeTime compact ts={eventTime(e)} />
@@ -206,9 +203,7 @@ export function RequestEventsTable({
                       'px-3 py-2 text-right tabular-nums whitespace-nowrap',
                       outcome.type === 'partial'
                         ? 'text-text-faint'
-                        : STATUS_TONE_TEXT[
-                            statusTone(e._phase === 'final' ? e.status : 0)
-                          ],
+                        : STATUS_TONE_TEXT[requestOutcomeTone(outcome)],
                     )}
                   >
                     <RequestOutcomeTableCell outcome={outcome} />
