@@ -25,6 +25,11 @@ impl FakeMode {
             .get("x-fake-mode")
             .and_then(|value| value.to_str().ok())
             .map(Self::from_str)
+            .or_else(|| {
+                std::env::var("FAKE_DEFAULT_MODE")
+                    .ok()
+                    .map(|value| Self::from_str(&value))
+            })
             .unwrap_or(Self::Ok)
     }
 
