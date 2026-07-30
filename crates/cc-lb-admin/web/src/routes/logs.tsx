@@ -1,7 +1,8 @@
 import { Toggle as BaseToggle } from '@base-ui/react/toggle';
+import { useQueryClient } from '@tanstack/react-query';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { AlertTriangle, Download, RefreshCw, X, Zap } from 'lucide-react';
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as z from 'zod';
 import { LiveTailFailureBanner } from '../components/LiveTailFailureBanner';
 import { type FilterOption, LogSelect } from '../components/ui/LogSelect';
@@ -21,21 +22,20 @@ import {
   type TimeRangeMode,
   TimeRangeSelect,
 } from '../components/ui/TimeRangeSelect';
+import type { RecentEventsPayload } from '../lib/api';
 import {
   filterLiveEventsByUnixSeconds,
   filterLogRows,
   LOG_STATUS_CLASSES,
   mergeLogRows,
 } from '../lib/logRows';
+import { LOGS_PAGE_SIZE } from '../lib/logsPagination';
 import {
-  clampLogsPage,
-  getLogsPageCount,
-  LOGS_PAGE_SIZE,
-  selectLogsPageRows,
-} from '../lib/logsPagination';
-import {
+  getRecentEventsCursor,
+  type RecentEventsPageParam,
+  recentEventsPageQueryOptions,
   usePrincipalNameMap,
-  useRecentEventsInfinite,
+  useRecentEventsPage,
   useUpstreamNameMap,
   useUpstreams,
 } from '../lib/queries';
@@ -129,31 +129,52 @@ export function getLogsRouteState({
 }
 
 const LOGS_TABLE_COLUMNS = { cost: true, tokens: true } as const;
+const INITIAL_LOGS_PAGE_PARAM: RecentEventsPageParam = {
+  kind: 'initial',
+  limit: LOGS_PAGE_SIZE,
+};
 
 function LogsPage() {
+  const queryClient = useQueryClient();
   const filters = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const upstreams = useUpstreams();
 
   const { session: sessionFilter, time_range } = filters;
-
   const serverFilters = buildLiveFilters(filters);
-
   const historicalFilters = buildHistoricalFilters(filters);
-
-  const recent = useRecentEventsInfinite(historicalFilters);
-  const principalNameMap = usePrincipalNameMap();
-  const upstreamNameMap = useUpstreamNameMap();
 
   const [userRequestedTailing, setUserRequestedTailing] = useState(true);
   const [page, setPage] = useState(0);
+  const [cursorStack, setCursorStack] = useState<RecentEventsPageParam[]>([
+    INITIAL_LOGS_PAGE_PARAM,
+  ]);
+  const [loadedPages, setLoadedPages] = useState<
+    Array<RecentEventsPayload | undefined>
+  >([]);
+  const [loadingNext, setLoadingNext] = useState(false);
+  const [exhaustedCursorKeys, setExhaustedCursorKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const paginationRequestGenerationRef = useRef(0);
 
+  const pageCount = Math.max(1, cursorStack.length);
+  const clampedPage = Math.min(page, pageCount - 1);
+  const currentPageParam = cursorStack[clampedPage] ?? INITIAL_LOGS_PAGE_PARAM;
+  const recent = useRecentEventsPage(historicalFilters, currentPageParam);
+  const principalNameMap = usePrincipalNameMap();
+  const upstreamNameMap = useUpstreamNameMap();
   const effectiveTailing = userRequestedTailing && time_range !== 'custom';
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: route filter scalars intentionally reset pagination and table scroll without being read in the effect body.
   useEffect(() => {
+    paginationRequestGenerationRef.current += 1;
     setPage(0);
+    setCursorStack([INITIAL_LOGS_PAGE_PARAM]);
+    setLoadedPages([]);
+    setLoadingNext(false);
+    setExhaustedCursorKeys(new Set());
     if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
   }, [
     filters.principal_id,
@@ -166,6 +187,26 @@ function LogsPage() {
     filters.since_unix_secs,
     filters.until_unix_secs,
   ]);
+
+  useEffect(
+    () => () => {
+      paginationRequestGenerationRef.current += 1;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (recent.data === undefined || recent.isPlaceholderData) return;
+    setLoadedPages((current) => {
+      if (current[clampedPage] === recent.data) return current;
+      const updated = current.slice(
+        0,
+        Math.max(current.length, clampedPage + 1),
+      );
+      updated[clampedPage] = recent.data;
+      return updated;
+    });
+  }, [clampedPage, recent.data, recent.isPlaceholderData]);
 
   const live = useLiveEventStream(serverFilters, { enabled: effectiveTailing });
   const tailStatus = effectiveTailing
@@ -197,29 +238,49 @@ function LogsPage() {
   }[tailStatus];
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: live.eventsMap is a stable Map ref mutated in place by useLiveEventStream; live.version is bumped on every upsert so it is the real re-run trigger.
-  const rows = useMemo(() => {
-    const historical = recent.isPlaceholderData
-      ? []
-      : (recent.data?.pages.flatMap((p) => p.events) ?? []);
-    const rangedLiveEvents = filterLiveEventsByUnixSeconds(live.eventsMap, {
-      since:
-        historicalFilters.since_unix_secs === undefined
-          ? undefined
-          : Number(historicalFilters.since_unix_secs),
-      until:
-        historicalFilters.until_unix_secs === undefined
-          ? undefined
-          : Number(historicalFilters.until_unix_secs),
-    });
-    return mergeLogRows(rangedLiveEvents, historical);
+  const rangedLiveEvents = useMemo(
+    () =>
+      filterLiveEventsByUnixSeconds(live.eventsMap, {
+        since:
+          historicalFilters.since_unix_secs === undefined
+            ? undefined
+            : Number(historicalFilters.since_unix_secs),
+        until:
+          historicalFilters.until_unix_secs === undefined
+            ? undefined
+            : Number(historicalFilters.until_unix_secs),
+      }),
+    [
+      live.eventsMap,
+      live.version,
+      historicalFilters.since_unix_secs,
+      historicalFilters.until_unix_secs,
+    ],
+  );
+
+  const historicalPages = useMemo(() => {
+    const pages = loadedPages.slice(0, pageCount);
+    if (recent.data !== undefined && !recent.isPlaceholderData) {
+      pages[clampedPage] = recent.data;
+    }
+    return pages;
   }, [
-    live.eventsMap,
-    live.version,
+    clampedPage,
+    loadedPages,
+    pageCount,
     recent.data,
     recent.isPlaceholderData,
-    historicalFilters.since_unix_secs,
-    historicalFilters.until_unix_secs,
   ]);
+  const rows = useMemo(
+    () =>
+      mergeLogRows(
+        rangedLiveEvents,
+        historicalPages.flatMap(
+          (historicalPage) => historicalPage?.events ?? [],
+        ),
+      ),
+    [rangedLiveEvents, historicalPages],
+  );
 
   const sessionOptions = useMemo(() => {
     const seen = new Set<string>();
@@ -238,30 +299,106 @@ function LogsPage() {
     () => filterLogRows(rows, filters),
     [rows, filters],
   );
-  const deferredVisibleRows = useDeferredValue(visibleRows);
-
-  const pageCount = getLogsPageCount(deferredVisibleRows.length);
-  const clampedPage = clampLogsPage(page, pageCount);
+  const currentHistoricalEvents = historicalPages[clampedPage]?.events ?? [];
   const pageRows = useMemo(
-    () => selectLogsPageRows(deferredVisibleRows, clampedPage),
-    [deferredVisibleRows, clampedPage],
+    () =>
+      filterLogRows(
+        mergeLogRows(
+          clampedPage === 0 ? rangedLiveEvents : new Map(),
+          currentHistoricalEvents,
+        ),
+        filters,
+      ).slice(0, LOGS_PAGE_SIZE),
+    [clampedPage, currentHistoricalEvents, filters, rangedLiveEvents],
   );
+  const currentCursor = pageRows.length
+    ? getRecentEventsCursor(pageRows[pageRows.length - 1])
+    : undefined;
+  const currentCursorKey =
+    currentCursor === undefined
+      ? undefined
+      : `${currentCursor.ts_ms}:${currentCursor.event_id}`;
+  const lastHistoricalEvents = historicalPages[pageCount - 1]?.events ?? [];
+  const lastHistoricalCursor = lastHistoricalEvents.length
+    ? getRecentEventsCursor(
+        lastHistoricalEvents[lastHistoricalEvents.length - 1],
+      )
+    : undefined;
+  const lastHistoricalCursorKey =
+    lastHistoricalCursor === undefined
+      ? undefined
+      : `${lastHistoricalCursor.ts_ms}:${lastHistoricalCursor.event_id}`;
+  const hasMore =
+    lastHistoricalEvents.length === LOGS_PAGE_SIZE &&
+    lastHistoricalCursorKey !== undefined &&
+    !exhaustedCursorKeys.has(lastHistoricalCursorKey);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: clampedPage changes intentionally trigger the imperative scroll reset.
   useEffect(() => {
     if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
   }, [clampedPage]);
 
-  const nextPage = () => {
-    if (clampedPage < pageCount - 1) {
-      setPage((current) => current + 1);
+  const nextPage = async () => {
+    if (currentCursor === undefined || currentCursorKey === undefined) return;
+    const nextPageIndex = clampedPage + 1;
+    const nextPageParam: RecentEventsPageParam = {
+      kind: 'cursor',
+      limit: LOGS_PAGE_SIZE,
+      ...currentCursor,
+    };
+    const cachedPageParam = cursorStack[nextPageIndex];
+    if (
+      loadedPages[nextPageIndex] !== undefined &&
+      cachedPageParam?.kind === 'cursor' &&
+      cachedPageParam.ts_ms === nextPageParam.ts_ms &&
+      cachedPageParam.event_id === nextPageParam.event_id
+    ) {
+      paginationRequestGenerationRef.current += 1;
+      setPage(nextPageIndex);
       return;
     }
-    if (recent.hasNextPage && !recent.isFetchingNextPage) {
-      void recent.fetchNextPage().then(() => {
-        setPage((current) => current + 1);
-      });
+
+    const requestGeneration = paginationRequestGenerationRef.current + 1;
+    paginationRequestGenerationRef.current = requestGeneration;
+    setLoadingNext(true);
+    try {
+      const next = await queryClient.fetchQuery(
+        recentEventsPageQueryOptions(historicalFilters, nextPageParam),
+      );
+      if (requestGeneration !== paginationRequestGenerationRef.current) return;
+      if (next.events.length === 0) {
+        setExhaustedCursorKeys((current) => {
+          const updated = new Set(current);
+          updated.add(currentCursorKey);
+          return updated;
+        });
+        return;
+      }
+      setCursorStack((current) => [
+        ...current.slice(0, nextPageIndex),
+        nextPageParam,
+      ]);
+      setLoadedPages((current) => [...current.slice(0, nextPageIndex), next]);
+      setPage(nextPageIndex);
+    } catch {
+      // QueryCache owns the user-facing error toast.
+    } finally {
+      if (requestGeneration === paginationRequestGenerationRef.current) {
+        setLoadingNext(false);
+      }
     }
+  };
+
+  const refreshLogs = () => {
+    paginationRequestGenerationRef.current += 1;
+    setLoadingNext(false);
+    void recent.refetch();
+  };
+
+  const previousPage = () => {
+    paginationRequestGenerationRef.current += 1;
+    setLoadingNext(false);
+    setPage((current) => Math.max(0, current - 1));
   };
 
   const principalSelectOptions = useMemo<FilterOption[]>(
@@ -414,7 +551,7 @@ function LogsPage() {
             <Button
               size="sm"
               iconLeft={<RefreshCw className="w-3 h-3" />}
-              onClick={() => recent.refetch()}
+              onClick={refreshLogs}
             >
               Refresh
             </Button>
@@ -526,26 +663,32 @@ function LogsPage() {
               upstreamNameMap={upstreamNameMap}
               loading={
                 (recent.isPending || recent.isPlaceholderData) &&
-                live.eventsMap.size === 0
+                pageRows.length === 0
               }
-              liveFlashIds={effectiveTailing ? recentLiveIds : undefined}
+              liveFlashIds={
+                effectiveTailing && clampedPage === 0
+                  ? recentLiveIds
+                  : undefined
+              }
               columns={LOGS_TABLE_COLUMNS}
-              loadingMore={recent.isFetchingNextPage}
-              hasMore={false}
               minWidthClass="min-w-[1080px]"
               emptyTitle="No requests"
               emptyDescription="Adjust filters or enable live tail."
             />
           </div>
-          {deferredVisibleRows.length > 0 && (
+          {pageRows.length > 0 && (
             <LogsPagination
               page={clampedPage}
               pageCount={pageCount}
-              totalRows={deferredVisibleRows.length}
+              totalRows={Math.max(
+                visibleRows.length,
+                clampedPage * LOGS_PAGE_SIZE + pageRows.length,
+              )}
               pageSize={LOGS_PAGE_SIZE}
-              hasMore={recent.hasNextPage}
-              onPrev={() => setPage((p) => Math.max(0, p - 1))}
-              onNext={nextPage}
+              hasMore={hasMore}
+              loadingNext={loadingNext}
+              onPrev={previousPage}
+              onNext={() => void nextPage()}
             />
           )}
         </Card>

@@ -4,6 +4,7 @@
 
 import {
   type InfiniteData,
+  queryOptions,
   experimental_streamedQuery as streamedQuery,
   useInfiniteQuery,
   useMutation,
@@ -442,7 +443,12 @@ export function useRequestEventDetail(eventId: string | null) {
 
 const RECENT_EVENTS_PAGE_SIZE = 200;
 
-type RecentEventsPageParam =
+export type RecentEventsCursor = {
+  readonly ts_ms: number;
+  readonly event_id: string;
+};
+
+export type RecentEventsPageParam =
   | { readonly kind: 'initial'; readonly limit: number }
   | {
       readonly kind: 'cursor';
@@ -457,15 +463,83 @@ type RecentEventsQueryKey = readonly [
   'infinite',
 ];
 
-const INITIAL_RECENT_EVENTS_PAGE: RecentEventsPageParam = {
-  kind: 'initial',
-  limit: RECENT_EVENTS_PAGE_SIZE,
-};
+type RecentEventsPageQueryKey = readonly [
+  'events',
+  Record<string, string | undefined>,
+  'page',
+  number,
+  number | null,
+  string | null,
+];
+
+export function getRecentEventsCursor(event: {
+  readonly ts?: number | null;
+  readonly ts_ms?: number | null;
+  readonly event_id?: string;
+  readonly request_id: string;
+}): RecentEventsCursor | undefined {
+  const ts_ms = event.ts_ms ?? (event.ts != null ? event.ts * 1000 : null);
+  const event_id = event.event_id ?? event.request_id;
+  if (ts_ms == null || !Number.isFinite(ts_ms) || !event_id) return undefined;
+  return { ts_ms, event_id };
+}
+
+export function fetchRecentEventsPage(
+  filters: Record<string, string | undefined>,
+  pageParam: RecentEventsPageParam,
+): Promise<RecentEventsPayload> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value) params.set(key, value);
+  }
+  if (pageParam.kind === 'cursor') {
+    params.set('until_ts_ms', String(pageParam.ts_ms));
+    params.set('until_event_id', pageParam.event_id);
+  }
+  params.set('limit', String(pageParam.limit));
+  return getJson<RecentEventsPayload>(
+    `/admin/events/recent?${params.toString()}`,
+  );
+}
+
+export function recentEventsPageQueryOptions(
+  filters: Record<string, string | undefined>,
+  pageParam: RecentEventsPageParam,
+) {
+  const cursorTs = pageParam.kind === 'cursor' ? pageParam.ts_ms : null;
+  const cursorEventId = pageParam.kind === 'cursor' ? pageParam.event_id : null;
+  return queryOptions<
+    RecentEventsPayload,
+    Error,
+    RecentEventsPayload,
+    RecentEventsPageQueryKey
+  >({
+    queryKey: [
+      ...qk.events(filters),
+      'page',
+      pageParam.limit,
+      cursorTs,
+      cursorEventId,
+    ],
+    queryFn: () => fetchRecentEventsPage(filters, pageParam),
+  });
+}
+
+export function useRecentEventsPage(
+  filters: Record<string, string | undefined>,
+  pageParam: RecentEventsPageParam,
+) {
+  return useQuery(recentEventsPageQueryOptions(filters, pageParam));
+}
 
 export function useRecentEventsInfinite(
   filters: Record<string, string | undefined>,
 ) {
   const queryKey: RecentEventsQueryKey = [...qk.events(filters), 'infinite'];
+  const initialPageParam: RecentEventsPageParam = {
+    kind: 'initial',
+    limit: RECENT_EVENTS_PAGE_SIZE,
+  };
   return useInfiniteQuery<
     RecentEventsPayload,
     Error,
@@ -474,35 +548,19 @@ export function useRecentEventsInfinite(
     RecentEventsPageParam
   >({
     queryKey,
-    initialPageParam: INITIAL_RECENT_EVENTS_PAGE,
-    queryFn: async ({ pageParam }) => {
-      const params = new URLSearchParams();
-      for (const [k, v] of Object.entries(filters)) if (v) params.set(k, v);
-      if (pageParam.kind === 'cursor') {
-        params.set('until_ts_ms', String(pageParam.ts_ms));
-        params.set('until_event_id', pageParam.event_id);
-      }
-      params.set('limit', String(pageParam.limit));
-      return getJson<RecentEventsPayload>(
-        `/admin/events/recent?${params.toString()}`,
-      );
-    },
+    initialPageParam,
+    queryFn: ({ pageParam }) => fetchRecentEventsPage(filters, pageParam),
     getNextPageParam: (last) => {
-      const evs = last.events;
-      if (!evs.length || evs.length < last.limit) return undefined;
-      const oldest = evs[evs.length - 1];
-      const ts_ms =
-        oldest.ts_ms ?? (oldest.ts != null ? oldest.ts * 1000 : null);
-      const event_id = oldest.event_id ?? oldest.request_id;
-      if (ts_ms != null && event_id != null) {
-        return {
-          kind: 'cursor',
-          limit: RECENT_EVENTS_PAGE_SIZE,
-          ts_ms,
-          event_id,
-        };
+      if (!last.events.length || last.events.length < last.limit) {
+        return undefined;
       }
-      return undefined;
+      const cursor = getRecentEventsCursor(last.events[last.events.length - 1]);
+      if (cursor === undefined) return undefined;
+      return {
+        kind: 'cursor',
+        limit: RECENT_EVENTS_PAGE_SIZE,
+        ...cursor,
+      };
     },
   });
 }

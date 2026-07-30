@@ -3,7 +3,11 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { RecentEventsPayload, RequestEvent } from '../../api';
-import { useRecentEventsInfinite } from '../../queries';
+import {
+  type RecentEventsPageParam,
+  useRecentEventsInfinite,
+  useRecentEventsPage,
+} from '../../queries';
 
 function makePage(page: number, limit: number): RecentEventsPayload {
   return {
@@ -88,5 +92,56 @@ describe('useRecentEventsInfinite', () => {
       await result.current.fetchNextPage();
     });
     expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+  it('uses the requested page size and carries the visible cursor forward', async () => {
+    const requestedUrls: URL[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const rawUrl =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const url = new URL(rawUrl, 'http://localhost');
+      requestedUrls.push(url);
+      return jsonResponse(makePage(requestedUrls.length - 1, 50));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const initialPageParam: RecentEventsPageParam = {
+      kind: 'initial',
+      limit: 50,
+    };
+    const { result, rerender } = renderHook(
+      ({ pageParam }: { pageParam: RecentEventsPageParam }) =>
+        useRecentEventsPage({}, pageParam),
+      {
+        initialProps: {
+          pageParam: initialPageParam,
+        } as { pageParam: RecentEventsPageParam },
+        wrapper: makeWrapper(client),
+      },
+    );
+    await waitFor(() => expect(result.current.data?.events).toHaveLength(50));
+
+    rerender({
+      pageParam: {
+        kind: 'cursor',
+        limit: 50,
+        ts_ms: 0,
+        event_id: 'event-0',
+      },
+    });
+    await waitFor(() => expect(requestedUrls).toHaveLength(2));
+
+    expect(requestedUrls).toHaveLength(2);
+    expect(requestedUrls.map((url) => url.searchParams.get('limit'))).toEqual([
+      '50',
+      '50',
+    ]);
+    expect(requestedUrls[1].searchParams.get('until_ts_ms')).toBe('0');
+    expect(requestedUrls[1].searchParams.get('until_event_id')).toBe('event-0');
   });
 });
