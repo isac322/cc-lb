@@ -53,7 +53,7 @@ client=$1
 upstream=$2
 
 case "$client" in
-  claude-code|opencode|pi) ;;
+  claude-code|opencode|pi|senpi) ;;
   *) fail "unsupported client: $client" ;;
 esac
 case "$upstream" in
@@ -68,21 +68,27 @@ expected=$(tr -d '\r\n' < "$expected_file")
 
 fake_package=fake-anthropic
 
+REAL_CLIENT_ONLY=$client
 . "$SCRIPT_DIR/install.sh"
 
 case "$client" in
   claude-code) bin=${CLAUDE_CODE_BIN:-}; status_file="$ROOT_DIR/target/test-bins/claude-code/install-status" ;;
   opencode) bin=${OPENCODE_BIN:-}; status_file="$ROOT_DIR/target/test-bins/opencode/install-status" ;;
   pi) bin=${PI_BIN:-}; status_file="$ROOT_DIR/target/test-bins/pi/install-status" ;;
+  senpi) bin=${SENPI_BIN:-}; status_file="$ROOT_DIR/target/test-bins/senpi/install-status" ;;
 esac
 
 if [ -z "${bin:-}" ] || [ ! -x "$bin" ]; then
   if [ -f "$status_file" ]; then
-    reason=$(sed -n 's/^SKIP [^ ]* reason: //p' "$status_file" | head -n 1)
-    [ -n "$reason" ] || reason="client binary missing: $bin"
-    skip "$reason"
+    reason=$(sed -n 's/^FAIL reason: //p' "$status_file" | head -n 1)
+    [ -z "$reason" ] || fail "$reason"
   fi
-  skip "client binary missing: $bin"
+  fail "client binary missing: $bin"
+fi
+senpi_extension=''
+if [ "$client" = "senpi" ]; then
+  senpi_extension="$ROOT_DIR/target/test-bins/senpi/node_modules/@code-yeongyu/senpi/examples/extensions/subagent/index.ts"
+  [ -f "$senpi_extension" ] || fail "installed Senpi package is missing subagent extension: $senpi_extension"
 fi
 
 free_port() {
@@ -116,7 +122,30 @@ print(f'{name} did not accept tcp on 127.0.0.1:{port}: {last}', file=sys.stderr)
 sys.exit(1)
 PY
 }
+run_isolated_client() {
+  timeout_secs=$1
+  shift
+  python3 - "$timeout_secs" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
 
+timeout = int(sys.argv[1])
+process = subprocess.Popen(sys.argv[2:], start_new_session=True)
+try:
+    code = process.wait(timeout=timeout)
+except subprocess.TimeoutExpired:
+    code = 124
+finally:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+sys.exit(code)
+PY
+}
 render_config() {
   template=$1
   output=$2
@@ -143,8 +172,9 @@ PY
 
 detect_skip_reason() {
   stderr_file=$1
-  if grep -Eiq 'tty|required.*interactive|interactive.*required|browser|oauth|login|required.*auth|terms|ToS|subscription|not logged in|permission denied' "$stderr_file"; then
-    grep -Ei 'tty|required.*interactive|interactive.*required|browser|oauth|login|required.*auth|terms|ToS|subscription|not logged in|permission denied' "$stderr_file" | head -n 1 | sed 's/^/client refused deterministic non-interactive run: /'
+  skip_pattern='not a tty|no tty available|raw mode is not supported|requires? (a )?tty|tty.*(required|not (available|supported))|required.*tty|interactive.*required|required.*interactive|browser.*(login|auth)|oauth.*(login|required|authorize)|please.*(log in|login|authenticate)|login required|authentication required|accept.*(terms|tos)|subscription.*required|not logged in|permission denied'
+  if grep -Eiq "$skip_pattern" "$stderr_file"; then
+    grep -Ei "$skip_pattern" "$stderr_file" | head -n 1 | sed 's/^/client refused deterministic non-interactive run: /'
     return 0
   fi
   return 1
@@ -173,11 +203,58 @@ config_path="$TMP_DIR/cc-lb.toml"
 gcp_credentials="$TMP_DIR/gcp-adc.json"
 stdout_file="$TMP_DIR/client.stdout"
 stderr_file="$TMP_DIR/client.stderr"
-mkdir -p "$TMP_DIR/home" "$TMP_DIR/xdg-config" "$TMP_DIR/xdg-data" "$TMP_DIR/pi-agent"
+mkdir -p \
+  "$TMP_DIR/home" \
+  "$TMP_DIR/xdg-config" \
+  "$TMP_DIR/xdg-data" \
+  "$TMP_DIR/pi-agent" \
+  "$TMP_DIR/senpi-agent/agents" \
+  "$TMP_DIR/senpi-sessions"
 cat > "$TMP_DIR/pi-agent/models.json" <<JSON
 {"providers":{"anthropic":{"baseUrl":"http://127.0.0.1:$proxy_port","apiKey":"ANTHROPIC_API_KEY","api":"anthropic-messages","compat":{"supportsEagerToolInputStreaming":false}}}}
 JSON
 
+cat > "$TMP_DIR/senpi-agent/models.json" <<JSON
+{"providers":{"senpi-mock":{"baseUrl":"http://127.0.0.1:$proxy_port","apiKey":"$API_KEY","api":"anthropic-messages","models":[{"id":"senpi-main","name":"Senpi Main","api":"anthropic-messages","reasoning":false,"input":["text"],"contextWindow":128000,"maxTokens":4096,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"headers":{"x-fake-mode":"senpi-tools","x-senpi-image-path":"$TMP_DIR/senpi-look-at.png"},"compat":{"sendSessionAffinityHeaders":true}},{"id":"senpi-vision","name":"Senpi Vision","api":"anthropic-messages","reasoning":false,"input":["text","image"],"contextWindow":128000,"maxTokens":4096,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"headers":{"x-fake-mode":"senpi-tools"},"compat":{"sendSessionAffinityHeaders":true}}]}}}
+JSON
+cat > "$TMP_DIR/senpi-agent/settings.json" <<'JSON'
+{"defaultProvider":"senpi-mock","defaultModel":"senpi-main","lookAt":{"enabled":true,"models":["senpi-mock/senpi-vision"]}}
+JSON
+cat > "$TMP_DIR/senpi-agent/agents/reviewer.md" <<'EOF'
+---
+name: reviewer
+description: Reviews one small request for the real-client proxy test.
+---
+Answer the delegated request directly.
+EOF
+
+python3 - "$TMP_DIR/senpi-look-at.png" <<'PY'
+import binascii
+import struct
+import sys
+import zlib
+
+def chunk(kind, data):
+    payload = kind + data
+    return struct.pack(">I", len(data)) + payload + struct.pack(">I", binascii.crc32(payload))
+
+width = 2
+height = 2
+pixels = b"".join(
+    [
+        b"\x00\xff\x00\x00\x00\xff\x00",
+        b"\x00\x00\x00\xff\xff\xff\xff",
+    ]
+)
+png = (
+    b"\x89PNG\r\n\x1a\n"
+    + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    + chunk(b"IDAT", zlib.compress(pixels))
+    + chunk(b"IEND", b"")
+)
+with open(sys.argv[1], "wb") as output:
+    output.write(png)
+PY
 cat > "$gcp_credentials" <<'JSON'
 {"type":"authorized_user","client_id":"fake-client","client_secret":"fake-secret","refresh_token":"fake-refresh"}
 JSON
@@ -297,7 +374,7 @@ case "$client" in
     code=$?
     ;;
   pi)
-    timeout 30s env \
+    run_isolated_client 30 env \
       HOME="$TMP_DIR/home" \
       XDG_CONFIG_HOME="$TMP_DIR/xdg-config" \
       XDG_DATA_HOME="$TMP_DIR/xdg-data" \
@@ -307,6 +384,33 @@ case "$client" in
       ANTHROPIC_BASE_URL="http://127.0.0.1:$proxy_port" \
       ANTHROPIC_MODEL=claude-3-5-sonnet-20241022 \
       "$bin" --provider anthropic --model claude-3-5-sonnet-20241022 --api-key "$API_KEY" --print --no-session --no-tools --offline "$PROMPT" > "$stdout_file" 2> "$stderr_file"
+    code=$?
+    ;;
+  senpi)
+    senpi_env=(
+      HOME="$TMP_DIR/home"
+      USERPROFILE="$TMP_DIR/home"
+      XDG_CONFIG_HOME="$TMP_DIR/xdg-config"
+      XDG_DATA_HOME="$TMP_DIR/xdg-data"
+      SENPI_CODING_AGENT_DIR="$TMP_DIR/senpi-agent"
+      SENPI_CODING_AGENT_SESSION_DIR="$TMP_DIR/senpi-sessions"
+      SENPI_OMO_LOCAL_UPDATE=0
+      PI_OFFLINE=1
+      PI_TELEMETRY=0
+    )
+    run_isolated_client 60 env -i PATH="$PATH" "${senpi_env[@]}" \
+      "$bin" \
+      --provider senpi-mock \
+      --model senpi-main \
+      --api-key "$API_KEY" \
+      --session-id senpi-real-client-main \
+      --extension "$senpi_extension" \
+      --no-skills \
+      --no-prompt-templates \
+      --no-themes \
+      --no-context-files \
+      --offline \
+      --print "$PROMPT" > "$stdout_file" 2> "$stderr_file"
     code=$?
     ;;
 esac
@@ -336,6 +440,57 @@ fi
 
 if ! grep -qiF "$expected" "$stdout_file"; then
   fail "client stdout did not contain expected substring: $expected"
+fi
+
+if [ "$client" = "senpi" ]; then
+  python3 - "$TMP_DIR/cc-lb.sqlite" <<'PY'
+import sqlite3
+import sys
+import time
+
+database = sys.argv[1]
+deadline = time.monotonic() + 10
+rows = []
+while time.monotonic() < deadline:
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT request_kind, observed_session_id, session_id_source, client_app
+            FROM request_events_v1
+            WHERE request_kind IS NOT NULL
+            ORDER BY request_kind, observed_session_id
+            """
+        ).fetchall()
+    kinds = {row[0] for row in rows}
+    if {"main", "subagent", "look_at"}.issubset(kinds):
+        break
+    time.sleep(0.05)
+
+kinds = {row[0] for row in rows}
+missing = {"main", "subagent", "look_at"} - kinds
+if missing:
+    print(f"FAIL reason: missing Senpi request kinds {sorted(missing)}; rows={rows}", file=sys.stderr)
+    sys.exit(1)
+main_session_ids = {row[1] for row in rows if row[0] == "main" and row[1] is not None}
+if main_session_ids != {"senpi-real-client-main"}:
+    print(f"FAIL reason: Senpi main session ID was not preserved; rows={rows}", file=sys.stderr)
+    sys.exit(1)
+if any(row[0] == "subagent" and row[1] == "senpi-real-client-main" for row in rows):
+    print(f"FAIL reason: Senpi subagent reused the parent session ID; rows={rows}", file=sys.stderr)
+    sys.exit(1)
+if any(row[0] in {"main", "subagent"} and row[2] != "x-session-affinity" for row in rows):
+    print(f"FAIL reason: Senpi session-bearing requests used an unexpected source; rows={rows}", file=sys.stderr)
+    sys.exit(1)
+look_at_identities = {(row[1], row[2]) for row in rows if row[0] == "look_at"}
+if look_at_identities != {(None, None)}:
+    print(f"FAIL reason: Senpi look_at unexpectedly carried session identity; rows={rows}", file=sys.stderr)
+    sys.exit(1)
+if any(row[3] is not None for row in rows):
+    print(f"FAIL reason: Senpi requests invented client_app; rows={rows}", file=sys.stderr)
+    sys.exit(1)
+
+print("PASS senpi request kinds: main, subagent, look_at")
+PY
 fi
 
 printf 'PASS %s/%s stdout contained %s\n' "$client" "$upstream" "$expected"
