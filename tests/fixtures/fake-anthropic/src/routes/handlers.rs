@@ -72,6 +72,12 @@ pub(crate) async fn messages(
         .and_then(Value::as_str)
         .unwrap_or("claude-3-5-sonnet-20241022")
         .to_owned();
+    if mode == FakeMode::SenpiTools && wants_stream(&headers, &body_json) {
+        let image_path = headers
+            .get("x-senpi-image-path")
+            .and_then(|value| value.to_str().ok());
+        return crate::sse::senpi_tools_response(model, &body_json, image_path);
+    }
     if wants_stream(&headers, &body_json) {
         return streaming_response(model, mode, state.config.slow_mode_bps, weather);
     }

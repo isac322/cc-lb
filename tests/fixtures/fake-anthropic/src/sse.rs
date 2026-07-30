@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::time::sleep;
 
 use crate::modes::FakeMode;
@@ -37,6 +37,224 @@ pub(crate) fn streaming_response(
         .keep_alive(KeepAlive::default())
         .into_response();
     with_fixture_headers(response)
+}
+pub(crate) fn senpi_tools_response(
+    model: String,
+    request: &Value,
+    image_path: Option<&str>,
+) -> Response {
+    const SUBAGENT_TOOL_ID: &str = "toolu_senpi_subagent";
+    const LOOK_AT_TOOL_ID: &str = "toolu_senpi_look_at";
+
+    let system = request.get("system");
+    let first_user = request
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| {
+            messages
+                .iter()
+                .find(|message| message.get("role") == Some(&json!("user")))
+        })
+        .and_then(|message| message.get("content"));
+    let is_subagent = system
+        .is_some_and(|value| content_starts_with(value, "You are senpi, a coding agent."))
+        && first_user.is_some_and(|value| content_starts_with(value, "Task: "));
+    let is_look_at = request.get("model").and_then(Value::as_str) == Some("senpi-vision")
+        || system.is_some_and(|value| {
+            content_starts_with(
+                value,
+                "You analyze attached media for a downstream agent that cannot inspect the attachments directly.",
+            )
+        });
+
+    let items = if is_subagent || is_look_at || has_tool_result(request, LOOK_AT_TOOL_ID) {
+        text_stream_items(&model, "fake anthropic fixture response HELLO")
+    } else if has_tool_result(request, SUBAGENT_TOOL_ID) {
+        let input = image_path.map_or_else(
+            || {
+                json!({
+                    "image_data": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGP4z8DAAMIM/4EAAB/uBfsL2WiLAAAAAElFTkSuQmCC",
+                    "goal": "Read the image and answer HELLO"
+                })
+            },
+            |path| {
+                json!({
+                    "file_path": path,
+                    "goal": "Read the image and answer HELLO"
+                })
+            },
+        );
+        tool_stream_items(&model, LOOK_AT_TOOL_ID, "look_at", input)
+    } else {
+        tool_stream_items(
+            &model,
+            SUBAGENT_TOOL_ID,
+            "subagent",
+            json!({
+                "agent": "reviewer",
+                "task": "Print the word HELLO",
+                "agentScope": "user"
+            }),
+        )
+    };
+
+    immediate_streaming_response(items)
+}
+
+fn content_starts_with(content: &Value, prefix: &str) -> bool {
+    match content {
+        Value::String(text) => text.starts_with(prefix),
+        Value::Array(blocks) => blocks.iter().any(|block| {
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.starts_with(prefix))
+        }),
+        _ => false,
+    }
+}
+
+fn has_tool_result(request: &Value, tool_use_id: &str) -> bool {
+    request
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block.get("type").and_then(Value::as_str) == Some("tool_result")
+                                && block.get("tool_use_id").and_then(Value::as_str)
+                                    == Some(tool_use_id)
+                        })
+                    })
+            })
+        })
+}
+
+fn immediate_streaming_response(items: Vec<(&'static str, String)>) -> Response {
+    let stream = async_stream::stream! {
+        for (event_name, data) in items {
+            yield Ok::<_, Infallible>(Event::default().event(event_name).data(data));
+        }
+    };
+    with_fixture_headers(
+        Sse::new(stream)
+            .keep_alive(KeepAlive::default())
+            .into_response(),
+    )
+}
+
+fn text_stream_items(model: &str, text: &str) -> Vec<(&'static str, String)> {
+    vec![
+        message_start(model),
+        (
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""}
+            })
+            .to_string(),
+        ),
+        (
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": text}
+            })
+            .to_string(),
+        ),
+        content_block_stop(),
+        message_delta("end_turn"),
+        message_stop(),
+    ]
+}
+
+fn tool_stream_items(
+    model: &str,
+    tool_use_id: &str,
+    name: &str,
+    input: Value,
+) -> Vec<(&'static str, String)> {
+    vec![
+        message_start(model),
+        (
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": tool_use_id,
+                    "name": name,
+                    "input": {}
+                }
+            })
+            .to_string(),
+        ),
+        (
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": input.to_string()
+                }
+            })
+            .to_string(),
+        ),
+        content_block_stop(),
+        message_delta("tool_use"),
+        message_stop(),
+    ]
+}
+
+fn message_start(model: &str) -> (&'static str, String) {
+    (
+        "message_start",
+        json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_fake_000000000000000000000000",
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {"input_tokens": 100, "output_tokens": 0}
+            }
+        })
+        .to_string(),
+    )
+}
+
+fn content_block_stop() -> (&'static str, String) {
+    (
+        "content_block_stop",
+        json!({"type": "content_block_stop", "index": 0}).to_string(),
+    )
+}
+
+fn message_delta(stop_reason: &str) -> (&'static str, String) {
+    (
+        "message_delta",
+        json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason, "stop_sequence": null},
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        })
+        .to_string(),
+    )
+}
+
+fn message_stop() -> (&'static str, String) {
+    ("message_stop", json!({"type": "message_stop"}).to_string())
 }
 
 fn stream_items(model: &str, mode: FakeMode, delta_count: u64) -> Vec<(&'static str, String)> {
