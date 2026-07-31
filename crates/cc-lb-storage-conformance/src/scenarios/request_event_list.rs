@@ -138,6 +138,84 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
     .await
 }
 
+pub async fn request_event_list_model_filter_matches_case_insensitive_prefix<
+    B: ConformanceBackend,
+>(
+    backend: Arc<B>,
+) -> Result<()> {
+    with_fixture(backend, |storage| async move {
+        let upstream_id = Uuid::from_u128(7);
+        let base = request_event(
+            "event-base",
+            "req-base",
+            5_000,
+            200,
+            "principal-a",
+            upstream_id,
+        );
+
+        let mut dated = decoy(&base, "event-dated", 4_000);
+        dated.model = Some("claude-sonnet-4-5-20250929".to_owned());
+        let mut upper = decoy(&base, "event-upper", 3_000);
+        upper.model = Some("CLAUDE-SONNET-4-5-PREVIEW".to_owned());
+        let mut other_family = decoy(&base, "event-opus", 2_000);
+        other_family.model = Some("claude-opus-4-1".to_owned());
+        let mut wildcard = decoy(&base, "event-wildcard", 1_000);
+        wildcard.model = Some("claude%sonnet".to_owned());
+        let mut model_less = decoy(&base, "event-model-less", 500);
+        model_less.model = None;
+
+        for event in [&base, &dated, &upper, &other_family, &wildcard, &model_less] {
+            storage.append_request_event(event).await?;
+        }
+
+        let by_model = |model: &str| RequestEventStreamFilters {
+            model: Some(model.to_owned()),
+            ..RequestEventStreamFilters::default()
+        };
+
+        // A shortened prefix keeps the exact match and picks up the dated and
+        // mixed-case variants; other families and model-less rows stay out.
+        let prefix_page = storage
+            .list_request_events(&list_query(by_model("claude-sonnet"), None, 10, None, None))
+            .await?;
+        assert_event_ids(&prefix_page, &["event-base", "event-dated", "event-upper"]);
+
+        let upper_needle_page = storage
+            .list_request_events(&list_query(by_model("Claude-Sonnet"), None, 10, None, None))
+            .await?;
+        assert_event_ids(
+            &upper_needle_page,
+            &["event-base", "event-dated", "event-upper"],
+        );
+
+        let exact_page = storage
+            .list_request_events(&list_query(
+                by_model("claude-sonnet-4-5-20250929"),
+                None,
+                10,
+                None,
+                None,
+            ))
+            .await?;
+        assert_event_ids(&exact_page, &["event-dated"]);
+
+        // `%` is a literal in the needle, not a wildcard.
+        let wildcard_page = storage
+            .list_request_events(&list_query(by_model("claude%"), None, 10, None, None))
+            .await?;
+        assert_event_ids(&wildcard_page, &["event-wildcard"]);
+
+        let miss_page = storage
+            .list_request_events(&list_query(by_model("gpt"), None, 10, None, None))
+            .await?;
+        assert_event_ids(&miss_page, &[]);
+
+        Ok(())
+    })
+    .await
+}
+
 async fn with_fixture<B, F, Fut>(backend: Arc<B>, scenario: F) -> Result<()>
 where
     B: ConformanceBackend,

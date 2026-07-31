@@ -134,6 +134,9 @@ const INITIAL_LOGS_PAGE_PARAM: RecentEventsPageParam = {
   limit: LOGS_PAGE_SIZE,
 };
 const LOGS_RESERVED_ROW_COUNT = 10;
+// Every committed model value re-runs the historical query and reconnects the
+// live SSE stream, so typing has to settle before the URL changes.
+const MODEL_FILTER_DEBOUNCE_MS = 300;
 
 function LogsPage() {
   const queryClient = useQueryClient();
@@ -147,6 +150,8 @@ function LogsPage() {
 
   const [userRequestedTailing, setUserRequestedTailing] = useState(true);
   const [page, setPage] = useState(0);
+  const [modelDraft, setModelDraft] = useState(filters.model ?? '');
+  const lastCommittedModelRef = useRef(filters.model ?? '');
   const [cursorStack, setCursorStack] = useState<RecentEventsPageParam[]>([
     INITIAL_LOGS_PAGE_PARAM,
   ]);
@@ -167,6 +172,28 @@ function LogsPage() {
   const principalNameMap = usePrincipalNameMap();
   const upstreamNameMap = useUpstreamNameMap();
   const effectiveTailing = userRequestedTailing && time_range !== 'custom';
+
+  const routeModel = filters.model ?? '';
+  // Only external navigations (Clear, back/forward, a shared URL) may overwrite
+  // the draft; echoing back our own debounced commit would drop keystrokes typed
+  // while the router was settling.
+  useEffect(() => {
+    if (routeModel !== lastCommittedModelRef.current) {
+      lastCommittedModelRef.current = routeModel;
+      setModelDraft(routeModel);
+    }
+  }, [routeModel]);
+  useEffect(() => {
+    const next = modelDraft.trim();
+    if (next === routeModel) return;
+    const timer = setTimeout(() => {
+      lastCommittedModelRef.current = next;
+      navigate({
+        search: (prev) => ({ ...prev, model: next || undefined }),
+      });
+    }, MODEL_FILTER_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [modelDraft, routeModel, navigate]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: route filter scalars intentionally reset pagination and table scroll without being read in the effect body.
   useEffect(() => {
@@ -600,8 +627,8 @@ function LogsPage() {
             <Field label="Model">
               <input
                 className={`${INPUT_CLASS} w-44 font-mono`}
-                value={filters.model ?? ''}
-                onChange={(e) => setFilter('model', e.target.value)}
+                value={modelDraft}
+                onChange={(e) => setModelDraft(e.target.value)}
                 placeholder="claude-sonnet-4-5"
               />
             </Field>

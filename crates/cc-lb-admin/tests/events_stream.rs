@@ -174,7 +174,7 @@ async fn events_stream_applies_combined_filters_to_partial_updates() {
 
     let response = stream_response_uri(
         state,
-        "/admin/events/stream?principal_id=principal-target&thread_id=thread-target&model=model-target&status_class=4xx&source_kind=renewal",
+        "/admin/events/stream?principal_id=principal-target&thread_id=thread-target&model=MODEL-tar&status_class=4xx&source_kind=renewal",
         Some("0"),
     )
     .await;
@@ -201,11 +201,16 @@ async fn events_stream_applies_combined_filters_to_partial_updates() {
         source_kind: Some("renewal".to_owned()),
         ..Default::default()
     };
-    let mut non_matching = matching.clone();
-    non_matching.event_id = "event-wrong-session".to_owned();
-    non_matching.request_id = "wrong-session".to_owned();
-    non_matching.thread_id = Some("thread-other".to_owned());
-    bus.publish(RequestEventUpdate::Partial(non_matching));
+    let mut wrong_session = matching.clone();
+    wrong_session.event_id = "event-wrong-session".to_owned();
+    wrong_session.request_id = "wrong-session".to_owned();
+    wrong_session.thread_id = Some("thread-other".to_owned());
+    let mut wrong_model = matching.clone();
+    wrong_model.event_id = "event-wrong-model".to_owned();
+    wrong_model.request_id = "wrong-model".to_owned();
+    wrong_model.model = Some("other-model-target".to_owned());
+    bus.publish(RequestEventUpdate::Partial(wrong_session));
+    bus.publish(RequestEventUpdate::Partial(wrong_model));
     bus.publish(RequestEventUpdate::Partial(matching));
 
     while message_request_ids(&text).is_empty() {

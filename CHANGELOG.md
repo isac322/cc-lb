@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Request-log model filtering now matches a case-insensitive prefix instead of the full model ID, so `claude-sonnet` finds `claude-sonnet-4-5-20250929`. Historical SQL, the live SSE tail and the dashboard row filter share the predicate, and the Model input commits once typing settles instead of re-querying and reconnecting the stream on every keystroke.
+
 ## [0.3.1] - 2026-07-28
 
 ### Changed

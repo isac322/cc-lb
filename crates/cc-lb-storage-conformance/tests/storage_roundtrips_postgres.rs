@@ -200,6 +200,14 @@ fn request_event_list_projects_rows_and_preserves_detail_postgres() {
 }
 
 #[test]
+fn request_event_list_model_filter_matches_case_insensitive_prefix_postgres() {
+    run_postgres_scenario(
+        "request_event_list_model_filter_matches_case_insensitive_prefix",
+        request_event_list::request_event_list_model_filter_matches_case_insensitive_prefix,
+    );
+}
+
+#[test]
 fn cache_keepalive_batch_turn_reads_match_per_session_postgres() {
     run_postgres_scenario(
         "cache_keepalive_batch_turn_reads_match_per_session",
