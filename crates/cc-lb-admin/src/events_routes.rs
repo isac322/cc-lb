@@ -21,8 +21,9 @@ use tokio::{sync::broadcast::error::RecvError, time::Duration};
 use crate::AdminState;
 use crate::events::{
     BACKFILL_MAX_EVENTS, EventsError, StorageTailUpdate, StreamFilters, apply_filters_to_event,
-    build_delta_events_payload, build_recent_events_payload, parse_delta_query,
-    parse_last_event_id, parse_recent_params, parse_stream_filters, sse_id_from_cursor,
+    build_delta_events_payload, build_histogram_payload, build_recent_events_payload,
+    parse_delta_query, parse_histogram_params, parse_last_event_id, parse_recent_params,
+    parse_stream_filters, sse_id_from_cursor,
 };
 
 const MAX_EMITTED_EVENT_IDS: usize = 10_000;
@@ -71,6 +72,31 @@ pub async fn handle_recent_events(
         Ok(payload) => Json(payload).into_response(),
         Err(EventsError::Storage(error)) => {
             tracing::error!(%error, "recent events query failed");
+            internal_error("storage_error")
+        }
+        Err(error) => bad_request(error.as_str()),
+    }
+}
+
+pub async fn handle_events_histogram(
+    State(state): State<AdminState>,
+    Query(map): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(storage) = state.storage.as_ref() else {
+        return service_unavailable("storage_unavailable");
+    };
+    let params = match parse_histogram_params(&map) {
+        Ok(params) => params,
+        Err(EventsError::Storage(error)) => {
+            tracing::error!(%error, "parse histogram params storage error");
+            return internal_error("storage_error");
+        }
+        Err(error) => return bad_request(error.as_str()),
+    };
+    match build_histogram_payload(storage.as_ref(), &params).await {
+        Ok(payload) => Json(payload).into_response(),
+        Err(EventsError::Storage(error)) => {
+            tracing::error!(%error, "events histogram query failed");
             internal_error("storage_error")
         }
         Err(error) => bad_request(error.as_str()),

@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventListItem, RequestEventListQuery, RequestEventStreamFilters,
-    RequestEventUpstream, StatusClass, Storage, StorageError, model_filter_matches,
+    RequestEvent, RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventListItem,
+    RequestEventListQuery, RequestEventStreamFilters, RequestEventUpstream, StatusClass, Storage,
+    StorageError, model_filter_matches,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -10,6 +11,7 @@ use uuid::Uuid;
 
 pub const DEFAULT_RECENT_EVENTS_LIMIT: usize = 100;
 pub const MAX_RECENT_EVENTS_LIMIT: usize = 500;
+pub const MAX_HISTOGRAM_BUCKETS: u64 = 240;
 
 /// Upper bound on how many events a single reconnect may replay from storage.
 ///
@@ -36,6 +38,15 @@ pub struct RecentEventsParams {
     pub upstream: Option<RequestEventUpstream>,
     pub status_class: Option<StatusClass>,
     pub source_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistogramParams {
+    pub since_unix_secs: u64,
+    pub until_unix_secs: u64,
+    pub bucket_ms: u64,
+    pub bucket_count: u64,
+    pub filters: StreamFilters,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,6 +78,13 @@ pub struct RecentEventsPayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct HistogramPayload {
+    pub buckets: Vec<RequestEventHistogramBucket>,
+    pub bucket_ms: u64,
+    pub bucket_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct EventsDeltaPayload {
     pub events: Vec<RequestEvent>,
     pub next_cursor: u64,
@@ -78,6 +96,9 @@ pub enum EventsError {
     InvalidSinceUnixSecs,
     InvalidUntilUnixSecs,
     InvalidUntilTsMs,
+    InvalidBucketMs,
+    InvalidHistogramRange,
+    TooManyBuckets,
     InvalidSinceCursor,
     InvalidLimit,
     LimitTooLarge,
@@ -141,6 +162,61 @@ pub fn parse_recent_params(
         upstream: filters.upstream,
         status_class: filters.status_class,
         source_kind: filters.source_kind,
+    })
+}
+
+pub fn parse_histogram_params(
+    map: &HashMap<String, String>,
+) -> Result<HistogramParams, EventsError> {
+    let since_unix_secs = map
+        .get("since_unix_secs")
+        .ok_or(EventsError::InvalidSinceUnixSecs)?
+        .parse::<u64>()
+        .map_err(|_| EventsError::InvalidSinceUnixSecs)?;
+    let until_unix_secs = map
+        .get("until_unix_secs")
+        .ok_or(EventsError::InvalidUntilUnixSecs)?
+        .parse::<u64>()
+        .map_err(|_| EventsError::InvalidUntilUnixSecs)?;
+    let bucket_ms = map
+        .get("bucket_ms")
+        .ok_or(EventsError::InvalidBucketMs)?
+        .parse::<u64>()
+        .map_err(|_| EventsError::InvalidBucketMs)?;
+
+    if bucket_ms == 0 || bucket_ms % 1_000 != 0 || bucket_ms > i64::MAX as u64 {
+        return Err(EventsError::InvalidBucketMs);
+    }
+    if since_unix_secs > until_unix_secs {
+        return Err(EventsError::InvalidHistogramRange);
+    }
+
+    let range_start_ms = since_unix_secs
+        .checked_mul(1_000)
+        .ok_or(EventsError::InvalidHistogramRange)?;
+    let range_end_ms = until_unix_secs
+        .checked_mul(1_000)
+        .ok_or(EventsError::InvalidHistogramRange)?;
+    if range_start_ms > i64::MAX as u64 || range_end_ms > i64::MAX as u64 {
+        return Err(EventsError::InvalidHistogramRange);
+    }
+
+    let span_ms = until_unix_secs
+        .checked_sub(since_unix_secs)
+        .and_then(|span| span.checked_add(1))
+        .and_then(|span| span.checked_mul(1_000))
+        .ok_or(EventsError::InvalidHistogramRange)?;
+    let bucket_count = span_ms.div_ceil(bucket_ms);
+    if bucket_count > MAX_HISTOGRAM_BUCKETS {
+        return Err(EventsError::TooManyBuckets);
+    }
+
+    Ok(HistogramParams {
+        since_unix_secs,
+        until_unix_secs,
+        bucket_ms,
+        bucket_count,
+        filters: parse_stream_filters(map)?,
     })
 }
 
@@ -291,6 +367,20 @@ pub async fn build_recent_events_payload(
     })
 }
 
+pub async fn build_histogram_payload(
+    storage: &dyn Storage,
+    params: &HistogramParams,
+) -> Result<HistogramPayload, EventsError> {
+    let buckets = storage
+        .request_event_histogram(&params.histogram_query())
+        .await?;
+    Ok(HistogramPayload {
+        buckets,
+        bucket_ms: params.bucket_ms,
+        bucket_count: params.bucket_count,
+    })
+}
+
 pub async fn fetch_request_event_detail(
     storage: &dyn Storage,
     event_id: &str,
@@ -324,6 +414,19 @@ impl RecentEventsParams {
     }
 }
 
+impl HistogramParams {
+    fn histogram_query(&self) -> RequestEventHistogramQuery {
+        RequestEventHistogramQuery {
+            since_unix_secs: self.since_unix_secs,
+            until_unix_secs: self.until_unix_secs,
+            bucket_ms: self.bucket_ms,
+            bucket_count: self.bucket_count,
+            filters: self.filters.storage_filters(),
+            source_kind: self.filters.source_kind.clone(),
+        }
+    }
+}
+
 impl StreamFilters {
     pub fn storage_filters(&self) -> RequestEventStreamFilters {
         RequestEventStreamFilters {
@@ -343,6 +446,9 @@ impl EventsError {
             Self::InvalidSinceUnixSecs => "invalid_since_unix_secs",
             Self::InvalidUntilUnixSecs => "invalid_until_unix_secs",
             Self::InvalidUntilTsMs => "invalid_until_ts_ms",
+            Self::InvalidBucketMs => "invalid_bucket_ms",
+            Self::InvalidHistogramRange => "invalid_histogram_range",
+            Self::TooManyBuckets => "too_many_buckets",
             Self::InvalidSinceCursor => "invalid_since_cursor",
             Self::InvalidLimit => "invalid_limit",
             Self::LimitTooLarge => "limit_too_large",

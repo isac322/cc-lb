@@ -29,6 +29,13 @@ const STATUS_TONE_TEXT: Record<'ok' | 'warn' | 'danger' | 'neutral', string> = {
   neutral: 'text-text',
 };
 
+/** Radii offered by the per-row time anchor, as [label, seconds either side]. */
+const ANCHOR_RADII_SECS: ReadonlyArray<readonly [string, number]> = [
+  ['±1m', 60],
+  ['±5m', 300],
+  ['±30m', 1800],
+];
+
 interface RequestEventsTableProps {
   events: readonly RequestEventWithPhase[];
   principalNameMap: Map<string, string>;
@@ -50,6 +57,8 @@ interface RequestEventsTableProps {
   hasMore?: boolean;
   minWidthClass?: string;
   className?: string;
+  /** Focus the surrounding time range on a row, in seconds either side. */
+  onAnchorRange?: (tsMs: number, radiusSecs: number) => void;
 }
 
 export function RequestEventsTable({
@@ -67,6 +76,7 @@ export function RequestEventsTable({
   hasMore,
   minWidthClass = 'min-w-[960px]',
   className,
+  onAnchorRange,
 }: RequestEventsTableProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = selectedId
@@ -185,7 +195,7 @@ export function RequestEventsTable({
                   aria-selected={selectedId === key}
                   aria-label={`View request ${key}`}
                 >
-                  <td className="px-3 py-2 text-text-faint whitespace-nowrap">
+                  <td className="group/ts relative px-3 py-2 text-text-faint whitespace-nowrap">
                     <span
                       className={cx(
                         'status-dot mr-2',
@@ -195,6 +205,26 @@ export function RequestEventsTable({
                       )}
                     />
                     <RelativeTime compact ts={eventTime(e)} />
+                    {onAnchorRange != null && eventTime(e) != null ? (
+                      <span className="absolute inset-y-0 right-0 hidden items-center gap-0.5 bg-[color:var(--color-panel-strong)] pl-2 pr-1 group-hover/ts:flex group-focus-within/ts:flex">
+                        {ANCHOR_RADII_SECS.map(([label, radius]) => (
+                          <button
+                            key={label}
+                            type="button"
+                            className="rounded-sm border border-subtle px-1 text-[10px] leading-4 hover:bg-[color:var(--color-hover-bg)]"
+                            title={`Show ${label} around this request`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              const at = eventTime(e);
+                              if (at != null)
+                                onAnchorRange(at.getTime(), radius);
+                            }}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </span>
+                    ) : null}
                   </td>
                   {showPrincipal && (
                     <td className="px-3 py-2 whitespace-nowrap truncate max-w-[160px]">

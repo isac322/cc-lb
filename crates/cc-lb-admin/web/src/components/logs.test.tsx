@@ -110,6 +110,11 @@ vi.mock('../lib/queries', () => ({
     isPending: false,
     refetch: vi.fn(),
   }),
+  useEventsHistogram: () => ({
+    data: { buckets: [], bucket_ms: 60_000, bucket_count: 0 },
+    isFetching: false,
+    isError: false,
+  }),
 }));
 
 vi.mock('../lib/useLiveEventStream', () => ({

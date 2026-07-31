@@ -67,31 +67,29 @@ describe('logsSearchSchema', () => {
 });
 
 describe('getLogsRouteState', () => {
-  it('disables effective tailing when custom time range is set', () => {
+  it('disables effective tailing when the range has a fixed end', () => {
     expect(
       getLogsRouteState({
         userRequestedTailing: true,
-        time_range: 'custom',
+        until_unix_secs: 1_700_000_000,
       }).effectiveTailing,
     ).toBe(false);
   });
 
-  it('enables effective tailing when user requested it and no custom time range', () => {
+  it('enables effective tailing when the right edge stays open', () => {
     expect(
       getLogsRouteState({
         userRequestedTailing: true,
-        time_range: '1h',
       }).effectiveTailing,
     ).toBe(true);
   });
 });
 
 describe('buildHistoricalFilters', () => {
-  it('sends both custom bounds only when the range is complete', () => {
+  it('sends both absolute bounds when the range has a fixed end', () => {
     expect(
       buildHistoricalFilters({
         session: 'session-1',
-        time_range: 'custom',
         since_unix_secs: 100,
         until_unix_secs: 200,
       }),
@@ -100,32 +98,22 @@ describe('buildHistoricalFilters', () => {
       since_unix_secs: '100',
       until_unix_secs: '200',
     });
-
-    expect(
-      buildHistoricalFilters({
-        time_range: 'custom',
-        since_unix_secs: 100,
-      }),
-    ).toEqual({});
   });
 
-  it('sends only since for a preset and no time keys for All time', () => {
+  it('omits until when the right edge stays pinned to now', () => {
     expect(
       buildHistoricalFilters({
         principal_id: 'principal-1',
-        time_range: '1h',
         since_unix_secs: 100,
       }),
     ).toEqual({ principal_id: 'principal-1', since_unix_secs: '100' });
+  });
 
-    const all = buildHistoricalFilters({
-      time_range: 'all',
-      since_unix_secs: 100,
-      until_unix_secs: 200,
-    });
-    expect(all).toEqual({});
-    expect(all).not.toHaveProperty('since');
-    expect(all).not.toHaveProperty('until');
+  it('sends no time keys when the range is unbounded', () => {
+    const unbounded = buildHistoricalFilters({});
+    expect(unbounded).toEqual({});
+    expect(unbounded).not.toHaveProperty('since_unix_secs');
+    expect(unbounded).not.toHaveProperty('until_unix_secs');
   });
 
   it('maps every route filter to the backend contract', () => {

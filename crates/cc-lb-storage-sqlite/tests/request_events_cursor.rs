@@ -2,8 +2,9 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, RequestEvent, RequestEventKeyLastUsedQuery, RequestEventKeyUsageQuery,
-    RequestEventStore, RequestEventStreamFilters, RequestEventUpstream, StatusClass,
+    BackendKind, MetaStore, RequestEvent, RequestEventHistogramQuery, RequestEventKeyLastUsedQuery,
+    RequestEventKeyUsageQuery, RequestEventListQuery, RequestEventStore, RequestEventStreamFilters,
+    RequestEventUpstream, StatusClass,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -443,4 +444,210 @@ async fn cursor_pages_cover_two_hundred_rows_without_gaps_or_duplicates() {
     }
 
     assert_eq!(seen, expected);
+}
+
+/// The histogram exists to say the same thing the list says. These cases lock
+/// the invariants that make that true: the same `ts` window, a zero-filled
+/// continuous axis, the UI's danger set for `error_count`, and an index range
+/// scan instead of a table scan.
+#[tokio::test]
+async fn request_event_histogram_matches_list_and_uses_index() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let database_url = format!(
+        "sqlite://{}",
+        temp_dir
+            .path()
+            .join("request-events-histogram.sqlite")
+            .display()
+    );
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+            .await
+            .expect("open sqlite");
+    storage
+        .initialize(BackendKind::Sqlite)
+        .await
+        .expect("initialize sqlite");
+
+    let base = 1_800_000_000_u64;
+    let events = [
+        (base, 200_u16, None, None),
+        // 4xx is warn in the UI, so it must stay out of the error lane.
+        (base + 10, 429, None, None),
+        (base + 20, 503, Some("upstream_5xx"), None),
+        // A 2xx carrying a semantic stream failure is an error.
+        (base + 30, 200, Some("upstream_stream_error"), None),
+        // Renewal traffic is excluded unless asked for.
+        (base + 40, 200, None, Some("renewal")),
+        // Bucket 1 and 2 stay empty so zero-fill has something to prove.
+        (base + 180, 200, None, None),
+    ];
+    for (index, (ts, status, error_code, source_kind)) in events.iter().enumerate() {
+        storage
+            .append_request_event(&RequestEvent {
+                ts: *ts,
+                // Offset into the second on purpose: the window is filtered on
+                // `ts`, so a sub-second remainder must not drop the row.
+                ts_ms: Some(ts * 1_000 + 500),
+                request_id: format!("req-histogram-{index}"),
+                event_id: Some(format!("0193a7b8-1234-7e2f-9012-hist{index:08}")),
+                principal_id: Some("principal-histogram".to_owned()),
+                model: Some("claude-sonnet-4-5".to_owned()),
+                status: *status,
+                error_code: error_code.map(str::to_owned),
+                source_kind: source_kind.map(str::to_owned),
+                duration_ms: 10,
+                ..Default::default()
+            })
+            .await
+            .expect("append histogram event");
+    }
+
+    // Today's writer derives `ts` from `ts_ms` (request_events.rs:800), so the
+    // two cannot drift apart through the public API. This row is written
+    // directly to simulate a future writer that timestamps them separately:
+    // `ts` puts it inside the window, `list_ts_ms` sits 30s before the window
+    // start. It survives only while the `list_ts_ms` bound stays a widened seek
+    // hint; turning that bound into a real filter drops the row and fails here.
+    sqlx::query(
+        "INSERT INTO request_events_v1 \
+            (request_id, ts, event_type, payload, event_id, principal_id, model, \
+             cache_breakpoints, list_ts_ms, list_event_key, list_status, list_duration_ms) \
+         VALUES (?, ?, 'request_completed', ?, ?, ?, ?, '[]', ?, ?, 200, 10)",
+    )
+    .bind("req-histogram-skewed")
+    .bind(base as i64)
+    .bind(format!(
+        "{{\"ts_ms\":{},\"status\":200,\"duration_ms\":10}}",
+        base * 1_000 - 30_000
+    ))
+    .bind("0193a7b8-1234-7e2f-9012-histskewed0")
+    .bind("principal-histogram")
+    .bind("claude-sonnet-4-5")
+    .bind((base * 1_000 - 30_000) as i64)
+    .bind("0193a7b8-1234-7e2f-9012-histskewed0")
+    .execute(storage.pool())
+    .await
+    .expect("insert skewed histogram row");
+
+    let window_end = base + 180;
+    let query = |source_kind: Option<&str>, filters: RequestEventStreamFilters| {
+        RequestEventHistogramQuery {
+            since_unix_secs: base,
+            until_unix_secs: window_end,
+            bucket_ms: 60_000,
+            bucket_count: 4,
+            filters,
+            source_kind: source_kind.map(str::to_owned),
+        }
+    };
+
+    let buckets = storage
+        .request_event_histogram(&query(None, RequestEventStreamFilters::default()))
+        .await
+        .expect("histogram");
+    assert_eq!(buckets.len(), 4, "zero-filled buckets are never omitted");
+    for (index, bucket) in buckets.iter().enumerate() {
+        assert_eq!(
+            bucket.bucket_start_unix_secs,
+            base + (index as u64) * 60,
+            "bucket axis is continuous"
+        );
+    }
+    assert_eq!(
+        buckets[0].total_count, 5,
+        "renewal stays out by default, and a row whose ts_ms precedes the \
+         window start is still counted because `ts` decides membership"
+    );
+    assert_eq!(
+        buckets[0].error_count, 2,
+        "error_count is 5xx plus 2xx semantic failures, never 4xx"
+    );
+    assert_eq!(buckets[1].total_count, 0);
+    assert_eq!(buckets[2].total_count, 0);
+    assert_eq!(
+        buckets[3].total_count, 1,
+        "an event in the final second of the window is kept"
+    );
+
+    let listed = storage
+        .list_request_events(&RequestEventListQuery {
+            since_unix_secs: base,
+            until_unix_secs: window_end,
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .expect("list request events");
+    let histogram_total: u64 = buckets.iter().map(|bucket| bucket.total_count).sum();
+    assert_eq!(
+        histogram_total,
+        listed.len() as u64,
+        "histogram total must equal the list count for the same window"
+    );
+
+    let with_renewal = storage
+        .request_event_histogram(&query(Some("all"), RequestEventStreamFilters::default()))
+        .await
+        .expect("histogram including renewal");
+    assert_eq!(
+        with_renewal
+            .iter()
+            .map(|bucket| bucket.total_count)
+            .sum::<u64>(),
+        histogram_total + 1,
+        "source_kind=all includes renewal rows"
+    );
+
+    let other_model = storage
+        .request_event_histogram(&query(
+            None,
+            RequestEventStreamFilters {
+                model: Some("claude-haiku".to_owned()),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("histogram with model filter");
+    assert_eq!(
+        other_model
+            .iter()
+            .map(|bucket| bucket.total_count)
+            .sum::<u64>(),
+        0,
+        "filters reach the histogram, not just the list"
+    );
+
+    // The `ts` predicate cannot use an index on its own, so the query carries a
+    // deliberately wider `list_ts_ms` bound purely as a seek hint.
+    let plan = sqlx::query(
+        "EXPLAIN QUERY PLAN SELECT MIN(MAX((list_ts_ms - ?) / ?, 0), ?) AS bucket_index, \
+                COUNT(*) \
+         FROM request_events_v1 \
+         WHERE ts >= ? AND ts <= ? AND list_ts_ms >= ? AND list_ts_ms < ? \
+         GROUP BY bucket_index",
+    )
+    .bind(1_800_000_000_000_i64)
+    .bind(60_000_i64)
+    .bind(3_i64)
+    .bind(base as i64)
+    .bind(window_end as i64)
+    .bind(1_799_999_940_000_i64)
+    .bind(1_800_000_241_000_i64)
+    .fetch_all(storage.pool())
+    .await
+    .expect("explain histogram")
+    .into_iter()
+    .map(|row| row.get::<String, _>("detail"))
+    .collect::<Vec<_>>();
+    assert!(
+        plan.iter().any(|detail| detail.contains("USING INDEX")),
+        "histogram must range-scan an index rather than scan the table: {plan:?}"
+    );
+    assert!(
+        !plan
+            .iter()
+            .any(|detail| detail.starts_with("SCAN request_events_v1")),
+        "histogram must not fall back to a full table scan: {plan:?}"
+    );
 }

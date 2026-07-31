@@ -4,6 +4,7 @@
 
 import {
   type InfiniteData,
+  keepPreviousData,
   queryOptions,
   experimental_streamedQuery as streamedQuery,
   useInfiniteQuery,
@@ -27,6 +28,9 @@ import {
   type DashboardSummaryResponse,
   type DashboardUsageResponse,
   deleteJson,
+  type EventsHistogramPayload,
+  type EventsHistogramRange,
+  fetchEventsHistogram,
   fetchWithAuth,
   getJson,
   type KeyListResponse,
@@ -427,6 +431,30 @@ export function useRecentEvents(filters: Record<string, string | undefined>) {
     },
     POLLING_INTERVALS.RECENT_EVENTS_MS,
   );
+}
+
+export function useEventsHistogram(
+  filters: Record<string, string | undefined>,
+  range: EventsHistogramRange | null,
+  options?: { readonly poll?: boolean },
+) {
+  return useQuery<EventsHistogramPayload>({
+    queryKey: ['events', 'histogram', filters, range],
+    queryFn: () => {
+      if (range === null) {
+        throw new Error('Histogram range is required');
+      }
+      return fetchEventsHistogram(filters, range);
+    },
+    enabled: range !== null,
+    // The bucket-snapped range keeps the key stable, so without a poll the
+    // trailing bucket would only grow when a bucket boundary rolls over.
+    // Matches the request list interval so both advance together. A parked
+    // historical view does not poll: those buckets cannot change.
+    refetchInterval:
+      options?.poll === false ? false : POLLING_INTERVALS.RECENT_EVENTS_MS,
+    placeholderData: keepPreviousData,
+  });
 }
 
 export function useRequestEventDetail(eventId: string | null) {

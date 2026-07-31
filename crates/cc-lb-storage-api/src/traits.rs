@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 
 use crate::{
-    BackendKind, CacheKeepaliveDecisionRow, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
+    BackendKind, CacheKeepaliveDecisionRow, RequestEventHistogramBucket,
+    RequestEventHistogramQuery, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
     RequestEventKeyUsageBucket, RequestEventKeyUsageQuery, RequestEventProjections,
     RuntimeChangeNotifier, StorageError, StorageResult,
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
@@ -157,6 +158,17 @@ pub trait RequestEventStore: Send + Sync {
         let _ = query;
         Err(StorageError::Fatal {
             message: "request_event_key_usage is not implemented for this storage backend"
+                .to_owned(),
+        })
+    }
+
+    async fn request_event_histogram(
+        &self,
+        query: &RequestEventHistogramQuery,
+    ) -> StorageResult<Vec<RequestEventHistogramBucket>> {
+        let _ = query;
+        Err(StorageError::Fatal {
+            message: "request_event_histogram is not implemented for this storage backend"
                 .to_owned(),
         })
     }
