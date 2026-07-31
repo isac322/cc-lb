@@ -69,6 +69,23 @@ function renderWithProviders(ui: React.ReactElement) {
   );
 }
 
+function principalFixture(
+  overrides: Partial<queries.Principal> = {},
+): queries.Principal {
+  return {
+    id: 'p-1',
+    name: 'p-1',
+    kind: 'machine',
+    enabled: true,
+    revision: 7,
+    allowed_models: [],
+    allowed_upstreams: [],
+    default_limits: [],
+    cache_keepalive: null,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   Object.assign(Route, { useSearch: () => ({}) });
@@ -267,18 +284,65 @@ test('renders ordered list with locked terminal row', () => {
     mutate: vi.fn(),
   } as unknown as ReturnType<typeof queries.useDeleteChainEntry>);
 
-  renderWithProviders(<RouterSlotEditor principalId="p-1" />);
+  renderWithProviders(<RouterSlotEditor principal={principalFixture()} />);
 
   expect(screen.getByText('My Plugin')).toBeDefined();
   expect(screen.getByText('Terminal step')).toBeDefined();
 });
 
-test('renders empty state when no entries', () => {
+test('loading router metadata keeps Basic selected and disables mutations', () => {
+  vi.mocked(queries.usePluginChain).mockReturnValue({
+    data: undefined,
+    isLoading: true,
+  } as never);
+  vi.mocked(queries.usePluginRegistry).mockReturnValue({
+    data: undefined,
+    isLoading: true,
+  } as never);
+  vi.mocked(queries.useRouterTerminalStrategy).mockReturnValue({
+    data: undefined,
+    isLoading: true,
+  } as never);
+  vi.mocked(queries.useUpdateRouterTerminalStrategy).mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as never);
+  vi.mocked(queries.useReorderChain).mockReturnValue({
+    mutate: vi.fn(),
+  } as never);
+  vi.mocked(queries.useInsertChainEntry).mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as never);
+  vi.mocked(queries.useDeleteChainEntry).mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as never);
+
+  renderWithProviders(<RouterSlotEditor principal={principalFixture()} />);
+
+  const basicTab = screen.getByRole('tab', { name: 'Basic' });
+  expect(basicTab.getAttribute('aria-disabled')).toBe('false');
+  expect(basicTab.getAttribute('aria-selected')).toBe('true');
+  expect(screen.getByRole('switch').hasAttribute('disabled')).toBe(true);
+});
+
+test('empty router chain keeps Basic available and enables subscription-preference', () => {
+  const insertMock = vi.fn();
   vi.mocked(queries.usePluginChain).mockReturnValue({
     data: { entries: [] },
   } as unknown as ReturnType<typeof queries.usePluginChain>);
   vi.mocked(queries.usePluginRegistry).mockReturnValue({
-    data: { entries: [] },
+    data: {
+      entries: [
+        {
+          id: 'subscription-preference-id',
+          name: 'subscription-preference',
+          metadata: null,
+          sha256_hex: '',
+        },
+      ],
+    },
   } as unknown as ReturnType<typeof queries.usePluginRegistry>);
   vi.mocked(queries.useRouterTerminalStrategy).mockReturnValue({
     data: { strategy: 'first-pick', revision: 1 },
@@ -292,30 +356,56 @@ test('renders empty state when no entries', () => {
     mutate: vi.fn(),
   } as unknown as ReturnType<typeof queries.useReorderChain>);
   vi.mocked(queries.useInsertChainEntry).mockReturnValue({
-    mutate: vi.fn(),
+    mutate: insertMock,
+    isPending: false,
   } as unknown as ReturnType<typeof queries.useInsertChainEntry>);
   vi.mocked(queries.useDeleteChainEntry).mockReturnValue({
     mutate: vi.fn(),
+    isPending: false,
   } as unknown as ReturnType<typeof queries.useDeleteChainEntry>);
 
-  renderWithProviders(<RouterSlotEditor principalId="p-1" />);
+  renderWithProviders(<RouterSlotEditor principal={principalFixture()} />);
 
-  // It should default to Basic tab because it's not complex
   expect(
-    screen.getByText('Keep prompt cache warm by reusing upstreams'),
-  ).toBeDefined();
-
-  // Switch to Advanced tab
-  fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
-  expect(screen.getByText('No filters yet.')).toBeDefined();
+    screen.getByRole('tab', { name: 'Basic' }).getAttribute('aria-disabled'),
+  ).toBe('false');
+  const toggle = screen.getByRole('switch');
+  expect(toggle.getAttribute('aria-checked')).toBe('false');
+  fireEvent.click(toggle);
+  expect(insertMock).toHaveBeenCalledWith({
+    pid: 'p-1',
+    body: {
+      slot: 'router',
+      wasm_registry_id: 'subscription-preference-id',
+      order: 0,
+    },
+  });
 });
 
 test('toggles terminal strategy', async () => {
   vi.mocked(queries.usePluginChain).mockReturnValue({
-    data: { entries: [] },
+    data: {
+      entries: [
+        {
+          id: 'entry-subscription-preference',
+          order: 0,
+          wasm_registry_id: 'subscription-preference-id',
+          revision: 1,
+        },
+      ],
+    },
   } as unknown as ReturnType<typeof queries.usePluginChain>);
   vi.mocked(queries.usePluginRegistry).mockReturnValue({
-    data: { entries: [] },
+    data: {
+      entries: [
+        {
+          id: 'subscription-preference-id',
+          name: 'subscription-preference',
+          metadata: null,
+          sha256_hex: '',
+        },
+      ],
+    },
   } as unknown as ReturnType<typeof queries.usePluginRegistry>);
   const mutateMock = vi.fn();
   vi.mocked(queries.useRouterTerminalStrategy).mockReturnValue({
@@ -336,7 +426,15 @@ test('toggles terminal strategy', async () => {
     mutate: vi.fn(),
   } as unknown as ReturnType<typeof queries.useDeleteChainEntry>);
 
-  renderWithProviders(<RouterSlotEditor principalId="p-1" />);
+  renderWithProviders(<RouterSlotEditor principal={principalFixture()} />);
+  fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
+  expect(
+    screen.queryByText('Keep prompt cache warm by reusing upstreams'),
+  ).toBeNull();
+  fireEvent.click(screen.getByRole('tab', { name: 'Basic' }));
+  expect(
+    screen.getByText('Keep prompt cache warm by reusing upstreams'),
+  ).toBeDefined();
 
   // In Basic tab
   const randomRadio = screen.getAllByRole('radio', { name: /Random/ })[0];
@@ -399,38 +497,41 @@ test('complex chain forces Advanced and disables Basic with tooltip', () => {
     mutate: vi.fn(),
   } as unknown as ReturnType<typeof queries.useDeleteChainEntry>);
 
-  renderWithProviders(<RouterSlotEditor principalId="p-1" />);
+  renderWithProviders(<RouterSlotEditor principal={principalFixture()} />);
 
   const basicTab = screen.getByRole('tab', { name: 'Basic' });
   expect(basicTab.getAttribute('aria-disabled')).toBe('true');
 
-  // Click basic tab should show notice
   fireEvent.click(basicTab);
+  expect(screen.getByRole('button', { name: '×' })).toBeDefined();
   expect(
-    screen.getAllByText(
-      /Basic can't show this chain without losing the extra filters/,
-    )[0],
-  ).toBeDefined();
+    screen.getByRole('tab', { name: 'Advanced' }).getAttribute('aria-selected'),
+  ).toBe('true');
 });
 
-test('Smart routing toggle inserts subscription-preference at order 0 then removes it', async () => {
-  const insertMock = vi.fn();
+test('Subscription preference toggle removes the built-in chain entry', async () => {
   const deleteMock = vi.fn();
+  const subscriptionPreferencePlugin = {
+    id: 'subscription-preference-id',
+    name: 'subscription-preference',
+    metadata: null,
+    sha256_hex: '',
+  };
 
   vi.mocked(queries.usePluginChain).mockReturnValue({
-    data: { entries: [] },
-  } as unknown as ReturnType<typeof queries.usePluginChain>);
-  vi.mocked(queries.usePluginRegistry).mockReturnValue({
     data: {
       entries: [
         {
-          id: 'subscription-preference-id',
-          name: 'subscription-preference',
-          metadata: null,
-          sha256_hex: '',
+          id: 'entry-subscription-preference',
+          wasm_registry_id: 'subscription-preference-id',
+          order: 0,
+          revision: 2,
         },
       ],
     },
+  } as unknown as ReturnType<typeof queries.usePluginChain>);
+  vi.mocked(queries.usePluginRegistry).mockReturnValue({
+    data: { entries: [subscriptionPreferencePlugin] },
   } as unknown as ReturnType<typeof queries.usePluginRegistry>);
   vi.mocked(queries.useRouterTerminalStrategy).mockReturnValue({
     data: { strategy: 'first-pick', revision: 1 },
@@ -444,68 +545,25 @@ test('Smart routing toggle inserts subscription-preference at order 0 then remov
     mutate: vi.fn(),
   } as unknown as ReturnType<typeof queries.useReorderChain>);
   vi.mocked(queries.useInsertChainEntry).mockReturnValue({
-    mutate: insertMock,
-    isPending: false,
+    mutate: vi.fn(),
   } as unknown as ReturnType<typeof queries.useInsertChainEntry>);
   vi.mocked(queries.useDeleteChainEntry).mockReturnValue({
     mutate: deleteMock,
     isPending: false,
   } as unknown as ReturnType<typeof queries.useDeleteChainEntry>);
 
-  const { rerender } = renderWithProviders(
-    <RouterSlotEditor principalId="p-1" />,
-  );
+  renderWithProviders(<RouterSlotEditor principal={principalFixture()} />);
 
   const toggle = screen.getByRole('switch');
-  expect(toggle.getAttribute('aria-checked')).toBe('false');
-
+  expect(toggle.getAttribute('aria-checked')).toBe('true');
   fireEvent.click(toggle);
-
-  await waitFor(() => {
-    expect(insertMock).toHaveBeenCalledWith({
-      pid: 'p-1',
-      body: {
-        slot: 'router',
-        wasm_registry_id: 'subscription-preference-id',
-        order: 0,
-      },
-    });
-  });
-
-  // Mock that it was added
-  vi.mocked(queries.usePluginChain).mockReturnValue({
-    data: {
-      entries: [
-        {
-          id: 'entry-cache',
-          order: 0,
-          wasm_registry_id: 'subscription-preference-id',
-          revision: 2,
-        },
-      ],
-    },
-  } as unknown as ReturnType<typeof queries.usePluginChain>);
-
-  rerender(
-    <QueryClientProvider client={queryClient}>
-      <RouterSlotEditor principalId="p-1" />
-    </QueryClientProvider>,
-  );
-
-  const toggleOn = screen.getByRole('switch');
-  expect(toggleOn.getAttribute('aria-checked')).toBe('true');
-
-  fireEvent.click(toggleOn);
-
-  await waitFor(() => {
-    expect(deleteMock).toHaveBeenCalledWith({
-      id: 'entry-cache',
-      revision: 2,
-    });
+  expect(deleteMock).toHaveBeenCalledWith({
+    id: 'entry-subscription-preference',
+    revision: 2,
   });
 });
 
-test('picker disables already-in-chain entries and Basic-managed subscription-preference', () => {
+test('picker disables already-in-chain entries', () => {
   vi.mocked(queries.usePluginChain).mockReturnValue({
     data: {
       entries: [
@@ -556,7 +614,7 @@ test('picker disables already-in-chain entries and Basic-managed subscription-pr
     mutate: vi.fn(),
   } as unknown as ReturnType<typeof queries.useDeleteChainEntry>);
 
-  renderWithProviders(<RouterSlotEditor principalId="p-1" />);
+  renderWithProviders(<RouterSlotEditor principal={principalFixture()} />);
 
   // Switch to Advanced tab
   fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
@@ -568,7 +626,7 @@ test('picker disables already-in-chain entries and Basic-managed subscription-pr
     name: /subscription-preference/,
   })[1];
   expect(preferenceBtn.hasAttribute('disabled')).toBe(true);
-  expect(screen.getByText('Managed by Basic')).toBeDefined();
+  expect(screen.getByText('Already in chain')).toBeDefined();
 
   const otherBtn = screen.getByRole('button', { name: /other-plugin/ });
   expect(otherBtn.hasAttribute('disabled')).toBe(false);
@@ -620,7 +678,7 @@ test('addFilter no-ops when entry is disabled', () => {
     mutate: vi.fn(),
   } as unknown as ReturnType<typeof queries.useDeleteChainEntry>);
 
-  renderWithProviders(<RouterSlotEditor principalId="p-1" />);
+  renderWithProviders(<RouterSlotEditor principal={principalFixture()} />);
 
   // Switch to Advanced tab
   fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));

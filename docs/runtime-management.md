@@ -70,7 +70,7 @@ If an operator keeps a local proxy client key file such as `~/.config/cc-lb/prox
   "name": "upstream-name",
   "kind": "anthropic_api_key",
   "enabled": true,
-  "warmup_enabled": false,
+  "warmup_enabled": true,
   "warmup_dialect_plugin": null,
   "spec_revision": 1,
   "status": {
@@ -81,7 +81,7 @@ If an operator keeps a local proxy client key file such as `~/.config/cc-lb/prox
 }
 ```
 
-`spec_revision` is the user-managed optimistic-lock counter used by `If-Match` and `ETag`. Background controller writes (status/lease/secret/token) never bump it. The nested `status` object holds system-managed operational state: only the apply daemon and warmup observer write here.
+`spec_revision` is the user-managed optimistic-lock counter used by `If-Match` and `ETag`. Background controller writes (status/lease/secret/token) never bump it. The nested `status` object holds system-managed operational state: only the apply daemon and warmup observer write here. `warmup_enabled` defaults to `true` for `anthropic_oauth` upstreams and `false` for other kinds; see [docs/upstream-warmup.md](./upstream-warmup.md).
 
 ### Principals API
 
@@ -145,6 +145,10 @@ create/update requests that set it return `unsupported_cache_keepalive_llm_judge
 The `cache_keepalive` field mirrors whatever was persisted on the
 principal, or `null` when unset. `PATCH /admin/v1/principals/{id}` with
 `"cache_keepalive": null` clears the config.
+
+Each principal receives a built-in `subscription-preference` Router chain
+entry at creation, with order `0`. Use the plugin-chain endpoints below to
+remove the entry or change its position among other router plugins.
 
 ### Plugins API
 

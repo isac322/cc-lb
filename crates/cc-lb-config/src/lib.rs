@@ -21,13 +21,13 @@ pub use types::{
     CircuitBreakerConfig, ClusterConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV,
     DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
     DEFAULT_SQLITE_PATH, DnsConfig, DownstreamAuthConfig, DownstreamAuthMode, EgressConfig,
-    EventBusConfig, EventBusTransport, ListenerConfig, ListenerOverrides, NoneModeConfig,
-    NoneModeUpstreamKind, ObservabilityConfig, PluginFailurePolicy, PluginWireBounds,
-    PostgresPoolConfig, PriceCatalogConfig, PromptCacheShadowConfig, RecurringJobConfig,
-    RestartRequiredField, RuntimeConfig, SchedulerConfig, SchedulerIdempotencyConfig,
-    SchedulerPoolConfig, SchedulerRetryClasses, SchedulerRetryConfig, SchedulerStalenessConfig,
-    ShapeOriginPolicy, StorageConfig, SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig,
-    WasmtimeAllocationStrategy, WasmtimeConfig,
+    EventBusConfig, ListenerConfig, ListenerOverrides, NoneModeConfig, NoneModeUpstreamKind,
+    ObservabilityConfig, PluginFailurePolicy, PluginWireBounds, PostgresPoolConfig,
+    PriceCatalogConfig, PromptCacheShadowConfig, RecurringJobConfig, RestartRequiredField,
+    RuntimeConfig, SchedulerConfig, SchedulerIdempotencyConfig, SchedulerPoolConfig,
+    SchedulerRetryClasses, SchedulerRetryConfig, SchedulerStalenessConfig, ShapeOriginPolicy,
+    StorageConfig, SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig, WasmtimeAllocationStrategy,
+    WasmtimeConfig,
 };
 pub use validation::{ValidationError, validate_postgres_url};
 

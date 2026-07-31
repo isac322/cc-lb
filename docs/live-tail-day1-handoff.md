@@ -5,7 +5,7 @@ Operator checklist for the first 72 hours after deploying the dashboard live-tai
 ## 1. Verify metrics ingestion
 
 - Prometheus target list includes every cc-lb instance (`up{job="cc-lb"} == 1` for each).
-- Every live-tail metric documented in [docs/metrics-live-tail.md](metrics-live-tail.md) has at least one successful scrape (or a documented reason for staying at zero — e.g. `sse_partial_notify_sent_total` will be absent on `event_bus.transport = in_memory` deployments).
+- Every live-tail metric documented in [docs/metrics-live-tail.md](metrics-live-tail.md) has at least one successful scrape (or a documented reason for staying at zero — e.g. `sse_partial_notify_sent_total` will be absent on sqlite deployments, where the in-memory event bus replaces pg_notify fanout).
 
 Quick check:
 

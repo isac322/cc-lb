@@ -4,9 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING**: Removed the `event_bus.transport` config key. The event fanout now follows the storage backend: postgres always runs pg_notify fanout, sqlite always uses the in-memory bus. A config that still sets `event_bus.transport` fails to load. The postgres backend now requires `cluster.instance_url` and a cluster token; the Helm chart injects both and requires `secrets.clusterToken` unless `secrets.existingSecret` supplies the token.
+- New principals receive the built-in `subscription-preference` Router chain entry at order `0`, and its presence is the enabled state. Existing principals and operator-configured chains remain unchanged on upgrade. Use the plugin-chain endpoints to insert, remove, or reorder the entry.
+- Upstream warm-up is now opt-out for `anthropic_oauth`: `warmup_enabled` defaults to `true` for OAuth upstreams created through the admin API and through the OAuth flow. Other upstream kinds remain disabled by default. Creating an `anthropic_oauth` upstream no longer fails when warm-up is on without credentials; the warm-up scheduler already skips credential-less upstreams.
+
 ### Fixed
 
 - Request-log model filtering now matches a case-insensitive prefix instead of the full model ID, so `claude-sonnet` finds `claude-sonnet-4-5-20250929`. Historical SQL, the live SSE tail and the dashboard row filter share the predicate, and the Model input commits once typing settles instead of re-querying and reconnecting the stream on every keystroke.
+- Subscription routing and warmup now use only quota windows reported by each upstream, so accounts without a shared `7d` window continue through `5h` and model-scoped weekly quota while preserving shared-weekly precedence when both exist.
+- The `db_unreachable_503` chaos test now calls the real `/admin/v1/principals/{id}/keys` route instead of a path that no longer exists, so it exercises its assertions again.
 
 ## [0.3.1] - 2026-07-28
 
@@ -16,7 +24,6 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- Subscription routing and warmup now use only quota windows reported by each upstream, so accounts without a shared `7d` window continue through `5h` and model-scoped weekly quota while preserving shared-weekly precedence when both exist.
 - API key rolling limits now persist in durable usage buckets shared by every replica, so a restart or a second instance no longer resets or double-counts a key's rolling window.
 - Prompt-cache simulation now models top-level `cache_control` (automatic caching). Such requests previously produced no breakpoints, leaving cache-affinity routing blind and recording no warm entry.
 - Prompt-cache simulation now keeps `thinking`, `redacted_thinking` and `tool_reference` blocks in the prefix chain, and salts the documented request-level invalidators (`thinking`, `output_config.effort`, `speed`, `tool_choice`) at the tier each one affects. Requests differing only by replayed reasoning or by a changed invalidator no longer predict a hit the provider misses, and `tools`-tier prefixes stay byte-stable across those changes.

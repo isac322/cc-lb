@@ -8,9 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle as ThreadJoinHandle;
 
 use cc_lb_storage_api::{
-    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BackendKind, MetaStore, PluginChainEntryInput,
-    PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind, PrincipalStore,
-    UpstreamCreate, UpstreamStore,
+    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate,
+    UpstreamStore,
     principal::Limit,
     types::{PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
 };
@@ -38,6 +37,10 @@ pub async fn postgres_test_lock(database_url: &str) -> Result<sqlx::PgConnection
         .await?;
     Ok(connection)
 }
+
+/// Runtime environment variable that Cargo-invoked tests inherit without
+/// mutating the integration binary's process-global environment.
+pub const TEST_NONEMPTY_ENV: &str = "CARGO_PKG_NAME";
 
 pub fn install_prometheus() -> &'static PrometheusHandle {
     static PROMETHEUS: OnceLock<PrometheusHandle> = OnceLock::new();
@@ -499,7 +502,7 @@ async fn seed_storage(
         .await
         .expect("seed upstream");
     }
-    let principal = PrincipalStore::create(
+    PrincipalStore::create(
         storage.as_ref(),
         PrincipalCreate {
             name: "api-key".to_owned(),
@@ -513,23 +516,6 @@ async fn seed_storage(
     )
     .await
     .expect("seed principal");
-    if matches!(topology, TestTopology::SubscriptionPreferencePair) {
-        PluginRegistryStore::insert_chain_entry(
-            storage.as_ref(),
-            PluginChainEntryInput {
-                principal_id: principal.id,
-                slot: PluginSlotKind::Router,
-                order: 1_000,
-                wasm_registry_id: BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
-                config: serde_json::json!({}),
-                sse_per_event: false,
-                batched_events_per_flush: 1,
-                batched_flush_ms: 100,
-            },
-        )
-        .await
-        .expect("seed subscription preference router filter");
-    }
     match auth_config {
         AuthConfig::NoneMode => None,
         AuthConfig::ApiKey => {

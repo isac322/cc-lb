@@ -20,7 +20,7 @@ use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
 use bytes::{Bytes, BytesMut};
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, DownstreamAuthMode, EventBusTransport, TlsConfig};
+use cc_lb_config::{Config, DownstreamAuthMode, TlsConfig};
 use cc_lb_engine::{
     BreakerRegistry, BreakerRuntimeConfig, BulkheadDispatch, BulkheadRegistry,
     BulkheadRuntimeConfig, CircuitBreakerDispatch, ClockHandle, DynamicView, DynamicViewBuilder,
@@ -229,8 +229,10 @@ pub enum BuildError {
     InvalidStorageKey,
     #[error("cluster token env {env} is missing")]
     ClusterTokenMissing { env: String },
-    #[error("pg_notify transport requires postgres storage pool")]
+    #[error("postgres storage pool unavailable for pg_notify fanout")]
     PgNotifyPoolUnavailable,
+    #[error("cluster.instance_url is required when storage.kind=postgres")]
+    ClusterInstanceUrlMissing,
 }
 
 impl App {
@@ -646,6 +648,12 @@ fn build_app_for_testing_postgres_config(database_url: &str) -> Config {
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
     config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
     config.downstream_auth.none_mode = None;
+    // The postgres backend always runs pg_notify fanout, which needs a peer
+    // identity and a shared cluster token. Postgres tests only run with
+    // CI_POSTGRES_URL set, so borrow it as the token env instead of mutating
+    // process-wide state from a library helper.
+    config.cluster.instance_url = Some("http://127.0.0.1:0".to_owned());
+    config.cluster.token_env = "CI_POSTGRES_URL".to_owned();
     config
 }
 
@@ -664,6 +672,8 @@ async fn build_app_with_path_inner(
     clock: ClockHandle,
 ) -> Result<App, BuildError> {
     config.validate()?;
+    validate_cluster_token_before_storage(&config)?;
+
     let (
         managed_store,
         storage,
@@ -723,6 +733,8 @@ pub async fn build_app_with_storage(
     aead: Arc<AeadService>,
     clock: ClockHandle,
 ) -> Result<App, BuildError> {
+    validate_cluster_token_before_storage(&config)?;
+
     let opened_scheduler = crate::scheduler_factory::open_scheduler_storage(
         &config.storage,
         &config.scheduler,
@@ -1127,9 +1139,9 @@ async fn build_app_with_storage_inner(
         let _ = &mut event_fanout_tasks;
         let _ = &mut internal_partials_state;
     }
-    let event_bus: Arc<dyn cc_lb_control::RequestEventBus> = match config.event_bus.transport {
-        EventBusTransport::InMemory => Arc::new(in_memory_bus.clone()),
-        EventBusTransport::PgNotify => {
+    let event_bus: Arc<dyn cc_lb_control::RequestEventBus> = match &config.storage {
+        cc_lb_config::StorageConfig::Sqlite { .. } => Arc::new(in_memory_bus.clone()),
+        cc_lb_config::StorageConfig::Postgres { .. } => {
             #[cfg(not(feature = "postgres"))]
             {
                 return Err(BuildError::StorageFactory(
@@ -1154,13 +1166,13 @@ async fn build_app_with_storage_inner(
                     .cluster
                     .instance_url
                     .clone()
-                    .ok_or(BuildError::PgNotifyPoolUnavailable)?;
+                    .ok_or(BuildError::ClusterInstanceUrlMissing)?;
 
                 event_fanout_tasks.push(cc_lb_engine::PgNotifier::spawn_with_channel(
                     pg_pool.clone(),
                     notify_rx,
                     retention.clone(),
-                    instance_url,
+                    instance_url.clone(),
                     config.event_bus.pg_notify_channel.clone(),
                     event_fanout_shutdown_rx.clone(),
                 ));
@@ -1177,13 +1189,16 @@ async fn build_app_with_storage_inner(
                     http_client,
                     secrecy::SecretString::from(cluster_token.clone()),
                     config.event_bus.pg_notify_channel.clone(),
+                    instance_url,
                     event_fanout_shutdown_rx.clone(),
                 ));
 
+                let initial_storage_tail_cursor = storage.current_request_event_cursor().await?;
                 event_fanout_tasks.push(cc_lb_engine::StorageTailPoller::spawn(
                     storage.clone(),
                     storage_tail_tx.clone(),
                     Duration::from_millis(config.event_bus.storage_tail_poll_interval_ms.max(1)),
+                    initial_storage_tail_cursor,
                     event_fanout_shutdown_rx.clone(),
                 ));
 
@@ -2035,10 +2050,26 @@ fn spawn_reload_watcher(config_watcher: Arc<ConfigWatcher>) -> JoinHandle<()> {
 }
 
 #[cfg(feature = "postgres")]
+fn validate_cluster_token_before_storage(config: &Config) -> Result<(), BuildError> {
+    if matches!(config.storage, cc_lb_config::StorageConfig::Postgres { .. }) {
+        load_cluster_token(config)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "postgres"))]
+fn validate_cluster_token_before_storage(_config: &Config) -> Result<(), BuildError> {
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
 fn load_cluster_token(config: &Config) -> Result<String, BuildError> {
-    std::env::var(&config.cluster.token_env).map_err(|_| BuildError::ClusterTokenMissing {
-        env: config.cluster.token_env.clone(),
-    })
+    std::env::var(&config.cluster.token_env)
+        .ok()
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| BuildError::ClusterTokenMissing {
+            env: config.cluster.token_env.clone(),
+        })
 }
 
 struct InMemoryCurrentConfig {
@@ -3326,6 +3357,42 @@ mod tests {
             hot_engine_cfg.allocation_strategy,
             cc_lb_runtime_wasmtime::HotEngineAllocationStrategy::OnDemand,
         );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_startup_rejects_missing_cluster_token_before_storage_connect() {
+        let mut config = Config {
+            storage: cc_lb_config::StorageConfig::Postgres {
+                url: "postgres://127.0.0.1:1/cc_lb".to_owned(),
+                pool: cc_lb_config::PostgresPoolConfig::default(),
+            },
+            ..Config::default()
+        };
+        config.cluster.instance_url = Some("http://127.0.0.1:9091".to_owned());
+        config.cluster.token_env = format!(
+            "CC_LB_TEST_MISSING_CLUSTER_TOKEN_{}",
+            uuid::Uuid::now_v7().simple()
+        );
+
+        let preflight_result = preflight::run_offline(
+            &config,
+            preflight::PreflightOptions { skip_bind: true },
+            Arc::new(cc_lb_engine::SystemClock),
+        )
+        .await;
+        assert!(matches!(
+            preflight_result,
+            Err(preflight::PreflightError::ClusterTokenMissing(env))
+                if env == config.cluster.token_env
+        ));
+
+        let result = build_app(config.clone(), Arc::new(cc_lb_engine::SystemClock)).await;
+
+        assert!(matches!(
+            result,
+            Err(BuildError::ClusterTokenMissing { env }) if env == config.cluster.token_env
+        ));
     }
 
     async fn assert_admin_state(router: Router, expected: &str) {

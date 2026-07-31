@@ -54,6 +54,41 @@ describe('Hint', () => {
     expect(screen.getByTestId('hint-content')).toBeDefined();
   });
 
+  it('leaves children untouched when no label is provided', () => {
+    const onChildClick = vi.fn();
+    const onParentClick = vi.fn();
+    render(
+      <div onClick={onParentClick}>
+        <Hint label="">
+          <button type="button" onClick={onChildClick}>
+            Click me
+          </button>
+        </Hint>
+      </div>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Click me' }));
+    expect(onChildClick).toHaveBeenCalledOnce();
+    expect(onParentClick).toHaveBeenCalledOnce();
+  });
+  it('can preserve click bubbling when requested', () => {
+    const onChildClick = vi.fn();
+    const onParentClick = vi.fn();
+    render(
+      <div onClick={onParentClick}>
+        <Hint label="Tooltip Content" stopClickPropagation={false}>
+          <button type="button" onClick={onChildClick}>
+            Click me
+          </button>
+        </Hint>
+      </div>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Click me' }));
+    expect(onChildClick).toHaveBeenCalledOnce();
+    expect(onParentClick).toHaveBeenCalledOnce();
+  });
+
   it('preserves child click handling without bubbling', () => {
     const onChildClick = vi.fn();
     const onParentClick = vi.fn();

@@ -296,6 +296,10 @@ fn test_config(database_url: &str) -> Config {
     config.admin.token = Some(ADMIN_TOKEN.to_owned());
     config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
     config.downstream_auth.none_mode = None;
+    // Postgres always runs pg_notify fanout; borrow the always-set CI env as the
+    // shared cluster token so the app can build.
+    config.cluster.instance_url = Some("http://127.0.0.1:0".to_owned());
+    config.cluster.token_env = "CI_POSTGRES_URL".to_owned();
     config
 }
 

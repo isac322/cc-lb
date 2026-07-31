@@ -206,7 +206,6 @@ path = "$TMP_DIR/cc-lb.sqlite"
 
 [event_bus]
 broadcast_capacity = 4096
-transport = "in_memory"
 storage_tail_poll_interval_ms = 250
 
 [aead]

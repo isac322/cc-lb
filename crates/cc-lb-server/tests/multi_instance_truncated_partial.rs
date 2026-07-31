@@ -145,6 +145,7 @@ async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
         reqwest::Client::new(),
         SecretString::new(consumer_token.to_owned().into()),
         channel,
+        "http://consumer.local".to_owned(),
         listener_shutdown_rx,
     );
 

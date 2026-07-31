@@ -81,7 +81,10 @@ impl PgNotifier {
             return;
         };
         let full_update = RequestEventUpdate::Partial(partial.clone());
-        let payload = match serde_json::to_vec(&full_update) {
+        let inline_payload = match serde_json::to_vec(&super::protocol::InlinePartialNotify {
+            update: &full_update,
+            producer_url: self.cluster_instance_url.as_str(),
+        }) {
             Ok(payload) => payload,
             Err(error) => {
                 record_notify_dropped(NotifyDropReason::SerializeError);
@@ -90,9 +93,17 @@ impl PgNotifier {
             }
         };
 
-        let (notify_payload, outcome) = if notify_payload_fits_inline(payload.len()) {
-            (payload, NotifySentOutcome::Sent)
+        let (notify_payload, outcome) = if notify_payload_fits_inline(inline_payload.len()) {
+            (inline_payload, NotifySentOutcome::Sent)
         } else {
+            let payload = match serde_json::to_vec(&full_update) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    record_notify_dropped(NotifyDropReason::SerializeError);
+                    tracing::warn!(%error, "retained partial serialization failed");
+                    return;
+                }
+            };
             self.retention.insert(partial.event_id.clone(), payload);
             let marker = match serde_json::to_vec(&TruncatedPartialNotify {
                 event_id: partial.event_id,

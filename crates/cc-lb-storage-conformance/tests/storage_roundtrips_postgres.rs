@@ -277,10 +277,10 @@ fn plugin_registry_registry_by_id_returns_seeded_builtin_subscription_preference
 }
 
 #[test]
-fn plugin_registry_insert_chain_entry_with_builtin_subscription_preference_succeeds_postgres() {
+fn plugin_registry_created_principal_has_builtin_subscription_preference_chain_entry_postgres() {
     run_postgres_scenario(
-        "insert_chain_entry_with_builtin_subscription_preference_succeeds",
-        plugin_registry_store::insert_chain_entry_with_builtin_subscription_preference_succeeds,
+        "created_principal_has_builtin_subscription_preference_chain_entry",
+        plugin_registry_store::created_principal_has_builtin_subscription_preference_chain_entry,
     );
 }
 

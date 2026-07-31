@@ -55,6 +55,8 @@ use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
 use crate::reconcile::collect_revision_hash;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
+/// Maximum number of user-supplied router filters. The built-in
+/// `subscription-preference` entry is structural router-chain state.
 const MAX_ROUTER_CHAIN_DEPTH: usize = 16;
 
 pub struct Stores {
@@ -860,14 +862,17 @@ async fn build_router_pipeline(
     if router_entries.is_empty() {
         return Ok(None);
     }
-    if router_entries.len() > MAX_ROUTER_CHAIN_DEPTH {
+    let user_router_filter_count = router_entries
+        .iter()
+        .filter(|entry| entry.wasm_registry_id != BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
+        .count();
+    if user_router_filter_count > MAX_ROUTER_CHAIN_DEPTH {
         return Ok(Some(Arc::new(RouterPipelineCache {
             user_filters: Vec::new(),
             terminal: principal.router_terminal_strategy.clone(),
             instantiation_error: Some(Arc::<str>::from(format!(
-                "router chain depth {} exceeds maximum {}",
-                router_entries.len(),
-                MAX_ROUTER_CHAIN_DEPTH
+                "router user filter depth {} exceeds maximum {}",
+                user_router_filter_count, MAX_ROUTER_CHAIN_DEPTH
             ))),
         })));
     }
@@ -1221,6 +1226,92 @@ mod tests {
     };
 
     const MODEL: &str = "claude-sonnet-4-5-20250929";
+
+    /// Stand-in for a user-uploaded router filter so ordering and dedupe can be
+    /// observed without a wasm runtime.
+    fn plugin_ids(filters: &[Arc<dyn FilterPlugin>]) -> Vec<Uuid> {
+        filters.iter().map(|filter| filter.plugin_id()).collect()
+    }
+
+    async fn router_pipeline_for_seeded_principal(
+        include_router_entries: bool,
+    ) -> Option<Arc<RouterPipelineCache>> {
+        let (dir, storage) = storage_fixture(9).await;
+        let stores = stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
+        );
+        let runtime = Arc::new(
+            cc_lb_runtime_wasmtime::WasmtimeRuntime::new(Default::default()).expect("runtime"),
+        );
+        let principal = PrincipalStore::create(
+            storage.as_ref(),
+            cc_lb_storage_api::PrincipalCreate {
+                name: "pipeline-wiring".to_owned(),
+                kind: cc_lb_storage_api::PrincipalKind::Machine,
+                allowed_models: vec!["*".to_owned()],
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+                cache_keepalive: None,
+            },
+            1,
+        )
+        .await
+        .expect("principal created");
+        let router_entries = if include_router_entries {
+            PluginRegistryStore::list_chain_for_principal(
+                storage.as_ref(),
+                principal.id,
+                cc_lb_storage_api::PluginSlotKind::Router,
+            )
+            .await
+            .expect("seeded router chain")
+        } else {
+            Vec::new()
+        };
+        let registry = PluginRegistryStore::list_registry(storage.as_ref(), None, 100)
+            .await
+            .expect("plugin registry")
+            .into_iter()
+            .map(|entry| (entry.id, entry))
+            .collect();
+
+        let mut slot_keys = HashSet::new();
+        let pipeline = build_router_pipeline(
+            &stores,
+            &runtime,
+            dir.path(),
+            &principal,
+            router_entries,
+            &registry,
+            &mut slot_keys,
+        )
+        .await
+        .expect("pipeline builds");
+        drop(dir);
+        pipeline
+    }
+
+    #[tokio::test]
+    async fn seeded_subscription_preference_chain_yields_the_builtin_filter() {
+        let pipeline = router_pipeline_for_seeded_principal(true)
+            .await
+            .expect("seeded entry produces a router pipeline");
+
+        assert!(pipeline.instantiation_error.is_none());
+        assert_eq!(
+            plugin_ids(&pipeline.user_filters),
+            vec![BUILTIN_SUBSCRIPTION_PREFERENCE_ID]
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_router_chain_yields_no_pipeline() {
+        assert!(
+            router_pipeline_for_seeded_principal(false).await.is_none(),
+            "an absent chain means no router filter pipeline"
+        );
+    }
 
     #[derive(Clone)]
     struct FakePromptCacheObservationStore {

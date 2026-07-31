@@ -438,10 +438,12 @@ export function Hint({
   label,
   children,
   side = 'top',
+  stopClickPropagation = true,
 }: {
   label: ReactNode;
   children: ReactNode;
   side?: 'top' | 'right' | 'bottom' | 'left';
+  stopClickPropagation?: boolean;
 }) {
   const [engaged, setEngaged] = useState(false);
   const [open, setOpen] = useState(false);
@@ -452,6 +454,7 @@ export function Hint({
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, []);
+  if (!label) return children;
 
   if (!engaged) {
     if (isValidElement<HintChildProps>(children)) {
@@ -474,7 +477,7 @@ export function Hint({
           setOpen(true);
         },
         onClick: (e) => {
-          e.stopPropagation();
+          if (stopClickPropagation) e.stopPropagation();
           childElement.props.onClick?.(e);
         },
       });
@@ -494,7 +497,9 @@ export function Hint({
           setEngaged(true);
           setOpen(true);
         }}
-        onClick={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          if (stopClickPropagation) e.stopPropagation();
+        }}
       >
         {children}
       </span>
@@ -506,7 +511,7 @@ export function Hint({
       <BasePopover.Trigger
         delay={200}
         onClick={(event: React.MouseEvent) => {
-          event.stopPropagation();
+          if (stopClickPropagation) event.stopPropagation();
         }}
         openOnHover
         render={isValidElement(children) ? children : <span />}

@@ -24,13 +24,14 @@ where
         storage: Arc<S>,
         tx: broadcast::Sender<StorageTailUpdate>,
         poll_interval: Duration,
+        initial_cursor: u64,
         shutdown_rx: watch::Receiver<bool>,
     ) -> JoinHandle<()> {
         let poller = Self {
             storage,
             tx,
             poll_interval,
-            last_seen: AtomicU64::new(0),
+            last_seen: AtomicU64::new(initial_cursor),
         };
         tokio::spawn(poller.run(shutdown_rx))
     }

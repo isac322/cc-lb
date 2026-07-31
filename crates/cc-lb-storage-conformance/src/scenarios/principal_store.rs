@@ -35,6 +35,7 @@ where
     principal_allowed_upstreams_roundtrip(Arc::clone(&backend)).await?;
     default_limits_roundtrip(Arc::clone(&backend)).await?;
     router_terminal_strategy_roundtrip(Arc::clone(&backend)).await?;
+    subscription_preference_is_seeded_as_router_entry(Arc::clone(&backend)).await?;
     soft_delete_excludes_default_list(Arc::clone(&backend)).await?;
     soft_delete_cascades_plugin_chains(Arc::clone(&backend)).await?;
     hard_delete_removes_unreferenced(Arc::clone(&backend)).await?;
@@ -300,6 +301,36 @@ where
         ensure!(
             serde_json::to_value(&fetched.router_terminal_strategy)? == json!("random"),
             "terminal strategy persists"
+        );
+        Ok(())
+    })
+    .await
+}
+
+pub async fn subscription_preference_is_seeded_as_router_entry<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: AuditStore + PrincipalStore + PluginRegistryStore,
+{
+    with_fixture(backend, |storage| async move {
+        let record = PrincipalStore::create(&*storage, principal_create(16), BASE_TS).await?;
+        let entries = PluginRegistryStore::list_chain_for_principal(
+            &*storage,
+            record.id,
+            PluginSlotKind::Router,
+        )
+        .await?;
+        ensure!(
+            entries.len() == 1,
+            "new principals must receive exactly one subscription-preference router entry"
+        );
+        ensure!(
+            entries[0].wasm_registry_id == cc_lb_storage_api::BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+            "the seeded router entry must be subscription-preference"
+        );
+        ensure!(
+            entries[0].order == 0,
+            "the seeded router entry uses the reserved zero order"
         );
         Ok(())
     })
