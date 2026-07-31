@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { Filter, RefreshCw, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { z } from 'zod';
+import * as z from 'zod';
 import {
   Badge,
   Button,

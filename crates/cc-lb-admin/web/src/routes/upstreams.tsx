@@ -27,7 +27,7 @@ import {
   YAxis,
 } from 'recharts';
 import { toast } from 'sonner';
-import { z } from 'zod';
+import * as z from 'zod';
 import {
   Badge,
   Button,
