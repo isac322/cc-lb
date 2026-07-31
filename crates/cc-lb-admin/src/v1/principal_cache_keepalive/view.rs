@@ -1,3 +1,5 @@
+use std::collections::{BTreeSet, HashMap};
+
 mod serialize;
 mod wire;
 
@@ -6,8 +8,10 @@ use cc_lb_pricing::PriceCatalog;
 use cc_lb_storage_api::{
     CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListItem,
     CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore, CacheKeepaliveSessionRecord,
-    CacheKeepaliveSessionStatus, Storage, StorageError, StorageResult, UpstreamStore,
+    CacheKeepaliveSessionStatus, CacheKeepaliveTurnRecord, Storage, StorageError, StorageResult,
+    UpstreamStore,
 };
+use uuid::Uuid;
 
 use serialize::{config_snapshot, dollars_from_micros, raw_record, ttl_name};
 use wire::CacheKeepaliveTurnResponse;
@@ -29,6 +33,44 @@ pub(super) struct CacheKeepaliveViewContext<'a> {
 struct LoadedActivity {
     activity: crate::cache_keepalive_view::CacheKeepaliveActivityView,
     session: Option<CacheKeepaliveSessionRecord>,
+}
+
+pub(crate) struct CacheKeepaliveActivityBatch {
+    turns_by_session: HashMap<String, Vec<CacheKeepaliveTurnRecord>>,
+}
+
+impl CacheKeepaliveActivityBatch {
+    pub(crate) fn from_turns(turns: Vec<CacheKeepaliveTurnRecord>) -> Self {
+        let mut turns_by_session: HashMap<String, Vec<CacheKeepaliveTurnRecord>> = HashMap::new();
+        for turn in turns {
+            turns_by_session
+                .entry(turn.session_key_hash.clone())
+                .or_default()
+                .push(turn);
+        }
+        Self { turns_by_session }
+    }
+
+    fn turns_for_item(
+        &self,
+        item: &CacheKeepaliveSessionListItem,
+    ) -> StorageResult<&[CacheKeepaliveTurnRecord]> {
+        let CacheKeepaliveSessionEntrySource::Session = item.source else {
+            return Ok(&[]);
+        };
+        let session_key_hash =
+            item.session_key_hash
+                .as_deref()
+                .ok_or_else(|| StorageError::InvalidInput {
+                    field: "cache_keepalive_session_key_hash".to_owned(),
+                    reason: "session entry is missing its session key hash".to_owned(),
+                })?;
+        let turns = match self.turns_by_session.get(session_key_hash) {
+            Some(turns) => turns.as_slice(),
+            None => &[],
+        };
+        Ok(turns)
+    }
 }
 
 pub(super) async fn list_all(
@@ -57,15 +99,45 @@ pub(super) async fn list_all(
     }
 }
 
-pub(super) async fn summary_for_items(
-    context: &CacheKeepaliveViewContext<'_>,
+pub(super) async fn load_activity_batch<'a>(
+    storage: &dyn Storage,
+    principal_id: &str,
+    items: impl IntoIterator<Item = &'a CacheKeepaliveSessionListItem>,
+) -> StorageResult<CacheKeepaliveActivityBatch> {
+    let mut session_key_hashes = Vec::new();
+    for item in items {
+        match item.source {
+            CacheKeepaliveSessionEntrySource::Session => {
+                session_key_hashes.push(item.session_key_hash.clone().ok_or_else(|| {
+                    StorageError::InvalidInput {
+                        field: "cache_keepalive_session_key_hash".to_owned(),
+                        reason: "session entry is missing its session key hash".to_owned(),
+                    }
+                })?);
+            }
+            CacheKeepaliveSessionEntrySource::Decision => {}
+        }
+    }
+    let turns = CacheKeepaliveSessionReadStore::list_cache_keepalive_turns_for_sessions(
+        storage,
+        principal_id,
+        &session_key_hashes,
+    )
+    .await?;
+    Ok(CacheKeepaliveActivityBatch::from_turns(turns))
+}
+
+pub(crate) fn summary_for_items(
+    catalog: &PriceCatalog,
+    now_ms: u64,
     items: &[CacheKeepaliveSessionListItem],
+    batch: &CacheKeepaliveActivityBatch,
 ) -> StorageResult<CacheKeepaliveSummaryResponse> {
     let mut renewing_now = 0_u64;
     let mut sessions_last_5m = 0_u64;
     let mut renewals_fired = 0_u64;
     let mut cost_saved_micros = 0_i64;
-    let cutoff = context.now_ms.saturating_sub(FIVE_MINUTES_MS);
+    let cutoff = now_ms.saturating_sub(FIVE_MINUTES_MS);
     for item in items {
         if item.last_message_at_ms >= cutoff {
             sessions_last_5m = sessions_last_5m.saturating_add(1);
@@ -74,8 +146,9 @@ pub(super) async fn summary_for_items(
             renewing_now = renewing_now.saturating_add(1);
         }
         renewals_fired = renewals_fired.saturating_add(u64::from(item.refresh_count.unwrap_or(0)));
-        let loaded = load_activity(context, item).await?;
-        if let Some(pnl) = loaded.activity.pnl {
+        // Summary P&L depends only on list items and turns; never load encrypted sessions.
+        let activity = activity_for_item(catalog, now_ms, item, None, batch)?;
+        if let Some(pnl) = activity.pnl {
             cost_saved_micros = cost_saved_micros.saturating_add(pnl.net_micros);
         }
     }
@@ -87,20 +160,51 @@ pub(super) async fn summary_for_items(
     })
 }
 
-pub(super) async fn row_for_item(
+pub(super) fn row_for_item(
     context: &CacheKeepaliveViewContext<'_>,
     item: &CacheKeepaliveSessionListItem,
+    batch: &CacheKeepaliveActivityBatch,
+    upstream_names: &HashMap<Uuid, String>,
 ) -> StorageResult<CacheKeepaliveRowResponse> {
-    let loaded = load_activity(context, item).await?;
-    row_from_loaded(context, item, &loaded).await
+    // List rows do not expose session-only next-renewal/raw fields.
+    let activity = activity_for_item(context.catalog, context.now_ms, item, None, batch)?;
+    row_from_activity(
+        context.max_attempts,
+        item,
+        &activity,
+        upstream_names.get(&item.upstream_id).cloned(),
+    )
+}
+
+pub(super) async fn list_upstream_names(
+    storage: &dyn Storage,
+    items: &[CacheKeepaliveSessionListItem],
+) -> StorageResult<HashMap<Uuid, String>> {
+    if items.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let upstream_ids = items
+        .iter()
+        .map(|item| item.upstream_id)
+        .collect::<BTreeSet<_>>();
+    let mut upstream_names = HashMap::with_capacity(upstream_ids.len());
+    for upstream_id in upstream_ids {
+        if let Some(upstream) = UpstreamStore::get_by_id(storage, upstream_id).await? {
+            upstream_names.insert(upstream_id, upstream.name);
+        }
+    }
+    Ok(upstream_names)
 }
 
 pub(super) async fn detail_for_item(
     context: &CacheKeepaliveViewContext<'_>,
     item: &CacheKeepaliveSessionListItem,
 ) -> StorageResult<CacheKeepaliveDetailResponse> {
-    let loaded = load_activity(context, item).await?;
-    let row = row_from_loaded(context, item, &loaded).await?;
+    let loaded = load_detail_activity(context, item).await?;
+    let upstream = UpstreamStore::get_by_id(context.storage, item.upstream_id)
+        .await?
+        .map(|upstream| upstream.name);
+    let row = row_from_activity(context.max_attempts, item, &loaded.activity, upstream)?;
     let total_avoided = loaded.activity.pnl.map_or(0, |pnl| pnl.avoided_micros);
     let total_spent = loaded.activity.pnl.map_or(0, |pnl| pnl.spent_micros);
     let renewal_tokens = loaded.activity.turns.iter().fold(0_u64, |total, turn| {
@@ -138,30 +242,27 @@ pub(super) async fn detail_for_item(
     })
 }
 
-async fn row_from_loaded(
-    context: &CacheKeepaliveViewContext<'_>,
+pub(crate) fn row_from_activity(
+    max_attempts: u32,
     item: &CacheKeepaliveSessionListItem,
-    loaded: &LoadedActivity,
+    activity: &crate::cache_keepalive_view::CacheKeepaliveActivityView,
+    upstream: Option<String>,
 ) -> StorageResult<CacheKeepaliveRowResponse> {
     Ok(CacheKeepaliveRowResponse {
         id: item.id.clone(),
         last_message_at_ms: item.last_message_at_ms,
-        state: loaded.activity.state,
+        state: activity.state,
         ttl: Some(ttl_name(item.ttl)),
         attempts: item.refresh_count,
         max_attempts: item
             .config_snapshot
             .as_ref()
-            .map_or(context.max_attempts, |config| {
-                config.max_refreshes_per_session
-            }),
+            .map_or(max_attempts, |config| config.max_refreshes_per_session),
         reason: item.reason.clone(),
         generation: item.generation,
-        upstream: UpstreamStore::get_by_id(context.storage, item.upstream_id)
-            .await?
-            .map(|upstream| upstream.name),
+        upstream,
         error: item.error.clone(),
-        net_pnl: dollars_from_micros(loaded.activity.pnl.map_or(0, |pnl| pnl.net_micros))?,
+        net_pnl: dollars_from_micros(activity.pnl.map_or(0, |pnl| pnl.net_micros))?,
         session_key_hash: item
             .session_key_hash
             .clone()
@@ -169,7 +270,25 @@ async fn row_from_loaded(
     })
 }
 
-async fn load_activity(
+pub(crate) fn activity_for_item(
+    catalog: &PriceCatalog,
+    now_ms: u64,
+    item: &CacheKeepaliveSessionListItem,
+    session: Option<&CacheKeepaliveSessionRecord>,
+    batch: &CacheKeepaliveActivityBatch,
+) -> StorageResult<crate::cache_keepalive_view::CacheKeepaliveActivityView> {
+    Ok(derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item,
+            session,
+            turns: batch.turns_for_item(item)?,
+            now_ms,
+        },
+        catalog,
+    ))
+}
+
+async fn load_detail_activity(
     context: &CacheKeepaliveViewContext<'_>,
     item: &CacheKeepaliveSessionListItem,
 ) -> StorageResult<LoadedActivity> {

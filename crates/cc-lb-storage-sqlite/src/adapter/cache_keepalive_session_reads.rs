@@ -9,6 +9,12 @@ use cc_lb_storage_api::{
     CacheKeepaliveSessionPage, CacheKeepaliveSessionReadStore, CacheKeepaliveTurnRecord,
     StorageResult,
 };
+use sqlx::{QueryBuilder, Sqlite};
+
+// Stay below SQLite's historical 999-variable default while reserving one bind
+// for principal_id. Rust byte order matches the column's default BINARY collation,
+// so sorted input makes concatenated chunk results globally ordered.
+const SESSION_HASH_BATCH_SIZE: usize = 900;
 
 const LIST_SQL: &str = "
 WITH entries AS (
@@ -183,6 +189,50 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         .await
         .map_err(map_sqlx_error)?;
         rows.into_iter().map(turn_from_row).collect()
+    }
+
+    async fn list_cache_keepalive_turns_for_sessions(
+        &self,
+        principal_id: &str,
+        session_key_hashes: &[String],
+    ) -> StorageResult<Vec<CacheKeepaliveTurnRecord>> {
+        if session_key_hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut session_key_hashes = session_key_hashes
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        session_key_hashes.sort_unstable();
+        session_key_hashes.dedup();
+
+        let mut turns = Vec::new();
+        for batch in session_key_hashes.chunks(SESSION_HASH_BATCH_SIZE) {
+            let mut query = QueryBuilder::<Sqlite>::new(
+                "SELECT source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, hit_miss, ts FROM cache_keepalive_turns WHERE principal_id = ",
+            );
+            query
+                .push_bind(principal_id)
+                .push(" AND session_key_hash IN (");
+            {
+                let mut hashes = query.separated(", ");
+                for session_key_hash in batch {
+                    hashes.push_bind(session_key_hash);
+                }
+                hashes
+                    .push_unseparated(") ORDER BY session_key_hash ASC, ts ASC, source_ref_id ASC");
+            }
+            let rows = query
+                .build()
+                .fetch_all(self.pool())
+                .await
+                .map_err(map_sqlx_error)?;
+            for row in rows {
+                turns.push(turn_from_row(row)?);
+            }
+        }
+        Ok(turns)
     }
 
     async fn get_cache_keepalive_decision_for_principal(

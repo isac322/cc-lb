@@ -181,6 +181,31 @@ pub trait CacheKeepaliveSessionReadStore: Send + Sync {
         session_key_hash: &str,
     ) -> StorageResult<Vec<CacheKeepaliveTurnRecord>>;
 
+    async fn list_cache_keepalive_turns_for_sessions(
+        &self,
+        principal_id: &str,
+        session_key_hashes: &[String],
+    ) -> StorageResult<Vec<CacheKeepaliveTurnRecord>> {
+        let mut session_key_hashes = session_key_hashes.to_vec();
+        session_key_hashes.sort_unstable();
+        session_key_hashes.dedup();
+
+        let mut turns = Vec::new();
+        for session_key_hash in session_key_hashes {
+            turns.extend(
+                self.list_cache_keepalive_turns(principal_id, &session_key_hash)
+                    .await?,
+            );
+        }
+        turns.sort_unstable_by(|left, right| {
+            left.session_key_hash
+                .cmp(&right.session_key_hash)
+                .then_with(|| left.ts.cmp(&right.ts))
+                .then_with(|| left.source_ref_id.cmp(&right.source_ref_id))
+        });
+        Ok(turns)
+    }
+
     async fn get_cache_keepalive_decision_for_principal(
         &self,
         principal_id: &str,

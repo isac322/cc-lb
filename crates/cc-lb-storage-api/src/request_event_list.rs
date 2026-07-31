@@ -5,11 +5,10 @@ use crate::storage_types_common::RequestEventStreamFilters;
 use cc_lb_request_log::RequestEventUpstream;
 
 /// Slim projection of a [`cc_lb_request_log::RequestEvent`] limited to the
-/// fields the admin request-event LIST view displays. Backends select and
-/// decode only these columns for a list page instead of the full row
-/// (including large `payload`/body columns), so paginated/polled list reads
-/// stop paying the full-event decode cost. The single-item DETAIL path still
-/// returns the full event byte-identically via `RequestEventStore::get_request_event`.
+/// fields the admin request-event LIST view displays. Backends may populate
+/// these fields from materialized columns or decode the stored payload once
+/// after selecting a bounded page; the DETAIL path still returns the full
+/// event byte-identically via `RequestEventStore::get_request_event`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RequestEventListItem {
     pub ts: u64,

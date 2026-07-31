@@ -1,9 +1,13 @@
 use cc_lb_pricing::PriceCatalog;
 use cc_lb_storage_api::{
-    CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionListItem, CacheKeepaliveTurnRecord,
-    CacheTtl,
+    CacheKeepaliveEnqueueState, CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionListItem,
+    CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus, CacheKeepaliveTurnRecord, CacheTtl,
 };
 use uuid::Uuid;
+
+use crate::v1::principal_cache_keepalive::view::{
+    CacheKeepaliveActivityBatch, activity_for_item, row_from_activity,
+};
 
 use super::status::CacheKeepaliveViewState;
 use super::{CacheKeepaliveActivitySource, derive_activity_view};
@@ -12,7 +16,8 @@ fn item(source: CacheKeepaliveSessionEntrySource) -> CacheKeepaliveSessionListIt
     CacheKeepaliveSessionListItem {
         id: "decision-only".to_owned(),
         source,
-        session_key_hash: None,
+        session_key_hash: matches!(source, CacheKeepaliveSessionEntrySource::Session)
+            .then(|| "session".to_owned()),
         principal_id: "principal".to_owned(),
         upstream_id: Uuid::nil(),
         last_message_at_ms: 1_730_000_000_000,
@@ -46,6 +51,33 @@ fn turn(source_ref_id: &str, ts: u64) -> CacheKeepaliveTurnRecord {
         cost_micros: 0,
         hit_miss: "hit".to_owned(),
         ts,
+    }
+}
+
+fn session() -> CacheKeepaliveSessionRecord {
+    CacheKeepaliveSessionRecord {
+        session_key_hash: "session".to_owned(),
+        principal_id: "principal".to_owned(),
+        accounting_key_id: None,
+        upstream_id: Uuid::nil(),
+        generation: 42,
+        refresh_count: 0,
+        first_scheduled_at_unix_secs: 1_730_000_000,
+        cache_anchor_at_unix_secs: 1_730_000_000,
+        run_at_unix_secs: 1_730_000_200,
+        ttl: CacheTtl::Ttl5m,
+        status: CacheKeepaliveSessionStatus::Active,
+        enqueue_state: CacheKeepaliveEnqueueState::Pending,
+        running_since_unix_secs: None,
+        current_job_key: "cache_keepalive:session:42".to_owned(),
+        encrypted_payload: b"must-not-be-loaded-for-list-summary".to_vec(),
+        display_reason: "agent-in-turn".to_owned(),
+        error: None,
+        config_snapshot: None,
+        terminal_reason: None,
+        expires_at_unix_secs: 1_730_000_300,
+        created_at_unix_secs: 1_730_000_000,
+        updated_at_unix_secs: 1_730_000_000,
     }
 }
 
@@ -85,4 +117,38 @@ fn cache_keepalive_activity_orders_turns_newest_first_without_fabricating_decisi
     assert_eq!(decision_view.net_pnl_display, "$0.00");
     assert_eq!(session_view.turns[0].source_ref_id, "newer");
     assert_eq!(session_view.turns[1].source_ref_id, "older");
+}
+
+#[test]
+fn batched_cache_keepalive_turns_preserve_serialized_row_behavior() {
+    // Given: the same list item and turn records as the legacy per-session row path.
+    let item = item(CacheKeepaliveSessionEntrySource::Session);
+    let turns = vec![turn("older", 100), turn("newer", 200)];
+    let catalog = PriceCatalog::new_empty();
+    let session = session();
+    let legacy_activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: Some(&session),
+            turns: &turns,
+            now_ms: 1_730_000_100_000,
+        },
+        catalog.as_ref(),
+    );
+
+    // When: the list row consumes those records from the shared batch without the encrypted session.
+    let batch = CacheKeepaliveActivityBatch::from_turns(turns);
+    let batched_activity =
+        activity_for_item(catalog.as_ref(), 1_730_000_100_000, &item, None, &batch)
+            .expect("batched activity");
+    let legacy_row = row_from_activity(12, &item, &legacy_activity, Some("primary".to_owned()))
+        .expect("legacy row");
+    let batched_row = row_from_activity(12, &item, &batched_activity, Some("primary".to_owned()))
+        .expect("batched row");
+
+    // Then: every serialized field remains byte-for-byte identical.
+    assert_eq!(
+        serde_json::to_vec(&batched_row).expect("serialize batched row"),
+        serde_json::to_vec(&legacy_row).expect("serialize legacy row"),
+    );
 }

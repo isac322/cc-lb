@@ -83,6 +83,29 @@ ORDER BY last_message_at_ms DESC, entry_id ASC
 LIMIT $10
 ";
 
+const LIST_TURNS_FOR_SESSIONS_SQL: &str = "
+SELECT
+    source_ref_id,
+    session_key_hash,
+    principal_id,
+    accounting_key_id,
+    upstream_id,
+    model,
+    input_tokens,
+    output_tokens,
+    cache_creation_input_tokens,
+    cache_creation_input_tokens_5m,
+    cache_creation_input_tokens_1h,
+    cache_read_input_tokens,
+    cost_micros,
+    hit_miss,
+    ts
+FROM cache_keepalive_turns
+WHERE principal_id = $1
+  AND session_key_hash = ANY($2)
+ORDER BY session_key_hash ASC, ts ASC, source_ref_id ASC
+";
+
 #[async_trait]
 impl CacheKeepaliveSessionReadStore for PostgresStorage {
     async fn list_cache_keepalive_sessions(
@@ -169,6 +192,23 @@ impl CacheKeepaliveSessionReadStore for PostgresStorage {
     ) -> StorageResult<Vec<CacheKeepaliveTurnRecord>> {
         let rows = sqlx::query("SELECT * FROM cache_keepalive_turns WHERE principal_id = $1 AND session_key_hash = $2 ORDER BY ts DESC, source_ref_id ASC")
             .bind(principal_id).bind(session_key_hash).fetch_all(&self.pool).await.map_err(map_sqlx_error)?;
+        rows.into_iter().map(turn_from_row).collect()
+    }
+
+    async fn list_cache_keepalive_turns_for_sessions(
+        &self,
+        principal_id: &str,
+        session_key_hashes: &[String],
+    ) -> StorageResult<Vec<CacheKeepaliveTurnRecord>> {
+        if session_key_hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(LIST_TURNS_FOR_SESSIONS_SQL)
+            .bind(principal_id)
+            .bind(session_key_hashes)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
         rows.into_iter().map(turn_from_row).collect()
     }
 
