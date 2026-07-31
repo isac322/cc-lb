@@ -42,7 +42,6 @@ vi.mock('../lib/queries', async () => {
     usePrincipalKeys: vi.fn(),
     useIssueKey: vi.fn(),
     useRevokeKey: vi.fn(),
-    useUpdatePrincipalSmartRouting: vi.fn(),
   };
 });
 
@@ -103,10 +102,6 @@ beforeEach(() => {
       dispatchEvent: vi.fn(),
     }),
   });
-  vi.mocked(queries.useUpdatePrincipalSmartRouting).mockReturnValue({
-    mutate: vi.fn(),
-    isPending: false,
-  } as unknown as ReturnType<typeof queries.useUpdatePrincipalSmartRouting>);
 });
 
 afterEach(() => {
