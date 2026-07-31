@@ -8,7 +8,7 @@ import {
 } from 'react';
 import { fmtMs, fmtN } from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
-import { cx } from '../primitives';
+import { cx, Skeleton } from '../primitives';
 import { deriveSetupOverhead } from './computeStageGroups';
 
 // -----------------------------------------------------------------------------
@@ -1190,12 +1190,16 @@ function clampPct(v: number): number {
 // Entry component
 // -----------------------------------------------------------------------------
 
+const LATENCY_LAYOUT_CLASS = 'space-y-3 min-h-80';
+
 export function LatencyTimeline({
   event,
   isPartial,
+  isLoading = false,
 }: {
   event: RequestEventWithPhase;
   isPartial?: boolean;
+  isLoading?: boolean;
 }) {
   const total = isPartial
     ? event.elapsed_ms || 0
@@ -1212,10 +1216,57 @@ export function LatencyTimeline({
     return { positioned: out, unaccountedStartMs: cursor };
   }, [stages]);
   const active = useActiveKey();
+  if (isLoading) {
+    return (
+      <div
+        role="status"
+        aria-busy="true"
+        aria-label="Loading latency detail"
+        className={LATENCY_LAYOUT_CLASS}
+        data-testid="latency-timeline-region"
+      >
+        <div className="space-y-2" aria-hidden="true">
+          {GROUP_ORDER.map((group) => (
+            <div key={group}>
+              <div className="flex items-center justify-between mb-0.5">
+                <Skeleton className="h-2.5 w-16" />
+                <Skeleton className="h-2.5 w-20" />
+              </div>
+              <Skeleton className="h-4 w-full" />
+            </div>
+          ))}
+        </div>
+        <div aria-hidden="true">
+          <div className="flex items-center justify-between mb-1">
+            <Skeleton className="h-2.5 w-20" />
+            <Skeleton className="h-2.5 w-16" />
+          </div>
+          <Skeleton className="h-6 w-full" />
+          <Skeleton className="mt-1 h-3 w-full" />
+          <div className="mt-2 flex gap-3">
+            <Skeleton className="h-2.5 w-12" />
+            <Skeleton className="h-2.5 w-14" />
+            <Skeleton className="h-2.5 w-12" />
+          </div>
+        </div>
+        <div className="border-t border-subtle pt-1.5" aria-hidden="true">
+          <Skeleton className="h-5 w-32" />
+        </div>
+        <div className="border-t border-subtle pt-1.5" aria-hidden="true">
+          <Skeleton className="h-5 w-40" />
+        </div>
+      </div>
+    );
+  }
 
   if (total <= 0) {
     return (
-      <div className="text-text-faint text-xs">No latency data recorded.</div>
+      <div
+        className="min-h-80 text-text-faint text-xs"
+        data-testid="latency-timeline-region"
+      >
+        No latency data recorded.
+      </div>
     );
   }
 
@@ -1224,7 +1275,7 @@ export function LatencyTimeline({
   const showStreamLane = markers.length > 0 && !isPartial;
 
   return (
-    <div className="space-y-3">
+    <div className={LATENCY_LAYOUT_CLASS} data-testid="latency-timeline-region">
       <div className="space-y-2">
         {GROUP_ORDER.map((g) => {
           const items = positioned.positioned.filter((p) => p.group === g);

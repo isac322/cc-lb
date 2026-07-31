@@ -8,7 +8,7 @@ import {
   type WarmupAttempt,
   type WarmupAttemptStatus,
 } from '../../../lib/queries';
-import { Button, cx, EmptyState, Spinner } from '../../ui/primitives';
+import { Button, cx, EmptyState, Skeleton, Spinner } from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
 import { OUTCOME_LABEL, REASON_LABEL } from './parts/copy';
 import { WarmupOutcomeBadge } from './parts/WarmupOutcomeBadge';
@@ -40,12 +40,16 @@ const FILTERS: { key: WarmupAttemptStatus | 'all'; label: string }[] = [
   { key: 'skipped', label: OUTCOME_LABEL.skipped },
 ];
 
+const ATTEMPT_SKELETON_ROWS = [0, 1, 2, 3, 4] as const;
+
 function OverviewStrip({
   attempts,
   horizon,
+  isPending,
 }: {
   attempts: WarmupAttempt[];
   horizon: Horizon;
+  isPending: boolean;
 }) {
   const now = Math.floor(Date.now() / 1000);
   const cutoff = horizon === 'all' ? 0 : now - HORIZON_SECS[horizon];
@@ -79,22 +83,40 @@ function OverviewStrip({
 
   return (
     <div className="px-3 py-2.5 border-b border-subtle shrink-0">
-      <div className="flex items-baseline gap-2 mb-1 flex-wrap">
+      <div className="flex min-h-5 items-baseline gap-2 mb-1 flex-wrap">
         <span className="text-xs text-text-muted">
           Last {horizon === 'all' ? 'all-time' : horizon}:
         </span>
-        <span className="text-sm font-medium text-text">{total} attempts</span>
-        <span className="text-[11px] text-text-faint">
-          · {counts.success} success · {failed} failed · {counts.skipped}{' '}
-          skipped
-        </span>
+        {isPending ? (
+          <>
+            <Skeleton className="h-4 w-20 self-center" />
+            <Skeleton className="h-3 w-40 self-center" />
+          </>
+        ) : (
+          <>
+            <span className="text-sm font-medium text-text">
+              {total} attempts
+            </span>
+            <span className="text-[11px] text-text-faint">
+              · {counts.success} success · {failed} failed · {counts.skipped}{' '}
+              skipped
+            </span>
+          </>
+        )}
       </div>
-      {dominantReason && failed > 0 && (
-        <p className="text-[11px] text-text-muted">
-          Most common failure:{' '}
-          <span className="text-text">{dominantReason}</span> ({maxCount}×)
-        </p>
-      )}
+      <div
+        className="min-h-4"
+        data-testid="warmup-history-dominant-failure-slot"
+      >
+        {isPending ? (
+          <Skeleton className="h-3 w-48" />
+        ) : dominantReason && failed > 0 ? (
+          <p className="text-[11px] text-text-muted">
+            Most common failure:{' '}
+            <span className="text-text">{dominantReason}</span> ({maxCount}×)
+          </p>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -128,6 +150,30 @@ function HorizonToggle({
   );
 }
 
+function AttemptListSkeleton() {
+  return (
+    <ul
+      aria-hidden="true"
+      className="flex flex-col gap-1"
+      data-testid="warmup-attempt-skeleton-list"
+    >
+      {ATTEMPT_SKELETON_ROWS.map((row) => (
+        <li data-testid="warmup-attempt-skeleton-row" key={row}>
+          <div className="w-full rounded-sm border border-subtle bg-overlay-1 px-2.5 py-1.5">
+            <div className="flex min-h-5 items-center gap-2 flex-wrap leading-tight">
+              <Skeleton className="h-2 w-2 shrink-0 rounded-full" />
+              <Skeleton className="h-3 w-16" />
+              <Skeleton className="h-5 w-16 rounded-sm" />
+              <Skeleton className="h-3 w-12" />
+            </div>
+            <Skeleton className="mt-0.5 h-4 w-3/4" />
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
   const [filter, setFilter] = useState<WarmupAttemptStatus | 'all'>('all');
   const [horizon, setHorizon] = useState<Horizon>('24h');
@@ -137,6 +183,7 @@ export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
     status: filter === 'all' ? null : filter,
     limit: 50,
   });
+  const attemptsPending = query.isPending;
 
   const allAttempts = useMemo(() => {
     return query.data?.pages.flatMap((p) => p.attempts ?? []) ?? [];
@@ -184,7 +231,11 @@ export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
             </button>
           </header>
 
-          <OverviewStrip attempts={allAttempts} horizon={horizon} />
+          <OverviewStrip
+            attempts={allAttempts}
+            horizon={horizon}
+            isPending={attemptsPending}
+          />
 
           <div className="px-3 py-2 border-b border-subtle shrink-0 flex flex-wrap gap-1">
             {FILTERS.map((f) => (
@@ -219,10 +270,8 @@ export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
                 selected ? 'w-[44%] shrink-0 border-r border-subtle' : 'flex-1',
               )}
             >
-              {query.isLoading ? (
-                <div className="flex items-center justify-center py-12">
-                  <Spinner />
-                </div>
+              {attemptsPending ? (
+                <AttemptListSkeleton />
               ) : allAttempts.length === 0 ? (
                 <EmptyState
                   title="No matching attempts"

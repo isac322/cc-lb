@@ -1,7 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { CacheKeepaliveDetail } from '../../../../lib/cacheKeepaliveApi';
 import * as queries from '../../../../lib/queries';
+import type { PolledDataResult } from '../../../../lib/usePolledData';
 import { SessionDetailPane } from '../SessionDetailPane';
 
 function renderWithProviders(ui: React.ReactElement) {
@@ -19,6 +21,54 @@ describe('SessionDetailPane', () => {
     document.body.innerHTML = '';
   });
 
+  it('keeps the detail structure mounted while the query is pending', () => {
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      isError: false,
+    } as unknown as PolledDataResult<CacheKeepaliveDetail, Error>);
+
+    const { container } = renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="a1f39c2b7e04"
+        onClose={() => {}}
+      />,
+    );
+
+    const pane = screen.getByTestId('session-detail-loading');
+    expect(pane.className).toBe('flex-1 min-w-0 overflow-y-auto');
+    expect(pane.getAttribute('aria-busy')).toBe('true');
+
+    const content = screen.getByTestId('session-detail-loading-content');
+    expect(content.className).toBe('flex flex-col gap-3 p-3');
+
+    const header = screen.getByText('Session detail').parentElement;
+    expect(header?.className).toContain('sticky');
+    expect(header?.className).toContain('px-3');
+    expect(screen.getByText('Close ▶')).toBeDefined();
+
+    const overview = screen.getByTestId('session-detail-overview-skeleton');
+    expect(overview.className).toContain('p-3');
+    expect(screen.getByText('Net P&L')).toBeDefined();
+
+    const metadata = screen.getByTestId('session-detail-metadata-skeleton');
+    expect(metadata.className).toContain('grid-cols-[100px_minmax(0,1fr)]');
+    expect(metadata.querySelectorAll('dt')).toHaveLength(7);
+    expect(metadata.querySelectorAll('dd')).toHaveLength(7);
+
+    const turns = screen.getByTestId('session-detail-turns-skeleton');
+    expect(turns.className).toContain('mt-2');
+    expect(screen.getByText('Message-by-message')).toBeDefined();
+    const turnCards = screen.getAllByTestId('session-detail-turn-skeleton');
+    expect(turnCards).toHaveLength(3);
+    expect(turnCards[0].className).toContain('px-3');
+    expect(turnCards[0].className).toContain('py-2.5');
+    expect(turnCards[1].className).toContain('px-3');
+    expect(turnCards[1].className).toContain('py-2');
+
+    expect(container.querySelector('svg.animate-spin')).toBeNull();
+  });
   it('renders Renewed active pending with exact labels and formatting', () => {
     vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
       data: {

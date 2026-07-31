@@ -5,7 +5,7 @@ import { fmtBytes, fmtMs } from '../../lib/format';
 import { useRequestEventDetail } from '../../lib/queries';
 import { useCopyButton } from '../../lib/useCopyButton';
 import { LatencyTimeline } from './latency/LatencyTimeline';
-import { Badge } from './primitives';
+import { Badge, Skeleton } from './primitives';
 import { CostPie } from './usage/CostPie';
 import { useActiveSlice } from './usage/PieChart';
 import { TokenPie } from './usage/TokenPie';
@@ -82,6 +82,10 @@ function RequestDetail({
   const merged: RequestEventWithPhase = detail.data
     ? ({ ...event, ...detail.data, _phase: 'final' } as RequestEventWithPhase)
     : event;
+  const isDetailPending = Boolean(detailId) && detail.isPending;
+  const hasUpstreamFailure = Boolean(
+    merged.upstream_error_type || merged.upstream_error_message,
+  );
 
   const hasAnyToken =
     (merged.input_tokens ?? 0) > 0 ||
@@ -134,10 +138,10 @@ function RequestDetail({
           event={merged}
           principalLabel={principalLabel}
           isPartial={isPartial}
+          isDetailPending={isDetailPending}
         />
 
-        {merged._phase === 'final' &&
-        (merged.upstream_error_type || merged.upstream_error_message) ? (
+        {merged._phase === 'final' && hasUpstreamFailure ? (
           <DetailSection title="Upstream Failure">
             <div className="bg-overlay-2 border border-subtle rounded p-3 space-y-2 min-w-0">
               {merged.upstream_error_type ? (
@@ -165,10 +169,17 @@ function RequestDetail({
           </div>
         ) : null}
 
-        {merged._phase === 'final' && merged.body_bytes != null ? (
+        {merged._phase === 'final' &&
+        (merged.body_bytes != null || isDetailPending) ? (
           <KvRow
             label="Body bytes"
-            value={<MonoNum>{fmtBytes(merged.body_bytes)}</MonoNum>}
+            value={
+              merged.body_bytes != null ? (
+                <MonoNum>{fmtBytes(merged.body_bytes)}</MonoNum>
+              ) : (
+                <Skeleton className="ml-auto h-3 w-20" />
+              )
+            }
           />
         ) : null}
 
@@ -185,7 +196,11 @@ function RequestDetail({
                   : DASH}
             </MonoNum>
           </div>
-          <LatencyTimeline event={merged} isPartial={isPartial} />
+          <LatencyTimeline
+            event={merged}
+            isPartial={isPartial}
+            isLoading={isDetailPending}
+          />
         </DetailSection>
       </div>
     </>

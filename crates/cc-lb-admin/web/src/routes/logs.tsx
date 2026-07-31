@@ -133,6 +133,7 @@ const INITIAL_LOGS_PAGE_PARAM: RecentEventsPageParam = {
   kind: 'initial',
   limit: LOGS_PAGE_SIZE,
 };
+const LOGS_RESERVED_ROW_COUNT = 10;
 
 function LogsPage() {
   const queryClient = useQueryClient();
@@ -209,6 +210,8 @@ function LogsPage() {
   }, [clampedPage, recent.data, recent.isPlaceholderData]);
 
   const live = useLiveEventStream(serverFilters, { enabled: effectiveTailing });
+  const initialRowsLoading =
+    (recent.isPending || recent.isPlaceholderData) && live.eventsMap.size === 0;
   const tailStatus = effectiveTailing
     ? live.permanentFailure
       ? 'failed'
@@ -661,10 +664,8 @@ function LogsPage() {
               events={pageRows}
               principalNameMap={principalNameMap}
               upstreamNameMap={upstreamNameMap}
-              loading={
-                (recent.isPending || recent.isPlaceholderData) &&
-                pageRows.length === 0
-              }
+              loading={initialRowsLoading}
+              reservedRowCount={LOGS_RESERVED_ROW_COUNT}
               liveFlashIds={
                 effectiveTailing && clampedPage === 0
                   ? recentLiveIds
@@ -676,21 +677,20 @@ function LogsPage() {
               emptyDescription="Adjust filters or enable live tail."
             />
           </div>
-          {pageRows.length > 0 && (
-            <LogsPagination
-              page={clampedPage}
-              pageCount={pageCount}
-              totalRows={Math.max(
-                visibleRows.length,
-                clampedPage * LOGS_PAGE_SIZE + pageRows.length,
-              )}
-              pageSize={LOGS_PAGE_SIZE}
-              hasMore={hasMore}
-              loadingNext={loadingNext}
-              onPrev={previousPage}
-              onNext={() => void nextPage()}
-            />
-          )}
+          <LogsPagination
+            page={clampedPage}
+            pageCount={pageCount}
+            totalRows={Math.max(
+              visibleRows.length,
+              clampedPage * LOGS_PAGE_SIZE + pageRows.length,
+            )}
+            pageSize={LOGS_PAGE_SIZE}
+            hasMore={hasMore}
+            loading={initialRowsLoading}
+            loadingNext={loadingNext}
+            onPrev={previousPage}
+            onNext={() => void nextPage()}
+          />
         </Card>
       </Section>
     </FullPage>

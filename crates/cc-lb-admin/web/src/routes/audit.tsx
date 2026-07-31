@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { Filter, RefreshCw, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { z } from 'zod';
+import * as z from 'zod';
 import {
   Badge,
   Button,
@@ -15,7 +15,7 @@ import {
   INPUT_CLASS,
   Modal,
   Section,
-  Skeleton,
+  SkeletonRow,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
 import { eventTime } from '../lib/api';
@@ -53,6 +53,32 @@ interface AuditEntryLike {
   payload?: Record<string, unknown> | null;
   [k: string]: unknown;
 }
+
+const AUDIT_COLUMN_CLASS_NAMES = [
+  'w-36 whitespace-nowrap',
+  'w-40 max-w-40 truncate',
+  'w-36 max-w-36 truncate',
+  'w-40',
+  'w-44 max-w-44 truncate',
+  'w-72 max-w-72 truncate',
+  'w-40 max-w-40 truncate',
+  'w-20 text-right',
+  'w-20 text-right',
+] as const;
+
+const AUDIT_SKELETON_CLASS_NAMES = [
+  'w-24',
+  'w-28',
+  'w-24',
+  'w-28',
+  'w-32',
+  'w-48',
+  'w-28',
+  'w-10 ml-auto',
+  'w-10 ml-auto',
+] as const;
+const AUDIT_COUNT_SLOT_CLASS =
+  'inline-flex min-w-5 shrink-0 items-center justify-end';
 
 function cleanAuditPayload(entry: AuditEntryLike): Record<string, unknown> {
   const DROP = new Set([
@@ -111,7 +137,26 @@ function AuditPage() {
       <Section
         title="Audit Trail"
         className="flex-1 min-h-0"
-        subtitle={`${sortedRows.length} admin actions · ${activeFilterCount ? `${activeFilterCount} filter${activeFilterCount > 1 ? 's' : ''} active` : 'unfiltered'}`}
+        subtitle={
+          <span className="inline-flex items-center gap-1.5">
+            <span
+              className={AUDIT_COUNT_SLOT_CLASS}
+              data-testid="audit-count-slot"
+            >
+              {audit.isLoading ? (
+                <span className="skeleton h-3 flex-1" aria-hidden="true" />
+              ) : (
+                sortedRows.length
+              )}
+            </span>
+            <span>
+              admin actions ·{' '}
+              {activeFilterCount
+                ? `${activeFilterCount} filter${activeFilterCount > 1 ? 's' : ''} active`
+                : 'unfiltered'}
+            </span>
+          </span>
+        }
         action={
           <div className="flex items-center gap-2">
             <Button
@@ -125,91 +170,158 @@ function AuditPage() {
         }
       >
         <Card className="flex-1 flex flex-col min-h-0">
-          <div className="p-3 border-b border-subtle flex flex-wrap gap-3 items-end shrink-0">
-            <Field label="Principal">
-              <select
-                className={`${INPUT_CLASS} w-44`}
-                value={filters.principal_id ?? ''}
-                onChange={(e) => setFilter('principal_id', e.target.value)}
-              >
-                <option value="">All principals</option>
-                {principals.data?.principals.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Upstream">
-              <select
-                className={`${INPUT_CLASS} w-44`}
-                value={filters.upstream ?? ''}
-                onChange={(e) => setFilter('upstream', e.target.value)}
-              >
-                <option value="">All upstreams</option>
-                {upstreams.data?.upstreams.map((u) => (
-                  <option key={u.id} value={u.name}>
-                    {u.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Route">
-              <input
-                className={`${INPUT_CLASS} w-44 font-mono`}
-                value={filters.route ?? ''}
-                onChange={(e) => setFilter('route', e.target.value)}
-                placeholder="/v1/messages"
-              />
-            </Field>
-            <Field label="Status">
-              <select
-                className={`${INPUT_CLASS} w-32`}
-                value={filters.status_class ?? ''}
-                onChange={(e) => setFilter('status_class', e.target.value)}
-              >
-                <option value="">All</option>
-                <option value="2xx">2xx</option>
-                <option value="4xx">4xx</option>
-                <option value="5xx">5xx</option>
-              </select>
-            </Field>
+          <div className="grid shrink-0 grid-cols-2 items-end gap-3 border-b border-subtle p-3 md:flex md:flex-wrap">
+            <div className="min-w-0">
+              <Field label="Principal">
+                <select
+                  className={`${INPUT_CLASS} w-full md:w-44`}
+                  value={filters.principal_id ?? ''}
+                  onChange={(e) => setFilter('principal_id', e.target.value)}
+                >
+                  <option value="">All principals</option>
+                  {principals.data?.principals.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+            <div className="min-w-0">
+              <Field label="Upstream">
+                <select
+                  className={`${INPUT_CLASS} w-full md:w-44`}
+                  value={filters.upstream ?? ''}
+                  onChange={(e) => setFilter('upstream', e.target.value)}
+                >
+                  <option value="">All upstreams</option>
+                  {upstreams.data?.upstreams.map((u) => (
+                    <option key={u.id} value={u.name}>
+                      {u.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+            <div className="min-w-0">
+              <Field label="Route">
+                <input
+                  className={`${INPUT_CLASS} w-full font-mono md:w-44`}
+                  value={filters.route ?? ''}
+                  onChange={(e) => setFilter('route', e.target.value)}
+                  placeholder="/v1/messages"
+                />
+              </Field>
+            </div>
+            <div className="min-w-0">
+              <Field label="Status">
+                <select
+                  className={`${INPUT_CLASS} w-full md:w-32`}
+                  value={filters.status_class ?? ''}
+                  onChange={(e) => setFilter('status_class', e.target.value)}
+                >
+                  <option value="">All</option>
+                  <option value="2xx">2xx</option>
+                  <option value="4xx">4xx</option>
+                  <option value="5xx">5xx</option>
+                </select>
+              </Field>
+            </div>
             {activeFilterCount ? (
-              <Button
-                size="sm"
-                iconLeft={<X className="w-3 h-3" />}
-                onClick={() => navigate({ search: {} })}
-              >
-                Clear
-              </Button>
+              <div className="col-span-2 md:col-auto">
+                <Button
+                  size="sm"
+                  iconLeft={<X className="w-3 h-3" />}
+                  onClick={() => navigate({ search: {} })}
+                >
+                  Clear
+                </Button>
+              </div>
             ) : null}
           </div>
 
           <div className="flex-1 overflow-auto min-h-0">
-            <table className="min-w-[1080px] w-full font-mono text-xs">
+            <table className="table-fixed min-w-[1080px] w-full font-mono text-xs">
+              <colgroup>
+                {AUDIT_COLUMN_CLASS_NAMES.map((className, index) => (
+                  <col key={index} className={className} />
+                ))}
+              </colgroup>
               <thead className="table-header sticky top-0 z-10">
                 <tr className="text-[10px] uppercase tracking-wider">
-                  <th className="text-left px-3 py-2">
+                  <th
+                    className={cx(
+                      'text-left px-3 py-2',
+                      AUDIT_COLUMN_CLASS_NAMES[0],
+                    )}
+                  >
                     Timestamp <span className="font-mono ml-1">↓</span>
                   </th>
-                  <th className="text-left px-3 py-2">Principal</th>
-                  <th className="text-left px-3 py-2">Actor</th>
-                  <th className="text-left px-3 py-2">Route</th>
-                  <th className="text-left px-3 py-2">Upstream</th>
-                  <th className="text-left px-3 py-2">Action</th>
-                  <th className="text-left px-3 py-2">Kind</th>
-                  <th className="text-right px-3 py-2">Status</th>
-                  <th className="text-right px-3 py-2">Detail</th>
+                  <th
+                    className={cx(
+                      'text-left px-3 py-2',
+                      AUDIT_COLUMN_CLASS_NAMES[1],
+                    )}
+                  >
+                    Principal
+                  </th>
+                  <th
+                    className={cx(
+                      'text-left px-3 py-2',
+                      AUDIT_COLUMN_CLASS_NAMES[2],
+                    )}
+                  >
+                    Actor
+                  </th>
+                  <th
+                    className={cx(
+                      'text-left px-3 py-2',
+                      AUDIT_COLUMN_CLASS_NAMES[3],
+                    )}
+                  >
+                    Route
+                  </th>
+                  <th
+                    className={cx(
+                      'text-left px-3 py-2',
+                      AUDIT_COLUMN_CLASS_NAMES[4],
+                    )}
+                  >
+                    Upstream
+                  </th>
+                  <th
+                    className={cx(
+                      'text-left px-3 py-2',
+                      AUDIT_COLUMN_CLASS_NAMES[5],
+                    )}
+                  >
+                    Action
+                  </th>
+                  <th
+                    className={cx(
+                      'text-left px-3 py-2',
+                      AUDIT_COLUMN_CLASS_NAMES[6],
+                    )}
+                  >
+                    Kind
+                  </th>
+                  <th className={cx('px-3 py-2', AUDIT_COLUMN_CLASS_NAMES[7])}>
+                    Status
+                  </th>
+                  <th className={cx('px-3 py-2', AUDIT_COLUMN_CLASS_NAMES[8])}>
+                    Detail
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {audit.isLoading ? (
                   Array.from({ length: 5 }).map((_, i) => (
-                    <tr key={i}>
-                      <td colSpan={9} className="px-3 py-2">
-                        <Skeleton />
-                      </td>
-                    </tr>
+                    <SkeletonRow
+                      key={i}
+                      cols={AUDIT_COLUMN_CLASS_NAMES.length}
+                      cellClassNames={AUDIT_COLUMN_CLASS_NAMES}
+                      skeletonClassNames={AUDIT_SKELETON_CLASS_NAMES}
+                    />
                   ))
                 ) : sortedRows.length ? (
                   sortedRows.map((e) => (
@@ -218,37 +330,65 @@ function AuditPage() {
                       className="border-b border-row hover:bg-overlay-3 cursor-pointer"
                       onClick={() => setSelected(e)}
                     >
-                      <td className="px-3 py-2 text-text-faint whitespace-nowrap">
+                      <td
+                        className={cx(
+                          'px-3 py-2 text-text-faint',
+                          AUDIT_COLUMN_CLASS_NAMES[0],
+                        )}
+                      >
                         <RelativeTime compact ts={eventTime(e)} />
                       </td>
-                      <td className="px-3 py-2 truncate max-w-[160px]">
+                      <td
+                        className={cx('px-3 py-2', AUDIT_COLUMN_CLASS_NAMES[1])}
+                      >
                         {principalNameMap.get(e.principal_id ?? '') ??
                           e.principal_id ??
                           '—'}
                       </td>
-                      <td className="px-3 py-2 font-mono truncate max-w-[140px]">
+                      <td
+                        className={cx(
+                          'px-3 py-2 font-mono',
+                          AUDIT_COLUMN_CLASS_NAMES[2],
+                        )}
+                      >
                         {e.actor ?? '—'}
                       </td>
-                      <td className="px-3 py-2 text-text-muted">
+                      <td
+                        className={cx(
+                          'px-3 py-2 text-text-muted',
+                          AUDIT_COLUMN_CLASS_NAMES[3],
+                        )}
+                      >
                         {e.route ?? '—'}
                       </td>
-                      <td className="px-3 py-2 truncate max-w-[180px]">
+                      <td
+                        className={cx('px-3 py-2', AUDIT_COLUMN_CLASS_NAMES[4])}
+                      >
                         {upstreamNameMap.get(e.upstream ?? '') ??
                           e.upstream ??
                           '—'}
                       </td>
                       <td
-                        className="px-3 py-2 font-mono truncate max-w-[280px]"
+                        className={cx(
+                          'px-3 py-2 font-mono',
+                          AUDIT_COLUMN_CLASS_NAMES[5],
+                        )}
                         title={e.admin_action ?? undefined}
                       >
                         {e.admin_action ?? '—'}
                       </td>
-                      <td className="px-3 py-2 font-mono truncate max-w-[160px]">
+                      <td
+                        className={cx(
+                          'px-3 py-2 font-mono',
+                          AUDIT_COLUMN_CLASS_NAMES[6],
+                        )}
+                      >
                         {e.kind ?? '—'}
                       </td>
                       <td
                         className={cx(
-                          'px-3 py-2 text-right tabular-nums',
+                          'px-3 py-2 tabular-nums',
+                          AUDIT_COLUMN_CLASS_NAMES[7],
                           e.status >= 500
                             ? 'text-red-400'
                             : e.status >= 400
@@ -258,7 +398,9 @@ function AuditPage() {
                       >
                         {e.status}
                       </td>
-                      <td className="px-3 py-2 text-right">
+                      <td
+                        className={cx('px-3 py-2', AUDIT_COLUMN_CLASS_NAMES[8])}
+                      >
                         <Badge tone="neutral">view</Badge>
                       </td>
                     </tr>

@@ -67,6 +67,29 @@ describe('CacheKeepaliveCard', () => {
     } as unknown as ReturnType<typeof queries.useCacheKeepaliveSummary>);
   });
 
+  it('renders four stable metric skeletons while the summary is loading', () => {
+    vi.spyOn(queries, 'useCacheKeepaliveSummary').mockReturnValue({
+      data: undefined,
+      isLoading: true,
+    } as never);
+
+    renderWithProviders(<CacheKeepaliveCard principal={mockPrincipal} />);
+
+    const card = screen.getByTestId('cache-keepalive-card');
+    const valueLines = card.querySelectorAll(
+      '[data-testid="cache-keepalive-metric-value"]',
+    );
+
+    expect(valueLines).toHaveLength(4);
+    expect(card.querySelectorAll('.skeleton')).toHaveLength(4);
+    valueLines.forEach((line) => {
+      expect(line.className).toContain('h-7');
+      expect(line.querySelectorAll('.skeleton')).toHaveLength(1);
+    });
+    expect(screen.queryAllByText('0')).toHaveLength(0);
+    expect(screen.queryByText('$0.00')).toBeNull();
+  });
+
   it('renders exact card labels, subcaptions, caption, and tooltip text', async () => {
     vi.spyOn(queries, 'useCacheKeepaliveSummary').mockReturnValue({
       data: {

@@ -6,13 +6,26 @@ import {
   screen,
   waitFor,
 } from '@testing-library/react';
+import type React from 'react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import * as queries from '../lib/queries';
-import { RouterSlotEditor } from './principals';
+import {
+  ApiKeysCard,
+  RecentRequestsCard,
+  Route,
+  RouterSlotEditor,
+} from './principals';
+
+vi.mock('@tanstack/react-router', async () => {
+  const actual = await vi.importActual('@tanstack/react-router');
+  return {
+    ...actual,
+    useNavigate: () => vi.fn(),
+  };
+});
 
 vi.mock('../lib/queries', async () => {
-  const actual =
-    await vi.importActual<typeof import('../lib/queries')>('../lib/queries');
+  const actual = await vi.importActual<typeof queries>('../lib/queries');
   return {
     ...actual,
     usePluginChain: vi.fn(),
@@ -22,12 +35,33 @@ vi.mock('../lib/queries', async () => {
     useDeleteChainEntry: vi.fn(),
     useRouterTerminalStrategy: vi.fn(),
     useUpdateRouterTerminalStrategy: vi.fn(),
+    usePrincipals: vi.fn(),
+    useRecentEvents: vi.fn(),
+    usePrincipalNameMap: vi.fn(),
+    useUpstreamNameMap: vi.fn(),
+    usePrincipalKeys: vi.fn(),
+    useIssueKey: vi.fn(),
+    useRevokeKey: vi.fn(),
   };
 });
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: false } },
 });
+
+const Component = Route.options.component as React.ComponentType;
+
+const principal: queries.Principal = {
+  id: 'p-1',
+  name: 'Ada',
+  kind: 'human',
+  enabled: true,
+  revision: 1,
+  allowed_models: [],
+  allowed_upstreams: [],
+  default_limits: [],
+  cache_keepalive: null,
+};
 
 function renderWithProviders(ui: React.ReactElement) {
   return render(
@@ -37,10 +71,145 @@ function renderWithProviders(ui: React.ReactElement) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  Object.assign(Route, { useSearch: () => ({}) });
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    value: vi.fn().mockReturnValue({
+      matches: false,
+      media: '',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }),
+  });
 });
 
 afterEach(() => {
   cleanup();
+});
+
+test('pending principals keep the mobile list, desktop detail shell, and shared row geometry', () => {
+  vi.mocked(queries.usePrincipals).mockReturnValue({
+    data: undefined,
+    isLoading: true,
+  } as never);
+
+  const loadingView = renderWithProviders(<Component />);
+
+  expect(screen.queryByText('0 total')).toBeNull();
+  expect(screen.queryByText('Select a principal')).toBeNull();
+  expect(screen.getByTestId('principal-count-skeleton')).toBeDefined();
+
+  const rowGeometryClasses = [
+    'w-full',
+    'min-h-[72px]',
+    'text-left',
+    'p-3',
+    'rounded-sm',
+    'border',
+  ];
+  const loadingCards = screen.getAllByTestId('principal-list-skeleton');
+  expect(loadingCards).toHaveLength(4);
+  for (const card of loadingCards) {
+    for (const className of rowGeometryClasses) {
+      expect(card.className).toContain(className);
+    }
+    expect(card.querySelectorAll('.skeleton')).toHaveLength(5);
+  }
+
+  const listPane = screen.getByText('Principals').closest('aside');
+  expect(listPane?.className).toContain('flex');
+  expect(listPane?.className).not.toContain('hidden');
+
+  const detailShell = screen.getByRole('status', {
+    name: 'Loading principal details',
+  });
+  const detailPane = detailShell.closest('section');
+  expect(detailPane?.className).toContain('hidden');
+  expect(detailPane?.className).toContain('md:flex');
+  expect(detailShell.querySelectorAll('.glass')).toHaveLength(8);
+  expect(detailShell.querySelectorAll('.skeleton').length).toBeGreaterThan(40);
+
+  loadingView.unmount();
+  vi.mocked(queries.usePrincipals).mockReturnValue({
+    data: { principals: [principal] },
+    isLoading: false,
+  } as never);
+
+  renderWithProviders(<Component />);
+
+  expect(screen.getByText('1 total')).toBeDefined();
+  const loadedRow = screen.getByRole('button', { name: /Ada/ });
+  for (const className of rowGeometryClasses) {
+    expect(loadedRow.className).toContain(className);
+  }
+});
+
+test('recent requests delegates pending geometry to the structured table', () => {
+  vi.mocked(queries.usePrincipalNameMap).mockReturnValue(
+    new Map([[principal.id, principal.name]]),
+  );
+  vi.mocked(queries.useUpstreamNameMap).mockReturnValue(new Map());
+  vi.mocked(queries.useRecentEvents).mockReturnValue({
+    data: undefined,
+    isLoading: true,
+    isPending: true,
+    isPlaceholderData: false,
+  } as never);
+
+  const { container } = renderWithProviders(
+    <RecentRequestsCard principal={principal} />,
+  );
+
+  expect(screen.queryByText(/Loading recent requests/)).toBeNull();
+  expect(
+    screen.queryByText('No recent requests for this principal'),
+  ).toBeNull();
+  expect(screen.getByTestId('recent-requests-subtitle-skeleton')).toBeDefined();
+  const slot = screen.getByTestId('recent-requests-table-slot');
+  expect(slot.className).toContain('min-h-48');
+  expect(slot.querySelectorAll('thead th')).toHaveLength(8);
+  const rows = slot.querySelectorAll('tbody tr');
+  expect(rows).toHaveLength(5);
+  for (const row of rows) {
+    expect(row.className).toContain('border-b');
+    expect(row.querySelectorAll('td')).toHaveLength(8);
+  }
+  expect(container.textContent).not.toContain('—');
+});
+
+test('API key loading keeps the table header and per-column skeleton rows', () => {
+  vi.mocked(queries.usePrincipalKeys).mockReturnValue({
+    data: undefined,
+    isLoading: true,
+  } as never);
+  vi.mocked(queries.useIssueKey).mockReturnValue({
+    mutate: vi.fn(),
+  } as never);
+  vi.mocked(queries.useRevokeKey).mockReturnValue({
+    mutate: vi.fn(),
+  } as never);
+
+  const { container } = renderWithProviders(
+    <ApiKeysCard principal={principal} />,
+  );
+
+  expect(screen.queryByText('No API keys issued.')).toBeNull();
+  const slot = screen.getByTestId('api-keys-table-slot');
+  expect(slot.className).toContain('min-h-32');
+  expect(slot.querySelectorAll('thead th')).toHaveLength(7);
+  const rows = slot.querySelectorAll('tbody tr');
+  expect(rows).toHaveLength(3);
+  for (const row of rows) {
+    expect(row.getAttribute('aria-hidden')).toBe('true');
+    expect(row.className).toContain('border-row');
+    expect(row.querySelectorAll('td')).toHaveLength(7);
+    expect(row.querySelectorAll('.skeleton')).toHaveLength(7);
+  }
+  expect(container.textContent).not.toContain('—');
 });
 
 test('renders ordered list with locked terminal row', () => {

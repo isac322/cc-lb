@@ -27,7 +27,7 @@ import {
   YAxis,
 } from 'recharts';
 import { toast } from 'sonner';
-import { z } from 'zod';
+import * as z from 'zod';
 import {
   Badge,
   Button,
@@ -144,6 +144,10 @@ function UpstreamsPage() {
 
   // /admin/v1/status reports per-upstream runtime state incl. OAuth binding.
   const status = useStatus();
+  const quotaLatestPending =
+    quotaLatest.isPending || quotaLatest.isPlaceholderData;
+  const listUsagePending = listUsage.isPending || listUsage.isPlaceholderData;
+  const statusPending = status.isPending || status.isPlaceholderData;
   const statusByUpstreamId = useMemo(() => {
     const m = new Map<
       string,
@@ -198,9 +202,13 @@ function UpstreamsPage() {
         <div className="h-12 px-4 flex items-center justify-between border-b border-subtle shrink-0">
           <div>
             <h1 className="text-sm font-medium">Upstreams</h1>
-            <p className="text-[11px] text-text-faint">
-              {visibleUpstreams.length} total
-            </p>
+            <div className="mt-0.5 h-3 text-[11px] text-text-faint">
+              {upstreams.isLoading ? (
+                <Skeleton className="h-3 w-14" />
+              ) : (
+                `${visibleUpstreams.length} total`
+              )}
+            </div>
           </div>
           <Button
             id="btn-new-upstream"
@@ -215,7 +223,7 @@ function UpstreamsPage() {
         <div className="flex-1 overflow-y-auto p-2 pb-8 space-y-1">
           {upstreams.isLoading ? (
             Array.from({ length: 3 }).map((_, i) => (
-              <Skeleton key={i} className="h-20" />
+              <SidebarUpstreamRowSkeleton key={i} />
             ))
           ) : visibleUpstreams.length ? (
             visibleUpstreams.map((u) => {
@@ -230,10 +238,12 @@ function UpstreamsPage() {
                   : runtimeStatus?.status === 'active'
                     ? 'ok'
                     : 'neutral';
-              const barWindows = selectSidebarQuotaWindows({
-                latestWindows: latest?.windows,
-                nowUnixSecs: listNowUnixSecs,
-              });
+              const barWindows = quotaLatestPending
+                ? ['5h', '7d']
+                : selectSidebarQuotaWindows({
+                    latestWindows: latest?.windows,
+                    nowUnixSecs: listNowUnixSecs,
+                  });
               return (
                 <button
                   key={u.id}
@@ -249,7 +259,11 @@ function UpstreamsPage() {
                 >
                   <div className="flex items-center justify-between gap-2 mb-2">
                     <div className="flex items-center gap-2 min-w-0">
-                      <span className={cx('status-dot', dotTone)} />
+                      {statusPending ? (
+                        <Skeleton className="h-2 w-2 shrink-0 rounded-full" />
+                      ) : (
+                        <span className={cx('status-dot', dotTone)} />
+                      )}
                       <span className="font-medium text-sm truncate">
                         {u.name}
                       </span>
@@ -300,76 +314,90 @@ function UpstreamsPage() {
                                   ? 'Fable'
                                   : label}
                             </div>
-                            <BaseMeter.Root
-                              value={
-                                utilization == null
-                                  ? 0
-                                  : Math.min(
-                                      100,
-                                      Math.max(0, utilization * 100),
-                                    )
-                              }
-                              max={100}
-                              className="flex-1 h-[5px] bg-progress-track rounded-full overflow-hidden"
-                            >
-                              <BaseMeter.Track className="h-full">
-                                <BaseMeter.Indicator
-                                  className="h-full rounded-full"
-                                  style={{ backgroundColor: color.stroke }}
-                                />
-                              </BaseMeter.Track>
-                            </BaseMeter.Root>
-                            <div className="w-8 shrink-0 text-right tabular-nums">
-                              {pct}
-                            </div>
-                            <div className="hidden @[240px]:flex w-2 shrink-0 justify-end">
-                              {stateDot && (
-                                <Hint
-                                  label={
-                                    <span>
-                                      {snap?.state} · {snap?.source} ·{' '}
-                                      {snap ? (
-                                        <QuotaObservedAt snapshot={snap} />
-                                      ) : (
-                                        '—'
-                                      )}
-                                    </span>
+                            {quotaLatestPending ? (
+                              <>
+                                <Skeleton className="h-[5px] flex-1" />
+                                <Skeleton className="h-3 w-8 shrink-0" />
+                                <div className="hidden @[240px]:block w-2 shrink-0" />
+                              </>
+                            ) : (
+                              <>
+                                <BaseMeter.Root
+                                  value={
+                                    utilization == null
+                                      ? 0
+                                      : Math.min(
+                                          100,
+                                          Math.max(0, utilization * 100),
+                                        )
                                   }
+                                  max={100}
+                                  className="flex-1 h-[5px] bg-progress-track rounded-full overflow-hidden"
                                 >
-                                  <div
-                                    className={cx(
-                                      'w-1.5 h-1.5 rounded-full',
-                                      stateDot,
-                                    )}
-                                  />
-                                </Hint>
-                              )}
-                            </div>
+                                  <BaseMeter.Track className="h-full">
+                                    <BaseMeter.Indicator
+                                      className="h-full rounded-full"
+                                      style={{ backgroundColor: color.stroke }}
+                                    />
+                                  </BaseMeter.Track>
+                                </BaseMeter.Root>
+                                <div className="w-8 shrink-0 text-right tabular-nums">
+                                  {pct}
+                                </div>
+                                <div className="hidden @[240px]:flex w-2 shrink-0 justify-end">
+                                  {stateDot && (
+                                    <Hint
+                                      label={
+                                        <span>
+                                          {snap?.state} · {snap?.source} ·{' '}
+                                          {snap ? (
+                                            <QuotaObservedAt snapshot={snap} />
+                                          ) : (
+                                            '—'
+                                          )}
+                                        </span>
+                                      }
+                                    >
+                                      <div
+                                        className={cx(
+                                          'w-1.5 h-1.5 rounded-full',
+                                          stateDot,
+                                        )}
+                                      />
+                                    </Hint>
+                                  )}
+                                </div>
+                              </>
+                            )}
                           </div>
                         );
                       })}
                     </div>
                   ) : (
-                    <div className="flex items-center gap-2 text-[10px] font-mono text-text-faint">
-                      <Hint label="Spend and total tokens over the last 7 days">
-                        {(() => {
-                          const usage = usageByUpstreamId.get(u.id);
-                          if (!usage) {
-                            return <span>—</span>;
-                          }
-                          const tokens =
-                            usage.tokens >= 1_000_000
-                              ? `${(usage.tokens / 1_000_000).toFixed(1)}M`
-                              : usage.tokens >= 1_000
-                                ? `${(usage.tokens / 1_000).toFixed(1)}K`
-                                : String(usage.tokens);
-                          return (
-                            <span className="text-text">
-                              ${usage.cost_usd.toFixed(2)} · {tokens} tok
-                            </span>
-                          );
-                        })()}
-                      </Hint>
+                    <div className="flex min-h-3 items-center gap-2 text-[10px] font-mono text-text-faint">
+                      {listUsagePending ? (
+                        <Skeleton className="h-3 w-32" />
+                      ) : (
+                        <Hint label="Spend and total tokens over the last 7 days">
+                          {(() => {
+                            const usage = usageByUpstreamId.get(u.id);
+                            if (!usage) {
+                              return <span>—</span>;
+                            }
+                            const tokens =
+                              usage.tokens >= 1_000_000
+                                ? `${(usage.tokens / 1_000_000).toFixed(1)}M`
+                                : usage.tokens >= 1_000
+                                  ? `${(usage.tokens / 1_000).toFixed(1)}K`
+                                  : String(usage.tokens);
+                            return (
+                              <span className="text-text">
+                                ${usage.cost_usd.toFixed(2)} · {tokens} tok
+                              </span>
+                            );
+                          })()}
+                        </Hint>
+                      )}
                     </div>
                   )}
                 </button>
@@ -398,6 +426,8 @@ function UpstreamsPage() {
       >
         {selected ? (
           <DetailView upstream={selected} onBack={() => select(undefined)} />
+        ) : upstreams.isLoading ? (
+          <UpstreamDetailLoadingShell />
         ) : (
           <div className="flex-1 flex items-center justify-center">
             <EmptyState
@@ -413,6 +443,156 @@ function UpstreamsPage() {
         onOpenChange={setCreateOpen}
         onPendingCreatedIdChange={setPendingCreatedId}
       />
+    </div>
+  );
+}
+
+const QUOTA_SNAPSHOT_GRID_CLASS =
+  'grid min-h-[203px] gap-3 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]';
+const QUOTA_HISTORY_RANGES = ['1h', '6h', '24h', '7d'] as const;
+const QUOTA_HISTORY_RANGE_GROUP_CLASS =
+  'flex flex-wrap bg-overlay-2 border border-subtle rounded-sm p-0.5 max-w-full';
+const QUOTA_HISTORY_RANGE_ITEM_CLASS =
+  'px-2.5 h-7 text-xs rounded-sm transition-colors text-text-faint';
+
+function MetadataStripSkeleton() {
+  return (
+    <div
+      data-testid="upstream-metadata-loading"
+      className="flex min-w-max items-center gap-3"
+    >
+      {['w-28', 'w-24', 'w-32', 'w-40', 'w-36'].map((width, index) => (
+        <span key={width} className="flex items-center gap-2">
+          <Skeleton className={cx('h-3', width)} />
+          {index < 4 ? <span className="text-text-muted/50">·</span> : null}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function SidebarUpstreamRowSkeleton() {
+  return (
+    <div
+      data-testid="upstream-list-loading-row"
+      className="@container w-full rounded-sm border border-subtle p-3"
+    >
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <Skeleton className="h-2 w-2 shrink-0 rounded-full" />
+          <Skeleton className="h-4 w-32" />
+        </div>
+        <Skeleton className="hidden h-5 w-20 shrink-0 @[240px]:block" />
+      </div>
+      <div className="flex w-full flex-col gap-1.5">
+        {['5h', '7d'].map((windowName) => (
+          <div
+            key={windowName}
+            className="flex w-full items-center gap-2 text-[10px] font-mono"
+          >
+            <span className="w-8 shrink-0 text-text-faint">{windowName}</span>
+            <Skeleton className="h-[5px] flex-1" />
+            <Skeleton className="h-3 w-8 shrink-0" />
+            <div className="hidden w-2 shrink-0 @[240px]:block" />
+          </div>
+        ))}
+      </div>
+      <div className="mt-2 min-h-3">
+        <Skeleton className="h-3 w-32" />
+      </div>
+    </div>
+  );
+}
+
+function QuotaSnapshotCardSkeleton() {
+  return (
+    <Card data-testid="quota-snapshot-skeleton-card">
+      <CardBody className="flex min-h-[168px] flex-col gap-3 p-3">
+        <div className="flex items-center justify-between">
+          <Skeleton className="h-3 w-20" />
+          <Skeleton className="h-4 w-24" />
+        </div>
+        <Skeleton className="h-7 w-20" />
+        <Skeleton className="h-1 w-full" />
+        <Skeleton className="mt-auto h-3 w-32" />
+      </CardBody>
+    </Card>
+  );
+}
+
+function UpstreamDetailLoadingShell() {
+  return (
+    <div
+      data-testid="upstream-detail-loading-shell"
+      className="contents"
+      aria-busy="true"
+      aria-label="Loading upstream details"
+    >
+      <div className="sticky top-0 z-30 border-b border-subtle bg-bg-sub backdrop-blur-sm">
+        <div className="flex shrink-0 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-6">
+          <div className="flex items-center gap-3">
+            <Skeleton className="h-7 w-48" />
+            <Skeleton className="h-6 w-20" />
+            <Skeleton className="h-5 w-28" />
+          </div>
+          <Skeleton className="h-7 w-20" />
+        </div>
+        <div
+          data-testid="upstream-detail-loading-metadata"
+          className="flex h-9 min-h-9 items-center border-t border-subtle bg-overlay-1 px-4 py-2 md:px-6"
+        >
+          <MetadataStripSkeleton />
+        </div>
+      </div>
+
+      <div className="flex-1 space-y-6 overflow-y-auto p-4 pb-8 md:p-6 md:pb-12">
+        <Section title="Subscription Quota">
+          <Card>
+            <CardHeader
+              title="Quota History"
+              action={
+                <div
+                  aria-hidden="true"
+                  className={QUOTA_HISTORY_RANGE_GROUP_CLASS}
+                  data-testid="quota-history-range-control"
+                >
+                  {QUOTA_HISTORY_RANGES.map((range) => (
+                    <span
+                      key={range}
+                      className={cx(
+                        'skeleton inline-flex items-center justify-center',
+                        QUOTA_HISTORY_RANGE_ITEM_CLASS,
+                      )}
+                    >
+                      <span className="invisible">{range}</span>
+                    </span>
+                  ))}
+                </div>
+              }
+            />
+            <CardBody className="p-4 pt-2">
+              <div className="h-full min-h-[300px] w-full">
+                <Skeleton className="h-[300px] w-full" />
+              </div>
+              <div
+                data-testid="quota-history-legend-slot"
+                className="mt-2 flex min-h-5 items-center justify-center gap-4"
+              >
+                <Skeleton className="h-3 w-20" />
+                <Skeleton className="h-3 w-20" />
+              </div>
+            </CardBody>
+          </Card>
+          <div
+            data-testid="quota-snapshot-grid"
+            className={QUOTA_SNAPSHOT_GRID_CLASS}
+          >
+            {Array.from({ length: 3 }).map((_, index) => (
+              <QuotaSnapshotCardSkeleton key={index} />
+            ))}
+          </div>
+        </Section>
+      </div>
     </div>
   );
 }
@@ -739,17 +919,39 @@ function DetailView({
   }, [recent.data]);
 
   const isOauth = upstream.kind === 'anthropic_oauth';
+  const metadataPending =
+    isOauth &&
+    (subscriptionMetadataQ.isPending ||
+      subscriptionMetadataQ.isPlaceholderData);
+  const quotaLatestPending =
+    quotaLatest.isPending || quotaLatest.isPlaceholderData;
+  const quotaHistoryPending =
+    quotaLatestPending ||
+    quotaSeries.isPending ||
+    quotaSeries.isPlaceholderData;
+  const quotaAnalysisPending =
+    quotaAnalysis.isPending || quotaAnalysis.isPlaceholderData;
+  const analysis = quotaAnalysis.data?.upstreams[0];
+  const a5h = analysis?.windows.find((w) => w.window === '5h');
+  const caveats = Array.from(
+    new Set(analysis?.windows.flatMap((w) => w.caveats) ?? []),
+  ).filter(
+    (c) =>
+      c.toLowerCase().trim() !==
+      'capacity is inferred from proxy tokens and quota utilization; anthropic quota units are not directly exposed',
+  );
+  const oauthStatusPending =
+    isOauth && (upstreamOAuthQ.isPending || upstreamOAuthQ.isPlaceholderData);
+  const recentPending = recent.isPending || recent.isPlaceholderData;
   const subMeta = subscriptionMetadataQ.data?.subscription_metadata;
   const orgMeta = subscriptionMetadataQ.data?.organization_metadata;
   const principalEntry = upstreamOAuthQ.data?.has_credentials
     ? upstreamOAuthQ.data
     : null;
   const hasBoundToken = Boolean(principalEntry);
-  const oauthStatusBadge: OAuthBadge = upstreamOAuthQ.isLoading
-    ? { tone: 'neutral', label: 'Loading' }
-    : principalEntry
-      ? oauthBadge(principalEntry)
-      : { tone: 'neutral', label: 'Not connected' };
+  const oauthStatusBadge: OAuthBadge = principalEntry
+    ? oauthBadge(principalEntry)
+    : { tone: 'neutral', label: 'Not connected' };
 
   const renderHeader = () => {
     const fields: {
@@ -972,26 +1174,33 @@ function DetailView({
           </div>
         </div>
         {fields.length > 0 && (
-          <div className="px-4 md:px-6 py-2 border-t border-subtle bg-overlay-1 flex items-center gap-3">
+          <div
+            data-testid="upstream-metadata-strip"
+            className="flex h-9 min-h-9 items-center gap-3 border-t border-subtle bg-overlay-1 px-4 py-2 md:px-6"
+          >
             <div className="flex-1 min-w-0 overflow-x-auto whitespace-nowrap scrollbar-none">
-              <div className="flex items-center gap-2 text-xs font-mono text-text-faint">
-                {visibleFields.map((f, i) => (
-                  <span key={f.label} className="flex items-center gap-2">
-                    <Hint label={f.tooltip}>
-                      <span className="cursor-help border-b border-dotted border-text-faint/30 hover:text-text transition-colors">
-                        <span className="text-text-muted">{f.label}:</span>{' '}
-                        <span className="text-text">{f.value}</span>
-                      </span>
-                    </Hint>
-                    {i < visibleFields.length - 1 && (
-                      <span className="text-text-muted/50">·</span>
-                    )}
-                  </span>
-                ))}
-              </div>
+              {metadataPending ? (
+                <MetadataStripSkeleton />
+              ) : (
+                <div className="flex items-center gap-2 text-xs font-mono text-text-faint">
+                  {visibleFields.map((f, i) => (
+                    <span key={f.label} className="flex items-center gap-2">
+                      <Hint label={f.tooltip}>
+                        <span className="cursor-help border-b border-dotted border-text-faint/30 hover:text-text transition-colors">
+                          <span className="text-text-muted">{f.label}:</span>{' '}
+                          <span className="text-text">{f.value}</span>
+                        </span>
+                      </Hint>
+                      {i < visibleFields.length - 1 && (
+                        <span className="text-text-muted/50">·</span>
+                      )}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              {hiddenCount > 0 && (
+              {!metadataPending && hiddenCount > 0 && (
                 <button
                   type="button"
                   onClick={() => setShowMoreMeta((v) => !v)}
@@ -1071,16 +1280,20 @@ function DetailView({
                       const first = values[0];
                       if (first) setRange(first);
                     }}
-                    className="flex flex-wrap bg-overlay-2 border border-subtle rounded-sm p-0.5 max-w-full"
+                    className={QUOTA_HISTORY_RANGE_GROUP_CLASS}
+                    data-testid="quota-history-range-control"
                   >
-                    {(['1h', '6h', '24h', '7d'] as const).map((r) => (
+                    {QUOTA_HISTORY_RANGES.map((rangeOption) => (
                       <BaseToggle
-                        key={r}
+                        key={rangeOption}
                         type="button"
-                        value={r}
-                        className="px-2.5 h-7 text-xs rounded-sm transition-colors text-text-faint hover:text-text data-[pressed]:bg-[color:var(--color-overlay-6)] data-[pressed]:text-[color:var(--color-text)]"
+                        value={rangeOption}
+                        className={cx(
+                          QUOTA_HISTORY_RANGE_ITEM_CLASS,
+                          'hover:text-text data-[pressed]:bg-[color:var(--color-overlay-6)] data-[pressed]:text-[color:var(--color-text)]',
+                        )}
                       >
-                        {r}
+                        {rangeOption}
                       </BaseToggle>
                     ))}
                   </BaseToggleGroup>
@@ -1088,10 +1301,8 @@ function DetailView({
               />
               <CardBody className="p-4 pt-2">
                 <div className="w-full h-[300px]" style={{ minWidth: 0 }}>
-                  {quotaSeries.isPending || quotaSeries.isPlaceholderData ? (
-                    <div className="h-full flex items-center justify-center text-text-faint text-sm">
-                      Loading…
-                    </div>
+                  {quotaHistoryPending ? (
+                    <Skeleton className="h-full w-full" />
                   ) : !chartRows.length || !visibleGraphWindows.length ? (
                     <EmptyState title="No data in range" />
                   ) : (
@@ -1340,11 +1551,18 @@ function DetailView({
                     </ResponsiveContainer>
                   )}
                 </div>
-                {!(quotaSeries.isPending || quotaSeries.isPlaceholderData) &&
-                chartData.rows.length > 0 &&
-                visibleGraphWindows.length > 0 ? (
-                  <div className="mt-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
-                    {visibleGraphWindows.map((windowName) => {
+                <div
+                  data-testid="quota-history-legend-slot"
+                  className="mt-2 flex min-h-5 flex-wrap items-center justify-center gap-x-4 gap-y-1"
+                >
+                  {quotaHistoryPending ? (
+                    <>
+                      <Skeleton className="h-3 w-20" />
+                      <Skeleton className="h-3 w-20" />
+                    </>
+                  ) : chartData.rows.length > 0 &&
+                    visibleGraphWindows.length > 0 ? (
+                    visibleGraphWindows.map((windowName) => {
                       const dimmed =
                         effectiveIsolatedWindow !== null &&
                         effectiveIsolatedWindow !== windowName;
@@ -1373,37 +1591,48 @@ function DetailView({
                           </span>
                         </button>
                       );
-                    })}
-                  </div>
-                ) : null}
+                    })
+                  ) : null}
+                </div>
               </CardBody>
             </Card>
 
             {(() => {
               const latest = selectedLatest;
-              if (!latest) {
+              if (quotaLatestPending) {
                 return (
-                  <Card>
-                    <CardBody className="p-6">
-                      <EmptyState
-                        title={`No subscription quota data for ${upstream.name}`}
-                      />
-                    </CardBody>
-                  </Card>
+                  <div
+                    data-testid="quota-snapshot-grid"
+                    className={QUOTA_SNAPSHOT_GRID_CLASS}
+                  >
+                    {Array.from({ length: 3 }).map((_, index) => (
+                      <QuotaSnapshotCardSkeleton key={index} />
+                    ))}
+                  </div>
                 );
               }
-              const analysis = quotaAnalysis.data?.upstreams[0];
-              const a5h = analysis?.windows.find((w) => w.window === '5h');
-              const caveats = Array.from(
-                new Set(analysis?.windows.flatMap((w) => w.caveats) ?? []),
-              ).filter(
-                (c) =>
-                  c.toLowerCase().trim() !==
-                  'capacity is inferred from proxy tokens and quota utilization; anthropic quota units are not directly exposed',
-              );
+              if (!latest) {
+                return (
+                  <div
+                    data-testid="quota-snapshot-grid"
+                    className={QUOTA_SNAPSHOT_GRID_CLASS}
+                  >
+                    <Card className="col-span-full">
+                      <CardBody className="flex min-h-[168px] items-center justify-center p-6">
+                        <EmptyState
+                          title={`No subscription quota data for ${upstream.name}`}
+                        />
+                      </CardBody>
+                    </Card>
+                  </div>
+                );
+              }
               return (
                 <div className="space-y-4">
-                  <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
+                  <div
+                    data-testid="quota-snapshot-grid"
+                    className={QUOTA_SNAPSHOT_GRID_CLASS}
+                  >
                     {selectQuotaCardSnapshots({
                       latestWindows: latest.windows,
                       nowUnixSecs,
@@ -1437,7 +1666,7 @@ function DetailView({
                             'insufficient_growth_intervals');
                       return (
                         <Card key={snap.window}>
-                          <CardBody className="p-3 flex flex-col gap-1.5">
+                          <CardBody className="p-3 flex min-h-[168px] flex-col gap-1.5">
                             <div className="flex items-center justify-between">
                               <span className="text-[11px] uppercase tracking-wider text-text-faint">
                                 {windowLabel(snap.window)}
@@ -1540,30 +1769,38 @@ function DetailView({
                                   <span className="text-[10px] uppercase tracking-wider text-text-faint">
                                     ETA to limit
                                   </span>
-                                  <span className="font-mono tabular-nums text-sm">
-                                    {eta != null && eta <= 0 ? (
-                                      'Already saturated'
-                                    ) : (
-                                      <RelativeOffsetTime
-                                        compact
-                                        offsetSeconds={eta}
-                                      />
-                                    )}
-                                  </span>
+                                  {quotaAnalysisPending ? (
+                                    <Skeleton className="h-5 w-28" />
+                                  ) : (
+                                    <span className="font-mono tabular-nums text-sm">
+                                      {eta != null && eta <= 0 ? (
+                                        'Already saturated'
+                                      ) : (
+                                        <RelativeOffsetTime
+                                          compact
+                                          offsetSeconds={eta}
+                                        />
+                                      )}
+                                    </span>
+                                  )}
                                 </div>
-                                <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-text-faint">
+                                <div className="flex min-h-3 items-center justify-between gap-2 text-[10px] font-mono text-text-faint">
                                   <span>burn</span>
-                                  <span className="tabular-nums">
-                                    {actualBurn == null
-                                      ? '—'
-                                      : `${(actualBurn * 60 * 100).toFixed(2)}%/min`}
-                                    {' · proj '}
-                                    {projBurn == null
-                                      ? '—'
-                                      : `${((projBurn / 60) * 100).toFixed(2)}%/min`}
-                                  </span>
+                                  {quotaAnalysisPending ? (
+                                    <Skeleton className="h-3 w-32" />
+                                  ) : (
+                                    <span className="tabular-nums">
+                                      {actualBurn == null
+                                        ? '—'
+                                        : `${(actualBurn * 60 * 100).toFixed(2)}%/min`}
+                                      {' · proj '}
+                                      {projBurn == null
+                                        ? '—'
+                                        : `${((projBurn / 60) * 100).toFixed(2)}%/min`}
+                                    </span>
+                                  )}
                                 </div>
-                                {waitingForGrowth && (
+                                {!quotaAnalysisPending && waitingForGrowth && (
                                   <div className="text-[10px] text-amber-400">
                                     Waiting for utilization to rise — burn
                                     appears once growth is observed.
@@ -1576,53 +1813,6 @@ function DetailView({
                       );
                     })}
                   </div>
-                  {a5h?.deficit && (
-                    <Card>
-                      <CardHeader title="Quota deficit" />
-                      <CardBody className="p-3">
-                        <div className="flex flex-col gap-2">
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm text-text-faint">
-                              Shortfall
-                            </span>
-                            <span className="font-mono text-amber-400">
-                              {Math.round(
-                                a5h.deficit.shortfall_tokens,
-                              ).toLocaleString()}{' '}
-                              tokens
-                            </span>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm text-text-faint">
-                              Recommended Multiplier
-                            </span>
-                            <span className="font-mono text-amber-400">
-                              {a5h.deficit.recommended_multiplier}x
-                            </span>
-                          </div>
-                          <div className="text-[10px] text-text-faint mt-1">
-                            Confidence:{' '}
-                            <span className="text-text">
-                              {a5h.deficit.confidence}
-                            </span>
-                          </div>
-                        </div>
-                      </CardBody>
-                    </Card>
-                  )}
-                  {caveats.length > 0 && (
-                    <div className="bg-amber-500/10 border border-amber-500/20 rounded-sm p-3 text-xs text-amber-400 flex flex-col gap-1">
-                      <div className="font-medium flex items-center gap-1.5">
-                        <Info className="w-3.5 h-3.5" />
-                        Analysis Caveats
-                      </div>
-                      <ul className="list-disc list-inside opacity-90 ml-1">
-                        {caveats.map((c, i) => (
-                          <li key={i}>{c}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
                 </div>
               );
             })()}
@@ -1648,43 +1838,76 @@ function DetailView({
             <Card className="w-full h-full flex flex-col">
               <CardHeader
                 title={
-                  <div className="flex items-center gap-2">
-                    <StatusBadge
-                      tone={oauthStatusBadge.tone}
-                      label={oauthStatusBadge.label}
-                    />
-                    <span>OAuth Status</span>
-                  </div>
+                  oauthStatusPending ? (
+                    <Skeleton className="h-5 w-36" />
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <StatusBadge
+                        tone={oauthStatusBadge.tone}
+                        label={oauthStatusBadge.label}
+                      />
+                      <span>OAuth Status</span>
+                    </div>
+                  )
                 }
                 subtitle={
-                  hasBoundToken ? 'Bound on this upstream' : 'Not connected'
+                  oauthStatusPending ? (
+                    <Skeleton className="h-3 w-32" />
+                  ) : hasBoundToken ? (
+                    'Bound on this upstream'
+                  ) : (
+                    'Not connected'
+                  )
                 }
                 action={
-                  <Button
-                    size="sm"
-                    className="self-center"
-                    iconLeft={<KeyRound className="h-3 w-3" />}
-                    onClick={() => {
-                      oauthStart.mutate(upstream.id, {
-                        onSuccess: (res) => {
-                          setOauthState({
-                            authorize_url: res.authorize_url,
-                            state_token: res.state_token,
-                            code: '',
-                          });
-                          setOauthOpen(true);
-                        },
-                      });
-                    }}
-                  >
-                    {hasBoundToken ? 'Reconnect' : 'Connect'}
-                  </Button>
+                  oauthStatusPending ? (
+                    <Skeleton className="h-7 w-24" />
+                  ) : (
+                    <Button
+                      size="sm"
+                      className="self-center"
+                      iconLeft={<KeyRound className="h-3 w-3" />}
+                      onClick={() => {
+                        oauthStart.mutate(upstream.id, {
+                          onSuccess: (res) => {
+                            setOauthState({
+                              authorize_url: res.authorize_url,
+                              state_token: res.state_token,
+                              code: '',
+                            });
+                            setOauthOpen(true);
+                          },
+                        });
+                      }}
+                    >
+                      {hasBoundToken ? 'Reconnect' : 'Connect'}
+                    </Button>
+                  )
                 }
                 align="center"
               />
-              <CardBody className="text-sm flex-1">
-                {statusQ.isLoading ? (
-                  <Skeleton className="h-12" />
+              <CardBody
+                data-testid="oauth-status-card-body"
+                className="min-h-28 flex-1 text-sm"
+              >
+                {oauthStatusPending ? (
+                  <div
+                    data-testid="oauth-status-loading-grid"
+                    className="min-h-20 space-y-3"
+                  >
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                      {Array.from({ length: 2 }).map((_, index) => (
+                        <div key={index}>
+                          <Skeleton className="h-3 w-20" />
+                          <Skeleton className="mt-1 h-5 w-28" />
+                        </div>
+                      ))}
+                    </div>
+                    <div>
+                      <Skeleton className="h-3 w-16" />
+                      <Skeleton className="mt-1 h-3 w-full max-w-56" />
+                    </div>
+                  </div>
                 ) : !hasBoundToken ? (
                   <div className="flex flex-wrap items-center gap-3">
                     <StatusBadge
@@ -1696,7 +1919,10 @@ function DetailView({
                     </p>
                   </div>
                 ) : principalEntry ? (
-                  <div className="space-y-3">
+                  <div
+                    data-testid="oauth-status-loaded-grid"
+                    className="min-h-20 space-y-3"
+                  >
                     <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                       <div>
                         <div className="text-[11px] uppercase tracking-wider text-text-faint">
@@ -1756,23 +1982,28 @@ function DetailView({
 
         {!isOauth && <SettingsCard upstream={upstream} />}
 
-        <Card>
+        <Card data-testid="recent-requests-card">
           <CardHeader
             title="Recent Requests"
             subtitle={
-              recent.isPending || recent.isPlaceholderData
-                ? `Loading recent requests for ${upstream.name}…`
-                : recentForUpstream.length === 0
-                  ? `No recent requests against ${upstream.name}`
-                  : `Last ${recentForUpstream.length} against ${upstream.name}`
+              recentPending ? (
+                <Skeleton className="h-3 w-52" />
+              ) : recentForUpstream.length === 0 ? (
+                `No recent requests against ${upstream.name}`
+              ) : (
+                `Last ${recentForUpstream.length} against ${upstream.name}`
+              )
             }
           />
-          <div className="overflow-x-auto">
+          <div
+            data-testid="recent-requests-table-slot"
+            className="min-h-48 overflow-x-auto"
+          >
             <RequestEventsTable
-              events={recent.isPlaceholderData ? [] : recentForUpstream}
+              events={recentPending ? [] : recentForUpstream}
               principalNameMap={principalNameMap}
               upstreamNameMap={upstreamNameMap}
-              loading={recent.isPending || recent.isPlaceholderData}
+              loading={recentPending}
               columns={{
                 upstream: false,
                 cost: true,
@@ -1783,6 +2014,59 @@ function DetailView({
             />
           </div>
         </Card>
+        {selectedLatest && (a5h?.deficit || caveats.length > 0) && (
+          <Section title="Quota Analysis">
+            <div className="space-y-4">
+              {a5h?.deficit && (
+                <Card>
+                  <CardHeader title="Quota deficit" />
+                  <CardBody className="p-3">
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-text-faint">
+                          Shortfall
+                        </span>
+                        <span className="font-mono text-amber-400">
+                          {Math.round(
+                            a5h.deficit.shortfall_tokens,
+                          ).toLocaleString()}{' '}
+                          tokens
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-text-faint">
+                          Recommended Multiplier
+                        </span>
+                        <span className="font-mono text-amber-400">
+                          {a5h.deficit.recommended_multiplier}x
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-text-faint mt-1">
+                        Confidence:{' '}
+                        <span className="text-text">
+                          {a5h.deficit.confidence}
+                        </span>
+                      </div>
+                    </div>
+                  </CardBody>
+                </Card>
+              )}
+              {caveats.length > 0 && (
+                <div className="bg-amber-500/10 border border-amber-500/20 rounded-sm p-3 text-xs text-amber-400 flex flex-col gap-1">
+                  <div className="font-medium flex items-center gap-1.5">
+                    <Info className="w-3.5 h-3.5" />
+                    Analysis Caveats
+                  </div>
+                  <ul className="list-disc list-inside opacity-90 ml-1">
+                    {caveats.map((c, i) => (
+                      <li key={i}>{c}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          </Section>
+        )}
       </div>
 
       <Modal

@@ -32,10 +32,11 @@ import {
   cx,
   PageContainer,
   Section,
+  Skeleton,
   Sparkline,
 } from '../components/ui/primitives';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
-import { eventTime } from '../lib/api';
+import { type AggregateResponse, eventTime } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import {
   formatCount,
@@ -56,7 +57,7 @@ import type { RequestEventWithPhase } from '../lib/RequestEventTypes';
 import { useLiveEventStream } from '../lib/useLiveEventStream';
 import {
   buildPoolQuotaChartData,
-  hasFableHistoryData,
+  POOL_QUOTA_WINDOWS,
   type PoolQuotaChartRow,
   type PoolQuotaLatest,
   type PoolQuotaWindow,
@@ -73,6 +74,8 @@ type Range = (typeof RANGES)[number];
 const stepFor = (r: Range): 'hour' | 'minute' =>
   r === '7d' || r === '24h' ? 'hour' : 'minute';
 
+const POOL_QUOTA_QUERY_WINDOWS = POOL_QUOTA_WINDOWS.join(',');
+
 function fmtMs(n: number | undefined | null): string {
   if (n == null) return '—';
   if (n >= 1000) return `${(n / 1000).toFixed(2)}s`;
@@ -87,13 +90,14 @@ function fmtChartTooltip(unix: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-function ValueTile({
+export function ValueTile({
   icon,
   label,
   value,
   sub,
   spark,
   sparkColor,
+  loading = false,
   tone = 'neutral',
   size = 'md',
 }: {
@@ -103,6 +107,7 @@ function ValueTile({
   sub?: React.ReactNode;
   spark?: number[];
   sparkColor?: string;
+  loading?: boolean;
   tone?: 'neutral' | 'accent' | 'warn' | 'ok';
   size?: 'sm' | 'md';
 }) {
@@ -119,40 +124,165 @@ function ValueTile({
           {label}
         </span>
       </div>
-      <div className="flex items-baseline justify-between gap-2 min-w-0">
-        <span
-          className={cx(
-            'tabular-nums leading-none truncate',
-            size === 'sm' ? 'text-xl font-medium' : 'text-2xl font-medium',
-            tone === 'accent' && 'text-accent',
-            tone === 'warn' && 'text-[color:var(--color-warn)]',
-            tone === 'ok' && 'text-[color:var(--color-ok)]',
-          )}
-        >
-          {value}
-        </span>
+      <div
+        className={cx(
+          'flex items-center justify-between gap-2 min-w-0',
+          size === 'sm' ? 'h-5' : 'h-6',
+        )}
+        data-slot="value"
+      >
+        {loading ? (
+          <Skeleton className={size === 'sm' ? 'h-5 w-20' : 'h-6 w-24'} />
+        ) : (
+          <span
+            className={cx(
+              'tabular-nums leading-none truncate',
+              size === 'sm' ? 'text-xl font-medium' : 'text-2xl font-medium',
+              tone === 'accent' && 'text-accent',
+              tone === 'warn' && 'text-[color:var(--color-warn)]',
+              tone === 'ok' && 'text-[color:var(--color-ok)]',
+            )}
+          >
+            {value}
+          </span>
+        )}
       </div>
-      {sub ? (
-        <div className="text-[11px] text-text-faint truncate">{sub}</div>
-      ) : null}
-      {spark && spark.length > 0 ? (
+      {sub !== undefined ? (
         <div
-          className={
-            size === 'sm'
-              ? '-mx-2.5 -mb-2.5 pt-1 mt-auto'
-              : '-mx-3 -mb-3 pt-1 mt-auto'
-          }
+          className="flex h-4 items-center text-[11px] text-text-faint truncate"
+          data-slot="sub"
         >
-          <Sparkline data={spark} color={sparkColor ?? 'var(--color-accent)'} />
+          {loading ? <Skeleton className="h-3 w-20" /> : sub}
         </div>
       ) : null}
+      <div
+        className={cx(
+          'h-8 shrink-0 pt-1 mt-auto',
+          size === 'sm' ? '-mx-2.5 -mb-2.5' : '-mx-3 -mb-3',
+        )}
+        data-slot="sparkline"
+      >
+        {loading ? (
+          <Skeleton className="h-7" />
+        ) : spark && spark.length > 0 ? (
+          <Sparkline data={spark} color={sparkColor ?? 'var(--color-accent)'} />
+        ) : null}
+      </div>
     </div>
   );
 }
 
-type AggregateWindow = NonNullable<
-  ReturnType<typeof useSubscriptionQuotaAggregate>['data']
->['windows'][number];
+export type TopPrincipal = {
+  id: string;
+  name: string;
+  cost_usd: number;
+  tokens: number;
+  requests: number;
+  primary_model: string;
+  share_pct: number;
+  max_cost: number;
+};
+
+const TOP_PRINCIPAL_ROW_CLASS =
+  'flex min-h-[66px] items-center gap-3 border-b border-subtle px-3 py-2 last:border-b-0';
+
+export function TopPrincipalsCard({
+  range,
+  principals,
+  loading,
+}: {
+  range: Range;
+  principals: readonly TopPrincipal[];
+  loading: boolean;
+}) {
+  return (
+    <Card className="min-w-0 flex flex-col h-full">
+      <CardHeader
+        title={
+          <span className="inline-flex items-center gap-2">
+            <Users className="w-3.5 h-3.5 text-text-faint" />
+            Top principals
+          </span>
+        }
+        subtitle={`by virtual cost · ${range}`}
+      />
+      <div className="flex-1 overflow-auto min-h-0 max-h-96 xl:max-h-none">
+        <div className="flex min-h-80 flex-col" data-slot="principal-list">
+          {loading ? (
+            Array.from({ length: 5 }).map((_, index) => (
+              <div
+                key={index}
+                aria-hidden="true"
+                className={TOP_PRINCIPAL_ROW_CLASS}
+                data-testid="top-principal-skeleton-row"
+              >
+                <div className="min-w-0 flex-1">
+                  <Skeleton className="h-5 w-2/5" />
+                  <Skeleton className="mt-0.5 h-3 w-3/5" />
+                  <Skeleton className="mt-1.5 h-1.5 rounded-full" />
+                </div>
+                <div className="flex shrink-0 flex-col items-end gap-1 text-right">
+                  <Skeleton className="h-5 w-16" />
+                  <Skeleton className="h-3 w-10" />
+                </div>
+              </div>
+            ))
+          ) : principals.length === 0 ? (
+            <div className="flex flex-1 items-center justify-center p-4 text-center text-xs text-text-faint">
+              No usage data
+            </div>
+          ) : (
+            principals.map((principal) => (
+              <div
+                key={principal.id}
+                className={cx(
+                  TOP_PRINCIPAL_ROW_CLASS,
+                  'hover:bg-overlay-2 transition-colors',
+                )}
+                data-testid="top-principal-row"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm truncate">{principal.name}</div>
+                  <div className="text-[11px] text-text-faint truncate">
+                    {principal.primary_model} ·{' '}
+                    {formatCount(principal.requests)} req ·{' '}
+                    {formatCount(principal.tokens)} tok
+                  </div>
+                  <BaseMeter.Root
+                    className="mt-1.5"
+                    max={100}
+                    value={Math.min(
+                      100,
+                      Math.max(
+                        0,
+                        (principal.cost_usd / Math.max(1, principal.max_cost)) *
+                          100 || 0,
+                      ),
+                    )}
+                  >
+                    <BaseMeter.Track className="relative w-full bg-overlay-3 rounded-full overflow-hidden h-1.5">
+                      <BaseMeter.Indicator className="h-full rounded-full transition-all bg-[color:var(--color-accent)]" />
+                    </BaseMeter.Track>
+                  </BaseMeter.Root>
+                </div>
+                <div className="text-right shrink-0">
+                  <div className="text-sm font-mono tabular-nums">
+                    {formatUsdAmount(principal.cost_usd)}
+                  </div>
+                  <div className="text-[11px] text-text-faint tabular-nums">
+                    {principal.share_pct.toFixed(1)}%
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+type AggregateWindow = AggregateResponse['windows'][number];
 
 const POOL_PALETTES: Record<PoolQuotaWindow, readonly string[]> = {
   '5h': [
@@ -177,6 +307,11 @@ const POOL_PALETTES: Record<PoolQuotaWindow, readonly string[]> = {
     'rgb(217, 249, 157)',
   ],
 };
+
+const POOL_QUOTA_SNAPSHOT_SLOT_CLASS =
+  'relative flex min-h-[56px] w-full flex-col justify-center';
+const POOL_QUOTA_CHART_SLOT_CLASS = 'relative flex-1 min-h-64 min-w-0 w-full';
+const POOL_QUOTA_LEGEND_ITEM_CLASS = 'inline-flex min-h-4 items-center gap-1.5';
 
 function poolSegmentColor(window: PoolQuotaWindow, index: number): string {
   const palette = POOL_PALETTES[window];
@@ -265,24 +400,34 @@ function PoolQuotaPopoverContent({
 export function PoolQuotaStackedBar({
   window,
   w,
+  loading = false,
 }: {
   window: PoolQuotaWindow;
   w: AggregateWindow | undefined;
+  loading?: boolean;
 }) {
   const [activeIdx, setActiveIdx] = useState<number | null>(null);
   const [openPopover, setOpenPopover] = useState(false);
   const label = window === '7d_fable' ? '7d (Fable)' : window;
 
-  if (!w) {
+  if (loading || !w) {
     return (
-      <div className="flex flex-col gap-2 min-h-[56px]">
+      <div className={cx(POOL_QUOTA_SNAPSHOT_SLOT_CLASS, 'gap-2')}>
         <div className="flex items-center justify-between mb-1.5">
           <span className="text-xs font-medium text-text-muted">
             {label} pool
           </span>
-          <span className="text-xs text-text-faint">no data</span>
+          {loading ? (
+            <Skeleton as="span" className="inline-block h-4 w-12" />
+          ) : (
+            <span className="text-xs text-text-faint">no data</span>
+          )}
         </div>
-        <div className="h-5 w-full rounded-full border border-subtle bg-surface-raised" />
+        {loading ? (
+          <Skeleton className="h-5 rounded-full" />
+        ) : (
+          <div className="h-5 w-full rounded-full border border-subtle bg-surface-raised" />
+        )}
       </div>
     );
   }
@@ -365,7 +510,11 @@ export function PoolQuotaStackedBar({
       }}
     >
       <BasePopover.Trigger
-        className={cx('relative block w-full text-left', openPopover && 'z-50')}
+        className={cx(
+          POOL_QUOTA_SNAPSHOT_SLOT_CLASS,
+          'text-left',
+          openPopover && 'z-50',
+        )}
         closeDelay={0}
         delay={0}
         nativeButton={false}
@@ -436,8 +585,9 @@ export function PoolQuotaStackedBar({
 function PoolQuotaCard({
   aggregate,
   chart,
+  loading,
 }: {
-  aggregate: ReturnType<typeof useSubscriptionQuotaAggregate>;
+  aggregate: { data: AggregateResponse | undefined };
   chart: {
     data: PoolQuotaChartRow[];
     maxValue: number;
@@ -447,6 +597,7 @@ function PoolQuotaCard({
     latest: PoolQuotaLatest;
     showFable: boolean;
   };
+  loading: boolean;
 }) {
   const w5h = aggregate.data?.windows.find((x) => x.window === '5h');
   const w7d = aggregate.data?.windows.find((x) => x.window === '7d');
@@ -455,10 +606,14 @@ function PoolQuotaCard({
   const contributingCount = Math.max(
     w5h?.contributing_upstreams ?? 0,
     w7d?.contributing_upstreams ?? 0,
-    chart.showFable ? (wFable?.contributing_upstreams ?? 0) : 0,
+    wFable?.contributing_upstreams ?? 0,
   );
   return (
-    <Card className="min-w-0 flex flex-col h-full">
+    <Card
+      aria-busy={loading}
+      className="min-w-0 min-h-[41rem] flex flex-col h-full sm:min-h-0"
+      data-testid="pool-quota-card"
+    >
       <CardHeader
         title={
           <span className="inline-flex items-center gap-2">
@@ -477,38 +632,51 @@ function PoolQuotaCard({
           <div className="text-xs uppercase tracking-wider font-medium text-text-faint">
             Snapshot
           </div>
-          <div
-            className={cx(
-              'grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4',
-              chart.showFable && 'xl:grid-cols-3',
-            )}
-          >
-            <PoolQuotaStackedBar window="5h" w={w5h} />
-            <PoolQuotaStackedBar window="7d" w={w7d} />
-            {chart.showFable ? (
-              <PoolQuotaStackedBar window="7d_fable" w={wFable} />
-            ) : null}
+          <div className="grid grid-cols-1 gap-x-10 gap-y-4 md:grid-cols-2 xl:grid-cols-3">
+            {POOL_QUOTA_WINDOWS.map((window) => (
+              <div
+                key={window}
+                data-testid="pool-quota-snapshot-slot"
+                className={POOL_QUOTA_SNAPSHOT_SLOT_CLASS}
+              >
+                <PoolQuotaStackedBar
+                  window={window}
+                  w={aggregate.data?.windows.find(
+                    (entry) => entry.window === window,
+                  )}
+                  loading={loading}
+                />
+              </div>
+            ))}
           </div>
         </div>
         <div className="h-px bg-border" />
         <div className="flex-1 flex flex-col gap-2 min-h-0">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-xs uppercase tracking-wider font-medium text-text-faint">
               Trend · {chart.range}
             </div>
             <PoolQuotaLegend
               latest={chart.latest}
               showFable={chart.showFable}
+              loading={loading}
             />
           </div>
-          <div className="flex-1 min-h-64 min-w-0 w-full relative">
-            <PoolQuotaThemedChart
-              seriesData={chart.data}
-              rangeStartUnix={chart.rangeStartUnix}
-              rangeEndUnix={chart.rangeEndUnix}
-              maxValue={chart.maxValue}
-              showFable={chart.showFable}
-            />
+          <div
+            className={POOL_QUOTA_CHART_SLOT_CLASS}
+            data-testid="pool-quota-chart-slot"
+          >
+            {loading ? (
+              <Skeleton className="absolute inset-0 h-full w-full" />
+            ) : (
+              <PoolQuotaThemedChart
+                seriesData={chart.data}
+                rangeStartUnix={chart.rangeStartUnix}
+                rangeEndUnix={chart.rangeEndUnix}
+                maxValue={chart.maxValue}
+                showFable={chart.showFable}
+              />
+            )}
           </div>
         </div>
       </div>
@@ -756,41 +924,39 @@ export function PoolQuotaThemedChart({
 export function PoolQuotaLegend({
   latest,
   showFable,
+  loading = false,
 }: {
   latest?: PoolQuotaLatest;
   showFable: boolean;
+  loading?: boolean;
 }) {
-  const c5h = getWindowColor('5h');
-  const c7d = getWindowColor('7d');
-  const cFable = getWindowColor('7d_fable');
-  const v5h = latest?.['5h'];
-  const v7d = latest?.['7d'];
-  const vFable = latest?.['7d_fable'];
   return (
     <div className="flex flex-wrap items-center gap-3 text-[11px] text-text-faint">
-      <span className="inline-flex items-center gap-1.5">
-        <span
-          className="w-2 h-2 rounded-sm"
-          style={{ background: c5h.stroke }}
-        />
-        5h{v5h != null ? ` · ${v5h.toFixed(0)}%` : ''}
-      </span>
-      <span className="inline-flex items-center gap-1.5">
-        <span
-          className="w-2 h-2 rounded-sm"
-          style={{ background: c7d.stroke }}
-        />
-        7d{v7d != null ? ` · ${v7d.toFixed(0)}%` : ''}
-      </span>
-      {showFable ? (
-        <span className="inline-flex items-center gap-1.5">
+      {POOL_QUOTA_WINDOWS.filter(
+        (window) => showFable || window !== '7d_fable',
+      ).map((window) => {
+        const color = getWindowColor(window);
+        const value = latest?.[window];
+        const label = window === '7d_fable' ? 'Fable' : window;
+        return (
           <span
-            className="w-2 h-2 rounded-sm"
-            style={{ background: cFable.stroke }}
-          />
-          Fable{vFable != null ? ` · ${vFable.toFixed(0)}%` : ''}
-        </span>
-      ) : null}
+            key={window}
+            className={POOL_QUOTA_LEGEND_ITEM_CLASS}
+            data-testid="pool-quota-legend-slot"
+          >
+            <span
+              className="w-2 h-2 rounded-sm"
+              style={{ background: color.stroke }}
+            />
+            {label}
+            {loading ? (
+              <Skeleton as="span" className="inline-block h-3 w-8" />
+            ) : value != null ? (
+              ` · ${value.toFixed(0)}%`
+            ) : null}
+          </span>
+        );
+      })}
     </div>
   );
 }
@@ -815,7 +981,7 @@ function OverviewPage() {
   }, []);
 
   const quotaAggregate = useSubscriptionQuotaAggregate({
-    windows: '5h,7d,7d_fable',
+    windows: POOL_QUOTA_QUERY_WINDOWS,
     source: 'merged',
   });
 
@@ -828,11 +994,16 @@ function OverviewPage() {
           ? 86400
           : 604800;
   const quotaPoolHistory = useSubscriptionQuotaPoolHistory({
-    windows: '5h,7d,7d_fable',
+    windows: POOL_QUOTA_QUERY_WINDOWS,
     sinceUnixSecs: nowUnixSecs - seriesRangeSecs,
     untilUnixSecs: nowUnixSecs,
   });
-  const showFable = hasFableHistoryData(quotaPoolHistory.data?.windows);
+  const showFable = POOL_QUOTA_WINDOWS.includes('7d_fable');
+  const quotaLoading =
+    quotaAggregate.isPending ||
+    quotaAggregate.isPlaceholderData ||
+    quotaPoolHistory.isPending ||
+    quotaPoolHistory.isPlaceholderData;
 
   const live = useLiveEventStream({});
   const streamStatus = live.status;
@@ -950,15 +1121,10 @@ function OverviewPage() {
   // Principals Data
   const topPrincipals = useMemo(() => {
     const series = principalUsage.data?.series ?? [];
-    type PrincipalRow = {
-      id: string;
-      name: string;
-      cost_usd: number;
-      tokens: number;
-      requests: number;
-      primary_model: string;
-    };
-    const byId = new Map<string, PrincipalRow>();
+    const byId = new Map<
+      string,
+      Omit<TopPrincipal, 'share_pct' | 'max_cost'>
+    >();
     let maxCost = 0;
     let totalCost = 0;
 
@@ -1034,6 +1200,7 @@ function OverviewPage() {
           size="sm"
           icon={<Activity className="w-3.5 h-3.5" />}
           label="avg req/s"
+          loading={summary.isPending}
           value={formatRate(reqPerSec)}
           sub={`${formatCount(totals?.request_count)} / ${range}`}
           spark={sparkRate}
@@ -1043,6 +1210,7 @@ function OverviewPage() {
           size="sm"
           icon={<Database className="w-3.5 h-3.5" />}
           label="tokens"
+          loading={summary.isPending}
           value={formatCount(totalTokens)}
           spark={sparkTokens}
           sparkColor="#06b6d4"
@@ -1051,6 +1219,7 @@ function OverviewPage() {
           size="sm"
           icon={<TrendingUp className="w-3.5 h-3.5" />}
           label="equiv $"
+          loading={summary.isPending}
           value={formatUsdAmount(virtualUsd)}
           spark={sparkCost}
           sparkColor="#10b981"
@@ -1060,6 +1229,7 @@ function OverviewPage() {
           size="sm"
           icon={<Timer className="w-3.5 h-3.5" />}
           label={latencyLabel}
+          loading={summary.isPending}
           value={fmtMs(latency)}
           spark={sparkLatency}
           sparkColor="#f59e0b"
@@ -1068,6 +1238,7 @@ function OverviewPage() {
           size="sm"
           icon={<ShieldCheck className="w-3.5 h-3.5" />}
           label="err rate"
+          loading={summary.isPending}
           value={`${errRate.toFixed(2)}%`}
           spark={sparkError}
           sparkColor="var(--color-danger)"
@@ -1077,6 +1248,7 @@ function OverviewPage() {
       <div className="grid grid-cols-1 xl:grid-cols-[2fr_1fr] gap-4 min-w-0">
         <PoolQuotaCard
           aggregate={quotaAggregate}
+          loading={quotaLoading}
           chart={{
             data: chartData,
             maxValue: chartMaxValue,
@@ -1088,68 +1260,11 @@ function OverviewPage() {
           }}
         />
 
-        <Card className="min-w-0 flex flex-col h-full">
-          <CardHeader
-            title={
-              <span className="inline-flex items-center gap-2">
-                <Users className="w-3.5 h-3.5 text-text-faint" />
-                Top principals
-              </span>
-            }
-            subtitle={`by virtual cost · ${range}`}
-          />
-          <div className="flex-1 overflow-auto min-h-0 max-h-96 xl:max-h-none">
-            <div className="flex flex-col">
-              {principalUsage.isPending || principalUsage.isPlaceholderData ? (
-                <div className="p-4 text-center text-xs text-text-faint">
-                  Loading top principals…
-                </div>
-              ) : topPrincipals.length === 0 ? (
-                <div className="p-4 text-center text-xs text-text-faint">
-                  No usage data
-                </div>
-              ) : (
-                topPrincipals.map((p) => (
-                  <div
-                    key={p.id}
-                    className="flex items-center gap-3 px-3 py-2 border-b border-subtle last:border-b-0 hover:bg-overlay-2 transition-colors"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm truncate">{p.name}</div>
-                      <div className="text-[11px] text-text-faint truncate">
-                        {p.primary_model} · {formatCount(p.requests)} req ·{' '}
-                        {formatCount(p.tokens)} tok
-                      </div>
-                      <BaseMeter.Root
-                        className="mt-1.5"
-                        max={100}
-                        value={Math.min(
-                          100,
-                          Math.max(
-                            0,
-                            (p.cost_usd / Math.max(1, p.max_cost)) * 100 || 0,
-                          ),
-                        )}
-                      >
-                        <BaseMeter.Track className="relative w-full bg-overlay-3 rounded-full overflow-hidden h-1.5">
-                          <BaseMeter.Indicator className="h-full rounded-full transition-all bg-[color:var(--color-accent)]" />
-                        </BaseMeter.Track>
-                      </BaseMeter.Root>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <div className="text-sm font-mono tabular-nums">
-                        {formatUsdAmount(p.cost_usd)}
-                      </div>
-                      <div className="text-[11px] text-text-faint tabular-nums">
-                        {p.share_pct.toFixed(1)}%
-                      </div>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </Card>
+        <TopPrincipalsCard
+          range={range}
+          principals={topPrincipals}
+          loading={principalUsage.isPending || principalUsage.isPlaceholderData}
+        />
       </div>
 
       {/* Recent Requests */}
@@ -1191,7 +1306,7 @@ function OverviewPage() {
       >
         <Card className="min-w-0">
           <div
-            className="overflow-auto max-h-[50vh] scroll-fade-right"
+            className="overflow-auto h-[50vh] scroll-fade-right"
             ref={scrollContainerRef}
           >
             <RequestEventsTable

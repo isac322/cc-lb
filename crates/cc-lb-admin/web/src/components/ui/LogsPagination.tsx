@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react';
-import { Button } from './primitives';
+import { Button, Skeleton, Spinner } from './primitives';
 
 export interface LogsPaginationProps {
   readonly page: number;
@@ -10,6 +10,7 @@ export interface LogsPaginationProps {
   readonly loadingNext?: boolean;
   readonly onPrev: () => void;
   readonly onNext: () => void;
+  readonly loading?: boolean;
 }
 
 export function LogsPagination({
@@ -21,6 +22,7 @@ export function LogsPagination({
   loadingNext = false,
   onPrev,
   onNext,
+  loading = false,
 }: LogsPaginationProps) {
   const startRow = totalRows === 0 ? 0 : page * pageSize + 1;
   const endRow = Math.min((page + 1) * pageSize, totalRows);
@@ -30,28 +32,43 @@ export function LogsPagination({
       : `${totalRows}+`
     : String(totalRows);
   const pageCountLabel = hasMore ? `${pageCount}+` : String(pageCount);
+  const showNextPending = !loading && loadingNext;
   return (
     <nav
       aria-label="Log pagination"
-      className="flex items-center justify-between gap-4 px-4 py-3 border-t border-subtle bg-bg-sub"
+      aria-busy={loading || showNextPending}
+      className="h-14 shrink-0 flex items-center justify-between gap-4 px-4 py-3 border-t border-subtle bg-bg-sub"
     >
       <div
         aria-live="polite"
         className="text-xs text-text-muted flex items-center gap-4"
       >
-        <span>
-          Showing {startRow}–{endRow} of {totalLabel}
-        </span>
-        <span className="hidden sm:inline">
-          Page {page + 1} of {pageCountLabel}
-        </span>
+        {loading ? (
+          <>
+            <div className="w-28 sm:w-36">
+              <Skeleton className="h-3" />
+            </div>
+            <div className="hidden sm:block w-20">
+              <Skeleton className="h-3" />
+            </div>
+          </>
+        ) : (
+          <>
+            <span>
+              Showing {startRow}–{endRow} of {totalLabel}
+            </span>
+            <span className="hidden sm:inline">
+              Page {page + 1} of {pageCountLabel}
+            </span>
+          </>
+        )}
       </div>
       <div className="flex items-center gap-2">
         <Button
           variant="secondary"
           size="sm"
           onClick={onPrev}
-          disabled={page <= 0}
+          disabled={loading || page <= 0}
           aria-label="Previous page"
           iconLeft={<ChevronLeft className="w-4 h-4" />}
         >
@@ -61,11 +78,22 @@ export function LogsPagination({
           variant="secondary"
           size="sm"
           onClick={onNext}
-          disabled={loadingNext || (page >= pageCount - 1 && !hasMore)}
-          aria-label="Next page"
-          iconRight={<ChevronRight className="w-4 h-4" />}
+          disabled={
+            loading || showNextPending || (page >= pageCount - 1 && !hasMore)
+          }
+          aria-label={showNextPending ? 'Loading next page' : 'Next page'}
+          aria-busy={showNextPending}
+          iconRight={
+            showNextPending ? (
+              <span aria-hidden="true" className="inline-flex h-4 w-4">
+                <Spinner className="w-4 h-4 text-text-muted" />
+              </span>
+            ) : (
+              <ChevronRight className="w-4 h-4" />
+            )
+          }
         >
-          {loadingNext ? 'Loading…' : 'Next'}
+          Next
         </Button>
       </div>
     </nav>

@@ -133,6 +133,42 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     } as unknown as ReturnType<typeof queries.useCacheKeepaliveSessionDetail>);
   });
 
+  it('renders five structured session skeleton rows with reserved list geometry', () => {
+    vi.spyOn(queries, 'useCacheKeepaliveSessions').mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: vi.fn(),
+    } as never);
+
+    renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+
+    const region = screen.getByTestId('cache-keepalive-session-list-region');
+    const rows = screen.getAllByTestId('cache-keepalive-session-skeleton-row');
+
+    expect(region.className).toContain('min-h-[340px]');
+    expect(rows).toHaveLength(5);
+    expect(rows[0].parentElement?.tagName).toBe('UL');
+    expect(rows[0].parentElement?.className).toContain('flex');
+    expect(rows[0].parentElement?.className).toContain('flex-col');
+    rows.forEach((row) => {
+      expect(row.className).toContain('border-b');
+      expect(row.className).toContain('min-h-[68px]');
+      expect(row.className).toContain('px-4');
+      expect(row.className).toContain('py-3');
+      expect(row.querySelectorAll('.skeleton')).toHaveLength(6);
+    });
+    expect(screen.queryByText('0 renewals fired')).toBeNull();
+    expect(screen.queryByText(/\$0\.00 saved/)).toBeNull();
+  });
+
   it('Given in-place update, When data changes, Then row updates in place', () => {
     vi.spyOn(queries, 'useCacheKeepaliveSessions').mockReturnValue({
       data: {
@@ -408,6 +444,9 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         principal={mockPrincipal}
       />,
     );
+    expect(
+      screen.getByTestId('cache-keepalive-session-list-region').className,
+    ).toContain('min-h-[340px]');
 
     expect(screen.queryByText('Session detail pane (Todo 7)')).toBeNull();
 
@@ -538,6 +577,9 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     );
 
     expect(screen.getByText('No sessions')).toBeDefined();
+    expect(
+      screen.getByTestId('cache-keepalive-session-list-region').className,
+    ).toContain('min-h-[340px]');
   });
 
   it('renders no matching sessions empty state', () => {

@@ -15,6 +15,7 @@ import {
   CardHeader,
   cx,
   Hint,
+  Skeleton,
 } from '../../ui/primitives';
 import { cacheKeepaliveAnimationContract } from './__fixtures__/cacheKeepaliveContract';
 import { CacheKeepaliveSessionsDrawer } from './CacheKeepaliveSessionsDrawer';
@@ -69,11 +70,13 @@ function CacheKeepaliveHelpHover() {
 function MetricTile({
   label,
   value,
+  isLoading,
   subtext,
   valueClassName = 'text-text',
 }: {
   label: string;
-  value: string | number;
+  value?: string | number;
+  isLoading: boolean;
   subtext: string;
   valueClassName?: string;
 }) {
@@ -81,6 +84,7 @@ function MetricTile({
   const prevValueRef = useRef(value);
 
   useEffect(() => {
+    if (isLoading) return;
     if (prevValueRef.current !== value) {
       prevValueRef.current = value;
       if (!window.PAUSE_ANIMATIONS) {
@@ -89,7 +93,7 @@ function MetricTile({
         return () => clearTimeout(timer);
       }
     }
-  }, [value]);
+  }, [isLoading, value]);
 
   return (
     <div className="flex flex-col gap-1">
@@ -97,8 +101,10 @@ function MetricTile({
         {label}
       </span>
       <div
+        data-testid="cache-keepalive-metric-value"
+        aria-busy={isLoading}
         className={cx(
-          'text-lg font-medium tabular-nums',
+          'flex h-7 items-center text-lg font-medium tabular-nums',
           valueClassName,
           flash && 'flash-text-active',
         )}
@@ -110,12 +116,14 @@ function MetricTile({
             : undefined
         }
       >
-        {value}
+        {isLoading ? <Skeleton className="h-5 w-16" /> : value}
       </div>
       <span className="text-[11px] text-text-faint">{subtext}</span>
     </div>
   );
 }
+
+export const CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS = 'min-h-[323px]';
 
 export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
   const updateSettings = useUpdatePrincipalCacheKeepalive();
@@ -210,28 +218,56 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
 
   return (
     <>
-      <Card data-testid="cache-keepalive-card" className="w-full flex flex-col">
+      <Card
+        data-testid="cache-keepalive-card"
+        className={cx(
+          CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS,
+          'w-full flex flex-col',
+        )}
+      >
         <CardHeader title={headerTitle} action={headerActions} align="center" />
         <CardBody className="space-y-4 flex-1 flex flex-col">
           <div className="grid grid-cols-2 gap-4">
             <MetricTile
               label="Renewing now"
-              value={(summary?.renewing_now ?? 0).toLocaleString('en-US')}
+              isLoading={summaryQ.isLoading}
+              value={
+                summaryQ.isLoading
+                  ? undefined
+                  : (summary?.renewing_now ?? 0).toLocaleString('en-US')
+              }
               subtext="scheduled or mid-renewal"
             />
             <MetricTile
               label="Sessions (last 5m)"
-              value={(summary?.sessions_last_5m ?? 0).toLocaleString('en-US')}
+              isLoading={summaryQ.isLoading}
+              value={
+                summaryQ.isLoading
+                  ? undefined
+                  : (summary?.sessions_last_5m ?? 0).toLocaleString('en-US')
+              }
               subtext="seen in last 5 min"
             />
             <MetricTile
               label="Renewals fired"
-              value={(summary?.renewals_fired ?? 0).toLocaleString('en-US')}
+              isLoading={summaryQ.isLoading}
+              value={
+                summaryQ.isLoading
+                  ? undefined
+                  : (summary?.renewals_fired ?? 0).toLocaleString('en-US')
+              }
               subtext="all-time"
             />
             <MetricTile
               label="Cost saved"
-              value={summary ? formatMoney(summary.cost_saved) : '$0.00'}
+              isLoading={summaryQ.isLoading}
+              value={
+                summaryQ.isLoading
+                  ? undefined
+                  : summary
+                    ? formatMoney(summary.cost_saved)
+                    : '$0.00'
+              }
               subtext="net, after renewal spend"
               valueClassName="text-green-400"
             />

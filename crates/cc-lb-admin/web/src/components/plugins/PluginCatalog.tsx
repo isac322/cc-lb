@@ -10,10 +10,44 @@ import {
   CardHeader,
   Hint,
   Skeleton,
+  SkeletonRow,
 } from '../ui/primitives';
 import { RelativeTime } from '../ui/RelativeTime';
 import { PluginDeleteDialog } from './PluginDeleteDialog';
 import { SLOTS } from './slots/model';
+
+const PLUGIN_COLUMN_WIDTHS = [
+  'w-1/4',
+  'w-1/6',
+  'w-1/6',
+  'w-1/12',
+  'w-1/12',
+  'w-1/8',
+  'w-1/8',
+] as const;
+
+const PLUGIN_LOADING_ROWS = [0, 1, 2] as const;
+const PLUGIN_ROW_GEOMETRY_CLASS = 'h-20';
+
+const PLUGIN_SKELETON_CELL_CLASSES = [
+  '!px-4',
+  '!px-4',
+  '!px-4',
+  '!px-4',
+  '!px-4',
+  '!px-4',
+  '!px-4',
+] as const;
+
+const PLUGIN_SKELETON_CLASSES = [
+  'h-16 w-4/5',
+  'h-5 w-20',
+  'h-4 w-28',
+  'ml-auto h-4 w-16',
+  'mx-auto h-5 w-10',
+  'h-4 w-20',
+  'ml-auto h-4 w-24',
+] as const;
 
 export function PluginCatalog({
   onSelectPlugin,
@@ -44,11 +78,18 @@ export function PluginCatalog({
             </span>
           }
           subtitle={
-            <span className="flex flex-col gap-1">
-              <span className="text-sm text-text-faint">
-                {entries.length} available · {unusedUploadCount} not used
-                anywhere
-              </span>
+            <span
+              className="flex min-h-5 min-w-56 items-center"
+              data-testid="plugin-count-slot"
+            >
+              {reg.isLoading ? (
+                <Skeleton as="span" className="block h-4 w-48" />
+              ) : (
+                <span className="text-sm text-text-faint">
+                  {entries.length} available · {unusedUploadCount} not used
+                  anywhere
+                </span>
+              )}
             </span>
           }
           action={
@@ -70,8 +111,13 @@ export function PluginCatalog({
             </Button>
           }
         />
-        <div className="overflow-x-auto">
-          <table className="w-full font-mono text-xs">
+        <div className="min-h-72 overflow-x-auto">
+          <table className="w-full min-w-[960px] table-fixed font-mono text-xs">
+            <colgroup>
+              {PLUGIN_COLUMN_WIDTHS.map((className, index) => (
+                <col key={index} className={className} />
+              ))}
+            </colgroup>
             <thead className="table-header sticky top-0 z-10">
               <tr className="text-[10px] uppercase tracking-wider">
                 <th className="text-left px-4 py-2">Name</th>
@@ -91,18 +137,20 @@ export function PluginCatalog({
             </thead>
             <tbody>
               {reg.isLoading ? (
-                Array.from({ length: 3 }).map((_, i) => (
-                  <tr key={i}>
-                    <td colSpan={7} className="px-4 py-2">
-                      <Skeleton />
-                    </td>
-                  </tr>
+                PLUGIN_LOADING_ROWS.map((row) => (
+                  <SkeletonRow
+                    key={row}
+                    className={PLUGIN_ROW_GEOMETRY_CLASS}
+                    cols={7}
+                    cellClassNames={PLUGIN_SKELETON_CELL_CLASSES}
+                    skeletonClassNames={PLUGIN_SKELETON_CLASSES}
+                  />
                 ))
               ) : entries.length ? (
                 entries.map((p) => (
                   <tr
                     key={p.id}
-                    className="border-b border-row hover:bg-overlay-1"
+                    className={`${PLUGIN_ROW_GEOMETRY_CLASS} border-b border-row hover:bg-overlay-1`}
                   >
                     <td className="px-4 py-2 max-w-[260px]">
                       <div className="flex items-center gap-2">
