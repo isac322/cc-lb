@@ -25,7 +25,7 @@ describe('LogsPagination', () => {
     expect(nav.className).toContain('h-14');
     expect(nav.className).toContain('shrink-0');
     expect(nav.getAttribute('aria-busy')).toBe('true');
-    expect(nav.querySelectorAll('.skeleton')).toHaveLength(2);
+    expect(nav.querySelectorAll('.skeleton')).toHaveLength(1);
     expect(screen.queryByText('Showing 0–0 of 0')).toBeNull();
     expect(
       screen
@@ -94,7 +94,7 @@ describe('LogsPagination', () => {
     expect(statusText).toBeDefined();
     expect(statusText.parentElement?.getAttribute('aria-live')).toBe('polite');
 
-    expect(screen.getByText('Page 1 of 10')).toBeDefined();
+    expect(screen.queryByText(/^Page /)).toBeNull();
 
     const prevButton = screen.getByRole('button', { name: 'Previous page' });
     expect(prevButton.hasAttribute('disabled')).toBe(true);
@@ -122,7 +122,6 @@ describe('LogsPagination', () => {
     );
 
     expect(screen.getByText('Showing 401–450 of 450')).toBeDefined();
-    expect(screen.getByText('Page 9 of 9')).toBeDefined();
 
     const prevButton = screen.getByRole('button', { name: 'Previous page' });
     expect(prevButton.hasAttribute('disabled')).toBe(false);
@@ -147,7 +146,6 @@ describe('LogsPagination', () => {
     );
 
     expect(screen.getByText('Showing 401–450 of 450+')).toBeDefined();
-    expect(screen.getByText('Page 9 of 9+')).toBeDefined();
     expect(
       screen
         .getByRole('button', { name: 'Next page' })
@@ -155,7 +153,7 @@ describe('LogsPagination', () => {
     ).toBe(false);
   });
 
-  it('caps the open-ended row label at 999+', () => {
+  it('shows the loaded maximum in the open-ended row label', () => {
     render(
       <LogsPagination
         page={19}
@@ -168,7 +166,7 @@ describe('LogsPagination', () => {
       />,
     );
 
-    expect(screen.getByText('Showing 951–1000 of 999+')).toBeDefined();
+    expect(screen.getByText('Showing 951–1000 of 1200+')).toBeDefined();
   });
 
   it('renders correctly on a single page', () => {
@@ -188,7 +186,6 @@ describe('LogsPagination', () => {
     );
 
     expect(screen.getByText('Showing 1–30 of 30')).toBeDefined();
-    expect(screen.getByText('Page 1 of 1')).toBeDefined();
 
     const prevButton = screen.getByRole('button', { name: 'Previous page' });
     expect(prevButton.hasAttribute('disabled')).toBe(true);
@@ -219,7 +216,6 @@ describe('LogsPagination', () => {
     const nav = screen.getByRole('navigation', { name: 'Log pagination' });
     expect(nav.className).toContain('h-14');
     expect(nav.className).toContain('shrink-0');
-    expect(screen.getByText('Page 1 of 1')).toBeDefined();
 
     const prevButton = screen.getByRole('button', { name: 'Previous page' });
     expect(prevButton.hasAttribute('disabled')).toBe(true);

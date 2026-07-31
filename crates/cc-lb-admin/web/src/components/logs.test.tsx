@@ -272,7 +272,7 @@ describe('LogsPage', () => {
     };
 
     expect(screen.getByText('Showing 1–50 of 50+')).toBeDefined();
-    expect(screen.getByText('Page 1 of 1+')).toBeDefined();
+    expect(screen.queryByText(/^Page /)).toBeNull();
     expect(getRowCount()).toBe(50);
 
     const scroller = document.querySelector<HTMLDivElement>(
@@ -286,7 +286,6 @@ describe('LogsPage', () => {
     await waitFor(() =>
       expect(screen.getByText('Showing 51–100 of 100+')).toBeDefined(),
     );
-    expect(screen.getByText('Page 2 of 2+')).toBeDefined();
     expect(getRowCount()).toBe(50);
     expect(scroller.scrollTop).toBe(0);
 
@@ -294,7 +293,6 @@ describe('LogsPage', () => {
     await waitFor(() =>
       expect(screen.getByText('Showing 101–120 of 120')).toBeDefined(),
     );
-    expect(screen.getByText('Page 3 of 3')).toBeDefined();
     expect(getRowCount()).toBe(20);
 
     const prevBtn = screen.getByRole('button', { name: /Previous page/i });
@@ -302,7 +300,6 @@ describe('LogsPage', () => {
     await waitFor(() =>
       expect(screen.getByText('Showing 51–100 of 120')).toBeDefined(),
     );
-    expect(screen.getByText('Page 2 of 3')).toBeDefined();
     expect(getRowCount()).toBe(50);
 
     scroller.scrollTop = 100;
@@ -316,7 +313,6 @@ describe('LogsPage', () => {
     await waitFor(() =>
       expect(screen.getByText('Showing 1–50 of 50+')).toBeDefined(),
     );
-    expect(screen.getByText('Page 1 of 1+')).toBeDefined();
     expect(getRowCount()).toBe(50);
     expect(scroller.scrollTop).toBe(0);
   }, 30_000);
@@ -336,8 +332,9 @@ describe('LogsPage', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: /Next page/i }));
-    await waitFor(() => expect(screen.getByText('Page 2 of 2+')).toBeDefined());
-    expect(screen.getByLabelText('View request req-50')).toBeDefined();
+    await waitFor(() =>
+      expect(screen.getByLabelText('View request req-50')).toBeDefined(),
+    );
 
     liveState.eventsMap.set('live-new', {
       phase: 'final',
@@ -355,7 +352,6 @@ describe('LogsPage', () => {
       </QueryClientProvider>,
     );
 
-    expect(screen.getByText('Page 2 of 2+')).toBeDefined();
     expect(screen.getByLabelText('View request req-50')).toBeDefined();
     expect(screen.queryByLabelText('View request live-new')).toBeNull();
   });
@@ -417,9 +413,13 @@ describe('LogsPage', () => {
 
     const nextButton = screen.getByRole('button', { name: /Next page/i });
     fireEvent.click(nextButton);
-    await waitFor(() => expect(screen.getByText('Page 2 of 2+')).toBeDefined());
+    await waitFor(() =>
+      expect(screen.getByText('Showing 51–100 of 100+')).toBeDefined(),
+    );
     fireEvent.click(nextButton);
-    await waitFor(() => expect(screen.getByText('Page 3 of 3')).toBeDefined());
+    await waitFor(() =>
+      expect(screen.getByText('Showing 101–120 of 120')).toBeDefined(),
+    );
 
     const exportBtn = screen.getByRole('button', { name: /Export/i });
 
