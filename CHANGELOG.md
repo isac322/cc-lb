@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-31
+
+### Added
+
+- Request Logs now provide a request-density histogram backed by `GET /admin/v1/events/histogram`. It replaces the fixed relative time presets with drag, resize, pan, zoom, absolute range controls, and row-centered shortcuts; shares the table's filters and error classification; and keeps live tailing only while the upper bound remains open.
+
 ## [0.4.0] - 2026-07-31
 
 ### Changed
