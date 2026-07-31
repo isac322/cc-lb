@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    CacheKeepaliveConfig, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore,
-    PrincipalUpdate, StorageError, StorageResult, validate_identifier,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheKeepaliveConfig, PrincipalCreate, PrincipalKind,
+    PrincipalRecord, PrincipalStore, PrincipalUpdate, StorageError, StorageResult,
+    validate_identifier,
 };
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
@@ -34,6 +35,7 @@ impl PrincipalStore for PostgresStorage {
             .as_ref()
             .map(serde_json::to_value)
             .transpose()?;
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let row = sqlx::query(
             "INSERT INTO principals_v1 (id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, revision, created_at, updated_at, cache_keepalive) VALUES ($1, $2, $3, $4, $5, $6, TRUE, 0, $7, $7, $8) RETURNING *",
         )
@@ -45,10 +47,21 @@ impl PrincipalStore for PostgresStorage {
         .bind(default_limits)
         .bind(now)
         .bind(cache_keepalive)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        sqlx::query(
+            "INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision) VALUES ($1, $2, 'router', $3, $4, '{}'::jsonb, FALSE, 1, 100, 0)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(id)
+        .bind(0_i64)
+        .bind(BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
+        .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
         let record = principal_from_row(row)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
         self.notify_principal_changed(record.id).await?;
         Ok(record)
     }

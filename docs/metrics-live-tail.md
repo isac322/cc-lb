@@ -13,7 +13,7 @@ This is the canonical metric inventory for the dashboard live-tail redesign. Lab
 | `sse_lagged_resync_total` | Counter | none | Legacy companion counter for broadcast lag resets. | Zero in normal operation. |
 | `sse_reconnects_total` | Counter | none | Admin SSE stream connection attempts. | Tracks active dashboard reconnect cadence. |
 | `sse_malformed_frames_total` | Counter | none | Server-side SSE message frames that could not be serialized. | Always zero. |
-| `sse_storage_tail_polls_total` | Counter | none | Storage tail poll attempts by multi-instance pollers. | Increases every poll interval while PG notify transport is enabled. |
+| `sse_storage_tail_polls_total` | Counter | none | Storage tail poll attempts by multi-instance pollers. | Increases every poll interval on the postgres backend, where pg_notify fanout is always on. Absent on sqlite. |
 | `sse_storage_tail_lag_ms` | Histogram | none | Time between request event timestamp and storage-tail broadcast. | p95 should normally stay below 1000 ms. |
 | `sse_storage_tail_backlog_rows` | Gauge | none | Rows found in the latest storage-tail poll. | Usually 0 between bursts; sustained high values mean poll interval or storage is lagging. |
 | `sse_partial_notify_sent_total` | Counter | `outcome=sent|truncated_sent|failed` | PG NOTIFY partial publish outcomes. | `sent` dominates; `truncated_sent` only for large partial payloads; `failed` should be zero. |

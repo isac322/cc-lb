@@ -8,9 +8,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cc_lb_aead::AeadService;
-use cc_lb_config::{
-    Config, DownstreamAuthMode, EventBusTransport, PostgresPoolConfig, StorageConfig,
-};
+use cc_lb_config::{Config, DownstreamAuthMode, PostgresPoolConfig, StorageConfig};
 use cc_lb_engine::{ClockHandle, SystemClock};
 use cc_lb_server::app::{App, build_app_with_storage, seed_app_testing_storage};
 use cc_lb_storage_api::{BackendKind, ManagedKeyStore, MetaStore, RequestEvent, RequestEventStore};
@@ -148,7 +146,6 @@ fn test_config(database_url: &str, label: &str) -> Config {
     config.admin.token = Some(ADMIN_TOKEN.to_owned());
     config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
     config.downstream_auth.none_mode = None;
-    config.event_bus.transport = EventBusTransport::PgNotify;
     config.event_bus.storage_tail_poll_interval_ms = 10;
     config.cluster.instance_url = Some(format!("http://{label}.example.test"));
     config.cluster.token_env = CLUSTER_TOKEN_ENV.to_owned();

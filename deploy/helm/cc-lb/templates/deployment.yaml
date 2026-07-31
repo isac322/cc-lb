@@ -97,6 +97,21 @@ spec:
                   name: {{ .Values.config.storage.postgres.urlSecret.name }}
                   key: {{ .Values.config.storage.postgres.urlSecret.key }}
             {{- end }}
+            {{- if not $isSqlite }}
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: CC_LB_CLUSTER__INSTANCE_URL
+              value: "http://$(POD_IP):{{ .Values.ports.admin }}"
+            - name: CC_LB_CLUSTER__TOKEN_ENV
+              value: {{ .Values.config.cluster.tokenEnv | quote }}
+            - name: {{ .Values.config.cluster.tokenEnv }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cc-lb.secretName" . }}
+                  key: {{ .Values.secrets.keys.clusterToken }}
+            {{- end }}
             {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

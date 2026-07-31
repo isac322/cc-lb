@@ -54,7 +54,7 @@ where
     cascade_delete_registry_entry_removes_chain_warmup_and_blob_on_storage(storage).await?;
     cascade_delete_registry_entry_rejects_changed_fingerprint_on_storage(storage).await?;
     registry_by_id_returns_seeded_builtin_subscription_preference_on_storage(storage).await?;
-    insert_chain_entry_with_builtin_subscription_preference_succeeds_on_storage(storage).await?;
+    created_principal_has_builtin_subscription_preference_chain_entry_on_storage(storage).await?;
     registry_label_update_with_correct_revision_bumps_and_persists(storage).await?;
     registry_label_update_with_stale_revision_conflicts(storage).await?;
     chain_insert_preserves_sparse_order(storage).await?;
@@ -519,12 +519,14 @@ async fn cascade_delete_registry_entry_removes_chain_warmup_and_blob_on_storage<
         "cascade returns deleted entry"
     );
     ensure!(deleted.references.len() == 2, "cascade returns references");
+    let router_entries = storage
+        .list_chain_for_principal(principal, PluginSlotKind::Router)
+        .await?;
     ensure!(
-        storage
-            .list_chain_for_principal(principal, PluginSlotKind::Router)
-            .await?
-            .is_empty(),
-        "cascade removes chain references"
+        router_entries
+            .iter()
+            .all(|entry| entry.wasm_registry_id != plugin.id),
+        "cascade removes the deleted plugin's chain reference"
     );
     let updated_upstream = UpstreamStore::get_by_id(storage, upstream.id)
         .await?
@@ -635,46 +637,40 @@ pub async fn registry_by_id_returns_seeded_builtin_subscription_preference_on_st
 }
 
 plugin_registry_scenario!(
-    insert_chain_entry_with_builtin_subscription_preference_succeeds,
-    insert_chain_entry_with_builtin_subscription_preference_succeeds_on_storage
+    created_principal_has_builtin_subscription_preference_chain_entry,
+    created_principal_has_builtin_subscription_preference_chain_entry_on_storage
 );
 
-pub async fn insert_chain_entry_with_builtin_subscription_preference_succeeds_on_storage<
+pub async fn created_principal_has_builtin_subscription_preference_chain_entry_on_storage<
     S: PluginRegistryStore + PrincipalStore,
 >(
     storage: &S,
 ) -> Result<()> {
+    let refcount_before = storage
+        .get_registry_entry_by_id(BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
+        .await?
+        .expect("builtin is registered before principal creation")
+        .refcount;
     let principal = PrincipalStore::create(storage, principal_create(42), BASE_TS + 42).await?;
-    let inserted = storage
-        .insert_chain_entry(PluginChainEntryInput {
-            principal_id: principal.id,
-            slot: PluginSlotKind::Router,
-            order: sparse_order::STEP,
-            wasm_registry_id: BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
-            config: json!({}),
-            sse_per_event: false,
-            batched_events_per_flush: 1,
-            batched_flush_ms: 100,
-        })
-        .await?;
-
-    ensure!(
-        inserted.wasm_registry_id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
-        "chain entry references builtin subscription-preference"
-    );
     let listed = storage
         .list_chain_for_principal(principal.id, PluginSlotKind::Router)
         .await?;
-    ensure!(listed.len() == 1, "builtin chain insert is listed");
     ensure!(
-        listed[0].id == inserted.id,
-        "listed chain is the inserted row"
+        listed.len() == 1,
+        "new principal has one router chain entry"
+    );
+    ensure!(
+        listed[0].wasm_registry_id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+        "new principal chain references builtin subscription-preference"
     );
     let registry = storage
         .get_registry_entry_by_id(BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
         .await?
-        .expect("builtin remains registered after chain insert");
-    ensure!(registry.refcount == 1, "builtin refcount increments");
+        .expect("builtin remains registered after principal creation");
+    ensure!(
+        registry.refcount == refcount_before + 1,
+        "builtin refcount increments for the seeded entry"
+    );
     Ok(())
 }
 
@@ -785,35 +781,32 @@ pub async fn list_chains_for_principals_returns_ordered_and_filtered<
         )
         .await?;
 
-    let mut expected_groups = vec![
-        (
-            first_principal,
-            PluginSlotKind::ObservabilityHook,
-            vec![first_early.id, first_late.id],
-        ),
-        (
-            second_principal,
-            PluginSlotKind::Router,
-            vec![second_router.id],
-        ),
-    ];
-    expected_groups.sort_by_key(|g| (g.0, g.1));
-
-    let mut actual_groups = std::collections::BTreeMap::new();
-    for entry in listed {
-        actual_groups
-            .entry((entry.principal_id, entry.slot))
-            .or_insert_with(Vec::new)
-            .push(entry.id);
-    }
-
-    let actual_groups_vec: Vec<_> = actual_groups
-        .into_iter()
-        .map(|(k, v)| (k.0, k.1, v))
-        .collect();
+    let actual_groups: std::collections::BTreeMap<_, Vec<_>> =
+        listed
+            .into_iter()
+            .fold(std::collections::BTreeMap::new(), |mut groups, entry| {
+                groups
+                    .entry((entry.principal_id, entry.slot))
+                    .or_default()
+                    .push(entry.id);
+                groups
+            });
     ensure!(
-        actual_groups_vec == expected_groups,
-        "batched chain list is filtered and ordered by principal, slot, and order"
+        actual_groups.get(&(first_principal, PluginSlotKind::ObservabilityHook))
+            == Some(&vec![first_early.id, first_late.id]),
+        "batched chain list orders observability entries"
+    );
+    ensure!(
+        actual_groups
+            .get(&(second_principal, PluginSlotKind::Router))
+            .is_some_and(|entries| entries.contains(&second_router.id)),
+        "batched chain list includes the requested principal's custom router entry"
+    );
+    ensure!(
+        actual_groups
+            .keys()
+            .all(|(principal_id, _)| *principal_id != ignored_principal),
+        "batched chain list excludes unrequested principals"
     );
 
     let empty = storage
@@ -856,14 +849,21 @@ async fn router_multi_entry_ordered_on_storage<S: PluginRegistryStore + Principa
     let listed = storage
         .list_chain_for_principal(principal, PluginSlotKind::Router)
         .await?;
-    ensure!(listed.len() == 2, "router slot allows multiple entries");
+    let custom_entries: Vec<_> = listed
+        .iter()
+        .filter(|entry| entry.wasm_registry_id == plugin.id)
+        .collect();
     ensure!(
-        listed[0].order < listed[1].order,
+        custom_entries.len() == 2,
+        "router slot allows multiple custom entries"
+    );
+    ensure!(
+        custom_entries[0].order < custom_entries[1].order,
         "router entries are properly ordered"
     );
     ensure!(
-        listed[0].id == first.id && listed[1].id == second.id,
-        "entries appear in insertion order"
+        custom_entries[0].id == first.id && custom_entries[1].id == second.id,
+        "custom entries appear in insertion order"
     );
     Ok(())
 }
@@ -893,23 +893,35 @@ async fn router_reorder_preserves_invariants_on_storage<S: PluginRegistryStore +
             200,
         ))
         .await?;
+    let entries = storage
+        .list_chain_for_principal(principal, PluginSlotKind::Router)
+        .await?;
+    let builtin = entries
+        .iter()
+        .find(|entry| entry.wasm_registry_id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
+        .expect("principal has a built-in router entry");
     let reordered = storage
         .reorder_chain(
             principal,
             PluginSlotKind::Router,
             vec![
+                (builtin.id, builtin.order, builtin.revision),
                 (first.id, 150, first.revision),
                 (second.id, 250, second.revision),
             ],
         )
         .await?;
+    let custom_entries: Vec<_> = reordered
+        .iter()
+        .filter(|entry| entry.wasm_registry_id == plugin.id)
+        .collect();
     ensure!(
-        reordered[0].order == 150 && reordered[1].order == 250,
-        "router entries can be reordered"
+        custom_entries[0].order == 150 && custom_entries[1].order == 250,
+        "custom router entries can be reordered"
     );
     ensure!(
-        reordered[0].order < reordered[1].order,
-        "reordering preserves order invariant"
+        custom_entries[0].order < custom_entries[1].order,
+        "reordering preserves custom-entry order"
     );
     Ok(())
 }
@@ -1235,15 +1247,34 @@ pub async fn reorder_chain_valid_orders<S: PluginRegistryStore + PrincipalStore>
     storage: &S,
 ) -> Result<()> {
     let first = one_chain(storage, 15, "plugin-reorder").await?;
+    let expected_order = sparse_order::STEP * 3;
+    let entries = storage
+        .list_chain_for_principal(first.principal_id, first.slot)
+        .await?;
     let reordered = storage
         .reorder_chain(
             first.principal_id,
             first.slot,
-            vec![(first.id, sparse_order::STEP * 3, first.revision)],
+            entries
+                .into_iter()
+                .map(|entry| {
+                    (
+                        entry.id,
+                        if entry.id == first.id {
+                            expected_order
+                        } else {
+                            entry.order
+                        },
+                        entry.revision,
+                    )
+                })
+                .collect(),
         )
         .await?;
     ensure!(
-        reordered[0].order == sparse_order::STEP * 3,
+        reordered
+            .iter()
+            .any(|entry| entry.id == first.id && entry.order == expected_order),
         "order updated"
     );
     Ok(())
@@ -1857,9 +1888,9 @@ pub async fn fk_on_delete_restrict<S: PluginRegistryStore + PrincipalStore>(
         storage
             .list_chain_for_principal(created.principal_id, created.slot)
             .await?
-            .len()
-            == 1,
-        "chain exists"
+            .iter()
+            .any(|entry| entry.id == created.id),
+        "custom chain exists"
     );
     Ok(())
 }

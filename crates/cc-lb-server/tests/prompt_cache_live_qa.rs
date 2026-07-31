@@ -22,7 +22,7 @@ fn assert_message_response(response: &common::RawResponse, usage_field: &str) ->
 }
 
 #[tokio::test]
-async fn full_proxy_write_then_non_breakpoint_lookback_hit_preserves_smart_routing() {
+async fn full_proxy_write_then_non_breakpoint_lookback_hit_preserves_subscription_preference() {
     let script = MessageScript::new();
     let mut creation = ScriptedMessageResponse::ok();
     creation.body["usage"]["cache_creation_input_tokens"] = json!(4096);

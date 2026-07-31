@@ -92,6 +92,9 @@ fn test_tagged_kind_postgres_without_legacy_keys_parses() {
         r#"[storage]
 kind = "postgres"
 url = "postgres://localhost/db"
+
+[cluster]
+instance_url = "http://127.0.0.1:9090"
 "#,
     )
     .unwrap();

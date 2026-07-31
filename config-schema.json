@@ -80,8 +80,7 @@
         "partial_retention_max_entries": 10000,
         "partial_retention_ttl_secs": 300,
         "pg_notify_channel": "cc_lb_events_partial",
-        "storage_tail_poll_interval_ms": 250,
-        "transport": "in_memory"
+        "storage_tail_poll_interval_ms": 250
       }
     },
     "lifecycle_api_key_metrics_subscriber": {
@@ -589,20 +588,9 @@
           "format": "uint64",
           "default": 250,
           "minimum": 0
-        },
-        "transport": {
-          "$ref": "#/$defs/EventBusTransport",
-          "default": "in_memory"
         }
       },
       "additionalProperties": false
-    },
-    "EventBusTransport": {
-      "type": "string",
-      "enum": [
-        "in_memory",
-        "pg_notify"
-      ]
     },
     "LifecycleApiKeyMetricsSubscriberConfig": {
       "type": "object",

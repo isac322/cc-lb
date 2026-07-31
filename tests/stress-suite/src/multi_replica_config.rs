@@ -89,7 +89,6 @@ statement_timeout_secs = 25
 sslmode = "disable"
 
 [event_bus]
-transport = "pg_notify"
 storage_tail_poll_interval_ms = 100
 
 [cluster]

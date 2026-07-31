@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 
 use super::metrics::{record_http_fetch, record_pg_listener_reconnect, record_queue_usage};
 use super::notifier::DEFAULT_PG_NOTIFY_CHANNEL;
-use super::protocol::TruncatedPartialNotifyOwned;
+use super::protocol::{NotifyOrigin, TruncatedPartialNotifyOwned};
 use crate::event_bus::{RequestEventBus, RequestEventUpdate};
 use crate::metrics_labels::{NotifyHttpOutcome, PgListenerReconnectReason};
 
@@ -19,6 +19,7 @@ pub struct PgListener {
     pub bus: Arc<dyn RequestEventBus>,
     pub http_client: reqwest::Client,
     pub cluster_token: SecretString,
+    local_instance_url: String,
     channel: String,
 }
 
@@ -28,6 +29,7 @@ impl PgListener {
         bus: Arc<dyn RequestEventBus>,
         http_client: reqwest::Client,
         cluster_token: SecretString,
+        local_instance_url: String,
         shutdown_rx: watch::Receiver<bool>,
     ) -> JoinHandle<()> {
         Self::spawn_with_channel(
@@ -36,6 +38,7 @@ impl PgListener {
             http_client,
             cluster_token,
             DEFAULT_PG_NOTIFY_CHANNEL.to_owned(),
+            local_instance_url,
             shutdown_rx,
         )
     }
@@ -46,6 +49,7 @@ impl PgListener {
         http_client: reqwest::Client,
         cluster_token: SecretString,
         channel: String,
+        local_instance_url: String,
         shutdown_rx: watch::Receiver<bool>,
     ) -> JoinHandle<()> {
         let listener = Self {
@@ -53,6 +57,7 @@ impl PgListener {
             bus,
             http_client,
             cluster_token,
+            local_instance_url,
             channel,
         };
         tokio::spawn(listener.run(shutdown_rx))
@@ -114,6 +119,10 @@ impl PgListener {
     }
 
     async fn handle_payload(&self, payload: &str) {
+        if is_local_notification(payload, &self.local_instance_url) {
+            return;
+        }
+
         if let Ok(update) = serde_json::from_str::<RequestEventUpdate>(payload) {
             self.bus.publish(update);
             return;
@@ -130,7 +139,6 @@ impl PgListener {
         }
         self.fetch_truncated(marker).await;
     }
-
     async fn fetch_truncated(&self, marker: TruncatedPartialNotifyOwned) {
         let url = format!(
             "{}/internal/v1/partials/{}",
@@ -185,5 +193,40 @@ impl PgListener {
             }
             Err(error) => tracing::warn!(%error, "partial fetch body parse failed"),
         }
+    }
+}
+
+fn is_local_notification(payload: &str, local_instance_url: &str) -> bool {
+    serde_json::from_str::<NotifyOrigin>(payload)
+        .ok()
+        .and_then(|origin| origin.producer_url)
+        .is_some_and(|producer_url| producer_url == local_instance_url)
+}
+
+#[cfg(test)]
+mod tests {
+    use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
+
+    use super::is_local_notification;
+    use crate::pg_notify_fanout::protocol::InlinePartialNotify;
+
+    #[test]
+    fn local_inline_partial_is_identified_by_producer_url() {
+        let update = RequestEventUpdate::Partial(RequestEventPartial {
+            event_id: "event-local".to_owned(),
+            ..RequestEventPartial::default()
+        });
+        let payload = serde_json::to_string(&InlinePartialNotify {
+            update: &update,
+            producer_url: "http://instance-a",
+        })
+        .expect("inline partial serializes");
+
+        assert!(is_local_notification(&payload, "http://instance-a"));
+        assert!(!is_local_notification(&payload, "http://instance-b"));
+        assert!(!is_local_notification(
+            &serde_json::to_string(&update).expect("legacy update serializes"),
+            "http://instance-a"
+        ));
     }
 }

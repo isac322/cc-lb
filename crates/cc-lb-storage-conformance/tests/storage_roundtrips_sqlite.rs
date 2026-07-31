@@ -401,8 +401,8 @@ plugin_registry_sqlite_test!(
     registry_by_id_returns_seeded_builtin_subscription_preference
 );
 plugin_registry_sqlite_test!(
-    plugin_registry_insert_chain_entry_with_builtin_subscription_preference_succeeds_sqlite,
-    insert_chain_entry_with_builtin_subscription_preference_succeeds
+    plugin_registry_created_principal_has_builtin_subscription_preference_chain_entry_sqlite,
+    created_principal_has_builtin_subscription_preference_chain_entry
 );
 plugin_registry_sqlite_test!(
     plugin_registry_list_orphan_blobs_returns_blobs_without_registry_sqlite,

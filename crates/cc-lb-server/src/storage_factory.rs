@@ -9,6 +9,8 @@ use cc_lb_config::StorageConfig;
 #[cfg(feature = "sqlite")]
 use cc_lb_storage_api::MetaStore;
 use cc_lb_storage_api::{BackendKind, ManagedKeyStore, PluginBlobRepo, Storage, StorageResult};
+#[cfg(feature = "postgres")]
+const PG_FANOUT_MAX_CONNECTIONS: u32 = 2;
 
 pub struct OpenedStorage {
     pub storage: Arc<dyn Storage>,
@@ -83,7 +85,10 @@ pub async fn open_pg_fanout_pool(
     else {
         return Ok(None);
     };
-    open_postgres_pool(url, pool_config).await.map(Some)
+    let mut fanout_pool_config = pool_config.clone();
+    fanout_pool_config.max_connections = PG_FANOUT_MAX_CONNECTIONS;
+    fanout_pool_config.min_connections = 0;
+    open_postgres_pool(url, &fanout_pool_config).await.map(Some)
 }
 
 #[cfg(not(feature = "postgres"))]

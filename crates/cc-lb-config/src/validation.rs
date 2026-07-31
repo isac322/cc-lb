@@ -11,9 +11,7 @@ pub use legacy::{
     validate_raw_toml,
 };
 
-use crate::{
-    Config, ConfigError, DEFAULT_SQLITE_PATH, DownstreamAuthMode, EventBusTransport, StorageConfig,
-};
+use crate::{Config, ConfigError, DEFAULT_SQLITE_PATH, DownstreamAuthMode, StorageConfig};
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("{field}: {message}")]
@@ -42,14 +40,8 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
 }
 
 fn validate_event_bus(config: &Config) -> Result<(), ValidationError> {
-    if !matches!(config.event_bus.transport, EventBusTransport::PgNotify) {
-        return Ok(());
-    }
     if matches!(config.storage, StorageConfig::Sqlite { .. }) {
-        return Err(ValidationError::new(
-            "event_bus.transport",
-            "pg_notify transport requires postgres storage",
-        ));
+        return Ok(());
     }
     if config
         .cluster
@@ -59,7 +51,7 @@ fn validate_event_bus(config: &Config) -> Result<(), ValidationError> {
     {
         return Err(ValidationError::new(
             "cluster.instance_url",
-            "cluster.instance_url is required when event_bus.transport=pg_notify",
+            "cluster.instance_url is required when storage.kind=postgres (pg_notify fanout is always enabled)",
         ));
     }
     Ok(())

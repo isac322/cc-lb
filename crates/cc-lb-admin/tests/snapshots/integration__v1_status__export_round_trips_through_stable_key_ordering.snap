@@ -1,6 +1,6 @@
 ---
 source: crates/cc-lb-admin/tests/v1_status.rs
-assertion_line: 181
+assertion_line: 159
 expression: body
 ---
 {
@@ -10,6 +10,14 @@ expression: body
       "principal-alpha": {
         "ObservabilityHook": [],
         "Router": [
+          {
+            "batched_events_per_flush": 1,
+            "batched_flush_ms": 100,
+            "config": {},
+            "order": 0,
+            "sse_per_event": false,
+            "wasm_registry_name": "subscription-preference"
+          },
           {
             "batched_events_per_flush": 3,
             "batched_flush_ms": 250,
@@ -41,7 +49,7 @@ expression: body
         "label": "Built-in subscription preference filter",
         "name": "subscription-preference",
         "original_filename": "builtin://subscription-preference",
-        "refcount": 0,
+        "refcount": 1,
         "sha256_hex": "737562736372697074696f6e2d707265666572656e6365000000000000000000",
         "size_bytes": 0,
         "supported_slots": [

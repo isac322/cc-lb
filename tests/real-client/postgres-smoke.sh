@@ -64,6 +64,9 @@ url = "$CI_POSTGRES_URL"
 acquire_timeout_secs = 10
 statement_timeout_secs = 25
 
+[cluster]
+instance_url = "http://127.0.0.1:$admin_port"
+
 [aead]
 key_env = "CC_LB_MASTER_KEY"
 
@@ -171,6 +174,7 @@ wait_port "$fake_port" fake-anthropic
 echo "===> step 2: spawn cc-lb-server with [storage] kind=postgres"
 CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
 CC_LB_ADMIN_TOKEN=test \
+CC_LB_CLUSTER_TOKEN=0000000000000000000000000000000000000000000000000000000000000001 \
 cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$config_path" \
   > "$TMP_DIR/proxy.log" 2>&1 &
 PROXY_PID=$!
@@ -228,6 +232,7 @@ mismatch_log="$TMP_DIR/proxy-mismatch.log"
 set +e
 CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
 CC_LB_ADMIN_TOKEN=test \
+CC_LB_CLUSTER_TOKEN=0000000000000000000000000000000000000000000000000000000000000001 \
 timeout 30 cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$config_path" \
   > "$mismatch_log" 2>&1
 exit_code=$?
