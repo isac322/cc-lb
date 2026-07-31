@@ -1,7 +1,10 @@
 use crate::common;
 
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -31,7 +34,7 @@ use hyper_util::client::legacy::connect::Connect;
 use hyper_util::rt::TokioExecutor;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 use url::Url;
 use uuid::Uuid;
 
@@ -39,10 +42,76 @@ use common::{TestAuthn, TestState, messages_request};
 
 const DEFAULT_UPSTREAM_ID: &str = "00000000-0000-0000-0000-000000000001";
 
+type HyperTask = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+#[derive(Clone)]
+struct PoolReturnObserver {
+    spawned: Arc<AtomicUsize>,
+    completed: Arc<Semaphore>,
+}
+
+impl PoolReturnObserver {
+    async fn wait(&self) {
+        let spawned = self.spawned.load(Ordering::SeqCst);
+        // Exactly one executor task stays alive here: the HTTP/1 connection driver.
+        // No pool idle-interval task exists because this test client configures no timer.
+        let short_tasks = spawned
+            .checked_sub(1)
+            .expect("hyper spawned its connection driver");
+        if short_tasks == 0 {
+            return;
+        }
+        let short_tasks =
+            u32::try_from(short_tasks).expect("hyper spawned fewer than u32::MAX short tasks");
+
+        let permit = tokio::time::timeout(
+            Duration::from_secs(3),
+            self.completed.acquire_many(short_tasks),
+        )
+        .await
+        .expect("timed out waiting for hyper idle-pool task")
+        .expect("pool return observer remains open");
+        permit.forget();
+    }
+}
+
+#[derive(Clone)]
+struct PoolObservingExecutor {
+    inner: TokioExecutor,
+    spawned: Arc<AtomicUsize>,
+    completed: Arc<Semaphore>,
+}
+
+impl PoolObservingExecutor {
+    fn new() -> (Self, PoolReturnObserver) {
+        let spawned = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(Semaphore::new(0));
+        (
+            Self {
+                inner: TokioExecutor::new(),
+                spawned: Arc::clone(&spawned),
+                completed: Arc::clone(&completed),
+            },
+            PoolReturnObserver { spawned, completed },
+        )
+    }
+}
+
+impl hyper::rt::Executor<HyperTask> for PoolObservingExecutor {
+    fn execute(&self, fut: HyperTask) {
+        self.spawned.fetch_add(1, Ordering::SeqCst);
+        let completed = Arc::clone(&self.completed);
+        self.inner.execute(Box::pin(async move {
+            fut.await;
+            completed.add_permits(1);
+        }));
+    }
+}
+
 #[tokio::test]
 async fn cold_request_populates_all_connection_stages_ip_upstream() {
     let upstream = MockUpstream::start(Duration::ZERO).await;
-    let dispatcher = instrumented_bulkhead_dispatcher(None, 8, 8);
+    let (dispatcher, _pool_return) = instrumented_bulkhead_dispatcher(None, 8, 8);
     let harness = lifecycle_for(&upstream.ip_base_url(), dispatcher).await;
 
     send_message(&harness.lifecycle).await;
@@ -75,7 +144,7 @@ async fn cold_request_populates_all_connection_stages_ip_upstream() {
 async fn cold_request_with_hostname_populates_dns_ms() {
     let upstream = MockUpstream::start(Duration::ZERO).await;
     let resolver = Arc::new(StaticResolver::new("mock-upstream.test"));
-    let dispatcher = instrumented_bulkhead_dispatcher(Some(resolver), 8, 8);
+    let (dispatcher, _pool_return) = instrumented_bulkhead_dispatcher(Some(resolver), 8, 8);
     let harness = lifecycle_for(&upstream.host_base_url("mock-upstream.test"), dispatcher).await;
 
     send_message(&harness.lifecycle).await;
@@ -93,10 +162,11 @@ async fn cold_request_with_hostname_populates_dns_ms() {
 async fn warm_pool_request_skips_connection_stages() {
     let upstream = MockUpstream::start(Duration::ZERO).await;
     let resolver = Arc::new(StaticResolver::new("mock-upstream.test"));
-    let dispatcher = instrumented_bulkhead_dispatcher(Some(resolver), 8, 8);
+    let (dispatcher, pool_return) = instrumented_bulkhead_dispatcher(Some(resolver), 8, 8);
     let harness = lifecycle_for(&upstream.host_base_url("mock-upstream.test"), dispatcher).await;
 
     send_message(&harness.lifecycle).await;
+    pool_return.wait().await;
     send_message(&harness.lifecycle).await;
 
     let events = wait_for_events(&harness.storage, 2).await;
@@ -116,7 +186,7 @@ async fn warm_pool_request_skips_connection_stages() {
 #[tokio::test]
 async fn bulkhead_contention_records_wait_ms() {
     let upstream = MockUpstream::start(Duration::from_millis(40)).await;
-    let dispatcher = instrumented_bulkhead_dispatcher(None, 1, 1);
+    let (dispatcher, _pool_return) = instrumented_bulkhead_dispatcher(None, 1, 1);
     let harness = lifecycle_for(&upstream.ip_base_url(), dispatcher).await;
     let LifecycleHarness {
         lifecycle,
@@ -323,8 +393,9 @@ fn instrumented_bulkhead_dispatcher(
     resolver: Option<Arc<dyn DnsResolver>>,
     semaphore_permits: u32,
     max_idle_per_host: usize,
-) -> Arc<dyn UpstreamDispatch> {
-    let inner = instrumented_dispatcher(resolver, max_idle_per_host);
+) -> (Arc<dyn UpstreamDispatch>, PoolReturnObserver) {
+    let (executor, pool_return) = PoolObservingExecutor::new();
+    let inner = instrumented_dispatcher(resolver, max_idle_per_host, executor);
     let config = BulkheadRuntimeConfig {
         max_conns_per_upstream: max_idle_per_host as u32,
         semaphore_permits,
@@ -332,7 +403,7 @@ fn instrumented_bulkhead_dispatcher(
     };
     let dispatcher_factory: Arc<dyn Fn(usize) -> Arc<dyn UpstreamDispatch> + Send + Sync> =
         Arc::new(move |_| Arc::clone(&inner));
-    Arc::new(BulkheadDispatch::with_dispatcher_factory(
+    let dispatcher = Arc::new(BulkheadDispatch::with_dispatcher_factory(
         Arc::new(BulkheadRegistry::new()),
         config,
         Arc::new(|request| {
@@ -343,12 +414,14 @@ fn instrumented_bulkhead_dispatcher(
                 .to_owned()
         }),
         dispatcher_factory,
-    ))
+    ));
+    (dispatcher, pool_return)
 }
 
 fn instrumented_dispatcher(
     resolver: Option<Arc<dyn DnsResolver>>,
     max_idle_per_host: usize,
+    executor: PoolObservingExecutor,
 ) -> Arc<dyn UpstreamDispatch> {
     let config = DnsResolverConfig::default();
     let caching_http = match resolver {
@@ -362,15 +435,23 @@ fn instrumented_dispatcher(
         .enable_http2()
         .wrap_connector(caching_http);
     Arc::new(HyperDispatch {
-        client: build_client(InstrumentedHttpsConnector::new(https), max_idle_per_host),
+        client: build_client(
+            InstrumentedHttpsConnector::new(https),
+            max_idle_per_host,
+            executor,
+        ),
     })
 }
 
-fn build_client<C>(connector: C, max_idle_per_host: usize) -> Client<C, Full<Bytes>>
+fn build_client<C>(
+    connector: C,
+    max_idle_per_host: usize,
+    executor: PoolObservingExecutor,
+) -> Client<C, Full<Bytes>>
 where
     C: Connect + Clone + Send + Sync + 'static,
 {
-    let mut builder = Client::builder(TokioExecutor::new());
+    let mut builder = Client::builder(executor);
     builder.pool_idle_timeout(Duration::from_secs(90));
     builder.pool_max_idle_per_host(max_idle_per_host);
     builder.build(connector)
