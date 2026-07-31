@@ -256,9 +256,9 @@ describe('RequestEventDrawer', () => {
     expect(screen.getByTitle('session-observed')).toBeDefined();
     expect(screen.getByLabelText('Copy observed session id')).toBeDefined();
     const sessionRow = screen.getByText('Session').parentElement;
-    expect(sessionRow?.textContent).toContain('sub');
-    expect(screen.queryByText('Request kind')).toBeNull();
-    expect(screen.queryByText('subagent')).toBeNull();
+    expect(sessionRow?.textContent).not.toContain('sub');
+    const requestKindRow = screen.getByText('Request kind').parentElement;
+    expect(requestKindRow?.textContent).toContain('subagent');
     expect(screen.getByText('Session source')).toBeDefined();
     expect(screen.getByText('x-claude-code-session-id')).toBeDefined();
     expect(screen.getByText('Parent session')).toBeDefined();
@@ -293,6 +293,9 @@ describe('RequestEventDrawer', () => {
     );
 
     expect(screen.queryByText('Session source')).toBeNull();
+    expect(screen.getByText('Request kind').parentElement?.textContent).toBe(
+      'Request kind—',
+    );
     expect(screen.queryByText('Parent session')).toBeNull();
     expect(screen.queryByText('Agent')).toBeNull();
     expect(screen.queryByText('Parent agent')).toBeNull();

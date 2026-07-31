@@ -57,6 +57,7 @@ describe('RequestEventsTable', () => {
       'max-w-24',
       'max-w-24',
       'max-w-28',
+      'max-w-12',
       'max-w-40',
       'max-w-12',
       'max-w-16',
@@ -64,7 +65,7 @@ describe('RequestEventsTable', () => {
       'max-w-20',
     ];
 
-    expect(headerCells).toHaveLength(8);
+    expect(headerCells).toHaveLength(9);
     expect(rows).toHaveLength(3);
     expect(body?.style.height).toBe('7.59375rem');
 
@@ -79,7 +80,7 @@ describe('RequestEventsTable', () => {
         const skeleton = cell.querySelector('.skeleton');
         expect(skeleton?.className).toContain(expectedSkeletonWidths[index]);
 
-        if (index >= 4) {
+        if (index >= 5) {
           expect(cell.className).toContain('text-right');
           expect(cell.className).toContain('tabular-nums');
           expect(skeleton?.className).toContain('ml-auto');
@@ -155,7 +156,7 @@ describe('RequestEventsTable', () => {
     const emptyRow = emptyBody?.querySelector('tr');
     expect(emptyBody?.style.height).toBe(loadingHeight);
     expect(emptyRow?.className).toContain('h-full');
-    expect(emptyRow?.querySelector('td')?.getAttribute('colspan')).toBe('9');
+    expect(emptyRow?.querySelector('td')?.getAttribute('colspan')).toBe('10');
     expect(screen.getByText('No requests')).toBeDefined();
   });
 
@@ -199,7 +200,7 @@ describe('RequestEventsTable', () => {
     expect(screen.getByText('500')).toBeDefined();
   });
 
-  it('renders only explicit request-kind badges', () => {
+  it('renders explicit request-kind badges in a dedicated column', () => {
     const events: RequestEventWithPhase[] = [
       {
         event_id: 'evt_advisor',
@@ -223,7 +224,7 @@ describe('RequestEventsTable', () => {
       },
     ];
 
-    render(
+    const { container } = render(
       <RequestEventsTable
         events={events}
         principalNameMap={principalNameMap}
@@ -233,9 +234,20 @@ describe('RequestEventsTable', () => {
 
     const sessionChip = screen.getByTitle('session-advisor');
     const requestKindBadge = screen.getByText('adv');
-    expect(sessionChip.closest('td')).toBe(requestKindBadge.closest('td'));
+    expect(sessionChip.closest('td')).not.toBe(requestKindBadge.closest('td'));
+    expect(
+      screen.getByRole('columnheader', { name: 'Request kind' }),
+    ).toBeDefined();
     expect(screen.queryByText('advisor')).toBeNull();
     expect(screen.queryByText('main')).toBeNull();
+
+    const kindColumnIndex = [
+      ...container.querySelectorAll('thead th'),
+    ].findIndex((th) => th.textContent === 'Request kind');
+    const unclassifiedRow = container.querySelectorAll('tbody > tr')[1];
+    expect(
+      unclassifiedRow.querySelectorAll('td')[kindColumnIndex].textContent,
+    ).toBe('—');
   });
 
   it('supports keyboard navigation and correctly identifies events with colliding request_id', async () => {
