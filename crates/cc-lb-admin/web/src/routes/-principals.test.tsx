@@ -188,12 +188,12 @@ test('recent requests delegates pending geometry to the structured table', () =>
   expect(screen.getByTestId('recent-requests-subtitle-skeleton')).toBeDefined();
   const slot = screen.getByTestId('recent-requests-table-slot');
   expect(slot.className).toContain('min-h-48');
-  expect(slot.querySelectorAll('thead th')).toHaveLength(8);
+  expect(slot.querySelectorAll('thead th')).toHaveLength(9);
   const rows = slot.querySelectorAll('tbody tr');
   expect(rows).toHaveLength(5);
   for (const row of rows) {
     expect(row.className).toContain('border-b');
-    expect(row.querySelectorAll('td')).toHaveLength(8);
+    expect(row.querySelectorAll('td')).toHaveLength(9);
   }
   expect(container.textContent).not.toContain('—');
 });
