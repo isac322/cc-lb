@@ -184,8 +184,10 @@ function LogsPage() {
   const recent = useRecentEventsPage(historicalFilters, currentPageParam);
   const principalNameMap = usePrincipalNameMap();
   const upstreamNameMap = useUpstreamNameMap();
-  const effectiveTailing =
-    userRequestedTailing && filters.until_unix_secs == null;
+  const { effectiveTailing } = getLogsRouteState({
+    userRequestedTailing,
+    until_unix_secs: filters.until_unix_secs,
+  });
 
   // Legacy preset bookmarks (`?time_range=24h`) are rewritten to an absolute
   // lower bound with an open right edge, preserving both the window they used
