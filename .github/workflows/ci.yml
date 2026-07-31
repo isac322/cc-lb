@@ -462,11 +462,14 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
+      # The self-hosted pool may schedule either an x86_64 or arm64 runner, and
+      # these are native client binaries. Keep runner.arch in the key or a
+      # cross-arch restore hands the matrix binaries it cannot execute.
       - name: Cache pinned real clients
         uses: actions/cache@v6
         with:
           path: target/test-bins
-          key: real-client-test-bins-${{ runner.os }}-${{ hashFiles('tests/real-client/install.sh') }}
+          key: real-client-test-bins-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/real-client/install.sh') }}
       - uses: dtolnay/rust-toolchain@1.97.0
       - uses: ./.github/actions/setup-rust-cache
       - name: Install pinned real clients
