@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use cc_lb_storage_api::{
     RequestEvent, RequestEventListItem, RequestEventListQuery, RequestEventStreamFilters,
-    RequestEventUpstream, StatusClass, Storage, StorageError,
+    RequestEventUpstream, StatusClass, Storage, StorageError, model_filter_matches,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -212,7 +212,11 @@ pub fn parse_stream_filters(map: &HashMap<String, String>) -> Result<StreamFilte
     Ok(StreamFilters {
         principal_id: map.get("principal_id").cloned(),
         thread_id: map.get("thread_id").cloned(),
-        model: map.get("model").cloned(),
+        model: map
+            .get("model")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
         upstream: match map.get("upstream") {
             Some(value) => Some(parse_upstream(value)?),
             None => None,
@@ -243,7 +247,7 @@ pub fn apply_filters_to_event(event: &RequestEvent, filters: &StreamFilters) -> 
         return false;
     }
     if let Some(model) = filters.model.as_deref()
-        && event.model.as_deref() != Some(model)
+        && !model_filter_matches(model, event.model.as_deref())
     {
         return false;
     }

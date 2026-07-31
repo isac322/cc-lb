@@ -28,6 +28,38 @@ pub struct RequestEventStreamFilters {
     pub status_class: Option<StatusClass>,
 }
 
+/// Case-insensitive ASCII prefix match for the request-log model filter.
+///
+/// Historical SQL, the in-memory live tail, the SSE fan-out and the admin UI all
+/// filter on `model` independently; they must agree on the exact predicate or the
+/// same row shows up in one path and is silently dropped in another.
+/// A row without a model never matches, mirroring `lower(model) LIKE …` which is
+/// NULL (and therefore false) for `model IS NULL`.
+pub fn model_filter_matches(needle: &str, model: Option<&str>) -> bool {
+    let Some(model) = model else {
+        return false;
+    };
+    let needle = needle.trim().as_bytes();
+    let model = model.as_bytes();
+    model.len() >= needle.len() && model[..needle.len()].eq_ignore_ascii_case(needle)
+}
+
+/// `LIKE` pattern equivalent to [`model_filter_matches`], to be bound against
+/// `lower(model)` with `ESCAPE '\'`. Wildcards in the needle are escaped so a
+/// user-typed `%` or `_` matches literally.
+pub fn model_filter_like_pattern(needle: &str) -> String {
+    let needle = needle.trim();
+    let mut pattern = String::with_capacity(needle.len() + 4);
+    for ch in needle.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(ch.to_ascii_lowercase());
+    }
+    pattern.push('%');
+    pattern
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusClass {
     TwoXx,
@@ -242,4 +274,43 @@ pub struct UsageRollupRun {
     pub processed_events: u64,
     pub updated_rollups: u64,
     pub checkpoint: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{model_filter_like_pattern, model_filter_matches};
+
+    #[test]
+    fn model_filter_matches_case_insensitive_prefix() {
+        assert!(model_filter_matches(
+            "claude-sonnet",
+            Some("claude-sonnet-4-5-20250929")
+        ));
+        assert!(model_filter_matches(
+            "Claude-Sonnet",
+            Some("claude-sonnet-4-5")
+        ));
+        assert!(model_filter_matches(
+            "claude-sonnet-4-5",
+            Some("CLAUDE-SONNET-4-5")
+        ));
+        assert!(!model_filter_matches("sonnet", Some("claude-sonnet-4-5")));
+        assert!(!model_filter_matches(
+            "claude-sonnet-4-5-2025",
+            Some("claude-sonnet-4-5")
+        ));
+    }
+
+    #[test]
+    fn model_filter_never_matches_a_model_less_row() {
+        assert!(!model_filter_matches("claude", None));
+        assert!(!model_filter_matches("", None));
+    }
+
+    #[test]
+    fn model_filter_like_pattern_escapes_wildcards() {
+        assert_eq!(model_filter_like_pattern("Claude-Opus"), "claude-opus%");
+        assert_eq!(model_filter_like_pattern("  claude  "), "claude%");
+        assert_eq!(model_filter_like_pattern("a%b_c\\d"), "a\\%b\\_c\\\\d%");
+    }
 }

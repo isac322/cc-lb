@@ -63,6 +63,9 @@ export function filterLogRows(
   filters: LogRowFilters,
 ): readonly RequestEventWithPhase[] {
   const statusRows = filterLogRowsByStatusClass(rows, filters.status);
+  // Case-insensitive prefix, matching `lower(model) LIKE …` in storage and
+  // `model_filter_matches` in the SSE fan-out. A row without a model never matches.
+  const modelPrefix = filters.model?.trim().toLowerCase();
   return statusRows.filter((row) => {
     if (filters.principal_id && row.principal_id !== filters.principal_id) {
       return false;
@@ -73,7 +76,7 @@ export function filterLogRows(
     if (filters.session && row.thread_id !== filters.session) {
       return false;
     }
-    if (filters.model && row.model !== filters.model) {
+    if (modelPrefix && !row.model?.toLowerCase().startsWith(modelPrefix)) {
       return false;
     }
     if (filters.source_kind === 'renewal') {

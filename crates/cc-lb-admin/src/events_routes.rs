@@ -14,7 +14,7 @@ use axum::{
 use cc_lb_control::BusReceiver;
 use cc_lb_control::record_dashboard_sse_lagged;
 use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
-use cc_lb_storage_api::RequestEvent;
+use cc_lb_storage_api::{RequestEvent, model_filter_matches};
 use serde_json::json;
 use tokio::{sync::broadcast::error::RecvError, time::Duration};
 
@@ -407,7 +407,7 @@ fn apply_filters_to_partial(partial: &RequestEventPartial, filters: &StreamFilte
         return false;
     }
     if let Some(model) = filters.model.as_deref()
-        && partial.model.as_deref() != Some(model)
+        && !model_filter_matches(model, partial.model.as_deref())
     {
         return false;
     }

@@ -1,6 +1,6 @@
 use cc_lb_storage_api::{
     RequestEvent, RequestEventListItem, RequestEventListQuery, RequestEventUpstream, StatusClass,
-    StorageResult,
+    StorageResult, model_filter_like_pattern,
 };
 use sqlx::{FromRow, Postgres, QueryBuilder};
 
@@ -110,8 +110,9 @@ pub(super) async fn list_request_events(
         builder.push_bind(principal_id);
     }
     if let Some(model) = query.filters.model.as_deref() {
-        builder.push(" AND r.model = ");
-        builder.push_bind(model);
+        builder.push(" AND lower(r.model) LIKE ");
+        builder.push_bind(model_filter_like_pattern(model));
+        builder.push(" ESCAPE '\\'");
     }
     if let Some(upstream_id) = query.filters.upstream_id {
         builder.push(" AND r.upstream_id = ");

@@ -230,7 +230,7 @@ async fn events_recent_applies_each_filter_and_their_combination() {
         match request_id {
             "wrong-principal" => event.principal_id = Some("principal-other".to_owned()),
             "wrong-session" => event.thread_id = Some("thread-other".to_owned()),
-            "wrong-model" => event.model = Some("model-other".to_owned()),
+            "wrong-model" => event.model = Some("other-model".to_owned()),
             "wrong-upstream" => {
                 event.upstream_id = Some(other_upstream_id);
                 event.upstream_name = Some("other-upstream".to_owned());
@@ -261,6 +261,11 @@ async fn events_recent_applies_each_filter_and_their_combination() {
         ),
         (
             "model=model-target&source_kind=all".to_owned(),
+            "wrong-model",
+        ),
+        ("model=model-tar&source_kind=all".to_owned(), "wrong-model"),
+        (
+            "model=MODEL-Target&source_kind=all".to_owned(),
             "wrong-model",
         ),
         (

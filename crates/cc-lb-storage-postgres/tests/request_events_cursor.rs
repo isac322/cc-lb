@@ -113,7 +113,7 @@ async fn assert_materialized_schema(pool: &PgPool) -> Result<()> {
     for index in [
         "request_events_v1_list_order_idx",
         "request_events_v1_principal_list_order_idx",
-        "request_events_v1_model_list_order_idx",
+        "request_events_v1_lower_model_list_order_idx",
         "request_events_v1_upstream_list_order_idx",
     ] {
         ensure!(

@@ -4,7 +4,7 @@ use cc_lb_storage_api::{
     RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket,
     RequestEventKeyUsageQuery, RequestEventListItem, RequestEventListQuery,
     RequestEventProjections, RequestEventStore, RequestEventStreamFilters, StorageError,
-    StorageResult,
+    StorageResult, model_filter_matches,
 };
 use sqlx::AssertSqlSafe;
 use std::time::Instant;
@@ -678,7 +678,7 @@ fn request_event_matches_filters(
         return false;
     }
     if let Some(model) = filters.model.as_deref()
-        && event.model.as_deref() != Some(model)
+        && !model_filter_matches(model, event.model.as_deref())
     {
         return false;
     }

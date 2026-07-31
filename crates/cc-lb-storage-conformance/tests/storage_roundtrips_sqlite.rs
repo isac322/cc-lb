@@ -123,6 +123,14 @@ fn request_event_list_projects_rows_and_preserves_detail_sqlite() {
 }
 
 #[test]
+fn request_event_list_model_filter_matches_case_insensitive_prefix_sqlite() {
+    run_sqlite_scenario(
+        "request_event_list_model_filter_matches_case_insensitive_prefix",
+        request_event_list::request_event_list_model_filter_matches_case_insensitive_prefix,
+    );
+}
+
+#[test]
 fn cache_keepalive_batch_turn_reads_match_per_session_sqlite() {
     run_sqlite_scenario(
         "cache_keepalive_batch_turn_reads_match_per_session",
