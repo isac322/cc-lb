@@ -1,10 +1,11 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent,
-    RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket,
-    RequestEventKeyUsageQuery, RequestEventListItem, RequestEventListQuery,
-    RequestEventProjections, RequestEventStore, RequestEventStreamFilters, StorageError,
-    StorageResult, model_filter_matches,
+    RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventKeyLastUsed,
+    RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket, RequestEventKeyUsageQuery,
+    RequestEventListItem, RequestEventListQuery, RequestEventProjections, RequestEventStore,
+    RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_pattern,
+    model_filter_matches,
 };
 use sqlx::AssertSqlSafe;
 use std::time::Instant;
@@ -191,6 +192,17 @@ impl RequestEventStore for SqliteStorage {
         result
     }
 
+    async fn request_event_histogram(
+        &self,
+        query: &RequestEventHistogramQuery,
+    ) -> StorageResult<Vec<RequestEventHistogramBucket>> {
+        let start = Instant::now();
+        let result = request_event_histogram(self, query).await;
+        record_storage_operation("request_event_histogram", start, &result);
+        self.record_pool_metrics();
+        result
+    }
+
     async fn get_request_event(&self, event_id: &str) -> StorageResult<Option<RequestEvent>> {
         request_event_list_sql::get_request_event(self, event_id).await
     }
@@ -304,6 +316,138 @@ async fn request_event_key_usage(
         bucket.input_tokens = i64_to_u64(input_tokens, "request event key usage input tokens")?;
         bucket.output_tokens = i64_to_u64(output_tokens, "request event key usage output tokens")?;
         bucket.cost_usd_micros = cost_usd_micros;
+    }
+
+    Ok(buckets)
+}
+
+/// The histogram filters its window on `ts` (seconds), exactly like the list
+/// query, so the two always count the same rows. That predicate alone cannot
+/// use an index: `request_events_v1` has no `ts`-leading index, only
+/// `list_ts_ms`-leading ones. The extra `list_ts_ms` bound in the query exists
+/// solely to give SQLite a seekable leading-column range; it is deliberately
+/// WIDER than the `ts` window so it can never decide membership even if a
+/// writer ever sets `ts` and `ts_ms` from separate clock reads.
+///
+/// Do not tighten this to the exact window.
+const HISTOGRAM_INDEX_HINT_SLACK_MS: u64 = 60_000;
+
+async fn request_event_histogram(
+    storage: &SqliteStorage,
+    query: &RequestEventHistogramQuery,
+) -> StorageResult<Vec<RequestEventHistogramBucket>> {
+    if query.bucket_count == 0
+        || query.bucket_ms == 0
+        || query.until_unix_secs < query.since_unix_secs
+    {
+        return Ok(Vec::new());
+    }
+
+    let bucket_count = usize::try_from(query.bucket_count).map_err(|_| StorageError::Fatal {
+        message: "request event histogram bucket_count cannot be represented as usize".to_owned(),
+    })?;
+    let range_start_ms = query.since_unix_secs.saturating_mul(1_000);
+    let mut buckets = vec![RequestEventHistogramBucket::default(); bucket_count];
+    for (index, bucket) in buckets.iter_mut().enumerate() {
+        let bucket_start_ms =
+            range_start_ms.saturating_add((index as u64).saturating_mul(query.bucket_ms));
+        bucket.bucket_start_unix_secs = bucket_start_ms / 1_000;
+    }
+
+    let (status_min, status_max) = query
+        .filters
+        .status_class
+        .map(request_event_list_sql::status_class_range)
+        .map_or((None, None), |(min, max)| (Some(min), Some(max)));
+    let (source_kind_all, source_kind_exact) =
+        request_event_list_sql::source_kind_filter(query.source_kind.as_deref());
+
+    let rows = sqlx::query_as::<_, (i64, i64, i64)>(
+        "SELECT MIN(MAX((list_ts_ms - ?1) / ?2, 0), ?3) AS bucket_index, \
+                COUNT(*) AS total_count, \
+                COUNT(CASE WHEN list_status >= 500 \
+                    OR (list_status BETWEEN 200 AND 299 \
+                        AND error_code = 'upstream_stream_error') \
+                    THEN 1 END) AS error_count \
+         FROM request_events_v1 \
+         WHERE ts >= ?4 AND ts <= ?5 \
+           AND list_ts_ms >= ?15 AND list_ts_ms < ?16 \
+           AND (?6 IS NULL OR principal_id = ?6) \
+           AND (?7 IS NULL OR lower(model) LIKE ?7 ESCAPE '\\') \
+           AND (?8 IS NULL OR upstream_id = ?8) \
+           AND (?14 IS NULL OR thread_id = ?14) \
+           AND (?9 IS NULL OR list_upstream = ?9) \
+           AND (?10 IS NULL OR list_status BETWEEN ?10 AND ?11) \
+           AND ( \
+                 ?12 = 1 \
+              OR (?13 IS NOT NULL AND source_kind = ?13) \
+              OR (?13 IS NULL AND (source_kind IS NULL OR source_kind <> 'renewal')) \
+           ) \
+         GROUP BY bucket_index",
+    )
+    .bind(u64_to_i64(
+        range_start_ms,
+        "request event histogram range start",
+    )?)
+    .bind(u64_to_i64(
+        query.bucket_ms,
+        "request event histogram bucket width",
+    )?)
+    .bind(u64_to_i64(
+        query.bucket_count.saturating_sub(1),
+        "request event histogram last bucket",
+    )?)
+    .bind(u64_to_i64(
+        query.since_unix_secs,
+        "request event histogram since",
+    )?)
+    .bind(u64_to_i64_upper(query.until_unix_secs))
+    .bind(query.filters.principal_id.as_deref())
+    .bind(
+        query
+            .filters
+            .model
+            .as_deref()
+            .map(model_filter_like_pattern),
+    )
+    .bind(query.filters.upstream_id.map(|id| id.to_string()))
+    .bind(
+        query
+            .filters
+            .upstream
+            .map(request_event_list_sql::upstream_as_str),
+    )
+    .bind(status_min)
+    .bind(status_max)
+    .bind(i64::from(source_kind_all))
+    .bind(source_kind_exact)
+    .bind(query.filters.thread_id.as_deref())
+    .bind(u64_to_i64(
+        range_start_ms.saturating_sub(HISTOGRAM_INDEX_HINT_SLACK_MS),
+        "request event histogram index hint lower bound",
+    )?)
+    .bind(u64_to_i64_upper(
+        query
+            .until_unix_secs
+            .saturating_add(1)
+            .saturating_mul(1_000)
+            .saturating_add(HISTOGRAM_INDEX_HINT_SLACK_MS),
+    ))
+    .fetch_all(storage.pool())
+    .await
+    .map_err(map_sqlx_error)?;
+
+    for (bucket_index, total_count, error_count) in rows {
+        let bucket_index = usize::try_from(bucket_index).map_err(|_| StorageError::Corrupted {
+            message: "request event histogram bucket index is negative".to_owned(),
+        })?;
+        let Some(bucket) = buckets.get_mut(bucket_index) else {
+            return Err(StorageError::Corrupted {
+                message: "request event histogram bucket index is out of range".to_owned(),
+            });
+        };
+        bucket.total_count = i64_to_u64(total_count, "request event histogram total count")?;
+        bucket.error_count = i64_to_u64(error_count, "request event histogram error count")?;
     }
 
     Ok(buckets)

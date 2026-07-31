@@ -188,13 +188,13 @@ pub(super) async fn get_request_event(
         .transpose()
 }
 
-fn upstream_as_str(upstream: RequestEventUpstream) -> &'static str {
+pub(super) fn upstream_as_str(upstream: RequestEventUpstream) -> &'static str {
     match upstream {
         RequestEventUpstream::AnthropicDirect => "anthropic_direct",
     }
 }
 
-fn status_class_range(class: StatusClass) -> (i32, i32) {
+pub(super) fn status_class_range(class: StatusClass) -> (i32, i32) {
     match class {
         StatusClass::TwoXx => (200, 299),
         StatusClass::ThreeXx => (300, 399),

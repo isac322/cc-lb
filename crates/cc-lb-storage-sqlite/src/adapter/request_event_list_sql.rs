@@ -219,13 +219,13 @@ pub(super) async fn get_request_event(
         .transpose()
 }
 
-fn upstream_as_str(upstream: RequestEventUpstream) -> &'static str {
+pub(super) fn upstream_as_str(upstream: RequestEventUpstream) -> &'static str {
     match upstream {
         RequestEventUpstream::AnthropicDirect => "anthropic_direct",
     }
 }
 
-fn status_class_range(class: StatusClass) -> (i64, i64) {
+pub(super) fn status_class_range(class: StatusClass) -> (i64, i64) {
     match class {
         StatusClass::TwoXx => (200, 299),
         StatusClass::ThreeXx => (300, 399),
@@ -234,7 +234,7 @@ fn status_class_range(class: StatusClass) -> (i64, i64) {
     }
 }
 
-fn source_kind_filter(source_kind: Option<&str>) -> (bool, Option<&str>) {
+pub(super) fn source_kind_filter(source_kind: Option<&str>) -> (bool, Option<&str>) {
     match source_kind {
         Some("all") => (true, None),
         Some(kind) => (false, Some(kind)),

@@ -518,6 +518,40 @@ export interface RecentEventsPayload {
   limit: number;
 }
 
+export interface HistogramBucket {
+  bucket_start_unix_secs: number;
+  total_count: number;
+  error_count: number;
+}
+
+export interface EventsHistogramPayload {
+  buckets: HistogramBucket[];
+  bucket_ms: number;
+  bucket_count: number;
+}
+
+export interface EventsHistogramRange {
+  readonly sinceSecs: number;
+  readonly untilSecs: number;
+  readonly bucketMs: number;
+}
+
+export function fetchEventsHistogram(
+  filters: Record<string, string | undefined>,
+  range: EventsHistogramRange,
+): Promise<EventsHistogramPayload> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value) params.set(key, value);
+  }
+  params.set('since_unix_secs', String(range.sinceSecs));
+  params.set('until_unix_secs', String(range.untilSecs));
+  params.set('bucket_ms', String(range.bucketMs));
+  return getJson<EventsHistogramPayload>(
+    `/admin/v1/events/histogram?${params.toString()}`,
+  );
+}
+
 interface PrincipalLimitSnapshot {
   kind: 'requests' | 'tokens' | 'input_tokens' | 'output_tokens';
   limit: number | null;
