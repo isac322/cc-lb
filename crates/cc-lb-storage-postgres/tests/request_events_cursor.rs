@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 
 use anyhow::{Context, Result, ensure};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, RequestEvent, RequestEventListQuery, RequestEventStore,
-    RequestEventStreamFilters, RequestEventUpstream,
+    BackendKind, MetaStore, RequestEvent, RequestEventHistogramQuery, RequestEventListQuery,
+    RequestEventStore, RequestEventStreamFilters, RequestEventUpstream,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
@@ -58,6 +58,7 @@ async fn run_regression(pool: &PgPool) -> Result<()> {
     assert_cursor_pages(&storage, &expected_keys).await?;
     assert_raw_payload_list_semantics(&storage).await?;
     assert_order_index_is_usable(pool).await?;
+    assert_histogram_matches_list(&storage).await?;
 
     ensure!(
         fallback_event_key.starts_with("1800000000-legacy-live-"),
@@ -456,6 +457,120 @@ async fn assert_order_index_is_usable(pool: &PgPool) -> Result<()> {
             .iter()
             .any(|line| line.contains("request_events_v1_principal_list_order_idx")),
         "principal request-event list index was not structurally usable: {principal_plan:?}"
+    );
+    Ok(())
+}
+
+/// Mirrors the SQLite histogram regression: the aggregate must count exactly
+/// the rows the list returns for the same window, keep 4xx out of the error
+/// lane, and zero-fill a continuous axis.
+async fn assert_histogram_matches_list(storage: &PostgresStorage) -> Result<()> {
+    let base = FALLBACK_TS_SECS + 10_000;
+    let rows: [(u64, u16, Option<&str>, Option<&str>); 6] = [
+        (base, 200, None, None),
+        (base + 10, 429, None, None),
+        (base + 20, 503, Some("upstream_5xx"), None),
+        (base + 30, 200, Some("upstream_stream_error"), None),
+        (base + 40, 200, None, Some("renewal")),
+        (base + 180, 200, None, None),
+    ];
+    for (index, (ts, status, error_code, source_kind)) in rows.iter().enumerate() {
+        storage
+            .append_request_event(&RequestEvent {
+                ts: *ts,
+                ts_ms: Some(ts * 1_000 + 500),
+                request_id: format!("req-pg-histogram-{index}"),
+                event_id: Some(format!("0193a7b8-1234-7e2f-9012-pghist{index:06}")),
+                principal_id: Some("principal-pg-histogram".to_owned()),
+                model: Some("claude-sonnet-4-5".to_owned()),
+                status: *status,
+                error_code: error_code.map(str::to_owned),
+                source_kind: source_kind.map(str::to_owned),
+                duration_ms: 10,
+                ..Default::default()
+            })
+            .await?;
+    }
+
+    let window_end = base + 180;
+    let filters = RequestEventStreamFilters {
+        principal_id: Some("principal-pg-histogram".to_owned()),
+        ..Default::default()
+    };
+    let buckets = storage
+        .request_event_histogram(&RequestEventHistogramQuery {
+            since_unix_secs: base,
+            until_unix_secs: window_end,
+            bucket_ms: 60_000,
+            bucket_count: 4,
+            filters: filters.clone(),
+            source_kind: None,
+        })
+        .await?;
+    ensure!(buckets.len() == 4, "zero-filled buckets are never omitted");
+    for (index, bucket) in buckets.iter().enumerate() {
+        ensure!(
+            bucket.bucket_start_unix_secs == base + (index as u64) * 60,
+            "bucket axis is continuous: {bucket:?}"
+        );
+    }
+    ensure!(
+        buckets[0].error_count == 2,
+        "error_count is 5xx plus 2xx semantic failures, never 4xx: {:?}",
+        buckets[0]
+    );
+    ensure!(
+        buckets[1].total_count == 0 && buckets[2].total_count == 0,
+        "empty buckets are reported as zero"
+    );
+    ensure!(
+        buckets[3].total_count == 1,
+        "an event in the final second of the window is kept"
+    );
+
+    let listed = storage
+        .list_request_events(&RequestEventListQuery {
+            since_unix_secs: base,
+            until_unix_secs: window_end,
+            limit: 100,
+            filters,
+            ..Default::default()
+        })
+        .await?;
+    let histogram_total: u64 = buckets.iter().map(|bucket| bucket.total_count).sum();
+    ensure!(
+        histogram_total == listed.len() as u64,
+        "histogram total {histogram_total} must equal the list count {}",
+        listed.len()
+    );
+
+    // The `ts` predicate alone cannot seek, so the aggregate carries a widened
+    // `list_ts_ms` bound. Confirm the planner can actually use it as a range.
+    let mut tx = storage.pool().begin().await?;
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await?;
+    let plan = sqlx::query_scalar::<_, String>(
+        "EXPLAIN (COSTS OFF) \
+         SELECT LEAST(GREATEST((list_ts_ms - $1) / $2, 0), $3)::bigint AS bucket_index, \
+                COUNT(*) \
+         FROM request_events_v1 \
+         WHERE ts >= $4 AND ts <= $5 AND list_ts_ms >= $6 AND list_ts_ms < $7 \
+         GROUP BY bucket_index",
+    )
+    .bind((base * 1_000) as i64)
+    .bind(60_000_i64)
+    .bind(3_i64)
+    .bind(DateTime::<Utc>::from_timestamp(base as i64, 0).context("invalid since")?)
+    .bind(DateTime::<Utc>::from_timestamp(window_end as i64, 0).context("invalid until")?)
+    .bind((base * 1_000 - 60_000) as i64)
+    .bind(((window_end + 1) * 1_000 + 60_000) as i64)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.rollback().await?;
+    ensure!(
+        plan.iter().any(|line| line.contains("Index")),
+        "histogram aggregate must be able to use a list_ts_ms index: {plan:?}"
     );
     Ok(())
 }

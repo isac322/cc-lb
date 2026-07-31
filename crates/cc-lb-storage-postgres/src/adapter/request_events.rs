@@ -1,14 +1,16 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent,
-    RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket,
-    RequestEventKeyUsageQuery, RequestEventListItem, RequestEventListQuery,
-    RequestEventProjections, RequestEventStore, RequestEventStreamFilters, StorageError,
-    StorageResult, model_filter_matches,
+    RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventKeyLastUsed,
+    RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket, RequestEventKeyUsageQuery,
+    RequestEventListItem, RequestEventListQuery, RequestEventProjections, RequestEventStore,
+    RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_pattern,
+    model_filter_matches,
 };
 use chrono::{DateTime, Utc};
+use sqlx::{Postgres, QueryBuilder};
 
-use super::request_event_list_sql;
+use super::request_event_list_sql::{self, status_class_range, upstream_as_str};
 use crate::{
     adapter::{
         PostgresStorage, i64_to_u64, u64_to_i64, unix_secs_to_datetime,
@@ -245,6 +247,13 @@ impl RequestEventStore for PostgresStorage {
         request_event_key_usage(self, query).await
     }
 
+    async fn request_event_histogram(
+        &self,
+        query: &RequestEventHistogramQuery,
+    ) -> StorageResult<Vec<RequestEventHistogramBucket>> {
+        request_event_histogram(self, query).await
+    }
+
     async fn get_request_event(&self, event_id: &str) -> StorageResult<Option<RequestEvent>> {
         request_event_list_sql::get_request_event(self, event_id).await
     }
@@ -359,6 +368,153 @@ async fn request_event_key_usage(
         bucket.input_tokens = i64_to_u64(input_tokens, "request event key usage input tokens")?;
         bucket.output_tokens = i64_to_u64(output_tokens, "request event key usage output tokens")?;
         bucket.cost_usd_micros = cost_usd_micros;
+    }
+
+    Ok(buckets)
+}
+
+/// See the SQLite adapter: the `list_ts_ms` bound in the histogram query is a
+/// widened index hint, never a membership filter.
+const HISTOGRAM_INDEX_HINT_SLACK_MS: u64 = 60_000;
+
+async fn request_event_histogram(
+    storage: &PostgresStorage,
+    query: &RequestEventHistogramQuery,
+) -> StorageResult<Vec<RequestEventHistogramBucket>> {
+    if query.bucket_count == 0
+        || query.bucket_ms == 0
+        || query.until_unix_secs < query.since_unix_secs
+    {
+        return Ok(Vec::new());
+    }
+
+    let bucket_count = usize::try_from(query.bucket_count).map_err(|_| StorageError::Fatal {
+        message: "request event histogram bucket_count cannot be represented as usize".to_owned(),
+    })?;
+    let range_start_ms = query.since_unix_secs.saturating_mul(1_000);
+    let mut buckets = vec![RequestEventHistogramBucket::default(); bucket_count];
+    for (index, bucket) in buckets.iter_mut().enumerate() {
+        let bucket_start_ms =
+            range_start_ms.saturating_add((index as u64).saturating_mul(query.bucket_ms));
+        bucket.bucket_start_unix_secs = bucket_start_ms / 1_000;
+    }
+
+    let Some(since) =
+        unix_secs_to_datetime_lower(query.since_unix_secs, "request event histogram since")?
+    else {
+        return Ok(Vec::new());
+    };
+    let until =
+        unix_secs_to_datetime_upper(query.until_unix_secs, "request event histogram until")?;
+
+    let mut builder = QueryBuilder::<Postgres>::new("SELECT LEAST(GREATEST((r.list_ts_ms - ");
+    builder.push_bind(u64_to_i64(
+        range_start_ms,
+        "request event histogram range start",
+    )?);
+    builder.push(") / ");
+    builder.push_bind(u64_to_i64(
+        query.bucket_ms,
+        "request event histogram bucket size",
+    )?);
+    builder.push(", 0), ");
+    builder.push_bind(u64_to_i64(
+        query.bucket_count.saturating_sub(1),
+        "request event histogram last bucket",
+    )?);
+    builder.push(
+        ")::bigint AS bucket_index, \
+         COUNT(*) AS total_count, \
+         COUNT(CASE WHEN r.list_status >= 500 \
+             OR (r.list_status BETWEEN 200 AND 299 \
+                 AND r.error_code = 'upstream_stream_error') \
+             THEN 1 END) AS error_count \
+         FROM request_events_v1 r \
+         WHERE r.ts >= ",
+    );
+    builder.push_bind(since);
+
+    if let Some(until) = until {
+        builder.push(" AND r.ts <= ");
+        builder.push_bind(until);
+    }
+    // Widened `list_ts_ms` bound so the planner can range-scan a
+    // `list_ts_ms`-leading index; `r.ts` above stays the authoritative window.
+    // Deliberately a superset — do not tighten it to the exact range.
+    builder.push(" AND r.list_ts_ms >= ");
+    builder.push_bind(u64_to_i64(
+        range_start_ms.saturating_sub(HISTOGRAM_INDEX_HINT_SLACK_MS),
+        "request event histogram index hint lower bound",
+    )?);
+    builder.push(" AND r.list_ts_ms < ");
+    builder.push_bind(u64_to_i64(
+        query
+            .until_unix_secs
+            .saturating_add(1)
+            .saturating_mul(1_000)
+            .saturating_add(HISTOGRAM_INDEX_HINT_SLACK_MS)
+            .min(i64::MAX as u64),
+        "request event histogram index hint upper bound",
+    )?);
+    if let Some(principal_id) = query.filters.principal_id.as_deref() {
+        builder.push(" AND r.principal_id = ");
+        builder.push_bind(principal_id);
+    }
+    if let Some(model) = query.filters.model.as_deref() {
+        builder.push(" AND lower(r.model) LIKE ");
+        builder.push_bind(model_filter_like_pattern(model));
+        builder.push(" ESCAPE '\\'");
+    }
+    if let Some(upstream_id) = query.filters.upstream_id {
+        builder.push(" AND r.upstream_id = ");
+        builder.push_bind(upstream_id);
+    }
+    if let Some(thread_id) = query.filters.thread_id.as_deref() {
+        builder.push(" AND r.thread_id = ");
+        builder.push_bind(thread_id);
+    }
+    if let Some(upstream) = query.filters.upstream {
+        builder.push(" AND r.list_upstream = ");
+        builder.push_bind(upstream_as_str(upstream));
+    }
+    if let Some(status_class) = query.filters.status_class {
+        let (status_min, status_max) = status_class_range(status_class);
+        builder.push(" AND r.list_status BETWEEN ");
+        builder.push_bind(status_min);
+        builder.push(" AND ");
+        builder.push_bind(status_max);
+    }
+
+    match query.source_kind.as_deref() {
+        Some("all") => {}
+        Some(source_kind) => {
+            builder.push(" AND r.source_kind = ");
+            builder.push_bind(source_kind);
+        }
+        None => {
+            builder.push(" AND (r.source_kind IS NULL OR r.source_kind <> 'renewal')");
+        }
+    }
+
+    builder.push(" GROUP BY bucket_index");
+
+    let rows = builder
+        .build_query_as::<(i64, i64, i64)>()
+        .fetch_all(&storage.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+    for (bucket_index, total_count, error_count) in rows {
+        let bucket_index = usize::try_from(bucket_index).map_err(|_| StorageError::Corrupted {
+            message: "request event histogram bucket index is negative".to_owned(),
+        })?;
+        let Some(bucket) = buckets.get_mut(bucket_index) else {
+            return Err(StorageError::Corrupted {
+                message: "request event histogram bucket index is out of range".to_owned(),
+            });
+        };
+        bucket.total_count = i64_to_u64(total_count, "request event histogram total count")?;
+        bucket.error_count = i64_to_u64(error_count, "request event histogram error count")?;
     }
 
     Ok(buckets)

@@ -18,11 +18,9 @@ import {
 } from '../components/ui/primitives';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { SessionChip } from '../components/ui/SessionChip';
-import {
-  type TimeRangeMode,
-  TimeRangeSelect,
-} from '../components/ui/TimeRangeSelect';
-import type { RecentEventsPayload } from '../lib/api';
+import { TimeRangeBounds } from '../components/ui/TimeRangeBounds';
+import { TimeRangeStrip } from '../components/ui/TimeRangeStrip';
+import { eventTime, type RecentEventsPayload } from '../lib/api';
 import {
   filterLiveEventsByUnixSeconds,
   filterLogRows,
@@ -34,11 +32,18 @@ import {
   getRecentEventsCursor,
   type RecentEventsPageParam,
   recentEventsPageQueryOptions,
+  useEventsHistogram,
   usePrincipalNameMap,
   useRecentEventsPage,
   useUpstreamNameMap,
   useUpstreams,
 } from '../lib/queries';
+import {
+  BUCKET_LADDER_MS,
+  bucketCountFor,
+  chooseBucketMs,
+  MAX_HISTOGRAM_BUCKETS,
+} from '../lib/timeBuckets';
 import { MAX_FORMATTABLE_UNIX_SECONDS } from '../lib/timezone';
 import { useLiveEventStream } from '../lib/useLiveEventStream';
 
@@ -60,13 +65,14 @@ export const logsSearchSchema = z
     model: z.string().optional(),
     status: z.enum(LOG_STATUS_CLASSES).optional(),
     source_kind: z.enum(['all', 'renewal']).optional(),
-    time_range: z.enum(['all', '1h', '6h', '24h', '7d', 'custom']).optional(),
+    // Accepted only so bookmarked preset URLs do not fail validateSearch and
+    // fall through to the route error boundary. Normalized away on load.
+    time_range: z.string().optional(),
     since_unix_secs: unixSecondsSearchParam,
     until_unix_secs: unixSecondsSearchParam,
   })
   .transform((filters) => {
     if (
-      filters.time_range === 'custom' &&
       filters.since_unix_secs != null &&
       filters.until_unix_secs != null &&
       filters.since_unix_secs > filters.until_unix_secs
@@ -80,6 +86,14 @@ export const logsSearchSchema = z
     return filters;
   });
 
+/** Legacy preset widths, kept only to rewrite old bookmarks into absolute epochs. */
+const LEGACY_PRESET_SECONDS: Record<string, number> = {
+  '1h': 3600,
+  '6h': 6 * 3600,
+  '24h': 24 * 3600,
+  '7d': 7 * 24 * 3600,
+};
+
 export const Route = createFileRoute('/logs')({
   validateSearch: logsSearchSchema,
   component: LogsPage,
@@ -88,18 +102,17 @@ export const Route = createFileRoute('/logs')({
 export function buildHistoricalFilters(
   filters: z.infer<typeof logsSearchSchema>,
 ) {
-  const { time_range, since_unix_secs, until_unix_secs } = filters;
+  const { since_unix_secs, until_unix_secs } = filters;
   const base = buildLiveFilters(filters);
 
-  if (time_range === 'custom') {
-    if (since_unix_secs != null && until_unix_secs != null) {
-      base.since_unix_secs = since_unix_secs.toString();
-      base.until_unix_secs = until_unix_secs.toString();
-    }
-  } else if (time_range && time_range !== 'all') {
-    if (since_unix_secs != null) {
-      base.since_unix_secs = since_unix_secs.toString();
-    }
+  if (since_unix_secs != null) {
+    base.since_unix_secs = since_unix_secs.toString();
+  }
+  // An absent `until` means the right edge is pinned to now: the list API
+  // already defaults to u64::MAX, and materializing `now` here would shift the
+  // upper bound on every refetch.
+  if (until_unix_secs != null) {
+    base.until_unix_secs = until_unix_secs.toString();
   }
 
   return base;
@@ -118,13 +131,13 @@ export function buildLiveFilters(filters: z.infer<typeof logsSearchSchema>) {
 
 export function getLogsRouteState({
   userRequestedTailing,
-  time_range,
+  until_unix_secs,
 }: {
   userRequestedTailing: boolean;
-  time_range?: TimeRangeMode;
+  until_unix_secs?: number;
 }) {
   return {
-    effectiveTailing: userRequestedTailing && time_range !== 'custom',
+    effectiveTailing: userRequestedTailing && until_unix_secs == null,
   };
 }
 
@@ -144,7 +157,7 @@ function LogsPage() {
   const navigate = useNavigate({ from: Route.fullPath });
   const upstreams = useUpstreams();
 
-  const { session: sessionFilter, time_range } = filters;
+  const { session: sessionFilter } = filters;
   const serverFilters = buildLiveFilters(filters);
   const historicalFilters = buildHistoricalFilters(filters);
 
@@ -171,7 +184,28 @@ function LogsPage() {
   const recent = useRecentEventsPage(historicalFilters, currentPageParam);
   const principalNameMap = usePrincipalNameMap();
   const upstreamNameMap = useUpstreamNameMap();
-  const effectiveTailing = userRequestedTailing && time_range !== 'custom';
+  const effectiveTailing =
+    userRequestedTailing && filters.until_unix_secs == null;
+
+  // Legacy preset bookmarks (`?time_range=24h`) are rewritten to an absolute
+  // lower bound with an open right edge, preserving both the window they used
+  // to mean and live tailing.
+  useEffect(() => {
+    if (filters.time_range == null) return;
+    const width = LEGACY_PRESET_SECONDS[filters.time_range];
+    navigate({
+      replace: true,
+      search: (prev) => ({
+        ...prev,
+        time_range: undefined,
+        since_unix_secs:
+          width == null
+            ? prev.since_unix_secs
+            : Math.floor(Date.now() / 1000) - width,
+        until_unix_secs: width == null ? prev.until_unix_secs : undefined,
+      }),
+    });
+  }, [filters.time_range, navigate]);
 
   const routeModel = filters.model ?? '';
   // Only external navigations (Clear, back/forward, a shared URL) may overwrite
@@ -211,7 +245,6 @@ function LogsPage() {
     filters.model,
     filters.status,
     filters.source_kind,
-    filters.time_range,
     filters.since_unix_secs,
     filters.until_unix_secs,
   ]);
@@ -311,6 +344,179 @@ function LogsPage() {
       ),
     [rangedLiveEvents, historicalPages],
   );
+
+  // The initial strip domain comes from the first page we already fetched, so
+  // it costs no extra query and adapts to traffic density instead of assuming
+  // a fixed lookback. Global min/max is deliberately never queried.
+  const [view, setView] = useState<{ a: number; b: number } | null>(null);
+  const firstPageEvents = historicalPages[0]?.events;
+  useEffect(() => {
+    if (view != null || firstPageEvents == null) return;
+    const now = Date.now();
+    // A URL that pins the right edge is asking about a past window, so the
+    // domain brackets that window instead of stretching to now.
+    const fixedEnd =
+      filters.until_unix_secs == null ? null : filters.until_unix_secs * 1000;
+    if (firstPageEvents.length === 0) {
+      const end = fixedEnd ?? now;
+      setView({ a: end - 3_600_000, b: end });
+      setFollowRight(fixedEnd == null);
+      return;
+    }
+    let oldest = Number.POSITIVE_INFINITY;
+    let newest = 0;
+    for (const event of firstPageEvents) {
+      const at = eventTime(event);
+      if (at == null) continue;
+      const ts = at.getTime();
+      if (ts < oldest) oldest = ts;
+      if (ts > newest) newest = ts;
+    }
+    if (newest === 0) {
+      const end = fixedEnd ?? now;
+      setView({ a: end - 3_600_000, b: end });
+      setFollowRight(fixedEnd == null);
+      return;
+    }
+    if (fixedEnd != null) {
+      // The URL bounds are authoritative: on a dense range the first page only
+      // reaches back 200 events, which would start the domain after the
+      // selection begins and push the highlight off the left edge.
+      const start =
+        filters.since_unix_secs == null
+          ? oldest
+          : filters.since_unix_secs * 1000;
+      const pad = Math.max(60_000, (fixedEnd - start) * 0.15);
+      setView({ a: start - pad, b: Math.min(now, fixedEnd + pad) });
+      setFollowRight(false);
+      return;
+    }
+    // Otherwise the right edge is now, not the newest row: an idle proxy would
+    // open on a domain that ends in the past and never shows arriving traffic.
+    setView({ a: Math.min(oldest, now - 60_000), b: now });
+    setFollowRight(true);
+  }, [firstPageEvents, view, filters.since_unix_secs, filters.until_unix_secs]);
+
+  const histogramBucketMs = chooseBucketMs(
+    view == null ? 3_600_000 : view.b - view.a,
+  );
+
+  // Whether the domain follows now. Held explicitly rather than inferred from
+  // the current gap: a throttled background tab can leave an arbitrarily large
+  // gap, and inferring "the user panned away" from that would freeze the strip
+  // permanently with no way back.
+  const [followRight, setFollowRight] = useState(true);
+  useEffect(() => {
+    if (!followRight) return;
+    const timer = setInterval(() => {
+      setView((current) => {
+        if (current == null) return current;
+        const nowMs = Date.now();
+        const behind = nowMs - current.b;
+        if (behind <= 0) return current;
+        return { a: current.a + behind, b: nowMs };
+      });
+    }, 1_000);
+    return () => clearInterval(timer);
+  }, [followRight]);
+  // Snapping the queried domain to bucket boundaries keeps bucket identities
+  // (and the query key) stable across polls, so live tail grows the trailing
+  // bar instead of shifting all 240 buckets sideways.
+  const histogramRange = useMemo(() => {
+    if (view == null) return null;
+    const sinceMs = Math.floor(view.a / histogramBucketMs) * histogramBucketMs;
+    const untilMs = Math.ceil(view.b / histogramBucketMs) * histogramBucketMs;
+    let sinceSecs = Math.floor(sinceMs / 1000);
+    const untilSecs = Math.floor(untilMs / 1000);
+    // Snapping widens the window, so a domain sized right at the cap can spill
+    // one bucket past it and the server would reject the range. Give up the
+    // oldest buckets rather than the request.
+    const overflow =
+      bucketCountFor(sinceSecs, untilSecs, histogramBucketMs) -
+      MAX_HISTOGRAM_BUCKETS;
+    if (overflow > 0) {
+      sinceSecs += (overflow * histogramBucketMs) / 1000;
+    }
+    return { sinceSecs, untilSecs, bucketMs: histogramBucketMs };
+  }, [view, histogramBucketMs]);
+  const histogram = useEventsHistogram(serverFilters, histogramRange, {
+    poll: followRight,
+  });
+
+  const selection = useMemo(() => {
+    if (filters.since_unix_secs == null && filters.until_unix_secs == null) {
+      return null;
+    }
+    return {
+      a: (filters.since_unix_secs ?? 0) * 1000,
+      b: (filters.until_unix_secs ?? Math.floor(Date.now() / 1000)) * 1000,
+    };
+  }, [filters.since_unix_secs, filters.until_unix_secs]);
+
+  // The strip is free to pan and zoom, but a domain reaching past now would
+  // render dead space and put "the right edge of the strip" somewhere other
+  // than now, which is what makes a pinned-to-now selection recognisable.
+  // Clamp both the end and the span once, here.
+  const changeView = (next: { a: number; b: number }) => {
+    const nowMs = Date.now();
+    // Beyond this the coarsest bucket on the ladder still needs more than
+    // MAX_HISTOGRAM_BUCKETS buckets and the server rejects the range, so a
+    // wheel-out would land the strip in a permanent failure state.
+    const maxSpan =
+      MAX_HISTOGRAM_BUCKETS * BUCKET_LADDER_MS[BUCKET_LADDER_MS.length - 1];
+    const span = Math.min(next.b - next.a, maxSpan);
+    const end = Math.min(next.b, nowMs);
+    const clamped = { a: Math.max(0, end - span), b: end };
+    setFollowRight(nowMs - clamped.b <= Math.max(histogramBucketMs, 5_000));
+    setView(clamped);
+  };
+
+  const commitSelection = (sel: { a: number; b: number } | null) => {
+    const nowSecs = Math.floor(Date.now() / 1000);
+    const since =
+      sel == null ? undefined : Math.max(0, Math.floor(sel.a / 1000));
+    // A right edge inside the trailing bucket means "still pinned to now", so
+    // the bound is dropped rather than frozen. It is never written ahead of now.
+    const untilRaw =
+      sel == null ? undefined : Math.min(nowSecs, Math.ceil(sel.b / 1000));
+    const until =
+      untilRaw == null || untilRaw >= nowSecs - histogramBucketMs / 1000
+        ? undefined
+        : untilRaw;
+    if (
+      since === filters.since_unix_secs &&
+      until === filters.until_unix_secs
+    ) {
+      return;
+    }
+    navigate({
+      search: (prev) => ({
+        ...prev,
+        since_unix_secs: since,
+        until_unix_secs: until,
+      }),
+    });
+  };
+
+  const focusAround = (tsMs: number, radiusSecs: number) => {
+    const nowMs = Date.now();
+    const nowSecs = Math.floor(nowMs / 1000);
+    const centerSecs = Math.floor(tsMs / 1000);
+    const viewEnd = Math.min(nowMs, (centerSecs + radiusSecs * 3) * 1000);
+    setFollowRight(nowMs - viewEnd <= Math.max(histogramBucketMs, 5_000));
+    setView({ a: (centerSecs - radiusSecs * 3) * 1000, b: viewEnd });
+    // Anchoring a fresh row would otherwise write a future upper bound and
+    // freeze tailing on a window that has not happened yet.
+    const untilRaw = centerSecs + radiusSecs;
+    navigate({
+      search: (prev) => ({
+        ...prev,
+        since_unix_secs: centerSecs - radiusSecs,
+        until_unix_secs:
+          untilRaw >= nowSecs - histogramBucketMs / 1000 ? undefined : untilRaw,
+      }),
+    });
+  };
 
   const sessionOptions = useMemo(() => {
     const seen = new Set<string>();
@@ -568,10 +774,10 @@ function LogsPage() {
               className="inline-flex items-center justify-center rounded-sm font-medium transition-colors select-none disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 h-7 px-2.5 text-xs gap-1.5 bg-[color:var(--color-panel-strong)] border border-[color:var(--color-border)] text-[color:var(--color-text)] hover:bg-[color:var(--color-hover-bg)] data-[pressed]:bg-[color:var(--color-accent-dim)] data-[pressed]:text-[color:var(--color-accent)] data-[pressed]:border-[color:var(--color-accent)]"
               onPressedChange={setUserRequestedTailing}
               pressed={effectiveTailing}
-              disabled={time_range === 'custom'}
+              disabled={filters.until_unix_secs != null}
               title={
-                time_range === 'custom'
-                  ? 'Live tail is disabled for custom time ranges'
+                filters.until_unix_secs != null
+                  ? 'Live tail is off while the range has a fixed end. Extend the range to now to resume.'
                   : undefined
               }
             >
@@ -650,20 +856,16 @@ function LogsPage() {
                 widthClass="w-40"
               />
             </Field>
-            <TimeRangeSelect
-              value={{
-                mode: filters.time_range ?? 'all',
-                since_unix_secs: filters.since_unix_secs,
-                until_unix_secs: filters.until_unix_secs,
-              }}
-              onChange={(val) => {
+            <TimeRangeBounds
+              since={filters.since_unix_secs}
+              until={filters.until_unix_secs}
+              onCommit={({ since, until }) => {
                 navigate({
-                  search: {
-                    ...filters,
-                    time_range: val.mode === 'all' ? undefined : val.mode,
-                    since_unix_secs: val.since_unix_secs,
-                    until_unix_secs: val.until_unix_secs,
-                  },
+                  search: (prev) => ({
+                    ...prev,
+                    since_unix_secs: since,
+                    until_unix_secs: until,
+                  }),
                 });
               }}
             />
@@ -673,7 +875,8 @@ function LogsPage() {
             filters.model ||
             filters.status ||
             filters.source_kind ||
-            filters.time_range ? (
+            filters.since_unix_secs ||
+            filters.until_unix_secs ? (
               <Button
                 iconLeft={<X className="w-3 h-3" />}
                 onClick={() => navigate({ search: {} })}
@@ -682,6 +885,18 @@ function LogsPage() {
               </Button>
             ) : null}
           </div>
+          <div className="px-3 pt-2 border-b border-subtle shrink-0">
+            <TimeRangeStrip
+              buckets={histogram.data?.buckets ?? []}
+              bucketMs={histogramBucketMs}
+              view={view ?? { a: Date.now() - 3_600_000, b: Date.now() }}
+              selection={selection}
+              loading={histogram.isFetching}
+              failed={histogram.isError}
+              onViewChange={changeView}
+              onSelectionCommit={commitSelection}
+            />
+          </div>
 
           <div
             ref={scrollContainerRef}
@@ -689,6 +904,7 @@ function LogsPage() {
           >
             <RequestEventsTable
               events={pageRows}
+              onAnchorRange={focusAround}
               principalNameMap={principalNameMap}
               upstreamNameMap={upstreamNameMap}
               loading={initialRowsLoading}

@@ -123,3 +123,34 @@ pub struct RequestEventKeyUsageBucket {
     pub output_tokens: u64,
     pub cost_usd_micros: i64,
 }
+
+/// Describes a histogram over the same inclusive, second-based time window as
+/// [`RequestEventListQuery`]. Storage backends apply
+/// `ts >= since_unix_secs AND ts <= until_unix_secs`, then use `list_ts_ms`
+/// only to assign each matching row to a bucket.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestEventHistogramQuery {
+    pub since_unix_secs: u64,
+    pub until_unix_secs: u64,
+    pub bucket_ms: u64,
+    pub bucket_count: u64,
+    pub filters: RequestEventStreamFilters,
+    /// Same semantics as [`RequestEventListQuery::source_kind`]:
+    /// `None` excludes `renewal`, `Some("all")` includes everything, and
+    /// `Some(kind)` returns only that kind.
+    pub source_kind: Option<String>,
+}
+
+/// One point on the histogram's zero-filled, continuous bucket axis.
+///
+/// `bucket_start_unix_secs` is present for every bucket in the requested
+/// range, including buckets with no matching events. `error_count` includes
+/// rows where `list_status >= 500` or where `list_status` is 2xx and
+/// `error_code = 'upstream_stream_error'`. This matches the admin UI's danger
+/// tone in `crates/cc-lb-admin/web/src/lib/format.ts`; 4xx rows are excluded.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct RequestEventHistogramBucket {
+    pub bucket_start_unix_secs: u64,
+    pub total_count: u64,
+    pub error_count: u64,
+}
