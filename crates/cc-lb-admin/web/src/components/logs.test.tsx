@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -20,6 +21,8 @@ const liveState = vi.hoisted(() => ({
   eventsMap: new Map(),
   version: 0,
 }));
+
+const routerMocks = vi.hoisted(() => ({ navigate: vi.fn() }));
 
 const mockEvents = Array.from({ length: 120 }, (_, i) => ({
   request_id: `req-${i}`,
@@ -123,7 +126,7 @@ vi.mock('@tanstack/react-router', async (importOriginal) => {
     await importOriginal<typeof import('@tanstack/react-router')>();
   return {
     ...actual,
-    useNavigate: () => vi.fn(),
+    useNavigate: () => routerMocks.navigate,
   };
 });
 
@@ -153,6 +156,7 @@ describe('LogsPage', () => {
     queryMocks.pageCache.clear();
     liveState.eventsMap.clear();
     liveState.version = 0;
+    routerMocks.navigate.mockReset();
   });
 
   it('applies every row filter individually and in combination', () => {
@@ -181,7 +185,7 @@ describe('LogsPage', () => {
         upstream_id: 'upstream-other',
       },
       { ...target, request_id: 'wrong-session', thread_id: 'thread-other' },
-      { ...target, request_id: 'wrong-model', model: 'model-other' },
+      { ...target, request_id: 'wrong-model', model: 'other-model-target' },
       { ...target, request_id: 'wrong-status', status: 200 },
       { ...target, request_id: 'wrong-source', source_kind: 'request' },
     ] as RequestEventWithPhase[];
@@ -197,6 +201,7 @@ describe('LogsPage', () => {
       ],
       [{ session: 'thread-target', source_kind: 'all' }, 'wrong-session'],
       [{ model: 'model-target', source_kind: 'all' }, 'wrong-model'],
+      [{ model: 'MODEL-tar', source_kind: 'all' }, 'wrong-model'],
       [{ status: '4xx', source_kind: 'all' }, 'wrong-status'],
       [{ source_kind: 'renewal' }, 'wrong-source'],
     ] as const) {
@@ -243,6 +248,46 @@ describe('LogsPage', () => {
     const sessionSelect = screen.getByText('123').closest('button');
     expect(sessionSelect).not.toBeNull();
     expect(sessionSelect?.className).toContain('!w-64');
+  });
+
+  it('commits the model filter once typing settles', () => {
+    vi.useFakeTimers();
+    try {
+      const queryClient = new QueryClient();
+      vi.spyOn(Route, 'useSearch').mockReturnValue({});
+
+      const LogsPage = Route.options.component;
+      if (LogsPage === undefined) {
+        throw new Error('Expected logs route component');
+      }
+
+      render(
+        <QueryClientProvider client={queryClient}>
+          <LogsPage />
+        </QueryClientProvider>,
+      );
+
+      const modelInput = screen.getByPlaceholderText('claude-sonnet-4-5');
+      for (const value of ['c', 'cl', 'claude ']) {
+        fireEvent.change(modelInput, { target: { value } });
+        act(() => {
+          vi.advanceTimersByTime(200);
+        });
+      }
+      expect(routerMocks.navigate).not.toHaveBeenCalled();
+
+      act(() => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(routerMocks.navigate).toHaveBeenCalledTimes(1);
+      const { search } = routerMocks.navigate.mock.calls[0][0];
+      expect(search({ status: '4xx' })).toEqual({
+        status: '4xx',
+        model: 'claude',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // This remains the page-render throughput outlier: prior shared-runner

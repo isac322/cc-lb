@@ -1,6 +1,6 @@
 use cc_lb_storage_api::{
     RequestEvent, RequestEventListItem, RequestEventListQuery, RequestEventUpstream, StatusClass,
-    StorageResult,
+    StorageResult, model_filter_like_pattern,
 };
 use sqlx::FromRow;
 
@@ -71,7 +71,7 @@ SELECT \
 FROM request_events_v1 \
 WHERE ts >= ?1 AND ts <= ?2 \
   AND (?3 IS NULL OR principal_id = ?3) \
-  AND (?4 IS NULL OR model = ?4) \
+  AND (?4 IS NULL OR lower(model) LIKE ?4 ESCAPE '\\') \
   AND (?5 IS NULL OR upstream_id = ?5) \
   AND (?14 IS NULL OR thread_id = ?14) \
   AND (?6 IS NULL OR list_upstream = ?6) \
@@ -174,7 +174,13 @@ pub(super) async fn list_request_events(
         )?)
         .bind(u64_to_i64_upper(query.until_unix_secs))
         .bind(query.filters.principal_id.as_deref())
-        .bind(query.filters.model.as_deref())
+        .bind(
+            query
+                .filters
+                .model
+                .as_deref()
+                .map(model_filter_like_pattern),
+        )
         .bind(query.filters.upstream_id.map(|id| id.to_string()))
         .bind(query.filters.upstream.map(upstream_as_str))
         .bind(status_min)
