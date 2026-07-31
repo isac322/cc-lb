@@ -28,6 +28,7 @@ import {
   ConfirmDialog,
   cx,
   Hint,
+  Skeleton,
   StatusBadge,
 } from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
@@ -343,6 +344,8 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
     !selectedPluginValue ||
     shapePlugins.some((p) => p.id === selectedPluginValue);
   const settingsPending = updateSettings.isPending || clearPlugin.isPending;
+  const summaryPending = summaryQ.isPending;
+  const pluginRegistryPending = registry.isPending;
 
   const pluginSnapshot =
     summary?.dialect_plugin ??
@@ -391,7 +394,16 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
 
   const headerTitle = (
     <div className="flex items-center gap-2">
-      <StatusBadge tone={statusTone} label={statusLabel} />
+      <span
+        className="inline-flex min-h-5 w-24 items-center"
+        data-testid="warmup-status-value"
+      >
+        {summaryPending && upstream.warmup_enabled ? (
+          <Skeleton className="h-5 w-full rounded-sm" />
+        ) : (
+          <StatusBadge tone={statusTone} label={statusLabel} />
+        )}
+      </span>
       <span>Warm-up</span>
       <WarmupHelpHover />
     </div>
@@ -475,8 +487,13 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
                 <span className="text-[11px] uppercase tracking-wider text-text-faint">
                   Next run
                 </span>
-                <div className="text-sm font-medium text-text">
-                  {summary?.next_scheduled_at_unix_secs ? (
+                <div
+                  className="flex min-h-5 items-center text-sm font-medium text-text"
+                  data-testid="warmup-next-value"
+                >
+                  {summaryPending ? (
+                    <Skeleton className="h-4 w-24" />
+                  ) : summary?.next_scheduled_at_unix_secs ? (
                     <RelativeTime
                       compact
                       ts={summary.next_scheduled_at_unix_secs * 1000}
@@ -492,10 +509,12 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
                   Last run
                 </span>
                 <div
-                  className="text-sm font-medium text-text"
+                  className="flex min-h-5 items-center text-sm font-medium text-text"
                   data-testid="warmup-last"
                 >
-                  {lastAttempt ? (
+                  {summaryPending ? (
+                    <Skeleton className="h-4 w-28" />
+                  ) : lastAttempt ? (
                     <button
                       type="button"
                       onClick={openHistory}
@@ -524,12 +543,18 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
               </div>
             </div>
 
-            <div className="flex items-center justify-between gap-3">
+            <div
+              className="flex min-h-7 items-center justify-between gap-3"
+              data-testid="warmup-plugin-row"
+            >
               <span className="inline-flex items-center gap-1.5 text-sm text-text-muted">
                 Shape plugin
                 <ShapePluginHelpHover />
               </span>
-              {shapePlugins.length === 0 && !upstream.warmup_dialect_plugin ? (
+              {pluginRegistryPending ? (
+                <Skeleton className="h-7 w-40 rounded-sm" />
+              ) : shapePlugins.length === 0 &&
+                !upstream.warmup_dialect_plugin ? (
                 <div className="text-xs text-text-muted">
                   <span>{COPY.noShapePluginsAvailable}</span>{' '}
                   <a href="/plugins" className="text-accent hover:underline">
@@ -567,21 +592,25 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
               )}
             </div>
 
-            {lastAttempt?.error_detail && (
-              <div
-                className={cx(
-                  'rounded-sm border p-2 text-xs leading-relaxed',
-                  lastAttempt.status === 'permanent_failure'
-                    ? 'border-[color:var(--color-danger)]/30 bg-red-500/10 text-[color:var(--color-danger)]'
-                    : 'border-[color:var(--color-warn)]/30 bg-amber-500/10 text-[color:var(--color-warn)]',
-                )}
-              >
-                {lastAttempt.reason
-                  ? REASON_LABEL[lastAttempt.reason]
-                  : 'Warm-up failed'}
-                : {lastAttempt.error_detail}
-              </div>
-            )}
+            <div className="min-h-12" data-testid="warmup-failure-slot">
+              {summaryPending ? (
+                <Skeleton className="h-12 w-full rounded-sm" />
+              ) : lastAttempt?.error_detail ? (
+                <div
+                  className={cx(
+                    'flex min-h-12 items-center rounded-sm border p-2 text-xs leading-relaxed',
+                    lastAttempt.status === 'permanent_failure'
+                      ? 'border-[color:var(--color-danger)]/30 bg-red-500/10 text-[color:var(--color-danger)]'
+                      : 'border-[color:var(--color-warn)]/30 bg-amber-500/10 text-[color:var(--color-warn)]',
+                  )}
+                >
+                  {lastAttempt.reason
+                    ? REASON_LABEL[lastAttempt.reason]
+                    : 'Warm-up failed'}
+                  : {lastAttempt.error_detail}
+                </div>
+              ) : null}
+            </div>
 
             {(leasePanel || errorPanel) && (
               <div className="flex flex-col gap-2 mt-2">

@@ -7,6 +7,67 @@ describe('LogsPagination', () => {
   afterEach(() => {
     cleanup();
   });
+  it('keeps a fixed disabled shell while initial rows load', () => {
+    render(
+      <LogsPagination
+        page={0}
+        pageCount={1}
+        totalRows={0}
+        pageSize={50}
+        hasMore={false}
+        loading
+        onPrev={vi.fn()}
+        onNext={vi.fn()}
+      />,
+    );
+
+    const nav = screen.getByRole('navigation', { name: 'Log pagination' });
+    expect(nav.className).toContain('h-14');
+    expect(nav.className).toContain('shrink-0');
+    expect(nav.getAttribute('aria-busy')).toBe('true');
+    expect(nav.querySelectorAll('.skeleton')).toHaveLength(2);
+    expect(screen.queryByText('Showing 0–0 of 0')).toBeNull();
+    expect(
+      screen
+        .getByRole('button', { name: 'Previous page' })
+        .hasAttribute('disabled'),
+    ).toBe(true);
+    expect(
+      screen
+        .getByRole('button', { name: 'Next page' })
+        .hasAttribute('disabled'),
+    ).toBe(true);
+  });
+
+  it('shows next-page pending feedback inside the existing button slot', () => {
+    const onNext = vi.fn();
+    const props = {
+      page: 0,
+      pageCount: 1,
+      totalRows: 50,
+      pageSize: 50,
+      hasMore: true,
+      onPrev: vi.fn(),
+      onNext,
+    };
+    const { rerender } = render(<LogsPagination {...props} />);
+    const readyButton = screen.getByRole('button', { name: 'Next page' });
+    const readyClassName = readyButton.className;
+
+    rerender(<LogsPagination {...props} loadingNext />);
+
+    const pendingButton = screen.getByRole('button', {
+      name: 'Loading next page',
+    });
+    expect(pendingButton.className).toBe(readyClassName);
+    expect(pendingButton.textContent).toContain('Next');
+    expect(pendingButton.hasAttribute('disabled')).toBe(true);
+    expect(pendingButton.getAttribute('aria-busy')).toBe('true');
+    expect(pendingButton.querySelector('svg.animate-spin')).not.toBeNull();
+
+    fireEvent.click(pendingButton);
+    expect(onNext).not.toHaveBeenCalled();
+  });
 
   it('renders correctly on the first page', () => {
     const onPrev = vi.fn();
@@ -26,6 +87,8 @@ describe('LogsPagination', () => {
 
     const nav = screen.getByRole('navigation', { name: 'Log pagination' });
     expect(nav).toBeDefined();
+    expect(nav.className).toContain('h-14');
+    expect(nav.className).toContain('shrink-0');
 
     const statusText = screen.getByText('Showing 1–50 of 450');
     expect(statusText).toBeDefined();
@@ -153,6 +216,9 @@ describe('LogsPagination', () => {
     );
 
     expect(screen.getByText('Showing 0–0 of 0')).toBeDefined();
+    const nav = screen.getByRole('navigation', { name: 'Log pagination' });
+    expect(nav.className).toContain('h-14');
+    expect(nav.className).toContain('shrink-0');
     expect(screen.getByText('Page 1 of 1')).toBeDefined();
 
     const prevButton = screen.getByRole('button', { name: 'Previous page' });
@@ -203,8 +269,10 @@ describe('LogsPagination', () => {
       />,
     );
 
-    const nextButton = screen.getByRole('button', { name: 'Next page' });
+    const nextButton = screen.getByRole('button', {
+      name: 'Loading next page',
+    });
     expect(nextButton.hasAttribute('disabled')).toBe(true);
-    expect(nextButton.textContent).toContain('Loading…');
+    expect(nextButton.textContent).toContain('Next');
   });
 });

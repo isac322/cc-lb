@@ -40,7 +40,10 @@ import {
 import React, { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import * as z from 'zod';
-import { CacheKeepaliveCard } from '../components/principals/cache-keepalive/CacheKeepaliveCard';
+import {
+  CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS,
+  CacheKeepaliveCard,
+} from '../components/principals/cache-keepalive/CacheKeepaliveCard';
 import {
   Badge,
   Button,
@@ -55,6 +58,7 @@ import {
   INPUT_CLASS,
   Modal,
   Skeleton,
+  SkeletonRow,
   Spinner,
   StatusBadge,
 } from '../components/ui/primitives';
@@ -90,6 +94,26 @@ import { useCopyButton } from '../lib/useCopyButton';
 
 const principalSearchSchema = z.object({ selectedId: z.string().optional() });
 
+const PRINCIPAL_LIST_ROW_CLASS =
+  'w-full min-h-[72px] text-left p-3 rounded-sm border';
+const PRINCIPAL_DETAIL_HEADER_CLASS =
+  'px-4 md:px-6 py-4 border-b border-subtle flex items-start justify-between gap-3 flex-wrap shrink-0';
+const PRINCIPAL_DETAIL_BODY_CLASS =
+  'flex-1 overflow-y-auto p-4 md:p-6 pb-8 md:pb-12 space-y-6';
+const PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS = 'overflow-x-auto min-h-48';
+// Minimums measured against the production admin fixture at 1440×1000.
+const PRINCIPAL_DETAIL_CARD_CLASS_NAMES = {
+  cacheKeepalive: CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS,
+  allowedModels: 'min-h-[103px]',
+  defaultLimits: 'min-h-[113px]',
+  recentRequests: 'min-h-[308px]',
+  router: 'min-h-[336px]',
+  observability: 'min-h-[147px]',
+  shape: 'min-h-[236px]',
+  apiKeys: 'min-h-[202px]',
+} as const;
+const EMPTY_PRINCIPAL_DETAIL_NAME_MAP = new Map<string, string>();
+
 function pluginSupportsSlot(plugin: PluginEntry, slot: ChainSlot): boolean {
   const slots = plugin.supported_slots;
   if (!slots || slots.length === 0) {
@@ -113,6 +137,155 @@ export const Route = createFileRoute('/principals')({
   validateSearch: principalSearchSchema,
   component: PrincipalsPage,
 });
+
+function PrincipalDetailLoadingShell() {
+  return (
+    <div
+      aria-busy="true"
+      aria-label="Loading principal details"
+      className="contents"
+      data-testid="principal-detail-loading-shell"
+      role="status"
+    >
+      <header className={PRINCIPAL_DETAIL_HEADER_CLASS}>
+        <div className="min-w-0">
+          <div className="flex items-center gap-3 flex-wrap">
+            <Skeleton className="h-7 w-48" />
+            <Skeleton className="h-5 w-20" />
+            <Skeleton className="h-5 w-16" />
+          </div>
+          <Skeleton className="mt-0.5 h-4 w-44" />
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <Skeleton className="h-7 w-20" />
+          <Skeleton className="h-7 w-20" />
+        </div>
+      </header>
+
+      <div className={PRINCIPAL_DETAIL_BODY_CLASS}>
+        <Card
+          className={cx(
+            PRINCIPAL_DETAIL_CARD_CLASS_NAMES.cacheKeepalive,
+            'w-full flex flex-col',
+          )}
+          data-testid="cache-keepalive-card"
+        >
+          <CardHeader
+            title={<Skeleton as="span" className="block h-5 w-32" />}
+            action={<Skeleton className="h-5 w-9" />}
+          />
+          <CardBody className="space-y-4 flex-1 flex flex-col">
+            <div className="grid grid-cols-2 gap-4">
+              {Array.from({ length: 4 }).map((_, index) => (
+                <div key={index} className="flex flex-col gap-1">
+                  <Skeleton className="h-3 w-24" />
+                  <div className="flex h-7 items-center">
+                    <Skeleton className="h-5 w-16" />
+                  </div>
+                  <Skeleton className="h-3 w-32" />
+                </div>
+              ))}
+            </div>
+            <Skeleton className="h-3 w-56" />
+            <div className="mt-auto grid grid-cols-2 gap-2 border-t border-subtle pt-3">
+              <Skeleton className="h-7 w-full" />
+              <Skeleton className="h-7 w-full" />
+            </div>
+          </CardBody>
+        </Card>
+
+        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.allowedModels}>
+          <CardHeader
+            title={<Skeleton as="span" className="block h-5 w-32" />}
+            action={<Skeleton className="h-7 w-24" />}
+          />
+          <CardBody>
+            <Skeleton className="h-4 w-3/5" />
+          </CardBody>
+        </Card>
+
+        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.defaultLimits}>
+          <CardHeader
+            title={<Skeleton as="span" className="block h-5 w-32" />}
+            subtitle={<Skeleton as="span" className="block h-4 w-64" />}
+            action={<Skeleton className="h-7 w-24" />}
+          />
+          <CardBody>
+            <Skeleton className="h-4 w-2/5" />
+          </CardBody>
+        </Card>
+
+        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}>
+          <CardHeader
+            title={<Skeleton as="span" className="block h-5 w-32" />}
+            subtitle={<Skeleton as="span" className="block h-4 w-48" />}
+          />
+          <div className={PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS}>
+            <RequestEventsTable
+              events={[]}
+              principalNameMap={EMPTY_PRINCIPAL_DETAIL_NAME_MAP}
+              upstreamNameMap={EMPTY_PRINCIPAL_DETAIL_NAME_MAP}
+              loading
+              columns={{
+                principal: false,
+                cost: true,
+                tokens: true,
+              }}
+              minWidthClass="min-w-[920px]"
+            />
+          </div>
+        </Card>
+
+        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.router}>
+          <CardHeader
+            title={<Skeleton as="span" className="block h-5 w-24" />}
+            subtitle={<Skeleton as="span" className="block h-8 w-full" />}
+            action={<Skeleton className="h-7 w-24" />}
+          />
+          <CardBody className="space-y-3">
+            <Skeleton className="h-10" />
+            <Skeleton className="h-10" />
+            <Skeleton className="h-28" />
+          </CardBody>
+        </Card>
+
+        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.observability}>
+          <CardHeader
+            title={<Skeleton as="span" className="block h-5 w-32" />}
+            subtitle={<Skeleton as="span" className="block h-4 w-64" />}
+            action={<Skeleton className="h-7 w-24" />}
+          />
+          <CardBody>
+            <Skeleton className="h-10" />
+          </CardBody>
+        </Card>
+
+        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.shape}>
+          <CardHeader
+            title={<Skeleton as="span" className="block h-5 w-24" />}
+            subtitle={<Skeleton as="span" className="block h-4 w-96" />}
+          />
+          <CardBody className="space-y-3">
+            <Skeleton className="h-14" />
+            <Skeleton className="h-14" />
+          </CardBody>
+        </Card>
+
+        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}>
+          <CardHeader
+            title={<Skeleton as="span" className="block h-5 w-24" />}
+            subtitle={<Skeleton as="span" className="block h-4 w-44" />}
+            action={<Skeleton className="h-7 w-24" />}
+          />
+          <CardBody className="space-y-3">
+            <Skeleton className="h-9" />
+            <Skeleton className="h-9" />
+          </CardBody>
+        </Card>
+      </div>
+    </div>
+  );
+}
 
 function PrincipalsPage() {
   const { selectedId } = Route.useSearch();
@@ -152,9 +325,17 @@ function PrincipalsPage() {
         <div className="h-12 px-4 flex items-center justify-between border-b border-subtle shrink-0">
           <div>
             <h1 className="text-sm font-medium">Principals</h1>
-            <p className="text-[11px] text-text-faint">
-              {principals.data?.principals.length ?? 0} total
-            </p>
+            <div className="h-4 flex items-center text-[11px] text-text-faint">
+              {principals.isLoading ? (
+                <span
+                  className="skeleton inline-block h-3 w-12"
+                  data-testid="principal-count-skeleton"
+                  aria-hidden="true"
+                />
+              ) : (
+                `${principals.data?.principals.length ?? 0} total`
+              )}
+            </div>
           </div>
           <Button
             id="btn-new-principal"
@@ -169,7 +350,24 @@ function PrincipalsPage() {
         <div className="flex-1 overflow-y-auto p-2 pb-8 space-y-1">
           {principals.isLoading ? (
             Array.from({ length: 4 }).map((_, i) => (
-              <Skeleton key={i} className="h-20" />
+              <div
+                key={i}
+                className={cx(PRINCIPAL_LIST_ROW_CLASS, 'border-subtle')}
+                data-testid="principal-list-skeleton"
+                aria-hidden="true"
+              >
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Skeleton className="h-2 w-2 rounded-full shrink-0" />
+                    <Skeleton className="h-4 w-28" />
+                  </div>
+                  <Skeleton className="h-5 w-14" />
+                </div>
+                <div className="flex items-center justify-between mt-2">
+                  <Skeleton className="h-3 w-32" />
+                  <Skeleton className="h-3 w-10" />
+                </div>
+              </div>
             ))
           ) : principals.data?.principals.length ? (
             principals.data.principals.map((p) => (
@@ -178,7 +376,8 @@ function PrincipalsPage() {
                 type="button"
                 onClick={() => select(p.id)}
                 className={cx(
-                  'w-full text-left p-3 rounded-sm border transition-colors',
+                  PRINCIPAL_LIST_ROW_CLASS,
+                  'transition-colors',
                   p.id === selectedId
                     ? 'border-accent/40 bg-accent/5'
                     : 'border-subtle hover:bg-overlay-3',
@@ -233,6 +432,8 @@ function PrincipalsPage() {
             principal={selected}
             onBack={() => select(undefined)}
           />
+        ) : principals.isLoading ? (
+          <PrincipalDetailLoadingShell />
         ) : (
           <div className="flex-1 flex items-center justify-center">
             <EmptyState
@@ -264,16 +465,23 @@ function PrincipalDetail({
     (routerChain.data?.entries.length ?? 0) +
     (observabilityChain.data?.entries.length ?? 0) +
     (shapeChain.data?.entries.length ?? 0);
-  const deleteChainCountLabel =
+  const deleteChainCountLoading =
     routerChain.isLoading ||
     observabilityChain.isLoading ||
-    shapeChain.isLoading
-      ? 'Plugin chain count loading...'
-      : `${deleteChainCount} plugin chain ${deleteChainCount === 1 ? 'entry' : 'entries'} will be deleted.`;
+    shapeChain.isLoading;
+  const deleteChainCountLabel = deleteChainCountLoading ? (
+    <span
+      className="skeleton inline-block h-3 w-48"
+      data-testid="plugin-chain-count-skeleton"
+      aria-hidden="true"
+    />
+  ) : (
+    `${deleteChainCount} plugin chain ${deleteChainCount === 1 ? 'entry' : 'entries'} will be deleted.`
+  );
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   return (
     <>
-      <header className="px-4 md:px-6 py-4 border-b border-subtle flex items-start justify-between gap-3 flex-wrap shrink-0">
+      <header className={PRINCIPAL_DETAIL_HEADER_CLASS}>
         <div className="min-w-0">
           <button
             type="button"
@@ -357,7 +565,7 @@ function PrincipalDetail({
         }
       />
 
-      <div className="flex-1 overflow-y-auto p-4 md:p-6 pb-8 md:pb-12 space-y-6">
+      <div className={PRINCIPAL_DETAIL_BODY_CLASS}>
         <CacheKeepaliveCard principal={principal} />
         <AllowedModelsCard principal={principal} />
         <DefaultLimitsCard principal={principal} />
@@ -371,7 +579,7 @@ function PrincipalDetail({
   );
 }
 
-function RecentRequestsCard({ principal }: { principal: Principal }) {
+export function RecentRequestsCard({ principal }: { principal: Principal }) {
   const principalNameMap = usePrincipalNameMap();
   const upstreamNameMap = useUpstreamNameMap();
   const recent = useRecentEvents({
@@ -384,24 +592,36 @@ function RecentRequestsCard({ principal }: { principal: Principal }) {
       _phase: 'final' as const,
     }));
   }, [recent.data]);
+  const loading = recent.isPending || recent.isPlaceholderData;
   return (
-    <Card>
+    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}>
       <CardHeader
         title="Recent Requests"
         subtitle={
-          recent.isPending || recent.isPlaceholderData
-            ? `Loading recent requests for ${principal.name}…`
-            : events.length === 0
-              ? `No recent requests from ${principal.name}`
-              : `Last ${events.length} from ${principal.name}`
+          <span className="inline-flex h-4 items-center">
+            {loading ? (
+              <span
+                className="skeleton inline-block h-3 w-48"
+                data-testid="recent-requests-subtitle-skeleton"
+                aria-hidden="true"
+              />
+            ) : events.length === 0 ? (
+              `No recent requests from ${principal.name}`
+            ) : (
+              `Last ${events.length} from ${principal.name}`
+            )}
+          </span>
         }
       />
-      <div className="overflow-x-auto">
+      <div
+        className={PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS}
+        data-testid="recent-requests-table-slot"
+      >
         <RequestEventsTable
           events={recent.isPlaceholderData ? [] : events}
           principalNameMap={principalNameMap}
           upstreamNameMap={upstreamNameMap}
-          loading={recent.isPending || recent.isPlaceholderData}
+          loading={loading}
           columns={{
             principal: false,
             cost: true,
@@ -420,7 +640,7 @@ function AllowedModelsCard({ principal }: { principal: Principal }) {
   const [models, setModels] = useState(principal.allowed_models.join(', '));
   const [editing, setEditing] = useState(false);
   return (
-    <Card>
+    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.allowedModels}>
       <CardHeader
         title="Allowed Models"
         action={
@@ -651,7 +871,7 @@ function DefaultLimitsCard({ principal }: { principal: Principal }) {
   }, [editing, principal.default_limits]);
 
   return (
-    <Card>
+    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.defaultLimits}>
       <CardHeader
         title="Default Limits"
         subtitle="Per-principal rate caps applied to every API key"
@@ -1149,7 +1369,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
   const strategy = terminalStrategy.data?.strategy ?? 'first-pick';
 
   return (
-    <Card>
+    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.router}>
       <CardHeader
         title="Router"
         subtitle="Pick which upstream serves each request. Returning users stick to the upstream they hit before unless you turn that off; new users go to the first eligible upstream by default."
@@ -1723,7 +1943,7 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
   const candidates = registry.data?.entries ?? [];
 
   return (
-    <Card>
+    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.shape}>
       <CardHeader
         title={
           <div className="flex items-center gap-2">
@@ -1828,7 +2048,7 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
   };
 
   return (
-    <Card>
+    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.observability}>
       <CardHeader
         title="Observability"
         subtitle="SSE / audit hooks. Executed in order. Multiple allowed."
@@ -2019,7 +2239,27 @@ function SortableChainItem({
   );
 }
 
-function ApiKeysCard({ principal }: { principal: Principal }) {
+const API_KEY_SKELETON_CELL_CLASSES = [
+  'px-4',
+  'px-4',
+  'px-4',
+  'px-4',
+  'px-4',
+  'px-4',
+  'px-4 w-8',
+] as const;
+
+const API_KEY_SKELETON_CLASSES = [
+  'w-24',
+  'w-48',
+  'w-12',
+  'w-20',
+  'w-20',
+  'w-16',
+  'w-4',
+] as const;
+
+export function ApiKeysCard({ principal }: { principal: Principal }) {
   const keys = usePrincipalKeys(principal.id);
   const issue = useIssueKey();
   const revoke = useRevokeKey();
@@ -2036,7 +2276,7 @@ function ApiKeysCard({ principal }: { principal: Principal }) {
   } | null>(null);
 
   return (
-    <Card>
+    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}>
       <CardHeader
         title="API Keys"
         subtitle="Issue, view fingerprints, revoke"
@@ -2050,26 +2290,34 @@ function ApiKeysCard({ principal }: { principal: Principal }) {
           </Button>
         }
       />
-      <div className="overflow-x-auto">
-        {keys.isLoading ? (
-          <CardBody>
-            <Skeleton className="h-12" />
-          </CardBody>
-        ) : keys.data?.keys.length ? (
-          <table className="w-full font-mono text-xs">
-            <thead className="table-header sticky top-0 z-10">
-              <tr className="text-[10px] uppercase tracking-wider">
-                <th className="text-left px-4 py-2">Label</th>
-                <th className="text-left px-4 py-2">Key ID</th>
-                <th className="text-left px-4 py-2">Last 4</th>
-                <th className="text-left px-4 py-2">Issued</th>
-                <th className="text-left px-4 py-2">Last Used</th>
-                <th className="text-left px-4 py-2">Status</th>
-                <th className="px-4 py-2 w-8"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {keys.data.keys.map((k) => (
+      <div
+        className="overflow-x-auto min-h-32"
+        data-testid="api-keys-table-slot"
+      >
+        <table className="w-full min-w-[840px] font-mono text-xs">
+          <thead className="table-header sticky top-0 z-10">
+            <tr className="text-[10px] uppercase tracking-wider">
+              <th className="text-left px-4 py-2">Label</th>
+              <th className="text-left px-4 py-2">Key ID</th>
+              <th className="text-left px-4 py-2">Last 4</th>
+              <th className="text-left px-4 py-2">Issued</th>
+              <th className="text-left px-4 py-2">Last Used</th>
+              <th className="text-left px-4 py-2">Status</th>
+              <th className="px-4 py-2 w-8"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {keys.isLoading ? (
+              Array.from({ length: 3 }).map((_, i) => (
+                <SkeletonRow
+                  key={i}
+                  cols={7}
+                  cellClassNames={API_KEY_SKELETON_CELL_CLASSES}
+                  skeletonClassNames={API_KEY_SKELETON_CLASSES}
+                />
+              ))
+            ) : keys.data?.keys.length ? (
+              keys.data.keys.map((k) => (
                 <tr key={k.key_id} className="border-b border-row">
                   <td className="px-4 py-2">{k.label ?? '—'}</td>
                   <td className="px-4 py-2">{k.key_id}</td>
@@ -2117,14 +2365,19 @@ function ApiKeysCard({ principal }: { principal: Principal }) {
                     ) : null}
                   </td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <CardBody>
-            <p className="text-xs text-text-faint">No API keys issued.</p>
-          </CardBody>
-        )}
+              ))
+            ) : (
+              <tr className="border-b border-row">
+                <td
+                  colSpan={7}
+                  className="h-24 px-4 py-4 align-top text-xs text-text-faint"
+                >
+                  No API keys issued.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
 
       <Modal

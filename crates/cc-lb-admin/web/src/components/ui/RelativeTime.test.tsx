@@ -55,6 +55,30 @@ describe('RelativeTime', () => {
     expect(screen.getByText('Resets in 1m').textContent).toBe('Resets in 1m');
   });
 
+  test('treats NaN and invalid Date timestamps as absent', () => {
+    const { container, rerender } = render(<RelativeTime ts={Number.NaN} />);
+
+    expect(screen.getByText('—')).toBeDefined();
+    expect(container.querySelector('[title="Invalid Date"]')).toBeNull();
+
+    rerender(<RelativeTime ts={new Date(Number.NaN)} />);
+
+    expect(screen.getByText('—')).toBeDefined();
+    expect(container.querySelector('[title="Invalid Date"]')).toBeNull();
+  });
+
+  test('treats NaN and invalid Date reset timestamps as absent', () => {
+    const { container, rerender } = render(<ResetCountdown ts={Number.NaN} />);
+
+    expect(screen.getByText('—')).toBeDefined();
+    expect(container.querySelector('[title="Invalid Date"]')).toBeNull();
+
+    rerender(<ResetCountdown ts={new Date(Number.NaN)} />);
+
+    expect(screen.getByText('—')).toBeDefined();
+    expect(container.querySelector('[title="Invalid Date"]')).toBeNull();
+  });
+
   test('turns a relative offset into a stable live timestamp', () => {
     render(<RelativeOffsetTime offsetSeconds={5} />);
 

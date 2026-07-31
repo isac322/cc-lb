@@ -81,7 +81,69 @@ describe('RequestEventDrawer', () => {
     expect(screen.getAllByText('150 ms').length).toBeGreaterThan(0);
   });
 
-  it('renders structured upstream failure details when present', () => {
+  it('does not speculate upstream failure while detail-only fields are pending', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+    const event = {
+      event_id: 'evt_pending_detail',
+      request_id: 'req_pending_detail',
+      ts: 1718553120,
+      ts_ms: 1718553120000,
+      principal_id: 'principal-1',
+      upstream_name: 'anthropic',
+      model: 'claude-sonnet',
+      status: 502,
+      duration_ms: 150,
+      error_code: 'upstream_5xx',
+      _phase: 'final',
+    } satisfies RequestEventWithPhase;
+
+    render(
+      <RequestEventDrawer
+        event={event}
+        principalName="Principal One"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByText('req_pending_detail')).toBeDefined();
+    expect(screen.getAllByText('Principal One').length).toBeGreaterThan(0);
+    expect(screen.getByText('anthropic')).toBeDefined();
+    expect(screen.getByText('claude-sonnet')).toBeDefined();
+    expect(screen.getAllByText('150 ms').length).toBeGreaterThan(0);
+
+    const principalRow = screen.getByText('Principal').parentElement;
+    expect(principalRow?.querySelectorAll('.skeleton')).toHaveLength(1);
+
+    const keyRow = screen.getByText('Key ID').parentElement;
+    expect(keyRow?.querySelectorAll('.skeleton')).toHaveLength(1);
+    expect(keyRow?.textContent).not.toContain('—');
+
+    expect(
+      screen.queryByRole('heading', { name: 'Upstream Failure' }),
+    ).toBeNull();
+
+    const bodyRow = screen.getByText('Body bytes').parentElement;
+    expect(bodyRow?.querySelectorAll('.skeleton')).toHaveLength(1);
+
+    const latency = screen.getByTestId('latency-timeline-region');
+    expect(latency.getAttribute('aria-busy')).toBe('true');
+    expect(latency.querySelectorAll('.skeleton').length).toBeGreaterThan(0);
+    expect(screen.queryByText('No latency data recorded.')).toBeNull();
+
+    const dialog = screen.getByRole('dialog', { name: 'Request detail' });
+    expect(dialog.className).toContain('w-full');
+    expect(dialog.className).toContain('max-w-lg');
+  });
+
+  it('renders known upstream failure details immediately while detail is pending', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+
     const event = {
       event_id: 'evt_2',
       request_id: 'req_2',

@@ -10,7 +10,7 @@ import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { reasoningBadgeText } from '../../lib/reasoningTier';
 import { requestKindBadgeText } from '../../lib/requestKind';
 import { useCopyButton } from '../../lib/useCopyButton';
-import { Badge, cx, Hint } from './primitives';
+import { Badge, cx, Hint, Skeleton } from './primitives';
 import { RelativeTime } from './RelativeTime';
 import { SessionChip } from './SessionChip';
 
@@ -85,10 +85,12 @@ export function RequestEventIdentity({
   event,
   principalLabel,
   isPartial,
+  isDetailPending = false,
 }: {
   event: RequestEventWithPhase;
   principalLabel: string;
   isPartial: boolean;
+  isDetailPending?: boolean;
 }) {
   const { copy } = useCopyButton();
   const outcome = getRequestOutcome(
@@ -114,7 +116,7 @@ export function RequestEventIdentity({
         <KvRow
           label="Principal"
           value={
-            <span className="flex items-center gap-2 justify-end flex-wrap min-w-0">
+            <div className="flex min-h-5 items-center gap-2 justify-end flex-wrap min-w-0">
               <span
                 className="font-mono break-all min-w-0"
                 title={event.principal_id ?? ''}
@@ -125,8 +127,10 @@ export function RequestEventIdentity({
                 <Badge tone="mono" className="shrink-0">
                   {event.principal_kind}
                 </Badge>
+              ) : isDetailPending ? (
+                <Skeleton className="h-5 w-14 shrink-0" />
               ) : null}
-            </span>
+            </div>
           }
         />
         <KvRow
@@ -148,6 +152,8 @@ export function RequestEventIdentity({
                   <Copy className="w-3 h-3" />
                 </button>
               </span>
+            ) : isDetailPending ? (
+              <Skeleton className="ml-auto h-3 w-24" />
             ) : (
               DASH
             )
@@ -390,7 +396,7 @@ export function KvRow({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="flex items-start justify-between gap-3 min-h-[18px] min-w-0">
       <span className="text-text-faint shrink-0 mt-[1px]">{label}</span>
-      <span className="text-right flex-1 min-w-0 break-words">{value}</span>
+      <div className="text-right flex-1 min-w-0 break-words">{value}</div>
     </div>
   );
 }

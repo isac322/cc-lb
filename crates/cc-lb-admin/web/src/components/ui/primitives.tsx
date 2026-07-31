@@ -53,7 +53,12 @@ export function CardHeader({
       <div className="min-w-0">
         <h3 className="text-sm font-medium text-text">{title}</h3>
         {subtitle ? (
-          <p className="mt-0.5 text-xs text-text-faint">{subtitle}</p>
+          <div
+            className="mt-0.5 min-h-4 text-xs text-text-faint"
+            data-slot="card-subtitle"
+          >
+            {subtitle}
+          </div>
         ) : null}
       </div>
       {action ? (
@@ -204,20 +209,57 @@ export function StatusBadge({
 
 // ─── Skeleton ────────────────────────────────────────────────────────────────
 export function Skeleton({
+  as: Component = 'div',
   className,
   style,
 }: {
+  as?: 'div' | 'span';
   className?: string;
   style?: React.CSSProperties;
 }) {
-  return <div className={cx('skeleton h-4 w-full', className)} style={style} />;
-}
-export function SkeletonRow({ cols = 5 }: { cols?: number }) {
+  const classNames = className?.split(/\s+/) ?? [];
+  const hasHeight = classNames.some(
+    (name) => name.startsWith('h-') || name.startsWith('size-'),
+  );
+  const hasWidth = classNames.some(
+    (name) => name.startsWith('w-') || name.startsWith('size-'),
+  );
+
   return (
-    <tr>
+    <Component
+      aria-hidden="true"
+      className={cx(
+        'skeleton',
+        !hasHeight && 'h-4',
+        !hasWidth && 'w-full',
+        className,
+      )}
+      style={style}
+    />
+  );
+}
+export function SkeletonRow({
+  cols = 5,
+  className,
+  style,
+  cellClassNames,
+  skeletonClassNames,
+}: {
+  cols?: number;
+  className?: string;
+  style?: React.CSSProperties;
+  cellClassNames?: readonly (string | undefined)[];
+  skeletonClassNames?: readonly (string | undefined)[];
+}) {
+  return (
+    <tr
+      className={cx('border-b border-row', className)}
+      style={style}
+      aria-hidden="true"
+    >
       {Array.from({ length: cols }).map((_, i) => (
-        <td key={i} className="px-3 py-2">
-          <Skeleton />
+        <td key={i} className={cx('px-3 py-2', cellClassNames?.[i])}>
+          <Skeleton className={skeletonClassNames?.[i]} />
         </td>
       ))}
     </tr>
@@ -645,7 +687,12 @@ export function Section({
               <h2 className="text-sm font-medium text-text">{title}</h2>
             ) : null}
             {subtitle ? (
-              <p className="text-xs text-text-faint mt-0.5">{subtitle}</p>
+              <div
+                className="text-xs text-text-faint mt-0.5 min-h-4"
+                data-slot="section-subtitle"
+              >
+                {subtitle}
+              </div>
             ) : null}
           </div>
           {action ? <div className="flex-shrink-0">{action}</div> : null}

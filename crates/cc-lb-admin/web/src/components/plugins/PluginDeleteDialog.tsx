@@ -50,9 +50,24 @@ export function PluginDeleteDialog({
                   {pendingDelete.refcount === 1 ? '' : 's'}.
                 </span>
                 {refs.isLoading ? (
-                  <Skeleton className="h-4 w-32" />
+                  <ul
+                    data-testid="plugin-delete-reference-list"
+                    className="space-y-1"
+                    aria-hidden="true"
+                  >
+                    {Array.from({ length: pendingDelete.refcount }).map(
+                      (_, i) => (
+                        <li key={i}>
+                          <Skeleton className="h-4 w-full" />
+                        </li>
+                      ),
+                    )}
+                  </ul>
                 ) : refs.data ? (
-                  <ul className="list-disc pl-4 space-y-1">
+                  <ul
+                    data-testid="plugin-delete-reference-list"
+                    className="list-disc pl-4 space-y-1"
+                  >
                     {refs.data.references.map((r, i) => (
                       <li key={i}>
                         {r.kind === 'plugin_chain'

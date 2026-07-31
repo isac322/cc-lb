@@ -17,6 +17,10 @@ import { TokenCell } from './TokenCell';
 export { SessionChip };
 
 const DASH = '—';
+const REQUEST_EVENT_ROW_HEIGHT_REM = 2.53125;
+const REQUEST_EVENT_ROW_STYLE = {
+  height: `${REQUEST_EVENT_ROW_HEIGHT_REM}rem`,
+} satisfies React.CSSProperties;
 
 const STATUS_TONE_TEXT: Record<'ok' | 'warn' | 'danger' | 'neutral', string> = {
   ok: 'text-[color:var(--color-ok)]',
@@ -30,6 +34,7 @@ interface RequestEventsTableProps {
   principalNameMap: Map<string, string>;
   upstreamNameMap: Map<string, string>;
   loading?: boolean;
+  reservedRowCount?: number;
   emptyTitle?: string;
   emptyDescription?: string;
   liveFlashIds?: Set<string>;
@@ -52,6 +57,7 @@ export function RequestEventsTable({
   principalNameMap,
   upstreamNameMap,
   loading,
+  reservedRowCount = 5,
   emptyTitle = 'No requests',
   emptyDescription,
   liveFlashIds,
@@ -72,15 +78,33 @@ export function RequestEventsTable({
   const showTokens = columns?.tokens ?? true;
   const showCost = columns?.cost ?? true;
 
-  // Always shown: Timestamp, Model, Status, Latency (4)
-  // Toggleable: Principal, Upstream, Session, Tokens, Cost (up to 5)
-  const colCount =
-    4 +
-    (showPrincipal ? 1 : 0) +
-    (showUpstream ? 1 : 0) +
-    (showSession ? 1 : 0) +
-    (showTokens ? 1 : 0) +
-    (showCost ? 1 : 0);
+  const loadingCellClassNames = [
+    '',
+    ...(showPrincipal ? [''] : []),
+    ...(showUpstream ? [''] : []),
+    ...(showSession ? [''] : []),
+    '',
+    'text-right tabular-nums',
+    'text-right tabular-nums',
+    ...(showTokens ? ['text-right tabular-nums'] : []),
+    ...(showCost ? ['text-right tabular-nums'] : []),
+  ];
+  const loadingSkeletonClassNames = [
+    'max-w-24',
+    ...(showPrincipal ? ['max-w-24'] : []),
+    ...(showUpstream ? ['max-w-28'] : []),
+    ...(showSession ? ['max-w-24'] : []),
+    'max-w-40',
+    'max-w-12 ml-auto',
+    'max-w-16 ml-auto',
+    ...(showTokens ? ['max-w-36 ml-auto'] : []),
+    ...(showCost ? ['max-w-20 ml-auto'] : []),
+  ];
+  const colCount = loadingSkeletonClassNames.length;
+  const reservedBodyStyle =
+    loading || events.length === 0
+      ? { height: `${reservedRowCount * REQUEST_EVENT_ROW_HEIGHT_REM}rem` }
+      : undefined;
 
   return (
     <>
@@ -114,10 +138,16 @@ export function RequestEventsTable({
             )}
           </tr>
         </thead>
-        <tbody>
+        <tbody style={reservedBodyStyle}>
           {loading ? (
-            Array.from({ length: 5 }).map((_, i) => (
-              <SkeletonRow key={i} cols={colCount} />
+            Array.from({ length: reservedRowCount }).map((_, i) => (
+              <SkeletonRow
+                key={i}
+                cols={colCount}
+                style={REQUEST_EVENT_ROW_STYLE}
+                cellClassNames={loadingCellClassNames}
+                skeletonClassNames={loadingSkeletonClassNames}
+              />
             ))
           ) : events.length ? (
             events.map((e) => {
@@ -138,6 +168,7 @@ export function RequestEventsTable({
                     'border-b border-row hover:bg-overlay-1 focus:bg-overlay-1 focus:outline-none cursor-pointer',
                     liveFlashIds?.has(key) ? 'flash-in' : '',
                   )}
+                  style={REQUEST_EVENT_ROW_STYLE}
                   onClick={() => setSelectedId(key)}
                   tabIndex={0}
                   onKeyDown={(e) => {
@@ -215,10 +246,10 @@ export function RequestEventsTable({
               );
             })
           ) : (
-            <tr>
+            <tr className="h-full">
               <td
                 colSpan={colCount}
-                className="px-3 py-8 text-center text-text-faint text-xs"
+                className="px-3 py-8 align-middle text-center text-text-faint text-xs"
               >
                 <div className="flex flex-col items-center justify-center text-center py-4">
                   <h3 className="text-sm font-medium text-text">

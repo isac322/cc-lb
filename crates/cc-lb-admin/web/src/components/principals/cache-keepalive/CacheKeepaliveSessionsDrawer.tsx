@@ -12,7 +12,14 @@ import {
   type Principal,
   useCacheKeepaliveSessions,
 } from '../../../lib/queries';
-import { Badge, Button, cx, EmptyState, Spinner } from '../../ui/primitives';
+import {
+  Badge,
+  Button,
+  cx,
+  EmptyState,
+  Skeleton,
+  Spinner,
+} from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
 import { cacheKeepaliveAnimationContract } from './__fixtures__/cacheKeepaliveContract';
 import { mergeLiveSessions } from './liveMergeSessions';
@@ -128,24 +135,35 @@ function formatNetPnl(val: number) {
 function OverviewStrip({
   horizon,
   summary,
+  isLoading,
 }: {
   horizon: CacheKeepaliveHorizon;
   summary: CacheKeepaliveSummary | undefined;
+  isLoading: boolean;
 }) {
   const label = horizon === 'all' ? 'All time:' : `Last ${horizon}:`;
   return (
     <div className="px-4 py-3 border-b border-subtle shrink-0">
       <div className="flex items-baseline gap-2 flex-wrap">
         <span className="text-xs text-text-muted">{label}</span>
-        <span className="text-sm font-medium text-text">
-          {(summary?.renewals_fired ?? 0).toLocaleString('en-US')} renewals
-          fired
-        </span>
-        <span className="text-[11px] text-text-faint">
-          · {summary ? formatMoney(summary.cost_saved) : '$0.00'} saved ·{' '}
-          {(summary?.sessions_last_5m ?? 0).toLocaleString('en-US')} sessions
-          tracked
-        </span>
+        {isLoading ? (
+          <>
+            <Skeleton className="h-5 w-32" />
+            <Skeleton className="h-4 w-52" />
+          </>
+        ) : (
+          <>
+            <span className="text-sm font-medium text-text">
+              {(summary?.renewals_fired ?? 0).toLocaleString('en-US')} renewals
+              fired
+            </span>
+            <span className="text-[11px] text-text-faint">
+              · {summary ? formatMoney(summary.cost_saved) : '$0.00'} saved ·{' '}
+              {(summary?.sessions_last_5m ?? 0).toLocaleString('en-US')}{' '}
+              sessions tracked
+            </span>
+          </>
+        )}
       </div>
     </div>
   );
@@ -178,7 +196,7 @@ function SessionListRow({
         type="button"
         onClick={onSelect}
         className={cx(
-          'w-full text-left rounded-sm border-b border-subtle px-4 py-3 transition-colors',
+          'w-full min-h-[68px] text-left rounded-sm border-b border-subtle px-4 py-3 transition-colors',
           isSelected ? 'bg-accent/10 border-accent/40' : 'hover:bg-overlay-2',
           isError && 'border-l-2 border-l-red-500',
           isError && !isSelected && 'bg-red-500/5',
@@ -241,6 +259,35 @@ function SessionListRow({
         </div>
       </button>
     </li>
+  );
+}
+
+function SessionListSkeleton() {
+  return (
+    <ul className="flex flex-col" aria-hidden="true">
+      {Array.from({ length: 5 }).map((_, i) => (
+        <li
+          key={i}
+          data-testid="cache-keepalive-session-skeleton-row"
+          className="w-full min-h-[68px] rounded-sm border-b border-subtle px-4 py-3"
+        >
+          <div className="flex items-center justify-between gap-2 flex-wrap leading-tight">
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-5 w-36" />
+              <Skeleton className="h-5 w-16" />
+            </div>
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-4 w-14" />
+              <Skeleton className="h-4 w-12" />
+            </div>
+          </div>
+          <div className="flex items-center justify-between mt-2">
+            <Skeleton className="h-4 w-48" />
+            <Skeleton className="h-2 w-24 shrink-0 ml-2" />
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -388,7 +435,11 @@ export function CacheKeepaliveSessionsDrawer({
             </button>
           </header>
 
-          <OverviewStrip horizon={horizon} summary={summary} />
+          <OverviewStrip
+            horizon={horizon}
+            summary={summary}
+            isLoading={query.isLoading}
+          />
 
           <div className="px-4 py-2.5 border-b border-subtle shrink-0 flex gap-1.5 overflow-x-auto no-scrollbar">
             {FILTERS.map((f) => (
@@ -422,38 +473,42 @@ export function CacheKeepaliveSessionsDrawer({
                   : 'flex-1',
               )}
             >
-              {query.isLoading ? (
-                <div className="flex items-center justify-center py-12">
-                  <Spinner />
-                </div>
-              ) : !enabled && allRows.length === 0 ? (
-                <EmptyState
-                  title="Cache keepalive disabled"
-                  description="Enable cache keepalive to start tracking sessions."
-                />
-              ) : allRows.length === 0 ? (
-                <EmptyState
-                  title={
-                    filter === 'all' ? 'No sessions' : 'No matching sessions'
-                  }
-                  description={
-                    filter === 'all'
-                      ? 'No sessions recorded yet.'
-                      : 'Try a different filter.'
-                  }
-                />
-              ) : (
-                <ul ref={listRef} className="flex flex-col">
-                  {allRows.map((r) => (
-                    <SessionListRow
-                      key={r.id}
-                      row={r}
-                      isSelected={selected?.id === r.id}
-                      onSelect={() => setSelected(r)}
-                    />
-                  ))}
-                </ul>
-              )}
+              <div
+                data-testid="cache-keepalive-session-list-region"
+                aria-busy={query.isLoading}
+                className="min-h-[340px]"
+              >
+                {query.isLoading ? (
+                  <SessionListSkeleton />
+                ) : !enabled && allRows.length === 0 ? (
+                  <EmptyState
+                    title="Cache keepalive disabled"
+                    description="Enable cache keepalive to start tracking sessions."
+                  />
+                ) : allRows.length === 0 ? (
+                  <EmptyState
+                    title={
+                      filter === 'all' ? 'No sessions' : 'No matching sessions'
+                    }
+                    description={
+                      filter === 'all'
+                        ? 'No sessions recorded yet.'
+                        : 'Try a different filter.'
+                    }
+                  />
+                ) : (
+                  <ul ref={listRef} className="flex flex-col">
+                    {allRows.map((r) => (
+                      <SessionListRow
+                        key={r.id}
+                        row={r}
+                        isSelected={selected?.id === r.id}
+                        onSelect={() => setSelected(r)}
+                      />
+                    ))}
+                  </ul>
+                )}
+              </div>
               {query.hasNextPage && (
                 <div className="flex justify-center pt-3 pb-4">
                   <Button
