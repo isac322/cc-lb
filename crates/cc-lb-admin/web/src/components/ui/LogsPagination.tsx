@@ -26,12 +26,7 @@ export function LogsPagination({
 }: LogsPaginationProps) {
   const startRow = totalRows === 0 ? 0 : page * pageSize + 1;
   const endRow = Math.min((page + 1) * pageSize, totalRows);
-  const totalLabel = hasMore
-    ? totalRows >= 999
-      ? '999+'
-      : `${totalRows}+`
-    : String(totalRows);
-  const pageCountLabel = hasMore ? `${pageCount}+` : String(pageCount);
+  const totalLabel = hasMore ? `${totalRows}+` : String(totalRows);
   const showNextPending = !loading && loadingNext;
   return (
     <nav
@@ -44,23 +39,13 @@ export function LogsPagination({
         className="text-xs text-text-muted flex items-center gap-4"
       >
         {loading ? (
-          <>
-            <div className="w-28 sm:w-36">
-              <Skeleton className="h-3" />
-            </div>
-            <div className="hidden sm:block w-20">
-              <Skeleton className="h-3" />
-            </div>
-          </>
+          <div className="w-28 sm:w-36">
+            <Skeleton className="h-3" />
+          </div>
         ) : (
-          <>
-            <span>
-              Showing {startRow}–{endRow} of {totalLabel}
-            </span>
-            <span className="hidden sm:inline">
-              Page {page + 1} of {pageCountLabel}
-            </span>
-          </>
+          <span>
+            Showing {startRow}–{endRow} of {totalLabel}
+          </span>
         )}
       </div>
       <div className="flex items-center gap-2">
