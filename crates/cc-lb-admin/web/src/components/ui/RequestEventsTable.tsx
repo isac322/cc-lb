@@ -84,6 +84,7 @@ export function RequestEventsTable({
     ...(showUpstream ? [''] : []),
     ...(showSession ? [''] : []),
     '',
+    '',
     'text-right tabular-nums',
     'text-right tabular-nums',
     ...(showTokens ? ['text-right tabular-nums'] : []),
@@ -94,6 +95,7 @@ export function RequestEventsTable({
     ...(showPrincipal ? ['max-w-24'] : []),
     ...(showUpstream ? ['max-w-28'] : []),
     ...(showSession ? ['max-w-24'] : []),
+    'max-w-12',
     'max-w-40',
     'max-w-12 ml-auto',
     'max-w-16 ml-auto',
@@ -127,6 +129,9 @@ export function RequestEventsTable({
             {showSession && (
               <th className="text-left px-3 py-2 whitespace-nowrap">Session</th>
             )}
+            <th className="text-left px-3 py-2 whitespace-nowrap">
+              Request kind
+            </th>
             <th className="text-left px-3 py-2 whitespace-nowrap">Model</th>
             <th className="text-right px-3 py-2 whitespace-nowrap">Status</th>
             <th className="text-right px-3 py-2 whitespace-nowrap">Latency</th>
@@ -209,16 +214,18 @@ export function RequestEventsTable({
                   )}
                   {showSession && (
                     <td className="px-3 py-2 whitespace-nowrap">
-                      <span className="flex items-center gap-1.5 min-w-0">
-                        <SessionChip sessionId={e.thread_id ?? null} />
-                        {requestKindBadge != null && (
-                          <Badge tone="mono" className="shrink-0">
-                            {requestKindBadge}
-                          </Badge>
-                        )}
-                      </span>
+                      <SessionChip sessionId={e.thread_id ?? null} />
                     </td>
                   )}
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    {requestKindBadge != null ? (
+                      <Badge tone="mono" className="shrink-0">
+                        {requestKindBadge}
+                      </Badge>
+                    ) : (
+                      <span className="text-text-faint">{DASH}</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
                     <span className="flex items-center gap-2 min-w-0">
                       <span className="truncate">{e.model ?? DASH}</span>

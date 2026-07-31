@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - **BREAKING**: Removed the `event_bus.transport` config key. The event fanout now follows the storage backend: postgres always runs pg_notify fanout, sqlite always uses the in-memory bus. A config that still sets `event_bus.transport` fails to load. The postgres backend now requires `cluster.instance_url` and a cluster token; the Helm chart injects both and requires `secrets.clusterToken` unless `secrets.existingSecret` supplies the token.
 - New principals receive the built-in `subscription-preference` Router chain entry at order `0`, and its presence is the enabled state. Existing principals and operator-configured chains remain unchanged on upgrade. Use the plugin-chain endpoints to insert, remove, or reorder the entry.
 - Upstream warm-up is now opt-out for `anthropic_oauth`: `warmup_enabled` defaults to `true` for OAuth upstreams created through the admin API and through the OAuth flow. Other upstream kinds remain disabled by default. Creating an `anthropic_oauth` upstream no longer fails when warm-up is on without credentials; the warm-up scheduler already skips credential-less upstreams.
+- Request logs show the request kind in its own `Request kind` column instead of a badge crowded into the session cell, and the request drawer lists it as a separate `Request kind` row with the full kind (`subagent`) rather than the table's abbreviation.
 
 ### Fixed
 
