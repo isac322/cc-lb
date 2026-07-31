@@ -21,9 +21,10 @@ use cc_lb_storage_api::{
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
-        anthropic_compatibility_kv_store, organization_metadata_store, plan_tier_store,
-        plan_tier_store_backfill, plugin_registry_store, pool_quota_history_store, price_catalog,
-        principal_store, prompt_cache_observation_store, request_event_list, storage_roundtrips,
+        anthropic_compatibility_kv_store, cache_keepalive_session_reads,
+        organization_metadata_store, plan_tier_store, plan_tier_store_backfill,
+        plugin_registry_store, pool_quota_history_store, price_catalog, principal_store,
+        prompt_cache_observation_store, request_event_list, storage_roundtrips,
         storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
         upstream_rate_limit_store, upstream_subscription_metadata_store,
         upstream_subscription_quota_store, warmup_attempts_store,
@@ -195,6 +196,14 @@ fn request_event_list_projects_rows_and_preserves_detail_postgres() {
     run_postgres_scenario(
         "request_event_list_projects_rows_and_preserves_detail",
         request_event_list::request_event_list_projects_rows_and_preserves_detail,
+    );
+}
+
+#[test]
+fn cache_keepalive_batch_turn_reads_match_per_session_postgres() {
+    run_postgres_scenario(
+        "cache_keepalive_batch_turn_reads_match_per_session",
+        cache_keepalive_session_reads::batch_turn_reads_match_canonical_per_session_reads,
     );
 }
 

@@ -1,7 +1,19 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion};
-use cc_lb_storage_api::CacheTtl;
+use cc_lb_storage_api::{
+    CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionListItem, CacheKeepaliveSessionStatus,
+    CacheKeepaliveTurnRecord, CacheTtl,
+};
+use uuid::Uuid;
+
+use super::{CacheKeepaliveActivitySource, derive_activity_view};
+use crate::v1::principal_cache_keepalive::view::{
+    CacheKeepaliveActivityBatch, CacheKeepaliveSummaryResponse, summary_for_items,
+};
 
 use super::economics::{
     CacheKeepalivePnlRates, CacheKeepaliveTurnPnlInput, derive_turn_pnl, format_net_pnl,
@@ -24,6 +36,93 @@ fn pnl_sum(inputs: &[CacheKeepaliveTurnPnlInput], rates: CacheKeepalivePnlRates)
         .iter()
         .map(|input| derive_turn_pnl(*input, rates).net_micros)
         .sum()
+}
+
+fn priced_catalog() -> Arc<PriceCatalog> {
+    let catalog = PriceCatalog::new_empty();
+    let mut models = HashMap::new();
+    models.insert(
+        "claude-sonnet-4-5".to_owned(),
+        Pricing {
+            model: "claude-sonnet-4-5".to_owned(),
+            input_per_million_usd: UsdPerMillion::from_whole_usd(3),
+            output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+            by_tier: BTreeMap::new(),
+        },
+    );
+    let mut cache_creation_per_million_usd = HashMap::new();
+    cache_creation_per_million_usd.insert(
+        "claude-sonnet-4-5".to_owned(),
+        UsdPerMillion::from_micros_usd(CACHE_CREATE_5M_MICROS_PER_MILLION),
+    );
+    let mut cache_read_per_million_usd = HashMap::new();
+    cache_read_per_million_usd.insert(
+        "claude-sonnet-4-5".to_owned(),
+        UsdPerMillion::from_micros_usd(CACHE_READ_MICROS_PER_MILLION),
+    );
+    catalog.install_snapshot(CatalogSnapshot {
+        payload_hash: "fixture".to_owned(),
+        fetched_at_ms: 1,
+        models,
+        raw_json: Vec::new(),
+        cache_creation_per_million_usd,
+        cache_read_per_million_usd,
+        cache_creation_per_million_usd_by_tier: HashMap::new(),
+        cache_read_per_million_usd_by_tier: HashMap::new(),
+        status: CatalogStatus::Ok,
+    });
+    catalog
+}
+
+fn summary_item(
+    source: CacheKeepaliveSessionEntrySource,
+    last_message_at_ms: u64,
+) -> CacheKeepaliveSessionListItem {
+    CacheKeepaliveSessionListItem {
+        id: match source {
+            CacheKeepaliveSessionEntrySource::Session => "session",
+            CacheKeepaliveSessionEntrySource::Decision => "decision",
+        }
+        .to_owned(),
+        source,
+        session_key_hash: matches!(source, CacheKeepaliveSessionEntrySource::Session)
+            .then(|| "session".to_owned()),
+        principal_id: "principal".to_owned(),
+        upstream_id: Uuid::nil(),
+        last_message_at_ms,
+        ttl: CacheTtl::Ttl5m,
+        generation: 1,
+        refresh_count: matches!(source, CacheKeepaliveSessionEntrySource::Session).then_some(2),
+        status: matches!(source, CacheKeepaliveSessionEntrySource::Session)
+            .then_some(CacheKeepaliveSessionStatus::Active),
+        enqueue_state: None,
+        terminal_reason: None,
+        decision: matches!(source, CacheKeepaliveSessionEntrySource::Decision)
+            .then(|| "not_tracked".to_owned()),
+        reason: "fixture".to_owned(),
+        error: None,
+        config_snapshot: None,
+    }
+}
+
+fn summary_turn(source_ref_id: &str, ts: u64) -> CacheKeepaliveTurnRecord {
+    CacheKeepaliveTurnRecord {
+        source_ref_id: source_ref_id.to_owned(),
+        session_key_hash: "session".to_owned(),
+        principal_id: "principal".to_owned(),
+        accounting_key_id: None,
+        upstream_id: Uuid::nil(),
+        model: "claude-sonnet-4-5".to_owned(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_creation_input_tokens_5m: 0,
+        cache_creation_input_tokens_1h: 0,
+        cache_read_input_tokens: 20_000,
+        cost_micros: 0,
+        hit_miss: "hit".to_owned(),
+        ts,
+    }
 }
 
 #[test]
@@ -108,38 +207,7 @@ fn cache_keepalive_pnl_matches_the_frozen_multi_turn_examples() {
 #[test]
 fn cache_keepalive_pnl_uses_catalog_rates_and_exact_surface_formats() {
     // Given: a real catalog-shaped rate snapshot and a pending loss.
-    let catalog = PriceCatalog::new_empty();
-    let mut models = HashMap::new();
-    models.insert(
-        "claude-sonnet-4-5".to_owned(),
-        Pricing {
-            model: "claude-sonnet-4-5".to_owned(),
-            input_per_million_usd: UsdPerMillion::from_whole_usd(3),
-            output_per_million_usd: UsdPerMillion::from_whole_usd(15),
-            by_tier: BTreeMap::new(),
-        },
-    );
-    let mut cache_creation_per_million_usd = HashMap::new();
-    cache_creation_per_million_usd.insert(
-        "claude-sonnet-4-5".to_owned(),
-        UsdPerMillion::from_micros_usd(CACHE_CREATE_5M_MICROS_PER_MILLION),
-    );
-    let mut cache_read_per_million_usd = HashMap::new();
-    cache_read_per_million_usd.insert(
-        "claude-sonnet-4-5".to_owned(),
-        UsdPerMillion::from_micros_usd(CACHE_READ_MICROS_PER_MILLION),
-    );
-    catalog.install_snapshot(CatalogSnapshot {
-        payload_hash: "fixture".to_owned(),
-        fetched_at_ms: 1,
-        models,
-        raw_json: Vec::new(),
-        cache_creation_per_million_usd,
-        cache_read_per_million_usd,
-        cache_creation_per_million_usd_by_tier: HashMap::new(),
-        cache_read_per_million_usd_by_tier: HashMap::new(),
-        status: CatalogStatus::Ok,
-    });
+    let catalog = priced_catalog();
     let pending = derive_turn_pnl(
         CacheKeepaliveTurnPnlInput {
             renewal_tokens: 20_000,
@@ -160,4 +228,57 @@ fn cache_keepalive_pnl_uses_catalog_rates_and_exact_surface_formats() {
     assert_eq!(format_net_pnl(93_600), "+$0.0936");
     assert_eq!(format_net_pnl(102_000), "+$0.102");
     assert_eq!(format_turn_pnl(pending), "−$0.018 pending");
+}
+
+#[test]
+fn batched_cache_keepalive_turns_preserve_serialized_summary_behavior() {
+    const NOW_MS: u64 = 1_730_000_100_000;
+
+    // Given: one renewing session, one old decision row, and the legacy per-session turn slice.
+    let catalog = priced_catalog();
+    let session = summary_item(CacheKeepaliveSessionEntrySource::Session, NOW_MS);
+    let decision = summary_item(
+        CacheKeepaliveSessionEntrySource::Decision,
+        NOW_MS.saturating_sub(10 * 60 * 1_000),
+    );
+    let turns = vec![summary_turn("older", 100), summary_turn("newer", 200)];
+    let session_activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &session,
+            session: None,
+            turns: &turns,
+            now_ms: NOW_MS,
+        },
+        catalog.as_ref(),
+    );
+    let decision_activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &decision,
+            session: None,
+            turns: &[],
+            now_ms: NOW_MS,
+        },
+        catalog.as_ref(),
+    );
+    let legacy_cost_saved_micros = session_activity
+        .pnl
+        .map_or(0, |pnl| pnl.net_micros)
+        .saturating_add(decision_activity.pnl.map_or(0, |pnl| pnl.net_micros));
+    let legacy_summary = CacheKeepaliveSummaryResponse {
+        renewing_now: 1,
+        sessions_last_5m: 1,
+        renewals_fired: 2,
+        cost_saved: legacy_cost_saved_micros as f64 / 1_000_000.0,
+    };
+
+    // When: the summary derives all activity from one grouped turn batch.
+    let batch = CacheKeepaliveActivityBatch::from_turns(turns);
+    let batched_summary = summary_for_items(catalog.as_ref(), NOW_MS, &[session, decision], &batch)
+        .expect("batched summary");
+
+    // Then: the complete serialized summary is byte-for-byte unchanged.
+    assert_eq!(
+        serde_json::to_vec(&batched_summary).expect("serialize batched summary"),
+        serde_json::to_vec(&legacy_summary).expect("serialize legacy summary"),
+    );
 }

@@ -10,6 +10,11 @@ mod fixtures;
 use axum::http::StatusCode;
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::Config;
+use cc_lb_storage_api::upstream::UpstreamKind as StorageUpstreamKind;
+use cc_lb_storage_api::{
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStore,
+    CacheTtl, UpstreamCreate, UpstreamStore,
+};
 use config_admin_common::{app, authed_bytes, authed_json, temp_storage};
 use fixtures::{principal_create_body, seed_cache_keepalive_contract_rows};
 use serde_json::{Value, json};
@@ -68,6 +73,71 @@ async fn cache_keepalive_list_returns_card_summary_without_rows_when_limit_is_ze
     assert!(body["summary"]["cost_saved"].is_number());
     assert_eq!(body["rows"], serde_json::json!([]));
     assert!(body["next_cursor"].is_null());
+}
+
+#[tokio::test]
+async fn cache_keepalive_list_preserves_soft_deleted_upstream_names() {
+    let (_directory, storage, state, principal_id) = create_principal_id().await;
+    let upstream = storage
+        .create(UpstreamCreate {
+            name: "retired-upstream".to_owned(),
+            kind: StorageUpstreamKind::AnthropicApiKey,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_token_generation: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+        })
+        .await
+        .expect("create upstream");
+    let session_key_hash = "soft-deleted-upstream-session";
+    storage
+        .replace_from_real_request(&CacheKeepaliveReplaceRequest {
+            session_key_hash: session_key_hash.to_owned(),
+            principal_id: principal_id.clone(),
+            accounting_key_id: None,
+            upstream_id: upstream.id,
+            cache_anchor_at_unix_secs: NOW_UNIX_SECS,
+            ttl: CacheTtl::Ttl5m,
+            run_at_unix_secs: NOW_UNIX_SECS + 270,
+            expires_at_unix_secs: NOW_UNIX_SECS + 300,
+            encrypted_payload: vec![1],
+            display_reason: "scheduled".to_owned(),
+            config_snapshot: CacheKeepaliveConfigSnapshot {
+                refresh_lead_time_5m_secs: 30,
+                refresh_lead_time_1h_secs: 300,
+                max_refreshes_per_session: 12,
+                max_total_duration_secs: 14_400,
+                snapshot_max_bytes: 524_288,
+            },
+            now_unix_secs: NOW_UNIX_SECS,
+        })
+        .await
+        .expect("seed keepalive session");
+    storage
+        .soft_delete(upstream.id, upstream.revision)
+        .await
+        .expect("soft delete upstream");
+
+    let list_uri =
+        format!("/admin/v1/principals/{principal_id}/cache-keepalive?horizon=all&limit=10");
+    let (status, _headers, raw) = authed_bytes(app(state.clone()), "GET", &list_uri, None).await;
+    assert_eq!(status, StatusCode::OK, "list response: {raw:?}");
+    let list: Value = serde_json::from_slice(&raw).expect("list response JSON");
+    let row = list["rows"]
+        .as_array()
+        .expect("list rows")
+        .iter()
+        .find(|row| row["id"] == session_key_hash)
+        .expect("seeded keepalive row");
+    assert_eq!(row["upstream"], "retired-upstream");
+
+    let detail_uri =
+        format!("/admin/v1/principals/{principal_id}/cache-keepalive/{session_key_hash}");
+    let (status, _headers, raw) = authed_bytes(app(state), "GET", &detail_uri, None).await;
+    assert_eq!(status, StatusCode::OK, "detail response: {raw:?}");
+    let detail: Value = serde_json::from_slice(&raw).expect("detail response JSON");
+    assert_eq!(detail["upstream"], row["upstream"]);
 }
 
 #[tokio::test]

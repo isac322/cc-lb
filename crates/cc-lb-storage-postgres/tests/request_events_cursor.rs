@@ -56,6 +56,7 @@ async fn run_regression(pool: &PgPool) -> Result<()> {
     assert_materialized_schema(pool).await?;
     let (expected_keys, fallback_event_key) = append_events_and_assert_columns(&storage).await?;
     assert_cursor_pages(&storage, &expected_keys).await?;
+    assert_raw_payload_list_semantics(&storage).await?;
     assert_order_index_is_usable(pool).await?;
 
     ensure!(
@@ -216,6 +217,132 @@ async fn append_events_and_assert_columns(
     Ok((tied_keys, fallback_row.0))
 }
 
+async fn assert_raw_payload_list_semantics(storage: &PostgresStorage) -> Result<()> {
+    let event_id = "raw-payload-list-event";
+    let principal_id = "raw-payload-list-principal";
+    storage
+        .append_request_event(&RequestEvent {
+            ts: TIED_TS_SECS + 10,
+            ts_ms: Some((TIED_TS_SECS + 10) * 1_000 + 123),
+            request_id: "raw-payload-list-request".to_owned(),
+            event_id: Some(event_id.to_owned()),
+            source_kind: Some("proxy".to_owned()),
+            principal_id: Some(principal_id.to_owned()),
+            upstream: Some(RequestEventUpstream::AnthropicDirect),
+            status: 206,
+            duration_ms: 41,
+            auth_ms: Some(42),
+            connection_reused: Some(true),
+            cost_usd_micros: Some(43),
+            ..Default::default()
+        })
+        .await?;
+
+    let payload = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT payload FROM request_events_v1 WHERE event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(storage.pool())
+    .await?;
+    let mut payload = serde_json::from_slice::<serde_json::Value>(&payload)?;
+    payload
+        .as_object_mut()
+        .context("request event payload must be an object")?
+        .remove("request_id");
+    sqlx::query("UPDATE request_events_v1 SET payload = $1 WHERE event_id = $2")
+        .bind(serde_json::to_vec(&payload)?)
+        .bind(event_id)
+        .execute(storage.pool())
+        .await?;
+
+    let query = || RequestEventListQuery {
+        since_unix_secs: TIED_TS_SECS,
+        until_unix_secs: TIED_TS_SECS + 20,
+        until_ts_ms: None,
+        until_event_id: None,
+        limit: 10,
+        filters: RequestEventStreamFilters {
+            principal_id: Some(principal_id.to_owned()),
+            ..Default::default()
+        },
+        source_kind: Some("all".to_owned()),
+    };
+
+    let page = storage.list_request_events(&query()).await?;
+    ensure!(page.len() == 1, "missing-request-id page was {page:?}");
+    let item = &page[0];
+    ensure!(
+        item.request_id.is_empty()
+            && item.duration_ms == 41
+            && item.auth_ms == Some(42)
+            && item.connection_reused == Some(true)
+            && item.cost_usd_micros == Some(43),
+        "raw payload list projection changed unexpectedly: {item:?}"
+    );
+    let detail = storage
+        .get_request_event(event_id)
+        .await?
+        .context("missing-request-id detail")?;
+    ensure!(
+        detail.request_id.is_empty()
+            && detail.duration_ms == item.duration_ms
+            && detail.auth_ms == item.auth_ms
+            && detail.connection_reused == item.connection_reused
+            && detail.cost_usd_micros == item.cost_usd_micros,
+        "list/detail payload projection diverged: item={item:?} detail={detail:?}"
+    );
+
+    payload
+        .as_object_mut()
+        .context("request event payload must be an object")?
+        .remove("duration_ms");
+    sqlx::query("UPDATE request_events_v1 SET payload = $1 WHERE event_id = $2")
+        .bind(serde_json::to_vec(&payload)?)
+        .bind(event_id)
+        .execute(storage.pool())
+        .await?;
+    let page = storage.list_request_events(&query()).await?;
+    ensure!(
+        page.len() == 1 && page[0].duration_ms == 0,
+        "missing duration did not default to zero: {page:?}"
+    );
+
+    payload
+        .as_object_mut()
+        .context("request event payload must be an object")?
+        .insert("duration_ms".to_owned(), serde_json::json!(-1));
+    sqlx::query("UPDATE request_events_v1 SET payload = $1 WHERE event_id = $2")
+        .bind(serde_json::to_vec(&payload)?)
+        .bind(event_id)
+        .execute(storage.pool())
+        .await?;
+    ensure!(
+        storage.list_request_events(&query()).await.is_err(),
+        "negative duration unexpectedly decoded"
+    );
+
+    payload
+        .as_object_mut()
+        .context("request event payload must be an object")?
+        .insert("duration_ms".to_owned(), serde_json::json!(41));
+    sqlx::query(
+        "UPDATE request_events_v1 SET payload = $1, list_status = NULL WHERE event_id = $2",
+    )
+    .bind(serde_json::to_vec(&payload)?)
+    .bind(event_id)
+    .execute(storage.pool())
+    .await?;
+    ensure!(
+        matches!(
+            storage.list_request_events(&query()).await,
+            Err(cc_lb_storage_api::StorageError::Corrupted { .. })
+        ),
+        "missing materialized status was not reported as corrupted"
+    );
+
+    Ok(())
+}
+
 async fn assert_cursor_pages(storage: &PostgresStorage, expected_keys: &[String]) -> Result<()> {
     let mut cursor_ts_ms = None;
     let mut cursor_event_key = None;
@@ -298,12 +425,37 @@ async fn assert_order_index_is_usable(pool: &PgPool) -> Result<()> {
     .bind(PAGE_LIMIT as i64)
     .fetch_all(&mut *tx)
     .await?;
+    let principal_plan = sqlx::query_scalar::<_, String>(
+        "EXPLAIN (COSTS OFF) \
+         SELECT list_ts_ms, list_event_key \
+         FROM request_events_v1 \
+         WHERE ts >= $1 \
+           AND principal_id = $2 \
+           AND (source_kind IS NULL OR source_kind <> 'renewal') \
+           AND (list_ts_ms < $3 \
+                OR (list_ts_ms = $3 AND list_event_key < $4)) \
+         ORDER BY list_ts_ms DESC, list_event_key DESC \
+         LIMIT $5",
+    )
+    .bind(since)
+    .bind("cursor-principal")
+    .bind(TIED_TS_MS as i64)
+    .bind("cursor-event-03")
+    .bind(PAGE_LIMIT as i64)
+    .fetch_all(&mut *tx)
+    .await?;
     tx.rollback().await?;
 
     ensure!(
         plan.iter()
             .any(|line| line.contains("request_events_v1_list_order_idx")),
         "materialized request-event order index was not structurally usable: {plan:?}"
+    );
+    ensure!(
+        principal_plan
+            .iter()
+            .any(|line| line.contains("request_events_v1_principal_list_order_idx")),
+        "principal request-event list index was not structurally usable: {principal_plan:?}"
     );
     Ok(())
 }

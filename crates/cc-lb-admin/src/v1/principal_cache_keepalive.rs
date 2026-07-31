@@ -1,5 +1,5 @@
 mod query;
-mod view;
+pub(crate) mod view;
 
 use axum::{
     Json, Router,
@@ -15,7 +15,10 @@ use crate::AdminState;
 
 use self::{
     query::parse_query,
-    view::{CacheKeepaliveViewContext, detail_for_item, list_all, row_for_item, summary_for_items},
+    view::{
+        CacheKeepaliveViewContext, detail_for_item, list_all, list_upstream_names,
+        load_activity_batch, row_for_item, summary_for_items,
+    },
 };
 
 pub fn router() -> Router<AdminState> {
@@ -70,30 +73,47 @@ async fn list_cache_keepalive(
         Ok(items) => items,
         Err(error) => return storage_error(error),
     };
-    let summary = match summary_for_items(&context, &summary_items).await {
+    let page = if query.limit == 0 {
+        None
+    } else {
+        match CacheKeepaliveSessionReadStore::list_cache_keepalive_sessions(storage, &query.storage)
+            .await
+        {
+            Ok(page) => Some(page),
+            Err(error) => return storage_error(error),
+        }
+    };
+    let activity_items = summary_items
+        .iter()
+        .chain(page.as_ref().into_iter().flat_map(|page| page.rows.iter()));
+    let activity_batch = match load_activity_batch(storage, &principal_id, activity_items).await {
+        Ok(batch) => batch,
+        Err(error) => return storage_error(error),
+    };
+    let summary = match summary_for_items(
+        context.catalog,
+        context.now_ms,
+        &summary_items,
+        &activity_batch,
+    ) {
         Ok(summary) => summary,
         Err(error) => return storage_error(error),
     };
-    if query.limit == 0 {
+    let Some(page) = page else {
         return Json(view::CacheKeepaliveListResponse {
             summary,
             rows: Vec::new(),
             next_cursor: None,
         })
         .into_response();
-    }
-    let page = match CacheKeepaliveSessionReadStore::list_cache_keepalive_sessions(
-        storage,
-        &query.storage,
-    )
-    .await
-    {
-        Ok(page) => page,
+    };
+    let upstream_names = match list_upstream_names(storage, &page.rows).await {
+        Ok(upstream_names) => upstream_names,
         Err(error) => return storage_error(error),
     };
     let mut rows = Vec::with_capacity(page.rows.len());
     for item in &page.rows {
-        match row_for_item(&context, item).await {
+        match row_for_item(&context, item, &activity_batch, &upstream_names) {
             Ok(row) => rows.push(row),
             Err(error) => return storage_error(error),
         }

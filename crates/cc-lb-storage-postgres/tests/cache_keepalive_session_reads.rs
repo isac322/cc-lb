@@ -4,8 +4,8 @@ use anyhow::Result;
 use cc_lb_storage_api::{
     BackendKind, CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow,
     CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore,
-    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, CacheTtl, MetaStore, RequestEvent,
-    RequestEventProjections, RequestEventStore,
+    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, CacheKeepaliveTurnRecord, CacheTtl,
+    MetaStore, RequestEvent, RequestEventProjections, RequestEventStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
@@ -303,7 +303,95 @@ async fn read_model_contract(url: &str) -> Result<()> {
             .contains("cursor does not match principal")
     );
 
+    let expected_turns = vec![
+        turn_record("batch-a", "turn-a-early", PRINCIPAL_ID, 10, 1),
+        turn_record("batch-a", "turn-a-alpha", PRINCIPAL_ID, 20, 2),
+        turn_record("batch-a", "turn-a-zulu", PRINCIPAL_ID, 20, 3),
+        turn_record("batch-b", "turn-b", PRINCIPAL_ID, 5, 4),
+    ];
+    for turn in &expected_turns {
+        insert_turn(&storage, turn).await?;
+    }
+    insert_turn(
+        &storage,
+        &turn_record("batch-a", "turn-other-principal", "principal-b", 1, 5),
+    )
+    .await?;
+
+    let turns = storage
+        .list_cache_keepalive_turns_for_sessions(
+            PRINCIPAL_ID,
+            &[
+                "batch-b".to_owned(),
+                "unknown".to_owned(),
+                "batch-a".to_owned(),
+                "batch-a".to_owned(),
+            ],
+        )
+        .await?;
+    assert_eq!(turns, expected_turns);
+
+    fixture.pool.close().await;
+    assert!(
+        storage
+            .list_cache_keepalive_turns_for_sessions(PRINCIPAL_ID, &[])
+            .await?
+            .is_empty()
+    );
+
     fixture.drop_schema().await
+}
+
+async fn insert_turn(storage: &PostgresStorage, turn: &CacheKeepaliveTurnRecord) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO cache_keepalive_turns \
+         (source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, hit_miss, ts) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+    )
+    .bind(&turn.source_ref_id)
+    .bind(&turn.session_key_hash)
+    .bind(&turn.principal_id)
+    .bind(turn.accounting_key_id.as_deref())
+    .bind(turn.upstream_id)
+    .bind(&turn.model)
+    .bind(i64::try_from(turn.input_tokens)?)
+    .bind(i64::try_from(turn.output_tokens)?)
+    .bind(i64::try_from(turn.cache_creation_input_tokens)?)
+    .bind(i64::try_from(turn.cache_creation_input_tokens_5m)?)
+    .bind(i64::try_from(turn.cache_creation_input_tokens_1h)?)
+    .bind(i64::try_from(turn.cache_read_input_tokens)?)
+    .bind(turn.cost_micros)
+    .bind(&turn.hit_miss)
+    .bind(i64::try_from(turn.ts)?)
+    .execute(storage.pool())
+    .await?;
+    Ok(())
+}
+
+fn turn_record(
+    session_key_hash: &str,
+    source_ref_id: &str,
+    principal_id: &str,
+    ts: u64,
+    seed: u32,
+) -> CacheKeepaliveTurnRecord {
+    CacheKeepaliveTurnRecord {
+        source_ref_id: source_ref_id.to_owned(),
+        session_key_hash: session_key_hash.to_owned(),
+        principal_id: principal_id.to_owned(),
+        accounting_key_id: Some(format!("accounting-key-{seed}")),
+        upstream_id: Uuid::from_u128(100 + u128::from(seed)),
+        model: format!("model-{seed}"),
+        input_tokens: u64::from(seed) + 1,
+        output_tokens: u64::from(seed) + 2,
+        cache_creation_input_tokens: u64::from(seed) + 3,
+        cache_creation_input_tokens_5m: u64::from(seed) + 4,
+        cache_creation_input_tokens_1h: u64::from(seed) + 5,
+        cache_read_input_tokens: u64::from(seed) + 6,
+        cost_micros: -i64::from(seed),
+        hit_miss: format!("hit-miss-{seed}"),
+        ts,
+    }
 }
 
 async fn terminalize(

@@ -138,6 +138,47 @@ fn renewal_projection(source_ref_id: &str, ts: u64) -> RequestEventProjections {
     }
 }
 
+fn batched_turn_projection(
+    source_ref_id: &str,
+    session_key_hash: &str,
+    principal_id: &str,
+    ts: u64,
+) -> RequestEventProjections {
+    RequestEventProjections {
+        turn: Some(CacheKeepaliveTurnRow {
+            source_ref_id: source_ref_id.to_owned(),
+            session_key_hash: session_key_hash.to_owned(),
+            principal_id: principal_id.to_owned(),
+            accounting_key_id: Some("accounting-key".to_owned()),
+            upstream_id: UPSTREAM_ID,
+            model: "claude-opus-4-1".to_owned(),
+            input_tokens: 101,
+            output_tokens: 23,
+            cache_creation_input_tokens: 47,
+            cache_creation_input_tokens_5m: 29,
+            cache_creation_input_tokens_1h: 18,
+            cache_read_input_tokens: 89,
+            cost_micros: 12_345,
+            hit_miss: "miss".to_owned(),
+            ts,
+        }),
+        decision: CacheKeepaliveDecisionRow {
+            source_ref_id: source_ref_id.to_owned(),
+            principal_id: principal_id.to_owned(),
+            session_key_hash: Some(session_key_hash.to_owned()),
+            upstream_id: UPSTREAM_ID,
+            decision: "reschedule".to_owned(),
+            reason: "scheduled next renewal".to_owned(),
+            error: None,
+            generation: 3,
+            ttl: CacheTtl::Ttl5m,
+            config_snapshot: Some(snapshot()),
+            last_message_at_ms: ts * 1_000,
+            ts,
+        },
+    }
+}
+
 #[tokio::test]
 async fn lists_frozen_session_and_decision_projection_rows() {
     // Given: sessions in every storage state and a decision-only not-tracked row.
@@ -459,5 +500,104 @@ async fn frozen_message_timestamp_ignores_scheduler_state_updates_and_rejects_ma
         error
             .to_string()
             .contains("cursor does not match principal")
+    );
+}
+
+#[tokio::test]
+async fn batches_turn_reads_with_deduplication_principal_isolation_and_canonical_order() {
+    let (_temp_dir, storage) = storage().await;
+    for (source_ref_id, session_key_hash, principal_id, ts) in [
+        ("alpha-z", "alpha-session", PRINCIPAL_ID, 20),
+        ("beta-a", "beta-session", PRINCIPAL_ID, 5),
+        ("alpha-b", "alpha-session", PRINCIPAL_ID, 10),
+        ("alpha-a", "alpha-session", PRINCIPAL_ID, 20),
+        ("other-alpha", "alpha-session", "principal-b", 1),
+        ("zeta-a", "zeta-session", PRINCIPAL_ID, 30),
+    ] {
+        let mut request_event = event(source_ref_id, ts);
+        request_event.principal_id = Some(principal_id.to_owned());
+        storage
+            .append_request_event_with_projections(
+                &request_event,
+                &batched_turn_projection(source_ref_id, session_key_hash, principal_id, ts),
+            )
+            .await
+            .expect("insert cache keepalive turn");
+    }
+
+    let turns = storage
+        .list_cache_keepalive_turns_for_sessions(
+            PRINCIPAL_ID,
+            &[
+                "beta-session".to_owned(),
+                "unknown-session".to_owned(),
+                "alpha-session".to_owned(),
+                "beta-session".to_owned(),
+                "zeta-session".to_owned(),
+            ],
+        )
+        .await
+        .expect("list cache keepalive turns for sessions");
+
+    assert_eq!(
+        turns
+            .iter()
+            .map(|turn| {
+                (
+                    turn.session_key_hash.as_str(),
+                    turn.ts,
+                    turn.source_ref_id.as_str(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            ("alpha-session", 10, "alpha-b"),
+            ("alpha-session", 20, "alpha-a"),
+            ("alpha-session", 20, "alpha-z"),
+            ("beta-session", 5, "beta-a"),
+            ("zeta-session", 30, "zeta-a"),
+        ]
+    );
+    assert_eq!(
+        turns[0],
+        cc_lb_storage_api::CacheKeepaliveTurnRecord {
+            source_ref_id: "alpha-b".to_owned(),
+            session_key_hash: "alpha-session".to_owned(),
+            principal_id: PRINCIPAL_ID.to_owned(),
+            accounting_key_id: Some("accounting-key".to_owned()),
+            upstream_id: UPSTREAM_ID,
+            model: "claude-opus-4-1".to_owned(),
+            input_tokens: 101,
+            output_tokens: 23,
+            cache_creation_input_tokens: 47,
+            cache_creation_input_tokens_5m: 29,
+            cache_creation_input_tokens_1h: 18,
+            cache_read_input_tokens: 89,
+            cost_micros: 12_345,
+            hit_miss: "miss".to_owned(),
+            ts: 10,
+        }
+    );
+    let mut multi_batch_hashes = vec!["zeta-session".to_owned()];
+    multi_batch_hashes.extend((0..901).map(|index| format!("middle-session-{index:04}")));
+    multi_batch_hashes.extend(["alpha-session".to_owned(), "beta-session".to_owned()]);
+    let multi_batch_turns = storage
+        .list_cache_keepalive_turns_for_sessions(PRINCIPAL_ID, &multi_batch_hashes)
+        .await
+        .expect("list cache keepalive turns across SQLite bind batches");
+    assert_eq!(multi_batch_turns, turns);
+    assert!(
+        storage
+            .list_cache_keepalive_turns_for_sessions(PRINCIPAL_ID, &["unknown-session".to_owned()],)
+            .await
+            .expect("unknown session hash returns no turns")
+            .is_empty()
+    );
+    assert!(
+        storage
+            .list_cache_keepalive_turns_for_sessions(PRINCIPAL_ID, &[])
+            .await
+            .expect("empty session hash list returns no turns")
+            .is_empty()
     );
 }
