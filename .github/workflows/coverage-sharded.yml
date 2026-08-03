@@ -81,7 +81,7 @@ jobs:
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: llvm-tools-preview
       - name: Install wasm targets for pinned toolchain
@@ -91,7 +91,7 @@ jobs:
           rust-cache-key: coverage
           cache-targets: false
           stable-build-metadata: "true"
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.5
         with:
           tool: cargo-llvm-cov,cargo-nextest
       - name: Clean coverage artifacts
@@ -154,7 +154,7 @@ jobs:
       LLVM_PROFILE_FILE_NAME: shard-${{ matrix.shard }}-%p-%m.profraw
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: llvm-tools-preview
       - uses: ./.github/actions/setup-rust-cache
@@ -162,7 +162,7 @@ jobs:
           rust-cache-key: coverage
           cache-targets: false
           stable-build-metadata: "true"
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.5
         with:
           tool: cargo-llvm-cov,cargo-nextest,sqlx-cli
       - uses: actions/download-artifact@v8
@@ -192,10 +192,10 @@ jobs:
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.5
         with:
           tool: cargo-llvm-cov
       - uses: actions/download-artifact@v8
