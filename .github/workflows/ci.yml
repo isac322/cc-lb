@@ -1,4 +1,5 @@
 name: ci
+# Benchmark control: unchanged master behavior.
 
 on:
   push:

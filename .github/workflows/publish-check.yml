@@ -1,4 +1,5 @@
 name: publish-check
+# Benchmark control: unchanged master behavior.
 
 # PR-stage validation for the crates.io-published plugin ecosystem.
 #

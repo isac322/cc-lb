@@ -1,4 +1,5 @@
 name: docker-build
+# Benchmark control: unchanged master behavior.
 
 # Build the production image whenever Docker build inputs change, so source
 # linker configuration and Dockerfile/.dockerignore edits cannot silently break
