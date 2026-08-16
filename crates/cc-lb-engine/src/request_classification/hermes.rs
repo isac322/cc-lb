@@ -78,7 +78,10 @@ mod tests {
         ];
 
         for (value, expected) in cases {
-            assert_eq!(classify(&value, Some("hermes-root-session")), Some(expected));
+            assert_eq!(
+                classify(&value, Some("hermes-root-session")),
+                Some(expected)
+            );
         }
     }
 
@@ -99,6 +102,9 @@ mod tests {
             "messages": [{"role": "user", "content": "document"}]
         });
 
-        assert_eq!(classify(&value, Some("hermes-root-session")), Some("unknown"));
+        assert_eq!(
+            classify(&value, Some("hermes-root-session")),
+            Some("unknown")
+        );
     }
 }

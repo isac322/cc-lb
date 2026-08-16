@@ -6456,8 +6456,10 @@ mod tests {
         ];
 
         for (case, fixture, request_kind) in cases {
-            let metadata =
-                request_cache_metadata(&HeaderMap::new(), &Bytes::copy_from_slice(fixture.as_bytes()));
+            let metadata = request_cache_metadata(
+                &HeaderMap::new(),
+                &Bytes::copy_from_slice(fixture.as_bytes()),
+            );
 
             assert_eq!(
                 metadata.observed_session_id.as_deref(),

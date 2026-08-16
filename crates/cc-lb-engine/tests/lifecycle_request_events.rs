@@ -1,5 +1,3 @@
-mod storage_support;
-
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -8,7 +6,8 @@ use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_control::{BusReceiver, RequestEventBus};
 use cc_lb_engine::{BreakerRegistry, DispatchError, LifecycleConfig, UpstreamDispatch};
-use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::SignedRequest;
 use http::{Response, StatusCode};
 use http_body_util::BodyExt;
@@ -16,7 +15,6 @@ use http_body_util::BodyExt;
 use crate::common::{
     TestAuthn, TestLifecycleBus, TestRouter, TestState, lifecycle_with_parts, messages_request,
 };
-use storage_support::TestStorage;
 
 #[test]
 fn lifecycle_request_events_current_registry_smoke() {
@@ -29,9 +27,9 @@ async fn hermes_root_identity_crosses_proxy_and_persists_without_body_rewrite()
     let original_body = Bytes::from_static(
         br#"{"model":"claude-test","session_id":"hermes-root-session","tags":["product=hermes-agent","client=hermes-client-v0.19.0","conversation=hermes-root-session"],"system":[{"type":"text","text":"You are a focused subagent working on a specific delegated task.\n\nYOUR TASK:\nReview the auth change"}],"messages":[{"role":"user","content":"Review the auth change"}],"tools":[{"name":"terminal"}]}"#,
     );
-    let storage = TestStorage::new();
-    let test_bus =
-        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
         panic!("expected in-memory request-event receiver");
     };
@@ -111,4 +109,18 @@ impl UpstreamDispatch for CapturingDispatch {
         *response.status_mut() = StatusCode::OK;
         Ok(response)
     }
+}
+
+async fn sqlite_storage(
+    dir: &tempfile::TempDir,
+) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
+    let database_url = format!(
+        "sqlite://{}",
+        dir.path().join("hermes-request-events.sqlite").display()
+    );
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+            .await?;
+    storage.initialize(BackendKind::Sqlite).await?;
+    Ok(storage)
 }
