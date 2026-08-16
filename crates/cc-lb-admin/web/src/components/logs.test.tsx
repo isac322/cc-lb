@@ -367,42 +367,6 @@ describe('LogsPage', () => {
     expect(scroller.scrollTop).toBe(0);
   }, 30_000);
 
-  it('adds arriving live rows to the first page', () => {
-    const queryClient = new QueryClient();
-    vi.spyOn(Route, 'useSearch').mockReturnValue({});
-
-    const LogsPage = Route.options.component;
-    if (LogsPage === undefined) {
-      throw new Error('Expected logs route component');
-    }
-    const { rerender } = render(
-      <QueryClientProvider client={queryClient}>
-        <LogsPage />
-      </QueryClientProvider>,
-    );
-
-    expect(screen.queryByLabelText('View request live-new')).toBeNull();
-
-    liveState.eventsMap.set('live-new', {
-      phase: 'final',
-      event: {
-        ...mockEvents[0],
-        request_id: 'live-new',
-        ts: 2,
-        ts_ms: 2_000,
-      },
-    });
-    liveState.version = 1;
-    rerender(
-      <QueryClientProvider client={queryClient}>
-        <LogsPage />
-      </QueryClientProvider>,
-    );
-
-    expect(screen.getByLabelText('View request live-new')).toBeDefined();
-    expect(screen.queryByLabelText('View request req-49')).toBeNull();
-  });
-
   it('keeps historical pages stable while live rows continue arriving', async () => {
     const queryClient = new QueryClient();
     vi.spyOn(Route, 'useSearch').mockReturnValue({});
@@ -442,9 +406,22 @@ describe('LogsPage', () => {
     expect(screen.queryByLabelText('View request live-new')).toBeNull();
   });
 
-  it('moves the displaced historical tail onto the next page', async () => {
+  it('moves an arriving live row onto the first page and the displaced historical tail onto the next page', async () => {
     const queryClient = new QueryClient();
     vi.spyOn(Route, 'useSearch').mockReturnValue({});
+
+    const LogsPage = Route.options.component;
+    if (LogsPage === undefined) {
+      throw new Error('Expected logs route component');
+    }
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <LogsPage />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.queryByLabelText('View request live-new')).toBeNull();
+
     liveState.eventsMap.set('live-new', {
       phase: 'final',
       event: {
@@ -455,16 +432,14 @@ describe('LogsPage', () => {
       },
     });
     liveState.version = 1;
-
-    const LogsPage = Route.options.component;
-    if (LogsPage === undefined) {
-      throw new Error('Expected logs route component');
-    }
-    render(
+    rerender(
       <QueryClientProvider client={queryClient}>
         <LogsPage />
       </QueryClientProvider>,
     );
+
+    expect(screen.getByLabelText('View request live-new')).toBeDefined();
+    expect(screen.queryByLabelText('View request req-49')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /Next page/i }));
 
