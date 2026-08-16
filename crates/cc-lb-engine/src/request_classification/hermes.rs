@@ -4,6 +4,8 @@ const HERMES_MAIN_SYSTEM_PREFIX: &str =
     "You are Hermes Agent, an intelligent AI assistant created by Nous Research.";
 const HERMES_SUBAGENT_SYSTEM_PREFIX: &str =
     "You are a focused subagent working on a specific delegated task.";
+const HERMES_SUBAGENT_SYSTEM_MARKER: &str =
+    "\nPlatform: subagent\n\nYou are a focused subagent working on a specific delegated task.";
 const HERMES_SESSION_TITLE_SYSTEM_PREFIX: &str =
     "You name chat sessions. Given the user's opening message, write a title";
 const HERMES_COMPACTION_USER_PREFIX: &str =
@@ -12,10 +14,16 @@ const HERMES_COMPACTION_USER_PREFIX: &str =
 pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequestKind> {
     view.session_id()?;
 
-    if view.system_starts_with(HERMES_SUBAGENT_SYSTEM_PREFIX) {
+    if view.system_starts_with(HERMES_SUBAGENT_SYSTEM_PREFIX)
+        || view.leading_system_starts_with(HERMES_SUBAGENT_SYSTEM_PREFIX)
+        || view.system_contains(HERMES_SUBAGENT_SYSTEM_MARKER)
+        || view.leading_system_contains(HERMES_SUBAGENT_SYSTEM_MARKER)
+    {
         return Some(ClientRequestKind::Subagent);
     }
-    if view.system_starts_with(HERMES_SESSION_TITLE_SYSTEM_PREFIX) {
+    if view.system_starts_with(HERMES_SESSION_TITLE_SYSTEM_PREFIX)
+        || view.leading_system_starts_with(HERMES_SESSION_TITLE_SYSTEM_PREFIX)
+    {
         return Some(ClientRequestKind::SessionTitle);
     }
     if view.first_user_starts_with(HERMES_COMPACTION_USER_PREFIX) {
@@ -26,8 +34,10 @@ pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequest
 }
 
 pub(crate) fn classify_main(view: &RequestView<'_>) -> Option<ClientRequestKind> {
-    (view.session_id().is_some() && view.system_starts_with(HERMES_MAIN_SYSTEM_PREFIX))
-        .then_some(ClientRequestKind::Main)
+    (view.session_id().is_some()
+        && (view.system_starts_with(HERMES_MAIN_SYSTEM_PREFIX)
+            || view.leading_system_starts_with(HERMES_MAIN_SYSTEM_PREFIX)))
+    .then_some(ClientRequestKind::Main)
 }
 
 #[cfg(test)]
@@ -61,8 +71,70 @@ mod tests {
             ),
             (
                 json!({
+                    "system": [
+                        {
+                            "type": "text",
+                            "text": "You are Hermes Agent, an intelligent AI assistant created by Nous Research."
+                        },
+                        {
+                            "type": "text",
+                            "text": "\n\nConversation started: Sunday, August 16, 2026 (UTC)\nModel: anthropic/claude-opus-5\nProvider: nous\nPlatform: subagent\n\nYou are a focused subagent working on a specific delegated task.\n\nYOUR TASK:\nReview the auth change"
+                        }
+                    ],
+                    "messages": [{"role": "user", "content": "Review the auth change"}]
+                }),
+                "subagent",
+            ),
+            (
+                json!({
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are Hermes Agent, an intelligent AI assistant created by Nous Research. You are helpful, knowledgeable, and direct."
+                        },
+                        {
+                            "role": "user",
+                            "content": "hello"
+                        }
+                    ],
+                    "tools": [{"name": "memory"}]
+                }),
+                "main",
+            ),
+            (
+                json!({
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are Hermes Agent, an intelligent AI assistant created by Nous Research.\n\nConversation started: Sunday, August 16, 2026 (UTC)\nModel: anthropic/claude-opus-5\nProvider: nous\nPlatform: subagent\n\nYou are a focused subagent working on a specific delegated task.\n\nYOUR TASK:\nReview the auth change"
+                        },
+                        {
+                            "role": "user",
+                            "content": "Review the auth change"
+                        }
+                    ]
+                }),
+                "subagent",
+            ),
+            (
+                json!({
                     "system": "You name chat sessions. Given the user's opening message, write a title that lets them find this conversation again in a list.",
                     "messages": [{"role": "user", "content": "fix the router"}]
+                }),
+                "session_title",
+            ),
+            (
+                json!({
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You name chat sessions. Given the user's opening message, write a title that lets them find this conversation again in a list."
+                        },
+                        {
+                            "role": "user",
+                            "content": "fix the router"
+                        }
+                    ]
                 }),
                 "session_title",
             ),
@@ -72,6 +144,21 @@ mod tests {
                         "role": "user",
                         "content": "You are a summarization agent creating a context checkpoint.\n\nSummarize the conversation."
                     }]
+                }),
+                "compaction",
+            ),
+            (
+                json!({
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are Hermes Agent, an intelligent AI assistant created by Nous Research."
+                        },
+                        {
+                            "role": "user",
+                            "content": "You are a summarization agent creating a context checkpoint.\n\nSummarize the conversation."
+                        }
+                    ]
                 }),
                 "compaction",
             ),
