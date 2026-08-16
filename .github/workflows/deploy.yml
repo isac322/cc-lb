@@ -1,4 +1,5 @@
 name: deploy
+# Benchmark control: unchanged master behavior.
 
 on:
   pull_request:
