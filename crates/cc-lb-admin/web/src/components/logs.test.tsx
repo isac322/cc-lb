@@ -126,6 +126,29 @@ vi.mock('../lib/useLiveEventStream', () => ({
   }),
 }));
 
+vi.mock('./ui/RequestEventsTable', () => ({
+  RequestEventsTable: ({
+    events,
+  }: {
+    events: readonly RequestEventWithPhase[];
+  }) => (
+    <table>
+      <tbody>
+        {events.map((event) => {
+          const id = event.event_id ?? event.request_id;
+          return (
+            <tr key={id}>
+              <td>
+                <button type="button" aria-label={`View request ${id}`} />
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  ),
+}));
+
 vi.mock('@tanstack/react-router', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@tanstack/react-router')>();
