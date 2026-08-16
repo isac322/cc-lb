@@ -10,47 +10,46 @@
 //! a missing/broken fixture into a hard build failure, which is what
 //! the audit demanded.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 struct Fixture {
     crate_name: &'static str,
-    src_path: &'static str,
+    crate_path: &'static str,
 }
 
 const FIXTURE_CRATES: &[Fixture] = &[
     Fixture {
         crate_name: "wasmtime-shape-passthrough",
-        src_path: "../../plugins/test-fixtures/wasmtime-shape-passthrough/src/lib.rs",
+        crate_path: "../../plugins/test-fixtures/wasmtime-shape-passthrough",
     },
     Fixture {
         crate_name: "wasmtime-observe-noop",
-        src_path: "../../plugins/test-fixtures/wasmtime-observe-noop/src/lib.rs",
+        crate_path: "../../plugins/test-fixtures/wasmtime-observe-noop",
     },
     Fixture {
         crate_name: "wasmtime-filter-service-tier",
-        src_path: "../../plugins/test-fixtures/wasmtime-filter-service-tier/src/lib.rs",
+        crate_path: "../../plugins/test-fixtures/wasmtime-filter-service-tier",
     },
     Fixture {
         crate_name: "cache-aware-wasmtime",
-        src_path: "../../plugins/router/cache-aware-wasmtime/src/lib.rs",
+        crate_path: "../../plugins/router/cache-aware-wasmtime",
     },
 ];
 
 fn main() {
-    for f in FIXTURE_CRATES {
-        println!("cargo:rerun-if-changed={}", f.src_path);
-    }
+    let manifest_dir =
+        PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     println!("cargo:rerun-if-changed=build.rs");
-
-    if std::env::var_os("CC_LB_SKIP_WASM_FIXTURE_BUILD").is_some() {
+    println!("cargo:rerun-if-env-changed=CC_LB_SKIP_WASM_FIXTURE_BUILD");
+    if std::env::var("CC_LB_SKIP_WASM_FIXTURE_BUILD").as_deref() == Ok("1") {
         return;
     }
+    emit_rerun_directives(&manifest_dir);
 
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
-    let workspace_root = std::path::Path::new(&manifest_dir)
+    let workspace_root = manifest_dir
         .parent()
         .and_then(|p| p.parent())
         .expect("workspace root from cc-lb-runtime-wasmtime crate path");
@@ -120,5 +119,71 @@ fn main() {
                 e
             )
         });
+    }
+}
+
+fn emit_rerun_directives(manifest_dir: &Path) {
+    for path in ["../../Cargo.toml", "../../Cargo.lock"] {
+        emit_rerun_tree(manifest_dir, Path::new(path));
+    }
+    for fixture in FIXTURE_CRATES {
+        emit_crate_rerun_directives(manifest_dir, Path::new(fixture.crate_path));
+    }
+    for crate_path in [
+        "../../crates/cc-lb-pdk-wasmtime",
+        "../../crates/cc-lb-pdk-wasmtime-macros",
+        "../../crates/cc-lb-plugin-wire",
+    ] {
+        emit_crate_rerun_directives(manifest_dir, Path::new(crate_path));
+    }
+}
+
+fn emit_crate_rerun_directives(manifest_dir: &Path, crate_path: &Path) {
+    emit_rerun_tree(manifest_dir, &crate_path.join("Cargo.toml"));
+    emit_rerun_tree(manifest_dir, &crate_path.join("src"));
+
+    let build_script = crate_path.join("build.rs");
+    if manifest_dir.join(&build_script).is_file() {
+        emit_rerun_tree(manifest_dir, &build_script);
+    }
+}
+
+fn emit_rerun_tree(manifest_dir: &Path, relative_path: &Path) {
+    let path = manifest_dir.join(relative_path);
+    println!("cargo:rerun-if-changed={}", relative_path.display());
+
+    if path.is_file() {
+        return;
+    }
+    if !path.exists() {
+        return;
+    }
+    if !path.is_dir() {
+        panic!(
+            "wasm fixture build input is not a file or directory: {}",
+            path.display()
+        );
+    }
+
+    let mut entries = std::fs::read_dir(&path)
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to read wasm fixture build input directory {}: {error}",
+                path.display()
+            )
+        })
+        .map(|entry| {
+            entry.unwrap_or_else(|error| {
+                panic!(
+                    "failed to read an entry in wasm fixture build input directory {}: {error}",
+                    path.display()
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        emit_rerun_tree(manifest_dir, &relative_path.join(entry.file_name()));
     }
 }

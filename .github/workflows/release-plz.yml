@@ -55,6 +55,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.97.0
 
+      # Cache only preflight compilation. The release jobs below intentionally
+      # remain uncached and retain real commit metadata for published artifacts.
+      - uses: ./.github/actions/setup-rust-cache
+
       - name: Install cargo-semver-checks
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853
         with:
