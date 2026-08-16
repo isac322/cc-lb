@@ -4751,7 +4751,7 @@ fn request_cache_metadata_from_value(
 ) -> RequestCacheMetadata {
     let metadata = value.map(metadata_identity).unwrap_or_default();
     let (observed_session_id, session_id_source) =
-        match request_session_identity(headers, &metadata) {
+        match request_session_identity(headers, &metadata, value) {
             Some((session_id, source)) => (Some(session_id), Some(source.to_owned())),
             None => (None, None),
         };
@@ -4875,6 +4875,8 @@ fn request_cache_metadata_from_value(
 }
 
 const OMP_LEGACY_SESSION_MARKER: &str = "_session_";
+const HERMES_PRODUCT_TAG: &str = "product=hermes-agent";
+const HERMES_CONVERSATION_TAG_PREFIX: &str = "conversation=";
 const MAX_IDENTITY_VALUE_BYTES: usize = 512;
 
 #[derive(Default)]
@@ -4924,10 +4926,12 @@ fn header_identity(headers: &HeaderMap, name: &str) -> Option<String> {
 fn request_session_identity(
     headers: &HeaderMap,
     metadata: &MetadataIdentity,
+    value: Option<&Value>,
 ) -> Option<(String, &'static str)> {
-    const SESSION_HEADERS: [&str; 4] = [
+    const SESSION_HEADERS: [&str; 5] = [
         "x-claude-code-session-id",
         "x-claude-session-id",
+        "x-hermes-session-id",
         "x-session-affinity",
         "x-session-id",
     ];
@@ -4935,11 +4939,35 @@ fn request_session_identity(
     SESSION_HEADERS
         .into_iter()
         .find_map(|header| header_identity(headers, header).map(|value| (value, header)))
+        .or_else(|| value.and_then(hermes_body_session_identity))
         .or_else(|| {
             metadata
                 .session_id
                 .clone()
                 .map(|session_id| (session_id, "metadata.user_id"))
+        })
+}
+
+fn hermes_body_session_identity(value: &Value) -> Option<(String, &'static str)> {
+    let tags = value.get("tags").and_then(Value::as_array)?;
+    if !tags
+        .iter()
+        .any(|tag| tag.as_str() == Some(HERMES_PRODUCT_TAG))
+    {
+        return None;
+    }
+
+    value
+        .get("session_id")
+        .and_then(Value::as_str)
+        .and_then(bounded_identity)
+        .map(|session_id| (session_id, "session_id"))
+        .or_else(|| {
+            tags.iter().filter_map(Value::as_str).find_map(|tag| {
+                tag.strip_prefix(HERMES_CONVERSATION_TAG_PREFIX)
+                    .and_then(bounded_identity)
+                    .map(|session_id| (session_id, "tags.conversation"))
+            })
         })
 }
 
@@ -6370,6 +6398,150 @@ mod tests {
                 expected_reasoning_effort,
                 "{case} must preserve only valid reasoning effort"
             );
+        }
+    }
+
+    #[test]
+    fn request_cache_metadata_prefers_hermes_session_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-hermes-session-id"),
+            HeaderValue::from_static("hermes-header-session"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-session-affinity"),
+            HeaderValue::from_static("generic-affinity-session"),
+        );
+        let body = Bytes::from_static(
+            br#"{"system":"You are Hermes Agent, an intelligent AI assistant created by Nous Research.","messages":[{"role":"user","content":"hello"}]}"#,
+        );
+
+        let metadata = request_cache_metadata(&headers, &body);
+
+        assert_eq!(
+            metadata.observed_session_id.as_deref(),
+            Some("hermes-header-session")
+        );
+        assert_eq!(metadata.thread_id.as_deref(), Some("hermes-header-session"));
+        assert_eq!(
+            metadata.session_id_source.as_deref(),
+            Some("x-hermes-session-id")
+        );
+        assert_eq!(metadata.request_kind.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn request_cache_metadata_classifies_hermes_hierarchy_from_tagged_body() {
+        let cases = [
+            (
+                "main",
+                r#"{"session_id":"hermes-root-session","tags":["product=hermes-agent","client=hermes-client-v0.19.0","conversation=hermes-root-session"],"system":"You are Hermes Agent, an intelligent AI assistant created by Nous Research.\n\nYou assist users with a wide range of tasks.","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"terminal"}]}"#,
+                "main",
+            ),
+            (
+                "subagent",
+                r#"{"session_id":"hermes-root-session","tags":["product=hermes-agent","client=hermes-client-v0.19.0","conversation=hermes-root-session"],"system":[{"type":"text","text":"You are a focused subagent working on a specific delegated task.\n\nYOUR TASK:\nReview the auth change"}],"messages":[{"role":"user","content":"Review the auth change"}],"tools":[{"name":"terminal"}]}"#,
+                "subagent",
+            ),
+            (
+                "session title",
+                r#"{"session_id":"hermes-root-session","tags":["product=hermes-agent","client=hermes-client-v0.19.0","conversation=hermes-root-session"],"system":"You name chat sessions. Given the user's opening message, write a title that lets them find this conversation again in a list.","messages":[{"role":"user","content":"fix the router"}]}"#,
+                "session_title",
+            ),
+            (
+                "compaction",
+                r#"{"session_id":"hermes-root-session","tags":["product=hermes-agent","client=hermes-client-v0.19.0","conversation=hermes-root-session"],"messages":[{"role":"user","content":"You are a summarization agent creating a context checkpoint.\n\nSummarize the conversation."}]}"#,
+                "compaction",
+            ),
+        ];
+
+        for (case, fixture, request_kind) in cases {
+            let metadata =
+                request_cache_metadata(&HeaderMap::new(), &Bytes::copy_from_slice(fixture.as_bytes()));
+
+            assert_eq!(
+                metadata.observed_session_id.as_deref(),
+                Some("hermes-root-session"),
+                "{case}"
+            );
+            assert_eq!(
+                metadata.thread_id.as_deref(),
+                Some("hermes-root-session"),
+                "{case}"
+            );
+            assert_eq!(
+                metadata.session_id_source.as_deref(),
+                Some("session_id"),
+                "{case}"
+            );
+            assert_eq!(
+                metadata.request_kind.as_deref(),
+                Some(request_kind),
+                "{case}"
+            );
+            assert_eq!(metadata.parent_session_id, None, "{case}");
+            assert_eq!(metadata.client_app, None, "{case}");
+        }
+    }
+
+    #[test]
+    fn request_cache_metadata_uses_hermes_conversation_tag_fallback() {
+        let body = Bytes::from_static(
+            br#"{"tags":["product=hermes-agent","conversation=hermes-root-fallback"],"system":"You are Hermes Agent, an intelligent AI assistant created by Nous Research.","messages":[{"role":"user","content":"hello"}]}"#,
+        );
+
+        let metadata = request_cache_metadata(&HeaderMap::new(), &body);
+
+        assert_eq!(
+            metadata.observed_session_id.as_deref(),
+            Some("hermes-root-fallback")
+        );
+        assert_eq!(
+            metadata.session_id_source.as_deref(),
+            Some("tags.conversation")
+        );
+        assert_eq!(metadata.request_kind.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn request_cache_metadata_rejects_untrusted_hermes_body_session_ids() {
+        let oversized_session_id = "x".repeat(MAX_IDENTITY_VALUE_BYTES + 1);
+        let cases = [
+            serde_json::json!({
+                "session_id": "untagged-session",
+                "system": "You are Hermes Agent, an intelligent AI assistant created by Nous Research.",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            serde_json::json!({
+                "session_id": "wrong-product-session",
+                "tags": ["product=hermes-agent-impersonator"],
+                "system": "You are Hermes Agent, an intelligent AI assistant created by Nous Research.",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            serde_json::json!({
+                "session_id": 123,
+                "tags": ["product=hermes-agent"],
+                "system": "You are Hermes Agent, an intelligent AI assistant created by Nous Research.",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            serde_json::json!({
+                "session_id": oversized_session_id,
+                "tags": ["product=hermes-agent"],
+                "system": "You are Hermes Agent, an intelligent AI assistant created by Nous Research.",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+        ];
+
+        for value in cases {
+            let body = Bytes::from(
+                serde_json::to_vec(&value).expect("serialize invalid Hermes identity fixture"),
+            );
+            let metadata = request_cache_metadata(&HeaderMap::new(), &body);
+
+            assert_eq!(metadata.observed_session_id, None);
+            assert_eq!(metadata.thread_id, None);
+            assert_eq!(metadata.session_id_source, None);
+            assert_eq!(metadata.request_kind, None);
         }
     }
 

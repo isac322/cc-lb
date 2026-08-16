@@ -4,6 +4,7 @@
 //! through [`classify_client_request_kind`].
 
 pub(crate) mod claude_code;
+pub(crate) mod hermes;
 pub(crate) mod omp;
 pub(crate) mod opencode;
 pub(crate) mod senpi;
@@ -170,7 +171,8 @@ fn classify_shared(view: &RequestView<'_>) -> Option<ClientRequestKind> {
 }
 
 type FamilyClassifier = fn(&RequestView<'_>) -> Option<ClientRequestKind>;
-const FAMILY_CLASSIFIERS: [FamilyClassifier; 4] = [
+const FAMILY_CLASSIFIERS: [FamilyClassifier; 5] = [
+    hermes::classify_main,
     senpi::classify_main,
     opencode::classify_main,
     omp::classify,
@@ -190,6 +192,9 @@ pub(crate) fn classify_client_request_kind(
     let value = value?;
     let view = RequestView::new(value, observed_session_id, parent_session_id);
     if let Some(kind) = omp::classify_advisor(&view) {
+        return Some(kind.as_str());
+    }
+    if let Some(kind) = hermes::classify_auxiliary(&view) {
         return Some(kind.as_str());
     }
     if let Some(kind) = senpi::classify_auxiliary(&view) {
