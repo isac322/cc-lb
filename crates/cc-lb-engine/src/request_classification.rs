@@ -4,6 +4,7 @@
 //! through [`classify_client_request_kind`].
 
 pub(crate) mod claude_code;
+pub(crate) mod hermes;
 pub(crate) mod omp;
 pub(crate) mod opencode;
 pub(crate) mod senpi;
@@ -65,6 +66,7 @@ pub(crate) struct BillingAttribution<'a> {
 pub(crate) struct RequestView<'a> {
     value: &'a Value,
     system: Option<&'a Value>,
+    leading_system: Option<&'a Value>,
     first_user: Option<&'a Value>,
     last_user: Option<&'a Value>,
     billing: Option<BillingAttribution<'a>>,
@@ -81,6 +83,7 @@ impl<'a> RequestView<'a> {
         let system = value.get("system");
         Self {
             value,
+            leading_system: leading_system_content(value),
             system,
             first_user: first_user_content(value),
             last_user: last_user_content(value),
@@ -115,6 +118,17 @@ impl<'a> RequestView<'a> {
         self.system
             .is_some_and(|content| text_block_starts_with(content, marker))
     }
+
+    pub(crate) fn leading_system_contains(&self, marker: &str) -> bool {
+        self.leading_system
+            .is_some_and(|content| bounded_text_contains(content, marker))
+    }
+
+    pub(crate) fn leading_system_starts_with(&self, marker: &str) -> bool {
+        self.leading_system
+            .is_some_and(|content| text_block_starts_with(content, marker))
+    }
+
     pub(crate) fn system_ends_with(&self, marker: &str) -> bool {
         self.system
             .is_some_and(|content| text_block_ends_with(content, marker))
@@ -170,7 +184,8 @@ fn classify_shared(view: &RequestView<'_>) -> Option<ClientRequestKind> {
 }
 
 type FamilyClassifier = fn(&RequestView<'_>) -> Option<ClientRequestKind>;
-const FAMILY_CLASSIFIERS: [FamilyClassifier; 4] = [
+const FAMILY_CLASSIFIERS: [FamilyClassifier; 5] = [
+    hermes::classify_main,
     senpi::classify_main,
     opencode::classify_main,
     omp::classify,
@@ -190,6 +205,9 @@ pub(crate) fn classify_client_request_kind(
     let value = value?;
     let view = RequestView::new(value, observed_session_id, parent_session_id);
     if let Some(kind) = omp::classify_advisor(&view) {
+        return Some(kind.as_str());
+    }
+    if let Some(kind) = hermes::classify_auxiliary(&view) {
         return Some(kind.as_str());
     }
     if let Some(kind) = senpi::classify_auxiliary(&view) {
@@ -228,12 +246,24 @@ fn billing_attribution(system: Option<&Value>) -> Option<BillingAttribution<'_>>
     })
 }
 
-fn first_user_content(value: &Value) -> Option<&Value> {
+fn leading_system_content(value: &Value) -> Option<&Value> {
     value
         .get("messages")
         .and_then(Value::as_array)
         .and_then(|messages| messages.first())
-        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("system"))
+        .and_then(|message| message.get("content"))
+}
+
+fn first_user_content(value: &Value) -> Option<&Value> {
+    value
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| {
+            messages
+                .iter()
+                .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        })
         .and_then(|message| message.get("content"))
 }
 
