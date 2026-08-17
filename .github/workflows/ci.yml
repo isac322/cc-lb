@@ -31,7 +31,7 @@ jobs:
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt
       - uses: taiki-e/install-action@v2
@@ -128,7 +128,7 @@ jobs:
         with:
           version: v3.16.4
 
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Inspect release target
         id: release
@@ -275,7 +275,7 @@ jobs:
       CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy
       - uses: ./.github/actions/setup-rust-cache
@@ -295,7 +295,7 @@ jobs:
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
@@ -389,7 +389,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: llvm-tools-preview
       - name: Install wasm targets for pinned toolchain
@@ -473,7 +473,7 @@ jobs:
         with:
           path: target/test-bins
           key: real-client-test-bins-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/real-client/install.sh') }}
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: ./.github/actions/setup-rust-cache
         with:
           stable-build-metadata: "true"
