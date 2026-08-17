@@ -850,7 +850,9 @@ test('create pending locks the modal draft and dismissal controls', () => {
     target: { value: 'engineering' },
   });
   fireEvent.click(within(dialog).getByRole('button', { name: 'Add limit' }));
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
+  const createButton = within(dialog).getByRole('button', { name: 'Create' });
+  fireEvent.click(createButton);
+  fireEvent.click(createButton);
   expect(mutate).toHaveBeenCalledTimes(1);
 
   vi.mocked(queries.useCreatePrincipal).mockReturnValue({

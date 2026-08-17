@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -152,8 +153,12 @@ test('audit loading reserves the resolved count width and keeps the nine-column 
   expect(resolvedCountSlot.textContent).toBe('0');
 });
 
-test('audit refetch exposes progress and blocks duplicate refreshes', () => {
-  const refetch = vi.fn();
+test('manual audit refresh blocks same-tick duplicates and clears progress after settling', async () => {
+  let resolveRefetch!: () => void;
+  const refetchPromise = new Promise<void>((resolve) => {
+    resolveRefetch = resolve;
+  });
+  const refetch = vi.fn(() => refetchPromise);
   vi.mocked(queries.useAudit).mockReturnValue({
     data: { entries: [] },
     isFetching: false,
@@ -162,27 +167,46 @@ test('audit refetch exposes progress and blocks duplicate refreshes', () => {
     refetch,
   } as never);
 
-  const view = renderAudit();
-  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+  renderAudit();
+  const refresh = screen.getByRole('button', { name: 'Refresh' });
+  act(() => {
+    refresh.click();
+    refresh.click();
+  });
+
   expect(refetch).toHaveBeenCalledTimes(1);
-
-  vi.mocked(queries.useAudit).mockReturnValue({
-    data: { entries: [] },
-    isFetching: true,
-    isLoading: false,
-    isPending: false,
-    refetch,
-  } as never);
-  view.rerender(<AuditComponent />);
-
   const refreshing = screen.getByRole('button', { name: 'Refreshing...' });
   expect(refreshing).toBe(screen.getByTestId('audit-refresh'));
   expect(refreshing.hasAttribute('disabled')).toBe(true);
   expect(refreshing.getAttribute('aria-busy')).toBe('true');
   expect(refreshing.querySelector('svg.animate-spin')).not.toBeNull();
 
-  fireEvent.click(refreshing);
-  expect(refetch).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    resolveRefetch();
+    await refetchPromise;
+  });
+
+  const settled = screen.getByRole('button', { name: 'Refresh' });
+  expect(settled.hasAttribute('disabled')).toBe(false);
+  expect(settled.hasAttribute('aria-busy')).toBe(false);
+});
+
+test('background audit fetching leaves manual Refresh idle and enabled', () => {
+  vi.mocked(queries.useAudit).mockReturnValue({
+    data: { entries: [] },
+    isFetching: true,
+    isLoading: false,
+    isPending: false,
+    refetch: vi.fn(),
+  } as never);
+
+  renderAudit();
+
+  const refresh = screen.getByRole('button', { name: 'Refresh' });
+  expect(refresh).toBe(screen.getByTestId('audit-refresh'));
+  expect(refresh.hasAttribute('disabled')).toBe(false);
+  expect(refresh.hasAttribute('aria-busy')).toBe(false);
+  expect(refresh.textContent).toBe('Refresh');
 });
 
 function mockCredentialQueries({

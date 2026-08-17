@@ -78,8 +78,8 @@ import {
   usePluginRegistry,
   usePrincipalKeys,
   usePrincipalNameMap,
-  usePrincipalWritePending,
   usePrincipals,
+  usePrincipalWritePending,
   useRecentEvents,
   useReorderChain,
   useRevokeKey,
@@ -2661,6 +2661,7 @@ function CreatePrincipalModal({
   onOpenChange: (open: boolean) => void;
 }) {
   const create = useCreatePrincipal();
+  const createInFlight = React.useRef(false);
   const [name, setName] = useState('');
   const [kind, setKind] = useState<'machine' | 'human' | 'admin'>('human');
   const [defaultLimits, setDefaultLimits] = useState<PrincipalDefaultLimit[]>(
@@ -2675,9 +2676,26 @@ function CreatePrincipalModal({
   // A close request is only honoured when nothing is in flight; the draft is
   // discarded with the dialog so a cancelled form never resurfaces half-filled.
   const requestClose = () => {
-    if (creating) return;
+    if (createInFlight.current || creating) return;
     onOpenChange(false);
     reset();
+  };
+  const submitCreate = () => {
+    if (createInFlight.current || creating) return;
+    createInFlight.current = true;
+    create.mutate(
+      { name, kind, default_limits: defaultLimits },
+      {
+        onSuccess: () => {
+          toast.success('Principal created');
+          onOpenChange(false);
+          reset();
+        },
+        onSettled: () => {
+          createInFlight.current = false;
+        },
+      },
+    );
   };
   return (
     <Modal
@@ -2700,18 +2718,7 @@ function CreatePrincipalModal({
             variant="primary"
             disabled={!name.trim()}
             loading={creating}
-            onClick={() =>
-              create.mutate(
-                { name, kind, default_limits: defaultLimits },
-                {
-                  onSuccess: () => {
-                    toast.success('Principal created');
-                    onOpenChange(false);
-                    reset();
-                  },
-                },
-              )
-            }
+            onClick={submitCreate}
           >
             {creating ? 'Creating...' : 'Create'}
           </Button>

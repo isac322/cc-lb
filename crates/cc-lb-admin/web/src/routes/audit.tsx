@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { Filter, RefreshCw, X } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import * as z from 'zod';
 import {
   Badge,
@@ -112,6 +112,8 @@ function AuditPage() {
   const principalNameMap = usePrincipalNameMap();
   const upstreamNameMap = useUpstreamNameMap();
   const [selected, setSelected] = useState<AuditEntryLike | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshInFlightRef = useRef(false);
 
   const setFilter = <K extends keyof typeof filters>(key: K, value: string) => {
     navigate({ search: { ...filters, [key]: value || undefined } });
@@ -132,9 +134,18 @@ function AuditPage() {
 
   const activeFilterCount = Object.values(filters).filter(Boolean).length;
 
-  // The manual Refresh button reflects any in-flight fetch of this query, so a
-  // second click cannot queue a duplicate refetch while one is still running.
-  const refreshing = audit.isFetching;
+  const refreshAudit = async () => {
+    if (refreshInFlightRef.current) return;
+
+    refreshInFlightRef.current = true;
+    setRefreshing(true);
+    try {
+      await audit.refetch();
+    } finally {
+      refreshInFlightRef.current = false;
+      setRefreshing(false);
+    }
+  };
 
   return (
     <FullPage>
@@ -168,7 +179,7 @@ function AuditPage() {
               data-testid="audit-refresh"
               iconLeft={<RefreshCw className="w-3 h-3" />}
               loading={refreshing}
-              onClick={() => audit.refetch()}
+              onClick={refreshAudit}
             >
               {refreshing ? 'Refreshing...' : 'Refresh'}
             </Button>
