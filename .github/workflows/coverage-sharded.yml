@@ -85,8 +85,6 @@ jobs:
         run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
       - uses: ./.github/actions/setup-rust-cache
         with:
-          rust-cache-key: coverage
-          cache-targets: false
           stable-build-metadata: "true"
       - uses: taiki-e/install-action@v2
         with:
@@ -106,6 +104,7 @@ jobs:
           name: coverage-nextest-archive
           path: nextest-archive.tar.zst
           if-no-files-found: error
+          compression-level: 0
 
   # ---- 2) Run one slice of the tests per shard, upload its profile data -----
   # `--partition slice:i/N` is nextest's cross-binary, evenly balanced
@@ -156,8 +155,6 @@ jobs:
           components: llvm-tools-preview
       - uses: ./.github/actions/setup-rust-cache
         with:
-          rust-cache-key: coverage
-          cache-targets: false
           stable-build-metadata: "true"
       - uses: taiki-e/install-action@v2
         with:

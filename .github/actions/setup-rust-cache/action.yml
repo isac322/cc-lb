@@ -1,19 +1,7 @@
 name: Setup Rust cache
-description: Enable the node-shared sccache compiler cache and restore the Cargo registry cache.
+description: Enable sccache compiler caching and stable Rust build metadata.
 
 inputs:
-  rust-cache-key:
-    description: Extra key segment for Swatinem/rust-cache.
-    required: false
-    default: ""
-  cache-targets:
-    description: >-
-      Whether Swatinem/rust-cache should restore/save target directories.
-      Default off: the shared sccache (node hostPath) is the cross-job
-      compiler cache, and the per-job target tarballs (~tens of GB) do not
-      fit the single node's disk.
-    required: false
-    default: "false"
   stable-build-metadata:
     description: Whether to stabilize build metadata for better compiler cache reuse.
     required: false
@@ -22,22 +10,28 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Run sccache-cache
+    - name: Check for preinstalled sccache
+      id: sccache-probe
+      shell: bash
+      run: |
+        if sccache_path="$(command -v sccache)" && "$sccache_path" --version; then
+          echo "available=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "available=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Install sccache fallback
       id: sccache-setup
+      if: ${{ steps.sccache-probe.outputs.available != 'true' }}
       uses: mozilla-actions/sccache-action@v0.0.10
+      with:
+        version: "v0.17.0"
       continue-on-error: true
 
-    # No actions/cache round-trip: sccache stores into a shared garage (S3) bucket
-    # (SCCACHE_BUCKET/ENDPOINT + AWS creds set on the runner) so every runner —
-    # across nodes — shares one content-addressed compiler cache. The backend
-    # config comes from the runner env (.deploy/arc-cc-lb-values.yaml).
-    - name: Export Rust compiler cache env
-      if: steps.sccache-setup.outcome == 'success'
+    - name: Export stable Rust build env
       shell: bash
       run: |
         echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
-        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-        echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
         if [ "${{ inputs.stable-build-metadata }}" = "true" ]; then
           echo "GIT_SHA=0000000" >> "$GITHUB_ENV"
           echo "SOURCE_DATE_EPOCH=0" >> "$GITHUB_ENV"
@@ -45,8 +39,19 @@ runs:
           echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
         fi
 
-    - uses: Swatinem/rust-cache@v2
-      with:
-        cache-on-failure: true
-        cache-targets: ${{ inputs.cache-targets }}
-        key: ${{ inputs.rust-cache-key }}
+    # No actions/cache round-trip: sccache stores into a shared garage (S3) bucket
+    # (SCCACHE_BUCKET/ENDPOINT + AWS creds set on the runner) so every runner —
+    # across nodes — shares one content-addressed compiler cache. Cargo registry
+    # and git downloads persist separately in the runner's node-local CARGO_HOME.
+    - name: Export Rust compiler cache env
+      if: ${{ steps.sccache-probe.outputs.available == 'true' || steps.sccache-setup.outcome == 'success' }}
+      shell: bash
+      run: |
+        echo "SCCACHE_PATH=$(command -v sccache)" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
+    - name: Warn when sccache is unavailable
+      if: ${{ steps.sccache-probe.outputs.available != 'true' && steps.sccache-setup.outcome != 'success' }}
+      shell: bash
+      run: echo "::warning::sccache is unavailable; continuing without compiler caching"

@@ -8,8 +8,8 @@
 #     emulation of the toolchain, so `linux/amd64,linux/arm64` builds are fast.
 #   * The builder is Alpine (musl-native), so `cc-lb` links a fully static musl
 #     binary that runs on `scratch`/distroless-static with zero shared libs.
-#   * `cc-lb-admin/build.rs` shells out to Bun to build + embed the dashboard
-#     SPA; build scripts run on BUILDPLATFORM, so a BUILDPLATFORM Bun is enough.
+#   * The dashboard SPA is built once on BUILDPLATFORM, then copied into every
+#     Rust target build for validation and embedding by `cc-lb-admin/build.rs`.
 #   * TLS uses rustls + webpki-roots (CA roots compiled into the binary), so the
 #     final image needs no system CA certificates.
 #
@@ -23,8 +23,35 @@
 # ---- xx cross-compilation helper scripts (shared across all target platforms) ----
 FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0 AS xx
 
-# ---- Bun (musl) for the cc-lb-admin dashboard SPA build; runs on BUILDPLATFORM ----
-FROM --platform=$BUILDPLATFORM oven/bun:1.3.14-alpine AS bun
+# ---- Architecture-independent cc-lb-admin dashboard SPA build ----
+FROM --platform=$BUILDPLATFORM oven/bun:1.3.14-alpine AS admin-spa
+SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
+
+ARG BUILDOS
+ARG BUILDARCH
+ARG SKIP_SPA="0"
+WORKDIR /src/crates/cc-lb-admin/web
+
+# Resolve dependencies separately so source-only changes retain the frozen
+# install layer. Bun's cache contains native packages, so key it by the native
+# build platform even though this stage is shared by every target platform.
+# SKIP_SPA retains its no-Bun behavior while leaving an empty dist handoff for
+# the Rust build script to replace with the established placeholder.
+COPY crates/cc-lb-admin/web/package.json crates/cc-lb-admin/web/bun.lock ./
+RUN --mount=type=cache,id=bun-${BUILDOS}-${BUILDARCH},target=/root/.bun/install/cache \
+    if [ "${SKIP_SPA}" = "1" ]; then \
+      mkdir -p dist; \
+    else \
+      bun install --frozen-lockfile; \
+    fi
+
+COPY crates/cc-lb-admin/web/ ./
+COPY Cargo.toml /src/Cargo.toml
+RUN if [ "${SKIP_SPA}" != "1" ]; then \
+      cc_lb_version="$(sed -n '/^\[workspace.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' /src/Cargo.toml)"; \
+      test -n "${cc_lb_version}"; \
+      VITE_CC_LB_VERSION="${cc_lb_version}" bun run --shell=bun build; \
+    fi
 
 # ---- Builder: cross toolchain, source, and the compile ----
 FROM --platform=$BUILDPLATFORM rust:1.97.0-alpine AS builder
@@ -33,19 +60,14 @@ SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 # clang/lld: xx uses clang as the cross linker driver for every target
 #            architecture.
 # git:       cc-lb-server/build.rs reads `git rev-parse` (falls back gracefully).
-# libstdc++/libgcc: Bun's runtime dependencies on Alpine.
 # make:      tikv-jemalloc-sys builds its vendored jemalloc via autotools (runs
 #            `make` on BUILDPLATFORM); the rust:alpine image does not ship it.
 # sccache: Rust compiler cache; uses the S3/garage backend when creds are passed.
 # hadolint ignore=DL3018
-RUN apk add --no-cache clang lld git libstdc++ libgcc make sccache
+RUN apk add --no-cache clang lld git make sccache
 
 # xx scripts (xx-cargo, xx-apk, xx-verify, ...).
 COPY --from=xx / /
-
-# BUILDPLATFORM Bun + a `bunx` alias (package.json build script calls `bunx`).
-COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
-RUN ln -sf /usr/local/bin/bun /usr/local/bin/bunx
 
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
@@ -69,7 +91,7 @@ ARG SOURCE_DATE_EPOCH=""
 # runtime via `[storage] kind` ("sqlite" or "postgres"). Override to slim, e.g.
 # `--build-arg FEATURES=sqlite`.
 ARG FEATURES="sqlite,postgres"
-# Set to 1 to skip building the dashboard SPA (ships a placeholder page).
+# Set to 1 to embed the existing placeholder page instead of the built dashboard.
 ARG SKIP_SPA="0"
 # sccache S3 backend. Self-hosted CI and release builds require it so cache
 # failures are visible; local builds retain an explicit uncached fallback.
@@ -81,6 +103,10 @@ ARG REQUIRE_SCCACHE="0"
 ARG SCCACHE_S3_KEY_PREFIX=""
 
 COPY . .
+
+# The BUILDPLATFORM SPA is a target-independent input. BuildKit evaluates its
+# stage once, then reuses this dist tree across the multi-platform Rust fan-out.
+COPY --link --from=admin-spa /src/crates/cc-lb-admin/web/dist /src/crates/cc-lb-admin/web/dist
 
 # The repository's x86_64-musl linker is for standalone Cargo builds. When an
 # x86_64 Alpine builder also targets linux/amd64, Cargo applies that target
@@ -99,15 +125,12 @@ RUN config=.cargo/config.toml; \
 
 # Cargo's package-cache lock lives at $CARGO_HOME/.package-cache. Mounting the
 # whole CARGO_HOME lets Cargo serialize only registry/git mutation while the
-# four target builds compile concurrently.
-# Bun does not have that established contract here: give each target its own
-# locked cache so a concurrent SPA install cannot serialize the other targets.
-# The target dir is intentionally NOT cache-mounted: cc-lb-admin/build.rs
-# regenerates its embedded SPA (web/dist) into the freshly COPYed source tree
-# every build, and a persisted target dir makes cargo skip that build script on
-# a warm rebuild -> missing web/dist -> fail.
+# four target builds compile concurrently. This cache contains target-neutral
+# package sources; target-specific compiler output remains in sccache.
+# The target dir is intentionally NOT cache-mounted: the prebuilt SPA is copied
+# into the fresh source tree before each compile, avoiding stale build-script
+# fingerprints that could omit its embedded assets.
 RUN --mount=type=cache,id=cargo-home,sharing=shared,target=/cargo-home \
-    --mount=type=cache,id=bun-${TARGETPLATFORM},sharing=locked,target=/root/.bun/install/cache \
     --mount=type=secret,id=AWS_ACCESS_KEY_ID,required=false \
     --mount=type=secret,id=AWS_SECRET_ACCESS_KEY,required=false <<'EOF'
 # An empty SOURCE_DATE_EPOCH makes ring's cc/clang C build abort; drop it unless
@@ -116,7 +139,12 @@ if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then unset SOURCE_DATE_EPOCH; fi
 # cc-lb-runtime-wasmtime/build.rs would otherwise force a wasm32 fixture build.
 export CC_LB_SKIP_WASM_FIXTURE_BUILD=1
 export GIT_SHA="${GIT_SHA}"
-if [ "${SKIP_SPA}" = "1" ]; then export CC_LB_ADMIN_SKIP_SPA=1; fi
+if [ "${SKIP_SPA}" = "1" ]; then
+  rm -rf /src/crates/cc-lb-admin/web/dist
+  export CC_LB_ADMIN_SKIP_SPA=1
+else
+  export CC_LB_ADMIN_PREBUILT_SPA=1
+fi
 # Install and verify the target in the same snapshot Cargo uses. Resolve rustc
 # to its concrete binary before sccache receives it: the daemon must not
 # re-execute rustup's cwd-sensitive proxy outside /src.

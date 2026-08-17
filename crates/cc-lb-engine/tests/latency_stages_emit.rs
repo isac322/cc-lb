@@ -41,7 +41,6 @@ use uuid::Uuid;
 use common::{TestAuthn, TestState, messages_request};
 
 const DEFAULT_UPSTREAM_ID: &str = "00000000-0000-0000-0000-000000000001";
-
 type HyperTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 #[derive(Clone)]
@@ -52,10 +51,11 @@ struct PoolReturnObserver {
 
 impl PoolReturnObserver {
     async fn wait(&self) {
-        let spawned = self.spawned.load(Ordering::SeqCst);
-        // Exactly one executor task stays alive here: the HTTP/1 connection driver.
-        // No pool idle-interval task exists because this test client configures no timer.
-        let short_tasks = spawned
+        // Hyper-util currently leaves exactly one long-lived HTTP/1 connection
+        // driver task. Revisit this accounting when upgrading hyper-util.
+        let short_tasks = self
+            .spawned
+            .load(Ordering::SeqCst)
             .checked_sub(1)
             .expect("hyper spawned its connection driver");
         if short_tasks == 0 {
@@ -64,14 +64,14 @@ impl PoolReturnObserver {
         let short_tasks =
             u32::try_from(short_tasks).expect("hyper spawned fewer than u32::MAX short tasks");
 
-        let permit = tokio::time::timeout(
+        let completed = tokio::time::timeout(
             Duration::from_secs(3),
             self.completed.acquire_many(short_tasks),
         )
         .await
         .expect("timed out waiting for hyper idle-pool task")
         .expect("pool return observer remains open");
-        permit.forget();
+        completed.forget();
     }
 }
 
@@ -165,9 +165,9 @@ async fn warm_pool_request_skips_connection_stages() {
     let (dispatcher, pool_return) = instrumented_bulkhead_dispatcher(Some(resolver), 8, 8);
     let harness = lifecycle_for(&upstream.host_base_url("mock-upstream.test"), dispatcher).await;
 
-    send_message(&harness.lifecycle).await;
+    send_message_with_model(&harness.lifecycle, "claude-cold").await;
     pool_return.wait().await;
-    send_message(&harness.lifecycle).await;
+    send_message_with_model(&harness.lifecycle, "claude-warm").await;
 
     let events = wait_for_events(&harness.storage, 2).await;
     assert_eq!(
@@ -175,7 +175,12 @@ async fn warm_pool_request_skips_connection_stages() {
         2,
         "expected two request events, got {events:?}"
     );
-    let event = &events[1];
+    // Persistence is asynchronous, so storage insertion order is not a request
+    // completion-order guarantee. Select the request whose pool state we assert.
+    let event = events
+        .iter()
+        .find(|event| event.model.as_deref() == Some("claude-warm"))
+        .expect("warm request event exists");
     assert_eq!(event.connection_reused, Some(true));
     assert_eq!(event.dns_ms, None);
     assert_eq!(event.connect_ms, None);
@@ -316,10 +321,13 @@ fn upstream_record(base_url: Url) -> UpstreamRecord {
 }
 
 async fn send_message(lifecycle: &Lifecycle) {
+    send_message_with_model(lifecycle, "claude-test").await;
+}
+
+async fn send_message_with_model(lifecycle: &Lifecycle, model: &str) {
+    let request = format!(r#"{{"model":"{model}","max_tokens":32,"messages":[]}}"#);
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","max_tokens":32,"messages":[]}"#,
-        )))
+        .handle(messages_request(Bytes::from(request)))
         .await
         .expect("lifecycle handles request");
     assert_eq!(response.status(), StatusCode::OK);

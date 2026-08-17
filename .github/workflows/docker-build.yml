@@ -48,7 +48,7 @@ jobs:
           buildkitd-flags: --allow-insecure-entitlement network.host
 
       # Build every release target on Dockerfile changes so cross-compilation
-      # failures are caught before publication and the release cache stays warm.
+      # failures are caught before publication.
       - name: Build all release targets
         uses: docker/build-push-action@v7
         with:
