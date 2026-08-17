@@ -1,10 +1,20 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from '@testing-library/react';
 import type React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import * as queries from '../lib/queries';
 import { Route as AuditRoute } from './audit';
 import { Route as CredentialsRoute } from './credentials';
+
+const apiMocks = vi.hoisted(() => ({
+  postJson: vi.fn(),
+}));
 
 vi.mock('@tanstack/react-router', async () => {
   const actual = await vi.importActual<Record<string, unknown>>(
@@ -13,6 +23,14 @@ vi.mock('@tanstack/react-router', async () => {
   return {
     ...actual,
     useNavigate: () => vi.fn(),
+  };
+});
+
+vi.mock('../lib/api', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>('../lib/api');
+  return {
+    ...actual,
+    postJson: apiMocks.postJson,
   };
 });
 
@@ -53,18 +71,25 @@ function renderCredentials() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  apiMocks.postJson.mockResolvedValue(undefined);
   vi.mocked(queries.useAudit).mockReturnValue({
     data: undefined,
+    isFetching: true,
     isLoading: true,
+    isPending: true,
     refetch: vi.fn(),
   } as never);
   vi.mocked(queries.usePrincipals).mockReturnValue({
     data: { principals: [] },
+    isFetching: false,
     isLoading: false,
+    isPending: false,
   } as never);
   vi.mocked(queries.useUpstreams).mockReturnValue({
     data: { upstreams: [] },
+    isFetching: false,
     isLoading: false,
+    isPending: false,
   } as never);
   vi.mocked(queries.usePrincipalNameMap).mockReturnValue(new Map());
   vi.mocked(queries.useUpstreamNameMap).mockReturnValue(new Map());
@@ -116,7 +141,9 @@ test('audit loading reserves the resolved count width and keeps the nine-column 
 
   vi.mocked(queries.useAudit).mockReturnValue({
     data: { entries: [] },
+    isFetching: false,
     isLoading: false,
+    isPending: false,
     refetch: vi.fn(),
   } as never);
   rerender(<AuditComponent />);
@@ -125,60 +152,96 @@ test('audit loading reserves the resolved count width and keeps the nine-column 
   expect(resolvedCountSlot.textContent).toBe('0');
 });
 
-describe('credential loading geometry', () => {
-  function mockCredentialQueries({
-    loading,
-    populated = false,
-  }: {
-    loading: boolean;
-    populated?: boolean;
-  }) {
-    vi.mocked(queries.useCredentials).mockReturnValue({
-      data: populated
-        ? {
-            credentials: [
-              {
-                provider: 'anthropic',
-                kind: 'api_key',
-                identity: 'key@example.com',
-                status: 'active',
-                expires_at_unix_secs: null,
-                cred_id: 'key-1',
-              },
-            ],
-            observed: true,
-          }
-        : loading
-          ? undefined
-          : { credentials: [], observed: true },
-      isLoading: loading,
-    } as never);
-    vi.mocked(queries.useOAuthStatus).mockReturnValue({
-      data: populated
-        ? {
-            credentials: [
-              {
-                provider: 'anthropic',
-                kind: 'oauth',
-                identity: 'oauth@example.com',
-                status: 'active',
-                expires_at_unix_secs: 4_102_444_800,
-                refresh_token_present: true,
-                last_updated_unix_secs: 4_102_441_200,
-                principal_id: 'principal-1',
-                scopes: ['messages:write'],
-                cred_id: 'oauth-1',
-              },
-            ],
-            observed: true,
-          }
-        : loading
-          ? undefined
-          : { credentials: [], observed: true },
-      isLoading: loading,
-    } as never);
-  }
+test('audit refetch exposes progress and blocks duplicate refreshes', () => {
+  const refetch = vi.fn();
+  vi.mocked(queries.useAudit).mockReturnValue({
+    data: { entries: [] },
+    isFetching: false,
+    isLoading: false,
+    isPending: false,
+    refetch,
+  } as never);
 
+  const view = renderAudit();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+  expect(refetch).toHaveBeenCalledTimes(1);
+
+  vi.mocked(queries.useAudit).mockReturnValue({
+    data: { entries: [] },
+    isFetching: true,
+    isLoading: false,
+    isPending: false,
+    refetch,
+  } as never);
+  view.rerender(<AuditComponent />);
+
+  const refreshing = screen.getByRole('button', { name: 'Refreshing...' });
+  expect(refreshing).toBe(screen.getByTestId('audit-refresh'));
+  expect(refreshing.hasAttribute('disabled')).toBe(true);
+  expect(refreshing.getAttribute('aria-busy')).toBe('true');
+  expect(refreshing.querySelector('svg.animate-spin')).not.toBeNull();
+
+  fireEvent.click(refreshing);
+  expect(refetch).toHaveBeenCalledTimes(1);
+});
+
+function mockCredentialQueries({
+  loading,
+  populated = false,
+}: {
+  loading: boolean;
+  populated?: boolean;
+}) {
+  vi.mocked(queries.useCredentials).mockReturnValue({
+    data: populated
+      ? {
+          credentials: [
+            {
+              provider: 'anthropic',
+              kind: 'api_key',
+              identity: 'key@example.com',
+              status: 'active',
+              expires_at_unix_secs: null,
+              cred_id: 'key-1',
+            },
+          ],
+          observed: true,
+        }
+      : loading
+        ? undefined
+        : { credentials: [], observed: true },
+    isFetching: loading,
+    isLoading: loading,
+    isPending: loading,
+  } as never);
+  vi.mocked(queries.useOAuthStatus).mockReturnValue({
+    data: populated
+      ? {
+          credentials: [
+            {
+              provider: 'anthropic',
+              kind: 'oauth',
+              identity: 'oauth@example.com',
+              status: 'active',
+              expires_at_unix_secs: 4_102_444_800,
+              refresh_token_present: true,
+              last_updated_unix_secs: 4_102_441_200,
+              principal_id: 'principal-1',
+              scopes: ['messages:write'],
+              cred_id: 'oauth-1',
+            },
+          ],
+          observed: true,
+        }
+      : loading
+        ? undefined
+        : { credentials: [], observed: true },
+    isFetching: loading,
+    isLoading: loading,
+    isPending: loading,
+  } as never);
+}
+describe('credential loading geometry', () => {
   test('credential loading reserves summary, table, and one full-width OAuth card', () => {
     mockCredentialQueries({ loading: true });
 
@@ -264,3 +327,80 @@ describe('credential loading geometry', () => {
     expect(within(oauthCard).getByText('anthropic')).toBeDefined();
   });
 });
+
+test.each([
+  {
+    actionLabel: 'Rotate',
+    confirmLabel: 'Confirm rotate',
+    dialogTitle: 'Rotate credential?',
+    pendingLabel: 'Rotating...',
+    progress: 'Rotating anthropic credential — waiting for the server.',
+  },
+  {
+    actionLabel: 'Revoke',
+    confirmLabel: 'Confirm revoke',
+    dialogTitle: 'Revoke credential?',
+    pendingLabel: 'Revoking...',
+    progress: 'Revoking anthropic credential — waiting for the server.',
+  },
+])(
+  'credential $actionLabel keeps its modal target locked while pending',
+  async ({
+    actionLabel,
+    confirmLabel,
+    dialogTitle,
+    pendingLabel,
+    progress,
+  }) => {
+    mockCredentialQueries({ loading: false, populated: true });
+    const { promise } = Promise.withResolvers<unknown>();
+    apiMocks.postJson.mockReturnValue(promise);
+    renderCredentials();
+
+    fireEvent.click(
+      within(screen.getByTestId('api-keys-slot')).getByRole('button', {
+        name: actionLabel,
+      }),
+    );
+
+    const dialog = screen.getByRole('dialog', { name: dialogTitle });
+    expect(within(dialog).getByText('identity: key@example.com')).toBeDefined();
+    const confirm = within(dialog).getByRole('button', {
+      name: confirmLabel,
+    });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+
+    const pending = await within(dialog).findByRole('button', {
+      name: pendingLabel,
+    });
+    expect(apiMocks.postJson).toHaveBeenCalledTimes(1);
+    expect(pending.hasAttribute('disabled')).toBe(true);
+    expect(pending.getAttribute('aria-busy')).toBe('true');
+    expect(pending.querySelector('svg.animate-spin')).not.toBeNull();
+    expect(within(dialog).getByText(progress)).toBeDefined();
+    expect(
+      within(dialog)
+        .getByRole('button', { name: 'Cancel' })
+        .hasAttribute('disabled'),
+    ).toBe(true);
+    expect(
+      within(dialog)
+        .getByRole('button', { name: 'Close dialog' })
+        .hasAttribute('disabled'),
+    ).toBe(true);
+
+    for (const button of [
+      ...screen.getByTestId('api-keys-slot').querySelectorAll('button'),
+      ...screen.getByTestId('oauth-grid').querySelectorAll('button'),
+    ]) {
+      expect(button.hasAttribute('disabled')).toBe(true);
+    }
+
+    fireEvent.click(pending);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
+    expect(apiMocks.postJson).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('dialog', { name: dialogTitle })).toBeDefined();
+  },
+);

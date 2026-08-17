@@ -132,6 +132,10 @@ function AuditPage() {
 
   const activeFilterCount = Object.values(filters).filter(Boolean).length;
 
+  // The manual Refresh button reflects any in-flight fetch of this query, so a
+  // second click cannot queue a duplicate refetch while one is still running.
+  const refreshing = audit.isFetching;
+
   return (
     <FullPage>
       <Section
@@ -161,10 +165,12 @@ function AuditPage() {
           <div className="flex items-center gap-2">
             <Button
               size="sm"
+              data-testid="audit-refresh"
               iconLeft={<RefreshCw className="w-3 h-3" />}
+              loading={refreshing}
               onClick={() => audit.refetch()}
             >
-              Refresh
+              {refreshing ? 'Refreshing...' : 'Refresh'}
             </Button>
           </div>
         }
