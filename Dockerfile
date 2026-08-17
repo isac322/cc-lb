@@ -67,6 +67,7 @@ SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 RUN apk add --no-cache clang lld git make sccache
 
 # xx scripts (xx-cargo, xx-apk, xx-verify, ...).
+# hadolint ignore=DL3067
 COPY --from=xx / /
 
 ARG BUILDPLATFORM
