@@ -76,10 +76,9 @@ jobs:
   # win (fan-out of run time, not N-times-duplicated build time).
   coverage-build:
     runs-on: oracle4-cc-lb
-    env:
-      RUSTUP_HOME: ${{ github.workspace }}/.rustup
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -139,7 +138,6 @@ jobs:
           --health-timeout 3s
           --health-retries 10
     env:
-      RUSTUP_HOME: ${{ github.workspace }}/.rustup
       # Keep this coverage env in sync with ci.yml's nextest-cov job.
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -154,6 +152,7 @@ jobs:
       LLVM_PROFILE_FILE_NAME: shard-${{ matrix.shard }}-%p-%m.profraw
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -189,10 +188,9 @@ jobs:
   coverage-merge:
     needs: coverage-shard
     runs-on: oracle4-cc-lb
-    env:
-      RUSTUP_HOME: ${{ github.workspace }}/.rustup
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
