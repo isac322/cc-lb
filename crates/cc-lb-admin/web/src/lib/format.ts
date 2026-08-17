@@ -1,5 +1,3 @@
-import type { RequestEvent } from './api';
-
 const DASH = '—';
 const EN_US_NUMBER = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 20,
@@ -163,12 +161,22 @@ export function requestOutcomeTone(
   return statusTone(outcome.status);
 }
 
-export function cacheHitRatio(e: RequestEvent): number | null {
-  const read = e.cache_read_input_tokens ?? 0;
-  const input = e.input_tokens ?? 0;
-  const denom = read + input;
+export function cacheHitRatio(components: TokenComponents): number | null {
+  const input = components.input_tokens ?? 0;
+  const created = components.cache_creation_input_tokens ?? 0;
+  const read = components.cache_read_input_tokens ?? 0;
+  const denom = input + created + read;
   if (denom <= 0) return null;
   return read / denom;
+}
+
+export function cacheMissRatio(components: TokenComponents): number | null {
+  const input = components.input_tokens ?? 0;
+  const created = components.cache_creation_input_tokens ?? 0;
+  const read = components.cache_read_input_tokens ?? 0;
+  const denom = input + created + read;
+  if (denom <= 0) return null;
+  return (input + created) / denom;
 }
 
 export interface SplitNumber {

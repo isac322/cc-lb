@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  cacheHitRatio,
+  cacheMissRatio,
   fmtChartTooltipTs,
   fmtMsCompact,
   formatBigInteger,
@@ -9,6 +11,36 @@ import {
   formatUsdAmount,
   getRequestOutcome,
 } from './format';
+
+describe('cache ratios', () => {
+  it('returns null for a zero denominator', () => {
+    const components = {};
+    expect(cacheHitRatio(components)).toBeNull();
+    expect(cacheMissRatio(components)).toBeNull();
+  });
+
+  it('reports a pure cache hit', () => {
+    const components = { cache_read_input_tokens: 500 };
+    expect(cacheHitRatio(components)).toBe(1);
+    expect(cacheMissRatio(components)).toBe(0);
+  });
+
+  it('reports a pure cache creation miss', () => {
+    const components = { cache_creation_input_tokens: 500 };
+    expect(cacheHitRatio(components)).toBe(0);
+    expect(cacheMissRatio(components)).toBe(1);
+  });
+
+  it('includes input, creation, and read tokens in the denominator', () => {
+    const components = {
+      input_tokens: 200,
+      cache_creation_input_tokens: 300,
+      cache_read_input_tokens: 500,
+    };
+    expect(cacheHitRatio(components)).toBe(0.5);
+    expect(cacheMissRatio(components)).toBe(0.5);
+  });
+});
 
 describe('getRequestOutcome', () => {
   it('returns partial for isPartial=true', () => {
