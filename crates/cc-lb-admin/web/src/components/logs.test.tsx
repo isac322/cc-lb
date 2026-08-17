@@ -367,6 +367,7 @@ describe('LogsPage', () => {
       expect(screen.getByText('Showing 101–120 of 120')).toBeDefined(),
     );
     expect(getRowCount()).toBe(20);
+    scroller.scrollTop = 100;
 
     const prevBtn = screen.getByRole('button', { name: /Previous page/i });
     fireEvent.click(prevBtn);
@@ -374,6 +375,15 @@ describe('LogsPage', () => {
       expect(screen.getByText('Showing 51–100 of 120')).toBeDefined(),
     );
     expect(getRowCount()).toBe(50);
+    expect(scroller.scrollTop).toBe(0);
+
+    scroller.scrollTop = 100;
+    fireEvent.click(nextBtn);
+    await waitFor(() =>
+      expect(screen.getByText('Showing 101–120 of 120')).toBeDefined(),
+    );
+    expect(getRowCount()).toBe(20);
+    expect(scroller.scrollTop).toBe(0);
 
     scroller.scrollTop = 100;
     currentSearch = { session: 'session-a' };
