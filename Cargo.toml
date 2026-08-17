@@ -53,7 +53,7 @@ wasmtime  = "47"
 rkyv      = { version = "0.8", default-features = false }
 bytecheck = { version = "0.8", default-features = false }
 blake3    = { version = "1", default-features = false }
-wasmparser = "0.254"
+wasmparser = "0.256"
 
 anyhow = "1"
 arc-swap = "1"
