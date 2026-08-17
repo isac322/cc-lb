@@ -5,6 +5,7 @@ const OPENCODE_SESSION_TITLE_SYSTEM_PREFIX: &str =
     "You are a title generator. You output ONLY a thread title. Nothing else.";
 const OPENCODE_COMPACTION_SYSTEM_PREFIX: &str =
     "You are an anchored context summarization assistant for coding sessions.";
+const OPENCODE_COMPACTION_USER_PREFIX: &str = "Here is the conversation so far:\n\n<conversation>";
 
 pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequestKind> {
     view.session_id()?;
@@ -15,7 +16,9 @@ pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequest
     if view.system_starts_with(OPENCODE_SESSION_TITLE_SYSTEM_PREFIX) {
         return Some(ClientRequestKind::SessionTitle);
     }
-    if view.system_starts_with(OPENCODE_COMPACTION_SYSTEM_PREFIX) {
+    if view.system_starts_with(OPENCODE_COMPACTION_SYSTEM_PREFIX)
+        || (!view.has_tools() && view.first_user_starts_with(OPENCODE_COMPACTION_USER_PREFIX))
+    {
         return Some(ClientRequestKind::Compaction);
     }
 
@@ -78,6 +81,20 @@ mod tests {
                 None,
                 "compaction",
             ),
+            (
+                json!({
+                    "messages": [{
+                        "role": "user",
+                        "content": [{
+                            "type": "text",
+                            "text": "Here is the conversation so far:\n\n<conversation>\n[User]: fix the router\n</conversation>\n\nCreate a new anchored summary from the conversation history."
+                        }]
+                    }],
+                    "tools": []
+                }),
+                None,
+                "compaction",
+            ),
         ];
 
         for (value, parent_session_id, expected) in cases {
@@ -96,6 +113,20 @@ mod tests {
         });
 
         assert_eq!(classify(&value, None, None), None);
+    }
+
+    #[test]
+    fn main_request_quoting_current_compaction_prefix_stays_main() {
+        let value = json!({
+            "system": [{"type": "text", "text": "You are OpenCode, the best coding agent on the planet.\n\nYou are an interactive CLI tool."}],
+            "messages": [{
+                "role": "user",
+                "content": "Here is the conversation so far:\n\n<conversation>\nquoted text"
+            }],
+            "tools": [{"name": "task"}]
+        });
+
+        assert_eq!(classify(&value, Some("ses_main"), None), Some("main"));
     }
 
     #[test]
