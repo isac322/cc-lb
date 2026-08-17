@@ -1,6 +1,11 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { ComponentType } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type {
+  DashboardSummaryResponse,
+  DashboardUsageResponse,
+  UsageBucket,
+} from '../lib/api';
 import * as queries from '../lib/queries';
 import * as liveEvents from '../lib/useLiveEventStream';
 import { PoolQuotaLegend, Route, TopPrincipalsCard, ValueTile } from './index';
@@ -24,6 +29,142 @@ vi.mock('../lib/useLiveEventStream', () => ({
 }));
 
 const OverviewPage = Route.options.component as ComponentType;
+
+const KPI_TIMESTAMPS = [
+  Date.UTC(2026, 7, 17, 13, 30) / 1000,
+  Date.UTC(2026, 7, 17, 14, 30) / 1000,
+  Date.UTC(2026, 7, 17, 15, 30) / 1000,
+] as const;
+
+function kpiTooltipTimestamp(timestamp: number): string {
+  const date = new Date(timestamp * 1000);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function tooltipRows(testId: string): string[] {
+  return Array.from(
+    screen.getByTestId(testId).querySelectorAll('span'),
+    (row) => row.textContent ?? '',
+  );
+}
+
+function usageBucket(
+  bucketStart: number,
+  overrides: Partial<UsageBucket>,
+): UsageBucket {
+  return {
+    bucket_start_unix_secs: bucketStart,
+    request_count: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    error_count: 0,
+    virtual_cost_micros: 0,
+    latency_ms_sum: 0,
+    latency_count: 0,
+    proxy_setup_ms_sum: 0,
+    proxy_setup_ms_count: 0,
+    shape_ms_sum: 0,
+    shape_ms_count: 0,
+    sign_ms_sum: 0,
+    sign_ms_count: 0,
+    upstream_ttfb_ms_sum: 0,
+    upstream_ttfb_ms_count: 0,
+    upstream_body_ms_sum: 0,
+    upstream_body_ms_count: 0,
+    ...overrides,
+  };
+}
+
+const SUMMARY_BUCKETS = [
+  usageBucket(KPI_TIMESTAMPS[0], {
+    request_count: 120,
+    input_tokens: 100,
+    output_tokens: 50,
+    cache_creation_input_tokens: 300,
+    cache_read_input_tokens: 600,
+    error_count: 6,
+    virtual_cost_micros: 1_000_000,
+    latency_ms_sum: 12_000,
+    latency_count: 120,
+  }),
+  usageBucket(KPI_TIMESTAMPS[1], {
+    request_count: 180,
+    input_tokens: 300,
+    output_tokens: 100,
+    cache_creation_input_tokens: 100,
+    cache_read_input_tokens: 400,
+    error_count: 18,
+    virtual_cost_micros: 2_500_000,
+    latency_ms_sum: 36_000,
+    latency_count: 180,
+  }),
+  usageBucket(KPI_TIMESTAMPS[2], {
+    request_count: 240,
+    output_tokens: 30,
+    virtual_cost_micros: 4_000_000,
+    latency_ms_sum: 72_000,
+    latency_count: 240,
+  }),
+];
+
+const SUMMARY_FIXTURE: DashboardSummaryResponse = {
+  range: '24h',
+  step: 'minute',
+  window_start_unix_secs: KPI_TIMESTAMPS[0],
+  window_end_unix_secs: KPI_TIMESTAMPS[2] + 60,
+  totals: {
+    request_count: 540,
+    input_tokens: 400,
+    output_tokens: 180,
+    cache_creation_input_tokens: 400,
+    cache_read_input_tokens: 1_000,
+    error_count: 24,
+    error_rate: 24 / 540,
+    virtual_cost_micros: 7_500_000,
+    avg_latency_ms: 200,
+    avg_proxy_setup_ms: 0,
+    avg_shape_ms: 0,
+    avg_sign_ms: 0,
+    avg_upstream_ttfb_ms: 0,
+    avg_upstream_body_ms: 0,
+  },
+  sparkline: { buckets: SUMMARY_BUCKETS },
+  observed: true,
+};
+
+const PRINCIPAL_USAGE_FIXTURE: DashboardUsageResponse = {
+  range: '24h',
+  step: 'hour',
+  group_by: 'principal',
+  window_start_unix_secs: KPI_TIMESTAMPS[0],
+  window_end_unix_secs: KPI_TIMESTAMPS[2] + 60,
+  observed: true,
+  series: [
+    {
+      key: 'principal-alpha',
+      buckets: [
+        usageBucket(KPI_TIMESTAMPS[0], {
+          request_count: 10,
+          input_tokens: 50,
+          output_tokens: 100,
+          cache_creation_input_tokens: 150,
+          cache_read_input_tokens: 800,
+          virtual_cost_micros: 1_000_000,
+        }),
+        usageBucket(KPI_TIMESTAMPS[1], {
+          request_count: 20,
+          input_tokens: 150,
+          output_tokens: 100,
+          cache_creation_input_tokens: 50,
+          cache_read_input_tokens: 1_200,
+          virtual_cost_micros: 2_000_000,
+        }),
+      ],
+    },
+  ],
+};
 
 function mockPendingOverviewQueries() {
   vi.mocked(queries.useSummary).mockReturnValue({
@@ -82,6 +223,62 @@ function mockResolvedEmptyQuotaQueries() {
   } as never);
 }
 
+function mockResolvedKpiQueries({
+  zeroPromptDenominator = false,
+}: {
+  zeroPromptDenominator?: boolean;
+} = {}) {
+  mockPendingOverviewQueries();
+  mockResolvedEmptyQuotaQueries();
+
+  const summaryData = zeroPromptDenominator
+    ? {
+        ...SUMMARY_FIXTURE,
+        totals: {
+          ...SUMMARY_FIXTURE.totals,
+          input_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+        sparkline: {
+          buckets: SUMMARY_BUCKETS.map((bucket) => ({
+            ...bucket,
+            input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          })),
+        },
+      }
+    : SUMMARY_FIXTURE;
+  const principalData = zeroPromptDenominator
+    ? {
+        ...PRINCIPAL_USAGE_FIXTURE,
+        series: PRINCIPAL_USAGE_FIXTURE.series.map((series) => ({
+          ...series,
+          buckets: series.buckets.map((bucket) => ({
+            ...bucket,
+            input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          })),
+        })),
+      }
+    : PRINCIPAL_USAGE_FIXTURE;
+
+  vi.mocked(queries.useSummary).mockReturnValue({
+    data: summaryData,
+    isPending: false,
+  } as never);
+  vi.mocked(queries.useUsage).mockReturnValue({
+    data: principalData,
+    isPending: false,
+    isPlaceholderData: false,
+  } as never);
+  vi.mocked(queries.usePrincipalNameMap).mockReturnValue(
+    new Map([['principal-alpha', 'Principal Alpha']]),
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -114,6 +311,8 @@ describe('Overview loading geometry', () => {
   it('keeps ValueTile value, sub, and sparkline slots fixed', () => {
     const { container, rerender } = render(
       <ValueTile
+        chartId="request-rate"
+        chartLabel="Req/s"
         icon={<span />}
         label="requests"
         loading
@@ -151,6 +350,8 @@ describe('Overview loading geometry', () => {
 
     rerender(
       <ValueTile
+        chartId="request-rate"
+        chartLabel="Req/s"
         icon={<span />}
         label="requests"
         loading={false}
@@ -176,6 +377,46 @@ describe('Overview loading geometry', () => {
     ).toBeNull();
     expect(screen.getByText('12')).toBeDefined();
     expect(screen.getByText('12 / 24h')).toBeDefined();
+  });
+
+  it('renders an isolated secondary value as a visible point', () => {
+    render(
+      <ValueTile
+        chartId="isolated-secondary"
+        chartLabel="Primary"
+        icon={<span />}
+        label="isolated secondary"
+        secondary={{
+          color: '#8b5cf6',
+          format: String,
+          label: 'Secondary',
+          testId: 'overview-kpi-secondary-isolated',
+        }}
+        spark={[
+          {
+            secondaryValue: null,
+            timestamp: KPI_TIMESTAMPS[0],
+            value: 1,
+          },
+          {
+            secondaryValue: 50,
+            timestamp: KPI_TIMESTAMPS[1],
+            value: 2,
+          },
+          {
+            secondaryValue: null,
+            timestamp: KPI_TIMESTAMPS[2],
+            value: 3,
+          },
+        ]}
+        value="2"
+      />,
+    );
+
+    const secondary = screen.getByTestId('overview-kpi-secondary-isolated');
+    const marker = secondary.querySelector('path[data-slot="secondary-point"]');
+    expect(secondary.querySelectorAll('path')).toHaveLength(1);
+    expect(marker?.getAttribute('d')).toBe('M 50.00,50.00 h 0.01');
   });
 
   it('keeps the principal card shell stable across loading, empty, and loaded states', () => {
@@ -222,6 +463,7 @@ describe('Overview loading geometry', () => {
         loading={false}
         principals={[
           {
+            cache_hit_ratio: null,
             cost_usd: 1.25,
             id: 'principal-1',
             max_cost: 1.25,
@@ -409,5 +651,202 @@ describe('Overview loading geometry', () => {
       loadingScrollBox?.className,
     );
     expect(screen.getByText('test-model')).toBeDefined();
+  });
+});
+
+describe('Overview KPI details', () => {
+  it('renders cache averages and synchronizes all KPI tooltips by bucket index', () => {
+    mockResolvedKpiQueries();
+    render(<OverviewPage />);
+
+    expect(screen.getByText('Avg cache miss 44.4%')).toBeDefined();
+    expect(screen.getByTestId('top-principal-row').textContent).toContain(
+      '83.3% cache hit',
+    );
+    const secondary = screen.getByTestId('overview-kpi-secondary-tokens');
+    const secondaryPaths = Array.from(secondary.querySelectorAll('path'));
+    expect(secondaryPaths).toHaveLength(1);
+    expect(secondaryPaths[0]?.getAttribute('data-slot')).toBe(
+      'secondary-segment',
+    );
+    expect(secondaryPaths[0]?.getAttribute('d')).toBe(
+      'M 0.00,59.20 L 50.00,50.00',
+    );
+    expect(screen.queryAllByTestId(/^overview-kpi-tooltip-/)).toHaveLength(0);
+
+    const requestChart = screen.getByTestId('overview-kpi-chart-request-rate');
+    vi.spyOn(requestChart, 'getBoundingClientRect').mockReturnValue({
+      bottom: 42,
+      height: 32,
+      left: 10,
+      right: 210,
+      top: 10,
+      width: 200,
+      x: 10,
+      y: 10,
+      toJSON: () => ({}),
+    });
+    fireEvent.mouseMove(requestChart, { clientX: -10, clientY: 26 });
+    expect(tooltipRows('overview-kpi-tooltip-request-rate')).toEqual([
+      kpiTooltipTimestamp(KPI_TIMESTAMPS[0]),
+      'Req/s 2',
+    ]);
+
+    fireEvent.mouseMove(requestChart, { clientX: 230, clientY: 26 });
+    expect(tooltipRows('overview-kpi-tooltip-request-rate')).toEqual([
+      kpiTooltipTimestamp(KPI_TIMESTAMPS[2]),
+      'Req/s 4',
+    ]);
+
+    fireEvent.mouseMove(requestChart, { clientX: 110, clientY: 26 });
+    const tooltipTimestamp = kpiTooltipTimestamp(KPI_TIMESTAMPS[1]);
+    const chartIds = [
+      'request-rate',
+      'tokens',
+      'cost',
+      'latency',
+      'error-rate',
+    ] as const;
+
+    for (const chartId of chartIds) {
+      expect(screen.getByTestId(`overview-kpi-${chartId}`)).toBeDefined();
+      expect(screen.getByTestId(`overview-kpi-chart-${chartId}`)).toBeDefined();
+    }
+    expect(screen.queryAllByTestId(/^overview-kpi-tooltip-/)).toHaveLength(5);
+
+    expect(tooltipRows('overview-kpi-tooltip-request-rate')).toEqual([
+      tooltipTimestamp,
+      'Req/s 3',
+    ]);
+    expect(tooltipRows('overview-kpi-tooltip-tokens')).toEqual([
+      tooltipTimestamp,
+      'Tokens 900',
+      'Cache miss 50.0%',
+    ]);
+    expect(tooltipRows('overview-kpi-tooltip-cost')).toEqual([
+      tooltipTimestamp,
+      'Equiv $ $2.50',
+    ]);
+    expect(tooltipRows('overview-kpi-tooltip-latency')).toEqual([
+      tooltipTimestamp,
+      'Avg latency 200ms',
+    ]);
+    expect(tooltipRows('overview-kpi-tooltip-error-rate')).toEqual([
+      tooltipTimestamp,
+      'Err rate 10.00%',
+    ]);
+
+    fireEvent.mouseLeave(requestChart);
+    expect(screen.queryAllByTestId(/^overview-kpi-tooltip-/)).toHaveLength(0);
+  });
+
+  it('updates cache metrics when resolved query data changes', () => {
+    mockResolvedKpiQueries();
+    const { rerender } = render(<OverviewPage />);
+
+    expect(screen.getByText('Avg cache miss 44.4%')).toBeDefined();
+    expect(screen.getByTestId('top-principal-row').textContent).toContain(
+      '83.3% cache hit',
+    );
+
+    const requestChart = screen.getByTestId('overview-kpi-chart-request-rate');
+    vi.spyOn(requestChart, 'getBoundingClientRect').mockReturnValue({
+      bottom: 42,
+      height: 32,
+      left: 10,
+      right: 210,
+      top: 10,
+      width: 200,
+      x: 10,
+      y: 10,
+      toJSON: () => ({}),
+    });
+    fireEvent.mouseMove(requestChart, { clientX: 110, clientY: 26 });
+    expect(tooltipRows('overview-kpi-tooltip-tokens')).toContain(
+      'Cache miss 50.0%',
+    );
+
+    const updatedSummary: DashboardSummaryResponse = {
+      ...SUMMARY_FIXTURE,
+      totals: {
+        ...SUMMARY_FIXTURE.totals,
+        input_tokens: 300,
+        cache_creation_input_tokens: 300,
+        cache_read_input_tokens: 1_400,
+      },
+      sparkline: {
+        buckets: SUMMARY_BUCKETS.map((bucket, index) => ({
+          ...bucket,
+          input_tokens: 100,
+          cache_creation_input_tokens: 100,
+          cache_read_input_tokens: index === 0 ? 200 : index === 1 ? 800 : 400,
+        })),
+      },
+    };
+    const updatedPrincipalUsage: DashboardUsageResponse = {
+      ...PRINCIPAL_USAGE_FIXTURE,
+      series: PRINCIPAL_USAGE_FIXTURE.series.map((series) => ({
+        ...series,
+        buckets: series.buckets.map((bucket, index) => ({
+          ...bucket,
+          input_tokens: index === 0 ? 50 : 400,
+          cache_creation_input_tokens: index === 0 ? 50 : 100,
+          cache_read_input_tokens: index === 0 ? 400 : 1_000,
+        })),
+      })),
+    };
+    vi.mocked(queries.useSummary).mockReturnValue({
+      data: updatedSummary,
+      isPending: false,
+    } as never);
+    vi.mocked(queries.useUsage).mockReturnValue({
+      data: updatedPrincipalUsage,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    rerender(<OverviewPage />);
+
+    expect(screen.queryByText('Avg cache miss 44.4%')).toBeNull();
+    expect(screen.getByText('Avg cache miss 30.0%')).toBeDefined();
+    expect(screen.getByTestId('top-principal-row').textContent).not.toContain(
+      '83.3% cache hit',
+    );
+    expect(screen.getByTestId('top-principal-row').textContent).toContain(
+      '70.0% cache hit',
+    );
+    expect(tooltipRows('overview-kpi-tooltip-tokens')).toContain(
+      'Cache miss 20.0%',
+    );
+  });
+
+  it('renders dashes when cache ratios have a zero prompt denominator', () => {
+    mockResolvedKpiQueries({ zeroPromptDenominator: true });
+    render(<OverviewPage />);
+
+    expect(screen.getByText('Avg cache miss —')).toBeDefined();
+    expect(screen.getByTestId('top-principal-row').textContent).toContain(
+      '— cache hit',
+    );
+
+    const requestChart = screen.getByTestId('overview-kpi-chart-request-rate');
+    vi.spyOn(requestChart, 'getBoundingClientRect').mockReturnValue({
+      bottom: 42,
+      height: 32,
+      left: 10,
+      right: 210,
+      top: 10,
+      width: 200,
+      x: 10,
+      y: 10,
+      toJSON: () => ({}),
+    });
+    fireEvent.mouseMove(requestChart, { clientX: 110, clientY: 26 });
+
+    expect(tooltipRows('overview-kpi-tooltip-tokens')).toEqual([
+      kpiTooltipTimestamp(KPI_TIMESTAMPS[1]),
+      'Tokens 100',
+      'Cache miss —',
+    ]);
   });
 });

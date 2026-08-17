@@ -39,6 +39,8 @@ import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { type AggregateResponse, eventTime } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import {
+  cacheHitRatio,
+  cacheMissRatio,
   formatCount,
   formatRate,
   formatUsdAmount,
@@ -90,13 +92,80 @@ function fmtChartTooltip(unix: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+/** One bucket of a KPI chart: the shared hover index addresses this array. */
+export type KpiChartPoint = {
+  timestamp: number;
+  value: number;
+  secondaryValue?: number | null;
+};
+
+/** Optional second line drawn on a fixed 0–100 scale over the primary area. */
+type KpiSecondarySeries = {
+  testId: string;
+  label: string;
+  color: string;
+  format: (value: number | null | undefined) => string;
+};
+
+const NO_KPI_POINTS: readonly KpiChartPoint[] = [];
+
+/** One-decimal percent of a 0–100 value. */
+function fmtPercent(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  return `${value.toFixed(1)}%`;
+}
+
+/** One-decimal percent of a 0–1 ratio. */
+function fmtRatioPercent(ratio: number | null | undefined): string {
+  if (ratio == null || !Number.isFinite(ratio)) return '—';
+  return fmtPercent(ratio * 100);
+}
+
+function fmtErrorPercent(value: number): string {
+  return `${value.toFixed(2)}%`;
+}
+
+// The secondary series owns its geometry inside a `0 0 100 100` viewBox scaled
+// with preserveAspectRatio="none", inset so a 0% or 100% bucket keeps its full
+// stroke inside the 28px chart band.
+const KPI_SECONDARY_TOP = 4;
+const KPI_SECONDARY_BOTTOM = 96;
+
+/** Horizontal position (percent) of bucket `index`; matches Sparkline's plot. */
+function kpiPointX(index: number, count: number): number {
+  return count > 1 ? (index / (count - 1)) * 100 : 50;
+}
+
+function kpiSecondaryY(value: number): number {
+  const clamped = value < 0 ? 0 : value > 100 ? 100 : value;
+  return (
+    KPI_SECONDARY_BOTTOM -
+    (clamped / 100) * (KPI_SECONDARY_BOTTOM - KPI_SECONDARY_TOP)
+  );
+}
+
+const TOKENS_COLOR = '#06b6d4';
+
+const TOKENS_CACHE_MISS_SERIES: KpiSecondarySeries = {
+  testId: 'overview-kpi-secondary-tokens',
+  label: 'Cache miss',
+  color: '#8b5cf6',
+  format: fmtPercent,
+};
+
 export function ValueTile({
   icon,
   label,
   value,
   sub,
+  chartId,
   spark,
   sparkColor,
+  chartLabel,
+  formatChartValue = String,
+  secondary,
+  activeIndex = null,
+  onActiveIndexChange,
   loading = false,
   tone = 'neutral',
   size = 'md',
@@ -105,18 +174,94 @@ export function ValueTile({
   label: string;
   value: React.ReactNode;
   sub?: React.ReactNode;
-  spark?: number[];
+  chartId: string;
+  spark?: readonly KpiChartPoint[];
   sparkColor?: string;
+  chartLabel?: string;
+  formatChartValue?: (value: number) => string;
+  secondary?: KpiSecondarySeries;
+  activeIndex?: number | null;
+  onActiveIndexChange?: (index: number | null) => void;
   loading?: boolean;
   tone?: 'neutral' | 'accent' | 'warn' | 'ok';
   size?: 'sm' | 'md';
 }) {
+  const points = spark ?? NO_KPI_POINTS;
+  const color = sparkColor ?? 'var(--color-accent)';
+  const hasChart = !loading && points.length > 0;
+  const activeIdx =
+    hasChart && activeIndex != null
+      ? Math.min(Math.max(activeIndex, 0), points.length - 1)
+      : null;
+  const activePoint = activeIdx == null ? null : points[activeIdx];
+
+  const values = useMemo(() => points.map((point) => point.value), [points]);
+  // Memoized so a hover on any sibling tile does not re-render Recharts.
+  const primarySeries = useMemo(
+    () => <Sparkline color={color} data={values} />,
+    [color, values],
+  );
+  // Buckets that reported a cache-hit ratio, grouped into contiguous runs: an
+  // idle bucket has no ratio, so the line breaks there instead of interpolating
+  // across the gap. A run of one bucket has no segment to draw, so it is painted
+  // as a round dot — a `<circle>` would be squashed into a sub-pixel ellipse by
+  // preserveAspectRatio="none", while a nonzero-length subpath with round caps
+  // and a non-scaling stroke stays circular in device space.
+  const secondaryShapes = useMemo(() => {
+    if (!secondary) return [];
+    const shapes: { key: string; d: string; isPoint: boolean }[] = [];
+    let run: string[] = [];
+    const flush = (afterIndex: number) => {
+      if (run.length === 0) return;
+      const start = afterIndex - run.length;
+      const coords = run.join(' L ');
+      shapes.push(
+        run.length === 1
+          ? { key: `point-${start}`, d: `M ${coords} h 0.01`, isPoint: true }
+          : { key: `segment-${start}`, d: `M ${coords}`, isPoint: false },
+      );
+      run = [];
+    };
+    for (let i = 0; i < points.length; i++) {
+      const secondaryValue = points[i]?.secondaryValue;
+      if (secondaryValue == null || !Number.isFinite(secondaryValue)) {
+        flush(i);
+        continue;
+      }
+      run.push(
+        `${kpiPointX(i, points.length).toFixed(2)},${kpiSecondaryY(secondaryValue).toFixed(2)}`,
+      );
+    }
+    flush(points.length);
+    return shapes;
+  }, [points, secondary]);
+
+  const activeX =
+    activeIdx == null ? null : `${kpiPointX(activeIdx, points.length)}%`;
+  const secondaryMarker =
+    secondary && activeX != null && activePoint?.secondaryValue != null
+      ? {
+          color: secondary.color,
+          left: activeX,
+          top: `${kpiSecondaryY(activePoint.secondaryValue)}%`,
+        }
+      : null;
+
+  const handleMove = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!onActiveIndexChange || points.length === 0) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const ratio = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0;
+    const clamped = ratio < 0 ? 0 : ratio > 1 ? 1 : ratio;
+    onActiveIndexChange(Math.round(clamped * (points.length - 1)));
+  };
+
   return (
     <div
       className={cx(
         'glass rounded-sm flex flex-col gap-2 relative overflow-hidden',
         size === 'sm' ? 'p-2.5 min-h-[88px]' : 'p-3 min-h-[110px]',
       )}
+      data-testid={`overview-kpi-${chartId}`}
     >
       <div className="flex items-center gap-1.5 text-text-faint">
         <span className="w-3.5 h-3.5">{icon}</span>
@@ -155,6 +300,28 @@ export function ValueTile({
           {loading ? <Skeleton className="h-3 w-20" /> : sub}
         </div>
       ) : null}
+      {activePoint ? (
+        <div
+          className="pointer-events-none absolute inset-x-1.5 bottom-8 z-10 flex flex-col gap-0.5 rounded-sm border border-subtle-strong bg-bg-sub px-2 py-1 shadow-lg"
+          data-testid={`overview-kpi-tooltip-${chartId}`}
+        >
+          <span className="text-[10px] leading-none text-text-faint tabular-nums truncate">
+            {fmtChartTooltip(activePoint.timestamp)}
+          </span>
+          <span className="text-[11px] leading-none text-text tabular-nums truncate">
+            {`${chartLabel ?? label} ${formatChartValue(activePoint.value)}`}
+          </span>
+          {secondary ? (
+            // Muted body text rather than the purple series stroke: #8b5cf6 on
+            // bg-bg-sub measures 4.06:1 in light theme — under the 4.5:1 floor
+            // for this 11px row — and only 4.81:1 in dark, while the muted
+            // token holds 7.24:1 / 8.03:1. Purple stays on the chart itself.
+            <span className="text-[11px] leading-none text-text-muted tabular-nums truncate">
+              {`${secondary.label} ${secondary.format(activePoint.secondaryValue)}`}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
       <div
         className={cx(
           'h-8 shrink-0 pt-1 mt-auto',
@@ -164,8 +331,60 @@ export function ValueTile({
       >
         {loading ? (
           <Skeleton className="h-7" />
-        ) : spark && spark.length > 0 ? (
-          <Sparkline data={spark} color={sparkColor ?? 'var(--color-accent)'} />
+        ) : hasChart ? (
+          <div
+            className="relative h-full w-full"
+            data-testid={`overview-kpi-chart-${chartId}`}
+            onMouseLeave={() => onActiveIndexChange?.(null)}
+            onMouseMove={handleMove}
+          >
+            {primarySeries}
+            {secondary && secondaryShapes.length > 0 ? (
+              <svg
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 h-full w-full"
+                preserveAspectRatio="none"
+                viewBox="0 0 100 100"
+              >
+                <g data-testid={secondary.testId}>
+                  {secondaryShapes.map((shape) => (
+                    <path
+                      d={shape.d}
+                      data-slot={
+                        shape.isPoint ? 'secondary-point' : 'secondary-segment'
+                      }
+                      fill="none"
+                      key={shape.key}
+                      stroke={secondary.color}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeOpacity={0.9}
+                      strokeWidth={shape.isPoint ? 3 : 1.2}
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  ))}
+                </g>
+              </svg>
+            ) : null}
+            {activeX != null ? (
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-y-0 w-px -translate-x-1/2 bg-[color:var(--color-border-strong)]"
+                style={{ left: activeX }}
+              />
+            ) : null}
+            {secondaryMarker ? (
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full"
+                style={{
+                  backgroundColor: secondaryMarker.color,
+                  left: secondaryMarker.left,
+                  top: secondaryMarker.top,
+                }}
+              />
+            ) : null}
+          </div>
         ) : null}
       </div>
     </div>
@@ -178,6 +397,7 @@ export type TopPrincipal = {
   cost_usd: number;
   tokens: number;
   requests: number;
+  cache_hit_ratio: number | null;
   primary_model: string;
   share_pct: number;
   max_cost: number;
@@ -246,7 +466,10 @@ export function TopPrincipalsCard({
                   <div className="text-[11px] text-text-faint truncate">
                     {principal.primary_model} ·{' '}
                     {formatCount(principal.requests)} req ·{' '}
-                    {formatCount(principal.tokens)} tok
+                    {formatCount(principal.tokens)} tok ·{' '}
+                    <span>
+                      {`${fmtRatioPercent(principal.cache_hit_ratio)} cache hit`}
+                    </span>
                   </div>
                   <BaseMeter.Root
                     className="mt-1.5"
@@ -963,6 +1186,14 @@ export function PoolQuotaLegend({
 
 function OverviewPage() {
   const [range, setRange] = useState<Range>('24h');
+  // One hover index shared by every KPI chart so all five read the same bucket.
+  const [activeKpiIndex, setActiveKpiIndex] = useState<number | null>(null);
+  // Switching windows re-buckets every series, so an index carried over from
+  // the previous window would address unrelated data: drop it with the range.
+  const selectRange = (next: Range) => {
+    setActiveKpiIndex(null);
+    setRange(next);
+  };
 
   const summary = useSummary(range);
   const principalUsage = useUsage(range, stepFor(range), 'principal');
@@ -1082,25 +1313,51 @@ function OverviewPage() {
   const latency = totals?.avg_latency_ms ?? 0;
   const latencyLabel = 'Avg latency';
 
-  const sparkRate =
-    summary.data?.sparkline.buckets.map(
-      (b) =>
-        b.request_count / Math.max(1, summary.data.step === 'hour' ? 3600 : 60),
-    ) ?? [];
-  const sparkTokens =
-    summary.data?.sparkline.buckets.map((b) => sumTokens(b)) ?? [];
-  const sparkCost =
-    summary.data?.sparkline.buckets.map(
-      (b) => b.virtual_cost_micros / 1_000_000,
-    ) ?? [];
-  const sparkLatency =
-    summary.data?.sparkline.buckets.map(
-      (b) => b.latency_ms_sum / Math.max(1, b.latency_count),
-    ) ?? [];
-  const sparkError =
-    summary.data?.sparkline.buckets.map((b) =>
-      b.request_count > 0 ? (b.error_count / b.request_count) * 100 : 0,
-    ) ?? [];
+  const cacheMissAvg = totals ? cacheMissRatio(totals) : null;
+
+  const kpiPoints = useMemo(() => {
+    const buckets = summary.data?.sparkline.buckets ?? [];
+    const stepSecs = summary.data?.step === 'hour' ? 3600 : 60;
+    const series = {
+      rate: [] as KpiChartPoint[],
+      tokens: [] as KpiChartPoint[],
+      cost: [] as KpiChartPoint[],
+      latency: [] as KpiChartPoint[],
+      error: [] as KpiChartPoint[],
+    };
+    for (const b of buckets) {
+      const timestamp = b.bucket_start_unix_secs;
+      const miss = cacheMissRatio(b);
+      series.rate.push({ timestamp, value: b.request_count / stepSecs });
+      series.tokens.push({
+        timestamp,
+        value: sumTokens(b),
+        secondaryValue: miss == null ? null : miss * 100,
+      });
+      series.cost.push({
+        timestamp,
+        value: b.virtual_cost_micros / 1_000_000,
+      });
+      series.latency.push({
+        timestamp,
+        value: b.latency_ms_sum / Math.max(1, b.latency_count),
+      });
+      series.error.push({
+        timestamp,
+        value:
+          b.request_count > 0 ? (b.error_count / b.request_count) * 100 : 0,
+      });
+    }
+    return series;
+  }, [summary.data]);
+
+  const kpiBucketCount = kpiPoints.rate.length;
+  // An emptied summary drops the buckets the shared hover addressed, so the
+  // index goes with them. Polling refreshes that keep the same bucket count
+  // leave an active hover alone.
+  useEffect(() => {
+    if (kpiBucketCount === 0) setActiveKpiIndex(null);
+  }, [kpiBucketCount]);
 
   // Chart Data
   const chartData = useMemo(
@@ -1133,10 +1390,16 @@ function OverviewPage() {
       let cost = 0;
       let tokens = 0;
       let requests = 0;
+      let inputTokens = 0;
+      let cacheCreationTokens = 0;
+      let cacheReadTokens = 0;
       for (const b of s.buckets) {
         cost += (b.virtual_cost_micros ?? 0) / 1_000_000;
         tokens += sumTokens(b);
         requests += b.request_count ?? 0;
+        inputTokens += b.input_tokens ?? 0;
+        cacheCreationTokens += b.cache_creation_input_tokens ?? 0;
+        cacheReadTokens += b.cache_read_input_tokens ?? 0;
       }
       if (cost <= 0 && requests <= 0) continue;
 
@@ -1149,6 +1412,11 @@ function OverviewPage() {
         cost_usd: cost,
         tokens,
         requests,
+        cache_hit_ratio: cacheHitRatio({
+          input_tokens: inputTokens,
+          cache_creation_input_tokens: cacheCreationTokens,
+          cache_read_input_tokens: cacheReadTokens,
+        }),
         primary_model: '—', // Not available in this grouping
       });
     }
@@ -1178,7 +1446,7 @@ function OverviewPage() {
           className="flex flex-wrap bg-overlay-2 border border-subtle rounded-sm p-0.5"
           onValueChange={(values) => {
             const first = values[0];
-            if (first) setRange(first);
+            if (first) selectRange(first);
           }}
           value={[range]}
         >
@@ -1198,50 +1466,77 @@ function OverviewPage() {
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-2">
         <ValueTile
           size="sm"
+          chartId="request-rate"
           icon={<Activity className="w-3.5 h-3.5" />}
           label="avg req/s"
           loading={summary.isPending}
           value={formatRate(reqPerSec)}
           sub={`${formatCount(totals?.request_count)} / ${range}`}
-          spark={sparkRate}
+          spark={kpiPoints.rate}
           sparkColor="var(--color-accent)"
+          chartLabel="Req/s"
+          formatChartValue={formatRate}
+          activeIndex={activeKpiIndex}
+          onActiveIndexChange={setActiveKpiIndex}
         />
         <ValueTile
           size="sm"
+          chartId="tokens"
           icon={<Database className="w-3.5 h-3.5" />}
           label="tokens"
           loading={summary.isPending}
           value={formatCount(totalTokens)}
-          spark={sparkTokens}
-          sparkColor="#06b6d4"
+          sub={`Avg cache miss ${fmtRatioPercent(cacheMissAvg)}`}
+          spark={kpiPoints.tokens}
+          sparkColor={TOKENS_COLOR}
+          chartLabel="Tokens"
+          formatChartValue={formatCount}
+          secondary={TOKENS_CACHE_MISS_SERIES}
+          activeIndex={activeKpiIndex}
+          onActiveIndexChange={setActiveKpiIndex}
         />
         <ValueTile
           size="sm"
+          chartId="cost"
           icon={<TrendingUp className="w-3.5 h-3.5" />}
           label="equiv $"
           loading={summary.isPending}
           value={formatUsdAmount(virtualUsd)}
-          spark={sparkCost}
+          spark={kpiPoints.cost}
           sparkColor="#10b981"
           tone="accent"
+          chartLabel="Equiv $"
+          formatChartValue={formatUsdAmount}
+          activeIndex={activeKpiIndex}
+          onActiveIndexChange={setActiveKpiIndex}
         />
         <ValueTile
           size="sm"
+          chartId="latency"
           icon={<Timer className="w-3.5 h-3.5" />}
           label={latencyLabel}
           loading={summary.isPending}
           value={fmtMs(latency)}
-          spark={sparkLatency}
+          spark={kpiPoints.latency}
           sparkColor="#f59e0b"
+          chartLabel={latencyLabel}
+          formatChartValue={fmtMs}
+          activeIndex={activeKpiIndex}
+          onActiveIndexChange={setActiveKpiIndex}
         />
         <ValueTile
           size="sm"
+          chartId="error-rate"
           icon={<ShieldCheck className="w-3.5 h-3.5" />}
           label="err rate"
           loading={summary.isPending}
-          value={`${errRate.toFixed(2)}%`}
-          spark={sparkError}
+          value={fmtErrorPercent(errRate)}
+          spark={kpiPoints.error}
           sparkColor="var(--color-danger)"
+          chartLabel="Err rate"
+          formatChartValue={fmtErrorPercent}
+          activeIndex={activeKpiIndex}
+          onActiveIndexChange={setActiveKpiIndex}
         />
       </div>
 
