@@ -740,6 +740,86 @@ describe('Overview KPI details', () => {
     expect(screen.queryAllByTestId(/^overview-kpi-tooltip-/)).toHaveLength(0);
   });
 
+  it('updates cache metrics when resolved query data changes', () => {
+    mockResolvedKpiQueries();
+    const { rerender } = render(<OverviewPage />);
+
+    expect(screen.getByText('Avg cache miss 44.4%')).toBeDefined();
+    expect(screen.getByTestId('top-principal-row').textContent).toContain(
+      '83.3% cache hit',
+    );
+
+    const requestChart = screen.getByTestId('overview-kpi-chart-request-rate');
+    vi.spyOn(requestChart, 'getBoundingClientRect').mockReturnValue({
+      bottom: 42,
+      height: 32,
+      left: 10,
+      right: 210,
+      top: 10,
+      width: 200,
+      x: 10,
+      y: 10,
+      toJSON: () => ({}),
+    });
+    fireEvent.mouseMove(requestChart, { clientX: 110, clientY: 26 });
+    expect(tooltipRows('overview-kpi-tooltip-tokens')).toContain(
+      'Cache miss 50.0%',
+    );
+
+    const updatedSummary: DashboardSummaryResponse = {
+      ...SUMMARY_FIXTURE,
+      totals: {
+        ...SUMMARY_FIXTURE.totals,
+        input_tokens: 300,
+        cache_creation_input_tokens: 300,
+        cache_read_input_tokens: 1_400,
+      },
+      sparkline: {
+        buckets: SUMMARY_BUCKETS.map((bucket, index) => ({
+          ...bucket,
+          input_tokens: 100,
+          cache_creation_input_tokens: 100,
+          cache_read_input_tokens: index === 0 ? 200 : index === 1 ? 800 : 400,
+        })),
+      },
+    };
+    const updatedPrincipalUsage: DashboardUsageResponse = {
+      ...PRINCIPAL_USAGE_FIXTURE,
+      series: PRINCIPAL_USAGE_FIXTURE.series.map((series) => ({
+        ...series,
+        buckets: series.buckets.map((bucket, index) => ({
+          ...bucket,
+          input_tokens: index === 0 ? 50 : 400,
+          cache_creation_input_tokens: index === 0 ? 50 : 100,
+          cache_read_input_tokens: index === 0 ? 400 : 1_000,
+        })),
+      })),
+    };
+    vi.mocked(queries.useSummary).mockReturnValue({
+      data: updatedSummary,
+      isPending: false,
+    } as never);
+    vi.mocked(queries.useUsage).mockReturnValue({
+      data: updatedPrincipalUsage,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    rerender(<OverviewPage />);
+
+    expect(screen.queryByText('Avg cache miss 44.4%')).toBeNull();
+    expect(screen.getByText('Avg cache miss 30.0%')).toBeDefined();
+    expect(screen.getByTestId('top-principal-row').textContent).not.toContain(
+      '83.3% cache hit',
+    );
+    expect(screen.getByTestId('top-principal-row').textContent).toContain(
+      '70.0% cache hit',
+    );
+    expect(tooltipRows('overview-kpi-tooltip-tokens')).toContain(
+      'Cache miss 20.0%',
+    );
+  });
+
   it('renders dashes when cache ratios have a zero prompt denominator', () => {
     mockResolvedKpiQueries({ zeroPromptDenominator: true });
     render(<OverviewPage />);

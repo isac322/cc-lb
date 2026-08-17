@@ -139,6 +139,94 @@ const principalUsage: DashboardUsageResponse = {
   ],
 };
 
+/**
+ * The same 24h window one poll later. Every non-cache field is carried over by
+ * spread, and only the cache composition is rewritten: prompt tokens still add
+ * up to 1,800 across the window and to 800 in the hovered middle bucket, so the
+ * tokens tile keeps its value and its `Tokens 900` row while the ratios move —
+ * `Avg cache miss` 44.4% → 70.0% (1,260/1,800) and the hovered bucket 50.0% →
+ * 80.0% (640/800). The last bucket was idle and reported no ratio at all; now it
+ * reports one too, so the cache-miss line stops breaking mid-chart.
+ */
+const refreshedSummary: DashboardSummaryResponse = {
+  ...summary,
+  totals: {
+    ...summary.totals,
+    input_tokens: 420,
+    cache_creation_input_tokens: 840,
+    cache_read_input_tokens: 540,
+  },
+  sparkline: {
+    buckets: [
+      usageBucket(TIMESTAMPS[0], {
+        request_count: 120,
+        input_tokens: 80,
+        output_tokens: 50,
+        cache_creation_input_tokens: 240,
+        cache_read_input_tokens: 80,
+        error_count: 6,
+        virtual_cost_micros: 1_000_000,
+        latency_ms_sum: 12_000,
+        latency_count: 120,
+      }),
+      usageBucket(TIMESTAMPS[1], {
+        request_count: 180,
+        input_tokens: 240,
+        output_tokens: 100,
+        cache_creation_input_tokens: 400,
+        cache_read_input_tokens: 160,
+        error_count: 18,
+        virtual_cost_micros: 2_500_000,
+        latency_ms_sum: 36_000,
+        latency_count: 180,
+      }),
+      usageBucket(TIMESTAMPS[2], {
+        request_count: 240,
+        input_tokens: 100,
+        output_tokens: 30,
+        cache_creation_input_tokens: 200,
+        cache_read_input_tokens: 300,
+        virtual_cost_micros: 4_000_000,
+        latency_ms_sum: 72_000,
+        latency_count: 240,
+      }),
+    ],
+  },
+};
+
+/**
+ * The same principal one poll later: 30 requests, 2,600 tokens and $3.00 as
+ * before — prompt tokens still total 2,400 — with only the cache split
+ * rewritten, so the row's cache hit moves 83.3% → 40.0% (960/2,400) and nothing
+ * else on that row is allowed to move with it.
+ */
+const refreshedPrincipalUsage: DashboardUsageResponse = {
+  ...principalUsage,
+  series: [
+    {
+      key: 'principal-alpha',
+      buckets: [
+        usageBucket(TIMESTAMPS[0], {
+          request_count: 10,
+          input_tokens: 240,
+          output_tokens: 100,
+          cache_creation_input_tokens: 240,
+          cache_read_input_tokens: 320,
+          virtual_cost_micros: 1_000_000,
+        }),
+        usageBucket(TIMESTAMPS[1], {
+          request_count: 20,
+          input_tokens: 480,
+          output_tokens: 100,
+          cache_creation_input_tokens: 480,
+          cache_read_input_tokens: 640,
+          virtual_cost_micros: 2_000_000,
+        }),
+      ],
+    },
+  ],
+};
+
 function tooltipTimestamp(unix: number): string {
   const date = new Date(unix * 1000);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
@@ -154,17 +242,47 @@ const KPI_CHART_IDS = [
 
 type KpiChartId = (typeof KPI_CHART_IDS)[number];
 
-/** Tooltip rows below the timestamp for the hovered (middle) fixture bucket. */
+/**
+ * Tooltip rows below the timestamp for the hovered (middle) fixture bucket, plus
+ * the cache figures the first payload puts on the tokens tile and the principal
+ * row. Each `REFRESHED_` value is what the second payload replaces it with.
+ */
 const TOKENS_VALUE_ROW = 'Tokens 900';
 const CACHE_MISS_ROW = 'Cache miss 50.0%';
+const REFRESHED_CACHE_MISS_ROW = 'Cache miss 80.0%';
+const CACHE_MISS_AVG = 'Avg cache miss 44.4%';
+const REFRESHED_CACHE_MISS_AVG = 'Avg cache miss 70.0%';
+const PRINCIPAL_CACHE_HIT = '83.3% cache hit';
+const REFRESHED_PRINCIPAL_CACHE_HIT = '40.0% cache hit';
 
-const EXPECTED_TOOLTIP_ROWS: Record<KpiChartId, readonly string[]> = {
-  'request-rate': ['Req/s 3'],
-  tokens: [TOKENS_VALUE_ROW, CACHE_MISS_ROW],
-  cost: ['Equiv $ $2.50'],
-  latency: ['Avg latency 200ms'],
-  'error-rate': ['Err rate 10.00%'],
-};
+/**
+ * Only the tokens tile carries a cache-miss row, and that row is the one value a
+ * refreshed payload moves, so the hovered bucket's rows are built around it.
+ */
+function expectedTooltipRows(
+  cacheMissRow: string,
+): Record<KpiChartId, readonly string[]> {
+  return {
+    'request-rate': ['Req/s 3'],
+    tokens: [TOKENS_VALUE_ROW, cacheMissRow],
+    cost: ['Equiv $ $2.50'],
+    latency: ['Avg latency 200ms'],
+    'error-rate': ['Err rate 10.00%'],
+  };
+}
+
+/** `useSummary` and the principal `useUsage` both poll on this cadence. */
+const POLL_INTERVAL_MS = 5_000;
+
+/**
+ * Narrowly above two poll cycles: a payload swapped just after one tick still
+ * lands in time, while a value that only refreshes on a reload, on a range
+ * switch or on a manual refetch runs out of time here.
+ */
+const POLL_UPDATE_TIMEOUT_MS = 2 * POLL_INTERVAL_MS + 1_000;
+
+/** Marker parked on the document so a reload cannot pass for a live refresh. */
+type ProbedWindow = Window & { cclbPollProbe?: string };
 
 /** Explicit themes written to `cclb.theme`; order drives the dark-vs-light check. */
 const THEMES = ['dark', 'light'] as const satisfies readonly Theme[];
@@ -208,18 +326,24 @@ function contrastRatio(a: Rgba, b: Rgba): number {
 }
 
 /**
- * Route control handed back to a test: the summary payload can be swapped
- * between fetches, and every range the page asked for is recorded so a range
- * switch can be confirmed instead of assumed.
+ * Route control handed back to a test: the summary and the principal-usage
+ * payload can each be swapped between fetches, and every range the page asked
+ * for is recorded in order — so the recorded length doubles as a fetch count —
+ * letting a range switch or a polling refresh be confirmed instead of assumed.
  */
 type OverviewFixtures = {
   summaryRanges: () => readonly string[];
+  principalUsageRanges: () => readonly string[];
   serveSummary: (next: DashboardSummaryResponse) => void;
+  servePrincipalUsage: (next: DashboardUsageResponse) => void;
 };
 
 async function installOverviewFixtures(page: Page): Promise<OverviewFixtures> {
   let servedSummary: DashboardSummaryResponse = summary;
+  let servedPrincipalUsage: DashboardUsageResponse = principalUsage;
   const summaryRanges: string[] = [];
+  // The Overview issues exactly one usage query: the principal grouping.
+  const principalUsageRanges: string[] = [];
 
   await page.addInitScript(() => {
     window.localStorage.setItem('cc-lb-admin-token', 'mock-token');
@@ -258,7 +382,8 @@ async function installOverviewFixtures(page: Page): Promise<OverviewFixtures> {
       return json(200, servedSummary);
     }
     if (pathname === '/admin/usage') {
-      return json(200, principalUsage);
+      principalUsageRanges.push(url.searchParams.get('range') ?? '');
+      return json(200, servedPrincipalUsage);
     }
     if (pathname === '/admin/events/recent') {
       return json(200, { events: [], observed: true, count: 0, limit: 200 });
@@ -294,8 +419,12 @@ async function installOverviewFixtures(page: Page): Promise<OverviewFixtures> {
 
   return {
     summaryRanges: () => [...summaryRanges],
+    principalUsageRanges: () => [...principalUsageRanges],
     serveSummary: (next) => {
       servedSummary = next;
+    },
+    servePrincipalUsage: (next) => {
+      servedPrincipalUsage = next;
     },
   };
 }
@@ -389,11 +518,11 @@ async function expectTokensSecondarySeries(page: Page) {
 }
 
 async function expectOverviewSummary(page: Page) {
-  await expect(page.getByText('Avg cache miss 44.4%')).toBeVisible();
+  await expect(page.getByText(CACHE_MISS_AVG)).toBeVisible();
   await expect(page.getByTestId('top-principal-row')).toContainText(
-    '83.3% cache hit',
+    PRINCIPAL_CACHE_HIT,
   );
-  await expectTokensSecondarySeries(page);
+  return expectTokensSecondarySeries(page);
 }
 
 async function expectNoHorizontalOverflow(page: Page) {
@@ -414,17 +543,21 @@ async function hoverChartCenter(page: Page, chartId: KpiChartId) {
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
 }
 
-async function expectSynchronizedTooltips(page: Page) {
+async function expectSynchronizedTooltips(
+  page: Page,
+  options?: { readonly cacheMissRow?: string; readonly timeout?: number },
+) {
   const expectedTimestamp = tooltipTimestamp(TIMESTAMPS[1]);
+  const rows = expectedTooltipRows(options?.cacheMissRow ?? CACHE_MISS_ROW);
   for (const chartId of KPI_CHART_IDS) {
     const tooltip = page.getByTestId(`overview-kpi-tooltip-${chartId}`);
-    await expect(tooltip).toBeVisible();
+    await expect(tooltip).toBeVisible({ timeout: options?.timeout });
     // Exact and ordered, row by row: a different bucket, a changed formatter,
     // or an extra/missing line fails here instead of passing a substring.
-    await expect(tooltip.locator('span')).toHaveText([
-      expectedTimestamp,
-      ...EXPECTED_TOOLTIP_ROWS[chartId],
-    ]);
+    await expect(tooltip.locator('span')).toHaveText(
+      [expectedTimestamp, ...rows[chartId]],
+      { timeout: options?.timeout },
+    );
   }
 }
 
@@ -580,6 +713,105 @@ test.describe('Overview KPI hover', () => {
     await expectTooltipsDismissed(page);
   });
 
+  test('refreshes the cache metrics on its own polling cycle', async ({
+    page,
+  }) => {
+    // Two real poll cycles of waiting on top of a cold dev-server boot.
+    test.setTimeout(60_000);
+    const fixtures = await installOverviewFixtures(page);
+    await page.setViewportSize(DESKTOP_VIEWPORT);
+    await page.goto('/');
+    await expect(page.getByTestId('overview-kpi-request-rate')).toBeVisible();
+
+    // The cache figures the first payload puts on screen, with the tokens
+    // tooltip left open over the middle bucket.
+    const staleSeries = await expectOverviewSummary(page);
+    await hoverChartCenter(page, 'tokens');
+    await expectSynchronizedTooltips(page);
+    const stalePrincipalRow = await page
+      .getByTestId('top-principal-row')
+      .innerText();
+
+    // Parked on this document: a reload would take it with the stale numbers,
+    // so finding it later proves the fresh numbers landed in place.
+    await page.evaluate(() => {
+      (window as ProbedWindow).cclbPollProbe = 'alive';
+    });
+    const fetchesBefore = {
+      summary: fixtures.summaryRanges().length,
+      principalUsage: fixtures.principalUsageRanges().length,
+    };
+
+    // Both payloads change under a page that is asked to do nothing at all: no
+    // reload, no range switch, no refetch, no focus event, and the pointer stays
+    // where it was. Only the poll can carry this onto the screen.
+    fixtures.serveSummary(refreshedSummary);
+    fixtures.servePrincipalUsage(refreshedPrincipalUsage);
+
+    await expect(page.getByText(REFRESHED_CACHE_MISS_AVG)).toBeVisible({
+      timeout: POLL_UPDATE_TIMEOUT_MS,
+    });
+    await expect(page.getByTestId('top-principal-row')).toContainText(
+      REFRESHED_PRINCIPAL_CACHE_HIT,
+      { timeout: POLL_UPDATE_TIMEOUT_MS },
+    );
+    // The tooltip stayed open across the refresh, so it has to be the same
+    // bucket — same timestamp, same `Tokens 900` — with a new cache-miss row.
+    await expectSynchronizedTooltips(page, {
+      cacheMissRow: REFRESHED_CACHE_MISS_ROW,
+      timeout: POLL_UPDATE_TIMEOUT_MS,
+    });
+
+    // The refreshed last bucket reports a ratio, so the cache-miss line runs the
+    // full chart instead of stopping halfway across it.
+    await expect
+      .poll(
+        async () => {
+          const geometry = await readTokensSecondaryGeometry(page);
+          return geometry.chartWidth > 0
+            ? geometry.width / geometry.chartWidth
+            : 0;
+        },
+        { timeout: POLL_UPDATE_TIMEOUT_MS },
+      )
+      .toBeGreaterThan(0.9);
+    // ...and it is re-plotted, not just extended: 80/80/50 climbs higher up the
+    // band than the 40/50 the first payload drew.
+    const liveSeries = await readTokensSecondaryGeometry(page);
+    expect(liveSeries.height).toBeGreaterThan(staleSeries.height);
+
+    // Only the cache hit moved in the principal row. The refreshed payload keeps
+    // its requests, tokens and cost, so anything else changing here means the
+    // row re-rendered off something other than a like-for-like refresh.
+    expect(await page.getByTestId('top-principal-row').innerText()).toBe(
+      stalePrincipalRow.replace(
+        PRINCIPAL_CACHE_HIT,
+        REFRESHED_PRINCIPAL_CACHE_HIT,
+      ),
+    );
+
+    // Polling is what delivered it: both endpoints were fetched again, every
+    // fetch asked for the range the page opened on, and the document that
+    // rendered the stale figures is the one now showing the fresh ones.
+    expect(fixtures.summaryRanges().length).toBeGreaterThan(
+      fetchesBefore.summary,
+    );
+    expect(fixtures.principalUsageRanges().length).toBeGreaterThan(
+      fetchesBefore.principalUsage,
+    );
+    expect(
+      [
+        ...fixtures.summaryRanges(),
+        ...fixtures.principalUsageRanges(),
+      ].filter((range) => range !== '24h'),
+    ).toEqual([]);
+    expect(
+      await page.evaluate(() => (window as ProbedWindow).cclbPollProbe),
+    ).toBe('alive');
+
+    await expectTooltipsDismissed(page);
+  });
+
   test('keeps the mobile Overview free of horizontal overflow', async ({
     page,
   }) => {
@@ -590,7 +822,7 @@ test.describe('Overview KPI hover', () => {
 
     for (const theme of THEMES) {
       await bootOverviewWithTheme(page, theme);
-      await expect(page.getByText('Avg cache miss 44.4%')).toBeVisible();
+      await expect(page.getByText(CACHE_MISS_AVG)).toBeVisible();
       await expectNoHorizontalOverflow(page);
 
       // The narrow layout still draws the cache-miss line, and an open tooltip
