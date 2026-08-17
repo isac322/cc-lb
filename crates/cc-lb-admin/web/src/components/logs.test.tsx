@@ -126,6 +126,29 @@ vi.mock('../lib/useLiveEventStream', () => ({
   }),
 }));
 
+vi.mock('./ui/RequestEventsTable', () => ({
+  RequestEventsTable: ({
+    events,
+  }: {
+    events: readonly RequestEventWithPhase[];
+  }) => (
+    <table>
+      <tbody>
+        {events.map((event) => {
+          const id = event.event_id ?? event.request_id;
+          return (
+            <tr key={id}>
+              <td>
+                <button type="button" aria-label={`View request ${id}`} />
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  ),
+}));
+
 vi.mock('@tanstack/react-router', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@tanstack/react-router')>();
@@ -406,9 +429,22 @@ describe('LogsPage', () => {
     expect(screen.queryByLabelText('View request live-new')).toBeNull();
   });
 
-  it('moves the displaced historical tail onto the next page', async () => {
+  it('moves an arriving live row onto the first page and the displaced historical tail onto the next page', async () => {
     const queryClient = new QueryClient();
     vi.spyOn(Route, 'useSearch').mockReturnValue({});
+
+    const LogsPage = Route.options.component;
+    if (LogsPage === undefined) {
+      throw new Error('Expected logs route component');
+    }
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <LogsPage />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.queryByLabelText('View request live-new')).toBeNull();
+
     liveState.eventsMap.set('live-new', {
       phase: 'final',
       event: {
@@ -419,16 +455,14 @@ describe('LogsPage', () => {
       },
     });
     liveState.version = 1;
-
-    const LogsPage = Route.options.component;
-    if (LogsPage === undefined) {
-      throw new Error('Expected logs route component');
-    }
-    render(
+    rerender(
       <QueryClientProvider client={queryClient}>
         <LogsPage />
       </QueryClientProvider>,
     );
+
+    expect(screen.getByLabelText('View request live-new')).toBeDefined();
+    expect(screen.queryByLabelText('View request req-49')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /Next page/i }));
 
