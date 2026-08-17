@@ -29,6 +29,8 @@ env:
 jobs:
   fmt:
     runs-on: oracle4-cc-lb
+    env:
+      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-fmt
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -104,6 +106,7 @@ jobs:
       pull-requests: read
     env:
       IMAGE: cc-lb:release-pr-${{ github.run_id }}-${{ github.run_attempt }}
+      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-release-pr-artifacts
     steps:
       - uses: actions/checkout@v7
         with:
@@ -273,6 +276,7 @@ jobs:
       matrix:
         features: [sqlite, postgres]
     env:
+      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-clippy-${{ matrix.features }}
       # Clippy never runs fixture-backed WASM tests, so bypass that build-time
       # prerequisite. The workflow-level env already skips the admin SPA.
       CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
@@ -297,6 +301,8 @@ jobs:
 
   cargo-deny:
     runs-on: oracle4-cc-lb
+    env:
+      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-cargo-deny
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -352,6 +358,7 @@ jobs:
           --health-retries 10
 
     env:
+      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-nextest-cov
       # Raised from 2 to 4 to use the full 4-core node when nextest-cov runs as
       # the long-pole job alone. Risk: if it overlaps clippy/e2e it can saturate
       # the shared node that also hosts the k3s control plane → API starvation
@@ -464,6 +471,7 @@ jobs:
   e2e:
     runs-on: oracle4-cc-lb
     env:
+      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-e2e
       # Real-client E2E builds the server but does not run the fixture-backed
       # Wasmtime integration suite.
       CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"

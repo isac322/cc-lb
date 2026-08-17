@@ -18,6 +18,8 @@ jobs:
   rss-soak:
     if: github.ref == 'refs/heads/master'
     runs-on: oracle4-cc-lb
+    env:
+      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-rss-soak
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7

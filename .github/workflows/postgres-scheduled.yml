@@ -34,6 +34,7 @@ jobs:
           --health-retries 10
 
     env:
+      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-postgres-storage-stress
       CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
 
     steps:
@@ -69,6 +70,7 @@ jobs:
     runs-on: oracle4-cc-lb
 
     env:
+      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-postgres-e2e
       DOCKER_HOST: tcp://localhost:2375
       CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
 
