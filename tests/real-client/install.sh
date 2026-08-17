@@ -146,7 +146,7 @@ from pathlib import Path
 root = Path(sys.argv[1]) / "node_modules" / "@code-yeongyu" / "senpi"
 preset_dir = root / "dist" / "core" / "extensions" / "builtin" / "prompt-preset"
 builder_pattern = re.compile(r"function (build[A-Za-z0-9]+Core)\(")
-allowed_main_prefixes = ("You are senpi,", "You are senpi on ")
+allowed_main_prefixes = ("You are ${APP_NAME},", "You are ${APP_NAME} on ")
 core_builders = []
 for path in sorted(preset_dir.glob("*.js")):
     text = path.read_text()
@@ -172,7 +172,7 @@ if not core_builders:
 
 expected = {
     "dist/core/dynamic-prompt/identity.js": [
-        "You are senpi, a coding agent",
+        "You are ${APP_NAME}, a coding agent",
     ],
     "examples/extensions/subagent/index.ts": [
         "args.push(`Task: ${task}`);",
@@ -213,15 +213,15 @@ print("PASS senpi request-family markers match pinned package")
 PY
 }
 
-install_requested claude-code @anthropic-ai/claude-code 2.1.207 claude CLAUDE_CODE_BIN
-install_requested opencode opencode-ai 1.17.18 opencode OPENCODE_BIN
-# pi-coding-agent's ^0.80.6 companion ranges currently resolve to incompatible
-# 0.80.10 packages. Pin the published 0.80.6 package set explicitly.
-install_requested pi @earendil-works/pi-coding-agent 0.80.6 pi PI_BIN npm \
-  @earendil-works/pi-ai@0.80.6 \
-  @earendil-works/pi-agent-core@0.80.6 \
-  @earendil-works/pi-tui@0.80.6
-install_requested senpi @code-yeongyu/senpi 2026.7.30 senpi SENPI_BIN
+install_requested claude-code @anthropic-ai/claude-code 2.1.233 claude CLAUDE_CODE_BIN
+install_requested opencode opencode-ai 1.18.18 opencode OPENCODE_BIN
+# Pin the published 0.84.2 package set explicitly so the tested pi binary and
+# its companion packages stay in lockstep.
+install_requested pi @earendil-works/pi-coding-agent 0.84.2 pi PI_BIN npm \
+  @earendil-works/pi-ai@0.84.2 \
+  @earendil-works/pi-agent-core@0.84.2 \
+  @earendil-works/pi-tui@0.84.2
+install_requested senpi @code-yeongyu/senpi 2026.8.16 senpi SENPI_BIN
 if [ -z "${REAL_CLIENT_ONLY:-}" ] || [ "$REAL_CLIENT_ONLY" = "senpi" ]; then
   verify_senpi_markers
 fi

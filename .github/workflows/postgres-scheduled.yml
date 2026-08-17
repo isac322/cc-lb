@@ -34,13 +34,16 @@ jobs:
           --health-retries 10
 
     env:
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup
       CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
 
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
 
       - uses: ./.github/actions/setup-rust-cache
         with:
@@ -67,6 +70,7 @@ jobs:
     runs-on: oracle4-cc-lb
 
     env:
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup
       DOCKER_HOST: tcp://localhost:2375
       CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
 
@@ -74,7 +78,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
 
       - uses: ./.github/actions/setup-rust-cache
         with:

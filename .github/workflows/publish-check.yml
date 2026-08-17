@@ -68,6 +68,7 @@ jobs:
           - cc-lb-plugin-wire
           - cc-lb-plugin-conformance
     env:
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup
       # cc-lb-plugin-conformance's semver check transitively pulls
       # cc-lb-runtime-wasmtime, whose build.rs pre-builds wasm32 test
       # fixtures. That pre-build has no bearing on the rustdoc surface
@@ -76,7 +77,9 @@ jobs:
       CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
       - uses: ./.github/actions/setup-rust-cache
         with:
           stable-build-metadata: "true"
@@ -84,7 +87,7 @@ jobs:
       - name: Install cargo-semver-checks
         uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154
         with:
-          tool: cargo-semver-checks@0.48
+          tool: cargo-semver-checks@0.50
 
       - name: cargo semver-checks
         run: cargo semver-checks --package ${{ matrix.crate }}
@@ -92,9 +95,13 @@ jobs:
   dry-run:
     name: dry-run cc-lb-plugin-wire
     runs-on: oracle4-cc-lb
+    env:
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
       - uses: ./.github/actions/setup-rust-cache
         with:
           stable-build-metadata: "true"

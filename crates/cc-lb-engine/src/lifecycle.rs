@@ -6593,7 +6593,7 @@ mod tests {
             (
                 "compaction",
                 None,
-                r#"{"model":"claude-sonnet-4-5","system":[{"type":"text","text":"You are an anchored context summarization assistant for coding sessions.\n\nSummarize only the conversation provided."}],"messages":[{"role":"user","content":"conversation"}]}"#,
+                r#"{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":[{"type":"text","text":"Here is the conversation so far:\n\n<conversation>\n[User]: fix the router\n</conversation>\n\nCreate a new anchored summary from the conversation history in the <conversation> tags above so another coding agent can continue the work."}]}],"tools":[]}"#,
                 "compaction",
             ),
             (
