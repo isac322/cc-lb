@@ -43,9 +43,9 @@ jobs:
       # cc-lb-plugin-conformance's semver check transitively pulls
       # cc-lb-runtime-wasmtime, whose build.rs pre-builds wasm32 test
       # fixtures. That pre-build has no bearing on the rustdoc surface
-      # semver-checks inspects, and it fails because release jobs do not install
-      # the wasm32-unknown-unknown target. Skip via the same escape hatch that
-      # gates the release step below.
+      # semver-checks inspects. Release jobs do not install the
+      # wasm32-unknown-unknown target, so use the workspace-only escape hatch.
+      # Packaged/registry builds auto-detect that the fixture sources are absent.
       CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
@@ -54,6 +54,10 @@ jobs:
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@1.97.0
+
+      # Cache only preflight compilation. The release jobs below intentionally
+      # remain uncached and retain real commit metadata for published artifacts.
+      - uses: ./.github/actions/setup-rust-cache
 
       - name: Install cargo-semver-checks
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853
@@ -98,15 +102,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
-          # cc-lb-runtime-wasmtime/build.rs pre-builds wasm32 test fixtures
-          # so `cargo test -p cc-lb-runtime-wasmtime` never silently skips
-          # integration tests. During `cargo publish --verify`, the runner
-          # has no wasm32-unknown-unknown target installed and the fixture
-          # crates are not part of the published tarball, so that pre-build
-          # is both impossible and unnecessary. The build.rs exposes this
-          # exact escape hatch (see crates/cc-lb-runtime-wasmtime/build.rs).
-          CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
-
 
   release-pr:
     name: release-plz release-pr

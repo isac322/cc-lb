@@ -4,7 +4,7 @@ githubConfigSecret: pre-defined-secret
 # 단일 노드(4코어) 보호: runner 수 상한. 미설정 시 잡 백로그에 ARC가 수십 개
 # runner 를 띄워 노드 CPU/MEM 포화 → 같은 노드 k3s API starvation(TLS timeout) 유발.
 minRunners: 0
-maxRunners: 10
+maxRunners: 4
 
 # dind 를 chart 자동생성 대신 직접 정의 (registry-proxy CA 주입 위해).
 # chart 업그레이드 시 dind 스펙(args 등)을 직접 동기화할 것.
@@ -12,7 +12,7 @@ template:
   spec:
     initContainers:
       - name: init-dind-externals
-        image: ghcr.io/isac322/cc-lb-actions-runner:2.335.1-cclb-1
+        image: ghcr.io/isac322/cc-lb-actions-runner:2.335.1-cclb-2
         command: ["cp"]
         args: ["-r", "/home/runner/externals/.", "/home/runner/tmpDir/"]
         volumeMounts:
@@ -20,20 +20,21 @@ template:
             mountPath: /home/runner/tmpDir
       - name: toolcache-perms
         image: busybox:1.38
-        command: ["sh", "-c", "mkdir -p /opt/hostedtoolcache /opt/rustup /opt/sccache-disk && chown 1001:1001 /opt/hostedtoolcache /opt/rustup /opt/sccache-disk"]
+        command: ["sh", "-c", "mkdir -p /opt/hostedtoolcache /opt/rustup /opt/sccache-disk /cargo-home && chown 1001:1001 /opt/hostedtoolcache /opt/rustup /opt/sccache-disk /cargo-home"]
         securityContext:
           runAsUser: 0
         volumeMounts:
           - {name: tool-cache, mountPath: /opt/hostedtoolcache}
           - {name: rustup-home, mountPath: /opt/rustup}
           - {name: sccache-disk, mountPath: /opt/sccache-disk}
+          - {name: cargo-home, mountPath: /cargo-home}
     containers:
       - name: runner
-        image: ghcr.io/isac322/cc-lb-actions-runner:2.335.1-cclb-1
+        image: ghcr.io/isac322/cc-lb-actions-runner:2.335.1-cclb-2
         command: ["/home/runner/run.sh"]
         resources:
           requests:
-            cpu: "1"            # 동시 빌드 수 제한 (노드 4코어 → ~3개), limit 없어 burst
+            cpu: "1"            # 노드 4코어 → 최대 4개 runner, limit 없어 각 runner burst
         env:
           - name: RUNNER_TOOL_CACHE
             value: /opt/hostedtoolcache
@@ -42,6 +43,10 @@ template:
           # (single node) so toolchain+wasm targets install once and are reused.
           - name: RUSTUP_HOME
             value: /opt/rustup
+          # Cargo registry archives, sparse index, and git checkouts are safe to
+          # reuse directly on this single node, avoiding cache upload/download.
+          - name: CARGO_HOME
+            value: /cargo-home
           - name: DOCKER_HOST
             value: unix:///var/run/docker.sock
           - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
@@ -92,6 +97,7 @@ template:
           - {name: tool-cache, mountPath: /opt/hostedtoolcache}
           - {name: rustup-home, mountPath: /opt/rustup}
           - {name: sccache-disk, mountPath: /opt/sccache-disk}
+          - {name: cargo-home, mountPath: /cargo-home}
           - {name: work, mountPath: /home/runner/_work}
           - {name: dind-sock, mountPath: /var/run}
       - name: dind
@@ -126,6 +132,8 @@ template:
         hostPath: {path: /opt/actions-tool-cache, type: DirectoryOrCreate}
       - name: rustup-home
         hostPath: {path: /opt/actions-rustup, type: DirectoryOrCreate}
+      - name: cargo-home
+        hostPath: {path: /opt/actions-cargo-home, type: DirectoryOrCreate}
       - name: sccache-disk
         hostPath: {path: /opt/actions-sccache, type: DirectoryOrCreate}
       - name: registry-proxy-ca

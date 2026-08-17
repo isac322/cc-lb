@@ -78,6 +78,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.97.0
       - uses: ./.github/actions/setup-rust-cache
+        with:
+          stable-build-metadata: "true"
 
       - name: Install cargo-semver-checks
         uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154
@@ -94,6 +96,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.97.0
       - uses: ./.github/actions/setup-rust-cache
+        with:
+          stable-build-metadata: "true"
 
       - name: cargo publish --dry-run
         run: cargo publish --dry-run -p cc-lb-plugin-wire
