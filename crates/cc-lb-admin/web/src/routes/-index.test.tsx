@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from '@testing-library/react';
 import type { ComponentType } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -8,7 +14,13 @@ import type {
 } from '../lib/api';
 import * as queries from '../lib/queries';
 import * as liveEvents from '../lib/useLiveEventStream';
-import { PoolQuotaLegend, Route, TopPrincipalsCard, ValueTile } from './index';
+import {
+  PoolQuotaLegend,
+  Route,
+  type TopPrincipal,
+  TopPrincipalsCard,
+  ValueTile,
+} from './index';
 
 vi.mock('../lib/queries', async () => {
   const actual = await vi.importActual<typeof queries>('../lib/queries');
@@ -152,7 +164,14 @@ const PRINCIPAL_USAGE_FIXTURE: DashboardUsageResponse = {
           cache_creation_input_tokens: 150,
           cache_read_input_tokens: 800,
           virtual_cost_micros: 1_000_000,
+          cost_input_micros: 300_000,
+          cost_output_micros: 400_000,
+          cost_cache_creation_5m_micros: 150_000,
+          cost_cache_creation_1h_micros: 0,
+          cost_cache_read_micros: 150_000,
         }),
+        // Rolled up before per-category cost was persisted: its $2.00 has to
+        // land in the unattributed remainder instead of being split.
         usageBucket(KPI_TIMESTAMPS[1], {
           request_count: 20,
           input_tokens: 150,
@@ -464,11 +483,11 @@ describe('Overview loading geometry', () => {
         principals={[
           {
             cache_hit_ratio: null,
-            cost_usd: 1.25,
+            cost_components_micros: null,
+            cost_micros: 1_250_000,
             id: 'principal-1',
-            max_cost: 1.25,
+            max_cost_micros: 1_250_000,
             name: 'Primary principal',
-            primary_model: '—',
             requests: 12,
             share_pct: 100,
             tokens: 345,
@@ -848,5 +867,437 @@ describe('Overview KPI details', () => {
       'Tokens 100',
       'Cache miss —',
     ]);
+  });
+});
+
+/** Request-log slice colors as jsdom serializes them. */
+const CATEGORY_COLOR = {
+  input: 'rgb(56, 189, 248)',
+  output: 'rgb(167, 139, 250)',
+  cache_create_5m: 'rgb(251, 191, 36)',
+  cache_create_1h: 'rgb(180, 83, 9)',
+  cache_read: 'rgb(52, 211, 153)',
+  unattributed: 'rgb(107, 114, 128)',
+} as const;
+
+const COST_NOTE = 'Per-category cost not recorded for this window';
+
+const COMPLETE_PRINCIPAL: TopPrincipal = {
+  cache_hit_ratio: 0.5,
+  cost_components_micros: {
+    input: 400_000,
+    output: 300_000,
+    cache_create_5m: 100_000,
+    cache_create_1h: 100_000,
+    cache_read: 100_000,
+  },
+  cost_micros: 1_000_000,
+  id: 'principal-complete',
+  max_cost_micros: 1_000_000,
+  name: 'Complete principal',
+  requests: 12,
+  share_pct: 62.5,
+  tokens: 345,
+};
+
+/** $0.80 recorded, $0.60 of it attributed: the rest is a legacy remainder. */
+const PARTIAL_PRINCIPAL: TopPrincipal = {
+  ...COMPLETE_PRINCIPAL,
+  cost_components_micros: {
+    input: 200_000,
+    output: 200_000,
+    cache_create_5m: 0,
+    cache_create_1h: 0,
+    cache_read: 200_000,
+  },
+  cost_micros: 800_000,
+  id: 'principal-partial',
+  name: 'Partial principal',
+};
+
+const UNRECORDED_PRINCIPAL: TopPrincipal = {
+  ...COMPLETE_PRINCIPAL,
+  cache_hit_ratio: null,
+  cost_components_micros: null,
+  cost_micros: 500_000,
+  id: 'principal-unrecorded',
+  name: 'Unrecorded principal',
+};
+
+function costMeters(): HTMLElement[] {
+  return screen.getAllByTestId('top-principal-cost-meter');
+}
+
+function costTriggers(): HTMLButtonElement[] {
+  return screen.getAllByTestId<HTMLButtonElement>('top-principal-cost-trigger');
+}
+
+function meterFill(meter: HTMLElement): HTMLElement {
+  const fill = meter.querySelector<HTMLElement>(
+    '[data-slot="cost-meter-fill"]',
+  );
+  if (!fill) throw new Error('cost meter has no fill');
+  return fill;
+}
+
+function costSegments(
+  meter: HTMLElement,
+): { category: string; color: string; width: string }[] {
+  return Array.from(
+    meter.querySelectorAll<HTMLElement>(
+      '[data-testid="top-principal-cost-segment"]',
+    ),
+    (segment) => ({
+      category: segment.dataset.category ?? '',
+      color: segment.style.backgroundColor,
+      width: segment.style.width,
+    }),
+  );
+}
+
+/** Every figure the open breakdown shows, in order. */
+function costDetailValues(): string[] {
+  return Array.from(
+    screen.getByTestId('top-principal-cost-details').querySelectorAll('span'),
+    (span) => span.textContent ?? '',
+  ).filter((text) => text.length > 0);
+}
+
+function renderPrincipals(principals: readonly TopPrincipal[]) {
+  return render(
+    <TopPrincipalsCard loading={false} principals={principals} range="24h" />,
+  );
+}
+
+describe('Top principal cost meter', () => {
+  it('reads requests, tokens and cache hit with no primary-model placeholder', () => {
+    const { container } = renderPrincipals([COMPLETE_PRINCIPAL]);
+
+    expect(
+      container.querySelector('[data-slot="principal-meta"]')?.textContent,
+    ).toBe('12 req · 345 tok · 50.0% cache hit');
+    expect(screen.getByTestId('top-principal-row').textContent).not.toContain(
+      '—',
+    );
+    expect(screen.getByTestId('top-principal-row').className).toContain(
+      'min-h-[66px]',
+    );
+    expect(meterFill(costMeters()[0]).parentElement?.className).toContain(
+      'h-1.5',
+    );
+  });
+
+  it('subdivides the filled meter in request-log order, colors and widths', () => {
+    renderPrincipals([COMPLETE_PRINCIPAL]);
+    const meter = costMeters()[0];
+
+    expect(meter.dataset.costComponents).toBe('complete');
+    expect(meterFill(meter).style.width).toBe('100%');
+    expect(meterFill(meter).className).not.toContain('var(--color-accent)');
+    expect(costSegments(meter)).toEqual([
+      { category: 'input', color: CATEGORY_COLOR.input, width: '40%' },
+      { category: 'output', color: CATEGORY_COLOR.output, width: '30%' },
+      {
+        category: 'cache_create_5m',
+        color: CATEGORY_COLOR.cache_create_5m,
+        width: '10%',
+      },
+      {
+        category: 'cache_create_1h',
+        color: CATEGORY_COLOR.cache_create_1h,
+        width: '10%',
+      },
+      {
+        category: 'cache_read',
+        color: CATEGORY_COLOR.cache_read,
+        width: '10%',
+      },
+    ]);
+  });
+
+  it('names the meter and carries the whole breakdown in its value text', () => {
+    renderPrincipals([COMPLETE_PRINCIPAL]);
+    const meter = costMeters()[0];
+
+    expect(meter.getAttribute('role')).toBe('meter');
+    expect(meter.getAttribute('aria-label')).toBe('Complete principal cost');
+    expect(meter.getAttribute('aria-valuenow')).toBe('1000000');
+    expect(meter.getAttribute('aria-valuemax')).toBe('1000000');
+    expect(meter.getAttribute('aria-valuetext')).toBe(
+      'Total $1.0000; 100.0% of the largest principal; Input $0.4000, Output $0.3000, Cache create 5m $0.1000, Cache create 1h $0.1000, Cache read $0.1000',
+    );
+  });
+
+  it('shows exact values and keeps keyboard focus on the breakdown trigger', () => {
+    renderPrincipals([COMPLETE_PRINCIPAL]);
+    const trigger = costTriggers()[0];
+    const meter = costMeters()[0];
+
+    expect(screen.queryByTestId('top-principal-cost-details')).toBeNull();
+    act(() => trigger.focus());
+
+    expect(document.activeElement).toBe(trigger);
+    expect(costDetailValues()).toEqual([
+      'Input',
+      '$0.4000',
+      '40%',
+      'Output',
+      '$0.3000',
+      '30%',
+      'Cache create 5m',
+      '$0.1000',
+      '10%',
+      'Cache create 1h',
+      '$0.1000',
+      '10%',
+      'Cache read',
+      '$0.1000',
+      '10%',
+      'Total',
+      '$1.0000',
+    ]);
+    expect(costTriggers()[0]).toBe(trigger);
+    expect(document.activeElement).toBe(trigger);
+    expect(costMeters()[0]).toBe(meter);
+    expect(meter.getAttribute('role')).toBe('meter');
+    expect(meter.getAttribute('aria-valuetext')).toContain('Input $0.4000');
+    expect(costSegments(meter).map((segment) => segment.category)).toEqual([
+      'input',
+      'output',
+      'cache_create_5m',
+      'cache_create_1h',
+      'cache_read',
+    ]);
+  });
+
+  it('opens the same breakdown after the hover delay', () => {
+    vi.useFakeTimers();
+    try {
+      renderPrincipals([COMPLETE_PRINCIPAL]);
+      fireEvent.pointerEnter(costTriggers()[0]);
+
+      act(() => vi.advanceTimersByTime(199));
+      expect(screen.queryByTestId('top-principal-cost-details')).toBeNull();
+
+      act(() => vi.advanceTimersByTime(1));
+      expect(costDetailValues()).toContain('Cache create 5m');
+      expect(costDetailValues()).toContain('$1.0000');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('appends a neutral unattributed tail when the total outruns the categories', () => {
+    renderPrincipals([PARTIAL_PRINCIPAL]);
+    const meter = costMeters()[0];
+
+    expect(meter.dataset.costComponents).toBe('partial');
+    expect(meterFill(meter).style.width).toBe('80%');
+    expect(costSegments(meter)).toEqual([
+      { category: 'input', color: CATEGORY_COLOR.input, width: '25%' },
+      { category: 'output', color: CATEGORY_COLOR.output, width: '25%' },
+      {
+        category: 'cache_read',
+        color: CATEGORY_COLOR.cache_read,
+        width: '25%',
+      },
+      {
+        category: 'unattributed',
+        color: CATEGORY_COLOR.unattributed,
+        width: '25%',
+      },
+    ]);
+
+    fireEvent.focus(costTriggers()[0]);
+    expect(costDetailValues()).toEqual([
+      'Input',
+      '$0.2000',
+      '25%',
+      'Output',
+      '$0.2000',
+      '25%',
+      'Cache create 5m',
+      '$0.0000',
+      '—',
+      'Cache create 1h',
+      '$0.0000',
+      '—',
+      'Cache read',
+      '$0.2000',
+      '25%',
+      'Unattributed',
+      '$0.2000',
+      '25%',
+      'Total',
+      '$0.8000',
+    ]);
+  });
+
+  it('keeps a solid accent bar and says so when no category cost was recorded', () => {
+    renderPrincipals([UNRECORDED_PRINCIPAL]);
+    const meter = costMeters()[0];
+
+    expect(meter.dataset.costComponents).toBe('unavailable');
+    expect(costSegments(meter)).toEqual([]);
+    expect(meterFill(meter).className).toContain(
+      'bg-[color:var(--color-accent)]',
+    );
+    expect(meter.getAttribute('aria-valuetext')).toBe(
+      `Total $0.5000; 50.0% of the largest principal; ${COST_NOTE}`,
+    );
+
+    fireEvent.focus(costTriggers()[0]);
+    expect(screen.getByText(COST_NOTE)).toBeDefined();
+    expect(costDetailValues()).toEqual(['Total', '$0.5000']);
+  });
+
+  it('scales every meter against the largest principal below one dollar', () => {
+    renderPrincipals([
+      {
+        ...COMPLETE_PRINCIPAL,
+        cost_components_micros: {
+          input: 250_000,
+          output: 250_000,
+          cache_create_5m: 0,
+          cache_create_1h: 0,
+          cache_read: 0,
+        },
+        cost_micros: 500_000,
+        id: 'principal-top',
+        max_cost_micros: 500_000,
+        name: 'Top principal',
+        share_pct: 80,
+      },
+      {
+        ...UNRECORDED_PRINCIPAL,
+        cost_micros: 125_000,
+        max_cost_micros: 500_000,
+        share_pct: 20,
+      },
+    ]);
+    const [top, tail] = costMeters();
+
+    expect(meterFill(top).style.width).toBe('100%');
+    expect(meterFill(tail).style.width).toBe('25%');
+    expect(costSegments(top)).toEqual([
+      { category: 'input', color: CATEGORY_COLOR.input, width: '50%' },
+      { category: 'output', color: CATEGORY_COLOR.output, width: '50%' },
+    ]);
+    expect(screen.getAllByTestId('top-principal-row')[0].textContent).toContain(
+      '$0.50',
+    );
+  });
+
+  it('aggregates bucket components and follows refreshed usage data', () => {
+    mockResolvedKpiQueries();
+    const { rerender } = render(<OverviewPage />);
+    const meter = costMeters()[0];
+
+    // $1.00 of the window's $3.00 carries components; the pre-upgrade bucket's
+    // $2.00 stays unattributed instead of being spread over the categories.
+    expect(meter.dataset.costComponents).toBe('partial');
+    fireEvent.focus(costTriggers()[0]);
+    expect(costDetailValues()).toEqual([
+      'Input',
+      '$0.3000',
+      '10%',
+      'Output',
+      '$0.4000',
+      '13%',
+      'Cache create 5m',
+      '$0.1500',
+      '5%',
+      'Cache create 1h',
+      '$0.0000',
+      '—',
+      'Cache read',
+      '$0.1500',
+      '5%',
+      'Unattributed',
+      '$2.0000',
+      '67%',
+      'Total',
+      '$3.0000',
+    ]);
+    expect(screen.getByTestId('top-principal-row').textContent).toContain(
+      '83.3% cache hit',
+    );
+
+    // Same window, same total, same tokens: only the recorded split moves.
+    const refreshed: DashboardUsageResponse = {
+      ...PRINCIPAL_USAGE_FIXTURE,
+      series: PRINCIPAL_USAGE_FIXTURE.series.map((series) => ({
+        ...series,
+        buckets: series.buckets.map((bucket, index) =>
+          index === 0
+            ? {
+                ...bucket,
+                cost_input_micros: 500_000,
+                cost_output_micros: 300_000,
+                cost_cache_creation_5m_micros: 100_000,
+                cost_cache_creation_1h_micros: 100_000,
+                cost_cache_read_micros: 0,
+              }
+            : bucket,
+        ),
+      })),
+    };
+    vi.mocked(queries.useUsage).mockReturnValue({
+      data: refreshed,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    rerender(<OverviewPage />);
+
+    // The breakdown was never closed or re-opened: it re-rendered in place.
+    expect(costDetailValues()).toEqual([
+      'Input',
+      '$0.5000',
+      '17%',
+      'Output',
+      '$0.3000',
+      '10%',
+      'Cache create 5m',
+      '$0.1000',
+      '3%',
+      'Cache create 1h',
+      '$0.1000',
+      '3%',
+      'Cache read',
+      '$0.0000',
+      '—',
+      'Unattributed',
+      '$2.0000',
+      '67%',
+      'Total',
+      '$3.0000',
+    ]);
+    expect(costSegments(costMeters()[0])).toEqual([
+      {
+        category: 'input',
+        color: CATEGORY_COLOR.input,
+        width: '16.666666666666664%',
+      },
+      { category: 'output', color: CATEGORY_COLOR.output, width: '10%' },
+      {
+        category: 'cache_create_5m',
+        color: CATEGORY_COLOR.cache_create_5m,
+        width: '3.3333333333333335%',
+      },
+      {
+        category: 'cache_create_1h',
+        color: CATEGORY_COLOR.cache_create_1h,
+        width: '3.3333333333333335%',
+      },
+      {
+        category: 'unattributed',
+        color: CATEGORY_COLOR.unattributed,
+        width: '66.66666666666666%',
+      },
+    ]);
+    expect(screen.getByTestId('top-principal-row').textContent).toContain(
+      '83.3% cache hit',
+    );
   });
 });

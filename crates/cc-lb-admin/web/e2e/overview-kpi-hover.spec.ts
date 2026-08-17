@@ -125,6 +125,11 @@ const principalUsage: DashboardUsageResponse = {
           cache_creation_input_tokens: 150,
           cache_read_input_tokens: 800,
           virtual_cost_micros: 1_000_000,
+          cost_input_micros: 300_000,
+          cost_output_micros: 400_000,
+          cost_cache_creation_5m_micros: 150_000,
+          cost_cache_creation_1h_micros: 0,
+          cost_cache_read_micros: 150_000,
         }),
         usageBucket(TIMESTAMPS[1], {
           request_count: 20,
@@ -213,6 +218,11 @@ const refreshedPrincipalUsage: DashboardUsageResponse = {
           cache_creation_input_tokens: 240,
           cache_read_input_tokens: 320,
           virtual_cost_micros: 1_000_000,
+          cost_input_micros: 600_000,
+          cost_output_micros: 200_000,
+          cost_cache_creation_5m_micros: 100_000,
+          cost_cache_creation_1h_micros: 100_000,
+          cost_cache_read_micros: 0,
         }),
         usageBucket(TIMESTAMPS[1], {
           request_count: 20,
@@ -254,6 +264,80 @@ const CACHE_MISS_AVG = 'Avg cache miss 44.4%';
 const REFRESHED_CACHE_MISS_AVG = 'Avg cache miss 70.0%';
 const PRINCIPAL_CACHE_HIT = '83.3% cache hit';
 const REFRESHED_PRINCIPAL_CACHE_HIT = '40.0% cache hit';
+
+/**
+ * The principal's cost breakdown: label, exact value and share for every
+ * request-log category, then the footer total. Only the first bucket of the
+ * window records components, so its $1.00 is split and the second bucket's
+ * $2.00 stays unattributed — the shape a window that straddles the upgrade has.
+ * Each `REFRESHED_` list is what the second payload replaces it with, at the
+ * same $3.00 total.
+ */
+const PRINCIPAL_COST_VALUES = [
+  'Input',
+  '$0.3000',
+  '10%',
+  'Output',
+  '$0.4000',
+  '13%',
+  'Cache create 5m',
+  '$0.1500',
+  '5%',
+  'Cache create 1h',
+  '$0.0000',
+  '—',
+  'Cache read',
+  '$0.1500',
+  '5%',
+  'Unattributed',
+  '$2.0000',
+  '67%',
+  'Total',
+  '$3.0000',
+];
+
+const REFRESHED_PRINCIPAL_COST_VALUES = [
+  'Input',
+  '$0.6000',
+  '20%',
+  'Output',
+  '$0.2000',
+  '7%',
+  'Cache create 5m',
+  '$0.1000',
+  '3%',
+  'Cache create 1h',
+  '$0.1000',
+  '3%',
+  'Cache read',
+  '$0.0000',
+  '—',
+  'Unattributed',
+  '$2.0000',
+  '67%',
+  'Total',
+  '$3.0000',
+];
+
+/**
+ * Bar segments, in order, as a percentage of the filled meter: a category worth
+ * $0 is drawn by nobody, and the $2.00 no category accounts for closes the bar.
+ */
+const PRINCIPAL_COST_SEGMENTS = [
+  { category: 'input', widthPct: 10 },
+  { category: 'output', widthPct: 13.33 },
+  { category: 'cache_create_5m', widthPct: 5 },
+  { category: 'cache_read', widthPct: 5 },
+  { category: 'unattributed', widthPct: 66.67 },
+];
+
+const REFRESHED_PRINCIPAL_COST_SEGMENTS = [
+  { category: 'input', widthPct: 20 },
+  { category: 'output', widthPct: 6.67 },
+  { category: 'cache_create_5m', widthPct: 3.33 },
+  { category: 'cache_create_1h', widthPct: 3.33 },
+  { category: 'unattributed', widthPct: 66.67 },
+];
 
 /**
  * Only the tokens tile carries a cache-miss row, and that row is the one value a
@@ -619,6 +703,66 @@ async function readTokensTooltipColors(page: Page) {
   };
 }
 
+/**
+ * Figures the open cost breakdown shows, in order. The color dots and the
+ * footer spacer are empty spans, so they are dropped instead of padding the
+ * expectation with blanks.
+ */
+async function readPrincipalCostValues(page: Page) {
+  return page
+    .getByTestId('top-principal-cost-details')
+    .locator('span')
+    .evaluateAll((nodes) =>
+      nodes
+        .map((node) => node.textContent?.trim() ?? '')
+        .filter((text) => text.length > 0),
+    );
+}
+
+/**
+ * Category and declared width share of every segment drawn inside the filled
+ * meter. Widths are rounded to two decimals: the proportions are the contract,
+ * not however far the CSSOM chooses to serialize a repeating fraction.
+ */
+async function readPrincipalCostSegments(page: Page) {
+  return page
+    .getByTestId('top-principal-cost-segment')
+    .evaluateAll((nodes) =>
+      nodes.map((node) => {
+        const element = node as HTMLElement;
+        return {
+          category: element.dataset.category ?? '',
+          widthPct:
+            Math.round(Number.parseFloat(element.style.width) * 100) / 100,
+        };
+      }),
+    );
+}
+
+/**
+ * Painted color of every segment. Colors are the whole encoding here, so each
+ * one has to be opaque and distinct from its neighbours in the active theme.
+ */
+async function expectPrincipalCostPalette(page: Page) {
+  const painted = await page
+    .getByTestId('top-principal-cost-segment')
+    .evaluateAll((nodes) =>
+      nodes.map((node) => window.getComputedStyle(node).backgroundColor),
+    );
+  expect(painted).toHaveLength(PRINCIPAL_COST_SEGMENTS.length);
+  expect(new Set(painted).size).toBe(painted.length);
+  for (const color of painted) expect(parseCssColor(color).a).toBe(1);
+}
+
+/** Opens the principal cost breakdown by pointer, as a reader would. */
+async function hoverPrincipalCostMeter(page: Page) {
+  const trigger = page.getByTestId('top-principal-cost-trigger');
+  await expect(trigger).toBeVisible();
+  await trigger.scrollIntoViewIfNeeded();
+  await trigger.hover();
+  await expect(page.getByTestId('top-principal-cost-details')).toBeVisible();
+}
+
 test.describe('Overview KPI hover', () => {
   test('synchronizes KPI details in the dark and light themes', async ({
     page,
@@ -634,6 +778,9 @@ test.describe('Overview KPI hover', () => {
       await bootOverviewWithTheme(page, theme);
       await expectOverviewSummary(page);
       await expectNoHorizontalOverflow(page);
+      // The principal cost bar carries the same category palette in either
+      // theme: colors are the encoding, so they have to survive the re-skin.
+      await expectPrincipalCostPalette(page);
 
       await hoverChartCenter(page, 'request-rate');
       await expectSynchronizedTooltips(page);
@@ -810,6 +957,94 @@ test.describe('Overview KPI hover', () => {
     ).toBe('alive');
 
     await expectTooltipsDismissed(page);
+  });
+
+  test('breaks principal cost into categories and repolls them under an open breakdown', async ({
+    page,
+  }) => {
+    // Two real poll cycles of waiting on top of a cold dev-server boot.
+    test.setTimeout(60_000);
+    const fixtures = await installOverviewFixtures(page);
+    await page.setViewportSize(DESKTOP_VIEWPORT);
+    await page.goto('/');
+    await expect(page.getByTestId('overview-kpi-request-rate')).toBeVisible();
+
+    const meter = page.getByTestId('top-principal-cost-meter');
+    await expect(meter).toBeVisible();
+    await expect(meter).toHaveAttribute('aria-label', 'Principal Alpha cost');
+    // One of the two buckets recorded components, so the bar says so instead of
+    // spreading the whole $3.00 across the categories.
+    await expect(meter).toHaveAttribute('data-cost-components', 'partial');
+    expect(await readPrincipalCostSegments(page)).toEqual(
+      PRINCIPAL_COST_SEGMENTS,
+    );
+
+    const trigger = page.getByTestId('top-principal-cost-trigger');
+    await trigger.focus();
+    await expect(trigger).toBeFocused();
+    await expect(
+      page.getByTestId('top-principal-cost-details'),
+    ).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(
+      page.getByTestId('top-principal-cost-details'),
+    ).toHaveCount(0);
+
+    await hoverPrincipalCostMeter(page);
+    await expect
+      .poll(() => readPrincipalCostValues(page))
+      .toEqual(PRINCIPAL_COST_VALUES);
+
+    const stalePrincipalRow = await page
+      .getByTestId('top-principal-row')
+      .innerText();
+    // Parked on this document: a reload would take it with the stale numbers.
+    await page.evaluate(() => {
+      (window as ProbedWindow).cclbPollProbe = 'alive';
+    });
+    const fetchesBefore = fixtures.principalUsageRanges().length;
+
+    // The split changes at the same $3.00 total under a page that is asked to
+    // do nothing: no reload, no range switch, no refetch, and the pointer stays
+    // on the meter. Only the poll can carry this into the open breakdown.
+    fixtures.servePrincipalUsage(refreshedPrincipalUsage);
+
+    await expect
+      .poll(() => readPrincipalCostValues(page), {
+        timeout: POLL_UPDATE_TIMEOUT_MS,
+      })
+      .toEqual(REFRESHED_PRINCIPAL_COST_VALUES);
+    // The bar was re-plotted with it: cache read empties out and cache create
+    // 1h takes its place, which a memoized row would have missed.
+    await expect
+      .poll(() => readPrincipalCostSegments(page), {
+        timeout: POLL_UPDATE_TIMEOUT_MS,
+      })
+      .toEqual(REFRESHED_PRINCIPAL_COST_SEGMENTS);
+
+    // Only the cache hit moved in the row itself: the refreshed payload keeps
+    // its requests, tokens and cost, and no per-category figure leaks into the
+    // row text — those live in the breakdown and in the meter's value text.
+    expect(await page.getByTestId('top-principal-row').innerText()).toBe(
+      stalePrincipalRow.replace(
+        PRINCIPAL_CACHE_HIT,
+        REFRESHED_PRINCIPAL_CACHE_HIT,
+      ),
+    );
+    expect(await meter.getAttribute('aria-valuetext')).toBe(
+      'Total $3.0000; 100.0% of the largest principal; Input $0.6000, Output $0.2000, Cache create 5m $0.1000, Cache create 1h $0.1000, Cache read $0.0000, Unattributed $2.0000',
+    );
+    expect(fixtures.principalUsageRanges().length).toBeGreaterThan(
+      fetchesBefore,
+    );
+    expect(
+      await page.evaluate(() => (window as ProbedWindow).cclbPollProbe),
+    ).toBe('alive');
+
+    await page.mouse.move(0, 0);
+    await expect(
+      page.getByTestId('top-principal-cost-details'),
+    ).toHaveCount(0);
   });
 
   test('keeps the mobile Overview free of horizontal overflow', async ({
