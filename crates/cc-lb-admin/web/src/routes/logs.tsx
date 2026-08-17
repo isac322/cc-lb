@@ -336,6 +336,7 @@ function LogsPage() {
     recent.data,
     recent.isPlaceholderData,
   ]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: rangedLiveEvents can be the stable live.eventsMap ref when the range is unbounded; live.version is the mutation counter that invalidates this derived row list.
   const rows = useMemo(
     () =>
       mergeLogRows(
@@ -344,7 +345,7 @@ function LogsPage() {
           (historicalPage) => historicalPage?.events ?? [],
         ),
       ),
-    [rangedLiveEvents, historicalPages],
+    [rangedLiveEvents, historicalPages, live.version],
   );
 
   // The initial strip domain comes from the first page we already fetched, so
@@ -538,6 +539,7 @@ function LogsPage() {
     [rows, filters],
   );
   const currentHistoricalEvents = historicalPages[clampedPage]?.events ?? [];
+  // biome-ignore lint/correctness/useExhaustiveDependencies: same stable-Map contract as rows above; the first page must re-merge whenever a live upsert bumps live.version.
   const pageRows = useMemo(
     () =>
       filterLogRows(
@@ -547,7 +549,13 @@ function LogsPage() {
         ),
         filters,
       ).slice(0, LOGS_PAGE_SIZE),
-    [clampedPage, currentHistoricalEvents, filters, rangedLiveEvents],
+    [
+      clampedPage,
+      currentHistoricalEvents,
+      filters,
+      rangedLiveEvents,
+      live.version,
+    ],
   );
   const currentCursor = pageRows.length
     ? getRecentEventsCursor(pageRows[pageRows.length - 1])
