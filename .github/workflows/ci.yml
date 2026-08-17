@@ -29,10 +29,9 @@ env:
 jobs:
   fmt:
     runs-on: oracle4-cc-lb
-    env:
-      RUSTUP_HOME: ${{ github.workspace }}/.rustup
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -106,12 +105,12 @@ jobs:
       pull-requests: read
     env:
       IMAGE: cc-lb:release-pr-${{ github.run_id }}-${{ github.run_attempt }}
-      RUSTUP_HOME: ${{ github.workspace }}/.rustup
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: true
+      - uses: ./.github/actions/setup-rustup-home
       - uses: ./.github/actions/setup-gh
       - name: Attach release-plz validation branch
         run: |
@@ -276,12 +275,12 @@ jobs:
       matrix:
         features: [sqlite, postgres]
     env:
-      RUSTUP_HOME: ${{ github.workspace }}/.rustup
       # Clippy never runs fixture-backed WASM tests, so bypass that build-time
       # prerequisite. The workflow-level env already skips the admin SPA.
       CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -301,10 +300,9 @@ jobs:
 
   cargo-deny:
     runs-on: oracle4-cc-lb
-    env:
-      RUSTUP_HOME: ${{ github.workspace }}/.rustup
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -358,7 +356,6 @@ jobs:
           --health-retries 10
 
     env:
-      RUSTUP_HOME: ${{ github.workspace }}/.rustup
       # Raised from 2 to 4 to use the full 4-core node when nextest-cov runs as
       # the long-pole job alone. Risk: if it overlaps clippy/e2e it can saturate
       # the shared node that also hosts the k3s control plane → API starvation
@@ -402,6 +399,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -471,12 +469,12 @@ jobs:
   e2e:
     runs-on: oracle4-cc-lb
     env:
-      RUSTUP_HOME: ${{ github.workspace }}/.rustup
       # Real-client E2E builds the server but does not run the fixture-backed
       # Wasmtime integration suite.
       CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
