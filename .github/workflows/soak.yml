@@ -18,10 +18,14 @@ jobs:
   rss-soak:
     if: github.ref == 'refs/heads/master'
     runs-on: oracle4-cc-lb
+    env:
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
       - uses: ./.github/actions/setup-rust-cache
         with:
           stable-build-metadata: "true"

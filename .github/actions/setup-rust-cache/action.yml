@@ -23,7 +23,7 @@ runs:
     - name: Install sccache fallback
       id: sccache-setup
       if: ${{ steps.sccache-probe.outputs.available != 'true' }}
-      uses: mozilla-actions/sccache-action@v0.0.10
+      uses: mozilla-actions/sccache-action@v0.0.11
       with:
         version: "v0.17.0"
       continue-on-error: true
