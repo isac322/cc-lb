@@ -2,7 +2,13 @@ import { Toggle as BaseToggle } from '@base-ui/react/toggle';
 import { useQueryClient } from '@tanstack/react-query';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { AlertTriangle, Download, RefreshCw, X, Zap } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  type SetStateAction,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import * as z from 'zod';
 import { LiveTailFailureBanner } from '../components/LiveTailFailureBanner';
 import { type FilterOption, LogSelect } from '../components/ui/LogSelect';
@@ -579,10 +585,10 @@ function LogsPage() {
     lastHistoricalCursorKey !== undefined &&
     !exhaustedCursorKeys.has(lastHistoricalCursorKey);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: clampedPage changes intentionally trigger the imperative scroll reset.
-  useEffect(() => {
+  const commitPage = (nextPage: SetStateAction<number>) => {
     if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
-  }, [clampedPage]);
+    setPage(nextPage);
+  };
 
   const nextPage = async () => {
     if (currentCursor === undefined || currentCursorKey === undefined) return;
@@ -600,7 +606,7 @@ function LogsPage() {
       cachedPageParam.event_id === nextPageParam.event_id
     ) {
       paginationRequestGenerationRef.current += 1;
-      setPage(nextPageIndex);
+      commitPage(nextPageIndex);
       return;
     }
 
@@ -625,7 +631,7 @@ function LogsPage() {
         nextPageParam,
       ]);
       setLoadedPages((current) => [...current.slice(0, nextPageIndex), next]);
-      setPage(nextPageIndex);
+      commitPage(nextPageIndex);
     } catch {
       // QueryCache owns the user-facing error toast.
     } finally {
@@ -644,7 +650,7 @@ function LogsPage() {
   const previousPage = () => {
     paginationRequestGenerationRef.current += 1;
     setLoadingNext(false);
-    setPage((current) => Math.max(0, current - 1));
+    commitPage((current) => Math.max(0, current - 1));
   };
 
   const principalSelectOptions = useMemo<FilterOption[]>(
