@@ -1,6 +1,13 @@
-import { cleanup, render } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
-import { CardHeader, Section, Skeleton } from './primitives';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  Button,
+  CardHeader,
+  ConfirmDialog,
+  Modal,
+  Section,
+  Skeleton,
+} from './primitives';
 
 afterEach(cleanup);
 
@@ -112,5 +119,105 @@ describe('Skeleton dimensions', () => {
     expect(renderSkeleton('sm:h-8 md:w-32 lg:size-12').className).toBe(
       'skeleton h-4 w-full sm:h-8 md:w-32 lg:size-12',
     );
+  });
+});
+
+describe('Button loading state', () => {
+  it('disables the button, exposes busy state, and replaces its leading icon with a spinner', () => {
+    render(
+      <Button
+        iconLeft={<span data-testid="button-leading-icon">Icon</span>}
+        loading
+      >
+        Save changes
+      </Button>,
+    );
+
+    const button = screen.getByRole('button', { name: 'Save changes' });
+    expect(button.hasAttribute('disabled')).toBe(true);
+    expect(button.getAttribute('aria-busy')).toBe('true');
+    expect(button.querySelector('svg.animate-spin')).not.toBeNull();
+    expect(screen.getByText('Save changes')).toBeDefined();
+    expect(screen.queryByTestId('button-leading-icon')).toBeNull();
+  });
+});
+
+describe('Modal dismissal state', () => {
+  it('prevents close requests and disables the close control', () => {
+    const onOpenChange = vi.fn();
+    render(
+      <Modal
+        open
+        onOpenChange={onOpenChange}
+        preventDismiss
+        title="Pending modal"
+      >
+        Modal body
+      </Modal>,
+    );
+
+    const closeButton = screen.getByRole('button', { name: 'Close dialog' });
+    expect(closeButton.hasAttribute('disabled')).toBe(true);
+
+    fireEvent.click(closeButton);
+    fireEvent.keyDown(screen.getByRole('dialog'), {
+      key: 'Escape',
+      code: 'Escape',
+    });
+
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('ConfirmDialog pending state', () => {
+  it('disables actions, marks confirmation busy, and ignores dismissal requests', () => {
+    const onConfirm = vi.fn();
+    const onOpenChange = vi.fn();
+    render(
+      <ConfirmDialog
+        open
+        onOpenChange={onOpenChange}
+        onConfirm={onConfirm}
+        pending
+        title="Delete item?"
+        confirmLabel="Delete"
+      />,
+    );
+
+    const cancelButton = screen.getByRole('button', { name: 'Cancel' });
+    const confirmButton = screen.getByRole('button', { name: 'Delete' });
+    expect(cancelButton.hasAttribute('disabled')).toBe(true);
+    expect(confirmButton.hasAttribute('disabled')).toBe(true);
+    expect(confirmButton.getAttribute('aria-busy')).toBe('true');
+    expect(confirmButton.querySelector('svg.animate-spin')).not.toBeNull();
+
+    fireEvent.click(cancelButton);
+    fireEvent.click(confirmButton);
+    fireEvent.keyDown(screen.getByRole('alertdialog'), {
+      key: 'Escape',
+      code: 'Escape',
+    });
+
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it('can confirm without synchronously closing', () => {
+    const onConfirm = vi.fn();
+    const onOpenChange = vi.fn();
+    render(
+      <ConfirmDialog
+        open
+        closeOnConfirm={false}
+        onOpenChange={onOpenChange}
+        onConfirm={onConfirm}
+        title="Apply change?"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).not.toHaveBeenCalled();
   });
 });
