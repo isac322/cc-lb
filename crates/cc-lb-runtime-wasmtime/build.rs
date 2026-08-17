@@ -45,14 +45,24 @@ fn main() {
     if std::env::var("CC_LB_SKIP_WASM_FIXTURE_BUILD").as_deref() == Ok("1") {
         return;
     }
+    // The fixture crates are workspace-only and are intentionally absent from
+    // the published crate. Registry, vendored, and `cargo package --verify`
+    // builds must compile the runtime without requiring those test inputs.
+    let Some(workspace_root) = manifest_dir.parent().and_then(|path| path.parent()) else {
+        return;
+    };
+    if !FIXTURE_CRATES.iter().any(|fixture| {
+        manifest_dir
+            .join(fixture.crate_path)
+            .join("Cargo.toml")
+            .is_file()
+    }) {
+        return;
+    }
     emit_rerun_directives(&manifest_dir);
 
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root from cc-lb-runtime-wasmtime crate path");
 
     let nested_target_dir = PathBuf::from(&out_dir).join("wasm-fixture-target");
 

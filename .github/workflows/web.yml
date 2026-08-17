@@ -47,6 +47,8 @@ jobs:
           # Vite's TanStack Router plugin updates routeTree.gen.ts. Settle that
           # generated input before concurrent lint/typecheck/test readers start.
           bun run --shell=bun build || fail build
+          git diff --exit-code -- src/routeTree.gen.ts ||
+            fail "generated route tree is stale"
 
           bun run --shell=bun lint &
           lint_pid=$!
