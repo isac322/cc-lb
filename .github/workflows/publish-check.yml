@@ -68,7 +68,7 @@ jobs:
           - cc-lb-plugin-wire
           - cc-lb-plugin-conformance
     env:
-      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-semver-${{ matrix.crate }}
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup
       # cc-lb-plugin-conformance's semver check transitively pulls
       # cc-lb-runtime-wasmtime, whose build.rs pre-builds wasm32 test
       # fixtures. That pre-build has no bearing on the rustdoc surface
@@ -96,7 +96,7 @@ jobs:
     name: dry-run cc-lb-plugin-wire
     runs-on: oracle4-cc-lb
     env:
-      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-dry-run
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master

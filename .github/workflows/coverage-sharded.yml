@@ -80,7 +80,7 @@ jobs:
   coverage-build:
     runs-on: oracle4-cc-lb
     env:
-      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-coverage-build
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -142,7 +142,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
     env:
-      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-coverage-shard-${{ matrix.shard }}
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup
       # Keep this coverage env in sync with ci.yml's nextest-cov job.
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -193,7 +193,7 @@ jobs:
     needs: coverage-shard
     runs-on: oracle4-cc-lb
     env:
-      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-coverage-merge
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master

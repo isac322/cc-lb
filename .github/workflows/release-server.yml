@@ -32,7 +32,7 @@ jobs:
     name: release-plz server release
     runs-on: oracle4-cc-lb
     env:
-      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-prepare
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup
     permissions:
       contents: write
       pull-requests: read

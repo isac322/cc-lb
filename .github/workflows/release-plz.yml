@@ -40,7 +40,7 @@ jobs:
     permissions:
       contents: read
     env:
-      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-preflight
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup
       # cc-lb-plugin-conformance's semver check transitively pulls
       # cc-lb-runtime-wasmtime, whose build.rs pre-builds wasm32 test
       # fixtures. That pre-build has no bearing on the rustdoc surface
@@ -81,7 +81,7 @@ jobs:
     needs: preflight
     runs-on: oracle4-cc-lb
     env:
-      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-release
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup
     permissions:
       contents: write
       pull-requests: write
@@ -114,7 +114,7 @@ jobs:
     name: release-plz release-pr
     runs-on: oracle4-cc-lb
     env:
-      RUSTUP_HOME: /tmp/cc-lb-rustup-${{ github.run_id }}-release-pr
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup
     permissions:
       contents: write
       pull-requests: write
