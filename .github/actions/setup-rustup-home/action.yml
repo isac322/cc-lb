@@ -1,0 +1,9 @@
+name: Setup isolated Rustup home
+description: Put Rustup state in runner-managed temporary storage
+
+runs:
+  using: composite
+  steps:
+    - name: Export isolated Rustup home
+      shell: bash
+      run: echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"

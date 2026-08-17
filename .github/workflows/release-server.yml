@@ -31,8 +31,6 @@ jobs:
   prepare:
     name: release-plz server release
     runs-on: oracle4-cc-lb
-    env:
-      RUSTUP_HOME: ${{ github.workspace }}/.rustup
     permissions:
       contents: write
       pull-requests: read
@@ -47,6 +45,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: true
+      - uses: ./.github/actions/setup-rustup-home
       - uses: ./.github/actions/setup-gh
 
       - name: Validate release target
