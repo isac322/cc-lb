@@ -46,19 +46,34 @@ fn main() {
         return;
     }
     // The fixture crates are workspace-only and are intentionally absent from
-    // the published crate. Registry, vendored, and `cargo package --verify`
-    // builds must compile the runtime without requiring those test inputs.
-    let Some(workspace_root) = manifest_dir.parent().and_then(|path| path.parent()) else {
+    // the published crate. In the workspace, the crate is exactly two levels
+    // below the root; packaged builds live under target/package and therefore
+    // do not have a workspace manifest at that location.
+    let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) else {
         return;
     };
-    if !FIXTURE_CRATES.iter().any(|fixture| {
-        manifest_dir
-            .join(fixture.crate_path)
-            .join("Cargo.toml")
-            .is_file()
-    }) {
+    if !is_workspace_manifest(&workspace_root.join("Cargo.toml")) {
         return;
     }
+
+    let missing_fixtures = FIXTURE_CRATES
+        .iter()
+        .filter_map(|fixture| {
+            let manifest = manifest_dir.join(fixture.crate_path).join("Cargo.toml");
+            (!manifest.is_file()).then_some(manifest)
+        })
+        .collect::<Vec<_>>();
+    if !missing_fixtures.is_empty() {
+        panic!(
+            "workspace wasm fixture manifests are missing:\n{}",
+            missing_fixtures
+                .iter()
+                .map(|path| format!("  - {}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
     emit_rerun_directives(&manifest_dir);
 
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
@@ -130,6 +145,11 @@ fn main() {
             )
         });
     }
+}
+
+fn is_workspace_manifest(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .is_ok_and(|manifest| manifest.lines().any(|line| line.trim() == "[workspace]"))
 }
 
 fn emit_rerun_directives(manifest_dir: &Path) {
