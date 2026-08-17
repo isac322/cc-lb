@@ -146,7 +146,7 @@ from pathlib import Path
 root = Path(sys.argv[1]) / "node_modules" / "@code-yeongyu" / "senpi"
 preset_dir = root / "dist" / "core" / "extensions" / "builtin" / "prompt-preset"
 builder_pattern = re.compile(r"function (build[A-Za-z0-9]+Core)\(")
-allowed_main_prefixes = ("You are senpi,", "You are senpi on ")
+allowed_main_prefixes = ("You are ${APP_NAME},", "You are ${APP_NAME} on ")
 core_builders = []
 for path in sorted(preset_dir.glob("*.js")):
     text = path.read_text()
@@ -172,7 +172,7 @@ if not core_builders:
 
 expected = {
     "dist/core/dynamic-prompt/identity.js": [
-        "You are senpi, a coding agent",
+        "You are ${APP_NAME}, a coding agent",
     ],
     "examples/extensions/subagent/index.ts": [
         "args.push(`Task: ${task}`);",
